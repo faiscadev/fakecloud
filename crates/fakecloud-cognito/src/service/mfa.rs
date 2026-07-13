@@ -383,15 +383,26 @@ impl CognitoService {
                 )
             })?;
 
-        if user.totp_secret.is_none() {
+        let Some(secret) = user.totp_secret.clone() else {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "EnableSoftwareTokenMFAException",
                 "Software token MFA has not been associated.",
             ));
+        };
+
+        // Validate the supplied code as a real RFC 6238 TOTP derived from the
+        // secret AssociateSoftwareToken handed out (SHA1, 30s step, +/-1 window).
+        // Accepting any 6-digit code was an enrollment bypass — a wrong
+        // authenticator could still "enable" MFA.
+        if !crate::totp::verify_totp(&secret, user_code) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "EnableSoftwareTokenMFAException",
+                "Code mismatch and fail enable Software Token MFA",
+            ));
         }
 
-        // For local emulator: accept any valid 6-digit code
         user.totp_verified = true;
         user.user_last_modified_date = Utc::now();
 

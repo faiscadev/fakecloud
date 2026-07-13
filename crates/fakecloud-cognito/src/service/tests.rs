@@ -6353,8 +6353,15 @@ fn verify_software_token_after_associate_succeeds() {
     let token = issue_access_token(&state, &pool_id, "dave", "client-id");
     let body = json!({"AccessToken": token});
     let req = make_req("AssociateSoftwareToken", &body.to_string());
-    svc.associate_software_token(&req).unwrap();
-    let body = json!({"UserCode": "123456", "AccessToken": token});
+    let assoc = svc.associate_software_token(&req).unwrap();
+    // VerifySoftwareToken now validates a real RFC 6238 TOTP against the secret
+    // AssociateSoftwareToken handed out, so compute the current code.
+    let secret = resp_json(&assoc)["SecretCode"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let code = crate::totp::compute_totp_now(&secret).unwrap();
+    let body = json!({"UserCode": code, "AccessToken": token});
     let req = make_req("VerifySoftwareToken", &body.to_string());
     let resp = svc.verify_software_token(&req).unwrap();
     let b = resp_json(&resp);
@@ -8942,4 +8949,483 @@ fn admin_mutations_accept_email_alias() {
     let mas = svc.state.read();
     let st = mas.default_ref();
     assert!(st.users.get(&pool_id).map(|u| u.is_empty()).unwrap_or(true));
+}
+
+// ---------------------------------------------------------------------------
+// Auth hardening (cognito-hardening batch): MFA enforcement, TOTP validation,
+// expired-token / refresh-token expiry, admin SECRET_HASH, existence masking.
+// ---------------------------------------------------------------------------
+
+/// Base32 test secret (RFC 6238 vector secret) used to derive real TOTP codes.
+const TEST_TOTP_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+/// Create a client with USER_PASSWORD_AUTH + REFRESH and a confirmed user with
+/// a permanent password. Returns (client_id, username).
+fn setup_confirmed_user(svc: &CognitoService, pool_id: &str, username: &str) -> String {
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "pw-client",
+        "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+    });
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    let client_id = resp_json(&resp)["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    block_on(svc.sign_up(&make_req(
+        "SignUp",
+        &json!({"ClientId": client_id, "Username": username, "Password": "P@ssw0rd!"}).to_string(),
+    )))
+    .unwrap();
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({"UserPoolId": pool_id, "Username": username, "Password": "P@ssw0rd!", "Permanent": true})
+            .to_string(),
+    ))
+    .unwrap();
+    client_id
+}
+
+/// H1 + M2: an MFA-ON pool with a TOTP-enrolled user must challenge for the
+/// software token before minting tokens. A wrong code is rejected; the real
+/// computed TOTP passes and yields tokens.
+#[test]
+fn mfa_on_pool_enforces_software_token_challenge() {
+    let state = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "http://localhost:4569",
+        ),
+    ));
+    let svc = CognitoService::new(state);
+    let resp = block_on(svc.create_user_pool(&make_req(
+        "CreateUserPool",
+        &json!({"PoolName": "mfa", "MfaConfiguration": "ON"}).to_string(),
+    )))
+    .unwrap();
+    let pool_id = resp_json(&resp)["UserPool"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let client_id = setup_confirmed_user(&svc, &pool_id, "mfauser");
+
+    // Enroll a verified software token for the user.
+    {
+        let mut accounts = svc.state.write();
+        let st = accounts.get_or_create("123456789012");
+        let user = st
+            .users
+            .get_mut(&pool_id)
+            .and_then(|u| u.get_mut("mfauser"))
+            .unwrap();
+        user.totp_secret = Some(TEST_TOTP_SECRET.to_string());
+        user.totp_verified = true;
+        user.mfa_preferences = Some(crate::state::MfaPreferences {
+            sms_enabled: false,
+            sms_preferred: false,
+            software_token_enabled: true,
+            software_token_preferred: true,
+        });
+    }
+
+    // InitiateAuth returns the MFA challenge, NOT tokens.
+    let ia = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {"USERNAME": "mfauser", "PASSWORD": "P@ssw0rd!"},
+    });
+    let ch = resp_json(
+        &block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string()))).unwrap(),
+    );
+    assert_eq!(ch["ChallengeName"], "SOFTWARE_TOKEN_MFA", "got {ch}");
+    assert!(
+        ch.get("AuthenticationResult").is_none(),
+        "tokens must NOT be minted before MFA"
+    );
+    let session = ch["Session"].as_str().unwrap().to_string();
+
+    // Wrong code -> CodeMismatchException (session is not consumed).
+    let bad = json!({
+        "ClientId": client_id,
+        "ChallengeName": "SOFTWARE_TOKEN_MFA",
+        "Session": session,
+        "ChallengeResponses": {"USERNAME": "mfauser", "SOFTWARE_TOKEN_MFA_CODE": "000000"},
+    });
+    let err = block_on(
+        svc.respond_to_auth_challenge(&make_req("RespondToAuthChallenge", &bad.to_string())),
+    )
+    .err()
+    .expect("wrong TOTP rejected");
+    assert_eq!(err.code(), "CodeMismatchException");
+
+    // Correct computed TOTP -> tokens.
+    let code = crate::totp::compute_totp_now(TEST_TOTP_SECRET).unwrap();
+    let good = json!({
+        "ClientId": client_id,
+        "ChallengeName": "SOFTWARE_TOKEN_MFA",
+        "Session": session,
+        "ChallengeResponses": {"USERNAME": "mfauser", "SOFTWARE_TOKEN_MFA_CODE": code},
+    });
+    let ok = resp_json(
+        &block_on(
+            svc.respond_to_auth_challenge(&make_req("RespondToAuthChallenge", &good.to_string())),
+        )
+        .expect("correct TOTP mints tokens"),
+    );
+    assert!(
+        ok["AuthenticationResult"]["AccessToken"].is_string(),
+        "got {ok}"
+    );
+}
+
+/// Regression: a pool with MFA OFF must NOT introduce a challenge — tokens are
+/// minted straight from the password factor.
+#[test]
+fn mfa_off_pool_still_mints_tokens_directly() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let client_id = setup_confirmed_user(&svc, &pool_id, "plainuser");
+    let ia = json!({
+        "ClientId": client_id,
+        "AuthFlow": "USER_PASSWORD_AUTH",
+        "AuthParameters": {"USERNAME": "plainuser", "PASSWORD": "P@ssw0rd!"},
+    });
+    let out = resp_json(
+        &block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string()))).unwrap(),
+    );
+    assert!(
+        out["AuthenticationResult"]["AccessToken"].is_string(),
+        "got {out}"
+    );
+}
+
+/// M2: VerifySoftwareToken must reject a code that isn't the real TOTP, and
+/// accept the computed one.
+#[test]
+fn verify_software_token_validates_real_totp() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let _client_id = setup_confirmed_user(&svc, &pool_id, "totpuser");
+
+    // Seed the secret + an access token for the user (as AssociateSoftwareToken
+    // would leave things pre-verification).
+    let access_token = "at-totp".to_string();
+    {
+        let mut accounts = svc.state.write();
+        let st = accounts.get_or_create("123456789012");
+        let user = st
+            .users
+            .get_mut(&pool_id)
+            .and_then(|u| u.get_mut("totpuser"))
+            .unwrap();
+        user.totp_secret = Some(TEST_TOTP_SECRET.to_string());
+        user.totp_verified = false;
+        st.access_tokens.insert(
+            access_token.clone(),
+            AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "totpuser".to_string(),
+                client_id: "c".to_string(),
+                issued_at: chrono::Utc::now(),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            },
+        );
+    }
+
+    let bad = json!({"AccessToken": access_token, "UserCode": "000000"});
+    let err = svc
+        .verify_software_token(&make_req("VerifySoftwareToken", &bad.to_string()))
+        .err()
+        .expect("wrong TOTP rejected");
+    assert_eq!(err.code(), "EnableSoftwareTokenMFAException");
+
+    let code = crate::totp::compute_totp_now(TEST_TOTP_SECRET).unwrap();
+    let good = json!({"AccessToken": access_token, "UserCode": code});
+    let ok = resp_json(
+        &svc.verify_software_token(&make_req("VerifySoftwareToken", &good.to_string()))
+            .expect("correct TOTP accepted"),
+    );
+    assert_eq!(ok["Status"], "SUCCESS");
+}
+
+/// M3: ChangePassword must reject an expired access token.
+#[test]
+fn change_password_rejects_expired_token() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let _client_id = setup_confirmed_user(&svc, &pool_id, "cpuser");
+
+    let expired = "at-expired".to_string();
+    let fresh = "at-fresh".to_string();
+    {
+        let mut accounts = svc.state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.access_tokens.insert(
+            expired.clone(),
+            AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "cpuser".to_string(),
+                client_id: "c".to_string(),
+                issued_at: chrono::Utc::now() - chrono::Duration::hours(2),
+                expires_at: Some(chrono::Utc::now() - chrono::Duration::hours(1)),
+            },
+        );
+        st.access_tokens.insert(
+            fresh.clone(),
+            AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "cpuser".to_string(),
+                client_id: "c".to_string(),
+                issued_at: chrono::Utc::now(),
+                expires_at: Some(chrono::Utc::now() + chrono::Duration::hours(1)),
+            },
+        );
+    }
+
+    let body = json!({
+        "AccessToken": expired,
+        "PreviousPassword": "P@ssw0rd!",
+        "ProposedPassword": "N3wP@ssw0rd!",
+    });
+    let err = svc
+        .change_password(&make_req("ChangePassword", &body.to_string()))
+        .err()
+        .expect("expired token rejected");
+    assert_eq!(err.code(), "NotAuthorizedException");
+
+    // A fresh token still works.
+    let body = json!({
+        "AccessToken": fresh,
+        "PreviousPassword": "P@ssw0rd!",
+        "ProposedPassword": "N3wP@ssw0rd!",
+    });
+    svc.change_password(&make_req("ChangePassword", &body.to_string()))
+        .expect("fresh token accepted");
+}
+
+/// L2: an expired refresh token can no longer mint access tokens.
+#[test]
+fn refresh_token_expiry_enforced() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "rt-client",
+        "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+        "RefreshTokenValidity": 1,
+        "TokenValidityUnits": {"RefreshToken": "days"}
+    });
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    let client_id = resp_json(&resp)["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    block_on(svc.sign_up(&make_req(
+        "SignUp",
+        &json!({"ClientId": client_id, "Username": "rtuser", "Password": "P@ssw0rd!"}).to_string(),
+    )))
+    .unwrap();
+
+    let stale = "rt-stale".to_string();
+    let fresh = "rt-fresh".to_string();
+    {
+        let mut accounts = svc.state.write();
+        let st = accounts.get_or_create("123456789012");
+        st.refresh_tokens.insert(
+            stale.clone(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "rtuser".to_string(),
+                client_id: client_id.clone(),
+                issued_at: chrono::Utc::now() - chrono::Duration::days(2),
+            },
+        );
+        st.refresh_tokens.insert(
+            fresh.clone(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "rtuser".to_string(),
+                client_id: client_id.clone(),
+                issued_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    let stale_body = json!({
+        "ClientId": client_id,
+        "AuthFlow": "REFRESH_TOKEN_AUTH",
+        "AuthParameters": {"REFRESH_TOKEN": stale},
+    });
+    let err = block_on(svc.initiate_auth(&make_req("InitiateAuth", &stale_body.to_string())))
+        .err()
+        .expect("expired refresh token rejected");
+    assert_eq!(err.code(), "NotAuthorizedException");
+
+    let fresh_body = json!({
+        "ClientId": client_id,
+        "AuthFlow": "REFRESH_TOKEN_AUTH",
+        "AuthParameters": {"REFRESH_TOKEN": fresh},
+    });
+    let out = resp_json(
+        &block_on(svc.initiate_auth(&make_req("InitiateAuth", &fresh_body.to_string()))).unwrap(),
+    );
+    assert!(
+        out["AuthenticationResult"]["AccessToken"].is_string(),
+        "got {out}"
+    );
+}
+
+/// M4: AdminInitiateAuth must enforce SECRET_HASH for confidential clients.
+#[test]
+fn admin_initiate_auth_enforces_secret_hash() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "admin-sec",
+        "GenerateSecret": true,
+        "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"]
+    });
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    let rb = resp_json(&resp);
+    let client_id = rb["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let client_secret = rb["UserPoolClient"]["ClientSecret"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": "au"}).to_string(),
+    )))
+    .unwrap();
+    svc.admin_set_user_password(&make_req(
+        "AdminSetUserPassword",
+        &json!({"UserPoolId": pool_id, "Username": "au", "Password": "P@ssw0rd!", "Permanent": true})
+            .to_string(),
+    ))
+    .unwrap();
+
+    // No SECRET_HASH -> rejected.
+    let ia = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+        "AuthParameters": {"USERNAME": "au", "PASSWORD": "P@ssw0rd!"},
+    });
+    let err = block_on(svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &ia.to_string())))
+        .err()
+        .expect("admin auth without SECRET_HASH rejected");
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    // Correct SECRET_HASH -> success.
+    let ia = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+        "AuthParameters": {
+            "USERNAME": "au", "PASSWORD": "P@ssw0rd!",
+            "SECRET_HASH": crate::service::compute_secret_hash("au", &client_id, &client_secret),
+        },
+    });
+    block_on(svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &ia.to_string())))
+        .expect("admin auth with SECRET_HASH succeeds");
+}
+
+/// L3: with PreventUserExistenceErrors=ENABLED, ForgotPassword for an unknown
+/// user returns fake CodeDeliveryDetails instead of leaking UserNotFound.
+#[test]
+fn forgot_password_masks_unknown_user_when_prevented() {
+    let (svc, pool_id) = setup_svc_with_pool();
+
+    let masked = svc
+        .create_user_pool_client(&make_req(
+            "CreateUserPoolClient",
+            &json!({
+                "UserPoolId": pool_id,
+                "ClientName": "masked",
+                "PreventUserExistenceErrors": "ENABLED"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let masked_id = resp_json(&masked)["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let leaky = svc
+        .create_user_pool_client(&make_req(
+            "CreateUserPoolClient",
+            &json!({
+                "UserPoolId": pool_id,
+                "ClientName": "leaky",
+                "PreventUserExistenceErrors": "LEGACY"
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let leaky_id = resp_json(&leaky)["UserPoolClient"]["ClientId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Masking client: unknown user -> success shape with CodeDeliveryDetails.
+    let out = resp_json(
+        &block_on(svc.forgot_password(&make_req(
+            "ForgotPassword",
+            &json!({"ClientId": masked_id, "Username": "ghost"}).to_string(),
+        )))
+        .expect("masked ForgotPassword succeeds for unknown user"),
+    );
+    assert_eq!(out["CodeDeliveryDetails"]["DeliveryMedium"], "EMAIL");
+
+    // Non-masking client: unknown user -> UserNotFoundException.
+    let err = block_on(svc.forgot_password(&make_req(
+        "ForgotPassword",
+        &json!({"ClientId": leaky_id, "Username": "ghost"}).to_string(),
+    )))
+    .err()
+    .expect("non-masking ForgotPassword leaks existence");
+    assert_eq!(err.code(), "UserNotFoundException");
+}
+
+/// L1: /oauth2/userInfo must reject an expired access token instead of
+/// returning the user's claims.
+#[test]
+fn oauth2_userinfo_rejects_expired_token() {
+    let (svc, pool_id) = setup_svc_with_pool();
+    let _client_id = setup_confirmed_user(&svc, &pool_id, "uiuser");
+
+    let expired = "at-ui-expired".to_string();
+    let fresh = "at-ui-fresh".to_string();
+    {
+        let mut accounts = svc.state.write();
+        let st = accounts.get_or_create("123456789012");
+        for (tok, exp) in [
+            (&expired, chrono::Utc::now() - chrono::Duration::hours(1)),
+            (&fresh, chrono::Utc::now() + chrono::Duration::hours(1)),
+        ] {
+            st.access_tokens.insert(
+                tok.clone(),
+                AccessTokenData {
+                    user_pool_id: pool_id.clone(),
+                    username: "uiuser".to_string(),
+                    client_id: "c".to_string(),
+                    issued_at: chrono::Utc::now(),
+                    expires_at: Some(exp),
+                },
+            );
+        }
+    }
+
+    assert!(crate::service::handle_oauth2_userinfo(&svc.state, &expired).is_err());
+    let claims = crate::service::handle_oauth2_userinfo(&svc.state, &fresh)
+        .expect("fresh token returns claims");
+    assert_eq!(claims["username"], "uiuser");
 }

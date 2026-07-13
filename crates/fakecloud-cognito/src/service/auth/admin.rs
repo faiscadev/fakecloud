@@ -146,6 +146,45 @@ impl CognitoService {
         }
 
         let sub = user.sub.clone();
+
+        // Enforce a second factor before minting tokens (fixes the
+        // AdminInitiateAuth MFA bypass). Compute the decision + delivery
+        // destination while `user` is still borrowed, then drop the borrow so
+        // the challenge session can be inserted.
+        let mfa_challenge = state
+            .user_pools
+            .get(&input.pool_id)
+            .and_then(|pool| super::required_mfa_challenge(pool, user));
+        let mfa_phone = user
+            .attributes
+            .iter()
+            .find(|a| a.name == "phone_number")
+            .map(|a| a.value.clone());
+        if let Some(challenge_name) = mfa_challenge {
+            let sms_destination = mfa_phone.as_deref().map(super::mask_phone);
+            // For SMS_MFA the code is stored on the session; the admin path does
+            // not dispatch it here (SNS delivery must not run under the state
+            // write lock), but the challenge is still enforced.
+            let sms_code = (challenge_name == "SMS_MFA").then(generate_confirmation_code);
+            let session = Uuid::new_v4().to_string();
+            state.sessions.insert(
+                session.clone(),
+                SessionData {
+                    user_pool_id: input.pool_id.clone(),
+                    username: input.username.clone(),
+                    client_id: input.client_id.clone(),
+                    challenge_name: challenge_name.to_string(),
+                    challenge_results: vec![],
+                    challenge_metadata: sms_code,
+                },
+            );
+            return Ok(AdminAuthOutcome::MfaChallenge {
+                challenge_name,
+                session,
+                sms_destination,
+            });
+        }
+
         let pool_signing_owned = state.user_pools.get(&input.pool_id).and_then(|pool| {
             pool.signing_key_pem
                 .as_ref()
@@ -232,6 +271,17 @@ impl CognitoService {
                 }
             }
             // If session doesn't exist, handle_auth_challenge_response will return the error
+        }
+
+        // Confidential clients must present a valid SECRET_HASH here too, keyed
+        // on the USERNAME echoed back in ChallengeResponses (matches
+        // AdminInitiateAuth's enforcement).
+        if let Some(username) = body["ChallengeResponses"]["USERNAME"].as_str() {
+            self.require_secret_hash(
+                client_id,
+                username,
+                body["ChallengeResponses"].get("SECRET_HASH"),
+            )?;
         }
 
         self.handle_auth_challenge_response(client_id, challenge_name, session, &body, req)

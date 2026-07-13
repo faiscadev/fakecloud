@@ -113,6 +113,7 @@ flate2 = { workspace = true }
 zip = { workspace = true }
 fakecloud-sdk = { path = "../fakecloud-sdk" }
 fakecloud-testkit = { path = "../fakecloud-testkit", features = ["sdk-clients"] }
+fakecloud-cognito = { workspace = true }
 tempfile = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }

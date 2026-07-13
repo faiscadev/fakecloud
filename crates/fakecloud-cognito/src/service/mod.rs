@@ -811,7 +811,7 @@ pub(crate) fn validate_secret_hash(
         ));
     };
     let expected = compute_secret_hash(username, client_id, secret);
-    if supplied != expected {
+    if !crate::srp::ct_eq(supplied.as_bytes(), expected.as_bytes()) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "NotAuthorizedException",
@@ -1802,6 +1802,15 @@ fn client_token_validity(client: &UserPoolClient) -> (Option<i64>, Option<i64>) 
     (access, id)
 }
 
+/// Resolve an app client's refresh-token lifetime to seconds, applying
+/// `TokenValidityUnits` (default `days`). Cognito's documented default is 30
+/// days when `RefreshTokenValidity` is unset.
+pub(crate) fn refresh_token_validity_secs(client: &UserPoolClient) -> i64 {
+    let units = client.token_validity_units.as_ref();
+    let v = client.refresh_token_validity.unwrap_or(30);
+    v * token_validity_unit_secs(units.and_then(|u| u.refresh_token.as_deref()), "days")
+}
+
 /// Group names a user belongs to, ordered by Precedence (ascending; groups
 /// without a precedence sort last) then creation date — matching how Cognito
 /// orders `cognito:groups`.
@@ -2508,7 +2517,10 @@ pub async fn handle_oauth2_token(
     // request MUST present it (Basic header or `client_secret` form
     // field). RFC 6749 §2.3.1.
     if let Some(secret) = stored_secret.as_ref() {
-        if supplied_secret != Some(secret.as_str()) {
+        let matches = supplied_secret
+            .map(|s| crate::srp::ct_eq(s.as_bytes(), secret.as_bytes()))
+            .unwrap_or(false);
+        if !matches {
             return Err(OAuthTokenError::InvalidClient);
         }
     }
@@ -2701,6 +2713,18 @@ async fn handle_refresh_token_grant(
         for (_, account) in mas.iter() {
             if let Some(rt) = account.refresh_tokens.get(refresh_token) {
                 if rt.client_id != client_id {
+                    found = Err(OAuthTokenError::InvalidGrant);
+                    break;
+                }
+                // Enforce RefreshTokenValidity — an expired refresh token is an
+                // invalid_grant, not a fresh-token mint (L2).
+                let validity_secs = account
+                    .user_pool_clients
+                    .get(client_id)
+                    .map(refresh_token_validity_secs)
+                    .unwrap_or(30 * 86400);
+                let age = Utc::now().signed_duration_since(rt.issued_at).num_seconds();
+                if validity_secs > 0 && age >= validity_secs {
                     found = Err(OAuthTokenError::InvalidGrant);
                     break;
                 }
@@ -2948,7 +2972,9 @@ pub fn handle_oauth2_userinfo(
 ) -> Result<Value, OAuthUserInfoError> {
     let mas = state.read();
     for (_, account) in mas.iter() {
-        let Some(token_data) = account.access_tokens.get(bearer_token) else {
+        // Reject expired tokens — a bare map lookup returned OIDC claims for an
+        // expired-but-unrevoked access token (L1).
+        let Some(token_data) = account.valid_access_token(bearer_token) else {
             continue;
         };
         let user = account
@@ -3008,7 +3034,10 @@ pub fn handle_oauth2_revoke(
     };
     if let Some(secret) = stored_secret.as_ref() {
         let supplied = params.get("client_secret").map(String::as_str);
-        if supplied != Some(secret.as_str()) {
+        let matches = supplied
+            .map(|s| crate::srp::ct_eq(s.as_bytes(), secret.as_bytes()))
+            .unwrap_or(false);
+        if !matches {
             return Err(OAuthRevokeError::InvalidClient);
         }
     }

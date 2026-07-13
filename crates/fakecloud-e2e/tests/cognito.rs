@@ -3216,11 +3216,21 @@ async fn cognito_associate_verify_software_token() {
     );
     assert!(assoc.session().is_some(), "Should return a session");
 
-    // Verify software token with a 6-digit code
+    // A wrong code is rejected — VerifySoftwareToken now validates a real TOTP.
+    let bad = client
+        .verify_software_token()
+        .access_token(&access_token)
+        .user_code("000000")
+        .send()
+        .await;
+    assert!(bad.is_err(), "wrong TOTP must be rejected");
+
+    // Verify software token with the real RFC 6238 code derived from the secret.
+    let code = fakecloud_cognito::totp::compute_totp_now(secret).expect("compute totp");
     let verify = client
         .verify_software_token()
         .access_token(&access_token)
-        .user_code("123456")
+        .user_code(&code)
         .send()
         .await
         .expect("verify software token");
@@ -3228,6 +3238,184 @@ async fn cognito_associate_verify_software_token() {
     assert_eq!(
         verify.status(),
         Some(&aws_sdk_cognitoidentityprovider::types::VerifySoftwareTokenResponseType::Success)
+    );
+}
+
+/// Full software-token MFA sign-in: enroll TOTP on an OFF pool, flip the pool
+/// to MFA ON, then a fresh AdminInitiateAuth must issue a SOFTWARE_TOKEN_MFA
+/// challenge — a wrong code is rejected and the real code mints tokens. This is
+/// the sign-in MFA-bypass fix end to end.
+#[tokio::test]
+async fn cognito_software_token_mfa_signin_enforced() {
+    use aws_sdk_cognitoidentityprovider::types::AuthFlowType;
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("mfa-signin-pool")
+        .policies(
+            UserPoolPolicyType::builder()
+                .password_policy(
+                    PasswordPolicyType::builder()
+                        .minimum_length(6)
+                        .require_uppercase(false)
+                        .require_lowercase(false)
+                        .require_numbers(false)
+                        .require_symbols(false)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let pool_client = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("mfa-signin-client")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowRefreshTokenAuth)
+        .send()
+        .await
+        .expect("create client");
+    let client_id = pool_client
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("mfasignin")
+        .send()
+        .await
+        .expect("create user");
+    client
+        .admin_set_user_password()
+        .user_pool_id(&pool_id)
+        .username("mfasignin")
+        .password("passwd")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+
+    // First sign-in (pool still OFF) to obtain an access token for enrollment.
+    let auth = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "mfasignin")
+        .auth_parameters("PASSWORD", "passwd")
+        .send()
+        .await
+        .expect("auth");
+    let access_token = auth
+        .authentication_result()
+        .unwrap()
+        .access_token()
+        .unwrap()
+        .to_string();
+
+    // Enroll + verify a software token.
+    let assoc = client
+        .associate_software_token()
+        .access_token(&access_token)
+        .send()
+        .await
+        .expect("associate");
+    let secret = assoc.secret_code().unwrap().to_string();
+    let code = fakecloud_cognito::totp::compute_totp_now(&secret).unwrap();
+    client
+        .verify_software_token()
+        .access_token(&access_token)
+        .user_code(&code)
+        .send()
+        .await
+        .expect("verify");
+    client
+        .set_user_mfa_preference()
+        .access_token(&access_token)
+        .software_token_mfa_settings(
+            SoftwareTokenMfaSettingsType::builder()
+                .enabled(true)
+                .preferred_mfa(true)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("set mfa preference");
+
+    // Turn the pool's MFA requirement ON.
+    client
+        .set_user_pool_mfa_config()
+        .user_pool_id(&pool_id)
+        .mfa_configuration(UserPoolMfaType::On)
+        .software_token_mfa_configuration(
+            SoftwareTokenMfaConfigType::builder().enabled(true).build(),
+        )
+        .send()
+        .await
+        .expect("set pool mfa config");
+
+    // Fresh sign-in now yields a SOFTWARE_TOKEN_MFA challenge, not tokens.
+    let challenge = client
+        .admin_initiate_auth()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "mfasignin")
+        .auth_parameters("PASSWORD", "passwd")
+        .send()
+        .await
+        .expect("auth challenge");
+    assert!(
+        challenge.authentication_result().is_none(),
+        "tokens must not be minted before MFA"
+    );
+    assert_eq!(
+        challenge.challenge_name(),
+        Some(&ChallengeNameType::SoftwareTokenMfa)
+    );
+    let session = challenge.session().unwrap().to_string();
+
+    // Wrong code -> rejected.
+    let bad = client
+        .admin_respond_to_auth_challenge()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .challenge_name(ChallengeNameType::SoftwareTokenMfa)
+        .session(&session)
+        .challenge_responses("USERNAME", "mfasignin")
+        .challenge_responses("SOFTWARE_TOKEN_MFA_CODE", "000000")
+        .send()
+        .await;
+    assert!(bad.is_err(), "wrong MFA code must be rejected");
+
+    // Correct code -> tokens.
+    let code = fakecloud_cognito::totp::compute_totp_now(&secret).unwrap();
+    let done = client
+        .admin_respond_to_auth_challenge()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .challenge_name(ChallengeNameType::SoftwareTokenMfa)
+        .session(&session)
+        .challenge_responses("USERNAME", "mfasignin")
+        .challenge_responses("SOFTWARE_TOKEN_MFA_CODE", &code)
+        .send()
+        .await
+        .expect("mfa challenge completes");
+    assert!(
+        done.authentication_result()
+            .and_then(|r| r.access_token())
+            .is_some(),
+        "correct MFA code must mint tokens"
     );
 }
 

@@ -7,7 +7,20 @@ impl CognitoService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let mut input = AdminAuthInput::from_request(&req.json_body())?;
+        let body = req.json_body();
+        let mut input = AdminAuthInput::from_request(&body)?;
+
+        // Confidential clients must present a valid SECRET_HASH on
+        // AdminInitiateAuth too (the non-admin InitiateAuth already enforces
+        // this). Validate against the client-supplied username BEFORE resolving
+        // an email/phone alias, since the client computed the hash from the
+        // identifier it sent.
+        self.require_secret_hash(
+            &input.client_id,
+            &input.username,
+            body["AuthParameters"].get("SECRET_HASH"),
+        )?;
+
         // Resolve an email/phone alias to the stored username for pools with
         // UsernameAttributes / AliasAttributes.
         input.username = {
@@ -56,6 +69,32 @@ impl CognitoService {
                         "requiredAttributes": "[]",
                         "userAttributes": "{}"
                     }
+                })));
+            }
+            AdminAuthOutcome::MfaChallenge {
+                challenge_name,
+                session,
+                sms_destination,
+            } => {
+                let mut params = serde_json::Map::new();
+                params.insert("USERNAME".to_string(), json!(input.username));
+                params.insert("USER_ID_FOR_SRP".to_string(), json!(input.username));
+                if challenge_name == "SMS_MFA" {
+                    if let Some(dest) = sms_destination.as_ref() {
+                        params.insert("CODE_DELIVERY_DELIVERY_MEDIUM".to_string(), json!("SMS"));
+                        params.insert("CODE_DELIVERY_DESTINATION".to_string(), json!(dest));
+                    }
+                }
+                if challenge_name == "MFA_SETUP" {
+                    params.insert(
+                        "MFAS_CAN_SETUP".to_string(),
+                        json!("[\"SOFTWARE_TOKEN_MFA\"]"),
+                    );
+                }
+                return Ok(AwsResponse::ok_json(json!({
+                    "ChallengeName": challenge_name,
+                    "Session": session,
+                    "ChallengeParameters": params,
                 })));
             }
             AdminAuthOutcome::Tokens(tokens) => tokens,
@@ -677,6 +716,14 @@ impl CognitoService {
         };
         let (sub, pool_signing_owned) = pretoken_setup;
 
+        // The password factor succeeded. Before minting tokens, enforce any
+        // second factor the pool/user configuration demands (fixes the sign-in
+        // MFA bypass — tokens were previously issued straight after the
+        // password check).
+        if let Some(resp) = self.maybe_mfa_challenge(pool_id, client_id, username, req) {
+            return Ok(resp);
+        }
+
         let pretoken_overrides = if let Some(ctx) = self.delivery_ctx.as_ref() {
             if let Some(function_arn) = triggers::get_trigger_arn(
                 &self.state,
@@ -1072,6 +1119,25 @@ impl CognitoService {
                 StatusCode::BAD_REQUEST,
                 "NotAuthorizedException",
                 "Invalid refresh token.",
+            ));
+        }
+
+        // Enforce the app client's RefreshTokenValidity: an expired refresh
+        // token can no longer mint access tokens (L2). Previously the token was
+        // honored forever.
+        let refresh_validity_secs = state
+            .user_pool_clients
+            .get(client_id)
+            .map(crate::service::refresh_token_validity_secs)
+            .unwrap_or(30 * 86400);
+        let age = Utc::now()
+            .signed_duration_since(token_data.issued_at)
+            .num_seconds();
+        if refresh_validity_secs > 0 && age >= refresh_validity_secs {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Refresh Token has expired.",
             ));
         }
 
