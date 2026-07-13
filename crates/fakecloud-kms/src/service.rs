@@ -480,6 +480,16 @@ impl KmsService {
             // Could be key ARN or alias ARN
             if key_id_or_arn.contains(":key/") {
                 if let Some(id) = key_id_or_arn.rsplit('/').next() {
+                    // Multi-region replicas are stored under a region-scoped
+                    // composite key ("{region}:{id}") because the primary and
+                    // every replica share the same bare id. Resolve the ARN's
+                    // own region first so a DescribeKey on a replica ARN returns
+                    // the replica entry, not the primary that also matches `id`.
+                    let region = key_id_or_arn.split(':').nth(3).unwrap_or("");
+                    let scoped = format!("{region}:{id}");
+                    if state.keys.contains_key(&scoped) {
+                        return Some(scoped);
+                    }
                     if state.keys.contains_key(id) {
                         return Some(id.to_string());
                     }
@@ -844,6 +854,19 @@ impl KmsService {
         let body = req.json_body();
         let resolved = self.resolve_required_key(req, &body)?;
         let pending_days = body["PendingWindowInDays"].as_i64().unwrap_or(30);
+
+        // AWS enforces a 7..=30 day waiting period; anything outside that
+        // range is a ValidationException. Previously any value (including 0
+        // or negative) was accepted verbatim and echoed back.
+        if !(7..=30).contains(&pending_days) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "1 validation error detected: Value '{pending_days}' at 'pendingWindowInDays' failed to satisfy constraint: Member must have value less than or equal to 30 and greater than or equal to 7"
+                ),
+            ));
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -1395,7 +1418,11 @@ impl KmsService {
             imported_key_material: false,
             imported_material_bytes: None,
             private_key_seed: rand_bytes(32),
-            primary_region: None,
+            // Record which region holds the primary so a later DescribeKey on
+            // this replica renders MultiRegionKeyType=REPLICA (and the correct
+            // primary region/ARN). Leaving this None made the stored replica
+            // look like a PRIMARY on read-back.
+            primary_region: Some(source_region.clone()),
             ..source_key
         };
 

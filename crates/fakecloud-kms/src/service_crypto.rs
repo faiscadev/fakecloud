@@ -66,7 +66,7 @@ impl KmsService {
         }
 
         let requested_alg = body["EncryptionAlgorithm"].as_str();
-        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
 
         let (ciphertext_b64, echoed_alg) = if key.key_spec.starts_with("RSA_") {
             // Asymmetric ENCRYPT_DECRYPT (RSA): real RSA-OAEP under the key's
@@ -161,7 +161,7 @@ impl KmsService {
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &ec_aad)?;
 
         // When the caller supplies KeyId for a symmetric decrypt, AWS
@@ -268,8 +268,8 @@ impl KmsService {
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let source_ec_aad = canonical_encryption_context(&body["SourceEncryptionContext"]);
-        let dest_ec_aad = canonical_encryption_context(&body["DestinationEncryptionContext"]);
+        let source_ec_aad = canonical_encryption_context(&body["SourceEncryptionContext"])?;
+        let dest_ec_aad = canonical_encryption_context(&body["DestinationEncryptionContext"])?;
         let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &source_ec_aad)?;
 
         let dest_resolved =
@@ -290,6 +290,22 @@ impl KmsService {
         })?;
         require_usable_key_state(dest_key)?;
 
+        // The destination CMK must be an encryption key. Re-encrypting into a
+        // SIGN_VERIFY / GENERATE_VERIFY_MAC / KEY_AGREEMENT key is invalid;
+        // AWS rejects it with InvalidKeyUsageException. Previously any dest key
+        // was accepted and its plaintext silently wrapped under the symmetric
+        // path regardless of usage or spec.
+        if dest_key.key_usage != "ENCRYPT_DECRYPT" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeyUsageException",
+                format!(
+                    "The operation failed because the KMS key {} is not enabled for the requested operation. The key usage must be ENCRYPT_DECRYPT but is {}.",
+                    dest_key.arn, dest_key.key_usage
+                ),
+            ));
+        }
+
         // Source key gate too — AWS rejects ReEncrypt when either side
         // is in a non-Enabled state.
         if let Some(src_key_id) = decoded.source_arn.rsplit('/').next() {
@@ -301,7 +317,44 @@ impl KmsService {
         let plaintext_bytes = base64::engine::general_purpose::STANDARD
             .decode(&decoded.plaintext_b64)
             .unwrap_or_default();
-        let new_ciphertext_b64 = if let Some(ref material) = dest_key.imported_material_bytes {
+        let (new_ciphertext_b64, dest_algorithm) = if dest_key.key_spec.starts_with("RSA_") {
+            // Asymmetric destination: produce a real RSA-OAEP ciphertext under
+            // the destination key's public half, mirroring the Encrypt path,
+            // rather than the symmetric AES blob the old code emitted for every
+            // destination. The echoed DestinationEncryptionAlgorithm reflects
+            // the algorithm actually used.
+            let alg = body["DestinationEncryptionAlgorithm"]
+                .as_str()
+                .unwrap_or("RSAES_OAEP_SHA_256");
+            if alg != "RSAES_OAEP_SHA_1" && alg != "RSAES_OAEP_SHA_256" {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidKeyUsageException",
+                    format!(
+                        "Algorithm '{alg}' is incompatible with the key spec '{}'.",
+                        dest_key.key_spec
+                    ),
+                ));
+            }
+            let pub_der = dest_key.asymmetric_public_key_der.as_ref().ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    "asymmetric public key missing",
+                )
+            })?;
+            let raw = super::asym::rsa_oaep_wrap(pub_der, alg, &plaintext_bytes).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidKeyUsageException",
+                    format!("RSA re-encrypt failed: {e}"),
+                )
+            })?;
+            let raw_b64 = base64::engine::general_purpose::STANDARD.encode(&raw);
+            let envelope = format!("fakecloud-rsa:{}:{}:{}", dest_key.key_id, alg, raw_b64);
+            let env_b64 = base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes());
+            (env_b64, alg.to_string())
+        } else if let Some(ref material) = dest_key.imported_material_bytes {
             // Imported-key path: keep the legacy XOR envelope so consumers
             // that already round-trip via key material can still decrypt.
             let xored: Vec<u8> = plaintext_bytes
@@ -311,7 +364,10 @@ impl KmsService {
                 .collect();
             let xored_b64 = base64::engine::general_purpose::STANDARD.encode(&xored);
             let envelope = format!("fakecloud-imported:{}:{xored_b64}", dest_key.key_id);
-            base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes())
+            (
+                base64::engine::general_purpose::STANDARD.encode(envelope.as_bytes()),
+                "SYMMETRIC_DEFAULT".to_string(),
+            )
         } else {
             // Default path: wrap the recovered plaintext under the
             // destination key with the AWS-shaped binary blob, binding
@@ -322,7 +378,10 @@ impl KmsService {
                 &plaintext_bytes,
                 &dest_ec_aad,
             );
-            base64::engine::general_purpose::STANDARD.encode(&blob)
+            (
+                base64::engine::general_purpose::STANDARD.encode(&blob),
+                "SYMMETRIC_DEFAULT".to_string(),
+            )
         };
 
         Ok(AwsResponse::json(
@@ -331,8 +390,8 @@ impl KmsService {
                 "CiphertextBlob": new_ciphertext_b64,
                 "KeyId": dest_key.arn,
                 "SourceKeyId": decoded.source_arn,
-                "SourceEncryptionAlgorithm": "SYMMETRIC_DEFAULT",
-                "DestinationEncryptionAlgorithm": "SYMMETRIC_DEFAULT",
+                "SourceEncryptionAlgorithm": decoded.encryption_algorithm,
+                "DestinationEncryptionAlgorithm": dest_algorithm,
             }))
             .unwrap(),
         ))
@@ -378,7 +437,7 @@ impl KmsService {
         // matching real KMS and the Encrypt/ReEncrypt paths. Previously the
         // context was ignored, so the recommended envelope-encryption pattern
         // (GenerateDataKey + EncryptionContext) could never decrypt its key.
-        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
             &key.key_id,
@@ -436,7 +495,7 @@ impl KmsService {
         // with an EncryptionContext could never be decrypted with that context
         // (AEAD mismatch -> InvalidCiphertextException) and Decrypt with no
         // context wrongly succeeded.
-        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
             &key.key_id,
@@ -802,11 +861,27 @@ impl KmsService {
         }
 
         // Validate key spec supports MAC
-        if key.mac_algorithms.is_none() {
-            return Err(AwsServiceError::aws_error(
+        let mac_algs = key.mac_algorithms.as_deref().ok_or_else(|| {
+            AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidKeyUsageException",
                 format!("Key '{}' does not support MAC operations", key.arn),
+            )
+        })?;
+
+        // The requested MacAlgorithm must be one the key actually advertises
+        // (an HMAC_256 key supports only HMAC_SHA_256, etc.). AWS rejects a
+        // mismatch with InvalidKeyUsageException; previously any spec-shaped
+        // string was accepted and silently HMAC'd, so a HMAC_512 request
+        // against a HMAC_256 key wrongly succeeded.
+        if !mac_algs.iter().any(|a| a == &mac_algorithm) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeyUsageException",
+                format!(
+                    "1 validation error detected: Value '{mac_algorithm}' at 'MacAlgorithm' failed to satisfy constraint: Member must satisfy enum value set: {}",
+                    fmt_enum_set(mac_algs)
+                ),
             ));
         }
 
@@ -879,6 +954,29 @@ impl KmsService {
                 StatusCode::BAD_REQUEST,
                 "InvalidKeyUsageException",
                 format!("Key '{}' is not a GENERATE_VERIFY_MAC key", key.arn),
+            ));
+        }
+
+        // The requested MacAlgorithm must be one the key advertises — same
+        // rule as GenerateMac. Without this, VerifyMac against a HMAC_256
+        // key with MacAlgorithm=HMAC_SHA_512 would recompute under the wrong
+        // digest and report a spurious KMSInvalidMacException instead of the
+        // AWS InvalidKeyUsageException.
+        let mac_algs = key.mac_algorithms.as_deref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeyUsageException",
+                format!("Key '{}' does not support MAC operations", key.arn),
+            )
+        })?;
+        if !mac_algs.iter().any(|a| a == &mac_algorithm) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeyUsageException",
+                format!(
+                    "1 validation error detected: Value '{mac_algorithm}' at 'MacAlgorithm' failed to satisfy constraint: Member must satisfy enum value set: {}",
+                    fmt_enum_set(mac_algs)
+                ),
             ));
         }
 
@@ -976,7 +1074,7 @@ impl KmsService {
 
         // Wrap the private key in the AWS-shaped binary blob, binding the
         // caller's EncryptionContext into the AAD (see GenerateDataKey).
-        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
             &key.key_id,
@@ -1038,7 +1136,7 @@ impl KmsService {
         // GenerateDataKeyPair (with-plaintext) sibling. Previously this used
         // crate::blob::encode (AAD = key-id only), so the private key could
         // never be decrypted with its EncryptionContext.
-        let ec_aad = canonical_encryption_context(&body["EncryptionContext"]);
+        let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let blob = crate::blob::encode_with_context(
             &state.master_key_bytes,
             &key.key_id,

@@ -212,6 +212,22 @@ impl KmsService {
             )
         })?;
 
+        // AWS KMS requires symmetric imported key material to be exactly
+        // 256 bits (32 bytes). Reject anything else before it reaches the
+        // encrypt/decrypt XOR path — zero-length material there would
+        // panic with a divide-by-zero (`byte ^ material[i % material.len()]`),
+        // turning a malformed import into a server crash (DoS).
+        if unwrapped.len() != 32 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "Key material must be exactly 256 bits (32 bytes); got {} bytes",
+                    unwrapped.len()
+                ),
+            ));
+        }
+
         key.imported_key_material = true;
         key.imported_material_bytes = Some(unwrapped);
         key.enabled = true;
