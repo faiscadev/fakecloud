@@ -519,7 +519,10 @@ fn is_mutating(action: &str) -> bool {
     action.starts_with("Create")
         || action.starts_with("Update")
         || action.starts_with("Delete")
-        || action.starts_with("Put")
+        // `PutEvents` ingests analytics events but persists nothing here, so it
+        // must not trigger a snapshot (unlike `PutEventStream`, which writes the
+        // app's event-stream config).
+        || (action.starts_with("Put") && action != "PutEvents")
         || action == "TagResource"
         || action == "UntagResource"
         || action == "RemoveAttributes"

@@ -19,10 +19,9 @@ impl PinpointService {
         let id = shared::hex_id();
         let mut guard = self.state.write();
         let app = guard
-            .get_or_create(&ctx.account)
-            .apps
-            .entry(app_id.to_string())
-            .or_default();
+            .get_mut(&ctx.account)
+            .and_then(|d| d.apps.get_mut(app_id))
+            .ok_or_else(|| super::not_found_app(app_id))?;
         let record = build_segment(ctx, app_id, &id, 1, body);
         app.segments.insert(
             id,
