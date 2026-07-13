@@ -647,6 +647,26 @@ pub(crate) fn decode_offset_token(token: Option<&String>) -> usize {
         .unwrap_or(0)
 }
 
+/// Parse an input timestamp, accepting either RFC3339 (the query-protocol
+/// form) or a numeric epoch-seconds value (which JSON-protocol / X-Amz-Target
+/// callers send). Previously only RFC3339 was accepted, so an epoch-second
+/// timestamp was silently dropped or rejected.
+pub(crate) fn parse_input_timestamp(s: &str) -> Option<DateTime<Utc>> {
+    let s = s.trim();
+    if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    // Epoch seconds (optionally fractional).
+    if let Ok(secs) = s.parse::<f64>() {
+        if secs.is_finite() {
+            let whole = secs.trunc() as i64;
+            let nanos = (secs.fract().abs() * 1_000_000_000.0).round() as u32;
+            return DateTime::<Utc>::from_timestamp(whole, nanos);
+        }
+    }
+    None
+}
+
 /// Per-datapoint aggregation summary covering both the simple `Value` form
 /// and the `StatisticValues` form so callers don't lose the count or
 /// min/max baked into a `StatisticSet`.
@@ -743,15 +763,19 @@ pub(crate) fn percentile(sorted: &[f64], p: f64) -> Option<f64> {
 /// individual `value` samples (used for percentiles — distributions published
 /// as `StatisticValues` don't retain their raw values so they don't
 /// contribute), and the bucket's unit when consistent.
-struct MetricBucket {
+pub(crate) struct MetricBucket {
     agg: DatumStats,
-    samples: Vec<f64>,
+    pub(crate) samples: Vec<f64>,
     unit: Option<String>,
 }
 
 /// Resolve a single statistic (simple, e.g. `Sum`, or percentile, e.g. `p99`)
 /// for one bucket. `samples` must be sorted ascending.
-fn resolve_stat(stat: &str, bucket: &MetricBucket, samples_sorted: &[f64]) -> Option<f64> {
+pub(crate) fn resolve_stat(
+    stat: &str,
+    bucket: &MetricBucket,
+    samples_sorted: &[f64],
+) -> Option<f64> {
     if let Some(p) = parse_percentile(stat) {
         return percentile(samples_sorted, p);
     }
@@ -763,7 +787,7 @@ fn resolve_stat(stat: &str, bucket: &MetricBucket, samples_sorted: &[f64]) -> Op
 /// each distinct dimension combination as its own metric) and, when a unit
 /// filter is set, only datapoints published with that unit.
 #[allow(clippy::too_many_arguments)]
-fn collect_metric_buckets(
+pub(crate) fn collect_metric_buckets(
     data: &[MetricDatum],
     metric_name: &str,
     dim_filter: &BTreeMap<String, String>,
@@ -863,8 +887,7 @@ impl CloudWatchService {
                 .map_err(|_| invalid_param("Value must be a valid number"))?;
             let timestamp = member
                 .get("Timestamp")
-                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-                .map(|d| d.with_timezone(&Utc))
+                .and_then(|s| parse_input_timestamp(s))
                 .unwrap_or(now);
             let unit = member.get("Unit").cloned();
             let storage_resolution = member
@@ -1010,12 +1033,10 @@ impl CloudWatchService {
         if period <= 0 {
             return Err(invalid_param("Period must be positive"));
         }
-        let start_ts = DateTime::parse_from_rfc3339(&start)
-            .map_err(|_| invalid_param("StartTime must be ISO 8601"))?
-            .with_timezone(&Utc);
-        let end_ts = DateTime::parse_from_rfc3339(&end)
-            .map_err(|_| invalid_param("EndTime must be ISO 8601"))?
-            .with_timezone(&Utc);
+        let start_ts = parse_input_timestamp(&start)
+            .ok_or_else(|| invalid_param("StartTime must be ISO 8601 or epoch seconds"))?;
+        let end_ts = parse_input_timestamp(&end)
+            .ok_or_else(|| invalid_param("EndTime must be ISO 8601 or epoch seconds"))?;
 
         let mut statistics: Vec<String> = Vec::new();
         let mut extended_statistics: Vec<String> = Vec::new();
@@ -1122,12 +1143,10 @@ impl CloudWatchService {
         )?;
         let start = required_query_param(req, "StartTime")?;
         let end = required_query_param(req, "EndTime")?;
-        let start_ts = DateTime::parse_from_rfc3339(&start)
-            .map_err(|_| invalid_param("StartTime must be ISO 8601"))?
-            .with_timezone(&Utc);
-        let end_ts = DateTime::parse_from_rfc3339(&end)
-            .map_err(|_| invalid_param("EndTime must be ISO 8601"))?
-            .with_timezone(&Utc);
+        let start_ts = parse_input_timestamp(&start)
+            .ok_or_else(|| invalid_param("StartTime must be ISO 8601 or epoch seconds"))?;
+        let end_ts = parse_input_timestamp(&end)
+            .ok_or_else(|| invalid_param("EndTime must be ISO 8601 or epoch seconds"))?;
 
         // Default ScanBy is TimestampDescending (newest first); callers read
         // Values[0] as the latest datapoint. The bucket map is ascending, so
@@ -1487,7 +1506,13 @@ impl CloudWatchService {
             true
         };
 
-        let state = self.state.read();
+        // Recompute alarm states from the metric data (and composite rules)
+        // before rendering, so a PutMetricData that crosses a threshold is
+        // reflected here and a composite alarm mirrors its children.
+        let mut state = self.state.write();
+        if let Some(acct) = state.accounts.get_mut(&req.account_id) {
+            crate::alarm_eval::evaluate_alarms(acct, &req.region, Utc::now());
+        }
         let mut combined: Vec<(bool, String)> = Vec::new();
         if let Some(acct) = state.get(&req.account_id) {
             if let Some(alarms) = acct.alarms_in(&req.region) {
@@ -1668,20 +1693,34 @@ impl CloudWatchService {
         let new_state = AlarmState::parse(&state_value)
             .ok_or_else(|| invalid_param("StateValue must be OK | ALARM | INSUFFICIENT_DATA"))?;
 
+        let now = Utc::now();
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
-        let alarms = acct.alarms_in_mut(&req.region);
-        let alarm = alarms.get_mut(&alarm_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "ResourceNotFound",
-                format!("Alarm {alarm_name} not found"),
-            )
-        })?;
-        let old_state = alarm.state_value.as_str().to_string();
-        alarm.state_value = new_state;
-        alarm.state_reason = state_reason.clone();
-        alarm.state_updated_timestamp = Utc::now();
+        // SetAlarmState can target a metric alarm or a composite alarm; look up
+        // the metric store first, then fall back to the composite store.
+        let (old_state, alarm_type) =
+            if let Some(alarm) = acct.alarms_in_mut(&req.region).get_mut(&alarm_name) {
+                let old = alarm.state_value.as_str().to_string();
+                alarm.state_value = new_state;
+                alarm.state_reason = state_reason.clone();
+                alarm.state_updated_timestamp = now;
+                (old, "MetricAlarm")
+            } else if let Some(composite) = acct
+                .composite_alarms_in_mut(&req.region)
+                .get_mut(&alarm_name)
+            {
+                let old = composite.state_value.as_str().to_string();
+                composite.state_value = new_state;
+                composite.state_reason = state_reason.clone();
+                composite.state_updated_timestamp = now;
+                (old, "CompositeAlarm")
+            } else {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "ResourceNotFound",
+                    format!("Alarm {alarm_name} not found"),
+                ));
+            };
 
         let new_state_str = new_state.as_str().to_string();
         let summary = format!("Alarm updated from {old_state} to {new_state_str}");
@@ -1693,7 +1732,7 @@ impl CloudWatchService {
             acct,
             &req.region,
             &alarm_name,
-            "MetricAlarm",
+            alarm_type,
             "StateUpdate",
             summary,
             history_data,
@@ -1724,12 +1763,9 @@ impl CloudWatchService {
         )?;
         let alarm_filter = optional_query_param(req, "AlarmName");
         let type_filter = optional_query_param(req, "HistoryItemType");
-        let start_date = optional_query_param(req, "StartDate")
-            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-            .map(|d| d.with_timezone(&Utc));
-        let end_date = optional_query_param(req, "EndDate")
-            .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-            .map(|d| d.with_timezone(&Utc));
+        let start_date =
+            optional_query_param(req, "StartDate").and_then(|s| parse_input_timestamp(&s));
+        let end_date = optional_query_param(req, "EndDate").and_then(|s| parse_input_timestamp(&s));
         // DescribeAlarmHistory defaults to TimestampDescending (newest first).
         let descending = req
             .query_params
@@ -1956,7 +1992,7 @@ impl CloudWatchService {
 /// Append an alarm-history record (newest appended last). Shared by
 /// PutMetricAlarm, SetAlarmState and DeleteAlarms so DescribeAlarmHistory
 /// reflects real lifecycle transitions.
-fn push_alarm_history(
+pub(crate) fn push_alarm_history(
     acct: &mut crate::state::CloudWatchState,
     region: &str,
     alarm_name: &str,

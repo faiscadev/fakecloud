@@ -36,8 +36,14 @@ pub enum FilterClause {
     Equals { field: String, value: String },
     /// `filter field != "value"`
     NotEquals { field: String, value: String },
-    /// `filter field like /pattern/` or `filter field like "substring"`
-    Like { field: String, pattern: String },
+    /// `filter field like /pattern/` (regex) or `filter field like "substring"`
+    /// (plain substring). `is_regex` records which form was written so the
+    /// `/.../` form is matched as a compiled regular expression.
+    Like {
+        field: String,
+        pattern: String,
+        is_regex: bool,
+    },
 }
 
 /// A `parse` directive: glob `pattern` applied to `source`, binding each `*`
@@ -87,7 +93,11 @@ fn parse_field_list(s: &str) -> Vec<String> {
 }
 
 /// Parse a CWLI query string into a structured pipeline.
-pub fn parse_query(query: &str) -> ParsedQuery {
+///
+/// Returns an `Err` describing the problem for a malformed query (e.g. an
+/// unterminated regex or string literal) so the caller can surface a
+/// `MalformedQueryException` instead of proceeding with a broken pipeline.
+pub fn parse_query(query: &str) -> Result<ParsedQuery, String> {
     let mut parsed = ParsedQuery::default();
 
     for raw in query.split('|') {
@@ -105,7 +115,7 @@ pub fn parse_query(query: &str) -> ParsedQuery {
                 .commands
                 .push(Command::Display(parse_field_list(rest)));
         } else if let Some(rest) = strip_keyword(cmd, "filter") {
-            if let Some(clause) = parse_filter_clause(rest.trim()) {
+            if let Some(clause) = parse_filter_clause(rest.trim())? {
                 parsed.commands.push(Command::Filter(clause));
             }
         } else if let Some(rest) = strip_keyword(cmd, "stats") {
@@ -131,35 +141,61 @@ pub fn parse_query(query: &str) -> ParsedQuery {
         }
     }
 
-    parsed
+    Ok(parsed)
 }
 
-fn parse_filter_clause(s: &str) -> Option<FilterClause> {
+fn parse_filter_clause(s: &str) -> Result<Option<FilterClause>, String> {
     // Try: field like /pattern/ or field like "substring"
     if let Some(like_pos) = s.find(" like ") {
         let field = s[..like_pos].trim().to_string();
         let pattern_str = s[like_pos + 6..].trim();
-        let pattern = if pattern_str.starts_with('/') && pattern_str.ends_with('/') {
-            pattern_str[1..pattern_str.len() - 1].to_string()
+        let (pattern, is_regex) = if pattern_str.starts_with('/') {
+            // A `/.../` regex literal needs a closing delimiter and at least
+            // one character between the slashes; a lone `/` is malformed and
+            // must not slice out of bounds.
+            if pattern_str.len() < 2 || !pattern_str.ends_with('/') {
+                return Err(format!("malformed regex in filter: {pattern_str}"));
+            }
+            (pattern_str[1..pattern_str.len() - 1].to_string(), true)
         } else {
-            unquote(pattern_str)
+            (parse_string_literal(pattern_str)?, false)
         };
-        return Some(FilterClause::Like { field, pattern });
+        return Ok(Some(FilterClause::Like {
+            field,
+            pattern,
+            is_regex,
+        }));
     }
 
     if let Some(ne_pos) = s.find(" != ") {
         let field = s[..ne_pos].trim().to_string();
-        let value = unquote(s[ne_pos + 4..].trim());
-        return Some(FilterClause::NotEquals { field, value });
+        let value = parse_string_literal(s[ne_pos + 4..].trim())?;
+        return Ok(Some(FilterClause::NotEquals { field, value }));
     }
 
     if let Some(eq_pos) = s.find(" = ") {
         let field = s[..eq_pos].trim().to_string();
-        let value = unquote(s[eq_pos + 3..].trim());
-        return Some(FilterClause::Equals { field, value });
+        let value = parse_string_literal(s[eq_pos + 3..].trim())?;
+        return Ok(Some(FilterClause::Equals { field, value }));
     }
 
-    None
+    Ok(None)
+}
+
+/// Parse a filter right-hand side. A value wrapped in single or double quotes
+/// must be properly closed (guarding against a lone `"` slicing out of
+/// bounds); an unquoted value is taken literally.
+fn parse_string_literal(s: &str) -> Result<String, String> {
+    let bytes = s.as_bytes();
+    if let Some(&first) = bytes.first() {
+        if first == b'"' || first == b'\'' {
+            if s.len() >= 2 && bytes[s.len() - 1] == first {
+                return Ok(s[1..s.len() - 1].to_string());
+            }
+            return Err(format!("unterminated string literal in filter: {s}"));
+        }
+    }
+    Ok(s.to_string())
 }
 
 /// Parse a `stats` command body (the text after `stats`).
@@ -262,14 +298,6 @@ fn parse_parse(rest: &str) -> Option<ParseSpec> {
     })
 }
 
-fn unquote(s: &str) -> String {
-    if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
-        s[1..s.len() - 1].to_string()
-    } else {
-        s.to_string()
-    }
-}
-
 /// A materialized query row: ordered (field, value) pairs. Insertion order is
 /// preserved so output column ordering is stable.
 #[derive(Clone, Default)]
@@ -364,8 +392,24 @@ fn record_matches_filter(r: &Record, clause: &FilterClause) -> bool {
         FilterClause::NotEquals { field, value } => {
             record_field(r, field).map(|v| v != *value).unwrap_or(true)
         }
-        FilterClause::Like { field, pattern } => record_field(r, field)
-            .map(|v| matches_pattern(&v, pattern))
+        FilterClause::Like {
+            field,
+            pattern,
+            is_regex,
+        } => record_field(r, field)
+            .map(|v| {
+                if *is_regex {
+                    // A `like /regex/` clause matches the compiled regular
+                    // expression. An uncompilable pattern matches nothing
+                    // (rather than falling back to substring, which would
+                    // silently mis-match).
+                    regex::Regex::new(pattern)
+                        .map(|re| re.is_match(&v))
+                        .unwrap_or(false)
+                } else {
+                    matches_pattern(&v, pattern)
+                }
+            })
             .unwrap_or(false),
     }
 }
@@ -629,12 +673,13 @@ mod tests {
             timestamp: ts,
             message: msg.to_string(),
             ingestion_time: ts,
+            seq: 0,
         }
     }
 
     #[test]
     fn parse_fields_and_limit() {
-        let q = parse_query("fields @timestamp, @message | limit 5");
+        let q = parse_query("fields @timestamp, @message | limit 5").unwrap();
         assert_eq!(q.commands.len(), 2);
         match &q.commands[0] {
             Command::Fields(f) => assert_eq!(f, &vec!["@timestamp", "@message"]),
@@ -656,7 +701,7 @@ mod tests {
                 ev(3000000, "ERROR: again"),
             ],
         )];
-        let q = parse_query("filter @message like /ERROR/ | limit 10");
+        let q = parse_query("filter @message like /ERROR/ | limit 10").unwrap();
         let r = execute_query(&q, &streams, 0, 10000);
         assert_eq!(r.len(), 2);
     }
@@ -670,7 +715,7 @@ mod tests {
                 ev(2000000, r#"{"level":"INFO","msg":"ok"}"#),
             ],
         )];
-        let q = parse_query(r#"filter level = "ERROR""#);
+        let q = parse_query(r#"filter level = "ERROR""#).unwrap();
         let r = execute_query(&q, &streams, 0, 10000);
         assert_eq!(r.len(), 1);
     }
@@ -684,7 +729,7 @@ mod tests {
                 ev(2000000, r#"{"level":"INFO"}"#),
             ],
         )];
-        let q = parse_query(r#"filter level != "ERROR""#);
+        let q = parse_query(r#"filter level != "ERROR""#).unwrap();
         let r = execute_query(&q, &streams, 0, 10000);
         assert_eq!(r.len(), 1);
     }
@@ -700,7 +745,7 @@ mod tests {
                 ev(4000000, r#"{"level":"ERROR"}"#),
             ],
         )];
-        let q = parse_query("stats count(*) by level");
+        let q = parse_query("stats count(*) by level").unwrap();
         let rows = execute_query(&q, &streams, 0, 10000);
         assert_eq!(rows.len(), 2);
         let error_row = rows
@@ -730,7 +775,7 @@ mod tests {
                 ev(2000000, r#"{"svc":"a","latency":30}"#),
             ],
         )];
-        let q = parse_query("stats sum(latency) as total, avg(latency) as mean by svc");
+        let q = parse_query("stats sum(latency) as total, avg(latency) as mean by svc").unwrap();
         let rows = execute_query(&q, &streams, 0, 10000);
         assert_eq!(rows.len(), 1);
         let row = rows[0].as_array().unwrap();
@@ -744,7 +789,7 @@ mod tests {
     fn ptr_is_base64_group_stream_index() {
         use base64::Engine;
         let streams = vec![stream("s1", vec![ev(1000000, "hello")])];
-        let q = parse_query("fields @message");
+        let q = parse_query("fields @message").unwrap();
         let rows = execute_query(&q, &streams, 0, 10000);
         let row = rows[0].as_array().unwrap();
         let ptr = row.iter().find(|f| f["field"] == "@ptr").unwrap();
@@ -758,7 +803,8 @@ mod tests {
     fn parse_glob_extracts_fields() {
         let streams = vec![stream("s1", vec![ev(1000000, "GET /api 200")])];
         let q =
-            parse_query("parse @message \"* * *\" as method, path, code | filter code = \"200\"");
+            parse_query("parse @message \"* * *\" as method, path, code | filter code = \"200\"")
+                .unwrap();
         let rows = execute_query(&q, &streams, 0, 10000);
         assert_eq!(rows.len(), 1);
     }
@@ -773,7 +819,7 @@ mod tests {
                 ev(3000000, r#"{"level":"INFO"}"#),
             ],
         )];
-        let q = parse_query("dedup level");
+        let q = parse_query("dedup level").unwrap();
         let rows = execute_query(&q, &streams, 0, 10000);
         assert_eq!(rows.len(), 2);
     }
@@ -788,10 +834,51 @@ mod tests {
                 ev(2000000, "second"),
             ],
         )];
-        let q = parse_query("sort @timestamp desc");
+        let q = parse_query("sort @timestamp desc").unwrap();
         let rows = execute_query(&q, &streams, 0, 10000);
         let first = rows[0].as_array().unwrap();
         let msg = first.iter().find(|f| f["field"] == "@message").unwrap();
         assert_eq!(msg["value"], "third");
+    }
+
+    #[test]
+    fn malformed_filter_queries_error_not_panic() {
+        // Degenerate delimiters that previously sliced out of bounds now
+        // surface an error instead of panicking.
+        assert!(parse_query("filter x like /").is_err());
+        assert!(parse_query("filter x = \"").is_err());
+        assert!(parse_query("filter x != '").is_err());
+        // A well-formed regex / string still parses.
+        assert!(parse_query("filter x like /err.*/").is_ok());
+        assert!(parse_query(r#"filter x = "ok""#).is_ok());
+    }
+
+    #[test]
+    fn like_regex_matches_as_regex_not_substring() {
+        let streams = vec![stream(
+            "s1",
+            vec![
+                ev(1000000, "status=404 not found"),
+                ev(2000000, "status=200 ok"),
+                ev(3000000, "status=503 down"),
+            ],
+        )];
+        // `5..` should match 503 but not 404/200 as a regex anchored digit
+        // class — a substring match of `5[0-9][0-9]` would match nothing.
+        let q = parse_query("filter @message like /status=5[0-9][0-9]/").unwrap();
+        let rows = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn like_plain_string_is_substring() {
+        let streams = vec![stream(
+            "s1",
+            vec![ev(1000000, "the [0-9] literal"), ev(2000000, "nope")],
+        )];
+        // A quoted substring is matched literally, not as a regex.
+        let q = parse_query(r#"filter @message like "[0-9]""#).unwrap();
+        let rows = execute_query(&q, &streams, 0, 10000);
+        assert_eq!(rows.len(), 1);
     }
 }

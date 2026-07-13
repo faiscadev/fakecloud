@@ -273,9 +273,23 @@ impl LogsService {
             })
             .collect();
 
+        // Apply the `limit` (AWS caps DescribeExportTasks at 50 per page) and
+        // round-trip a `nextToken` — previously both were validated then
+        // ignored, so every task was returned on one page.
+        let (page, next_token) = super::paginate_offset(
+            &tasks,
+            body["limit"].as_i64(),
+            50,
+            body["nextToken"].as_str(),
+        );
+        let mut result = json!({ "exportTasks": page });
+        if let Some(token) = next_token {
+            result["nextToken"] = json!(token);
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "exportTasks": tasks })).unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 
@@ -873,6 +887,42 @@ mod tests {
         let data = entries[0]["data"].as_str().unwrap();
         assert!(data.contains("web event"));
         assert!(!data.contains("api event"));
+    }
+
+    #[test]
+    fn describe_export_tasks_applies_limit_and_next_token() {
+        let svc = make_service();
+        create_group(&svc, "/export/paged");
+        let now = chrono::Utc::now().timestamp_millis();
+        for i in 0..3 {
+            let req = make_request(
+                "CreateExportTask",
+                json!({
+                    "logGroupName": "/export/paged",
+                    "from": now - 1000,
+                    "to": now + 10000,
+                    "destination": format!("bucket-{i}"),
+                }),
+            );
+            svc.create_export_task(&req).unwrap();
+        }
+
+        // Page 1: limit 2 -> two tasks plus a nextToken.
+        let req = make_request("DescribeExportTasks", json!({ "limit": 2 }));
+        let resp = svc.describe_export_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["exportTasks"].as_array().unwrap().len(), 2);
+        let token = body["nextToken"].as_str().unwrap().to_string();
+
+        // Page 2: the remaining task, no further token.
+        let req = make_request(
+            "DescribeExportTasks",
+            json!({ "limit": 2, "nextToken": token }),
+        );
+        let resp = svc.describe_export_tasks(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["exportTasks"].as_array().unwrap().len(), 1);
+        assert!(body["nextToken"].as_str().is_none());
     }
 
     #[test]

@@ -12,15 +12,14 @@ use fakecloud_core::query::{optional_query_param, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{
-    collect_member_values, empty_metadata_response, missing_param, not_found, validate_len,
-    validate_range_i64, xml_escape, xml_response, CloudWatchService,
+    collect_member_values, empty_metadata_response, missing_param, not_found,
+    parse_input_timestamp, validate_len, validate_range_i64, xml_escape, xml_response,
+    CloudWatchService,
 };
 use crate::state::AlarmMuteRule;
 
 fn parse_ts(req: &AwsRequest, name: &str) -> Option<DateTime<Utc>> {
-    optional_query_param(req, name)
-        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-        .map(|d| d.with_timezone(&Utc))
+    optional_query_param(req, name).and_then(|s| parse_input_timestamp(&s))
 }
 
 /// Compute the wire status of a mute rule from its start/expire dates.
@@ -90,7 +89,10 @@ impl CloudWatchService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let name = optional_query_param(req, "AlarmMuteRuleName").unwrap_or_default();
+        // A required name that is omitted is a validation error; a present but
+        // unknown name is the declared ResourceNotFoundException below.
+        let name = optional_query_param(req, "AlarmMuteRuleName")
+            .ok_or_else(|| missing_param("AlarmMuteRuleName"))?;
         let state = self.state.read();
         let rule = state
             .get(&req.account_id)

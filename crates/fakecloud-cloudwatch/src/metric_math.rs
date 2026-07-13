@@ -113,15 +113,34 @@ fn tokenize(expr: &str) -> Result<Vec<Token>, String> {
     Ok(tokens)
 }
 
+/// Maximum parser recursion depth. Guards against a stack overflow on a
+/// pathologically deep expression (e.g. thousands of nested parentheses)
+/// arriving from an untrusted `GetMetricData` request.
+const MAX_DEPTH: usize = 256;
+
 struct Parser<'a> {
     tokens: Vec<Token>,
     pos: usize,
+    depth: usize,
     metrics: &'a BTreeMap<String, Series>,
 }
 
 impl Parser<'_> {
     fn peek(&self) -> Option<&Token> {
         self.tokens.get(self.pos)
+    }
+
+    /// Enter one level of recursion, erroring if the nesting limit is reached.
+    fn enter(&mut self) -> Result<(), String> {
+        self.depth += 1;
+        if self.depth > MAX_DEPTH {
+            return Err("expression nesting is too deep".to_string());
+        }
+        Ok(())
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
     }
 
     fn next(&mut self) -> Option<Token> {
@@ -170,6 +189,13 @@ impl Parser<'_> {
     }
 
     fn parse_factor(&mut self) -> Result<Value, String> {
+        self.enter()?;
+        let result = self.parse_factor_inner();
+        self.leave();
+        result
+    }
+
+    fn parse_factor_inner(&mut self) -> Result<Value, String> {
         match self.next() {
             Some(Token::Number(n)) => Ok(Value::Scalar(n)),
             Some(Token::Minus) => {
@@ -319,6 +345,7 @@ pub fn evaluate(expr: &str, metrics: &BTreeMap<String, Series>) -> Result<Series
     let mut parser = Parser {
         tokens,
         pos: 0,
+        depth: 0,
         metrics,
     };
     let value = parser.parse_expr()?;
@@ -399,5 +426,15 @@ mod tests {
     fn unknown_id_errors() {
         let m = BTreeMap::new();
         assert!(evaluate("m1+m2", &m).is_err());
+    }
+
+    #[test]
+    fn deeply_nested_parens_error_not_overflow() {
+        // A pathologically deep expression must return an Err rather than
+        // overflowing the stack.
+        let m = BTreeMap::new();
+        let expr = format!("{}1{}", "(".repeat(5000), ")".repeat(5000));
+        let out = evaluate(&expr, &m);
+        assert!(out.is_err());
     }
 }

@@ -1115,10 +1115,12 @@ pub(crate) fn deliver_to_logs(
             events: Vec::new(),
         });
 
+    let next_seq = stream.events.iter().map(|e| e.seq).max().unwrap_or(0) + 1;
     stream.events.push(fakecloud_logs::LogEvent {
         timestamp: ts_millis,
         message: payload.to_string(),
         ingestion_time: ts_millis,
+        seq: next_seq,
     });
     stream.last_event_timestamp = Some(ts_millis);
     stream.last_ingestion_time = Some(ts_millis);

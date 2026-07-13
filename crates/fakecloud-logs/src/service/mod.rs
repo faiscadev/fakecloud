@@ -529,6 +529,49 @@ pub(crate) fn extract_log_group_from_arn(arn: &str) -> Option<String> {
     }
 }
 
+/// Encode a pagination offset into an opaque base64 `nextToken`.
+pub(crate) fn encode_offset_token(offset: usize) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(format!("offset:{offset}").as_bytes())
+}
+
+/// Decode a `nextToken` produced by [`encode_offset_token`]. An absent or
+/// unparseable token resolves to the first page (offset 0).
+pub(crate) fn decode_offset_token(token: Option<&str>) -> usize {
+    use base64::Engine;
+    token
+        .and_then(|t| base64::engine::general_purpose::STANDARD.decode(t).ok())
+        .and_then(|b| String::from_utf8(b).ok())
+        .and_then(|s| {
+            s.strip_prefix("offset:")
+                .and_then(|n| n.parse::<usize>().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Apply an offset+limit page to `items`, returning the page slice together
+/// with the `nextToken` for the following page (if any). `limit` values <= 0
+/// fall back to `default_limit`.
+pub(crate) fn paginate_offset<T: Clone>(
+    items: &[T],
+    limit: Option<i64>,
+    default_limit: usize,
+    next_token: Option<&str>,
+) -> (Vec<T>, Option<String>) {
+    let limit = limit
+        .filter(|n| *n > 0)
+        .map(|n| n as usize)
+        .unwrap_or(default_limit);
+    let offset = decode_offset_token(next_token);
+    let page: Vec<T> = items.iter().skip(offset).take(limit).cloned().collect();
+    let next = if offset + limit < items.len() {
+        Some(encode_offset_token(offset + limit))
+    } else {
+        None
+    };
+    (page, next)
+}
+
 /// CloudWatch Logs filter pattern matching.
 ///
 /// Rules:

@@ -201,6 +201,13 @@ pub struct LogEvent {
     pub timestamp: i64,
     pub message: String,
     pub ingestion_time: i64,
+    /// A stable, monotonically-increasing per-stream identifier assigned at
+    /// ingestion. Unlike an array index it never shifts when an earlier event
+    /// is inserted, so a `FilterLogEvents` pagination cursor built from it
+    /// resumes correctly even after the stream is re-sorted. Defaults to 0 for
+    /// events restored from snapshots that predate this field.
+    #[serde(default)]
+    pub seq: u64,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
