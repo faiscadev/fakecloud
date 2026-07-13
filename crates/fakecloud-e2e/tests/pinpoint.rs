@@ -297,14 +297,11 @@ async fn pinpoint_write_to_missing_app_404s_without_corrupting_get_apps() {
         .expect("get_apps must still deserialize after failed writes");
     let listed: Vec<String> = apps
         .applications_response()
-        .and_then(|r| r.item())
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(|a| a.id().map(str::to_string))
-                .collect()
-        })
-        .unwrap_or_default();
+        .map(|r| r.item())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| a.id().map(str::to_string))
+        .collect();
     assert!(
         !listed.iter().any(|id| id == bogus),
         "phantom app must not appear in GetApps"
@@ -360,9 +357,10 @@ async fn pinpoint_remove_attributes_strips_endpoint_attributes() {
     assert!(
         removed
             .attributes_resource()
-            .and_then(|r| r.attributes())
-            .map(|a| a.iter().any(|k| k == "interests"))
-            .unwrap_or(false),
+            .map(|r| r.attributes())
+            .unwrap_or_default()
+            .iter()
+            .any(|k| k == "interests"),
         "response should report the removed attribute"
     );
 
