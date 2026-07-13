@@ -26,10 +26,10 @@ pub(crate) fn looks_like_fakecloud_envelope(body: &str) -> bool {
     }
 }
 
-/// Validate DelaySeconds (0–900) and MaximumMessageSize (1024–1 MiB) if
-/// present in the caller-supplied queue attributes. Both match AWS's
-/// documented ranges; we return the same error code/message the real
-/// service does.
+/// Validate DelaySeconds (0–900), VisibilityTimeout (0–43200), and
+/// MaximumMessageSize (1024–1 MiB) if present in the caller-supplied queue
+/// attributes. All match AWS's documented ranges; we return the same error
+/// code/message the real service does.
 pub(crate) fn validate_create_queue_attributes(
     attrs: &BTreeMap<String, String>,
 ) -> Result<(), AwsServiceError> {
@@ -46,6 +46,13 @@ pub(crate) fn validate_create_queue_attributes(
         }
     }
 
+    // VisibilityTimeout must be an integer in 0..=43200 (12 h). Without this
+    // guard a huge value is stored on the queue and later blows up the
+    // receive path: `now + Duration::seconds(v)` overflows and PANICS the
+    // worker thread (DoS), and values in 43201..8e12 are silently accepted.
+    // AWS returns InvalidAttributeValue for an out-of-range queue attribute.
+    validate_visibility_timeout_attr(attrs.get("VisibilityTimeout").map(String::as_str))?;
+
     if let Some(mms) = attrs.get("MaximumMessageSize") {
         if let Ok(size) = mms.parse::<u64>() {
             if !(1024..=1_048_576).contains(&size) {
@@ -58,6 +65,26 @@ pub(crate) fn validate_create_queue_attributes(
         }
     }
 
+    Ok(())
+}
+
+/// Validate the queue-level `VisibilityTimeout` attribute: it must be an
+/// integer in `0..=43200` seconds (12 h). Shared by CreateQueue and
+/// SetQueueAttributes so both paths reject the same out-of-range values AWS
+/// does with `InvalidAttributeValue`. `None` (attribute not supplied) is OK.
+pub(crate) fn validate_visibility_timeout_attr(value: Option<&str>) -> Result<(), AwsServiceError> {
+    if let Some(vt) = value {
+        match vt.parse::<i64>() {
+            Ok(v) if (0..=43200).contains(&v) => {}
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidAttributeValue",
+                    "Invalid value for the parameter VisibilityTimeout.".to_string(),
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -181,8 +208,11 @@ pub(crate) fn batch_failure(id: &str, code: &str, message: impl Into<String>) ->
 
 /// Process a single SendMessageBatch entry: validate per-entry constraints,
 /// enqueue the message, and return either a successful or failed response
-/// fragment. Returns `Err` only for errors that AWS signals at the
-/// *batch* level (missing MessageGroupId / dedup on FIFO queues).
+/// fragment. Per-entry validation failures (including FIFO MessageGroupId /
+/// dedup requirements) are returned as `Ok(BatchEntryOutcome::Failure(..))`
+/// so one bad entry never aborts the rest of the batch — matching AWS's
+/// partial-success batch semantics. `Err` is reserved for hard failures the
+/// caller must propagate.
 ///
 /// `stored_body_override` lets the caller pre-encrypt the message body
 /// for SSE-KMS queues without losing the plaintext MD5 the response
@@ -248,20 +278,24 @@ pub(crate) fn process_batch_send_entry(
         .map(|s| s.to_string());
 
     if cfg.is_fifo {
+        // Per-entry validation failures on a FIFO queue are reported in the
+        // batch's Failed list (BatchResultErrorEntry), NOT as a request-level
+        // 400 — a single bad entry must not abort the sibling entries that are
+        // valid. Real AWS SendMessageBatch surfaces these per entry.
         if message_group_id.is_none() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
+            return Ok(BatchEntryOutcome::Failure(batch_failure(
+                &id,
                 "MissingParameter",
                 "The request must contain the parameter MessageGroupId.",
-            ));
+            )));
         }
         if message_dedup_id.is_none() && !cfg.content_based_dedup {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
+            return Ok(BatchEntryOutcome::Failure(batch_failure(
+                &id,
                 "InvalidParameterValue",
                 "The queue should either have ContentBasedDeduplication enabled \
                  or MessageDeduplicationId provided explicitly",
-            ));
+            )));
         }
     }
 
@@ -1248,10 +1282,14 @@ pub(crate) fn resolve_queue_url(input: &str, state: &crate::state::SqsState) -> 
     if state.queues.contains_key(input) {
         return Some(input.to_string());
     }
-    // ARN form: extract queue name (last segment after the colon-prefix)
-    if let Some(rest) = input.strip_prefix("arn:aws:sqs:") {
-        // rest = "REGION:ACCOUNT:queue-name"
-        if let Some(name) = rest.rsplit(':').next() {
+    // ARN form: extract queue name (last colon-separated segment). Accept any
+    // partition (`aws`, `aws-cn`, `aws-us-gov`, ...) rather than hardcoding
+    // `aws`, so cn/gov-cloud ARNs — which is what the queue's own ARN uses in
+    // those regions — resolve too. Shape: arn:PARTITION:sqs:REGION:ACCOUNT:name.
+    {
+        let parts: Vec<&str> = input.split(':').collect();
+        if parts.len() == 6 && parts[0] == "arn" && parts[2] == "sqs" {
+            let name = parts[5];
             if !name.is_empty() {
                 if let Some(url) = state.name_to_url.get(name) {
                     return Some(url.clone());
