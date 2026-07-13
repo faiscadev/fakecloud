@@ -981,7 +981,13 @@ impl SnsService {
 
         // HTTP/HTTPS subscriptions start as pending (require confirmation)
         let confirmed = protocol != "http" && protocol != "https";
-        let response_arn = if confirmed {
+        // AWS returns the literal "pending confirmation" for an unconfirmed
+        // subscription unless the caller sets ReturnSubscriptionArn=true, in
+        // which case the real ARN is returned even while pending.
+        let return_arn = param(req, "ReturnSubscriptionArn")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+        let response_arn = if confirmed || return_arn {
             sub_arn.clone()
         } else {
             "pending confirmation".to_string()
@@ -1504,7 +1510,13 @@ impl SnsService {
         let members: String = topic
             .tags
             .iter()
-            .map(|(k, v)| format!("      <member><Key>{k}</Key><Value>{v}</Value></member>"))
+            .map(|(k, v)| {
+                format!(
+                    "      <member><Key>{}</Key><Value>{}</Value></member>",
+                    xml_escape(k),
+                    xml_escape(v)
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
 

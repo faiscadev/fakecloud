@@ -1257,3 +1257,107 @@ async fn sns_publish_batch_applies_filter_policy() {
         "filter policy not applied on batch: {bodies:?}"
     );
 }
+
+/// Regression: user-controlled strings echoed into XML read responses must be
+/// XML-escaped so the client SDK's XML parser never chokes. The most common
+/// trigger is an HTTPS endpoint carrying a query string (`?a=1&b=2`): the raw
+/// `&` would otherwise produce malformed XML on every ListSubscriptionsByTopic
+/// / GetSubscriptionAttributes. Also covers DisplayName `&`/`<` on the topic
+/// attributes and a tag value with `<`.
+#[tokio::test]
+async fn sns_xml_escaping_round_trips_special_chars() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("xml-escape-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    // DisplayName with `&` and angle brackets round-trips via GetTopicAttributes.
+    client
+        .set_topic_attributes()
+        .topic_arn(&topic_arn)
+        .attribute_name("DisplayName")
+        .attribute_value("Acme & Co <inc>")
+        .send()
+        .await
+        .expect("set DisplayName");
+
+    let attrs = client
+        .get_topic_attributes()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .expect("get_topic_attributes must parse")
+        .attributes
+        .unwrap_or_default();
+    assert_eq!(
+        attrs.get("DisplayName").map(String::as_str),
+        Some("Acme & Co <inc>")
+    );
+
+    // Tag value with `<` round-trips via ListTagsForResource.
+    use aws_sdk_sns::types::Tag;
+    client
+        .tag_resource()
+        .resource_arn(&topic_arn)
+        .tags(Tag::builder().key("expr").value("a<b").build().unwrap())
+        .send()
+        .await
+        .expect("tag_resource");
+    let tags = client
+        .list_tags_for_resource()
+        .resource_arn(&topic_arn)
+        .send()
+        .await
+        .expect("list_tags_for_resource must parse");
+    let expr = tags
+        .tags()
+        .iter()
+        .find(|t| t.key() == "expr")
+        .map(|t| t.value());
+    assert_eq!(expr, Some("a<b"));
+
+    // HTTPS endpoint with a query string. ReturnSubscriptionArn=true yields
+    // the real ARN so we can also exercise GetSubscriptionAttributes.
+    let endpoint = "https://example.com/hook?token=a&env=prod";
+    let sub = client
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("https")
+        .endpoint(endpoint)
+        .return_subscription_arn(true)
+        .send()
+        .await
+        .expect("subscribe");
+    let sub_arn = sub.subscription_arn().unwrap().to_string();
+    assert!(sub_arn.contains("xml-escape-topic"));
+
+    // ListSubscriptionsByTopic must parse and echo the endpoint intact.
+    let listed = client
+        .list_subscriptions_by_topic()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .expect("list_subscriptions_by_topic must parse");
+    let listed_endpoint = listed.subscriptions().iter().find_map(|s| s.endpoint());
+    assert_eq!(listed_endpoint, Some(endpoint));
+
+    // GetSubscriptionAttributes must parse and echo the endpoint intact.
+    let sub_attrs = client
+        .get_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .send()
+        .await
+        .expect("get_subscription_attributes must parse")
+        .attributes
+        .unwrap_or_default();
+    assert_eq!(
+        sub_attrs.get("Endpoint").map(String::as_str),
+        Some(endpoint)
+    );
+}

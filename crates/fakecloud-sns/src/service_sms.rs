@@ -134,7 +134,7 @@ impl SnsService {
         let members: String = state
             .opted_out_numbers
             .iter()
-            .map(|n| format!("      <member>{n}</member>"))
+            .map(|n| format!("      <member>{}</member>", xml_escape(n)))
             .collect::<Vec<_>>()
             .join("\n");
 
