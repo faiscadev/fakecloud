@@ -431,13 +431,18 @@ impl KinesisService {
         let mut names: Vec<String> = state.streams.keys().cloned().collect();
         names.sort();
 
+        // Resume at the first name strictly greater than the cursor. The cursor
+        // (last stream name of the previous page) is a stable total-ordering key
+        // over the sorted names, so if the stream it named was deleted between
+        // pages we still resume at the right offset instead of restarting from 0
+        // and re-emitting the whole list (which an exact-match lookup did).
         let start = resume_after
             .as_deref()
-            .and_then(|name| {
+            .map(|cursor| {
                 names
                     .iter()
-                    .position(|candidate| candidate == name)
-                    .map(|idx| idx + 1)
+                    .position(|candidate| candidate.as_str() > cursor)
+                    .unwrap_or(names.len())
             })
             .unwrap_or(0);
         let remaining = names.len().saturating_sub(start);
@@ -706,6 +711,15 @@ impl KinesisService {
 
         let partition_key = require_partition_key(&body)?;
         let data = decode_record_data(&body["Data"])?;
+        // Data + PartitionKey must fit the per-record ceiling (1 MiB, or the
+        // stream's configured MaxRecordSizeInKiB). AWS rejects an oversized
+        // single record with ValidationException before it is written.
+        let max_record_bytes = effective_max_record_bytes(stream);
+        if data.len() + partition_key.len() > max_record_bytes {
+            return Err(validation_exception(format!(
+                "Record size (Data + PartitionKey) exceeds the {max_record_bytes}-byte per-record limit"
+            )));
+        }
         let encryption_type = stream.encryption_type.clone();
         let explicit_hash_key = body["ExplicitHashKey"].as_str();
         let shard = select_shard_mut(stream, partition_key, explicit_hash_key)?;
@@ -738,6 +752,23 @@ impl KinesisService {
             .ok_or_else(|| invalid_argument("Records must be an array"))?;
         if entries.is_empty() {
             return Err(invalid_argument("Records must not be empty"));
+        }
+        // Whole-request limits AWS rejects up front with ValidationException,
+        // before any record is written: at most 500 records, and at most 5 MiB
+        // (or the stream's larger ceiling) of aggregate Data + PartitionKey.
+        if entries.len() > MAX_PUT_RECORDS_COUNT {
+            return Err(validation_exception(format!(
+                "1 validation error detected: Value at 'records' failed to satisfy \
+                 constraint: Member must have length less than or equal to {MAX_PUT_RECORDS_COUNT}"
+            )));
+        }
+        let max_batch_bytes = effective_max_batch_bytes(stream);
+        let aggregate_bytes: usize = entries.iter().map(put_records_entry_size).sum();
+        if aggregate_bytes > max_batch_bytes {
+            return Err(validation_exception(format!(
+                "PutRecords aggregate payload ({aggregate_bytes} bytes) exceeds the \
+                 {max_batch_bytes}-byte per-request limit"
+            )));
         }
 
         // A record that fails validation (e.g. empty PartitionKey) is reported
@@ -1814,21 +1845,49 @@ impl KinesisService {
             })
             .collect();
 
+        // Capture (id, start, end) of the pre-scale open shards *before*
+        // closing them, so the new shards can record them as parents — the
+        // lineage a consumer walks via `ChildShards` to discover the post-scale
+        // shards. Every refinement interval falls entirely inside exactly one
+        // of these (the cut points include every original start key).
+        let original_open: Vec<(String, u128, u128)> = stream
+            .shards
+            .iter()
+            .filter(|s| s.is_open)
+            .map(|s| {
+                (
+                    s.shard_id.clone(),
+                    s.starting_hash_key.parse::<u128>().unwrap_or(0),
+                    s.ending_hash_key.parse::<u128>().unwrap_or(MAX_HASH_KEY),
+                )
+            })
+            .collect();
+        let parent_for = |start: u128, end: u128| -> Option<String> {
+            original_open
+                .iter()
+                .find(|(_, ostart, oend)| start >= *ostart && end <= *oend)
+                .map(|(id, _, _)| id.clone())
+        };
+
         // Close every current open shard — they are all split away.
         for shard in &mut stream.shards {
             shard.is_open = false;
         }
 
-        // Materialise each refinement interval as a shard, recording its id so
-        // multi-piece target shards can reference their merge parents.
+        // Materialise each refinement interval as a shard whose parent is the
+        // pre-scale shard that contained it. Every original shard thus becomes
+        // the parent of at least one new shard, so GetRecords on a drained
+        // original returns non-empty `ChildShards` instead of stranding the
+        // consumer at the closed parent.
         let mut piece_ids: Vec<(u128, u128, String)> = Vec::new();
         for (start, end) in &refinement {
             let new_id = next_shard_id(stream);
+            let parent = parent_for(*start, *end);
             stream.shards.push(KinesisShard {
                 shard_id: new_id.clone(),
                 starting_hash_key: start.to_string(),
                 ending_hash_key: end.to_string(),
-                parent_shard_id: None,
+                parent_shard_id: parent,
                 adjacent_parent_shard_id: None,
                 is_open: true,
                 next_sequence_number: 1,
@@ -1838,37 +1897,43 @@ impl KinesisService {
         }
 
         // For each target shard, gather the refinement pieces inside it. A
-        // single-piece target keeps that piece open; a multi-piece target
-        // closes its pieces and opens one merged shard spanning the range.
+        // single-piece target keeps that piece open. A multi-piece target folds
+        // its pieces left-to-right into pairwise merges, closing each piece and
+        // every intermediate merge and leaving one open shard spanning the
+        // target range — so every piece has an open descendant and the lineage
+        // from each original shard stays connected end to end.
         for (tstart, tend) in &target_ranges {
-            let pieces: Vec<usize> = piece_ids
+            let pieces: Vec<(u128, String)> = piece_ids
                 .iter()
-                .enumerate()
-                .filter(|(_, (ps, pe, _))| ps >= tstart && pe <= tend)
-                .map(|(i, _)| i)
+                .filter(|(ps, pe, _)| ps >= tstart && pe <= tend)
+                .map(|(_, pe, id)| (*pe, id.clone()))
                 .collect();
             if pieces.len() <= 1 {
                 continue;
             }
-            let parent = piece_ids[pieces[0]].2.clone();
-            let adjacent = piece_ids[pieces[1]].2.clone();
-            for &i in &pieces {
-                let id = &piece_ids[i].2;
-                if let Some(sh) = stream.shards.iter_mut().find(|s| &s.shard_id == id) {
-                    sh.is_open = false;
-                }
+            // Fold: `acc` is the current open head of the merge chain, `acc_end`
+            // its ending hash key. Each step closes `acc` and the next piece and
+            // opens a merged shard parented on both.
+            let (_, mut acc) = pieces[0].clone();
+            close_shard(stream, &acc);
+            for (next_end, next_id) in &pieces[1..] {
+                close_shard(stream, next_id);
+                let merged_id = next_shard_id(stream);
+                stream.shards.push(KinesisShard {
+                    shard_id: merged_id.clone(),
+                    starting_hash_key: tstart.to_string(),
+                    ending_hash_key: next_end.to_string(),
+                    parent_shard_id: Some(acc.clone()),
+                    adjacent_parent_shard_id: Some(next_id.clone()),
+                    is_open: true,
+                    next_sequence_number: 1,
+                    records: Vec::new(),
+                });
+                // The previous head is now an interior (closed) merge node; the
+                // freshly pushed `merged_id` is the new open head.
+                close_shard(stream, &acc);
+                acc = merged_id;
             }
-            let merged_id = next_shard_id(stream);
-            stream.shards.push(KinesisShard {
-                shard_id: merged_id,
-                starting_hash_key: tstart.to_string(),
-                ending_hash_key: tend.to_string(),
-                parent_shard_id: Some(parent),
-                adjacent_parent_shard_id: Some(adjacent),
-                is_open: true,
-                next_sequence_number: 1,
-                records: Vec::new(),
-            });
         }
 
         stream.shard_count = stream.shards.len() as i32;

@@ -2028,3 +2028,361 @@ fn create_stream_persists_initial_tags() {
         "initial CreateStream tags should persist, got {body}"
     );
 }
+
+// ── H1: record-size / batch-count / batch-size limits ──
+
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+#[test]
+fn put_record_rejects_payload_over_one_mib() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    // Data alone is 1 MiB + 1 byte, over the 1 MiB (Data + PartitionKey) limit.
+    let oversized = vec![b'x'; 1024 * 1024 + 1];
+    let res = svc.put_record(&request(
+        "PutRecord",
+        json!({
+            "StreamName": "orders",
+            "Data": b64(&oversized),
+            "PartitionKey": "k1",
+        }),
+    ));
+    assert_code_kinesis(res, "ValidationException");
+}
+
+#[test]
+fn put_record_within_limit_is_accepted() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    // 512 KiB is comfortably under the 1 MiB ceiling.
+    let ok = vec![b'x'; 512 * 1024];
+    svc.put_record(&request(
+        "PutRecord",
+        json!({
+            "StreamName": "orders",
+            "Data": b64(&ok),
+            "PartitionKey": "k1",
+        }),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn put_records_rejects_more_than_500_records() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    let entries: Vec<Value> = (0..501)
+        .map(|i| json!({ "Data": b64(b"a"), "PartitionKey": format!("k{i}") }))
+        .collect();
+    let res = svc.put_records(&request(
+        "PutRecords",
+        json!({ "StreamName": "orders", "Records": entries }),
+    ));
+    assert_code_kinesis(res, "ValidationException");
+}
+
+#[test]
+fn put_records_rejects_aggregate_over_five_mib() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    // 6 records of ~1 MiB each = ~6 MiB aggregate, over the 5 MiB batch limit
+    // while each individual record stays within the 1 MiB per-record ceiling.
+    let chunk = vec![b'x'; 1000 * 1024];
+    let entries: Vec<Value> = (0..6)
+        .map(|i| json!({ "Data": b64(&chunk), "PartitionKey": format!("k{i}") }))
+        .collect();
+    let res = svc.put_records(&request(
+        "PutRecords",
+        json!({ "StreamName": "orders", "Records": entries }),
+    ));
+    assert_code_kinesis(res, "ValidationException");
+}
+
+#[test]
+fn put_record_honors_configured_max_record_size() {
+    let (svc, state) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    // Raise the per-record ceiling to 2 MiB for this stream.
+    state
+        .write()
+        .default_mut()
+        .streams
+        .get_mut("orders")
+        .unwrap()
+        .max_record_size_kib = Some(2048);
+    // 1.5 MiB is over the 1 MiB default but under the configured 2 MiB.
+    let payload = vec![b'x'; 1536 * 1024];
+    svc.put_record(&request(
+        "PutRecord",
+        json!({
+            "StreamName": "orders",
+            "Data": b64(&payload),
+            "PartitionKey": "k1",
+        }),
+    ))
+    .unwrap();
+}
+
+// ── M3: PartitionKey length ──
+
+#[test]
+fn put_record_rejects_partition_key_over_256_chars() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    let long_key = "p".repeat(257);
+    let res = svc.put_record(&request(
+        "PutRecord",
+        json!({
+            "StreamName": "orders",
+            "Data": b64(b"a"),
+            "PartitionKey": long_key,
+        }),
+    ));
+    assert_code_kinesis(res, "ValidationException");
+}
+
+#[test]
+fn put_records_reports_long_partition_key_as_per_record_failure() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    let long_key = "p".repeat(257);
+    let resp = svc
+        .put_records(&request(
+            "PutRecords",
+            json!({
+                "StreamName": "orders",
+                "Records": [
+                    { "Data": b64(b"a"), "PartitionKey": "ok" },
+                    { "Data": b64(b"b"), "PartitionKey": long_key },
+                ]
+            }),
+        ))
+        .unwrap();
+    let body = json_response(resp);
+    assert_eq!(body["FailedRecordCount"], json!(1));
+    let records = body["Records"].as_array().unwrap();
+    assert!(records[0].get("SequenceNumber").is_some());
+    assert!(records[1].get("ErrorCode").is_some());
+}
+
+// ── M2: read ops are not durable-mutating ──
+
+#[test]
+fn read_ops_are_not_mutating_actions() {
+    // GetRecords / GetShardIterator only touch the ephemeral (serde-skipped)
+    // iterator lease map, so they must not trigger a full-state snapshot save.
+    assert!(!is_mutating_action("GetRecords"));
+    assert!(!is_mutating_action("GetShardIterator"));
+    // Writes still are.
+    assert!(is_mutating_action("PutRecord"));
+    assert!(is_mutating_action("PutRecords"));
+}
+
+// ── M1: UpdateShardCount lineage ──
+
+#[test]
+fn update_shard_count_preserves_parent_lineage() {
+    let (svc, state) = make_service();
+    create_stream_action(&svc, "orders", 2);
+
+    // Capture the pre-scale open shard ids and force a record onto shard 0
+    // (ExplicitHashKey 0 always routes to the shard covering hash 0).
+    let original_ids: Vec<String> = {
+        let g = state.read();
+        g.default_ref()
+            .streams
+            .get("orders")
+            .unwrap()
+            .shards
+            .iter()
+            .map(|s| s.shard_id.clone())
+            .collect()
+    };
+    svc.put_record(&request(
+        "PutRecord",
+        json!({
+            "StreamName": "orders",
+            "Data": b64(b"hi"),
+            "PartitionKey": "k1",
+            "ExplicitHashKey": "0",
+        }),
+    ))
+    .unwrap();
+
+    svc.update_shard_count(&request(
+        "UpdateShardCount",
+        json!({
+            "StreamName": "orders",
+            "TargetShardCount": 4,
+            "ScalingType": "UNIFORM_SCALING",
+        }),
+    ))
+    .unwrap();
+
+    // Every original shard must now be a parent of at least one new shard, so
+    // consumers can discover the post-scale shards from the closed originals.
+    {
+        let g = state.read();
+        let stream = g.default_ref().streams.get("orders").unwrap();
+        for original in &original_ids {
+            let is_parent = stream.shards.iter().any(|s| {
+                s.parent_shard_id.as_deref() == Some(original.as_str())
+                    || s.adjacent_parent_shard_id.as_deref() == Some(original.as_str())
+            });
+            assert!(
+                is_parent,
+                "original shard {original} has no child after scaling"
+            );
+        }
+    }
+
+    // GetRecords draining a closed original returns non-empty ChildShards.
+    let closed_original = &original_ids[0];
+    let iter = json_response(
+        svc.get_shard_iterator(&request(
+            "GetShardIterator",
+            json!({
+                "StreamName": "orders",
+                "ShardId": closed_original,
+                "ShardIteratorType": "TRIM_HORIZON",
+            }),
+        ))
+        .unwrap(),
+    )["ShardIterator"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = json_response(
+        svc.get_records(&request("GetRecords", json!({ "ShardIterator": iter })))
+            .unwrap(),
+    );
+    let children = body["ChildShards"].as_array();
+    assert!(
+        children.map(|c| !c.is_empty()).unwrap_or(false),
+        "closed original shard should report ChildShards, got {body}"
+    );
+}
+
+// ── L1: below-horizon sequence number resolves to trim horizon ──
+
+#[test]
+fn at_sequence_number_below_trim_horizon_resolves_to_earliest() {
+    let (svc, state) = make_service();
+    create_stream_action(&svc, "orders", 1);
+
+    // Two records; capture the first sequence number, then simulate retention
+    // trimming it away so only the second remains.
+    let first_seq = json_response(
+        svc.put_record(&request(
+            "PutRecord",
+            json!({ "StreamName": "orders", "Data": b64(b"one"), "PartitionKey": "k" }),
+        ))
+        .unwrap(),
+    )["SequenceNumber"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.put_record(&request(
+        "PutRecord",
+        json!({ "StreamName": "orders", "Data": b64(b"two"), "PartitionKey": "k" }),
+    ))
+    .unwrap();
+    {
+        let mut g = state.write();
+        let stream = g.default_mut().streams.get_mut("orders").unwrap();
+        stream.shards[0].records.remove(0); // drop the trimmed record
+    }
+
+    // AT_SEQUENCE_NUMBER on the trimmed seq must resolve to the earliest
+    // available record instead of raising InvalidArgumentException.
+    let iter = json_response(
+        svc.get_shard_iterator(&request(
+            "GetShardIterator",
+            json!({
+                "StreamName": "orders",
+                "ShardId": "shardId-000000000000",
+                "ShardIteratorType": "AT_SEQUENCE_NUMBER",
+                "StartingSequenceNumber": first_seq,
+            }),
+        ))
+        .unwrap(),
+    )["ShardIterator"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = json_response(
+        svc.get_records(&request("GetRecords", json!({ "ShardIterator": iter })))
+            .unwrap(),
+    );
+    let records = body["Records"].as_array().unwrap();
+    assert_eq!(records.len(), 1, "resolves to the surviving record");
+}
+
+// ── L2: shard-iterator tokens are unique per insert ──
+
+#[test]
+fn insert_iterator_tokens_are_distinct_after_eviction() {
+    let mut st = KinesisState::new("123456789012", "us-east-1");
+    let t1 = st.insert_iterator("s", "shardId-000000000000", 0);
+    // Simulate the lease being evicted so the map size returns to its prior
+    // value — the exact case where the old `iterators.len()` tie-breaker
+    // produced a duplicate token within the same millisecond.
+    st.iterators.clear();
+    let t2 = st.insert_iterator("s", "shardId-000000000000", 0);
+    assert_ne!(t1, t2, "same-ms iterator tokens must not collide");
+}
+
+// ── L3: ListStreams resumes correctly after the cursor stream is deleted ──
+
+#[test]
+fn list_streams_resumes_after_deleted_cursor() {
+    let (svc, _) = make_service();
+    for name in ["a", "b", "c", "d"] {
+        create_stream_action(&svc, name, 1);
+    }
+    // First page of two returns [a, b] with a NextToken keyed on "b".
+    let page1 = json_response(
+        svc.list_streams(&request("ListStreams", json!({ "Limit": 2 })))
+            .unwrap(),
+    );
+    assert_eq!(page1["StreamNames"], json!(["a", "b"]));
+    let token = page1["NextToken"].as_str().unwrap().to_string();
+
+    // Delete the cursor stream "b" before resuming.
+    svc.delete_stream(&request("DeleteStream", json!({ "StreamName": "b" })))
+        .unwrap();
+
+    let page2 = json_response(
+        svc.list_streams(&request("ListStreams", json!({ "NextToken": token })))
+            .unwrap(),
+    );
+    assert_eq!(
+        page2["StreamNames"],
+        json!(["c", "d"]),
+        "resume must continue past the deleted cursor, not restart"
+    );
+}
+
+// ── Cheap guard: routing on a shard-less stream errors instead of panicking ──
+
+#[test]
+fn put_record_on_shardless_stream_errors_without_panic() {
+    let (svc, state) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    // Force the (unreachable-via-API) shard-less state.
+    state
+        .write()
+        .default_mut()
+        .streams
+        .get_mut("orders")
+        .unwrap()
+        .shards
+        .clear();
+    let res = svc.put_record(&request(
+        "PutRecord",
+        json!({ "StreamName": "orders", "Data": b64(b"a"), "PartitionKey": "k" }),
+    ));
+    assert_code_kinesis(res, "InvalidArgumentException");
+}
