@@ -39,9 +39,12 @@ pub struct LoggingConfig {
 /// Parse a `<BucketLoggingStatus>` XML body into a `LoggingConfig`, if logging
 /// is enabled (i.e. the `<LoggingEnabled>` element is present).
 pub(crate) fn parse_logging_config(xml: &str) -> Option<LoggingConfig> {
-    let le_start = xml.find("<LoggingEnabled>")?;
-    let le_end = xml.find("</LoggingEnabled>")?;
-    let le_body = &xml[le_start + 16..le_end];
+    // Locate the closing tag relative to the opening one so a malformed body
+    // (closing before opening, or a duplicated/inverted tag) can't slice with
+    // begin > end and panic — a reachable DoS under eager delivery.
+    let le_content = xml.find("<LoggingEnabled>")? + "<LoggingEnabled>".len();
+    let le_end = xml[le_content..].find("</LoggingEnabled>")? + le_content;
+    let le_body = &xml[le_content..le_end];
 
     let target_bucket = extract_tag(le_body, "TargetBucket")?;
     let target_prefix = extract_tag(le_body, "TargetPrefix").unwrap_or_default();
@@ -275,6 +278,15 @@ mod tests {
         let cfg = parse_logging_config(xml).unwrap();
         assert_eq!(cfg.target_bucket, "log");
         assert_eq!(cfg.target_prefix, "");
+    }
+
+    // A malformed body whose closing tag precedes its opening tag used to
+    // slice with begin > end and panic (a reachable DoS under eager delivery);
+    // it must return None instead.
+    #[test]
+    fn parse_logging_config_inverted_tags_does_not_panic() {
+        let xml = "</LoggingEnabled>garbage<LoggingEnabled>";
+        assert!(parse_logging_config(xml).is_none());
     }
 
     #[test]

@@ -7,7 +7,7 @@ use fakecloud_persistence::{
 };
 
 use crate::inventory;
-use crate::persistence::bucket_meta_snapshot;
+use crate::persistence::{bucket_meta_snapshot, object_meta_snapshot};
 
 use super::{
     build_acl_xml, canned_acl_grants, empty_response, extract_xml_value, no_such_bucket,
@@ -517,18 +517,27 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        // Composite metadata configuration: append/replace inventory table block.
-        let combined = match b.metadata_configuration.as_deref() {
-            Some(prev) => format!("{prev}\n<InventoryTable>{body_str}</InventoryTable>"),
-            None => format!("<InventoryTable>{body_str}</InventoryTable>"),
+        let combined = {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            // Composite metadata configuration: append/replace inventory table block.
+            let combined = match b.metadata_configuration.as_deref() {
+                Some(prev) => format!("{prev}\n<InventoryTable>{body_str}</InventoryTable>"),
+                None => format!("<InventoryTable>{body_str}</InventoryTable>"),
+            };
+            b.metadata_configuration = Some(combined.clone());
+            combined
         };
-        b.metadata_configuration = Some(combined);
+        // Persist the updated composite configuration the same way the create
+        // path does, so the inventory-table block survives a restart instead
+        // of living only in RAM.
+        self.store
+            .put_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration, &combined)
+            .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
     pub(super) fn update_bucket_metadata_journal_table(
@@ -538,17 +547,25 @@ impl S3Service {
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body_str = std::str::from_utf8(&req.body).unwrap_or("").to_string();
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let b = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        let combined = match b.metadata_configuration.as_deref() {
-            Some(prev) => format!("{prev}\n<JournalTable>{body_str}</JournalTable>"),
-            None => format!("<JournalTable>{body_str}</JournalTable>"),
+        let combined = {
+            let mut accts = self.state.write();
+            let state = accts.get_or_create(account_id);
+            let b = state
+                .buckets
+                .get_mut(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            let combined = match b.metadata_configuration.as_deref() {
+                Some(prev) => format!("{prev}\n<JournalTable>{body_str}</JournalTable>"),
+                None => format!("<JournalTable>{body_str}</JournalTable>"),
+            };
+            b.metadata_configuration = Some(combined.clone());
+            combined
         };
-        b.metadata_configuration = Some(combined);
+        // Persist the updated composite configuration (see the inventory-table
+        // sibling above) so the journal-table block survives a restart.
+        self.store
+            .put_bucket_subresource(bucket, BucketSubresource::MetadataConfiguration, &combined)
+            .map_err(crate::service::persistence_error)?;
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -637,7 +654,43 @@ impl S3Service {
                 format!("Source key {source_key} does not exist."),
             )
         })?;
+        let src_version = obj.version_id.clone();
         b.objects.insert(key.to_string(), obj);
+
+        // Persist the move through the store: write the object under the new
+        // key and delete the old key. Without this the rename lived only in
+        // memory and reverted to the old key on restart in disk mode.
+        let (meta, body_bytes) = {
+            let o = state
+                .buckets
+                .get(bucket)
+                .and_then(|bb| bb.objects.get(key))
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            let bytes = state
+                .read_body(&o.body)
+                .map_err(crate::service::io_to_aws)?;
+            (object_meta_snapshot(o), bytes)
+        };
+        let new_body = crate::service::objects::run_blocking_io(|| {
+            self.store.put_object(
+                bucket,
+                key,
+                meta.version_id.as_deref(),
+                fakecloud_persistence::BodySource::Bytes(body_bytes),
+                &meta,
+            )
+        })
+        .map_err(crate::service::persistence_error)?;
+        self.store
+            .delete_object(bucket, &source_key, src_version.as_deref())
+            .map_err(crate::service::persistence_error)?;
+        if let Some(o) = state
+            .buckets
+            .get_mut(bucket)
+            .and_then(|bb| bb.objects.get_mut(key))
+        {
+            o.body = new_body;
+        }
         Ok(empty_response(StatusCode::OK))
     }
 
@@ -727,10 +780,44 @@ impl S3Service {
         if let Some(kid) = new_kms_key_id {
             obj.sse_kms_key_id = if kid.is_empty() { None } else { Some(kid) };
         }
-        if !same_alg {
-            obj.body = crate::state::memory_body(new_bytes);
-        }
         let _ = body_handle; // silence unused when same_alg branch wins
+
+        // Snapshot the just-mutated metadata and persist through the store so
+        // the re-encrypted body + updated SSE metadata survive a restart.
+        // Previously this handler mutated RAM only: on restart disk mode
+        // rehydrated the stale on-disk ciphertext and old key id, which is
+        // undecryptable when this call had removed the KMS key.
+        let meta = object_meta_snapshot(
+            state
+                .buckets
+                .get(bucket)
+                .and_then(|bb| bb.objects.get(key))
+                .ok_or_else(|| no_such_bucket(bucket))?,
+        );
+        if same_alg {
+            // Body unchanged; only the metadata (kms key id) may have moved.
+            self.store
+                .put_object_meta(bucket, key, meta.version_id.as_deref(), &meta)
+                .map_err(crate::service::persistence_error)?;
+        } else {
+            let new_body = crate::service::objects::run_blocking_io(|| {
+                self.store.put_object(
+                    bucket,
+                    key,
+                    meta.version_id.as_deref(),
+                    fakecloud_persistence::BodySource::Bytes(new_bytes),
+                    &meta,
+                )
+            })
+            .map_err(crate::service::persistence_error)?;
+            if let Some(o) = state
+                .buckets
+                .get_mut(bucket)
+                .and_then(|bb| bb.objects.get_mut(key))
+            {
+                o.body = new_body;
+            }
+        }
         Ok(empty_response(StatusCode::OK))
     }
 

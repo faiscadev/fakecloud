@@ -13,14 +13,17 @@ struct InventoryDestination {
 
 /// Parse the destination from an `<InventoryConfiguration>` XML body.
 fn parse_inventory_destination(xml: &str) -> Option<InventoryDestination> {
-    let dest_start = xml.find("<Destination>")?;
-    let dest_end = xml.find("</Destination>")?;
-    let dest_body = &xml[dest_start + 13..dest_end];
+    // Locate each closing tag relative to its opening tag so a malformed body
+    // (closing before opening, or a duplicated/inverted tag) can't slice with
+    // begin > end and panic — a reachable DoS under eager delivery.
+    let dest_content = xml.find("<Destination>")? + "<Destination>".len();
+    let dest_end = xml[dest_content..].find("</Destination>")? + dest_content;
+    let dest_body = &xml[dest_content..dest_end];
 
     // Look for <S3BucketDestination>
-    let s3_start = dest_body.find("<S3BucketDestination>")?;
-    let s3_end = dest_body.find("</S3BucketDestination>")?;
-    let s3_body = &dest_body[s3_start + 21..s3_end];
+    let s3_content = dest_body.find("<S3BucketDestination>")? + "<S3BucketDestination>".len();
+    let s3_end = dest_body[s3_content..].find("</S3BucketDestination>")? + s3_content;
+    let s3_body = &dest_body[s3_content..s3_end];
 
     let bucket_arn = extract_tag(s3_body, "Bucket")?;
     let prefix = extract_tag(s3_body, "Prefix");
@@ -231,6 +234,17 @@ mod tests {
             </Destination>
         </InventoryConfiguration>";
         assert!(parse_inventory_destination(xml).is_none());
+    }
+
+    // Inverted/duplicated tags (closing before opening) used to slice with
+    // begin > end and panic (a reachable DoS under eager delivery); each guard
+    // must return None instead.
+    #[test]
+    fn parse_inventory_inverted_tags_does_not_panic() {
+        assert!(parse_inventory_destination("</Destination>x<Destination>").is_none());
+        let inverted_inner =
+            "<Destination></S3BucketDestination>y<S3BucketDestination></Destination>";
+        assert!(parse_inventory_destination(inverted_inner).is_none());
     }
 
     #[test]

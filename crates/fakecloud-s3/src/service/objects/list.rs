@@ -2,6 +2,30 @@
 
 use super::*;
 
+/// Parse the `max-keys` query parameter. Absent -> AWS's default page size of
+/// 1000. Present-but-invalid (non-integer, negative, or outside the signed
+/// 32-bit range AWS accepts) -> 400 `InvalidArgument`, rather than the silent
+/// coercion-to-1000 that used to mask client bugs. A valid value is capped at
+/// 1000, the most keys AWS returns in one page.
+fn parse_max_keys(req: &AwsRequest) -> Result<usize, AwsServiceError> {
+    let raw = match req.query_params.get("max-keys") {
+        Some(v) => v,
+        None => return Ok(1000),
+    };
+    match raw.trim().parse::<i64>() {
+        Ok(n) if (0..=2_147_483_647).contains(&n) => Ok((n as usize).min(1000)),
+        _ => Err(AwsServiceError::aws_error_with_fields(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "Provided max-keys not an integer or within integer range",
+            vec![
+                ("ArgumentName".to_string(), "max-keys".to_string()),
+                ("ArgumentValue".to_string(), raw.clone()),
+            ],
+        )),
+    }
+}
+
 impl S3Service {
     pub(crate) fn list_objects_v1(
         &self,
@@ -26,13 +50,9 @@ impl S3Service {
             .cloned();
         // AWS caps max-keys at 1000 regardless of the requested value, so
         // clients that don't paginate still see truncation (bug-audit
-        // 2026-05-28, 1.4 — we used the requested value verbatim).
-        let max_keys: usize = req
-            .query_params
-            .get("max-keys")
-            .and_then(|v| v.parse().ok())
-            .map(|n: usize| n.min(1000))
-            .unwrap_or(1000);
+        // 2026-05-28, 1.4 — we used the requested value verbatim). An invalid
+        // value is a 400, not a silent 1000.
+        let max_keys = parse_max_keys(req)?;
         let marker = req.query_params.get("marker").cloned().unwrap_or_default();
         let encoding_type = req.query_params.get("encoding-type").cloned();
 
@@ -209,13 +229,9 @@ impl S3Service {
             .get("delimiter")
             .cloned()
             .unwrap_or_default();
-        // AWS caps max-keys at 1000 (bug-audit 2026-05-28, 1.4).
-        let max_keys: usize = req
-            .query_params
-            .get("max-keys")
-            .and_then(|v| v.parse().ok())
-            .map(|n: usize| n.min(1000))
-            .unwrap_or(1000);
+        // AWS caps max-keys at 1000 (bug-audit 2026-05-28, 1.4); an invalid
+        // value is a 400, not a silent 1000.
+        let max_keys = parse_max_keys(req)?;
         let start_after = req
             .query_params
             .get("start-after")
@@ -449,13 +465,9 @@ impl S3Service {
             .cloned()
             .unwrap_or_default();
         let version_id_marker = req.query_params.get("version-id-marker").cloned();
-        // AWS caps max-keys at 1000 (bug-audit 2026-05-28, 1.4).
-        let max_keys: usize = req
-            .query_params
-            .get("max-keys")
-            .and_then(|s| s.parse().ok())
-            .map(|n: usize| n.min(1000))
-            .unwrap_or(1000);
+        // AWS caps max-keys at 1000 (bug-audit 2026-05-28, 1.4); an invalid
+        // value is a 400, not a silent 1000.
+        let max_keys = parse_max_keys(req)?;
 
         let owner_id = &b.acl_owner_id;
 
@@ -503,6 +515,16 @@ impl S3Service {
                 if !skip {
                     return true;
                 }
+                // If the marker is itself a delimiter-rolled CommonPrefix (it
+                // ends with the delimiter), skip every entry that rolls into it
+                // so resuming a page that ended on a CommonPrefix doesn't
+                // re-emit that same prefix.
+                if let Some(ref delim) = delimiter {
+                    if key_marker.ends_with(delim.as_str()) && key.starts_with(key_marker.as_str())
+                    {
+                        return false;
+                    }
+                }
                 if *key < key_marker.as_str() {
                     return false; // before marker, skip
                 }
@@ -524,46 +546,6 @@ impl S3Service {
             });
         }
 
-        // Handle delimiter: collect common prefixes
-        let mut common_prefixes: Vec<String> = Vec::new();
-        if let Some(ref delim) = delimiter {
-            let mut filtered_entries = Vec::new();
-            let mut seen_prefixes = std::collections::HashSet::new();
-            for entry @ (key, _, _) in &all_entries {
-                let after_prefix = &key[prefix.len()..];
-                if let Some(pos) = after_prefix.find(delim.as_str()) {
-                    let cp = format!("{}{}", prefix, &after_prefix[..pos + delim.len()]);
-                    if seen_prefixes.insert(cp.clone()) {
-                        common_prefixes.push(cp);
-                    }
-                } else {
-                    filtered_entries.push(*entry);
-                }
-            }
-            all_entries = filtered_entries;
-        }
-
-        // Pagination: truncate at max_keys (count versions + delete markers + common prefixes).
-        // Both `all_entries` and `common_prefixes` count against max_keys —
-        // truncate each so the combined emit length never exceeds the cap.
-        let total_items = all_entries.len() + common_prefixes.len();
-        let is_truncated = total_items > max_keys;
-        let truncated_entries: Vec<_> = all_entries.iter().take(max_keys).collect();
-        let remaining_slots = max_keys.saturating_sub(truncated_entries.len());
-        common_prefixes.truncate(remaining_slots);
-        let next_markers = if is_truncated && !truncated_entries.is_empty() {
-            let last = truncated_entries.last().unwrap();
-            Some((
-                last.0.to_string(),
-                last.1
-                    .version_id
-                    .clone()
-                    .unwrap_or_else(|| "null".to_string()),
-            ))
-        } else {
-            None
-        };
-
         // encoding-type=url: AWS url-encodes the key-type fields (Key, Prefix,
         // KeyMarker, NextKeyMarker, Delimiter, CommonPrefixes.Prefix) so keys
         // with XML-illegal control characters are still parseable. Unlike
@@ -577,9 +559,54 @@ impl S3Service {
             }
         };
 
-        // Build XML
+        // Single sorted pass interleaving version entries and delimiter-rolled
+        // CommonPrefixes, so truncation lands at a consistent point in the
+        // sorted stream and a CommonPrefix that sorts before the truncation
+        // boundary is never dropped across pages. The previous approach rolled
+        // every prefix up front and appended them AFTER the entries, so entries
+        // filling max-keys could push a lower-sorting prefix off the page while
+        // NextKeyMarker advanced past it — losing that prefix entirely. This
+        // mirrors the ListObjectsV1/V2 single-pass model.
         let mut versions_xml = String::new();
-        for (key, obj, is_latest) in &truncated_entries {
+        let mut cp_xml = String::new();
+        let mut seen_prefixes = std::collections::HashSet::new();
+        let mut count = 0usize;
+        let mut is_truncated = false;
+        // Cursor for the next page: (key, Some(version_id)) for a version
+        // entry, (common_prefix, None) for a rolled-up prefix (AWS omits
+        // NextVersionIdMarker when the page ends on a CommonPrefix).
+        let mut next_markers: Option<(String, Option<String>)> = None;
+
+        for (key, obj, is_latest) in &all_entries {
+            let rolled = delimiter.as_ref().and_then(|delim| {
+                let after_prefix = &key[prefix.len()..];
+                after_prefix
+                    .find(delim.as_str())
+                    .map(|pos| format!("{}{}", prefix, &after_prefix[..pos + delim.len()]))
+            });
+
+            if let Some(cp) = rolled {
+                if seen_prefixes.contains(&cp) {
+                    continue; // this CommonPrefix was already emitted
+                }
+                if count >= max_keys {
+                    is_truncated = true;
+                    break;
+                }
+                cp_xml.push_str(&format!(
+                    "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
+                    enc(&cp),
+                ));
+                next_markers = Some((cp.clone(), None));
+                seen_prefixes.insert(cp);
+                count += 1;
+                continue;
+            }
+
+            if count >= max_keys {
+                is_truncated = true;
+                break;
+            }
             if obj.is_delete_marker {
                 versions_xml.push_str(&format!(
                     "<DeleteMarker>\
@@ -615,27 +642,26 @@ impl S3Service {
                     obj.storage_class,
                 ));
             }
+            next_markers = Some((
+                key.to_string(),
+                Some(obj.version_id.as_deref().unwrap_or("null").to_string()),
+            ));
+            count += 1;
         }
 
-        // Common prefixes
-        let mut cp_xml = String::new();
-        for cp in &common_prefixes {
-            cp_xml.push_str(&format!(
-                "<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>",
-                enc(cp),
-            ));
-        }
+        // Markers are only meaningful for a truncated listing.
+        let next_markers = if is_truncated { next_markers } else { None };
 
         // Pagination markers
-        let marker_xml = if let Some((ref nk, ref nv)) = next_markers {
-            format!(
+        let marker_xml = match &next_markers {
+            Some((nk, Some(nv))) => format!(
                 "<NextKeyMarker>{}</NextKeyMarker>\
                  <NextVersionIdMarker>{}</NextVersionIdMarker>",
                 enc(nk),
                 xml_escape(nv),
-            )
-        } else {
-            String::new()
+            ),
+            Some((nk, None)) => format!("<NextKeyMarker>{}</NextKeyMarker>", enc(nk)),
+            None => String::new(),
         };
 
         let delimiter_xml = delimiter
