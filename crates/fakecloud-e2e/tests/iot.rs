@@ -209,10 +209,7 @@ async fn iot_control_plane_lifecycle() {
         .send()
         .await
         .expect("list_principal_things");
-    assert!(principal_things
-        .things()
-        .iter()
-        .any(|t| t == "thermostat"));
+    assert!(principal_things.things().iter().any(|t| t == "thermostat"));
 }
 
 #[tokio::test]

@@ -769,7 +769,10 @@ fn policy_version_subsystem_round_trips() {
     let got = body_of(&run(&s, "GET", "/policies/p1/version/2", &[], Value::Null).unwrap());
     assert_eq!(got["policyVersionId"], "2");
     assert_eq!(got["isDefaultVersion"], true);
-    assert!(got["policyDocument"].as_str().unwrap().contains("Statement"));
+    assert!(got["policyDocument"]
+        .as_str()
+        .unwrap()
+        .contains("Statement"));
 
     // ListPolicyVersions lists both, with exactly one default (v2).
     let listed = body_of(&run(&s, "GET", "/policies/p1/version", &[], Value::Null).unwrap());
@@ -783,7 +786,13 @@ fn policy_version_subsystem_round_trips() {
     assert_eq!(defaults[0]["versionId"], "2");
 
     // Deleting the default version is rejected; a non-default version deletes.
-    let err = expect_err(run(&s, "DELETE", "/policies/p1/version/2", &[], Value::Null));
+    let err = expect_err(run(
+        &s,
+        "DELETE",
+        "/policies/p1/version/2",
+        &[],
+        Value::Null,
+    ));
     assert!(is_code(&err, "DeleteConflictException"));
     run(&s, "DELETE", "/policies/p1/version/1", &[], Value::Null).unwrap();
     let listed = body_of(&run(&s, "GET", "/policies/p1/version", &[], Value::Null).unwrap());
@@ -809,7 +818,14 @@ fn provisioning_template_round_trips() {
 
     // DescribeProvisioningTemplate (generic get) round-trips the record.
     let desc = body_of(
-        &run(&s, "GET", "/provisioning-templates/fleet-1", &[], Value::Null).unwrap(),
+        &run(
+            &s,
+            "GET",
+            "/provisioning-templates/fleet-1",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
     );
     assert_eq!(desc["templateName"], "fleet-1");
     assert_eq!(desc["enabled"], true);
@@ -839,9 +855,7 @@ fn provisioning_template_round_trips() {
     assert_eq!(dv["versionId"], 2);
 
     // ListProvisioningTemplates must NOT include version records.
-    let listed = body_of(
-        &run(&s, "GET", "/provisioning-templates", &[], Value::Null).unwrap(),
-    );
+    let listed = body_of(&run(&s, "GET", "/provisioning-templates", &[], Value::Null).unwrap());
     assert_eq!(listed["templates"].as_array().unwrap().len(), 1);
 
     // A provisioning claim mints a real (persisted) certificate.
@@ -928,7 +942,14 @@ fn start_task_mints_and_persists_task_id() {
     assert!(!task_id.is_empty());
     // DescribeAuditTask reads the persisted task back.
     let desc = body_of(
-        &run(&s, "GET", &format!("/audit/tasks/{task_id}"), &[], Value::Null).unwrap(),
+        &run(
+            &s,
+            "GET",
+            &format!("/audit/tasks/{task_id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
     );
     assert_eq!(desc["taskStatus"], "IN_PROGRESS");
 }
@@ -972,8 +993,7 @@ fn list_thing_groups_for_thing_inverts_membership() {
         json!({"thingGroupName": "g1", "thingName": "t1"}),
     )
     .unwrap();
-    let listed =
-        body_of(&run(&s, "GET", "/things/t1/thing-groups", &[], Value::Null).unwrap());
+    let listed = body_of(&run(&s, "GET", "/things/t1/thing-groups", &[], Value::Null).unwrap());
     let groups = listed["thingGroups"].as_array().unwrap();
     assert_eq!(groups.len(), 1);
     assert_eq!(groups[0]["groupName"], "g1");

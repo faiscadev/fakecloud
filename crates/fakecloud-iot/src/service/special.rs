@@ -261,46 +261,40 @@ pub(super) fn dispatch(
 
         // Jobs: document read + lifecycle mutations that echo the job identity.
         "GetJobDocument" => Ok(Some(get_job_document(svc, ctx, meta, labels)?)),
-        "AssociateTargetsWithJob" => {
-            Ok(Some(job_lifecycle(svc, ctx, meta, labels, body, false)?))
-        }
+        "AssociateTargetsWithJob" => Ok(Some(job_lifecycle(svc, ctx, meta, labels, body, false)?)),
         "CancelJob" => Ok(Some(job_lifecycle(svc, ctx, meta, labels, body, true)?)),
 
         // Managed IAM-style policy versioning. Versions live in their own
         // `policy-versions` store keyed `policyName/versionId` so the policy
         // list is not polluted; CreatePolicy seeds version 1 as the default.
         "CreatePolicy" => Ok(Some(create_policy(svc, ctx, labels, body)?)),
-        "CreatePolicyVersion" => {
-            Ok(Some(create_policy_version(svc, ctx, meta, labels, query, body)?))
-        }
+        "CreatePolicyVersion" => Ok(Some(create_policy_version(
+            svc, ctx, meta, labels, query, body,
+        )?)),
         "GetPolicyVersion" => Ok(Some(get_policy_version(svc, ctx, meta, labels)?)),
         "ListPolicyVersions" => Ok(Some(list_policy_versions(svc, ctx, meta, labels)?)),
-        "SetDefaultPolicyVersion" => {
-            Ok(Some(set_default_policy_version(svc, ctx, meta, labels)?))
-        }
+        "SetDefaultPolicyVersion" => Ok(Some(set_default_policy_version(svc, ctx, meta, labels)?)),
         "DeletePolicyVersion" => Ok(Some(delete_policy_version(svc, ctx, meta, labels)?)),
 
         // Provisioning templates: persist the template + its versions so the
         // Describe / List reads (generic and version-specific) round-trip, and
         // mint a real (persisted) certificate for the provisioning claim.
-        "CreateProvisioningTemplate" => {
-            Ok(Some(create_provisioning_template(svc, ctx, body)?))
-        }
-        "CreateProvisioningTemplateVersion" => Ok(Some(
-            create_provisioning_template_version(svc, ctx, meta, labels, query, body)?,
-        )),
-        "DescribeProvisioningTemplateVersion" => {
-            Ok(Some(describe_provisioning_template_version(svc, ctx, meta, labels)?))
-        }
-        "ListProvisioningTemplateVersions" => {
-            Ok(Some(list_provisioning_template_versions(svc, ctx, meta, labels)?))
-        }
+        "CreateProvisioningTemplate" => Ok(Some(create_provisioning_template(svc, ctx, body)?)),
+        "CreateProvisioningTemplateVersion" => Ok(Some(create_provisioning_template_version(
+            svc, ctx, meta, labels, query, body,
+        )?)),
+        "DescribeProvisioningTemplateVersion" => Ok(Some(describe_provisioning_template_version(
+            svc, ctx, meta, labels,
+        )?)),
+        "ListProvisioningTemplateVersions" => Ok(Some(list_provisioning_template_versions(
+            svc, ctx, meta, labels,
+        )?)),
         "CreateProvisioningClaim" => Ok(Some(create_provisioning_claim(svc, ctx, meta, labels)?)),
 
         // Certificate transfer + fleet-provisioning thing registration.
-        "TransferCertificate" => {
-            Ok(Some(transfer_certificate(svc, ctx, meta, labels, query, body)?))
-        }
+        "TransferCertificate" => Ok(Some(transfer_certificate(
+            svc, ctx, meta, labels, query, body,
+        )?)),
         "RegisterThing" => Ok(Some(register_thing(svc, ctx))),
 
         // Long-running tasks whose only synchronous output is a minted taskId;
@@ -1187,7 +1181,11 @@ fn create_policy_version(
     let vid = next_policy_version_id(data, &name);
     if set_as_default {
         clear_default_policy_versions(data, &name);
-        if let Some(rec) = data.resources.get_mut("policies").and_then(|m| m.get_mut(&name)) {
+        if let Some(rec) = data
+            .resources
+            .get_mut("policies")
+            .and_then(|m| m.get_mut(&name))
+        {
             if let Some(o) = rec.as_object_mut() {
                 o.insert("defaultVersionId".to_string(), Value::String(vid.clone()));
             }
@@ -1232,7 +1230,10 @@ fn list_policy_versions(
     let name = labels.get("policyName").cloned().unwrap_or_default();
     let g = svc.state.read();
     let data = g.get(&ctx.account);
-    if data.and_then(|d| d.get_resource("policies", &name)).is_none() {
+    if data
+        .and_then(|d| d.get_resource("policies", &name))
+        .is_none()
+    {
         return Err(super::engine::not_found(meta, &name));
     }
     let prefix = format!("{name}/");
@@ -1271,7 +1272,11 @@ fn set_default_policy_version(
             o.insert("isDefaultVersion".to_string(), Value::Bool(true));
         }
     }
-    if let Some(rec) = data.resources.get_mut("policies").and_then(|m| m.get_mut(&name)) {
+    if let Some(rec) = data
+        .resources
+        .get_mut("policies")
+        .and_then(|m| m.get_mut(&name))
+    {
         if let Some(o) = rec.as_object_mut() {
             o.insert("defaultVersionId".to_string(), Value::String(vid.clone()));
         }
@@ -1381,12 +1386,20 @@ fn create_provisioning_template(
     let mut rec = Map::new();
     rec.insert("templateArn".to_string(), Value::String(arn.clone()));
     rec.insert("templateName".to_string(), Value::String(name.clone()));
-    for key in ["description", "provisioningRoleArn", "type", "preProvisioningHook"] {
+    for key in [
+        "description",
+        "provisioningRoleArn",
+        "type",
+        "preProvisioningHook",
+    ] {
         if let Some(v) = body.get(key) {
             rec.insert(key.to_string(), v.clone());
         }
     }
-    rec.insert("templateBody".to_string(), Value::String(template_body.clone()));
+    rec.insert(
+        "templateBody".to_string(),
+        Value::String(template_body.clone()),
+    );
     rec.insert(
         "enabled".to_string(),
         Value::Bool(body.get("enabled").and_then(Value::as_bool).unwrap_or(true)),
@@ -1506,8 +1519,7 @@ fn create_provisioning_claim(
     let name = labels.get("templateName").cloned().unwrap_or_default();
     {
         let g = svc.state.read();
-        if g
-            .get(&ctx.account)
+        if g.get(&ctx.account)
             .and_then(|d| d.get_resource("provisioning-templates", &name))
             .is_none()
         {
@@ -1544,7 +1556,9 @@ fn transfer_certificate(
     body: &Map<String, Value>,
 ) -> Result<(AwsResponse, bool), AwsServiceError> {
     let cert_id = labels.get("certificateId").cloned().unwrap_or_default();
-    let target = query_get(query, "targetAwsAccount").unwrap_or("").to_string();
+    let target = query_get(query, "targetAwsAccount")
+        .unwrap_or("")
+        .to_string();
     let mut g = svc.state.write();
     let data = g.get_or_create(&ctx.account);
     let Some(mut rec) = data.get_resource("certificates", &cert_id).cloned() else {
