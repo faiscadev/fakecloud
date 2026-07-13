@@ -22,6 +22,17 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
+import software.amazon.awssdk.services.cloudfront.CloudFrontClient;
+import software.amazon.awssdk.services.cloudfront.model.CookiePreference;
+import software.amazon.awssdk.services.cloudfront.model.CreateDistributionRequest;
+import software.amazon.awssdk.services.cloudfront.model.DefaultCacheBehavior;
+import software.amazon.awssdk.services.cloudfront.model.DistributionConfig;
+import software.amazon.awssdk.services.cloudfront.model.ForwardedValues;
+import software.amazon.awssdk.services.cloudfront.model.Headers;
+import software.amazon.awssdk.services.cloudfront.model.ItemSelection;
+import software.amazon.awssdk.services.cloudfront.model.Origin;
+import software.amazon.awssdk.services.cloudfront.model.Origins;
+import software.amazon.awssdk.services.cloudfront.model.ViewerProtocolPolicy;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.AttributeType;
 import software.amazon.awssdk.services.cognitoidentityprovider.model.CreateUserPoolClientRequest;
@@ -453,6 +464,53 @@ class E2ETest {
         assertTrue(
                 "creating".equals(cache.status()) || "available".equals(cache.status()),
                 "unexpected status: " + cache.status());
+    }
+
+    // ── CloudFront ─────────────────────────────────────────────────
+    @Test
+    void cloudfrontGetDistributionsReturnsManagedDistributions() {
+        CloudFrontClient cf = configure(CloudFrontClient.builder()).build();
+        var config = DistributionConfig.builder()
+                .callerReference("java-cf-" + System.nanoTime())
+                .comment("java e2e")
+                .enabled(true)
+                .origins(Origins.builder()
+                        .quantity(1)
+                        .items(Origin.builder()
+                                .id("o1")
+                                .domainName("example-bucket.s3-website-us-east-1.amazonaws.com")
+                                .build())
+                        .build())
+                .defaultCacheBehavior(DefaultCacheBehavior.builder()
+                        .targetOriginId("o1")
+                        .viewerProtocolPolicy(ViewerProtocolPolicy.ALLOW_ALL)
+                        .forwardedValues(ForwardedValues.builder()
+                                .queryString(false)
+                                .cookies(CookiePreference.builder()
+                                        .forward(ItemSelection.NONE)
+                                        .build())
+                                .headers(Headers.builder().quantity(0).build())
+                                .build())
+                        .minTTL(0L)
+                        .build())
+                .build();
+        var created = cf.createDistribution(CreateDistributionRequest.builder()
+                .distributionConfig(config)
+                .build());
+        String id = created.distribution().id();
+
+        var dist = fc.cloudfront().getDistributions().distributions().stream()
+                .filter(d -> id.equals(d.id()))
+                .findFirst()
+                .orElseThrow();
+        assertTrue(dist.enabled());
+        assertNotNull(dist.domainName());
+        assertTrue(
+                dist.domainName().endsWith(".cloudfront.net"),
+                "unexpected domainName: " + dist.domainName());
+        // The distribution is enabled and the data plane is on by default, so
+        // the in-process data plane serves it.
+        assertTrue(dist.served());
     }
 
     // ── Bedrock introspection ──────────────────────────────────────

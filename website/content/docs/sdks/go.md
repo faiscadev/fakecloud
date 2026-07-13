@@ -298,7 +298,22 @@ Sub-clients are accessed via methods: `fc.SES()`, `fc.SNS()`, `fc.Lambda()`, etc
 
 | Method | Description |
 |--------|-------------|
+| `GetDistributions(ctx)` | List distributions, each with its `.cloudfront.net` domain and whether the in-process data plane serves it |
 | `SetDistributionStatus(ctx, id, req)` | Force a distribution into `Deployed`/`InProgress` |
+
+```go
+dists, err := fc.CloudFront().GetDistributions(ctx)
+if err != nil {
+    t.Fatal(err)
+}
+for _, d := range dists.Distributions {
+    // Reach an enabled distribution's data plane by sending its DomainName
+    // as the Host header to fakecloud's main endpoint.
+    if d.Served {
+        req.Host = d.DomainName
+    }
+}
+```
 
 ## Error handling
 

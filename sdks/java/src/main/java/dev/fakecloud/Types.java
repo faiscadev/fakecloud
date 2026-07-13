@@ -1510,6 +1510,32 @@ public final class Types {
     @JsonIgnoreProperties(ignoreUnknown = true)
     public record Elbv2WafCountsResponse(Object counts) {}
 
+    // ── CloudFront ───────────────────────────────────────────────
+
+    /**
+     * One distribution from {@code GET /_fakecloud/cloudfront/distributions}.
+     *
+     * <ul>
+     *   <li>{@code domainName} — the {@code <id>.cloudfront.net} domain; send
+     *       it as the {@code Host} header to fakecloud's main endpoint to
+     *       reach the in-process data plane for this distribution.</li>
+     *   <li>{@code enabled} — the distribution's {@code Enabled} flag.</li>
+     *   <li>{@code served} — whether the in-process data plane currently
+     *       serves this distribution (true when it is enabled and the data
+     *       plane has not been disabled via
+     *       {@code FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE}).</li>
+     * </ul>
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudFrontDistribution(
+            String id,
+            String domainName,
+            boolean enabled,
+            boolean served) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record CloudFrontDistributionsResponse(List<CloudFrontDistribution> distributions) {}
+
     // ── CloudFront admin ─────────────────────────────────────────
 
     /**

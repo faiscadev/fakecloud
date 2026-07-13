@@ -31,6 +31,7 @@ dependencies {
     val awsSdk = "2.27.21"
     testImplementation(platform("software.amazon.awssdk:bom:$awsSdk"))
     testImplementation("software.amazon.awssdk:sqs")
+    testImplementation("software.amazon.awssdk:cloudfront")
     testImplementation("software.amazon.awssdk:sns")
     testImplementation("software.amazon.awssdk:sesv2")
     testImplementation("software.amazon.awssdk:s3")

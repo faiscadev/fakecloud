@@ -3618,6 +3618,37 @@ class CloudFrontDistributionStatusRequest:
         return {"status": self.status}
 
 
+@dataclass
+class CloudFrontDistribution:
+    id: str
+    domain_name: str
+    enabled: bool
+    served: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudFrontDistribution:
+        return cls(
+            id=data["id"],
+            domain_name=data["domainName"],
+            enabled=data["enabled"],
+            served=data["served"],
+        )
+
+
+@dataclass
+class CloudFrontDistributionsResponse:
+    distributions: List[CloudFrontDistribution]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> CloudFrontDistributionsResponse:
+        return cls(
+            distributions=[
+                CloudFrontDistribution.from_dict(d)
+                for d in data.get("distributions", [])
+            ],
+        )
+
+
 # ── ELBv2 WAF counts ────────────────────────────────────────────────
 
 

@@ -123,6 +123,7 @@ import type {
   InjectSsmSessionResponse,
   KmsUsageResponse,
   CloudFrontDistributionStatusRequest,
+  CloudFrontDistributionsResponse,
   Elbv2WafCountsResponse,
 } from "./types.js";
 
@@ -1136,6 +1137,14 @@ export class WafV2Client {
  */
 export class CloudFrontClient {
   constructor(private baseUrl: string) {}
+
+  /** List every CloudFront distribution fakecloud has seen, across every account. */
+  async getDistributions(): Promise<CloudFrontDistributionsResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cloudfront/distributions`,
+    );
+    return parse(resp);
+  }
 
   /** Flip a stored Distribution's status synchronously. */
   async setDistributionStatus(

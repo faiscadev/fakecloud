@@ -191,6 +191,7 @@ Pass `base_url` (default `http://localhost:4566`).
 
 | Method | Description |
 |---|---|
+| `get_distributions()` | List stored distributions with their `domain_name` (`Host` header) + `served` reachability |
 | `set_distribution_status(distribution_id, status)` | Force a distribution into a given status |
 
 ### `fc.acm`

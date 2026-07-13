@@ -2417,6 +2417,23 @@ pub struct CloudFrontClient<'a> {
 }
 
 impl CloudFrontClient<'_> {
+    /// List every stored CloudFront Distribution with its reachability. Each
+    /// entry carries the `<id>.cloudfront.net` `domainName` to send as the
+    /// `Host` header to fakecloud's main endpoint, plus `enabled` and whether
+    /// the in-process data plane currently `served` it.
+    pub async fn get_distributions(&self) -> Result<CloudFrontDistributionsResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .get(format!(
+                "{}/_fakecloud/cloudfront/distributions",
+                self.fc.base_url
+            ))
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
     /// Force a stored CloudFront Distribution into a new status (typically
     /// `"Deployed"` or `"InProgress"`). Returns an `Api { status: 404, .. }`
     /// error when the distribution doesn't exist.

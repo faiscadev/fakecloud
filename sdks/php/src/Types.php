@@ -4207,3 +4207,49 @@ final class Elbv2WafCountsResponse
         return new self($data['counts'] ?? null);
     }
 }
+
+// ── CloudFront ──────────────────────────────────────────────────
+
+final class CloudFrontDistribution
+{
+    public function __construct(
+        public readonly string $id,
+        /**
+         * The distribution's `<id>.cloudfront.net` domain. Send this as the
+         * `Host` header to fakecloud's main endpoint to reach the
+         * distribution's data plane.
+         */
+        public readonly string $domainName,
+        public readonly bool $enabled,
+        /**
+         * Whether the distribution is currently served by the in-process data
+         * plane on the main listener (`true` when enabled and the data plane
+         * is not disabled via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`).
+         * Data-plane extension, not part of the AWS API surface.
+         */
+        public readonly bool $served,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            $data['id'],
+            $data['domainName'],
+            $data['enabled'],
+            $data['served'],
+        );
+    }
+}
+
+final class CloudFrontDistributionsResponse
+{
+    public function __construct(
+        /** @var CloudFrontDistribution[] */
+        public readonly array $distributions,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(array_map(CloudFrontDistribution::fromArray(...), $data['distributions'] ?? []));
+    }
+}

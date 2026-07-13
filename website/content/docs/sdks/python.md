@@ -166,6 +166,7 @@ emails = fc.ses.get_emails()
 
 | Method                                         | Description                                          |
 | ---------------------------------------------- | ---------------------------------------------------- |
+| `get_distributions()`                          | List stored distributions with their `domain_name` (`Host` header) + `served` reachability |
 | `set_distribution_status(distribution_id, status)` | Force a distribution into a given status (204 / `FakeCloudError`) |
 
 ## `fc.acm`

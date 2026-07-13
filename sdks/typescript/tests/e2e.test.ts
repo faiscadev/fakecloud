@@ -58,6 +58,10 @@ import {
   CreateReplicationGroupCommand,
   CreateServerlessCacheCommand,
 } from "@aws-sdk/client-elasticache";
+import {
+  CloudFrontClient as AwsCloudFrontClient,
+  CreateDistributionCommand,
+} from "@aws-sdk/client-cloudfront";
 
 function getEndpoint(): string {
   const ep = process.env.FAKECLOUD_ENDPOINT;
@@ -254,6 +258,49 @@ describe("elasticache", () => {
     // The backing container starts asynchronously, so the cache is "creating"
     // right after create and transitions to "available" (bug-audit 3.2).
     expect(["creating", "available"]).toContain(cache!.status);
+  });
+});
+
+// ── CloudFront ──────────────────────────────────────────────────────
+
+describe("cloudfront", () => {
+  it("getDistributions() returns fakecloud-managed distributions", async () => {
+    const cf = new AwsCloudFrontClient(awsConfig());
+
+    const created = await cf.send(
+      new CreateDistributionCommand({
+        DistributionConfig: {
+          CallerReference: `ts-cf-${Date.now()}`,
+          Comment: "ts-sdk-getdistributions",
+          Enabled: true,
+          Origins: {
+            Quantity: 1,
+            Items: [{ Id: "primary", DomainName: "example.com" }],
+          },
+          DefaultCacheBehavior: {
+            TargetOriginId: "primary",
+            ViewerProtocolPolicy: "allow-all",
+            ForwardedValues: {
+              QueryString: false,
+              Cookies: { Forward: "none" },
+              Headers: { Quantity: 0 },
+            },
+            MinTTL: 0,
+          },
+        },
+      }),
+    );
+    const distributionId = created.Distribution?.Id;
+    expect(distributionId).toBeDefined();
+
+    const result = await fc.cloudfront.getDistributions();
+    const dist = result.distributions.find((d) => d.id === distributionId);
+    expect(dist).toBeDefined();
+    expect(dist!.domainName.endsWith(".cloudfront.net")).toBe(true);
+    expect(dist!.enabled).toBe(true);
+    // Data plane is on by default, so an enabled distribution is served on the
+    // main listener.
+    expect(dist!.served).toBe(true);
   });
 });
 

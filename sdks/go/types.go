@@ -1771,6 +1771,28 @@ type CloudFrontDistributionStatusRequest struct {
 	Status string `json:"status"`
 }
 
+// CloudFrontDistribution is a snapshot of one CloudFront distribution as
+// surfaced by GET /_fakecloud/cloudfront/distributions.
+type CloudFrontDistribution struct {
+	ID string `json:"id"`
+	// DomainName is the distribution's `<id>.cloudfront.net` domain. Send it
+	// as the `Host` header to fakecloud's main endpoint to reach the
+	// in-process data plane.
+	DomainName string `json:"domainName"`
+	// Enabled reflects the distribution's enabled flag.
+	Enabled bool `json:"enabled"`
+	// Served reports whether the in-process data plane currently serves this
+	// distribution — true when it is enabled and the data plane has not been
+	// disabled via FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE.
+	Served bool `json:"served"`
+}
+
+// CloudFrontDistributionsResponse is returned by
+// GET /_fakecloud/cloudfront/distributions.
+type CloudFrontDistributionsResponse struct {
+	Distributions []CloudFrontDistribution `json:"distributions"`
+}
+
 // ── ELBv2 WAF counts ───────────────────────────────────────────────
 
 // Elbv2WafCountsResponse is the pass-through payload from

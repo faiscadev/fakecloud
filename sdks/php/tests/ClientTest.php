@@ -20,6 +20,8 @@ use FakeCloud\ConfirmationCode;
 use FakeCloud\ConfirmationCodesResponse;
 use FakeCloud\ConfirmSubscriptionRequest;
 use FakeCloud\ConfirmSubscriptionResponse;
+use FakeCloud\CloudFrontDistribution;
+use FakeCloud\CloudFrontDistributionsResponse;
 use FakeCloud\ConfirmUserRequest;
 use FakeCloud\ConfirmUserResponse;
 use FakeCloud\ElastiCacheCluster;
@@ -500,6 +502,24 @@ final class ClientTest extends TestCase
         ]);
         $this->assertSame('msg-1', $resp->messageId);
         $this->assertCount(1, $resp->actionsExecuted);
+    }
+
+    public function testCloudFrontDistributionsResponseFromArray(): void
+    {
+        $resp = CloudFrontDistributionsResponse::fromArray([
+            'distributions' => [
+                ['id' => 'E1ABCDEF', 'domainName' => 'E1ABCDEF.cloudfront.net', 'enabled' => true, 'served' => true],
+                ['id' => 'E2GHIJKL', 'domainName' => 'E2GHIJKL.cloudfront.net', 'enabled' => false, 'served' => false],
+            ],
+        ]);
+        $this->assertCount(2, $resp->distributions);
+        $this->assertInstanceOf(CloudFrontDistribution::class, $resp->distributions[0]);
+        $this->assertSame('E1ABCDEF', $resp->distributions[0]->id);
+        $this->assertSame('E1ABCDEF.cloudfront.net', $resp->distributions[0]->domainName);
+        $this->assertTrue($resp->distributions[0]->enabled);
+        $this->assertTrue($resp->distributions[0]->served);
+        $this->assertFalse($resp->distributions[1]->enabled);
+        $this->assertFalse($resp->distributions[1]->served);
     }
 
     public function testUnknownFieldsIgnored(): void

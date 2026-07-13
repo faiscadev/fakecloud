@@ -11,6 +11,15 @@ type CloudFrontClient struct {
 	fc *FakeCloud
 }
 
+// GetDistributions lists every CloudFront distribution across every account.
+func (c *CloudFrontClient) GetDistributions(ctx context.Context) (*CloudFrontDistributionsResponse, error) {
+	var out CloudFrontDistributionsResponse
+	if err := c.fc.doGet(ctx, "/_fakecloud/cloudfront/distributions", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SetDistributionStatus flips a stored CloudFront Distribution's status
 // (typically "Deployed" or "InProgress") so tests can synchronously force
 // propagation without waiting on the periodic tick. Returns an APIError
