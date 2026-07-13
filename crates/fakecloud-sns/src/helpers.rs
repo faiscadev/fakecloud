@@ -1,4 +1,5 @@
 use super::*;
+use fakecloud_aws::xml::xml_escape;
 
 /// Actions that mutate SNS state.
 pub(crate) fn is_mutating_action(action: &str) -> bool {
@@ -420,7 +421,14 @@ pub(crate) fn build_sns_envelope(
 }
 
 pub(crate) fn format_attr(name: &str, value: &str) -> String {
-    format!("      <entry><key>{name}</key><value>{value}</value></entry>")
+    // Both the attribute name and value can carry user-controlled data
+    // (e.g. Endpoint URLs with query strings, DisplayName, DeliveryPolicy).
+    // Escape both so the emitted XML stays well-formed for client SDK parsers.
+    format!(
+        "      <entry><key>{}</key><value>{}</value></entry>",
+        xml_escape(name),
+        xml_escape(value)
+    )
 }
 
 pub(crate) fn format_sub_member(sub: &SnsSubscription) -> String {
@@ -437,7 +445,11 @@ pub(crate) fn format_sub_member(sub: &SnsSubscription) -> String {
         <Endpoint>{}</Endpoint>
         <Owner>{}</Owner>
       </member>"#,
-        display_arn, sub.topic_arn, sub.protocol, sub.endpoint, sub.owner,
+        xml_escape(display_arn),
+        xml_escape(&sub.topic_arn),
+        xml_escape(&sub.protocol),
+        xml_escape(&sub.endpoint),
+        xml_escape(&sub.owner),
     )
 }
 
@@ -772,7 +784,11 @@ pub(crate) fn matches_filter_policy(
                             if let Some(arr) = vals.as_array() {
                                 if let Some(msg_attr) = message_attributes.get(key) {
                                     let val = msg_attr.string_value.as_deref().unwrap_or("");
-                                    check_filter_values(arr, val)
+                                    // Type-aware, matching the non-$or path: a
+                                    // numeric filter must not match a string
+                                    // attribute (and vice versa).
+                                    let is_numeric_type = msg_attr.data_type == "Number";
+                                    check_filter_values_typed(arr, val, Some(is_numeric_type))
                                 } else {
                                     false
                                 }
@@ -1018,7 +1034,12 @@ pub(crate) fn check_filter_values_typed(
                         }
                         if let Ok(attr_num) = attr_value.parse::<f64>() {
                             if let Some(filter_num) = n.as_f64() {
-                                (attr_num - filter_num).abs() >= f64::EPSILON
+                                // Exclude when the value equals the filter number
+                                // using the same limited precision (~1e-5) that
+                                // every other numeric comparison uses, so a
+                                // single-value anything-but is consistent with the
+                                // array form, `=`, and numeric ranges.
+                                !numbers_equal(attr_num, filter_num)
                             } else {
                                 true
                             }
@@ -1519,5 +1540,117 @@ mod confirmation_envelope_tests {
             &policy,
             r#"{"category":"normal","price":10}"#
         ));
+    }
+}
+
+#[cfg(test)]
+mod xml_escape_render_tests {
+    use super::{format_attr, format_sub_member};
+    use crate::state::SnsSubscription;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn format_attr_escapes_endpoint_query_string() {
+        // The most common reachable trigger: an HTTPS endpoint with a query
+        // string. The raw `&` must become `&amp;` or the client XML parser
+        // hard-errors on ListSubscriptions/GetSubscriptionAttributes.
+        let out = format_attr("Endpoint", "https://example.com/hook?token=a&env=prod");
+        assert!(out.contains("token=a&amp;env=prod"), "got: {out}");
+        assert!(!out.contains("a&env"), "raw ampersand leaked: {out}");
+    }
+
+    #[test]
+    fn format_attr_escapes_display_name_and_angle_brackets() {
+        let out = format_attr("DisplayName", "Acme & Co <inc>");
+        assert!(out.contains("Acme &amp; Co &lt;inc&gt;"), "got: {out}");
+    }
+
+    #[test]
+    fn format_sub_member_escapes_endpoint() {
+        let sub = SnsSubscription {
+            subscription_arn: "arn:aws:sns:us-east-1:123456789012:t:sub".to_string(),
+            topic_arn: "arn:aws:sns:us-east-1:123456789012:t".to_string(),
+            protocol: "https".to_string(),
+            endpoint: "https://example.com/hook?a=1&b=2".to_string(),
+            owner: "123456789012".to_string(),
+            attributes: BTreeMap::new(),
+            confirmed: true,
+            confirmation_token: None,
+        };
+        let out = format_sub_member(&sub);
+        assert!(out.contains("<Endpoint>https://example.com/hook?a=1&amp;b=2</Endpoint>"));
+        assert!(!out.contains("a=1&b=2"), "raw ampersand leaked: {out}");
+    }
+}
+
+#[cfg(test)]
+mod filter_consistency_tests {
+    use super::{check_filter_values_typed, matches_filter_policy};
+    use crate::state::{MessageAttribute, SnsSubscription};
+    use serde_json::json;
+    use std::collections::BTreeMap;
+
+    fn num_attr(v: &str) -> MessageAttribute {
+        MessageAttribute {
+            data_type: "Number".to_string(),
+            string_value: Some(v.to_string()),
+            binary_value: None,
+        }
+    }
+
+    fn str_attr(v: &str) -> MessageAttribute {
+        MessageAttribute {
+            data_type: "String".to_string(),
+            string_value: Some(v.to_string()),
+            binary_value: None,
+        }
+    }
+
+    fn sub_with_filter(policy: serde_json::Value) -> SnsSubscription {
+        let mut attributes = BTreeMap::new();
+        attributes.insert("FilterPolicy".to_string(), policy.to_string());
+        SnsSubscription {
+            subscription_arn: "arn:aws:sns:us-east-1:123456789012:t:sub".to_string(),
+            topic_arn: "arn:aws:sns:us-east-1:123456789012:t".to_string(),
+            protocol: "sqs".to_string(),
+            endpoint: "arn:aws:sqs:us-east-1:123456789012:q".to_string(),
+            owner: "123456789012".to_string(),
+            attributes,
+            confirmed: true,
+            confirmation_token: None,
+        }
+    }
+
+    #[test]
+    fn single_value_anything_but_uses_limited_precision() {
+        // A value within ~1e-5 of the filter number is "equal" and must be
+        // excluded, consistent with `=`, ranges, and array anything-but.
+        let filter = vec![json!({"anything-but": 100})];
+        // 100 is equal -> excluded -> no match.
+        assert!(!check_filter_values_typed(&filter, "100", Some(true)));
+        // 100.0000001 is within tolerance -> still treated as equal -> excluded.
+        assert!(!check_filter_values_typed(
+            &filter,
+            "100.0000001",
+            Some(true)
+        ));
+        // 101 differs -> not excluded -> matches.
+        assert!(check_filter_values_typed(&filter, "101", Some(true)));
+    }
+
+    #[test]
+    fn or_branch_is_type_aware() {
+        // A numeric filter inside $or must NOT match a string attribute.
+        let policy = json!({ "$or": [ { "price": [100] } ] });
+        let sub = sub_with_filter(policy);
+
+        let mut numeric_attrs = BTreeMap::new();
+        numeric_attrs.insert("price".to_string(), num_attr("100"));
+        assert!(matches_filter_policy(&sub, &numeric_attrs, ""));
+
+        // Same textual value but the attribute is a String -> no match.
+        let mut string_attrs = BTreeMap::new();
+        string_attrs.insert("price".to_string(), str_attr("100"));
+        assert!(!matches_filter_policy(&sub, &string_attrs, ""));
     }
 }
