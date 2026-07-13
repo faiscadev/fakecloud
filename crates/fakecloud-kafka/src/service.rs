@@ -600,11 +600,14 @@ fn merge_replication_sub(info: &mut Map<String, Value>, key: &str, incoming: Opt
     let Some(incoming) = incoming.as_ref().and_then(Value::as_object) else {
         return;
     };
-    let target = info
-        .entry(key.to_string())
-        .or_insert_with(|| json!({}))
-        .as_object_mut()
-        .expect("replication sub-object");
+    let slot = info.entry(key.to_string()).or_insert_with(|| json!({}));
+    // A stored value that a prior create left as a non-object (create does not
+    // normalize it) would make `as_object_mut()` return None; reset it rather
+    // than panicking on the update path.
+    if !slot.is_object() {
+        *slot = Value::Object(Map::new());
+    }
+    let target = slot.as_object_mut().expect("slot set to object above");
     for (k, v) in incoming {
         target.insert(k.clone(), v.clone());
     }
@@ -3366,6 +3369,25 @@ mod tests {
         let (action, labels) = KafkaService::resolve_action(&req).unwrap();
         assert_eq!(action, "ListNodes");
         assert_eq!(labels[0], "arn:aws:kafka:us-east-1:123:cluster/x/u-1");
+    }
+
+    #[test]
+    fn merge_replication_sub_overwrites_non_object() {
+        // Regression: a stored non-object sub-value (a prior create does not
+        // normalize it) used to panic the UpdateReplicationInfo path via
+        // `.as_object_mut().expect(...)`.
+        let mut info = Map::new();
+        info.insert("topicReplication".into(), json!("notanobject"));
+        merge_replication_sub(
+            &mut info,
+            "topicReplication",
+            Some(json!({ "topicNameConfiguration": { "type": "PREFIX" } })),
+        );
+        assert!(info["topicReplication"].is_object());
+        assert_eq!(
+            info["topicReplication"]["topicNameConfiguration"]["type"],
+            "PREFIX"
+        );
     }
 
     fn test_req() -> AwsRequest {

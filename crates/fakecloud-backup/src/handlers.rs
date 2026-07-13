@@ -991,13 +991,31 @@ impl BackupService {
             .vaults
             .get_mut(name)
             .ok_or_else(|| not_found(format!("Backup vault not found: {name}")))?;
+        let changeable = body.get("ChangeableForDays").and_then(|x| x.as_i64());
+        // AWS bounds ChangeableForDays to 3..=36500; validate before the date
+        // arithmetic below (`Utc::now() + Duration::days(d)` panics on overflow
+        // in all build profiles for a hostile value).
+        if let Some(d) = changeable {
+            if !(3..=36500).contains(&d) {
+                return Err(invalid_param(format!(
+                    "ChangeableForDays must be between 3 and 36500, got {d}"
+                )));
+            }
+        }
         v.min_retention_days = body.get("MinRetentionDays").and_then(|x| x.as_i64());
         v.max_retention_days = body.get("MaxRetentionDays").and_then(|x| x.as_i64());
-        v.changeable_for_days = body.get("ChangeableForDays").and_then(|x| x.as_i64());
-        v.locked = v.changeable_for_days.unwrap_or(0) == 0;
-        v.lock_date = v
-            .changeable_for_days
-            .map(|d| Utc::now() + chrono::Duration::days(d));
+        v.changeable_for_days = changeable;
+        v.locked = changeable.unwrap_or(0) == 0;
+        v.lock_date = match changeable {
+            Some(d) => Some(
+                Utc::now()
+                    .checked_add_signed(chrono::Duration::days(d))
+                    .ok_or_else(|| {
+                        invalid_param("ChangeableForDays produces an out-of-range lock date")
+                    })?,
+            ),
+            None => None,
+        };
         Ok(empty(200))
     }
 
