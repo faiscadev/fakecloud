@@ -604,14 +604,28 @@ impl IamService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        let group = state.groups.get_mut(&group_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        if !state.groups.contains_key(&group_name) {
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
                 format!("The group with name {group_name} cannot be found."),
-            )
-        })?;
+            ));
+        }
 
+        // Check policy exists (allow AWS managed policies). Mirrors the
+        // existence check in attach_role_policy / attach_user_policy.
+        if !policy_arn.contains(":aws:policy/") && !state.policies.contains_key(&policy_arn) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "NoSuchEntity",
+                format!("Policy {policy_arn} does not exist or is not attachable."),
+            ));
+        }
+
+        let group = state
+            .groups
+            .get_mut(&group_name)
+            .expect("group presence checked above");
         if !group.attached_policies.contains(&policy_arn) {
             group.attached_policies.push(policy_arn.clone());
             if let Some(p) = state.policies.get_mut(&policy_arn) {

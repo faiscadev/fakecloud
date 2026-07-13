@@ -114,7 +114,7 @@ impl IamService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        if state.policies.remove(&policy_arn).is_none() {
+        if !state.policies.contains_key(&policy_arn) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",
@@ -122,16 +122,30 @@ impl IamService {
             ));
         }
 
-        // Remove from any attachments
-        for arns in state.role_policies.values_mut() {
-            arns.retain(|a| a != &policy_arn);
+        // AWS rejects DeletePolicy while the policy is still attached to any
+        // entity; the caller must detach it first. Match the DeleteConflict
+        // error rather than silently stripping attachments.
+        let still_attached = state
+            .role_policies
+            .values()
+            .any(|arns| arns.contains(&policy_arn))
+            || state
+                .user_policies
+                .values()
+                .any(|arns| arns.contains(&policy_arn))
+            || state
+                .groups
+                .values()
+                .any(|g| g.attached_policies.contains(&policy_arn));
+        if still_attached {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DeleteConflict",
+                "Cannot delete a policy attached to entities.".to_string(),
+            ));
         }
-        for arns in state.user_policies.values_mut() {
-            arns.retain(|a| a != &policy_arn);
-        }
-        for group in state.groups.values_mut() {
-            group.attached_policies.retain(|a| a != &policy_arn);
-        }
+
+        state.policies.remove(&policy_arn);
 
         let xml = empty_response("DeletePolicy", &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -892,6 +906,7 @@ impl CreatePolicyInput {
             .get("Path")
             .cloned()
             .unwrap_or_else(|| "/".to_string());
+        super::validate_iam_path(&path)?;
         let description = params.get("Description").cloned().unwrap_or_default();
         let tags = parse_tags(params);
         validate_tags(&tags, 0)?;

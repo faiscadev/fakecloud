@@ -7,7 +7,8 @@ use fakecloud_core::validation::*;
 use crate::state::IamInstanceProfile;
 
 use super::{
-    empty_response, generate_id, parse_tag_keys, parse_tags, tags_xml, url_encode, IamService,
+    empty_response, generate_id, paginated_tags_response, parse_tag_keys, parse_tags,
+    partition_for_region, tags_xml, url_encode, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -36,10 +37,12 @@ impl IamService {
             ));
         }
 
+        let partition = partition_for_region(&req.region);
         let ip = IamInstanceProfile {
             instance_profile_id: format!("AIPA{}", generate_id()),
             arn: format!(
-                "arn:aws:iam::{}:instance-profile{}{}",
+                "arn:{}:iam::{}:instance-profile{}{}",
+                partition,
                 state.account_id,
                 if path == "/" { "/" } else { &path },
                 name
@@ -114,13 +117,13 @@ impl IamService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _ = super::validate_list_pagination(req)?;
+        let max_items = super::validate_list_pagination(req)? as usize;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let path_prefix = req.query_params.get("PathPrefix").cloned();
 
-        let profiles: Vec<&IamInstanceProfile> = state
+        let mut profiles: Vec<&IamInstanceProfile> = state
             .instance_profiles
             .values()
             .filter(|ip| {
@@ -130,18 +133,26 @@ impl IamService {
                     .unwrap_or(true)
             })
             .collect();
+        profiles.sort_by(|a, b| a.instance_profile_name.cmp(&b.instance_profile_name));
 
-        let members: String = profiles
+        let (page, is_truncated, next_marker) =
+            paginate_by_name(&profiles, req, |ip| &ip.instance_profile_name, max_items);
+
+        let members: String = page
             .iter()
             .map(|ip| self.instance_profile_member_xml(ip, state))
             .collect::<Vec<_>>()
             .join("\n");
+        let marker_section = match &next_marker {
+            Some(m) => format!("\n    <Marker>{m}</Marker>"),
+            None => String::new(),
+        };
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListInstanceProfilesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListInstanceProfilesResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <InstanceProfiles>
 {members}
     </InstanceProfiles>
@@ -230,6 +241,7 @@ impl IamService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
+        let max_items = super::validate_list_pagination(req)? as usize;
         let accounts = self.state.read();
         let empty = crate::state::IamState::new(&req.account_id);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -242,23 +254,31 @@ impl IamService {
             ));
         }
 
-        let profiles: Vec<&IamInstanceProfile> = state
+        let mut profiles: Vec<&IamInstanceProfile> = state
             .instance_profiles
             .values()
             .filter(|ip| ip.roles.contains(&role_name))
             .collect();
+        profiles.sort_by(|a, b| a.instance_profile_name.cmp(&b.instance_profile_name));
 
-        let members: String = profiles
+        let (page, is_truncated, next_marker) =
+            paginate_by_name(&profiles, req, |ip| &ip.instance_profile_name, max_items);
+
+        let members: String = page
             .iter()
             .map(|ip| self.instance_profile_member_xml(ip, state))
             .collect::<Vec<_>>()
             .join("\n");
+        let marker_section = match &next_marker {
+            Some(m) => format!("\n    <Marker>{m}</Marker>"),
+            None => String::new(),
+        };
 
         let xml = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <ListInstanceProfilesForRoleResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
   <ListInstanceProfilesForRoleResult>
-    <IsTruncated>false</IsTruncated>
+    <IsTruncated>{is_truncated}</IsTruncated>{marker_section}
     <InstanceProfiles>
 {members}
     </InstanceProfiles>
@@ -341,22 +361,7 @@ impl IamService {
             )
         })?;
 
-        let members = tags_xml(&ip.tags);
-        let xml = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<ListInstanceProfileTagsResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
-  <ListInstanceProfileTagsResult>
-    <IsTruncated>false</IsTruncated>
-    <Tags>
-{members}
-    </Tags>
-  </ListInstanceProfileTagsResult>
-  <ResponseMetadata>
-    <RequestId>{}</RequestId>
-  </ResponseMetadata>
-</ListInstanceProfileTagsResponse>"#,
-            req.request_id
-        );
+        let xml = paginated_tags_response("ListInstanceProfileTags", &ip.tags, req)?;
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
 
@@ -437,4 +442,39 @@ impl IamService {
             .collect::<Vec<_>>()
             .join("\n")
     }
+}
+
+/// Apply the IAM `Marker`/`MaxItems` pagination triad to an already-sorted
+/// slice of items, using each item's name (via `name_of`) as the opaque
+/// cursor. Returns the page, the truncation flag, and the next `Marker`.
+/// Shared by the ListInstanceProfiles family, which previously returned every
+/// item with a hardcoded `IsTruncated=false`.
+fn paginate_by_name<'a, T, F>(
+    items: &[&'a T],
+    req: &AwsRequest,
+    name_of: F,
+    max_items: usize,
+) -> (Vec<&'a T>, bool, Option<String>)
+where
+    F: Fn(&T) -> &str,
+{
+    let marker = req.query_params.get("Marker").cloned();
+    let start = marker
+        .as_ref()
+        .and_then(|m| items.iter().position(|it| name_of(it) == m).map(|p| p + 1))
+        .unwrap_or(0)
+        .min(items.len());
+    let rest = &items[start..];
+    let is_truncated = rest.len() > max_items;
+    let page: Vec<&'a T> = if is_truncated {
+        rest[..max_items].to_vec()
+    } else {
+        rest.to_vec()
+    };
+    let next_marker = if is_truncated {
+        page.last().map(|it| name_of(it).to_string())
+    } else {
+        None
+    };
+    (page, is_truncated, next_marker)
 }

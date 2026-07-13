@@ -4890,3 +4890,396 @@ fn list_entities_for_managed_policy_counts_attachments() {
         "attachment count not reflected: {gp_body}"
     );
 }
+
+// ---- Hardening: policy-existence, DeleteConflict, single-object Statement,
+//      region partitions, path + MaxSessionDuration validation, and
+//      instance-profile pagination (pre-Show-HN bug-hunt fixes) ----
+
+/// Create a managed policy and return its ARN, extracted from the response.
+fn create_managed_policy(svc: &IamService, name: &str) -> String {
+    let doc =
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+    let resp = svc
+        .create_policy(&make_request(
+            "CreatePolicy",
+            vec![("PolicyName", name), ("PolicyDocument", doc)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    extract_xml_tag(&body, "Arn").to_string()
+}
+
+#[test]
+fn attach_group_policy_missing_policy_errors() {
+    let svc = make_service();
+    svc.create_group(&make_request("CreateGroup", vec![("GroupName", "grp")]))
+        .unwrap();
+
+    // A customer-managed ARN that was never created must be rejected, matching
+    // attach_role_policy / attach_user_policy behavior.
+    let err = svc
+        .attach_group_policy(&make_request(
+            "AttachGroupPolicy",
+            vec![
+                ("GroupName", "grp"),
+                ("PolicyArn", "arn:aws:iam::123456789012:policy/ghost"),
+            ],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "NoSuchEntity");
+    assert!(
+        err.message()
+            .contains("does not exist or is not attachable"),
+        "unexpected message: {}",
+        err.message()
+    );
+}
+
+#[test]
+fn attach_group_policy_missing_group_errors() {
+    let svc = make_service();
+    let err = svc
+        .attach_group_policy(&make_request(
+            "AttachGroupPolicy",
+            vec![
+                ("GroupName", "nope"),
+                ("PolicyArn", "arn:aws:iam::aws:policy/AdministratorAccess"),
+            ],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "NoSuchEntity");
+    assert!(err.message().contains("group"));
+}
+
+#[test]
+fn attach_group_policy_aws_managed_ok() {
+    let svc = make_service();
+    svc.create_group(&make_request("CreateGroup", vec![("GroupName", "grp")]))
+        .unwrap();
+    // AWS-managed ARNs are accepted without being present in state.
+    svc.attach_group_policy(&make_request(
+        "AttachGroupPolicy",
+        vec![
+            ("GroupName", "grp"),
+            ("PolicyArn", "arn:aws:iam::aws:policy/AdministratorAccess"),
+        ],
+    ))
+    .unwrap();
+}
+
+#[test]
+fn delete_policy_attached_to_group_conflicts() {
+    let svc = make_service();
+    let arn = create_managed_policy(&svc, "attached-pol");
+    svc.create_group(&make_request("CreateGroup", vec![("GroupName", "g")]))
+        .unwrap();
+    svc.attach_group_policy(&make_request(
+        "AttachGroupPolicy",
+        vec![("GroupName", "g"), ("PolicyArn", &arn)],
+    ))
+    .unwrap();
+
+    let err = svc
+        .delete_policy(&make_request("DeletePolicy", vec![("PolicyArn", &arn)]))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "DeleteConflict");
+    assert!(err.message().contains("attached to entities"));
+
+    // After detaching, the delete succeeds.
+    svc.detach_group_policy(&make_request(
+        "DetachGroupPolicy",
+        vec![("GroupName", "g"), ("PolicyArn", &arn)],
+    ))
+    .unwrap();
+    svc.delete_policy(&make_request("DeletePolicy", vec![("PolicyArn", &arn)]))
+        .unwrap();
+}
+
+#[test]
+fn delete_policy_attached_to_role_conflicts() {
+    let svc = make_service();
+    let arn = create_managed_policy(&svc, "role-attached");
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    svc.create_role(&make_request(
+        "CreateRole",
+        vec![("RoleName", "r"), ("AssumeRolePolicyDocument", trust)],
+    ))
+    .unwrap();
+    svc.attach_role_policy(&make_request(
+        "AttachRolePolicy",
+        vec![("RoleName", "r"), ("PolicyArn", &arn)],
+    ))
+    .unwrap();
+
+    let err = svc
+        .delete_policy(&make_request("DeletePolicy", vec![("PolicyArn", &arn)]))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "DeleteConflict");
+}
+
+#[test]
+fn delete_policy_unattached_succeeds() {
+    let svc = make_service();
+    let arn = create_managed_policy(&svc, "lonely-pol");
+    svc.delete_policy(&make_request("DeletePolicy", vec![("PolicyArn", &arn)]))
+        .unwrap();
+}
+
+#[test]
+fn update_assume_role_policy_single_object_statement_validated() {
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    svc.create_role(&make_request(
+        "CreateRole",
+        vec![("RoleName", "r"), ("AssumeRolePolicyDocument", trust)],
+    ))
+    .unwrap();
+
+    // Statement passed as a single object (not an array) with a prohibited
+    // Resource field must still be rejected.
+    let bad = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole","Resource":"*"}}"#;
+    let err = svc
+        .update_assume_role_policy(&make_request(
+            "UpdateAssumeRolePolicy",
+            vec![("RoleName", "r"), ("PolicyDocument", bad)],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "MalformedPolicyDocument");
+    assert!(err.message().contains("Resource"));
+
+    // Single-object Statement with a disallowed action is also rejected.
+    let bad_action = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"s3:GetObject"}}"#;
+    let err = svc
+        .update_assume_role_policy(&make_request(
+            "UpdateAssumeRolePolicy",
+            vec![("RoleName", "r"), ("PolicyDocument", bad_action)],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "MalformedPolicyDocument");
+
+    // A valid single-object Statement is accepted.
+    let good = r#"{"Version":"2012-10-17","Statement":{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}}"#;
+    svc.update_assume_role_policy(&make_request(
+        "UpdateAssumeRolePolicy",
+        vec![("RoleName", "r"), ("PolicyDocument", good)],
+    ))
+    .unwrap();
+}
+
+#[test]
+fn create_instance_profile_uses_region_partition() {
+    let svc = make_service();
+    let mut req = make_request(
+        "CreateInstanceProfile",
+        vec![("InstanceProfileName", "gov-ip")],
+    );
+    req.region = "us-gov-west-1".to_string();
+    let resp = svc.create_instance_profile(&req).unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(
+        body.contains("arn:aws-us-gov:iam::"),
+        "expected gov partition ARN, got: {body}"
+    );
+    assert!(!body.contains("arn:aws:iam::"));
+}
+
+#[test]
+fn create_virtual_mfa_device_uses_region_partition() {
+    let svc = make_service();
+    let mut req = make_request(
+        "CreateVirtualMFADevice",
+        vec![("VirtualMFADeviceName", "gov-mfa")],
+    );
+    req.region = "us-gov-west-1".to_string();
+    let resp = svc.create_virtual_mfa_device(&req).unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(
+        body.contains("arn:aws-us-gov:iam::"),
+        "expected gov partition serial number, got: {body}"
+    );
+}
+
+#[test]
+fn create_role_rejects_invalid_path() {
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    // Path without leading/trailing slash is malformed.
+    let err = svc
+        .create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "r"),
+                ("AssumeRolePolicyDocument", trust),
+                ("Path", "engineering"),
+            ],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "InvalidInput");
+    assert!(err.message().contains("path"));
+}
+
+#[test]
+fn create_policy_rejects_invalid_path() {
+    let svc = make_service();
+    let doc =
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#;
+    let err = svc
+        .create_policy(&make_request(
+            "CreatePolicy",
+            vec![
+                ("PolicyName", "p"),
+                ("PolicyDocument", doc),
+                ("Path", "/missing-trailing"),
+            ],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "InvalidInput");
+}
+
+#[test]
+fn create_role_valid_nested_path_ok() {
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    let resp = svc
+        .create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "r"),
+                ("AssumeRolePolicyDocument", trust),
+                ("Path", "/dept/eng/"),
+            ],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains(":role/dept/eng/r"));
+}
+
+#[test]
+fn create_role_rejects_out_of_range_max_session_duration() {
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    // Below 3600.
+    let err = svc
+        .create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "lo"),
+                ("AssumeRolePolicyDocument", trust),
+                ("MaxSessionDuration", "1800"),
+            ],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ValidationError");
+    assert!(err.message().contains("maxSessionDuration"));
+
+    // Above 43200.
+    let err = svc
+        .create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", "hi"),
+                ("AssumeRolePolicyDocument", trust),
+                ("MaxSessionDuration", "50000"),
+            ],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ValidationError");
+
+    // Boundary values are accepted.
+    for dur in ["3600", "43200"] {
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", &format!("ok-{dur}")),
+                ("AssumeRolePolicyDocument", trust),
+                ("MaxSessionDuration", dur),
+            ],
+        ))
+        .unwrap();
+    }
+}
+
+#[test]
+fn update_role_rejects_out_of_range_max_session_duration() {
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    svc.create_role(&make_request(
+        "CreateRole",
+        vec![("RoleName", "r"), ("AssumeRolePolicyDocument", trust)],
+    ))
+    .unwrap();
+
+    let err = svc
+        .update_role(&make_request(
+            "UpdateRole",
+            vec![("RoleName", "r"), ("MaxSessionDuration", "100")],
+        ))
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ValidationError");
+
+    // Valid update is applied.
+    svc.update_role(&make_request(
+        "UpdateRole",
+        vec![("RoleName", "r"), ("MaxSessionDuration", "7200")],
+    ))
+    .unwrap();
+    let body = String::from_utf8_lossy(
+        svc.get_role(&make_request("GetRole", vec![("RoleName", "r")]))
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .to_string();
+    assert!(body.contains("<MaxSessionDuration>7200</MaxSessionDuration>"));
+}
+
+#[test]
+fn list_instance_profiles_paginates() {
+    let svc = make_service();
+    for n in ["ip-a", "ip-b", "ip-c"] {
+        svc.create_instance_profile(&make_request(
+            "CreateInstanceProfile",
+            vec![("InstanceProfileName", n)],
+        ))
+        .unwrap();
+    }
+
+    // First page: MaxItems=2 -> truncated with a marker.
+    let resp = svc
+        .list_instance_profiles(&make_request(
+            "ListInstanceProfiles",
+            vec![("MaxItems", "2")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains("<IsTruncated>true</IsTruncated>"), "{body}");
+    assert!(body.contains("ip-a"));
+    assert!(body.contains("ip-b"));
+    assert!(!body.contains("ip-c"));
+    let marker = extract_xml_tag(&body, "Marker").to_string();
+    assert_eq!(marker, "ip-b");
+
+    // Second page: resume after the marker.
+    let resp = svc
+        .list_instance_profiles(&make_request(
+            "ListInstanceProfiles",
+            vec![("MaxItems", "2"), ("Marker", &marker)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains("<IsTruncated>false</IsTruncated>"), "{body}");
+    assert!(body.contains("ip-c"));
+    assert!(!body.contains("ip-a"));
+    assert!(!body.contains("ip-b"));
+}

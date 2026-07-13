@@ -1007,6 +1007,111 @@ pub(crate) fn validate_list_pagination(req: &AwsRequest) -> Result<i64, AwsServi
     Ok(max_items_i64.unwrap_or(100))
 }
 
+/// Validate an IAM `Path` value. IAM paths must begin and end with `/`,
+/// contain no empty segments (`//`), stay within 512 chars, and use only the
+/// permitted character set. Equivalent to the Smithy `pathType` pattern
+/// `^/(.*/)?$` plus the per-character constraint. Shared by CreateRole,
+/// CreatePolicy, and CreateVirtualMFADevice so a malformed path is rejected
+/// up front rather than baked into a broken ARN.
+pub(crate) fn is_valid_iam_path(path: &str) -> bool {
+    if !path.starts_with('/') || !path.ends_with('/') {
+        return false;
+    }
+    if path.contains("//") {
+        return false;
+    }
+    if path.len() > 512 {
+        return false;
+    }
+    path.chars().all(|c| {
+        c.is_alphanumeric()
+            || c == '/'
+            || c == '-'
+            || c == '_'
+            || c == '.'
+            || c == '+'
+            || c == '='
+            || c == '@'
+            || c == ','
+    })
+}
+
+/// Validate an IAM `Path` and return the IAM-declared `InvalidInput` error on
+/// failure, using the exact message AWS emits.
+pub(crate) fn validate_iam_path(path: &str) -> Result<(), AwsServiceError> {
+    if !is_valid_iam_path(path) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidInput",
+            "The specified value for path is invalid. It must begin and end with / and contain only alphanumeric characters and/or / characters.".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+/// Range-check an IAM `MaxSessionDuration` value (seconds). AWS enforces the
+/// Smithy `@range(min: 3600, max: 43200)` constraint and surfaces violations
+/// as a `ValidationError` on CreateRole/UpdateRole.
+pub(crate) fn validate_max_session_duration(seconds: i32) -> Result<(), AwsServiceError> {
+    if seconds < 3600 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationError",
+            format!(
+                "1 validation error detected: Value '{seconds}' at 'maxSessionDuration' failed to satisfy constraint: Member must have value greater than or equal to 3600"
+            ),
+        ));
+    }
+    if seconds > 43200 {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationError",
+            format!(
+                "1 validation error detected: Value '{seconds}' at 'maxSessionDuration' failed to satisfy constraint: Member must have value less than or equal to 43200"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+/// Parse and range-check an optional `MaxSessionDuration` query parameter.
+/// Returns `None` when the parameter is absent (caller keeps the existing or
+/// default value), `Some(seconds)` when present and valid, or a
+/// `ValidationError` when it is not a valid integer or out of range.
+pub(crate) fn parse_max_session_duration(
+    params: &std::collections::HashMap<String, String>,
+) -> Result<Option<i32>, AwsServiceError> {
+    match params.get("MaxSessionDuration") {
+        Some(raw) => {
+            let seconds: i32 = raw.parse().map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    format!(
+                        "1 validation error detected: Value '{raw}' at 'maxSessionDuration' failed to satisfy constraint: Member must be a valid integer"
+                    ),
+                )
+            })?;
+            validate_max_session_duration(seconds)?;
+            Ok(Some(seconds))
+        }
+        None => Ok(None),
+    }
+}
+
+/// Normalize a policy document's `Statement` element into a slice of statement
+/// values. AWS (and boto3/aws-cli) accept `Statement` as either a JSON array or
+/// a single JSON object; validators that only inspect `as_array()` silently skip
+/// the single-object form. Returns an empty vec when `Statement` is absent or is
+/// neither an array nor an object.
+pub(crate) fn statements_as_slice(doc: &serde_json::Value) -> Vec<&serde_json::Value> {
+    match doc.get("Statement") {
+        Some(serde_json::Value::Array(arr)) => arr.iter().collect(),
+        Some(obj @ serde_json::Value::Object(_)) => vec![obj],
+        _ => Vec::new(),
+    }
+}
+
 pub(crate) fn empty_response(action: &str, request_id: &str) -> String {
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>

@@ -285,6 +285,9 @@ impl IamService {
     pub(super) fn update_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let role_name = required_param(&req.query_params, "RoleName")?;
         validate_string_length("roleName", &role_name, 1, 64)?;
+        // Range-check MaxSessionDuration before mutating anything so an
+        // out-of-range value is rejected (ValidationError) rather than stored.
+        let new_duration = super::parse_max_session_duration(&req.query_params)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -303,11 +306,7 @@ impl IamService {
         if let Some(desc) = req.query_params.get("Description") {
             role.description = Some(desc.clone());
         }
-        if let Some(dur) = req
-            .query_params
-            .get("MaxSessionDuration")
-            .and_then(|v| v.parse().ok())
-        {
+        if let Some(dur) = new_duration {
             role.max_session_duration = dur;
         }
 
@@ -363,9 +362,11 @@ impl IamService {
             }
         };
 
-        // Validate trust policy constraints
-        if let Some(statements) = doc.get("Statement").and_then(|s| s.as_array()) {
-            for stmt in statements {
+        // Validate trust policy constraints. `Statement` may be a JSON array or
+        // a single JSON object (boto3/aws-cli accept a dict); normalize so the
+        // single-object form is validated identically instead of bypassed.
+        {
+            for stmt in super::statements_as_slice(&doc) {
                 // Check for prohibited Resource field
                 if stmt.get("Resource").is_some() {
                     return Err(AwsServiceError::aws_error(
@@ -1054,11 +1055,9 @@ impl CreateRoleInput {
             .get("Path")
             .cloned()
             .unwrap_or_else(|| "/".to_string());
+        super::validate_iam_path(&path)?;
         let description = params.get("Description").cloned();
-        let max_session_duration = params
-            .get("MaxSessionDuration")
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(3600);
+        let max_session_duration = super::parse_max_session_duration(params)?.unwrap_or(3600);
         let tags = parse_tags(params);
         validate_tags(&tags, 0)?;
         let permissions_boundary = params.get("PermissionsBoundary").cloned();
