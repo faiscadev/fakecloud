@@ -2266,10 +2266,13 @@ async fn cognito_associate_verify_software_token() {
     let secret = resp.secret_code().unwrap();
     assert_eq!(secret.len(), 32);
 
+    // VerifySoftwareToken validates a real RFC 6238 TOTP derived from the
+    // associated secret, so compute the current code rather than a dummy.
+    let code = fakecloud_cognito::totp::compute_totp_now(secret).expect("compute totp");
     let verify = client
         .verify_software_token()
         .access_token(&access_token)
-        .user_code("123456")
+        .user_code(code)
         .send()
         .await
         .unwrap();

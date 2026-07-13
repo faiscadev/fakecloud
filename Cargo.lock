@@ -5234,6 +5234,7 @@ dependencies = [
  "aws-types",
  "base64 0.22.1",
  "clap",
+ "fakecloud-cognito",
  "fakecloud-conformance-macros",
  "fakecloud-testkit",
  "flate2",
