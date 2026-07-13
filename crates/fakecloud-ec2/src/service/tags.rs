@@ -80,6 +80,45 @@ pub(crate) fn tag_specifications_for(
     out
 }
 
+/// `Some(true/false)` for a resource family we track by id, `None` for id
+/// prefixes we do not model (accepted leniently rather than falsely rejected).
+fn resource_exists(state: &Ec2State, id: &str) -> Option<bool> {
+    let prefix = id.split('-').next().unwrap_or("");
+    Some(match prefix {
+        "i" => state.instances.contains_key(id),
+        "vpc" => state.vpcs.contains_key(id),
+        "subnet" => state.subnets.contains_key(id),
+        "sg" => state.security_groups.contains_key(id),
+        "vol" => state.volumes.contains_key(id),
+        "snap" => state.snapshots.contains_key(id),
+        "ami" => state.images.contains_key(id),
+        "eni" => state.network_interfaces.contains_key(id),
+        "igw" => state.internet_gateways.contains_key(id),
+        "rtb" => state.route_tables.contains_key(id),
+        "dopt" => state.dhcp_options.contains_key(id),
+        "acl" => state.network_acls.contains_key(id),
+        "pcx" => state.vpc_peerings.contains_key(id),
+        "nat" => state.nat_gateways.contains_key(id),
+        "eipalloc" => state.elastic_ips.contains_key(id),
+        _ => return None,
+    })
+}
+
+/// Reject `CreateTags`/`DeleteTags` targeting a resource id of a modeled family
+/// that does not exist, matching AWS's `InvalidID` for a bad resource id.
+fn ensure_resources_exist(state: &Ec2State, ids: &[String]) -> Result<(), AwsServiceError> {
+    for id in ids {
+        if resource_exists(state, id) == Some(false) {
+            return Err(AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidID",
+                format!("The ID '{id}' is not valid"),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) fn create_tags(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -102,6 +141,7 @@ pub(crate) fn create_tags(
     if !resource_ids.is_empty() && !tags.is_empty() {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        ensure_resources_exist(state, &resource_ids)?;
         for id in &resource_ids {
             state.upsert_tags(id, &tags);
         }
@@ -125,6 +165,7 @@ pub(crate) fn delete_tags(
     if !resource_ids.is_empty() {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        ensure_resources_exist(state, &resource_ids)?;
         for id in &resource_ids {
             if to_remove.is_empty() {
                 // DeleteTags with no Tag set removes every tag on the resource.
@@ -192,14 +233,9 @@ fn tag_matches_filters(resource_id: &str, tag: &Tag, filters: &[Filter]) -> bool
             // nothing is the safe, test-stable behavior for the foundation).
             _ => return false,
         };
-        f.values.iter().any(|v| {
-            // EC2 filter values support a trailing `*` wildcard.
-            if let Some(prefix) = v.strip_suffix('*') {
-                candidate.starts_with(prefix)
-            } else {
-                candidate == *v
-            }
-        })
+        f.values
+            .iter()
+            .any(|v| crate::service_helpers::filter_value_matches(v, &candidate))
     })
 }
 
@@ -221,4 +257,52 @@ pub(crate) fn infer_resource_type(resource_id: &str) -> String {
         _ => "resource",
     };
     ty.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    #[test]
+    fn create_tags_rejects_nonexistent_resource() {
+        let svc = Ec2Service::new();
+        let err = err_of(create_tags(
+            &svc,
+            &req(
+                "CreateTags",
+                &[
+                    ("ResourceId.1", "vpc-doesnotexist0000"),
+                    ("Tag.1.Key", "Name"),
+                    ("Tag.1.Value", "x"),
+                ],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidID");
+    }
+
+    #[test]
+    fn create_tags_on_existing_resource_succeeds() {
+        let svc = Ec2Service::new();
+        let vpc_id = {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.vpcs.keys().next().unwrap().clone()
+        };
+        create_tags(
+            &svc,
+            &req(
+                "CreateTags",
+                &[
+                    ("ResourceId.1", &vpc_id),
+                    ("Tag.1.Key", "Name"),
+                    ("Tag.1.Value", "prod"),
+                ],
+            ),
+        )
+        .unwrap();
+        let accounts = svc.state.read();
+        let tags = accounts.get("000000000000").unwrap().tags_for(&vpc_id);
+        assert!(tags.iter().any(|t| t.key == "Name" && t.value == "prod"));
+    }
 }

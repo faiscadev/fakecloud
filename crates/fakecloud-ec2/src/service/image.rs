@@ -221,6 +221,10 @@ pub(crate) fn describe_images(
 ) -> Result<AwsResponse, AwsServiceError> {
     let filters = parse_filters(&req.query_params);
     let wanted = indexed_list(&req.query_params, "ImageId");
+    // A `disabled` image is hidden from a default DescribeImages; it is only
+    // returned when requested explicitly by id or by a `state` filter, matching
+    // AWS (DisableImage takes an AMI out of general listings).
+    let state_filtered = filters.iter().any(|f| f.name == "state");
     let owner = req.account_id.clone();
     // `Owner.N` request params (distinct from the `owner-*` filters): values are
     // an account id, `self`, or an owner alias (`amazon` / `aws-marketplace`).
@@ -244,6 +248,7 @@ pub(crate) fn describe_images(
         .images
         .values()
         .filter(|i| !i.in_recycle_bin)
+        .filter(|i| i.state != "disabled" || state_filtered || wanted.contains(&i.image_id))
         .filter(|i| wanted.is_empty() || wanted.contains(&i.image_id))
         .filter(|i| image_owner_match(i, &owner, &owners))
         .filter(|i| img_match(i, state.tags_for(&i.image_id), &filters))
@@ -334,7 +339,7 @@ fn img_match(i: &Image, tags: &[Tag], filters: &[Filter]) -> bool {
                         .map(|t| t.value.clone())
                         .collect()
                 } else {
-                    return true;
+                    return false;
                 }
             }
         };
@@ -682,12 +687,11 @@ fn image_ack(
     for k in extra_required {
         require(&req.query_params, k)?;
     }
-    if let Some(p) = protect {
-        let mut accounts = svc.state.write();
-        if let Some(img) = accounts.get_or_create(&req.account_id).images.get_mut(&id) {
+    mutate_image(svc, &req.account_id, &id, |img| {
+        if let Some(p) = protect {
             img.deregistration_protection = p;
         }
-    }
+    })?;
     Ok(Ec2Service::respond(
         action,
         &req.request_id,
@@ -695,29 +699,88 @@ fn image_ack(
     ))
 }
 
+/// `InvalidAMIID.NotFound` — the referenced image does not exist.
+fn image_not_found(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "InvalidAMIID.NotFound",
+        format!("The image id '[{id}]' does not exist"),
+    )
+}
+
+/// Look up an image mutably, apply `f`, and 404 if it is missing.
+fn mutate_image(
+    svc: &Ec2Service,
+    account_id: &str,
+    id: &str,
+    f: impl FnOnce(&mut Image),
+) -> Result<(), AwsServiceError> {
+    let mut accounts = svc.state.write();
+    let img = accounts
+        .get_or_create(account_id)
+        .images
+        .get_mut(id)
+        .ok_or_else(|| image_not_found(id))?;
+    f(img);
+    Ok(())
+}
+
 pub(crate) fn enable_image(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    image_ack(svc, req, "EnableImage", &[], None)
+    let id = require(&req.query_params, "ImageId")?;
+    mutate_image(svc, &req.account_id, &id, |img| {
+        img.state = "available".to_string();
+    })?;
+    Ok(Ec2Service::respond(
+        "EnableImage",
+        &req.request_id,
+        &ec2_return(true),
+    ))
 }
 pub(crate) fn disable_image(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    image_ack(svc, req, "DisableImage", &[], None)
+    let id = require(&req.query_params, "ImageId")?;
+    mutate_image(svc, &req.account_id, &id, |img| {
+        img.state = "disabled".to_string();
+    })?;
+    Ok(Ec2Service::respond(
+        "DisableImage",
+        &req.request_id,
+        &ec2_return(true),
+    ))
 }
 pub(crate) fn enable_image_deprecation(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    image_ack(svc, req, "EnableImageDeprecation", &["DeprecateAt"], None)
+    let id = require(&req.query_params, "ImageId")?;
+    let deprecate_at = require(&req.query_params, "DeprecateAt")?;
+    mutate_image(svc, &req.account_id, &id, |img| {
+        img.deprecation_time = Some(deprecate_at.clone());
+    })?;
+    Ok(Ec2Service::respond(
+        "EnableImageDeprecation",
+        &req.request_id,
+        &ec2_return(true),
+    ))
 }
 pub(crate) fn disable_image_deprecation(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    image_ack(svc, req, "DisableImageDeprecation", &[], None)
+    let id = require(&req.query_params, "ImageId")?;
+    mutate_image(svc, &req.account_id, &id, |img| {
+        img.deprecation_time = None;
+    })?;
+    Ok(Ec2Service::respond(
+        "DisableImageDeprecation",
+        &req.request_id,
+        &ec2_return(true),
+    ))
 }
 pub(crate) fn enable_image_deregistration_protection(
     svc: &Ec2Service,
@@ -1066,6 +1129,104 @@ mod tests {
             root_device_name: None,
             platform: None,
         }
+    }
+
+    fn seed_image(svc: &crate::service::Ec2Service, id: &str) {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        let mut i = img(None, None);
+        i.image_id = id.to_string();
+        state.images.insert(id.to_string(), i);
+    }
+
+    #[test]
+    fn disable_image_hides_it_and_enable_restores() {
+        use crate::test_support::ec2_request as req;
+        let svc = crate::service::Ec2Service::new();
+        seed_image(&svc, "ami-x");
+
+        super::disable_image(&svc, &req("DisableImage", &[("ImageId", "ami-x")])).unwrap();
+        {
+            let accounts = svc.state.read();
+            assert_eq!(
+                accounts.get("000000000000").unwrap().images["ami-x"].state,
+                "disabled"
+            );
+        }
+        // Hidden from a default DescribeImages...
+        let body = String::from_utf8(
+            super::describe_images(&svc, &req("DescribeImages", &[]))
+                .unwrap()
+                .body
+                .expect_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(!body.contains("<imageId>ami-x</imageId>"), "{body}");
+        // ...but visible when requested explicitly by id.
+        let body2 = String::from_utf8(
+            super::describe_images(&svc, &req("DescribeImages", &[("ImageId.1", "ami-x")]))
+                .unwrap()
+                .body
+                .expect_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+        assert!(body2.contains("<imageId>ami-x</imageId>"), "{body2}");
+
+        super::enable_image(&svc, &req("EnableImage", &[("ImageId", "ami-x")])).unwrap();
+        let accounts = svc.state.read();
+        assert_eq!(
+            accounts.get("000000000000").unwrap().images["ami-x"].state,
+            "available"
+        );
+    }
+
+    #[test]
+    fn enable_image_deprecation_persists_time() {
+        use crate::test_support::ec2_request as req;
+        let svc = crate::service::Ec2Service::new();
+        seed_image(&svc, "ami-x");
+        super::enable_image_deprecation(
+            &svc,
+            &req(
+                "EnableImageDeprecation",
+                &[
+                    ("ImageId", "ami-x"),
+                    ("DeprecateAt", "2030-01-01T00:00:00Z"),
+                ],
+            ),
+        )
+        .unwrap();
+        {
+            let accounts = svc.state.read();
+            assert_eq!(
+                accounts.get("000000000000").unwrap().images["ami-x"]
+                    .deprecation_time
+                    .as_deref(),
+                Some("2030-01-01T00:00:00Z")
+            );
+        }
+        super::disable_image_deprecation(
+            &svc,
+            &req("DisableImageDeprecation", &[("ImageId", "ami-x")]),
+        )
+        .unwrap();
+        let accounts = svc.state.read();
+        assert!(accounts.get("000000000000").unwrap().images["ami-x"]
+            .deprecation_time
+            .is_none());
+    }
+
+    #[test]
+    fn disable_image_missing_errors() {
+        use crate::test_support::{ec2_request as req, err_of};
+        let svc = crate::service::Ec2Service::new();
+        let err = err_of(super::disable_image(
+            &svc,
+            &req("DisableImage", &[("ImageId", "ami-nope")]),
+        ));
+        assert_eq!(err.code(), "InvalidAMIID.NotFound");
     }
 
     #[test]

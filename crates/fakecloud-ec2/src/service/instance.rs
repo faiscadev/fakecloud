@@ -9,8 +9,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, instance_limit_exceeded, invalid_parameter_value, parse_filters, require,
-    require_struct, validate_enum, Filter,
+    gen_id, indexed_list, instance_limit_exceeded, invalid_parameter_value, missing_parameter,
+    parse_filters, require, require_struct, validate_enum, Filter,
 };
 use crate::state::{Ec2State, Instance, Tag};
 
@@ -239,11 +239,18 @@ pub(crate) async fn run_instances(
     // and never with `lo > hi`, which would panic).
     let count = max.min(MAX_INSTANCES_PER_REQUEST).max(min);
     let reservation_id = gen_id("r");
-    let image_id = req
-        .query_params
-        .get("ImageId")
-        .cloned()
-        .unwrap_or_else(|| "ami-00000000000000000".to_string());
+    // ImageId is required unless a launch template (which can carry the image)
+    // is referenced. AWS returns MissingParameter rather than silently
+    // launching from a placeholder AMI.
+    let uses_launch_template = req.query_params.keys().any(|k| {
+        k.starts_with("LaunchTemplate.LaunchTemplateId")
+            || k.starts_with("LaunchTemplate.LaunchTemplateName")
+    });
+    let image_id = match req.query_params.get("ImageId").filter(|v| !v.is_empty()) {
+        Some(v) => v.clone(),
+        None if uses_launch_template => "ami-00000000000000000".to_string(),
+        None => return Err(missing_parameter("ImageId")),
+    };
     let instance_type = req
         .query_params
         .get("InstanceType")
@@ -303,6 +310,25 @@ pub(crate) async fn run_instances(
             .as_ref()
             .and_then(|sid| state.subnets.get(sid))
             .map(|s| s.vpc_id.clone());
+        // Honor `SecurityGroup.N` (group *names*, EC2-Classic/default-VPC form)
+        // by resolving each to its id, alongside the modern `SecurityGroupId.N`.
+        let sg_names = indexed_list(&req.query_params, "SecurityGroup");
+        if !sg_names.is_empty() {
+            let target_vpc = resolved_vpc
+                .clone()
+                .unwrap_or_else(|| crate::defaults::default_vpc_id(&req.account_id));
+            for name in &sg_names {
+                if let Some(sg) = state
+                    .security_groups
+                    .values()
+                    .find(|g| g.vpc_id == target_vpc && &g.group_name == name)
+                {
+                    if !sg_ids.contains(&sg.group_id) {
+                        sg_ids.push(sg.group_id.clone());
+                    }
+                }
+            }
+        }
         if sg_ids.is_empty() {
             let vpc = resolved_vpc
                 .clone()
@@ -429,6 +455,10 @@ pub(crate) async fn run_instances(
         let account_id = req.account_id.clone();
         let ids = ids.clone();
         let instance_network = instance_network.clone();
+        // Capture the persistence hook so the pending->running flip is written
+        // through to disk; RunInstances' own dispatch-path snapshot ran while
+        // the instance was still `pending` (M12).
+        let snapshot_hook = svc.snapshot_hook();
         tokio::spawn(async move {
             for id in &ids {
                 let running = if let Some(rt) = &runtime {
@@ -452,6 +482,11 @@ pub(crate) async fn run_instances(
                     None
                 };
                 reconcile_started(&svc_state, &account_id, id, running);
+            }
+            // Persist the reconciled (`running`) state so a restart restores
+            // running instances rather than resurrecting them as pending.
+            if let Some(hook) = &snapshot_hook {
+                hook().await;
             }
             // All instances are up with their real IPs: (re)apply the
             // security-group firewall so the new instances are filtered
@@ -1035,6 +1070,12 @@ fn monitor(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // A nonexistent instance id is a hard error, not a silent no-op.
+        for id in &ids {
+            if !state.instances.contains_key(id) {
+                return Err(crate::service_helpers::instance_not_found(id));
+            }
+        }
         for id in &ids {
             if let Some(i) = state.instances.get_mut(id) {
                 i.monitoring = enable;
@@ -1071,6 +1112,14 @@ pub(crate) fn describe_instances(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+    // An explicitly-listed InstanceId that does not exist is a hard error on
+    // AWS (`InvalidInstanceID.NotFound`), not an empty result set.
+    for id in &wanted {
+        if !state.instances.contains_key(id) {
+            return Err(crate::service_helpers::instance_not_found(id));
+        }
+    }
 
     // Flatten matching instances into a stable order (by reservation, then id),
     // then paginate over the flat instance list — AWS counts instances, not
@@ -2233,5 +2282,50 @@ mod modify_tests {
         );
         assert!(!out.contains("<item>Name</item>"), "got: {out}");
         assert!(out.contains("<item>env</item>"));
+    }
+
+    #[test]
+    fn describe_instances_explicit_missing_id_errors() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        let err = crate::test_support::err_of(describe_instances(
+            &svc,
+            &req("DescribeInstances", &[("InstanceId.1", "i-missing")]),
+        ));
+        assert_eq!(err.code(), "InvalidInstanceID.NotFound");
+    }
+
+    #[test]
+    fn describe_instances_existing_id_ok() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        let out = body(
+            describe_instances(&svc, &req("DescribeInstances", &[("InstanceId.1", "i-1")]))
+                .unwrap(),
+        );
+        assert!(out.contains("<instanceId>i-1</instanceId>"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn reconcile_pending_metadata_only_flips_to_running() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        // Simulate a persisted mid-boot instance.
+        {
+            let mut accounts = svc.state.write();
+            let inst = accounts
+                .get_mut("000000000000")
+                .unwrap()
+                .instances
+                .get_mut("i-1")
+                .unwrap();
+            inst.state_code = 0;
+            inst.state_name = "pending".into();
+        }
+        svc.reconcile_pending_metadata_only().await;
+        let accounts = svc.state.read();
+        let inst = &accounts.get("000000000000").unwrap().instances["i-1"];
+        assert_eq!(inst.state_code, 16);
+        assert_eq!(inst.state_name, "running");
     }
 }

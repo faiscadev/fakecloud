@@ -6,8 +6,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, invalid_parameter_value, parse_filters, require, require_struct,
-    validate_enum, validate_int_range, validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, invalid_parameter_value, not_found, parse_filters,
+    require, require_struct, validate_enum, validate_int_range, validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Snapshot, Tag};
 
@@ -52,8 +52,8 @@ pub(crate) fn create_snapshot(
 ) -> Result<AwsResponse, AwsServiceError> {
     let volume_id = require(&req.query_params, "VolumeId")?;
     validate_enum(&req.query_params, "Location", &["regional", "local"])?;
-    let snap = build_snapshot(
-        volume_id,
+    let mut snap = build_snapshot(
+        volume_id.clone(),
         req.query_params
             .get("Description")
             .cloned()
@@ -64,6 +64,13 @@ pub(crate) fn create_snapshot(
     let tags = {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // The source volume must exist — AWS rejects a snapshot of a phantom id.
+        let vol = state
+            .volumes
+            .get(&volume_id)
+            .ok_or_else(|| not_found("InvalidVolume.NotFound", &volume_id))?;
+        snap.volume_size = vol.size;
+        snap.encrypted = vol.encrypted;
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "snapshot");
         let t = state.tags_for(&id).to_vec();
         state.snapshots.insert(id.clone(), snap.clone());
@@ -84,20 +91,41 @@ pub(crate) fn create_snapshots(
     validate_enum(&req.query_params, "Location", &["regional", "local"])?;
     validate_enum(&req.query_params, "CopyTagsFromSource", &["volume"])?;
     let owner = req.account_id.clone();
-    let snap = build_snapshot("vol-0123456789abcdef0".to_string(), String::new());
-    let id = snap.snapshot_id.clone();
-    {
+    let instance_id = require(&req.query_params, "InstanceSpecification.InstanceId")?;
+    let description = req
+        .query_params
+        .get("Description")
+        .cloned()
+        .unwrap_or_default();
+    let items: Vec<String> = {
         let mut accounts = svc.state.write();
-        accounts
-            .get_or_create(&req.account_id)
-            .snapshots
-            .insert(id.clone(), snap.clone());
-    }
-    let item = snapshot_xml(&snap, &[], &owner);
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.instances.contains_key(&instance_id) {
+            return Err(not_found("InvalidInstanceId.NotFound", &instance_id));
+        }
+        // One snapshot per volume attached to the instance, each carrying the
+        // real source volume id and size (not a fabricated placeholder).
+        let sources: Vec<(String, i64, bool)> = state
+            .volumes
+            .values()
+            .filter(|v| v.attachments.iter().any(|a| a.instance_id == instance_id))
+            .map(|v| (v.volume_id.clone(), v.size, v.encrypted))
+            .collect();
+        let mut rendered = Vec::new();
+        for (vol_id, size, encrypted) in sources {
+            let mut snap = build_snapshot(vol_id, description.clone());
+            snap.volume_size = size;
+            snap.encrypted = encrypted;
+            let id = snap.snapshot_id.clone();
+            rendered.push(snapshot_xml(&snap, &[], &owner));
+            state.snapshots.insert(id, snap);
+        }
+        rendered
+    };
     Ok(Ec2Service::respond(
         "CreateSnapshots",
         &req.request_id,
-        &ec2_list("snapshotSet", &[item]),
+        &ec2_list("snapshotSet", &items),
     ))
 }
 
@@ -108,7 +136,9 @@ pub(crate) fn delete_snapshot(
     let id = require(&req.query_params, "SnapshotId")?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    state.snapshots.remove(&id);
+    if state.snapshots.remove(&id).is_none() {
+        return Err(not_found("InvalidSnapshot.NotFound", &id));
+    }
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
         "DeleteSnapshot",
@@ -158,11 +188,13 @@ fn snap_match(s: &Snapshot, tags: &[Tag], filters: &[Filter]) -> bool {
                         .map(|t| t.value.clone())
                         .collect()
                 } else {
-                    return true;
+                    return false;
                 }
             }
         };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|v| candidates.iter().any(|c| filter_value_matches(v, c)))
     })
 }
 
@@ -843,6 +875,143 @@ mod modify_tests {
             ],
         );
         assert!(format!("{err:?}").contains("InvalidParameterCombination"));
+    }
+
+    #[test]
+    fn create_snapshot_rejects_nonexistent_volume() {
+        let svc = Ec2Service::new();
+        let err = match create_snapshot(&svc, &req("CreateSnapshot", &[("VolumeId", "vol-nope")])) {
+            Err(e) => e,
+            Ok(_) => panic!("expected error"),
+        };
+        assert_eq!(err.code(), "InvalidVolume.NotFound");
+    }
+
+    #[test]
+    fn create_snapshot_uses_real_volume_size() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            let mut v = crate::state::Volume {
+                volume_id: "vol-1".into(),
+                size: 42,
+                snapshot_id: None,
+                availability_zone: "us-east-1a".into(),
+                state: "available".into(),
+                volume_type: "gp3".into(),
+                iops: None,
+                throughput: None,
+                encrypted: false,
+                kms_key_id: None,
+                multi_attach_enabled: false,
+                auto_enable_io: false,
+                attachments: vec![],
+                in_recycle_bin: false,
+                modification: None,
+            };
+            v.size = 42;
+            state.volumes.insert("vol-1".into(), v);
+        }
+        let resp = create_snapshot(&svc, &req("CreateSnapshot", &[("VolumeId", "vol-1")])).unwrap();
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(body.contains("<volumeSize>42</volumeSize>"), "{body}");
+    }
+
+    #[test]
+    fn create_snapshots_builds_one_per_attached_volume() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.instances.insert(
+                "i-1".into(),
+                crate::state::Instance {
+                    instance_id: "i-1".into(),
+                    image_id: "ami-1".into(),
+                    instance_type: "t3.micro".into(),
+                    state_code: 16,
+                    state_name: "running".into(),
+                    private_ip: "10.0.0.5".into(),
+                    public_ip: None,
+                    subnet_id: None,
+                    vpc_id: None,
+                    key_name: None,
+                    security_group_ids: vec![],
+                    reservation_id: "r-1".into(),
+                    ami_launch_index: 0,
+                    monitoring: false,
+                    az: "us-east-1a".into(),
+                    launch_time: "t".into(),
+                    container_id: None,
+                    disable_api_termination: false,
+                    disable_api_stop: false,
+                    source_dest_check: true,
+                    ebs_optimized: false,
+                    instance_initiated_shutdown_behavior: "stop".into(),
+                    user_data: None,
+                    metadata_options: Default::default(),
+                    cpu_options: None,
+                    bandwidth_weighting: None,
+                    maintenance_options: Default::default(),
+                    placement_tenancy: None,
+                    placement_affinity: None,
+                    placement_group_name: None,
+                    private_dns_hostname_type: None,
+                    enable_resource_name_dns_a_record: false,
+                    enable_resource_name_dns_aaaa_record: false,
+                },
+            );
+            for vid in ["vol-a", "vol-b"] {
+                state.volumes.insert(
+                    vid.into(),
+                    crate::state::Volume {
+                        volume_id: vid.into(),
+                        size: 10,
+                        snapshot_id: None,
+                        availability_zone: "us-east-1a".into(),
+                        state: "in-use".into(),
+                        volume_type: "gp3".into(),
+                        iops: None,
+                        throughput: None,
+                        encrypted: false,
+                        kms_key_id: None,
+                        multi_attach_enabled: false,
+                        auto_enable_io: false,
+                        attachments: vec![crate::state::VolumeAttachment {
+                            volume_id: vid.into(),
+                            instance_id: "i-1".into(),
+                            device: "/dev/sdf".into(),
+                            status: "attached".into(),
+                            delete_on_termination: false,
+                        }],
+                        in_recycle_bin: false,
+                        modification: None,
+                    },
+                );
+            }
+        }
+        let resp = create_snapshots(
+            &svc,
+            &req(
+                "CreateSnapshots",
+                &[("InstanceSpecification.InstanceId", "i-1")],
+            ),
+        )
+        .unwrap();
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(body.contains("<volumeId>vol-a</volumeId>"), "{body}");
+        assert!(body.contains("<volumeId>vol-b</volumeId>"), "{body}");
+        // Two snapshots persisted.
+        assert_eq!(
+            svc.state
+                .read()
+                .get("000000000000")
+                .unwrap()
+                .snapshots
+                .len(),
+            2
+        );
     }
 
     #[test]

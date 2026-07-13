@@ -5,7 +5,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, parse_filters, require, validate_enum, validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, paginate, parse_filters, require, validate_enum,
+    validate_max_results, Filter,
 };
 use crate::state::{Ec2State, EniAttachment, NetworkInterface, NetworkInterfacePermission, Tag};
 
@@ -176,7 +177,9 @@ pub(crate) fn delete_network_interface(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        state.network_interfaces.remove(&id);
+        if state.network_interfaces.remove(&id).is_none() {
+            return Err(eni_not_found(&id));
+        }
         state.tags.remove(&id);
     }
     Ok(Ec2Service::respond(
@@ -205,10 +208,22 @@ pub(crate) fn describe_network_interfaces(
         .map(|n| eni_xml(n, state.tags_for(&n.network_interface_id), &owner))
         .collect();
     items.sort();
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("networkInterfaceSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond(
         "DescribeNetworkInterfaces",
         &req.request_id,
-        &ec2_list("networkInterfaceSet", &items),
+        &body,
     ))
 }
 
@@ -217,7 +232,11 @@ fn eni_match(n: &NetworkInterface, tags: &[Tag], filters: &[Filter]) -> bool {
         let candidates: Vec<String> = match f.name.as_str() {
             "network-interface-id" => vec![n.network_interface_id.clone()],
             "subnet-id" => vec![n.subnet_id.clone()],
+            "vpc-id" => vec![n.vpc_id.clone()],
             "status" => vec![n.status.clone()],
+            "mac-address" => vec![n.mac_address.clone()],
+            "private-ip-address" => vec![n.private_ip_address.clone()],
+            "interface-type" => vec![n.interface_type.clone()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -226,11 +245,13 @@ fn eni_match(n: &NetworkInterface, tags: &[Tag], filters: &[Filter]) -> bool {
                         .map(|t| t.value.clone())
                         .collect()
                 } else {
-                    return true;
+                    return false;
                 }
             }
         };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|v| candidates.iter().any(|c| filter_value_matches(v, c)))
     })
 }
 
@@ -247,15 +268,17 @@ pub(crate) fn attach_network_interface(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(eni) = state.network_interfaces.get_mut(&eni_id) {
-            eni.status = "in-use".to_string();
-            eni.attachment = Some(EniAttachment {
-                attachment_id: attachment_id.clone(),
-                instance_id,
-                device_index,
-                status: "attached".to_string(),
-            });
-        }
+        let eni = state
+            .network_interfaces
+            .get_mut(&eni_id)
+            .ok_or_else(|| eni_not_found(&eni_id))?;
+        eni.status = "in-use".to_string();
+        eni.attachment = Some(EniAttachment {
+            attachment_id: attachment_id.clone(),
+            instance_id,
+            device_index,
+            status: "attached".to_string(),
+        });
     }
     let body = format!(
         "{}<networkCardIndex>0</networkCardIndex>",
@@ -508,32 +531,77 @@ pub(crate) fn describe_network_interface_permissions(
 
 // ---- IP assignment ----
 
+/// `InvalidNetworkInterfaceID.NotFound` — the referenced ENI does not exist.
+fn eni_not_found(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "InvalidNetworkInterfaceID.NotFound",
+        format!("The network interface ID '{id}' does not exist"),
+    )
+}
+
+/// Synthesize `count` secondary IPs from the ENI's primary /24 that are not
+/// already assigned, so an auto-assign request returns concrete addresses.
+fn synth_private_ips(eni: &NetworkInterface, count: usize) -> Vec<String> {
+    let base = eni
+        .private_ip_address
+        .rsplit_once('.')
+        .map(|(net, _)| net.to_string())
+        .unwrap_or_else(|| "10.0.0".to_string());
+    let mut out = Vec::new();
+    let mut host = 240u32;
+    while out.len() < count && host < 255 {
+        let candidate = format!("{base}.{host}");
+        if candidate != eni.private_ip_address && !eni.private_ips.contains(&candidate) {
+            out.push(candidate);
+        }
+        host += 1;
+    }
+    out
+}
+
 pub(crate) fn assign_private_ip_addresses(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "NetworkInterfaceId")?;
-    let assigned: Vec<String> = indexed_list(&req.query_params, "PrivateIpAddress")
-        .into_iter()
+    let explicit = indexed_list(&req.query_params, "PrivateIpAddress");
+    let count = req
+        .query_params
+        .get("SecondaryPrivateIpAddressCount")
+        .and_then(|v| v.parse::<usize>().ok());
+    let assigned: Vec<String> = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let eni = state
+            .network_interfaces
+            .get_mut(&id)
+            .ok_or_else(|| eni_not_found(&id))?;
+        let to_add = if !explicit.is_empty() {
+            explicit
+        } else {
+            synth_private_ips(eni, count.unwrap_or(1))
+        };
+        for ip in &to_add {
+            if !eni.private_ips.contains(ip) {
+                eni.private_ips.push(ip.clone());
+            }
+        }
+        to_add
+    };
+    let items: Vec<String> = assigned
+        .iter()
         .map(|ip| {
             format!(
                 "{}<isPrimary>false</isPrimary>",
-                ec2_elem("privateIpAddress", &ip)
+                ec2_elem("privateIpAddress", ip)
             )
         })
         .collect();
-    let assigned = if assigned.is_empty() {
-        vec![
-            "<privateIpAddress>10.0.0.30</privateIpAddress><isPrimary>false</isPrimary>"
-                .to_string(),
-        ]
-    } else {
-        assigned
-    };
     let body = format!(
         "{}{}",
         ec2_elem("networkInterfaceId", &id),
-        ec2_list("assignedPrivateIpAddressesSet", &assigned),
+        ec2_list("assignedPrivateIpAddressesSet", &items),
     );
     Ok(Ec2Service::respond(
         "AssignPrivateIpAddresses",
@@ -543,10 +611,20 @@ pub(crate) fn assign_private_ip_addresses(
 }
 
 pub(crate) fn unassign_private_ip_addresses(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "NetworkInterfaceId")?;
+    let id = require(&req.query_params, "NetworkInterfaceId")?;
+    let remove = indexed_list(&req.query_params, "PrivateIpAddress");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let eni = state
+            .network_interfaces
+            .get_mut(&id)
+            .ok_or_else(|| eni_not_found(&id))?;
+        eni.private_ips.retain(|ip| !remove.contains(ip));
+    }
     Ok(Ec2Service::respond(
         "UnassignPrivateIpAddresses",
         &req.request_id,
@@ -555,20 +633,41 @@ pub(crate) fn unassign_private_ip_addresses(
 }
 
 pub(crate) fn assign_ipv6_addresses(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "NetworkInterfaceId")?;
-    let addrs: Vec<String> = indexed_list(&req.query_params, "Ipv6Addresses");
-    let addrs = if addrs.is_empty() {
-        vec!["2600:1f00::5".to_string()]
-    } else {
-        addrs
+    let explicit = indexed_list(&req.query_params, "Ipv6Addresses");
+    let count = req
+        .query_params
+        .get("Ipv6AddressCount")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1);
+    let assigned: Vec<String> = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let eni = state
+            .network_interfaces
+            .get_mut(&id)
+            .ok_or_else(|| eni_not_found(&id))?;
+        let to_add = if !explicit.is_empty() {
+            explicit
+        } else {
+            (0..count)
+                .map(|i| format!("2600:1f00::{}", eni.ipv6_addresses.len() + i + 1))
+                .collect()
+        };
+        for ip in &to_add {
+            if !eni.ipv6_addresses.contains(ip) {
+                eni.ipv6_addresses.push(ip.clone());
+            }
+        }
+        to_add
     };
     let body = format!(
         "{}{}",
         ec2_elem("networkInterfaceId", &id),
-        ec2_scalar_list("assignedIpv6Addresses", &addrs),
+        ec2_scalar_list("assignedIpv6Addresses", &assigned),
     );
     Ok(Ec2Service::respond(
         "AssignIpv6Addresses",
@@ -578,11 +677,20 @@ pub(crate) fn assign_ipv6_addresses(
 }
 
 pub(crate) fn unassign_ipv6_addresses(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "NetworkInterfaceId")?;
     let addrs: Vec<String> = indexed_list(&req.query_params, "Ipv6Addresses");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let eni = state
+            .network_interfaces
+            .get_mut(&id)
+            .ok_or_else(|| eni_not_found(&id))?;
+        eni.ipv6_addresses.retain(|ip| !addrs.contains(ip));
+    }
     let body = format!(
         "{}{}",
         ec2_elem("networkInterfaceId", &id),
@@ -727,6 +835,68 @@ mod tests {
         assert!(describe_attr(&svc, "description")
             .contains("<description><value>new-desc</value></description>"));
         assert!(describe_attr(&svc, "groupSet").contains("<groupId>sg-a</groupId>"));
+    }
+
+    #[test]
+    fn assign_private_ips_persist_and_appear_in_describe() {
+        let svc = Ec2Service::new();
+        seed_eni(&svc);
+        assign_private_ip_addresses(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-1"),
+                ("PrivateIpAddress.1", "10.0.0.30"),
+                ("PrivateIpAddress.2", "10.0.0.31"),
+            ]),
+        )
+        .unwrap();
+        {
+            let accounts = svc.state.read();
+            let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+            assert_eq!(eni.private_ips, vec!["10.0.0.30", "10.0.0.31"]);
+        }
+        // Unassign one and confirm removal.
+        unassign_private_ip_addresses(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-1"),
+                ("PrivateIpAddress.1", "10.0.0.30"),
+            ]),
+        )
+        .unwrap();
+        let accounts = svc.state.read();
+        let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+        assert_eq!(eni.private_ips, vec!["10.0.0.31"]);
+    }
+
+    #[test]
+    fn assign_private_ips_missing_eni_errors() {
+        let svc = Ec2Service::new();
+        let err = crate::test_support::err_of(assign_private_ip_addresses(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-nope"),
+                ("PrivateIpAddress.1", "10.0.0.30"),
+            ]),
+        ));
+        assert_eq!(err.code(), "InvalidNetworkInterfaceID.NotFound");
+    }
+
+    #[test]
+    fn assign_ipv6_persists() {
+        let svc = Ec2Service::new();
+        seed_eni(&svc);
+        assign_ipv6_addresses(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-1"),
+                ("Ipv6Addresses.1", "2600:1f00::a"),
+            ]),
+        )
+        .unwrap();
+        let accounts = svc.state.read();
+        let eni = &accounts.get("000000000000").unwrap().network_interfaces["eni-1"];
+        assert_eq!(eni.ipv6_addresses, vec!["2600:1f00::a"]);
     }
 
     #[test]

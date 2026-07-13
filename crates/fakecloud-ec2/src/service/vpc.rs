@@ -6,7 +6,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, parse_filters, require, validate_enum, validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, parse_filters, require, validate_enum,
+    validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Tag, Vpc, VpcCidrAssoc};
 
@@ -105,11 +106,13 @@ fn vpc_matches(vpc: &Vpc, tags: &[Tag], filters: &[Filter]) -> bool {
                         .map(|t| t.value.clone())
                         .collect()
                 } else {
-                    return true; // unknown filter: don't exclude
+                    return false; // unknown filter: match nothing
                 }
             }
         };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|v| candidates.iter().any(|c| filter_value_matches(v, c)))
     })
 }
 

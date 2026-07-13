@@ -439,6 +439,11 @@ pub(crate) fn request_spot_fleet(
 ) -> Result<AwsResponse, AwsServiceError> {
     require_struct(&req.query_params, "SpotFleetRequestConfig")?;
     let id = gen_id("sfr");
+    let target_capacity = req
+        .query_params
+        .get("SpotFleetRequestConfig.TargetCapacity")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
     {
         let mut accounts = svc.state.write();
         accounts.get_or_create(&req.account_id).spot_fleets.insert(
@@ -446,6 +451,7 @@ pub(crate) fn request_spot_fleet(
             SpotFleet {
                 id: id.clone(),
                 state: "active".to_string(),
+                target_capacity,
             },
         );
     }
@@ -470,9 +476,10 @@ pub(crate) fn describe_spot_fleet_requests(
         .filter(|f| wanted.is_empty() || wanted.contains(&f.id))
         .map(|f| {
             format!(
-                "{}{}<spotFleetRequestConfig><targetCapacity>1</targetCapacity></spotFleetRequestConfig>{}",
+                "{}{}<spotFleetRequestConfig><targetCapacity>{}</targetCapacity></spotFleetRequestConfig>{}",
                 ec2_elem("spotFleetRequestId", &f.id),
                 ec2_elem("spotFleetRequestState", &f.state),
+                f.target_capacity,
                 ec2_elem("createTime", FIXED_TIME),
             )
         })
@@ -533,13 +540,30 @@ pub(crate) fn modify_spot_fleet_request(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "SpotFleetRequestId")?;
+    let id = require(&req.query_params, "SpotFleetRequestId")?;
     validate_enum(
         &req.query_params,
         "ExcessCapacityTerminationPolicy",
         &["noTermination", "default"],
     )?;
-    let _ = svc;
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let fleet = state.spot_fleets.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidSpotFleetRequestId.NotFound",
+                format!("The spot fleet request ID '{id}' does not exist"),
+            )
+        })?;
+        if let Some(tc) = req
+            .query_params
+            .get("TargetCapacity")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            fleet.target_capacity = tc;
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifySpotFleetRequest",
         &req.request_id,
@@ -749,6 +773,11 @@ pub(crate) fn create_fleet(
         .get("Type")
         .cloned()
         .unwrap_or_else(|| "maintain".to_string());
+    let target_capacity = req
+        .query_params
+        .get("TargetCapacitySpecification.TotalTargetCapacity")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
     {
         let mut accounts = svc.state.write();
         accounts.get_or_create(&req.account_id).fleets.insert(
@@ -757,6 +786,7 @@ pub(crate) fn create_fleet(
                 id: id.clone(),
                 state: "active".to_string(),
                 fleet_type: ftype,
+                target_capacity,
             },
         );
     }
@@ -847,10 +877,11 @@ pub(crate) fn describe_fleets(
         .filter(|f| wanted.is_empty() || wanted.contains(&f.id))
         .map(|f| {
             format!(
-                "{}{}{}<targetCapacitySpecification><totalTargetCapacity>1</totalTargetCapacity></targetCapacitySpecification>",
+                "{}{}{}<targetCapacitySpecification><totalTargetCapacity>{}</totalTargetCapacity></targetCapacitySpecification>",
                 ec2_elem("fleetId", &f.id),
                 ec2_elem("fleetState", &f.state),
                 ec2_elem("type", &f.fleet_type),
+                f.target_capacity,
             )
         })
         .collect();
@@ -866,13 +897,30 @@ pub(crate) fn modify_fleet(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "FleetId")?;
+    let id = require(&req.query_params, "FleetId")?;
     validate_enum(
         &req.query_params,
         "ExcessCapacityTerminationPolicy",
         &["no-termination", "termination"],
     )?;
-    let _ = svc;
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let fleet = state.fleets.get_mut(&id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidFleetId.NotFound",
+                format!("The fleet ID '{id}' does not exist"),
+            )
+        })?;
+        if let Some(tc) = req
+            .query_params
+            .get("TargetCapacitySpecification.TotalTargetCapacity")
+            .and_then(|v| v.parse::<i64>().ok())
+        {
+            fleet.target_capacity = tc;
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifyFleet",
         &req.request_id,
@@ -920,4 +968,97 @@ pub(crate) fn describe_fleet_instances(
         &req.request_id,
         &body,
     ))
+}
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn create_fleet_persists_target_capacity() {
+        let svc = Ec2Service::new();
+        let resp = create_fleet(
+            &svc,
+            &req(
+                "CreateFleet",
+                &[
+                    ("TargetCapacitySpecification.TotalTargetCapacity", "10"),
+                    ("Type", "maintain"),
+                ],
+            ),
+        )
+        .unwrap();
+        let fleet_id = {
+            let b = body(resp);
+            b.split("<fleetId>")
+                .nth(1)
+                .unwrap()
+                .split("</fleetId>")
+                .next()
+                .unwrap()
+                .to_string()
+        };
+        let desc = body(describe_fleets(&svc, &req("DescribeFleets", &[])).unwrap());
+        assert!(
+            desc.contains("<totalTargetCapacity>10</totalTargetCapacity>"),
+            "{desc}"
+        );
+
+        // Modify updates it.
+        modify_fleet(
+            &svc,
+            &req(
+                "ModifyFleet",
+                &[
+                    ("FleetId", &fleet_id),
+                    ("TargetCapacitySpecification.TotalTargetCapacity", "25"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc2 = body(describe_fleets(&svc, &req("DescribeFleets", &[])).unwrap());
+        assert!(
+            desc2.contains("<totalTargetCapacity>25</totalTargetCapacity>"),
+            "{desc2}"
+        );
+    }
+
+    #[test]
+    fn modify_fleet_missing_errors() {
+        let svc = Ec2Service::new();
+        let err = err_of(modify_fleet(
+            &svc,
+            &req("ModifyFleet", &[("FleetId", "fleet-nope")]),
+        ));
+        assert_eq!(err.code(), "InvalidFleetId.NotFound");
+    }
+
+    #[test]
+    fn spot_fleet_target_capacity_round_trips() {
+        let svc = Ec2Service::new();
+        let resp = request_spot_fleet(
+            &svc,
+            &req(
+                "RequestSpotFleet",
+                &[
+                    ("SpotFleetRequestConfig.IamFleetRole", "arn:x"),
+                    ("SpotFleetRequestConfig.TargetCapacity", "7"),
+                ],
+            ),
+        )
+        .unwrap();
+        let _ = body(resp);
+        let desc = body(
+            describe_spot_fleet_requests(&svc, &req("DescribeSpotFleetRequests", &[])).unwrap(),
+        );
+        assert!(
+            desc.contains("<targetCapacity>7</targetCapacity>"),
+            "{desc}"
+        );
+    }
 }
