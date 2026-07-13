@@ -104,6 +104,44 @@ impl IotWirelessData {
         self.seq += 1;
         self.seq
     }
+
+    // ---- account-scoped singleton configurations ----
+
+    /// Read a singleton configuration by its stable key.
+    pub fn get_singleton(&self, key: &str) -> Option<&Value> {
+        self.singletons.get(key)
+    }
+
+    /// Insert / replace a singleton configuration.
+    pub fn put_singleton(&mut self, key: &str, value: Value) {
+        self.singletons.insert(key.to_string(), value);
+    }
+
+    // ---- many-to-many relationship edges ----
+
+    /// Add `member` to the ordered relationship set `key` (idempotent — a member
+    /// already present is not duplicated).
+    pub fn add_relation(&mut self, key: &str, member: &str) {
+        let set = self.relations.entry(key.to_string()).or_default();
+        if !set.iter().any(|m| m == member) {
+            set.push(member.to_string());
+        }
+    }
+
+    /// Remove `member` from the relationship set `key`; drops the empty set.
+    pub fn remove_relation(&mut self, key: &str, member: &str) {
+        if let Some(set) = self.relations.get_mut(key) {
+            set.retain(|m| m != member);
+            if set.is_empty() {
+                self.relations.remove(key);
+            }
+        }
+    }
+
+    /// The members of relationship set `key`, in insertion order.
+    pub fn list_relation(&self, key: &str) -> Vec<String> {
+        self.relations.get(key).cloned().unwrap_or_default()
+    }
 }
 
 impl AccountState for IotWirelessData {
@@ -145,5 +183,37 @@ mod tests {
         assert!(d.remove_resource("destinations", "dest-1").is_some());
         assert!(d.get_resource("destinations", "dest-1").is_none());
         assert!(!d.resources.contains_key("destinations"));
+    }
+
+    #[test]
+    fn singleton_round_trips() {
+        let mut d = IotWirelessData::default();
+        assert!(d.get_singleton("metric-configuration").is_none());
+        d.put_singleton(
+            "metric-configuration",
+            json!({"SummaryMetric": {"Status": "Enabled"}}),
+        );
+        assert_eq!(
+            d.get_singleton("metric-configuration").unwrap()["SummaryMetric"]["Status"],
+            "Enabled"
+        );
+    }
+
+    #[test]
+    fn relation_edges_round_trip() {
+        let mut d = IotWirelessData::default();
+        d.add_relation("fuota-multicast:task-1", "mc-1");
+        d.add_relation("fuota-multicast:task-1", "mc-2");
+        // idempotent
+        d.add_relation("fuota-multicast:task-1", "mc-1");
+        assert_eq!(
+            d.list_relation("fuota-multicast:task-1"),
+            vec!["mc-1", "mc-2"]
+        );
+        d.remove_relation("fuota-multicast:task-1", "mc-1");
+        assert_eq!(d.list_relation("fuota-multicast:task-1"), vec!["mc-2"]);
+        d.remove_relation("fuota-multicast:task-1", "mc-2");
+        assert!(d.list_relation("fuota-multicast:task-1").is_empty());
+        assert!(!d.relations.contains_key("fuota-multicast:task-1"));
     }
 }

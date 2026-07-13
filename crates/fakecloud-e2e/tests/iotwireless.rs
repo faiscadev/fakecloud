@@ -7,7 +7,9 @@
 //! deserialises (restJson1 epoch-seconds), and tag / list-tags / untag a
 //! resource by ARN.
 
-use aws_sdk_iotwireless::types::{ExpressionType, Tag};
+use aws_sdk_iotwireless::types::{
+    ExpressionType, LogLevel, SummaryMetricConfiguration, SummaryMetricConfigurationStatus, Tag,
+};
 use fakecloud_testkit::TestServer;
 
 async fn iotwireless_client(server: &TestServer) -> aws_sdk_iotwireless::Client {
@@ -162,4 +164,124 @@ async fn iotwireless_control_plane_lifecycle() {
         .await
         .expect("list_tags_for_resource after untag");
     assert!(!tags.tags().iter().any(|t| t.key() == "env"));
+}
+
+/// Round-trips the operations that previously accepted-and-discarded their
+/// inputs: per-resource log levels, account-scoped singleton configs,
+/// association membership edges, and the minted `MessageId` of a downlink.
+#[tokio::test]
+async fn iotwireless_stub_fixes_round_trip() {
+    let server = TestServer::start().await;
+    let client = iotwireless_client(&server).await;
+
+    // --- Per-resource log level: Put -> Get, Reset -> 404 (finding 1) ---
+    client
+        .put_resource_log_level()
+        .resource_identifier("dev-log-1")
+        .resource_type("WirelessDevice")
+        .log_level(LogLevel::Error)
+        .send()
+        .await
+        .expect("put_resource_log_level");
+    let got = client
+        .get_resource_log_level()
+        .resource_identifier("dev-log-1")
+        .resource_type("WirelessDevice")
+        .send()
+        .await
+        .expect("get_resource_log_level");
+    assert_eq!(got.log_level(), Some(&LogLevel::Error));
+
+    client
+        .reset_resource_log_level()
+        .resource_identifier("dev-log-1")
+        .resource_type("WirelessDevice")
+        .send()
+        .await
+        .expect("reset_resource_log_level");
+    assert!(client
+        .get_resource_log_level()
+        .resource_identifier("dev-log-1")
+        .resource_type("WirelessDevice")
+        .send()
+        .await
+        .is_err());
+
+    // --- Singleton metric configuration: Update -> Get (finding 2) ---
+    client
+        .update_metric_configuration()
+        .summary_metric(
+            SummaryMetricConfiguration::builder()
+                .status(SummaryMetricConfigurationStatus::Enabled)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update_metric_configuration");
+    let cfg = client
+        .get_metric_configuration()
+        .send()
+        .await
+        .expect("get_metric_configuration");
+    assert_eq!(
+        cfg.summary_metric().and_then(|m| m.status()),
+        Some(&SummaryMetricConfigurationStatus::Enabled)
+    );
+
+    // --- Association edge: Associate -> List -> Disassociate (finding 4) ---
+    let task = client
+        .create_fuota_task()
+        .firmware_update_image("s3://bucket/image.bin")
+        .firmware_update_role("arn:aws:iam::000000000000:role/fuota")
+        .send()
+        .await
+        .expect("create_fuota_task");
+    let task_id = task.id().expect("fuota task id").to_string();
+
+    client
+        .associate_multicast_group_with_fuota_task()
+        .id(&task_id)
+        .multicast_group_id("mc-assoc-1")
+        .send()
+        .await
+        .expect("associate_multicast_group_with_fuota_task");
+    let listed = client
+        .list_multicast_groups_by_fuota_task()
+        .id(&task_id)
+        .send()
+        .await
+        .expect("list_multicast_groups_by_fuota_task");
+    assert!(listed
+        .multicast_group_list()
+        .iter()
+        .any(|g| g.id() == Some("mc-assoc-1")));
+
+    client
+        .disassociate_multicast_group_from_fuota_task()
+        .id(&task_id)
+        .multicast_group_id("mc-assoc-1")
+        .send()
+        .await
+        .expect("disassociate_multicast_group_from_fuota_task");
+    let listed = client
+        .list_multicast_groups_by_fuota_task()
+        .id(&task_id)
+        .send()
+        .await
+        .expect("list_multicast_groups_by_fuota_task after disassociate");
+    assert!(!listed
+        .multicast_group_list()
+        .iter()
+        .any(|g| g.id() == Some("mc-assoc-1")));
+
+    // --- SendDataToWirelessDevice mints a MessageId (finding 3) ---
+    let sent = client
+        .send_data_to_wireless_device()
+        .id("dev-downlink-1")
+        .transmit_mode(1)
+        .payload_data("aGVsbG8=")
+        .send()
+        .await
+        .expect("send_data_to_wireless_device");
+    assert!(sent.message_id().is_some_and(|m| !m.is_empty()));
 }

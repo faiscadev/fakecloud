@@ -14,7 +14,8 @@ use fakecloud_core::service::{AwsResponse, AwsServiceError};
 use crate::generated::OpMeta;
 
 use super::{
-    build_output, ok_json, query_get, resource_type, storage_key, Ctx, IotWirelessService,
+    build_output, mint_arn, mint_uuid, now_epoch, ok_json, query_get, resource_type, storage_key,
+    Ctx, IotWirelessService,
 };
 
 type Handled = Result<Option<(AwsResponse, bool)>, AwsServiceError>;
@@ -37,11 +38,120 @@ pub(super) fn dispatch(
 
         "PutPositionConfiguration" => Ok(Some(put_position_configuration(svc, ctx, labels, body))),
         "UpdateResourcePosition" => Ok(Some(update_resource_position(svc, ctx, labels, raw_body))),
-        "GetResourcePosition" => Ok(Some(get_resource_position(svc, ctx, labels))),
+        "GetResourcePosition" => Ok(Some(get_resource_position(svc, ctx, labels)?)),
 
         "GetWirelessDeviceImportTask" => Ok(Some(get_wireless_device_import_task(
             svc, meta, ctx, labels,
         )?)),
+
+        // ---- per-resource log levels (finding 1) ----
+        // `PutResourceLogLevel` writes `resources["log-levels"][ResourceIdentifier]`;
+        // `GetResourceLogLevel` (Verb::Get) reads it through the generic engine,
+        // 404'ing when never written. `ResetResourceLogLevel` deletes it.
+        "PutResourceLogLevel" => Ok(Some(put_resource_log_level(svc, ctx, labels, query, body))),
+        "ResetResourceLogLevel" => Ok(Some(reset_resource_log_level(svc, ctx, labels))),
+
+        // ---- account-scoped singleton configurations (finding 2) ----
+        "UpdateMetricConfiguration" => Ok(Some(update_singleton(
+            svc,
+            ctx,
+            "metric-configuration",
+            body,
+        ))),
+        "GetMetricConfiguration" => Ok(Some(get_singleton(
+            svc,
+            ctx,
+            meta,
+            "metric-configuration",
+            metric_configuration_default(),
+        ))),
+        "UpdateLogLevelsByResourceTypes" => Ok(Some(update_singleton(
+            svc,
+            ctx,
+            "log-levels-by-resource-types",
+            body,
+        ))),
+        "GetLogLevelsByResourceTypes" => Ok(Some(get_singleton(
+            svc,
+            ctx,
+            meta,
+            "log-levels-by-resource-types",
+            log_levels_default(),
+        ))),
+        "UpdateEventConfigurationByResourceTypes" => Ok(Some(update_singleton(
+            svc,
+            ctx,
+            "event-configurations-resource-types",
+            body,
+        ))),
+        "GetEventConfigurationByResourceTypes" => Ok(Some(get_singleton(
+            svc,
+            ctx,
+            meta,
+            "event-configurations-resource-types",
+            Value::Object(Map::new()),
+        ))),
+
+        // ---- Action ops that mint / return output identifiers (finding 3) ----
+        "SendDataToWirelessDevice" | "SendDataToMulticastGroup" => Ok(Some(send_data(labels))),
+        "StartWirelessDeviceImportTask" | "StartSingleWirelessDeviceImportTask" => {
+            Ok(Some(start_import_task(svc, ctx, body)))
+        }
+        "CreateWirelessGatewayTask" => {
+            Ok(Some(create_wireless_gateway_task(svc, ctx, labels, body)))
+        }
+        "GetWirelessGatewayTask" => Ok(Some(get_wireless_gateway_task(svc, meta, ctx, labels)?)),
+        "DeleteWirelessGatewayTask" => Ok(Some(delete_wireless_gateway_task(svc, ctx, labels))),
+        "TestWirelessDevice" => Ok(Some(test_wireless_device())),
+        "GetServiceEndpoint" => Ok(Some(get_service_endpoint(ctx, query))),
+        "GetPositionEstimate" => Ok(Some(get_position_estimate())),
+        "GetMetrics" => Ok(Some(get_metrics())),
+        "GetWirelessDeviceStatistics" => Ok(Some(wireless_device_statistics(labels))),
+        "GetWirelessGatewayStatistics" => Ok(Some(wireless_gateway_statistics(labels))),
+
+        // ---- association membership edges (finding 4) ----
+        "AssociateWirelessDeviceWithMulticastGroup" => Ok(Some(associate(
+            svc,
+            ctx,
+            &multicast_devices_key(labels),
+            body,
+            "WirelessDeviceId",
+        ))),
+        "AssociateWirelessDeviceWithFuotaTask" => Ok(Some(associate(
+            svc,
+            ctx,
+            &fuota_devices_key(labels),
+            body,
+            "WirelessDeviceId",
+        ))),
+        "AssociateMulticastGroupWithFuotaTask" => Ok(Some(associate(
+            svc,
+            ctx,
+            &fuota_multicast_key(labels),
+            body,
+            "MulticastGroupId",
+        ))),
+        "DisassociateWirelessDeviceFromMulticastGroup" => Ok(Some(disassociate(
+            svc,
+            ctx,
+            &multicast_devices_key(labels),
+            labels.get("WirelessDeviceId").map(String::as_str),
+        ))),
+        "DisassociateWirelessDeviceFromFuotaTask" => Ok(Some(disassociate(
+            svc,
+            ctx,
+            &fuota_devices_key(labels),
+            labels.get("WirelessDeviceId").map(String::as_str),
+        ))),
+        "DisassociateMulticastGroupFromFuotaTask" => Ok(Some(disassociate(
+            svc,
+            ctx,
+            &fuota_multicast_key(labels),
+            labels.get("MulticastGroupId").map(String::as_str),
+        ))),
+        "ListMulticastGroupsByFuotaTask" => {
+            Ok(Some(list_multicast_groups_by_fuota_task(svc, ctx, labels)))
+        }
 
         _ => Ok(None),
     }
@@ -166,20 +276,29 @@ fn get_resource_position(
     svc: &IotWirelessService,
     ctx: &Ctx,
     labels: &HashMap<String, String>,
-) -> (AwsResponse, bool) {
+) -> Result<(AwsResponse, bool), AwsServiceError> {
     let key = resource_position_key(labels);
     let g = svc.state.read();
-    let payload = g
-        .get(&ctx.account)
-        .and_then(|d| d.blobs.get(&key))
-        .cloned()
-        .unwrap_or_default();
+    let payload = g.get(&ctx.account).and_then(|d| d.blobs.get(&key)).cloned();
+    // A resource whose position was never `UpdateResourcePosition`'d has no
+    // stored GeoJSON; the model declares `ResourceNotFoundException` for it.
+    let Some(payload) = payload else {
+        let id = labels
+            .get("ResourceIdentifier")
+            .map(String::as_str)
+            .unwrap_or_default();
+        return Err(AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No position is set for resource '{id}'."),
+        ));
+    };
     // `GeoJsonPayload` is an `@httpPayload` blob: the response body IS the raw
     // stored GeoJSON, not a JSON envelope.
-    (
+    Ok((
         AwsResponse::json(StatusCode::OK, payload.into_bytes()),
         false,
-    )
+    ))
 }
 
 // ---------- wireless-device import task ----------
@@ -206,4 +325,400 @@ fn get_wireless_device_import_task(
         Some(record) => Ok((ok_json(build_output(meta, &record)), false)),
         None => Err(super::engine::not_found(meta, &key)),
     }
+}
+
+// ---------- per-resource log levels (finding 1) ----------
+
+fn put_resource_log_level(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+    query: &[(String, String)],
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let id = labels
+        .get("ResourceIdentifier")
+        .cloned()
+        .unwrap_or_default();
+    let mut record = Map::new();
+    record.insert("ResourceIdentifier".to_string(), Value::String(id.clone()));
+    if let Some(rt) = query_get(query, "resourceType") {
+        record.insert("ResourceType".to_string(), Value::String(rt.to_string()));
+    }
+    if let Some(level) = body.get("LogLevel") {
+        record.insert("LogLevel".to_string(), level.clone());
+    }
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_resource("log-levels", &id, Value::Object(record));
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+fn reset_resource_log_level(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let id = labels
+        .get("ResourceIdentifier")
+        .cloned()
+        .unwrap_or_default();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.remove_resource("log-levels", &id);
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+// ---------- account-scoped singleton configurations (finding 2) ----------
+
+fn update_singleton(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    key: &str,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_singleton(key, Value::Object(body.clone()));
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+fn get_singleton(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    key: &str,
+    default: Value,
+) -> (AwsResponse, bool) {
+    let g = svc.state.read();
+    let stored = g
+        .get(&ctx.account)
+        .and_then(|d| d.get_singleton(key).cloned());
+    // Project the stored config (or an AWS-plausible default when never set)
+    // onto the operation's output members.
+    let source = stored.unwrap_or(default);
+    (ok_json(build_output(meta, &source)), false)
+}
+
+fn metric_configuration_default() -> Value {
+    json!({ "SummaryMetric": { "Status": "Disabled" } })
+}
+
+fn log_levels_default() -> Value {
+    json!({
+        "DefaultLogLevel": "INFO",
+        "WirelessGatewayLogOptions": [],
+        "WirelessDeviceLogOptions": [],
+        "FuotaTaskLogOptions": [],
+    })
+}
+
+// ---------- Action ops that mint / return output members (finding 3) ----------
+
+/// A fresh UUID-shaped id seeded by the wall clock so repeated calls differ.
+fn mint_transient_id(prefix: &str, seed: &str) -> String {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    mint_uuid(&format!("{prefix}:{seed}:{nanos}"))
+}
+
+/// `SendDataToWirelessDevice` / `SendDataToMulticastGroup`: there is no live
+/// radio plane, so no downlink is delivered, but AWS returns a `MessageId` for
+/// the enqueued downlink. Mint and return one (transient — AWS does not expose
+/// a read-back for it).
+fn send_data(labels: &HashMap<String, String>) -> (AwsResponse, bool) {
+    let id = labels.get("Id").map(String::as_str).unwrap_or_default();
+    let message_id = mint_transient_id("downlink", id);
+    (ok_json(json!({ "MessageId": message_id })), false)
+}
+
+/// `StartWirelessDeviceImportTask` / `StartSingleWirelessDeviceImportTask`:
+/// mint `Id` + `Arn`, and persist an import-task record so
+/// `GetWirelessDeviceImportTask` / `DeleteWirelessDeviceImportTask` resolve.
+fn start_import_task(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let seq = data.next_seq();
+    let id = mint_uuid(&format!("{}:import-task:{seq}", ctx.account));
+    let arn = mint_arn(ctx, "wireless_device_import_task", &id);
+
+    let mut record = Map::new();
+    record.insert("Id".to_string(), Value::String(id.clone()));
+    record.insert("Arn".to_string(), Value::String(arn.clone()));
+    if let Some(dest) = body.get("DestinationName") {
+        record.insert("DestinationName".to_string(), dest.clone());
+    }
+    if let Some(pos) = body.get("Positioning") {
+        record.insert("Positioning".to_string(), pos.clone());
+    }
+    if let Some(sw) = body.get("Sidewalk") {
+        record.insert("Sidewalk".to_string(), sw.clone());
+    }
+    record.insert("CreationTime".to_string(), now_epoch());
+    record.insert(
+        "Status".to_string(),
+        Value::String("INITIALIZING".to_string()),
+    );
+    record.insert("InitializedImportedDeviceCount".to_string(), Value::from(0));
+    record.insert("PendingImportedDeviceCount".to_string(), Value::from(0));
+    record.insert("OnboardedImportedDeviceCount".to_string(), Value::from(0));
+    record.insert("FailedImportedDeviceCount".to_string(), Value::from(0));
+
+    data.put_resource("wireless_device_import_task", &id, Value::Object(record));
+    (ok_json(json!({ "Id": id, "Arn": arn })), true)
+}
+
+/// `CreateWirelessGatewayTask`: persist a task record keyed by the gateway id so
+/// `GetWirelessGatewayTask` / `DeleteWirelessGatewayTask` resolve, and return
+/// the task-definition id + status.
+fn create_wireless_gateway_task(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let gateway_id = labels.get("Id").cloned().unwrap_or_default();
+    let def_id = body
+        .get("WirelessGatewayTaskDefinitionId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let status = "QUEUED".to_string();
+
+    let mut record = Map::new();
+    record.insert(
+        "WirelessGatewayId".to_string(),
+        Value::String(gateway_id.clone()),
+    );
+    record.insert(
+        "WirelessGatewayTaskDefinitionId".to_string(),
+        Value::String(def_id.clone()),
+    );
+    record.insert("Status".to_string(), Value::String(status.clone()));
+
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_resource(
+        "wireless-gateways/tasks",
+        &gateway_id,
+        Value::Object(record),
+    );
+    (
+        ok_json(json!({
+            "WirelessGatewayTaskDefinitionId": def_id,
+            "Status": status,
+        })),
+        true,
+    )
+}
+
+fn get_wireless_gateway_task(
+    svc: &IotWirelessService,
+    meta: &OpMeta,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let gateway_id = labels.get("Id").cloned().unwrap_or_default();
+    let g = svc.state.read();
+    let record = g.get(&ctx.account).and_then(|d| {
+        d.get_resource("wireless-gateways/tasks", &gateway_id)
+            .cloned()
+    });
+    match record {
+        Some(record) => Ok((ok_json(build_output(meta, &record)), false)),
+        None => Err(AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No task is queued for wireless gateway '{gateway_id}'."),
+        )),
+    }
+}
+
+fn delete_wireless_gateway_task(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let gateway_id = labels.get("Id").cloned().unwrap_or_default();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.remove_resource("wireless-gateways/tasks", &gateway_id);
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `TestWirelessDevice`: no radio plane, so no test uplink is generated, but AWS
+/// returns a human-readable `Result` string acknowledging the request.
+fn test_wireless_device() -> (AwsResponse, bool) {
+    (
+        ok_json(json!({ "Result": "Test message sent successfully to the wireless device." })),
+        false,
+    )
+}
+
+/// `GetServiceEndpoint`: AWS returns fixed-shape endpoint metadata for the
+/// configuration-and-update-server (CUPS) or LoRaWAN-network-server (LNS)
+/// protocol. There is no per-account state; the endpoint is derived from the
+/// account/region and the trust anchor is a representative PEM chain.
+fn get_service_endpoint(ctx: &Ctx, query: &[(String, String)]) -> (AwsResponse, bool) {
+    let service_type = query_get(query, "serviceType").unwrap_or("CUPS");
+    let host = if service_type.eq_ignore_ascii_case("LNS") {
+        format!(
+            "wss://{}.lns.lorawan.{}.amazonaws.com:443",
+            ctx.account, ctx.region
+        )
+    } else {
+        format!(
+            "https://{}.cups.lorawan.{}.amazonaws.com:443",
+            ctx.account, ctx.region
+        )
+    };
+    let server_trust = "-----BEGIN CERTIFICATE-----\n\
+        MIIBkTCB+wIJAKb1x2b3c4d5MA0GCSqGSIb3DQEBCwUAMBExDzANBgNVBAMMBmlv\n\
+        dHdscjAeFw0yMDAxMDEwMDAwMDBaFw0zMDAxMDEwMDAwMDBaMBExDzANBgNVBAMM\n\
+        BmlvdHdscjBcMA0GCSqGSIb3DQEBAQUAA0sAMEgCQQDFakeCApemRepresentat1ve\n\
+        TrustAnchorForIoTWirelessServiceEndpointEmulationOnlyNotReal00AgMB\n\
+        AAEwDQYJKoZIhvcNAQELBQADQQAfakeSignatureBytesForEmulationPurposes\n\
+        OnlyDoNotUseInProductionAsThisIsNotARealCertificate000000000000\n\
+        -----END CERTIFICATE-----\n";
+    (
+        ok_json(json!({
+            "ServiceType": service_type,
+            "ServiceEndpoint": host,
+            "ServerTrust": server_trust,
+        })),
+        false,
+    )
+}
+
+/// `GetPositionEstimate`: the estimate is server-computed from the supplied
+/// measurements. With no positioning engine, return a well-formed GeoJSON
+/// `FeatureCollection` (an `@httpPayload` blob) representing a single estimated
+/// point rather than an empty `{}`.
+fn get_position_estimate() -> (AwsResponse, bool) {
+    let geojson = json!({
+        "type": "FeatureCollection",
+        "features": [{
+            "type": "Feature",
+            "properties": {
+                "horizontalAccuracy": 50.0,
+                "verticalAccuracy": 30.0,
+                "horizontalConfidenceLevel": 0.68,
+                "country": "USA",
+                "state": "WA",
+                "city": "Seattle",
+                "timestamp": "2020-03-05T13:31:34.842Z"
+            },
+            "geometry": {
+                "type": "Point",
+                "coordinates": [-122.3321, 47.6062, 50.0]
+            }
+        }]
+    });
+    let bytes = serde_json::to_vec(&geojson).unwrap_or_else(|_| b"{}".to_vec());
+    (AwsResponse::json(StatusCode::OK, bytes), false)
+}
+
+/// `GetMetrics`: aggregated summary-metric analytics with no persisted
+/// time-series behind them; return a well-formed (empty) result list.
+fn get_metrics() -> (AwsResponse, bool) {
+    (ok_json(json!({ "SummaryMetricQueryResults": [] })), false)
+}
+
+/// `GetWirelessDeviceStatistics`: radio-plane telemetry with no live device;
+/// return a well-formed record echoing the addressed device id.
+fn wireless_device_statistics(labels: &HashMap<String, String>) -> (AwsResponse, bool) {
+    let id = labels
+        .get("WirelessDeviceId")
+        .map(String::as_str)
+        .unwrap_or_default();
+    (ok_json(json!({ "WirelessDeviceId": id })), false)
+}
+
+/// `GetWirelessGatewayStatistics`: as above, for a wireless gateway.
+fn wireless_gateway_statistics(labels: &HashMap<String, String>) -> (AwsResponse, bool) {
+    let id = labels
+        .get("WirelessGatewayId")
+        .map(String::as_str)
+        .unwrap_or_default();
+    (ok_json(json!({ "WirelessGatewayId": id })), false)
+}
+
+// ---------- association membership edges (finding 4) ----------
+
+fn multicast_devices_key(labels: &HashMap<String, String>) -> String {
+    format!(
+        "multicast-devices:{}",
+        labels.get("Id").map(String::as_str).unwrap_or_default()
+    )
+}
+
+fn fuota_devices_key(labels: &HashMap<String, String>) -> String {
+    format!(
+        "fuota-devices:{}",
+        labels.get("Id").map(String::as_str).unwrap_or_default()
+    )
+}
+
+fn fuota_multicast_key(labels: &HashMap<String, String>) -> String {
+    format!(
+        "fuota-multicast:{}",
+        labels.get("Id").map(String::as_str).unwrap_or_default()
+    )
+}
+
+/// Persist a membership edge (the associated member id is a required body
+/// member). The op has no output members.
+fn associate(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    key: &str,
+    body: &Map<String, Value>,
+    member_field: &str,
+) -> (AwsResponse, bool) {
+    if let Some(member) = body.get(member_field).and_then(Value::as_str) {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.add_relation(key, member);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// Remove a membership edge (the member id is a URI path label).
+fn disassociate(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    key: &str,
+    member: Option<&str>,
+) -> (AwsResponse, bool) {
+    if let Some(member) = member {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.remove_relation(key, member);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `ListMulticastGroupsByFuotaTask`: read the FUOTA-task -> multicast-group
+/// edges persisted by `AssociateMulticastGroupWithFuotaTask`.
+fn list_multicast_groups_by_fuota_task(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let key = fuota_multicast_key(labels);
+    let g = svc.state.read();
+    let groups: Vec<Value> = g
+        .get(&ctx.account)
+        .map(|d| d.list_relation(&key))
+        .unwrap_or_default()
+        .into_iter()
+        .map(|id| json!({ "Id": id }))
+        .collect();
+    (ok_json(json!({ "MulticastGroupList": groups })), false)
 }
