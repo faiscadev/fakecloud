@@ -1971,3 +1971,68 @@ async fn approximate_first_receive_timestamp_is_constant() {
         "ApproximateFirstReceiveTimestamp must stay pinned to the first receipt"
     );
 }
+
+/// A queue-level VisibilityTimeout outside 0..=43200 must be rejected with
+/// InvalidAttributeValue (not a panic / dropped connection), and a subsequent
+/// ReceiveMessage on the queue must still succeed. Regression test for a DoS
+/// where an unchecked huge value overflowed `now + Duration::seconds(v)` on the
+/// receive path and panicked the worker thread.
+#[tokio::test]
+async fn sqs_set_visibility_timeout_out_of_range_rejected() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let queue_url = client
+        .create_queue()
+        .queue_name("vt-guard-queue")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+
+    // A value that used to overflow chrono at receive time.
+    let err = client
+        .set_queue_attributes()
+        .queue_url(&queue_url)
+        .attributes(QueueAttributeName::VisibilityTimeout, "9000000000000")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidAttributeValue")
+    );
+
+    // A merely out-of-range value (one past the 12 h max) is rejected too.
+    let err = client
+        .set_queue_attributes()
+        .queue_url(&queue_url)
+        .attributes(QueueAttributeName::VisibilityTimeout, "43201")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidAttributeValue")
+    );
+
+    // The queue kept its valid default, so send + receive still work — the
+    // out-of-range value was never stored, so nothing panics.
+    client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("still-alive")
+        .send()
+        .await
+        .unwrap();
+    let recv = client
+        .receive_message()
+        .queue_url(&queue_url)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(recv.messages().len(), 1);
+    assert_eq!(recv.messages()[0].body().unwrap(), "still-alive");
+}

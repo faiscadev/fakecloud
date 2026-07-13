@@ -156,10 +156,17 @@ impl SqsDelivery for SqsDeliveryImpl {
         // and replay detection. The sync SendMessage path already does
         // this; cross-service deliveries used to leave it as None,
         // which broke FIFO consumers downstream.
+        // Render the SequenceNumber with the same ~20-digit AWS shape the
+        // direct SendMessage / SendMessageBatch paths use
+        // (`format_sequence_number`), not a bare counter. Both paths share
+        // `queue.next_sequence_number`, so emitting `seq.to_string()` here
+        // produced tiny values like "1" that sort BELOW the base-offset
+        // values a direct send returns for a later message — breaking the
+        // numeric ordering FIFO consumers rely on.
         let sequence_number = if queue.is_fifo {
             let seq = queue.next_sequence_number;
             queue.next_sequence_number = queue.next_sequence_number.saturating_add(1);
-            Some(seq.to_string())
+            Some(crate::service::format_sequence_number(seq))
         } else {
             None
         };
@@ -407,6 +414,15 @@ mod tests {
         let n0: u64 = s0.parse().expect("decimal sequence number");
         let n1: u64 = s1.parse().expect("decimal sequence number");
         assert_eq!(n1, n0 + 1, "sequence_number must be monotonic");
+        // Cross-service delivery must emit the same ~20-digit AWS-shaped
+        // SequenceNumber as the direct SendMessage path, not a bare counter,
+        // so values from both paths sort consistently for FIFO consumers.
+        assert_eq!(s0, crate::service::format_sequence_number(0));
+        assert_eq!(s1, crate::service::format_sequence_number(1));
+        assert!(
+            n0 >= crate::service::SEQUENCE_NUMBER_BASE,
+            "sequence number must use the AWS base offset"
+        );
     }
 
     #[test]

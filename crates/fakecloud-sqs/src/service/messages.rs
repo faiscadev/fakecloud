@@ -572,14 +572,26 @@ impl SqsService {
             }
             true
         });
+        // Once a message's visibility window lapses and it becomes visible
+        // again, its prior receipt handle is invalidated — real SQS at-least-
+        // once semantics: a stale handle must not act on a message that may
+        // now be (re)delivered to another consumer. Without this, a late
+        // DeleteMessage carrying the OLD handle still resolves via
+        // `receipt_handle_map` and deletes the redelivered copy. Pruning the
+        // map entry here also bounds its growth under redelivery churn (each
+        // redelivery would otherwise append another handle that never leaves).
         // For FIFO queues, push returned messages to the FRONT to maintain order
         if is_fifo {
             for mut m in returned.into_iter().rev() {
+                queue.receipt_handle_map.remove(&m.message_id);
+                m.receipt_handle = None;
                 m.visible_at = None;
                 queue.messages.push_front(m);
             }
         } else {
             for mut m in returned {
+                queue.receipt_handle_map.remove(&m.message_id);
+                m.receipt_handle = None;
                 m.visible_at = None;
                 queue.messages.push_back(m);
             }
@@ -752,6 +764,14 @@ impl SqsService {
             msg.receipt_handle = None;
             msg.visible_at = None;
             if let Some(dlq) = state.queues.values_mut().find(|q| q.arn == dlq_arn) {
+                // A message that lands in the DLQ starts a fresh receive
+                // history there: AWS resets ApproximateReceiveCount when a
+                // message is moved to its dead-letter queue. Carrying the
+                // source-queue count over would immediately re-redrive the
+                // message on its first receive from a DLQ that has its own
+                // redrive policy (count already past maxReceiveCount).
+                msg.receive_count = 0;
+                msg.first_received_at = None;
                 dlq.messages.push_back(msg);
             } else {
                 tracing::warn!(

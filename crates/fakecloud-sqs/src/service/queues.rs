@@ -182,8 +182,11 @@ impl SqsService {
 
         let queue = SqsQueue {
             arn: format!(
-                "arn:aws:sqs:{}:{}:{}",
-                state.region, state.account_id, queue_name
+                "arn:{}:sqs:{}:{}:{}",
+                fakecloud_aws::arn::partition_for(&state.region),
+                state.region,
+                state.account_id,
+                queue_name
             ),
             queue_name: queue_name.clone(),
             queue_url: queue_url.clone(),
@@ -524,6 +527,18 @@ impl SqsService {
                     }
                 }
             }
+        }
+
+        // Validate VisibilityTimeout (0–43200 inclusive) before applying.
+        // An unchecked value is stored and later overflows the receive-path
+        // arithmetic (`now + Duration::seconds(v)`), panicking the worker
+        // thread — a DoS. AWS returns InvalidAttributeValue for the queue
+        // attribute (as opposed to InvalidParameterValue for the per-request
+        // VisibilityTimeout on ReceiveMessage/ChangeMessageVisibility).
+        if let Some(attrs) = body["Attributes"].as_object() {
+            validate_visibility_timeout_attr(
+                attrs.get("VisibilityTimeout").and_then(|v| v.as_str()),
+            )?;
         }
 
         if let Some(attrs) = body["Attributes"].as_object() {

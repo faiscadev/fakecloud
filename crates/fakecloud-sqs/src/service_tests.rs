@@ -2982,3 +2982,243 @@ fn list_queues_token_survives_interleaved_delete() {
     assert!(urls2[0].ends_with("/q2"), "resumed at q2, got {}", urls2[0]);
     assert!(urls2[1].ends_with("/q3"));
 }
+
+// ── VisibilityTimeout queue-attribute range validation (DoS guard) ──
+
+/// CreateQueue must reject an out-of-range VisibilityTimeout with
+/// InvalidAttributeValue rather than storing a value that later overflows the
+/// receive-path arithmetic and panics the worker thread.
+#[test]
+fn create_queue_rejects_out_of_range_visibility_timeout() {
+    let svc = make_service();
+    let req = make_request(
+        "CreateQueue",
+        json!({
+            "QueueName": "vt-create",
+            "Attributes": { "VisibilityTimeout": "9000000000000" }
+        }),
+    );
+    let err = expect_err(svc.create_queue(&req));
+    assert_eq!(err.code(), "InvalidAttributeValue");
+
+    // 43201 (one past the 12 h max) is rejected too.
+    let req = make_request(
+        "CreateQueue",
+        json!({ "QueueName": "vt-create2", "Attributes": { "VisibilityTimeout": "43201" } }),
+    );
+    assert_eq!(
+        expect_err(svc.create_queue(&req)).code(),
+        "InvalidAttributeValue"
+    );
+}
+
+/// SetQueueAttributes must reject an out-of-range VisibilityTimeout with
+/// InvalidAttributeValue, and a subsequent ReceiveMessage must still succeed
+/// (i.e. the bad value was never stored, so nothing panics).
+#[tokio::test]
+async fn set_queue_attributes_rejects_out_of_range_visibility_timeout_no_panic() {
+    let svc = make_service();
+    let url = create_queue(&svc, "vt-set");
+
+    // The value that overflowed the receive-path arithmetic before this guard.
+    let req = make_request(
+        "SetQueueAttributes",
+        json!({ "QueueUrl": url, "Attributes": { "VisibilityTimeout": "9000000000000" } }),
+    );
+    assert_eq!(
+        expect_err(svc.set_queue_attributes(&req)).code(),
+        "InvalidAttributeValue"
+    );
+
+    // 43201 is rejected; the 43200 boundary is accepted.
+    let req = make_request(
+        "SetQueueAttributes",
+        json!({ "QueueUrl": url, "Attributes": { "VisibilityTimeout": "43201" } }),
+    );
+    assert_eq!(
+        expect_err(svc.set_queue_attributes(&req)).code(),
+        "InvalidAttributeValue"
+    );
+    let req = make_request(
+        "SetQueueAttributes",
+        json!({ "QueueUrl": url, "Attributes": { "VisibilityTimeout": "43200" } }),
+    );
+    svc.set_queue_attributes(&req).expect("43200 is in range");
+
+    // ReceiveMessage still works — no panic from a stored overflow value.
+    send_msg(&svc, &url, "hi");
+    let resp = svc
+        .receive_message(&make_request("ReceiveMessage", json!({ "QueueUrl": url })))
+        .await
+        .expect("receive must not panic");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Messages"].as_array().unwrap().len(), 1);
+}
+
+/// After a message's visibility window lapses and it is redelivered under a
+/// fresh receipt handle, a DeleteMessage carrying the STALE handle must fail
+/// instead of deleting the redelivered copy (AWS at-least-once semantics).
+#[tokio::test]
+async fn stale_receipt_handle_cannot_delete_redelivered_message() {
+    let svc = make_service();
+    let url = create_queue(&svc, "stale-rh");
+    send_msg(&svc, &url, "m");
+
+    // First receive with VisibilityTimeout=0 -> immediately eligible for
+    // redelivery; capture the first handle (rh1).
+    let first = svc
+        .receive_message(&make_request(
+            "ReceiveMessage",
+            json!({ "QueueUrl": url, "VisibilityTimeout": 0 }),
+        ))
+        .await
+        .unwrap();
+    let b: Value = serde_json::from_slice(first.body.expect_bytes()).unwrap();
+    let rh1 = b["Messages"][0]["ReceiptHandle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Second receive returns the now-visible message under a NEW handle (rh2);
+    // rh1 must be invalidated at this point.
+    let second = svc
+        .receive_message(&make_request(
+            "ReceiveMessage",
+            json!({ "QueueUrl": url, "VisibilityTimeout": 30 }),
+        ))
+        .await
+        .unwrap();
+    let b2: Value = serde_json::from_slice(second.body.expect_bytes()).unwrap();
+    let rh2 = b2["Messages"][0]["ReceiptHandle"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(rh1, rh2, "redelivery must issue a fresh receipt handle");
+
+    // Deleting with the stale handle must fail, not remove the live message.
+    let stale = svc.delete_message(&make_request(
+        "DeleteMessage",
+        json!({ "QueueUrl": url, "ReceiptHandle": rh1 }),
+    ));
+    assert_eq!(expect_err(stale).code(), "ReceiptHandleIsInvalid");
+
+    // The current handle still deletes the message.
+    svc.delete_message(&make_request(
+        "DeleteMessage",
+        json!({ "QueueUrl": url, "ReceiptHandle": rh2 }),
+    ))
+    .expect("current handle deletes");
+}
+
+/// A SendMessageBatch to a FIFO queue where one entry omits MessageGroupId
+/// must report that entry as a per-entry BatchResultErrorEntry (partial
+/// success), not abort the whole batch with a request-level 400.
+#[test]
+fn send_message_batch_fifo_missing_group_id_is_per_entry_failure() {
+    let svc = make_service();
+    let url = create_queue(&svc, "batch.fifo");
+
+    let req = make_request(
+        "SendMessageBatch",
+        json!({
+            "QueueUrl": url,
+            "Entries": [
+                { "Id": "a", "MessageBody": "x", "MessageGroupId": "g", "MessageDeduplicationId": "d1" },
+                { "Id": "b", "MessageBody": "y" }
+            ]
+        }),
+    );
+    let resp = svc.send_message_batch(&req).expect("batch must not 400");
+    let body = body_json(resp);
+    let successful = body["Successful"].as_array().unwrap();
+    let failed = body["Failed"].as_array().unwrap();
+    assert_eq!(successful.len(), 1);
+    assert_eq!(successful[0]["Id"], "a");
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0]["Id"], "b");
+    assert_eq!(failed[0]["Code"], "MissingParameter");
+    assert_eq!(failed[0]["SenderFault"], true);
+}
+
+/// A message redriven to a DLQ starts a fresh receive history: its
+/// ApproximateReceiveCount resets so a DLQ with its own redrive policy does
+/// not immediately re-redrive the message on first receive.
+#[tokio::test]
+async fn redriven_message_resets_receive_count_in_dlq() {
+    let svc = make_service();
+    let dlq_url = create_queue(&svc, "reset-dlq");
+    let src_url = create_queue(&svc, "reset-src");
+    let dlq_arn = "arn:aws:sqs:us-east-1:123456789012:reset-dlq";
+    let redrive = json!({ "deadLetterTargetArn": dlq_arn, "maxReceiveCount": "1" }).to_string();
+    svc.set_queue_attributes(&make_request(
+        "SetQueueAttributes",
+        json!({ "QueueUrl": src_url, "Attributes": { "RedrivePolicy": redrive } }),
+    ))
+    .unwrap();
+
+    send_msg(&svc, &src_url, "over-limit");
+    // First receive (count 1 == max) delivers; second crosses max and redrives.
+    // Use VisibilityTimeout=0 so the message is immediately eligible again.
+    let req1 = make_request(
+        "ReceiveMessage",
+        json!({ "QueueUrl": src_url, "VisibilityTimeout": 0 }),
+    );
+    let first = body_json(svc.receive_message(&req1).await.unwrap());
+    assert_eq!(first["Messages"].as_array().unwrap().len(), 1);
+    let req2 = make_request(
+        "ReceiveMessage",
+        json!({ "QueueUrl": src_url, "VisibilityTimeout": 0 }),
+    );
+    let second = body_json(svc.receive_message(&req2).await.unwrap());
+    assert_eq!(
+        second["Messages"].as_array().map(|m| m.len()).unwrap_or(0),
+        0
+    );
+
+    // First receive from the DLQ: ApproximateReceiveCount must be "1" (fresh),
+    // not carried over from the source queue.
+    let resp = svc
+        .receive_message(&make_request(
+            "ReceiveMessage",
+            json!({ "QueueUrl": dlq_url, "AttributeNames": ["ApproximateReceiveCount"] }),
+        ))
+        .await
+        .unwrap();
+    let body = body_json(resp);
+    let msgs = body["Messages"].as_array().unwrap();
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["Attributes"]["ApproximateReceiveCount"], "1");
+}
+
+/// In a non-`aws` partition (cn / gov-cloud) the queue ARN must carry the
+/// region's partition, and that partition-correct ARN must resolve back to the
+/// queue on send/receive.
+#[test]
+fn queue_arn_uses_region_partition_and_resolves() {
+    let state: SharedSqsState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new(
+            "123456789012",
+            "cn-north-1",
+            "http://localhost:4566",
+        ),
+    ));
+    let svc = SqsService::new(state);
+    let url = create_queue(&svc, "cn-queue");
+    let arn = "arn:aws-cn:sqs:cn-north-1:123456789012:cn-queue";
+
+    // GetQueueAttributes reports the aws-cn ARN.
+    let resp = svc
+        .get_queue_attributes(&make_request(
+            "GetQueueAttributes",
+            json!({ "QueueUrl": url, "AttributeNames": ["QueueArn"] }),
+        ))
+        .unwrap();
+    assert_eq!(body_json(resp)["Attributes"]["QueueArn"], arn);
+
+    // Sending via that partition-correct ARN resolves the queue.
+    let id = send_msg(&svc, arn, "ni-hao");
+    assert!(!id.is_empty());
+    let msgs = receive_msgs(&svc, arn, 1);
+    assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0]["Body"], "ni-hao");
+}
