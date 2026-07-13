@@ -84,6 +84,9 @@ impl ApiGatewayV2Service {
         if let Some(ip) = requested_ip_type {
             api.ip_address_type = ip;
         }
+        if let Some(disabled) = body["disableExecuteApiEndpoint"].as_bool() {
+            api.disable_execute_api_endpoint = disabled;
+        }
         if protocol_type == "WEBSOCKET" {
             // WebSocket APIs use a body-based selection expression by default
             // and have no implicit api-key header selector.

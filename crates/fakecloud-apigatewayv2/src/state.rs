@@ -333,6 +333,13 @@ pub struct Integration {
     /// omits it.
     #[serde(default = "default_connection_type")]
     pub connection_type: String,
+    /// HTTP API parameter-mapping expressions keyed by
+    /// `<action>:<location>.<name>` (e.g. `overwrite:path`,
+    /// `append:header.x-user`). Values are either literals or `$request.*`
+    /// source expressions. Applied to the outgoing request for HTTP_PROXY
+    /// integrations. Round-tripped so the Terraform provider doesn't re-plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_parameters: Option<BTreeMap<String, String>>,
 }
 
 fn default_connection_type() -> String {

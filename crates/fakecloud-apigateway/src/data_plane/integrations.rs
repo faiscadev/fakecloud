@@ -2,16 +2,30 @@
 
 use super::*;
 
+/// Resolve the outgoing backend method for a **non-proxy** `HTTP`
+/// integration: AWS calls the backend with the configured
+/// `integrationHttpMethod`, not the client's front-facing method (a
+/// `GET` resource can be wired to `POST` the backend). Returns `None`
+/// when unset so callers keep the client method as the fallback.
+pub(super) fn integration_method_override(integration: &Integration) -> Option<Method> {
+    integration
+        .integration_http_method
+        .as_deref()
+        .and_then(|m| Method::from_bytes(m.to_ascii_uppercase().as_bytes()).ok())
+}
+
 pub(super) async fn http_proxy(
     req: &AwsRequest,
     integration: &Integration,
     body_override: Option<bytes::Bytes>,
+    method_override: Option<Method>,
 ) -> Result<AwsResponse, AwsServiceError> {
     let url = integration
         .uri
         .as_ref()
         .ok_or_else(|| bad_gateway("HTTP integration missing uri"))?;
-    let method = match req.method {
+    let effective_method = method_override.as_ref().unwrap_or(&req.method);
+    let method = match *effective_method {
         Method::GET => reqwest::Method::GET,
         Method::POST => reqwest::Method::POST,
         Method::PUT => reqwest::Method::PUT,
@@ -149,7 +163,8 @@ pub(super) async fn vpc_link_proxy(
 
     let mut proxy_integration = integration.clone();
     proxy_integration.uri = Some(backend_url);
-    http_proxy(req, &proxy_integration, None).await
+    let method_override = integration_method_override(integration);
+    http_proxy(req, &proxy_integration, None, method_override).await
 }
 
 /// Apply the integration's `requestTemplates` to the request body.
@@ -199,12 +214,10 @@ pub(super) async fn apply_response_template(
     );
     let accounts = service.state_handle().read();
     let state = accounts.get(&req.account_id);
-    let resp_template = state.and_then(|st| {
-        st.integration_responses
-            .get(&key)
-            .and_then(|v| v.get("responseTemplates"))
-            .and_then(|t| t.as_object())
-    });
+    let resp_record = state.and_then(|st| st.integration_responses.get(&key));
+    let resp_template = resp_record
+        .and_then(|v| v.get("responseTemplates"))
+        .and_then(|t| t.as_object());
     let content_type = backend_resp
         .content_type
         .as_str()
@@ -225,12 +238,63 @@ pub(super) async fn apply_response_template(
     } else {
         backend_resp.body.expect_bytes().to_vec()
     };
+    // Apply the integration response's responseParameters (mapped/static
+    // headers) onto the client response. Source expressions read the
+    // original backend headers, so clone before mutating.
+    let mut headers = backend_resp.headers.clone();
+    apply_response_parameters(&mut headers, resp_record, Some(&backend_resp));
     Ok(AwsResponse {
         status: backend_resp.status,
         content_type: backend_resp.content_type,
-        headers: backend_resp.headers,
+        headers,
         body: bytes::Bytes::from(body).into(),
     })
+}
+
+/// Apply an integration response's `responseParameters` map to the
+/// outgoing response headers. Keys are `method.response.header.<Name>`;
+/// values are either a `'literal'` (single-quoted static value) or a
+/// mapping expression `integration.response.header.<X>` sourced from the
+/// backend response. This is what makes a MOCK-based CORS preflight
+/// return its `Access-Control-Allow-*` headers, and lets non-proxy HTTP
+/// integrations project backend headers onto the client response.
+fn apply_response_parameters(
+    headers: &mut http::HeaderMap,
+    resp_record: Option<&Value>,
+    backend: Option<&AwsResponse>,
+) {
+    let Some(params) = resp_record
+        .and_then(|r| r.get("responseParameters"))
+        .and_then(|v| v.as_object())
+    else {
+        return;
+    };
+    for (key, value) in params {
+        let Some(header_name) = key.strip_prefix("method.response.header.") else {
+            continue;
+        };
+        let raw = value.as_str().unwrap_or_default();
+        let resolved = if raw.len() >= 2 && raw.starts_with('\'') && raw.ends_with('\'') {
+            Some(raw[1..raw.len() - 1].to_string())
+        } else if let Some(src) = raw.strip_prefix("integration.response.header.") {
+            backend
+                .and_then(|b| b.headers.get(src))
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string())
+        } else if !raw.is_empty() {
+            Some(raw.to_string())
+        } else {
+            None
+        };
+        if let (Ok(name), Some(v)) = (
+            http::HeaderName::from_bytes(header_name.as_bytes()),
+            resolved
+                .as_deref()
+                .and_then(|v| http::HeaderValue::from_str(v).ok()),
+        ) {
+            headers.insert(name, v);
+        }
+    }
 }
 
 /// Build a MOCK integration response by looking up the integration
@@ -246,13 +310,24 @@ pub(super) async fn mock_response(
     service: &ApiGatewayService,
 ) -> Result<AwsResponse, AwsServiceError> {
     let method = integration.http_method.as_str();
-    // Default to 200 when no explicit status code is configured.
+    // MOCK integrations select the integration response via the request
+    // template, which conventionally emits `{"statusCode": NNN}`. Render
+    // the application/json request template and read that selector; fall
+    // back to 200 when there is no template or no statusCode field.
     let default_status = "200";
-    let key = response_key(api_id, resource_path, method, default_status);
+    let selected_status = integration
+        .request_templates
+        .get("application/json")
+        .map(|tpl| crate::vtl::render(tpl, vtl_ctx))
+        .and_then(|rendered| serde_json::from_str::<Value>(&rendered).ok())
+        .and_then(|v| v.get("statusCode").and_then(|s| s.as_i64()))
+        .map(|n| n.to_string());
+    let lookup_status = selected_status.as_deref().unwrap_or(default_status);
+    let key = response_key(api_id, resource_path, method, lookup_status);
     let accounts = service.state_handle().read();
     let state = accounts.get(&req.account_id);
-    // Try the 200 response first; if absent scan for any integration
-    // response registered for this method and use its configured status.
+    // Try the selected-status response first; if absent scan for any
+    // integration response registered for this method and use its status.
     let resp_record = state.and_then(|st| {
         st.integration_responses.get(&key).or_else(|| {
             let prefix = format!("{api_id}/{resource_path}/{method}/");
@@ -266,11 +341,11 @@ pub(super) async fn mock_response(
         let status = record
             .get("statusCode")
             .and_then(|v| v.as_str())
-            .unwrap_or(default_status);
+            .unwrap_or(lookup_status);
         let templates = record.get("responseTemplates").and_then(|v| v.as_object());
         (status, templates)
     } else {
-        (default_status, None)
+        (lookup_status, None)
     };
     let status = status
         .parse::<u16>()
@@ -287,10 +362,13 @@ pub(super) async fn mock_response(
     } else {
         String::new()
     };
+    // Apply responseParameters (e.g. static CORS headers) to the response.
+    let mut headers = http::HeaderMap::new();
+    apply_response_parameters(&mut headers, resp_record, None);
     Ok(AwsResponse {
         status,
         content_type: content_type.to_string(),
-        headers: http::HeaderMap::new(),
+        headers,
         body: bytes::Bytes::from(body).into(),
     })
 }

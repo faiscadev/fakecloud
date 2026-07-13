@@ -3210,3 +3210,217 @@ async fn get_model_template_derives_from_schema() {
     assert_eq!(tmpl["count"], 0);
     assert_eq!(tmpl["active"], false);
 }
+
+// ── C1 / H7 / M4 / M5 / L2: routing + endpoint hardening ──
+
+/// Helper: create an integration of the given type and return its id.
+async fn create_integration_typed(
+    svc: &ApiGatewayV2Service,
+    api_id: &str,
+    body: serde_json::Value,
+) -> String {
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/integrations"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    body_json(&resp)["integrationId"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+async fn create_route_target(
+    svc: &ApiGatewayV2Service,
+    api_id: &str,
+    route_key: &str,
+    int_id: &str,
+) {
+    let body = serde_json::json!({
+        "routeKey": route_key,
+        "target": format!("integrations/{int_id}")
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+}
+
+async fn create_stage_named(svc: &ApiGatewayV2Service, api_id: &str, stage: &str) {
+    let body = serde_json::json!({"stageName": stage});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+}
+
+#[tokio::test]
+async fn execute_api_default_route_matches_any_request() {
+    // C1: an HTTP API whose only route is `$default` must route every
+    // request to that route (was 404ing all traffic).
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+    let int_id = create_integration_typed(
+        &svc,
+        &api_id,
+        serde_json::json!({"integrationType": "MOCK"}),
+    )
+    .await;
+    create_route_target(&svc, &api_id, "$default", &int_id).await;
+    create_stage_named(&svc, &api_id, "prod").await;
+
+    // Any method + any path routes to the $default integration.
+    let req = make_request(Method::GET, "/prod/literally/anything", "");
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn execute_api_default_stage_serves_path_without_stage_segment() {
+    // H7: with a `$default` stage, the default endpoint serves `/items`
+    // directly (no stage segment in the path), keyed on the Host api-id.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+    let int_id = create_integration_typed(
+        &svc,
+        &api_id,
+        serde_json::json!({"integrationType": "MOCK"}),
+    )
+    .await;
+    create_route_target(&svc, &api_id, "GET /items", &int_id).await;
+    create_stage_named(&svc, &api_id, "$default").await;
+
+    let mut req = make_request(Method::GET, "/items", "");
+    req.headers.insert(
+        "host",
+        format!("{api_id}.execute-api.us-east-1.amazonaws.com")
+            .parse()
+            .unwrap(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+}
+
+#[tokio::test]
+async fn execute_api_host_scopes_stage_across_apis() {
+    // H7: two APIs sharing a stage name resolve independently by Host.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state.clone());
+    let api_a = create_api(&svc);
+    let int_a =
+        create_integration_typed(&svc, &api_a, serde_json::json!({"integrationType": "MOCK"}))
+            .await;
+    create_route_target(&svc, &api_a, "GET /items", &int_a).await;
+    create_stage_named(&svc, &api_a, "prod").await;
+
+    let api_b = create_api(&svc);
+    // API B has a `prod` stage but NO `/items` route — a request pinned to
+    // B's Host must 404 rather than resolve against A's `/items`.
+    create_stage_named(&svc, &api_b, "prod").await;
+
+    let mut req = make_request(Method::GET, "/prod/items", "");
+    req.headers.insert(
+        "host",
+        format!("{api_b}.execute-api.us-east-1.amazonaws.com")
+            .parse()
+            .unwrap(),
+    );
+    let err = svc.handle(req).await;
+    assert!(err.is_err(), "request scoped to API B (no /items) must 404");
+}
+
+#[tokio::test]
+async fn integration_request_parameters_round_trip() {
+    // M4: requestParameters must persist on create and come back on get.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+    let body = serde_json::json!({
+        "integrationType": "HTTP_PROXY",
+        "integrationUri": "https://example.com/{proxy}",
+        "integrationMethod": "POST",
+        "requestParameters": {
+            "overwrite:header.x-user": "'admin'",
+            "append:querystring.trace": "'1'"
+        }
+    });
+    let int_id = create_integration_typed(&svc, &api_id, body).await;
+
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/integrations/{int_id}"),
+        "",
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["requestParameters"]["overwrite:header.x-user"], "'admin'");
+    assert_eq!(b["requestParameters"]["append:querystring.trace"], "'1'");
+}
+
+#[tokio::test]
+async fn disable_execute_api_endpoint_returns_403() {
+    // M5: the default execute-api endpoint returns 403 when disabled.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let body = serde_json::json!({
+        "name": "locked",
+        "protocolType": "HTTP",
+        "disableExecuteApiEndpoint": true
+    });
+    let req = make_request(Method::POST, "/v2/apis", &body.to_string());
+    let api_id = body_json(&svc.create_api(&req).unwrap())["apiId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let int_id = create_integration_typed(
+        &svc,
+        &api_id,
+        serde_json::json!({"integrationType": "MOCK"}),
+    )
+    .await;
+    create_route_target(&svc, &api_id, "GET /items", &int_id).await;
+    create_stage_named(&svc, &api_id, "prod").await;
+
+    let mut req = make_request(Method::GET, "/prod/items", "");
+    req.headers.insert(
+        "host",
+        format!("{api_id}.execute-api.us-east-1.amazonaws.com")
+            .parse()
+            .unwrap(),
+    );
+    let err = expect_err(svc.handle(req).await);
+    assert_eq!(err.status(), http::StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn export_api_includes_default_route() {
+    // L2: ExportApi must not silently drop the `$default` route.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+    let int_id = create_integration_typed(
+        &svc,
+        &api_id,
+        serde_json::json!({"integrationType": "MOCK"}),
+    )
+    .await;
+    create_route_target(&svc, &api_id, "$default", &int_id).await;
+
+    let mut req = make_request(Method::GET, &format!("/v2/apis/{api_id}/exports/OAS30"), "");
+    req.query_params
+        .insert("outputType".to_string(), "JSON".to_string());
+    let resp = svc.handle(req).await.unwrap();
+    // ExportApi returns the document in a `body` blob member.
+    let outer: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let spec: Value = serde_json::from_str(outer["body"].as_str().unwrap()).unwrap();
+    assert!(
+        spec["paths"]["$default"].is_object(),
+        "exported spec must contain the $default path, got: {spec}"
+    );
+}

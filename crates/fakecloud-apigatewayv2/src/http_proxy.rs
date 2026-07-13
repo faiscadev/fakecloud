@@ -2,12 +2,19 @@ use bytes::Bytes;
 use http::{HeaderMap, StatusCode};
 use std::time::Duration;
 
-use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
+use fakecloud_core::service::{AwsResponse, AwsServiceError};
 
-/// Forwards an HTTP request to an external endpoint
+/// Forwards an HTTP request to an external endpoint.
+///
+/// `target_url` must already include any query string — the caller is
+/// responsible for `{proxy}` path substitution and `requestParameters`
+/// mapping. `method` is the effective outgoing method (the integration's
+/// `integrationMethod` when set, otherwise the client's method).
 pub async fn forward_request(
     target_url: &str,
-    req: &AwsRequest,
+    method: &http::Method,
+    headers: &HeaderMap,
+    body: &Bytes,
     timeout_millis: Option<i64>,
 ) -> Result<AwsResponse, AwsServiceError> {
     let client = reqwest::Client::builder()
@@ -23,18 +30,11 @@ pub async fn forward_request(
             )
         })?;
 
-    // Build request URL with query parameters
-    let url = if req.raw_query.is_empty() {
-        target_url.to_string()
-    } else {
-        format!("{}?{}", target_url, req.raw_query)
-    };
-
     // Build the request
-    let mut request_builder = client.request(req.method.clone(), &url);
+    let mut request_builder = client.request(method.clone(), target_url);
 
     // Copy headers (skip host and authorization)
-    for (key, value) in &req.headers {
+    for (key, value) in headers {
         let key_str = key.as_str();
         if key_str != "host" && key_str != "authorization" {
             request_builder = request_builder.header(key, value);
@@ -42,8 +42,8 @@ pub async fn forward_request(
     }
 
     // Add body
-    if !req.body.is_empty() {
-        request_builder = request_builder.body(req.body.clone());
+    if !body.is_empty() {
+        request_builder = request_builder.body(body.clone());
     }
 
     // Execute request
@@ -91,6 +91,7 @@ pub async fn forward_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fakecloud_core::service::AwsRequest;
     use http::Method;
     use std::collections::HashMap;
 
@@ -124,7 +125,14 @@ mod tests {
     #[tokio::test]
     async fn test_forward_request_invalid_url() {
         let req = create_test_request();
-        let result = forward_request("not-a-valid-url", &req, Some(5000)).await;
+        let result = forward_request(
+            "not-a-valid-url",
+            &req.method,
+            &req.headers,
+            &req.body,
+            Some(5000),
+        )
+        .await;
         assert!(result.is_err());
     }
 
@@ -132,14 +140,28 @@ mod tests {
     async fn test_forward_request_unreachable_host_errors() {
         let req = create_test_request();
         // Non-existent port on localhost should fail quickly
-        let result = forward_request("http://127.0.0.1:1/unreachable", &req, Some(200)).await;
+        let result = forward_request(
+            "http://127.0.0.1:1/unreachable",
+            &req.method,
+            &req.headers,
+            &req.body,
+            Some(200),
+        )
+        .await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_forward_request_default_timeout() {
         let req = create_test_request();
-        let result = forward_request("http://127.0.0.1:1/x", &req, None).await;
+        let result = forward_request(
+            "http://127.0.0.1:1/x",
+            &req.method,
+            &req.headers,
+            &req.body,
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 }

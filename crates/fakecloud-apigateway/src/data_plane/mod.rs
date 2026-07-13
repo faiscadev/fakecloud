@@ -88,13 +88,18 @@ pub async fn handle(
     // When the Host header matches a DomainName's regionalDomainName,
     // look up BasePathMappings to determine the target API + stage.
     // The longest matching basePath prefix wins (AWS behavior).
-    let (stage_name, remaining, custom_domain_api_hint) = match resolve_custom_domain(service, req)
-    {
+    let custom = resolve_custom_domain(service, req);
+    let via_custom_domain = custom.is_some();
+    let (stage_name, remaining, custom_domain_api_hint) = match custom {
         Some(triple) => triple,
         None => {
             let stage = req.path_segments[0].clone();
             let rest = req.path_segments[1..].to_vec();
-            (Some(stage), rest, None)
+            // Default execute-api endpoint: pin resolution to the API id
+            // carried in the Host header (`{api-id}.execute-api...`) so two
+            // APIs sharing a stage name don't collide.
+            let hint = host_api_id(req);
+            (Some(stage), rest, hint)
         }
     };
     let stage_name = stage_name.unwrap_or_else(|| req.path_segments[0].clone());
@@ -140,6 +145,9 @@ pub async fn handle(
                 Some(r) => r,
                 None => continue,
             };
+            // Rank candidate resources by specificity so a static route
+            // (`/health`) beats a `{proxy+}` catch-all when both match.
+            let mut best_score: Option<Vec<u8>> = None;
             for resource in resources.values() {
                 if let Some(params) = match_resource_path(&resource.path, &remaining) {
                     let exact_key = format!(
@@ -207,22 +215,25 @@ pub async fn handle(
                             .get(api_id)
                             .map(|api| api.binary_media_types.clone())
                             .unwrap_or_default();
-                        found = Some(DataPlaneMatch {
-                            api_id: api_id.clone(),
-                            integration,
-                            path_params: params,
-                            resource_path: resource.path.clone(),
-                            stage_vars,
-                            authorization_type,
-                            authorizer,
-                            request_parameters,
-                            request_models,
-                            request_validator_id,
-                            api_key_required,
-                            stage_web_acl_arn,
-                            binary_media_types,
-                        });
-                        break;
+                        let score = resource_specificity(&resource.path);
+                        if best_score.as_ref().map(|b| score > *b).unwrap_or(true) {
+                            best_score = Some(score);
+                            found = Some(DataPlaneMatch {
+                                api_id: api_id.clone(),
+                                integration,
+                                path_params: params,
+                                resource_path: resource.path.clone(),
+                                stage_vars,
+                                authorization_type,
+                                authorizer,
+                                request_parameters,
+                                request_models,
+                                request_validator_id,
+                                api_key_required,
+                                stage_web_acl_arn,
+                                binary_media_types,
+                            });
+                        }
                     }
                 }
             }
@@ -240,6 +251,30 @@ pub async fn handle(
             }
         }
     };
+
+    // Enforce `disableExecuteApiEndpoint`: when set, the default
+    // execute-api endpoint returns 403. Custom-domain traffic is exempt —
+    // disabling the default endpoint is what forces callers onto the
+    // custom domain.
+    if !via_custom_domain {
+        let disabled = {
+            let accounts = service.state_handle().read();
+            accounts
+                .get(&req.account_id)
+                .and_then(|st| st.apis.get(&api_id))
+                .map(|api| api.disable_execute_api_endpoint)
+                .unwrap_or(false)
+        };
+        if disabled {
+            let err = AwsServiceError::aws_error(
+                StatusCode::FORBIDDEN,
+                "ForbiddenException",
+                "The execute-api endpoint is disabled for this API",
+            );
+            service.record_request(&req.account_id, &api_id, &stage_name, req, err.status());
+            return Err(err);
+        }
+    }
 
     // WAFv2 inspection: when the matched stage's ARN is associated
     // with a WebACL and the service was wired with WAF state,
@@ -388,14 +423,18 @@ pub async fn handle(
                 .ok_or_else(|| bad_gateway("Lambda delivery not configured"))?;
             lambda_proxy::invoke_lambda(delivery, &function_arn, event).await
         }
-        "HTTP_PROXY" => http_proxy(req, &integration, None).await,
+        "HTTP_PROXY" => http_proxy(req, &integration, None, None).await,
         "HTTP" => {
             if integration.connection_type.as_deref() == Some("VPC_LINK") {
                 vpc_link_proxy(req, &integration, service).await
             } else {
                 // Apply request template before sending to backend.
                 let transformed_body = apply_request_template(req, &integration, &mut vtl_ctx);
-                let backend_resp = http_proxy(req, &integration, transformed_body).await?;
+                // Non-proxy HTTP calls the backend with the configured
+                // integrationHttpMethod, not the client's method.
+                let method_override = integration_method_override(&integration);
+                let backend_resp =
+                    http_proxy(req, &integration, transformed_body, method_override).await?;
                 // Apply response template after receiving from backend.
                 apply_response_template(
                     backend_resp,
@@ -632,12 +671,17 @@ fn resolve_custom_domain(
     let accounts = service.state_handle().read();
     let state = accounts.get(&req.account_id)?;
 
-    // Find domain whose regionalDomainName matches the Host header.
-    let domain_entry = state.domain_names.iter().find(|(_name, value)| {
-        value
-            .get("regionalDomainName")
-            .and_then(Value::as_str)
-            .is_some_and(|rdn| rdn.eq_ignore_ascii_case(host))
+    // Find the domain whose name key OR regionalDomainName matches the
+    // Host header. Real clients send the custom domain name itself
+    // (`api.example.com`) as Host; the regionalDomainName is the internal
+    // CloudFront/regional alias. Matching only the latter missed every
+    // request that used the actual domain name.
+    let domain_entry = state.domain_names.iter().find(|(name, value)| {
+        name.eq_ignore_ascii_case(host)
+            || value
+                .get("regionalDomainName")
+                .and_then(Value::as_str)
+                .is_some_and(|rdn| rdn.eq_ignore_ascii_case(host))
     });
     let (domain_name, _domain_value) = domain_entry?;
 
@@ -675,6 +719,45 @@ fn resolve_custom_domain(
     }
 
     None
+}
+
+/// Extract the API id from the execute-api `Host` header
+/// (`{api-id}.execute-api.<region>.amazonaws.com`). Returns `None` when
+/// the header is absent or is not an execute-api host, so unit tests and
+/// custom-domain traffic fall through to the legacy stage scan.
+fn host_api_id(req: &AwsRequest) -> Option<String> {
+    let host = req.headers.get("host").and_then(|v| v.to_str().ok())?;
+    if !host.contains("execute-api") {
+        return None;
+    }
+    let id = host.split('.').next()?;
+    if id.is_empty() {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// Score a resource path's specificity, one entry per segment: a static
+/// segment (`items`) outranks a `{var}` placeholder, which outranks a
+/// `{proxy+}` greedy catch-all. Comparing the resulting vectors with the
+/// derived `Ord` picks the most specific matching resource — so `/health`
+/// wins over `/{proxy+}` and `/items/special` wins over `/items/{id}`.
+fn resource_specificity(path: &str) -> Vec<u8> {
+    path.split('/')
+        .filter(|s| !s.is_empty())
+        .map(|seg| {
+            if seg.starts_with('{') && seg.ends_with('}') {
+                let inner = seg.trim_start_matches('{').trim_end_matches('}');
+                if inner.ends_with('+') {
+                    0 // greedy {proxy+}
+                } else {
+                    1 // {var}
+                }
+            } else {
+                2 // static
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -2366,7 +2449,7 @@ mod tests {
             tls_config: None,
         };
         let req = make_request(HeaderMap::new());
-        let err = match http_proxy(&req, &integration, None).await {
+        let err = match http_proxy(&req, &integration, None, None).await {
             Err(e) => e,
             Ok(_) => panic!("hung backend must time out, not return a response"),
         };
@@ -2535,6 +2618,409 @@ mod tests {
         let dispatched = locked.as_ref().expect("stub must have received a request");
         assert_eq!(dispatched.raw_path, "/");
         assert_eq!(dispatched.path_segments, vec![""]); // path/ splits to [""]
+    }
+
+    // ── H1: non-proxy HTTP uses integrationHttpMethod ──
+
+    #[tokio::test]
+    async fn non_proxy_http_integration_uses_integration_method() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            if let Ok((mut stream, _)) = listener.accept().await {
+                let mut buf = [0u8; 1024];
+                let n = stream.read(&mut buf).await.unwrap_or(0);
+                let line = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                let _ = tx.send(line);
+                let _ = stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .await;
+            }
+        });
+        let integration = StateIntegration {
+            rest_api_id: "api1".to_string(),
+            resource_id: "res1".to_string(),
+            http_method: "GET".to_string(),
+            integration_type: "HTTP".to_string(),
+            // Client method is GET (make_request default); backend must POST.
+            integration_http_method: Some("POST".to_string()),
+            uri: Some(format!("http://{addr}/items")),
+            credentials: None,
+            request_parameters: BTreeMap::new(),
+            request_templates: BTreeMap::new(),
+            passthrough_behavior: "WHEN_NO_MATCH".to_string(),
+            timeout_in_millis: Some(5000),
+            cache_namespace: None,
+            cache_key_parameters: vec![],
+            content_handling: None,
+            connection_type: None,
+            connection_id: None,
+            tls_config: None,
+        };
+        let req = make_request(HeaderMap::new());
+        let resp = http_proxy(
+            &req,
+            &integration,
+            None,
+            integration_method_override(&integration),
+        )
+        .await
+        .expect("backend must respond");
+        assert_eq!(resp.status, StatusCode::OK);
+        let line = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("backend must have received a request");
+        assert!(
+            line.starts_with("POST "),
+            "backend must be called with the integrationHttpMethod (POST), got: {line}"
+        );
+    }
+
+    // ── H2 + M1: MOCK statusCode selector + responseParameters (CORS) ──
+
+    #[tokio::test]
+    async fn mock_integration_selects_status_and_applies_response_parameters() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            let key = format!("{TEST_API_ID}/{RES_ID}/GET");
+            let integ = st.integrations.get_mut(&key).unwrap();
+            integ.integration_type = "MOCK".to_string();
+            integ.uri = None;
+            // Request template selects HTTP 201 (M1).
+            integ.request_templates.insert(
+                "application/json".to_string(),
+                r#"{"statusCode": 201}"#.to_string(),
+            );
+            // Register both 200 and 201 responses; the 201 one carries a
+            // static CORS header via responseParameters (H2).
+            let rk201 = response_key(TEST_API_ID, "/items", "GET", "201");
+            st.integration_responses.insert(
+                rk201,
+                json!({
+                    "statusCode": "201",
+                    "responseParameters": {
+                        "method.response.header.Access-Control-Allow-Origin": "'*'"
+                    },
+                    "responseTemplates": {"application/json": r#"{"picked":201}"#}
+                }),
+            );
+            let rk200 = response_key(TEST_API_ID, "/items", "GET", "200");
+            st.integration_responses.insert(
+                rk200,
+                json!({
+                    "statusCode": "200",
+                    "responseTemplates": {"application/json": r#"{"picked":200}"#}
+                }),
+            );
+        }
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda, None);
+        let resp = handle(&service, &make_request(HeaderMap::new()))
+            .await
+            .expect("MOCK integration must succeed");
+        assert_eq!(resp.status, StatusCode::CREATED);
+        assert_eq!(
+            resp.headers
+                .get("Access-Control-Allow-Origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(
+            body.contains("201"),
+            "selected-status body expected, got: {body}"
+        );
+    }
+
+    // ── H3: Host api-id scopes stage resolution across APIs ──
+
+    fn install_full_api(state: &SharedApiGatewayState, api_id: &str, backend_arn: &str) {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create(TEST_ACCOUNT);
+        st.apis.insert(
+            api_id.to_string(),
+            RestApi {
+                id: api_id.to_string(),
+                name: api_id.to_string(),
+                description: None,
+                version: None,
+                created_date: Utc::now(),
+                api_key_source: "HEADER".to_string(),
+                endpoint_configuration: json!({}),
+                policy: None,
+                binary_media_types: vec![],
+                minimum_compression_size: None,
+                disable_execute_api_endpoint: false,
+                root_resource_id: "root".to_string(),
+                tags: BTreeMap::new(),
+                import_source: None,
+            },
+        );
+        let mut resources = BTreeMap::new();
+        let res_id = format!("{api_id}items");
+        resources.insert(
+            res_id.clone(),
+            StateResource {
+                id: res_id.clone(),
+                parent_id: Some("root".to_string()),
+                path_part: Some("items".to_string()),
+                path: "/items".to_string(),
+            },
+        );
+        st.resources.insert(api_id.to_string(), resources);
+        let key = format!("{api_id}/{res_id}/GET");
+        st.methods.insert(
+            key.clone(),
+            StateMethod {
+                rest_api_id: api_id.to_string(),
+                resource_id: res_id.clone(),
+                http_method: "GET".to_string(),
+                authorization_type: "NONE".to_string(),
+                authorizer_id: None,
+                api_key_required: false,
+                operation_name: None,
+                request_parameters: BTreeMap::new(),
+                request_models: BTreeMap::new(),
+                request_validator_id: None,
+                authorization_scopes: vec![],
+            },
+        );
+        st.integrations.insert(
+            key,
+            StateIntegration {
+                rest_api_id: api_id.to_string(),
+                resource_id: res_id,
+                http_method: "GET".to_string(),
+                integration_type: "AWS_PROXY".to_string(),
+                integration_http_method: Some("POST".to_string()),
+                uri: Some(format!(
+                    "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/{backend_arn}/invocations"
+                )),
+                credentials: None,
+                request_parameters: BTreeMap::new(),
+                request_templates: BTreeMap::new(),
+                passthrough_behavior: "WHEN_NO_MATCH".to_string(),
+                timeout_in_millis: None,
+                cache_namespace: None,
+                cache_key_parameters: vec![],
+                content_handling: None,
+                connection_type: None,
+                connection_id: None,
+                tls_config: None,
+            },
+        );
+        let mut stages = BTreeMap::new();
+        stages.insert(
+            "prod".to_string(),
+            StateStage {
+                stage_name: "prod".to_string(),
+                deployment_id: "dep1".to_string(),
+                description: None,
+                cache_cluster_enabled: false,
+                cache_cluster_size: None,
+                variables: BTreeMap::new(),
+                method_settings: BTreeMap::new(),
+                created_date: Utc::now(),
+                last_updated_date: Utc::now(),
+                tracing_enabled: false,
+                web_acl_arn: None,
+                canary_settings: None,
+                access_log_settings: None,
+                tags: BTreeMap::new(),
+            },
+        );
+        st.stages.insert(api_id.to_string(), stages);
+    }
+
+    #[tokio::test]
+    async fn host_api_id_scopes_stage_resolution_across_apis() {
+        // build_state installs API `abc123` (prod /items -> BACKEND_ARN).
+        // Add a second API `zzz999` sharing the `prod` stage + `/items`
+        // but wired to a different backend.
+        const SECOND_ARN: &str = "arn:aws:lambda:us-east-1:000000000000:function:second";
+        let state = build_state("NONE", None);
+        install_full_api(&state, "zzz999", SECOND_ARN);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(BACKEND_ARN, json!({"statusCode": 200, "body": "a"}));
+        lambda.set(SECOND_ARN, json!({"statusCode": 200, "body": "z"}));
+        let service = build_service(state, lambda.clone(), None);
+
+        // Request pinned to the SECOND API via its execute-api Host.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "host",
+            "zzz999.execute-api.us-east-1.amazonaws.com"
+                .parse()
+                .unwrap(),
+        );
+        let resp = handle(&service, &make_request(headers))
+            .await
+            .expect("request scoped to second API must succeed");
+        assert_eq!(resp.status, StatusCode::OK);
+        // Only the Host-selected API's backend runs, even though `abc123`
+        // sorts first and also has a `prod`/`/items`.
+        assert_eq!(lambda.invocation_count(SECOND_ARN), 1);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    // ── H4: static resource beats {proxy+} catch-all ──
+
+    fn install_resource_lambda(
+        state: &SharedApiGatewayState,
+        res_id: &str,
+        path: &str,
+        backend_arn: &str,
+    ) {
+        let mut accounts = state.write();
+        let st = accounts.get_or_create(TEST_ACCOUNT);
+        st.resources.get_mut(TEST_API_ID).unwrap().insert(
+            res_id.to_string(),
+            StateResource {
+                id: res_id.to_string(),
+                parent_id: Some("root".to_string()),
+                path_part: Some(path.trim_start_matches('/').to_string()),
+                path: path.to_string(),
+            },
+        );
+        let key = format!("{TEST_API_ID}/{res_id}/GET");
+        st.methods.insert(
+            key.clone(),
+            StateMethod {
+                rest_api_id: TEST_API_ID.to_string(),
+                resource_id: res_id.to_string(),
+                http_method: "GET".to_string(),
+                authorization_type: "NONE".to_string(),
+                authorizer_id: None,
+                api_key_required: false,
+                operation_name: None,
+                request_parameters: BTreeMap::new(),
+                request_models: BTreeMap::new(),
+                request_validator_id: None,
+                authorization_scopes: vec![],
+            },
+        );
+        st.integrations.insert(
+            key,
+            StateIntegration {
+                rest_api_id: TEST_API_ID.to_string(),
+                resource_id: res_id.to_string(),
+                http_method: "GET".to_string(),
+                integration_type: "AWS_PROXY".to_string(),
+                integration_http_method: Some("POST".to_string()),
+                uri: Some(format!(
+                    "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/{backend_arn}/invocations"
+                )),
+                credentials: None,
+                request_parameters: BTreeMap::new(),
+                request_templates: BTreeMap::new(),
+                passthrough_behavior: "WHEN_NO_MATCH".to_string(),
+                timeout_in_millis: None,
+                cache_namespace: None,
+                cache_key_parameters: vec![],
+                content_handling: None,
+                connection_type: None,
+                connection_id: None,
+                tls_config: None,
+            },
+        );
+    }
+
+    #[test]
+    fn resource_specificity_ranks_static_over_param_over_greedy() {
+        assert!(resource_specificity("/health") > resource_specificity("/{proxy+}"));
+        assert!(resource_specificity("/items/special") > resource_specificity("/items/{id}"));
+        assert!(resource_specificity("/items/{id}") > resource_specificity("/items/{p+}"));
+    }
+
+    #[tokio::test]
+    async fn static_resource_beats_proxy_catchall() {
+        const HEALTH_ARN: &str = "arn:aws:lambda:us-east-1:000000000000:function:health";
+        const PROXY_ARN: &str = "arn:aws:lambda:us-east-1:000000000000:function:proxy";
+        let state = build_state("NONE", None);
+        install_resource_lambda(&state, "health01", "/health", HEALTH_ARN);
+        install_resource_lambda(&state, "proxy01", "/{proxy+}", PROXY_ARN);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(HEALTH_ARN, json!({"statusCode": 200, "body": "h"}));
+        lambda.set(PROXY_ARN, json!({"statusCode": 200, "body": "p"}));
+        let service = build_service(state, lambda.clone(), None);
+        let mut req = make_request(HeaderMap::new());
+        req.raw_path = "/prod/health".to_string();
+        req.path_segments = vec!["prod".to_string(), "health".to_string()];
+        let resp = handle(&service, &req).await.expect("static route must win");
+        assert_eq!(resp.status, StatusCode::OK);
+        assert_eq!(lambda.invocation_count(HEALTH_ARN), 1);
+        assert_eq!(lambda.invocation_count(PROXY_ARN), 0);
+    }
+
+    // ── M2: custom domain matches the domain-name key ──
+
+    #[test]
+    fn resolve_custom_domain_matches_domain_name_key() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create(TEST_ACCOUNT);
+            s.domain_names.insert(
+                "api.example.com".to_string(),
+                json!({"regionalDomainName": "d-abc.execute-api.us-east-1.amazonaws.com"}),
+            );
+            let mut mappings = BTreeMap::new();
+            mappings.insert(
+                "(none)".to_string(),
+                json!({"restApiId": TEST_API_ID, "stage": "prod"}),
+            );
+            s.base_path_mappings
+                .insert("api.example.com".to_string(), mappings);
+        }
+        let service = ApiGatewayService::new(state);
+        let mut headers = HeaderMap::new();
+        // Host is the domain NAME, not the regionalDomainName.
+        headers.insert("host", "api.example.com".parse().unwrap());
+        let mut req = make_request(headers);
+        req.path_segments = vec!["items".to_string()];
+        let (stage, remaining, api) = resolve_custom_domain(&service, &req).unwrap();
+        assert_eq!(stage, Some("prod".to_string()));
+        assert_eq!(remaining, vec!["items".to_string()]);
+        assert_eq!(api, Some(TEST_API_ID.to_string()));
+    }
+
+    // ── M5: disableExecuteApiEndpoint returns 403 on the default endpoint ──
+
+    #[tokio::test]
+    async fn disable_execute_api_endpoint_returns_403_on_default_endpoint() {
+        let state = build_state("NONE", None);
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create(TEST_ACCOUNT);
+            st.apis
+                .get_mut(TEST_API_ID)
+                .unwrap()
+                .disable_execute_api_endpoint = true;
+        }
+        let lambda = Arc::new(StubLambda::new());
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "host",
+            "abc123.execute-api.us-east-1.amazonaws.com"
+                .parse()
+                .unwrap(),
+        );
+        let err = match handle(&service, &make_request(headers)).await {
+            Err(e) => e,
+            Ok(_) => panic!("disabled default endpoint must 403"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
     }
 }
 
