@@ -32,7 +32,9 @@ pub(crate) fn run_states<'a>(
         let mut current_state = start_at;
         let mut effective_input = input;
         let mut iteration = 0;
-        let max_iterations = 500;
+        // AWS Standard workflows allow up to 25,000 state transitions per
+        // execution before failing with States.Runtime.
+        let max_iterations = 25_000;
 
         loop {
             iteration += 1;
@@ -176,8 +178,9 @@ pub(crate) fn advance_from_error(
     input: &Value,
     error: String,
     cause: String,
+    is_task_error: bool,
 ) -> Advance {
-    match apply_state_catcher(state_def, input, &error, &cause) {
+    match apply_state_catcher(state_def, input, &error, &cause, is_task_error) {
         Some((next, new_input)) => Advance::Next(next, new_input),
         None => Advance::Fail(error, cause),
     }
@@ -1227,9 +1230,10 @@ pub(crate) fn apply_state_catcher(
     effective_input: &Value,
     error: &str,
     cause: &str,
+    is_task_error: bool,
 ) -> Option<(String, Value)> {
     let catchers = state_def["Catch"].as_array().cloned().unwrap_or_default();
-    let (next, result_path) = find_catcher(&catchers, error)?;
+    let (next, result_path) = find_catcher(&catchers, error, is_task_error)?;
     let error_output = json!({
         "Error": error,
         "Cause": cause,

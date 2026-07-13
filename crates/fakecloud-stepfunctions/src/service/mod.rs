@@ -599,8 +599,9 @@ fn validate_definition(definition: &str) -> Result<(), AwsServiceError> {
 }
 
 /// Validate the JSONPath reference fields of a single state. Recurses into the
-/// `Choices` array of Choice states. Returns an `InvalidDefinition` error for
-/// any syntactically malformed path.
+/// `Choices` array of Choice states, the `Branches` of Parallel states, and the
+/// `Iterator`/`ItemProcessor` of Map states. Returns an `InvalidDefinition`
+/// error for any syntactically malformed path or payload-template key.
 fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServiceError> {
     for field in ["InputPath", "OutputPath", "ResultPath"] {
         if let Some(p) = state.get(field).and_then(|v| v.as_str()) {
@@ -614,15 +615,143 @@ fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServic
         }
     }
 
-    if state.get("Type").and_then(|v| v.as_str()) == Some("Choice") {
-        if let Some(choices) = state.get("Choices").and_then(|v| v.as_array()) {
-            for rule in choices {
-                validate_choice_variables(state_name, rule)?;
+    // Reference-path fields that select a value from the input (or the context
+    // object). Unlike Input/Output/ResultPath they do not accept the literal
+    // "null", but they may reference the context object via `$$`.
+    for field in [
+        "SecondsPath",
+        "TimestampPath",
+        "ItemsPath",
+        "MaxConcurrencyPath",
+        "ToleratedFailureCountPath",
+        "ToleratedFailurePercentagePath",
+    ] {
+        if let Some(p) = state.get(field).and_then(|v| v.as_str()) {
+            if is_reference_or_context_path(p) {
+                continue;
             }
+            return Err(invalid_reference_path(state_name, field, p));
         }
     }
 
+    // Payload templates: every key ending in `.$` must carry a string value
+    // that is either a JSONPath reference (`$`/`$$`) or an intrinsic call. AWS
+    // rejects non-string and bare-literal `.$` values at CreateStateMachine.
+    for field in ["Parameters", "ResultSelector", "ItemSelector"] {
+        if let Some(template) = state.get(field) {
+            validate_payload_template(state_name, field, template)?;
+        }
+    }
+
+    match state.get("Type").and_then(|v| v.as_str()) {
+        Some("Choice") => {
+            if let Some(choices) = state.get("Choices").and_then(|v| v.as_array()) {
+                for rule in choices {
+                    validate_choice_variables(state_name, rule)?;
+                }
+            }
+        }
+        Some("Parallel") => {
+            if let Some(branches) = state.get("Branches").and_then(|v| v.as_array()) {
+                for branch in branches {
+                    validate_nested_definition(state_name, branch)?;
+                }
+            }
+        }
+        Some("Map") => {
+            // Distributed Map uses `ItemProcessor`; legacy inline Map uses
+            // `Iterator`. Both carry a nested `States` block.
+            for key in ["ItemProcessor", "Iterator"] {
+                if let Some(processor) = state.get(key) {
+                    validate_nested_definition(state_name, processor)?;
+                }
+            }
+        }
+        _ => {}
+    }
+
     Ok(())
+}
+
+/// Validate every state inside a nested definition (a Parallel branch or a Map
+/// processor). Errors are attributed to the enclosing state so the message
+/// still points at a real state name.
+fn validate_nested_definition(parent: &str, def: &Value) -> Result<(), AwsServiceError> {
+    if let Some(states) = def.get("States").and_then(|v| v.as_object()) {
+        for (name, state) in states {
+            validate_state_paths(&format!("{parent}/{name}"), state)?;
+        }
+    }
+    Ok(())
+}
+
+/// Recursively validate a payload template (Parameters / ResultSelector /
+/// ItemSelector). Any object key ending in `.$` must map to a string that is a
+/// JSONPath reference or an intrinsic-function invocation.
+fn validate_payload_template(
+    state_name: &str,
+    field: &str,
+    template: &Value,
+) -> Result<(), AwsServiceError> {
+    match template {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if let Some(stripped) = key.strip_suffix(".$") {
+                    let expr = value.as_str().ok_or_else(|| {
+                        invalid_payload_template(
+                            state_name,
+                            field,
+                            &format!(
+                                "the '{key}' field must be a JSONPath or intrinsic string, \
+                                 not {value}"
+                            ),
+                        )
+                    })?;
+                    let is_ref = expr.starts_with('$');
+                    if !is_ref && !crate::intrinsics::is_intrinsic_call(expr) {
+                        return Err(invalid_payload_template(
+                            state_name,
+                            field,
+                            &format!(
+                                "the '{stripped}.$' field value '{expr}' is neither a JSONPath \
+                                 reference nor an intrinsic function"
+                            ),
+                        ));
+                    }
+                } else {
+                    validate_payload_template(state_name, field, value)?;
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for v in arr {
+                validate_payload_template(state_name, field, v)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// A `*Path` field value: either a `$`-rooted reference path the interpreter can
+/// parse, or a `$$`-rooted context-object reference.
+fn is_reference_or_context_path(p: &str) -> bool {
+    if let Some(rest) = p.strip_prefix("$$") {
+        // "$$" alone, or "$$.Foo.Bar" — accept any context reference.
+        return rest.is_empty() || rest.starts_with('.') || rest.starts_with('[');
+    }
+    is_valid_reference_path(p)
+}
+
+fn invalid_payload_template(state_name: &str, field: &str, detail: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidDefinition",
+        format!(
+            "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED' \
+             (The {field} of state '{state_name}' is invalid: {detail})"
+        ),
+    )
 }
 
 /// Validate `Variable` reference paths inside a Choice rule, recursing through
@@ -1662,6 +1791,54 @@ mod tests {
             "S":{"Type":"Succeed","InputPath":"null"}
         }}"#;
         assert!(validate_definition(def).is_ok());
+    }
+
+    // M5: malformed paths nested inside Parallel branches and Map processors
+    // must be rejected.
+    #[test]
+    fn test_validate_definition_recurses_into_parallel_and_map() {
+        let par = r#"{"StartAt":"Par","States":{"Par":{"Type":"Parallel","End":true,
+            "Branches":[{"StartAt":"I","States":{"I":{"Type":"Pass","InputPath":"nope","End":true}}}]}}}"#;
+        assert!(validate_definition(par).is_err());
+
+        let map = r#"{"StartAt":"M","States":{"M":{"Type":"Map","End":true,
+            "ItemProcessor":{"StartAt":"E","States":{"E":{"Type":"Pass","OutputPath":"nope","End":true}}}}}}"#;
+        assert!(validate_definition(map).is_err());
+
+        // Legacy inline Map uses `Iterator`.
+        let iter = r#"{"StartAt":"M","States":{"M":{"Type":"Map","End":true,
+            "Iterator":{"StartAt":"E","States":{"E":{"Type":"Pass","ResultPath":"$.x[]","End":true}}}}}}"#;
+        assert!(validate_definition(iter).is_err());
+
+        // A well-formed Parallel/Map still validates.
+        let ok = r#"{"StartAt":"M","States":{"M":{"Type":"Map","ItemsPath":"$.items","End":true,
+            "ItemProcessor":{"StartAt":"E","States":{"E":{"Type":"Pass","InputPath":"$.a","End":true}}}}}}"#;
+        assert!(validate_definition(ok).is_ok());
+    }
+
+    // L7: `.$` payload-template keys must carry a JSONPath/intrinsic string.
+    #[test]
+    fn test_validate_definition_payload_template_dollar_keys() {
+        // Bare literal value.
+        let lit = r#"{"StartAt":"P","States":{"P":{"Type":"Pass",
+            "Parameters":{"v.$":"just text"},"End":true}}}"#;
+        assert!(validate_definition(lit).is_err());
+
+        // Non-string value.
+        let num = r#"{"StartAt":"P","States":{"P":{"Type":"Pass",
+            "Parameters":{"v.$":42},"End":true}}}"#;
+        assert!(validate_definition(num).is_err());
+
+        // Valid: JSONPath reference, context-object ref, and intrinsic.
+        let ok = r#"{"StartAt":"P","States":{"P":{"Type":"Pass","Parameters":{
+            "a.$":"$.input","b.$":"$$.Execution.Id","c.$":"States.Format('{}',$.n)",
+            "nested":{"d.$":"$.x"},"plain":"literal-ok"},"End":true}}}"#;
+        assert!(validate_definition(ok).is_ok());
+
+        // A bad `.$` nested inside an array under a plain key is also caught.
+        let arr = r#"{"StartAt":"P","States":{"P":{"Type":"Pass",
+            "ResultSelector":{"items":[{"bad.$":"literal"}]},"End":true}}}"#;
+        assert!(validate_definition(arr).is_err());
     }
 
     #[test]

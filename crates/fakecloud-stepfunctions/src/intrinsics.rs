@@ -181,6 +181,11 @@ fn arg_as_i64(v: &Value) -> Result<i64, IntrinsicError> {
         .ok_or_else(|| IntrinsicError(format!("expected integer, got {v}")))
 }
 
+fn arg_as_f64(v: &Value) -> Result<f64, IntrinsicError> {
+    v.as_f64()
+        .ok_or_else(|| IntrinsicError(format!("expected number, got {v}")))
+}
+
 fn need_args(args: &[Value], expected: usize, name: &str) -> Result<(), IntrinsicError> {
     if args.len() != expected {
         Err(IntrinsicError(format!(
@@ -439,8 +444,22 @@ fn fn_math_random(args: &[Value]) -> Result<Value, IntrinsicError> {
 
 fn fn_math_add(args: &[Value]) -> Result<Value, IntrinsicError> {
     need_args(args, 2, "States.MathAdd")?;
-    let a = arg_as_i64(&args[0])?;
-    let b = arg_as_i64(&args[1])?;
+    // Integer operands add with 64-bit integer semantics, but a genuine
+    // overflow errors instead of panicking (debug) or silently wrapping
+    // (release).
+    if let (Some(a), Some(b)) = (args[0].as_i64(), args[1].as_i64()) {
+        return match a.checked_add(b) {
+            Some(sum) => Ok(json!(sum)),
+            None => Err(IntrinsicError(
+                "States.MathAdd result overflows a 64-bit integer".into(),
+            )),
+        };
+    }
+    // Otherwise fall back to floating-point addition. This covers fractional
+    // operands (which the old i64 coercion truncated) and integers too large
+    // for i64. AWS treats numbers as given, so no truncation is applied.
+    let a = arg_as_f64(&args[0])?;
+    let b = arg_as_f64(&args[1])?;
     Ok(json!(a + b))
 }
 
@@ -570,6 +589,25 @@ mod tests {
         let r = evaluate("States.MathRandom(0, 10)", &Value::Null).unwrap();
         let n = r.as_i64().unwrap();
         assert!((0..10).contains(&n));
+    }
+
+    // L6: MathAdd must not panic (debug) or wrap (release) on i64 overflow, and
+    // must not truncate fractional operands.
+    #[test]
+    fn math_add_overflow_and_floats() {
+        // i64::MAX + 1 overflows → error rather than panic/wrap.
+        let expr = format!("States.MathAdd({}, 1)", i64::MAX);
+        assert!(evaluate(&expr, &Value::Null).is_err());
+
+        // Fractional operands are preserved, not truncated to int.
+        assert_eq!(
+            fn_math_add(&[json!(1.5), json!(2.25)]).unwrap(),
+            json!(3.75)
+        );
+        // Mixed int + float stays a float.
+        assert_eq!(fn_math_add(&[json!(2), json!(0.5)]).unwrap(), json!(2.5));
+        // Negative integers still work.
+        assert_eq!(fn_math_add(&[json!(-4), json!(1)]).unwrap(), json!(-3));
     }
 
     #[test]
