@@ -7,7 +7,7 @@
 //! constant-time comparison.
 
 use hmac::{Hmac, Mac};
-use sha2::{Sha256, Sha384, Sha512};
+use sha2::{Sha224, Sha256, Sha384, Sha512};
 
 #[derive(Debug, thiserror::Error)]
 pub enum MacError {
@@ -17,11 +17,17 @@ pub enum MacError {
 
 /// Compute the MAC of `message` keyed by `key_bytes`. Algorithm names
 /// match KMS's `MacAlgorithmSpec` enum (`HMAC_SHA_224` / `_256` /
-/// `_384` / `_512`). HMAC-SHA-224 is intentionally rejected — the
-/// `sha2::Sha224` digest exists, but AWS dropped HMAC_SHA_224 from
-/// supported MacAlgorithmSpec values, and we mirror that.
+/// `_384` / `_512`). All four are supported — an HMAC_224 key advertises
+/// `HMAC_SHA_224`, so rejecting it here made GenerateMac/VerifyMac
+/// unusable for that key spec.
 pub fn compute(algorithm: &str, key_bytes: &[u8], message: &[u8]) -> Result<Vec<u8>, MacError> {
     match algorithm {
+        "HMAC_SHA_224" => {
+            let mut mac = <Hmac<Sha224> as Mac>::new_from_slice(key_bytes)
+                .expect("HMAC accepts any key length");
+            mac.update(message);
+            Ok(mac.finalize().into_bytes().to_vec())
+        }
         "HMAC_SHA_256" => {
             let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key_bytes)
                 .expect("HMAC accepts any key length");
@@ -54,6 +60,12 @@ pub fn verify(
     mac_bytes: &[u8],
 ) -> Result<bool, MacError> {
     match algorithm {
+        "HMAC_SHA_224" => {
+            let mut mac = <Hmac<Sha224> as Mac>::new_from_slice(key_bytes)
+                .expect("HMAC accepts any key length");
+            mac.update(message);
+            Ok(mac.verify_slice(mac_bytes).is_ok())
+        }
         "HMAC_SHA_256" => {
             let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key_bytes)
                 .expect("HMAC accepts any key length");
@@ -79,6 +91,20 @@ pub fn verify(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_trip_sha224() {
+        // HMAC_224 keys advertise HMAC_SHA_224; the round trip must work
+        // and produce a 28-byte (224-bit) tag.
+        let key = b"sample-key-material";
+        let msg = b"the quick brown fox";
+        let mac = compute("HMAC_SHA_224", key, msg).unwrap();
+        assert_eq!(mac.len(), 28);
+        assert!(verify("HMAC_SHA_224", key, msg, &mac).unwrap());
+        let mut tampered = mac.clone();
+        tampered[0] ^= 0xff;
+        assert!(!verify("HMAC_SHA_224", key, msg, &tampered).unwrap());
+    }
 
     #[test]
     fn round_trip_sha256() {

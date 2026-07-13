@@ -26,16 +26,6 @@ pub enum AsymError {
 
 pub type KeyPair = (Vec<u8>, Vec<u8>);
 
-// One precomputed keypair per RSA bit width, shared across every CreateKey.
-// RSA-4096 keygen is ~20 seconds on CI; the conformance harness exercises
-// every enum value per operation, and earlier we hit 30s read timeouts
-// (surfaced as CRASH) when several RSA-4096 CreateKey variants ran in
-// parallel. Reuse is invisible to clients — each KMS key still has its
-// own ARN, metadata, and lifecycle, only the raw key material is shared.
-static RSA_2048_KEY: std::sync::OnceLock<KeyPair> = std::sync::OnceLock::new();
-static RSA_3072_KEY: std::sync::OnceLock<KeyPair> = std::sync::OnceLock::new();
-static RSA_4096_KEY: std::sync::OnceLock<KeyPair> = std::sync::OnceLock::new();
-
 fn generate_rsa(bits: usize) -> Result<KeyPair, AsymError> {
     let mut rng = rand::thread_rng();
     let private = RsaPrivateKey::new(&mut rng, bits)
@@ -54,25 +44,22 @@ fn generate_rsa(bits: usize) -> Result<KeyPair, AsymError> {
     Ok((priv_der, pub_der))
 }
 
-fn cached_rsa(
-    slot: &'static std::sync::OnceLock<KeyPair>,
-    bits: usize,
-) -> Result<KeyPair, AsymError> {
-    if let Some(kp) = slot.get() {
-        return Ok(kp.clone());
-    }
-    let kp = generate_rsa(bits)?;
-    Ok(slot.get_or_init(|| kp).clone())
-}
-
 /// Returns (private_pkcs8_der, public_spki_der) for the given KMS
 /// `KeySpec`. Returns `None` for symmetric / HMAC / unsupported specs
 /// so the caller can keep the existing fake-bytes path for those.
+///
+/// Each call mints a **fresh** keypair. AWS KMS guarantees every CMK has
+/// its own unique key material, so two RSA_2048 keys must return
+/// different public keys and a signature made under one must never verify
+/// under another. An earlier build cached one keypair per bit-width and
+/// shared it across every CreateKey, which broke that guarantee (all
+/// same-width keys were cryptographically identical). Correctness wins
+/// over the keygen cost the cache was avoiding.
 pub fn generate_keypair(key_spec: &str) -> Result<Option<KeyPair>, AsymError> {
     let kp = match key_spec {
-        "RSA_2048" => cached_rsa(&RSA_2048_KEY, 2048)?,
-        "RSA_3072" => cached_rsa(&RSA_3072_KEY, 3072)?,
-        "RSA_4096" => cached_rsa(&RSA_4096_KEY, 4096)?,
+        "RSA_2048" => generate_rsa(2048)?,
+        "RSA_3072" => generate_rsa(3072)?,
+        "RSA_4096" => generate_rsa(4096)?,
         // ECDSA / ECDH / SM2 specs are out of scope for G1; G2 covers
         // ECDSA. Falling through to None keeps the fake-bytes legacy
         // path in place for those.
@@ -332,6 +319,26 @@ mod tests {
     fn unsupported_spec_returns_none() {
         assert!(generate_keypair("SYMMETRIC_DEFAULT").unwrap().is_none());
         assert!(generate_keypair("HMAC_256").unwrap().is_none());
+    }
+
+    #[test]
+    fn two_rsa_keys_have_distinct_material() {
+        // AWS mints unique key material per CMK. Two RSA_2048 keys must
+        // not share a public key, and a signature under key A must not
+        // verify under key B (regression: a shared per-bit-width cache
+        // once made all same-width keys byte-identical).
+        let (priv_a, pub_a) = generate_keypair("RSA_2048").unwrap().unwrap();
+        let (priv_b, pub_b) = generate_keypair("RSA_2048").unwrap().unwrap();
+        assert_ne!(pub_a, pub_b, "distinct keys must have distinct public keys");
+        assert_ne!(priv_a, priv_b);
+
+        let msg = b"cross-key forgery attempt";
+        let sig_a = rsa_sign(&priv_a, "RSASSA_PSS_SHA_256", msg, false).unwrap();
+        assert!(rsa_verify(&priv_a, "RSASSA_PSS_SHA_256", msg, &sig_a, false).unwrap());
+        assert!(
+            !rsa_verify(&priv_b, "RSASSA_PSS_SHA_256", msg, &sig_a, false).unwrap(),
+            "signature under key A must not verify under key B"
+        );
     }
 
     #[test]

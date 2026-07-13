@@ -805,7 +805,7 @@ fn imported_key_material_encrypt_decrypt_roundtrip() {
 fn imported_key_material_decrypt_fails_after_deletion() {
     let svc = make_service();
     let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
-    import_external_material(&svc, &key_id, b"some-key-material-32bytes!!");
+    import_external_material(&svc, &key_id, b"my-secret-aes-key-material!12345");
 
     let plaintext_b64 = base64::engine::general_purpose::STANDARD.encode(b"secret");
     let resp = svc
@@ -2728,7 +2728,11 @@ fn import_key_material_token_is_single_use() {
     let public = rsa::RsaPublicKey::from_public_key_der(&pub_der).unwrap();
     let mut rng = rand::thread_rng();
     let wrapped = public
-        .encrypt(&mut rng, rsa::Oaep::new::<rsa::sha2::Sha256>(), b"material")
+        .encrypt(
+            &mut rng,
+            rsa::Oaep::new::<rsa::sha2::Sha256>(),
+            b"my-secret-aes-key-material!12345",
+        )
         .unwrap();
     let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
 
@@ -3267,4 +3271,377 @@ fn generate_data_key_pair_without_plaintext_binds_encryption_context() {
         .err()
         .expect("missing EC must error");
     assert!(format!("{err:?}").contains("InvalidCiphertextException"));
+}
+
+// ---- Hardening regression tests (kms hardening batch) ----
+
+/// H2: empty/short imported key material must be rejected, not stored —
+/// storing zero-length material later panics with a divide-by-zero in the
+/// XOR encrypt/decrypt path (`byte ^ material[i % material.len()]`).
+#[test]
+fn import_key_material_rejects_wrong_length_no_panic() {
+    use base64::Engine;
+    use rsa::pkcs8::DecodePublicKey;
+
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "Origin": "EXTERNAL" }));
+
+    let resp = svc
+        .get_parameters_for_import(&make_request(
+            "GetParametersForImport",
+            json!({"KeyId": key_id, "WrappingAlgorithm": "RSAES_OAEP_SHA_256"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let token = body["ImportToken"].as_str().unwrap().to_string();
+    let pub_der = base64::engine::general_purpose::STANDARD
+        .decode(body["PublicKey"].as_str().unwrap())
+        .unwrap();
+    let public = rsa::RsaPublicKey::from_public_key_der(&pub_der).unwrap();
+    let mut rng = rand::thread_rng();
+    // Zero-length material is the divide-by-zero vector.
+    let wrapped = public
+        .encrypt(&mut rng, rsa::Oaep::new::<rsa::sha2::Sha256>(), b"")
+        .unwrap();
+    let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
+
+    let err = svc
+        .import_key_material(&make_request(
+            "ImportKeyMaterial",
+            json!({
+                "KeyId": key_id,
+                "ImportToken": token,
+                "EncryptedKeyMaterial": wrapped_b64,
+                "WrappingAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
+        ))
+        .err()
+        .expect("empty imported material must be rejected");
+    assert!(
+        format!("{err:?}").contains("ValidationException"),
+        "got {err:?}"
+    );
+}
+
+/// M1: a key scheduled for deletion is `PendingDeletion` — crypto ops on it
+/// return `KMSInvalidStateException`, not `DisabledException`.
+#[test]
+fn encrypt_on_pending_deletion_key_is_invalid_state() {
+    use base64::Engine;
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    svc.schedule_key_deletion(&make_request(
+        "ScheduleKeyDeletion",
+        json!({"KeyId": key_id, "PendingWindowInDays": 7}),
+    ))
+    .unwrap();
+
+    let err = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": key_id,
+                "Plaintext": base64::engine::general_purpose::STANDARD.encode(b"hi"),
+            }),
+        ))
+        .err()
+        .expect("encrypt on pending-deletion key must fail");
+    assert!(
+        format!("{err:?}").contains("KMSInvalidStateException"),
+        "got {err:?}"
+    );
+}
+
+/// M1 (companion): a `Disabled` key still returns `DisabledException`.
+#[test]
+fn encrypt_on_disabled_key_is_disabled_exception() {
+    use base64::Engine;
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    svc.disable_key(&make_request("DisableKey", json!({"KeyId": key_id})))
+        .unwrap();
+
+    let err = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": key_id,
+                "Plaintext": base64::engine::general_purpose::STANDARD.encode(b"hi"),
+            }),
+        ))
+        .err()
+        .expect("encrypt on disabled key must fail");
+    assert!(
+        format!("{err:?}").contains("DisabledException"),
+        "got {err:?}"
+    );
+}
+
+/// M2: GenerateMac / VerifyMac reject a MacAlgorithm the key does not
+/// advertise (a HMAC_256 key only supports HMAC_SHA_256).
+#[test]
+fn mac_rejects_algorithm_not_advertised_by_key() {
+    use base64::Engine;
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "GENERATE_VERIFY_MAC", "KeySpec": "HMAC_256" }),
+    );
+    let msg_b64 = base64::engine::general_purpose::STANDARD.encode(b"payload");
+
+    let err = svc
+        .generate_mac(&make_request(
+            "GenerateMac",
+            json!({"KeyId": key_id, "Message": msg_b64, "MacAlgorithm": "HMAC_SHA_512"}),
+        ))
+        .err()
+        .expect("mismatched MacAlgorithm must be rejected");
+    assert!(
+        format!("{err:?}").contains("InvalidKeyUsageException"),
+        "got {err:?}"
+    );
+
+    let err = svc
+        .verify_mac(&make_request(
+            "VerifyMac",
+            json!({
+                "KeyId": key_id,
+                "Message": msg_b64,
+                "Mac": base64::engine::general_purpose::STANDARD.encode(b"whatever"),
+                "MacAlgorithm": "HMAC_SHA_512",
+            }),
+        ))
+        .err()
+        .expect("mismatched MacAlgorithm must be rejected on verify too");
+    assert!(
+        format!("{err:?}").contains("InvalidKeyUsageException"),
+        "got {err:?}"
+    );
+}
+
+/// M3: HMAC_224 keys advertise HMAC_SHA_224 and must round-trip through
+/// GenerateMac -> VerifyMac.
+#[test]
+fn hmac_224_generate_and_verify_round_trip() {
+    use base64::Engine;
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "GENERATE_VERIFY_MAC", "KeySpec": "HMAC_224" }),
+    );
+    let msg_b64 = base64::engine::general_purpose::STANDARD.encode(b"mac me");
+
+    let resp = svc
+        .generate_mac(&make_request(
+            "GenerateMac",
+            json!({"KeyId": key_id, "Message": msg_b64, "MacAlgorithm": "HMAC_SHA_224"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let mac = body["Mac"].as_str().unwrap().to_string();
+
+    let resp = svc
+        .verify_mac(&make_request(
+            "VerifyMac",
+            json!({
+                "KeyId": key_id,
+                "Message": msg_b64,
+                "Mac": mac,
+                "MacAlgorithm": "HMAC_SHA_224",
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["MacValid"].as_bool(), Some(true));
+}
+
+/// M7: DescribeKey on a replica ARN returns the replica (REPLICA type, its
+/// own region), not the primary that shares the same bare key id.
+#[test]
+fn describe_key_on_replica_arn_returns_replica() {
+    let svc = make_service();
+    let key_id = create_key_with_opts(&svc, json!({ "MultiRegion": true }));
+
+    let resp = svc
+        .replicate_key(&make_request(
+            "ReplicateKey",
+            json!({"KeyId": key_id, "ReplicaRegion": "us-west-2"}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let replica_arn = body["ReplicaKeyMetadata"]["Arn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(replica_arn.contains(":us-west-2:"), "got {replica_arn}");
+
+    let resp = svc
+        .describe_key(&make_request("DescribeKey", json!({"KeyId": replica_arn})))
+        .unwrap();
+    let meta: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let meta = &meta["KeyMetadata"];
+    assert!(meta["Arn"].as_str().unwrap().contains(":us-west-2:"));
+    assert_eq!(
+        meta["MultiRegionConfiguration"]["MultiRegionKeyType"].as_str(),
+        Some("REPLICA")
+    );
+    assert_eq!(
+        meta["MultiRegionConfiguration"]["PrimaryKey"]["Region"].as_str(),
+        Some("us-east-1")
+    );
+
+    // The primary ARN still describes as PRIMARY.
+    let resp = svc
+        .describe_key(&make_request("DescribeKey", json!({"KeyId": key_id})))
+        .unwrap();
+    let meta: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        meta["KeyMetadata"]["MultiRegionConfiguration"]["MultiRegionKeyType"].as_str(),
+        Some("PRIMARY")
+    );
+}
+
+/// L2: ScheduleKeyDeletion enforces the 7..=30 day window.
+#[test]
+fn schedule_key_deletion_rejects_out_of_range_window() {
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    for bad in [0_i64, 3, 31, 400] {
+        let err = svc
+            .schedule_key_deletion(&make_request(
+                "ScheduleKeyDeletion",
+                json!({"KeyId": key_id, "PendingWindowInDays": bad}),
+            ))
+            .err()
+            .unwrap_or_else(|| panic!("window {bad} must be rejected"));
+        assert!(
+            format!("{err:?}").contains("ValidationException"),
+            "window {bad}: got {err:?}"
+        );
+    }
+    // A valid window still works.
+    svc.schedule_key_deletion(&make_request(
+        "ScheduleKeyDeletion",
+        json!({"KeyId": key_id, "PendingWindowInDays": 7}),
+    ))
+    .unwrap();
+}
+
+/// L3: ReEncrypt refuses a destination key that is not ENCRYPT_DECRYPT.
+#[test]
+fn re_encrypt_rejects_non_encrypt_destination() {
+    use base64::Engine;
+    let svc = make_service();
+    let src = create_key(&svc);
+    let ciphertext = {
+        let resp = svc
+            .encrypt(&make_request(
+                "Encrypt",
+                json!({
+                    "KeyId": src,
+                    "Plaintext": base64::engine::general_purpose::STANDARD.encode(b"secret"),
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        body["CiphertextBlob"].as_str().unwrap().to_string()
+    };
+
+    let signing_key = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "SIGN_VERIFY", "KeySpec": "RSA_2048" }),
+    );
+    let err = svc
+        .re_encrypt(&make_request(
+            "ReEncrypt",
+            json!({"CiphertextBlob": ciphertext, "DestinationKeyId": signing_key}),
+        ))
+        .err()
+        .expect("re-encrypt into a SIGN_VERIFY key must fail");
+    assert!(
+        format!("{err:?}").contains("InvalidKeyUsageException"),
+        "got {err:?}"
+    );
+}
+
+/// L3: ReEncrypt into an RSA ENCRYPT_DECRYPT key produces a real RSA-OAEP
+/// ciphertext that Decrypt recovers, and echoes the true source/dest
+/// algorithms rather than a hardcoded SYMMETRIC_DEFAULT pair.
+#[test]
+fn re_encrypt_to_rsa_destination_round_trips() {
+    use base64::Engine;
+    let svc = make_service();
+    let src = create_key(&svc);
+    let resp = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": src,
+                "Plaintext": base64::engine::general_purpose::STANDARD.encode(b"top secret"),
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let ciphertext = body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    let rsa_key = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "ENCRYPT_DECRYPT", "KeySpec": "RSA_2048" }),
+    );
+    let resp = svc
+        .re_encrypt(&make_request(
+            "ReEncrypt",
+            json!({"CiphertextBlob": ciphertext, "DestinationKeyId": rsa_key}),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["SourceEncryptionAlgorithm"].as_str(),
+        Some("SYMMETRIC_DEFAULT")
+    );
+    assert_eq!(
+        body["DestinationEncryptionAlgorithm"].as_str(),
+        Some("RSAES_OAEP_SHA_256")
+    );
+    let new_ct = body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    let resp = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({
+                "CiphertextBlob": new_ct,
+                "KeyId": rsa_key,
+                "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let recovered = base64::engine::general_purpose::STANDARD
+        .decode(body["Plaintext"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(recovered, b"top secret");
+}
+
+/// L5: a non-string EncryptionContext value is rejected, not silently
+/// dropped (which would change the AAD bound at encrypt time).
+#[test]
+fn encrypt_rejects_non_string_encryption_context_value() {
+    use base64::Engine;
+    let svc = make_service();
+    let key_id = create_key(&svc);
+    let err = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": key_id,
+                "Plaintext": base64::engine::general_purpose::STANDARD.encode(b"hi"),
+                "EncryptionContext": { "purpose": 42 },
+            }),
+        ))
+        .err()
+        .expect("non-string EC value must be rejected");
+    assert!(
+        format!("{err:?}").contains("ValidationException"),
+        "got {err:?}"
+    );
 }

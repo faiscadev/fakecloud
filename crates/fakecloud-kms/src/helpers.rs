@@ -5,18 +5,33 @@ use super::*;
 /// sorted via `BTreeMap`'s ordering and the result is JSON-encoded
 /// without whitespace. An empty EC produces zero bytes so blobs
 /// encoded without EC stay byte-compatible with the original AAD shape.
-pub(crate) fn canonical_encryption_context(value: &serde_json::Value) -> Vec<u8> {
+///
+/// KMS's `EncryptionContextType` is `map<String, String>`. A value that
+/// isn't a string is rejected — AWS refuses such a request rather than
+/// silently dropping the offending entry, which is what the old
+/// `filter_map` did (it discarded non-string values, so the AAD bound at
+/// encrypt time could differ from what the caller intended).
+pub(crate) fn canonical_encryption_context(
+    value: &serde_json::Value,
+) -> Result<Vec<u8>, AwsServiceError> {
     let Some(obj) = value.as_object() else {
-        return Vec::new();
+        return Ok(Vec::new());
     };
     if obj.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
-    let sorted: std::collections::BTreeMap<&str, String> = obj
-        .iter()
-        .filter_map(|(k, v)| v.as_str().map(|s| (k.as_str(), s.to_string())))
-        .collect();
-    serde_json::to_vec(&sorted).unwrap_or_default()
+    let mut sorted: std::collections::BTreeMap<&str, &str> = std::collections::BTreeMap::new();
+    for (k, v) in obj {
+        let s = v.as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!("EncryptionContext value for key '{k}' must be a string"),
+            )
+        })?;
+        sorted.insert(k.as_str(), s);
+    }
+    Ok(serde_json::to_vec(&sorted).unwrap_or_default())
 }
 
 /// Decode a FakeCloud KMS ciphertext envelope back into its plaintext.
@@ -187,6 +202,7 @@ pub(crate) fn is_mutating_action(action: &str) -> bool {
             | "RevokeGrant"
             | "RetireGrant"
             | "ReplicateKey"
+            | "GetParametersForImport"
             | "ImportKeyMaterial"
             | "DeleteImportedKeyMaterial"
             | "UpdatePrimaryRegion"
@@ -500,7 +516,14 @@ pub(crate) fn require_usable_key_state(key: &KmsKey) -> Result<(), AwsServiceErr
     if key.key_state == "Enabled" {
         return Ok(());
     }
-    if key.key_state == "Disabled" || !key.enabled {
+    // Only the `Disabled` state maps to `DisabledException`. Every other
+    // non-Enabled lifecycle state (`PendingDeletion`, `PendingImport`,
+    // `Unavailable`, `Updating`, `Creating`) is a `KMSInvalidStateException`.
+    // The previous `|| !key.enabled` clause misrouted PendingDeletion and
+    // PendingImport keys (both have `enabled == false`) to
+    // `DisabledException`, so the `KMSInvalidStateException` arm below was
+    // unreachable.
+    if key.key_state == "Disabled" {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "DisabledException",
