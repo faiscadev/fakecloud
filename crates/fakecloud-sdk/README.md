@@ -105,6 +105,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 | Method                                   | Description                                              |
 | ---------------------------------------- | -------------------------------------------------------- |
+| `get_distributions().await`              | List distributions with `domainName` / `enabled` / `served` |
 | `set_distribution_status(id, req).await` | Override a CloudFront distribution's deployment status   |
 
 ### `fc.cognito()`

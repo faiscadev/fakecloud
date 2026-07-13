@@ -1,5 +1,9 @@
 mod helpers;
 
+use aws_sdk_cloudfront::types::{
+    CookiePreference, DefaultCacheBehavior, DistributionConfig, ForwardedValues, Headers,
+    ItemSelection, Origin, Origins, ViewerProtocolPolicy,
+};
 use aws_sdk_cognitoidentityprovider::types::{AttributeType, ExplicitAuthFlowsType};
 use aws_sdk_dynamodb::types::{
     AttributeDefinition, AttributeValue, KeySchemaElement, KeyType, ScalarAttributeType,
@@ -937,4 +941,91 @@ async fn sdk_secretsmanager_tick_rotation() {
         .expect("tick rotation");
     // Just verify it returns successfully with expected shape
     let _ = resp.rotated_secrets;
+}
+
+// ── CloudFront ─────────────────────────────────────────────────────
+
+// The legacy `forwarded_values`/`min_ttl` cache-behavior shape is deprecated in
+// the AWS SDK (superseded by cache policies) but is the minimal config fakecloud
+// accepts, matching the cloudfront_dataplane e2e tests.
+#[allow(deprecated)]
+#[tokio::test]
+async fn sdk_cloudfront_get_distributions() {
+    let server = TestServer::start().await;
+    let fc = FakeCloud::new(server.endpoint());
+    let cf = server.cloudfront_client().await;
+
+    // Minimal enabled distribution: one origin + a default cache behavior.
+    let config = DistributionConfig::builder()
+        .caller_reference("sdk-cf-dist")
+        .comment("sdk get_distributions e2e")
+        .enabled(true)
+        .origins(
+            Origins::builder()
+                .quantity(1)
+                .items(
+                    Origin::builder()
+                        .id("o1")
+                        .domain_name("example.s3-website-us-east-1.amazonaws.com")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .default_cache_behavior(
+            DefaultCacheBehavior::builder()
+                .target_origin_id("o1")
+                .viewer_protocol_policy(ViewerProtocolPolicy::AllowAll)
+                .forwarded_values(
+                    ForwardedValues::builder()
+                        .query_string(false)
+                        .cookies(
+                            CookiePreference::builder()
+                                .forward(ItemSelection::None)
+                                .build()
+                                .unwrap(),
+                        )
+                        .headers(Headers::builder().quantity(0).build().unwrap())
+                        .build()
+                        .unwrap(),
+                )
+                .min_ttl(0)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+
+    let created = cf
+        .create_distribution()
+        .distribution_config(config)
+        .send()
+        .await
+        .expect("create_distribution");
+    let id = created
+        .distribution()
+        .expect("distribution returned")
+        .id()
+        .to_string();
+
+    let resp = fc
+        .cloudfront()
+        .get_distributions()
+        .await
+        .expect("get_distributions");
+    let dist = resp
+        .distributions
+        .iter()
+        .find(|d| d.id == id)
+        .expect("created distribution listed");
+    // The data-plane domain lowercases the (uppercase) distribution id.
+    assert_eq!(
+        dist.domain_name,
+        format!("{}.cloudfront.net", id.to_lowercase())
+    );
+    assert!(dist.enabled);
+    // The data plane is on by default in the test server, so an enabled
+    // distribution is served on the main listener.
+    assert!(dist.served);
 }

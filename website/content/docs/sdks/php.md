@@ -300,9 +300,10 @@ $fc = new FakeCloud('http://localhost:5000');   // explicit base URL
 
 ## `$fc->cloudfront()`
 
-| Method                                            | Description                                   |
-| ------------------------------------------------- | --------------------------------------------- |
-| `setDistributionStatus($distributionId, $status)` | Force a CloudFront distribution into a status |
+| Method                                            | Description                                     |
+| ------------------------------------------------- | ----------------------------------------------- |
+| `getDistributions()`                              | List CloudFront distributions (id, domain, served) |
+| `setDistributionStatus($distributionId, $status)` | Force a CloudFront distribution into a status   |
 
 ## Error handling
 

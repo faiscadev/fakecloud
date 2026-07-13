@@ -319,7 +319,23 @@ FakeCloud fc2 = new FakeCloud("http://localhost:5000"); // explicit base URL
 
 | Method                                          | Description                                                                                  |
 | ----------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `getDistributions()`                            | List CloudFront distributions with their `<id>.cloudfront.net` domain, `enabled` flag, and whether the in-process data plane currently `served` them |
 | `setDistributionStatus(distributionId, status)` | Flip a stored CloudFront Distribution's status (`Deployed` / `InProgress`) without waiting   |
+
+```java
+import dev.fakecloud.FakeCloud;
+
+FakeCloud fc = new FakeCloud();
+
+// After creating a distribution via the AWS SDK CloudFront client:
+var dist = fc.cloudfront().getDistributions().distributions().get(0);
+System.out.println(dist.domainName()); // e.g. E1EXAMPLE123.cloudfront.net
+System.out.println(dist.enabled());    // true
+System.out.println(dist.served());     // true once the data plane serves it
+
+// Reach the data plane by sending domainName as the Host header to the
+// main fakecloud endpoint (http://localhost:4566).
+```
 
 ## Error handling
 

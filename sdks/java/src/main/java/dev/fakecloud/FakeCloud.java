@@ -20,6 +20,7 @@ import dev.fakecloud.Types.BedrockModelResponseConfig;
 import dev.fakecloud.Types.BedrockResponseRule;
 import dev.fakecloud.Types.BedrockStatusResponse;
 import dev.fakecloud.Types.CloudFrontDistributionStatusRequest;
+import dev.fakecloud.Types.CloudFrontDistributionsResponse;
 import dev.fakecloud.Types.CreateAdminRequest;
 import dev.fakecloud.Types.CreateAdminResponse;
 import dev.fakecloud.Types.ConfirmSubscriptionRequest;
@@ -1422,6 +1423,21 @@ public final class FakeCloud {
     public static final class CloudFrontClient {
         private final HttpTransport http;
         CloudFrontClient(HttpTransport http) { this.http = http; }
+
+        /**
+         * List every CloudFront Distribution fakecloud is tracking. Each
+         * entry carries its {@code <id>.cloudfront.net} domain name (send it
+         * as the {@code Host} header to fakecloud's main endpoint to reach
+         * the data plane), its {@code enabled} flag, and whether the
+         * in-process data plane currently {@code served} it (true when the
+         * distribution is enabled and the data plane has not been disabled
+         * via {@code FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE}).
+         */
+        public CloudFrontDistributionsResponse getDistributions() {
+            return http.get(
+                    "/_fakecloud/cloudfront/distributions",
+                    CloudFrontDistributionsResponse.class);
+        }
 
         /**
          * Flip a stored CloudFront Distribution's status (e.g.

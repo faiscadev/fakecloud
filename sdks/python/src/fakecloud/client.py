@@ -23,6 +23,7 @@ from fakecloud.types import (
     BedrockModelResponseConfig,
     BedrockResponseRule,
     BedrockStatusResponse,
+    CloudFrontDistributionsResponse,
     CloudFrontDistributionStatusRequest,
     CloudWatchAlarmsResponse,
     CloudWatchMetricsResponse,
@@ -898,6 +899,21 @@ class CloudFrontClient:
         self._client = client
         self._base = base_url
 
+    async def get_distributions(self) -> CloudFrontDistributionsResponse:
+        """List every stored CloudFront distribution with its reachability.
+
+        Each entry carries the ``<id>.cloudfront.net`` ``domain_name`` to send as
+        the ``Host`` header to fakecloud's main endpoint to reach the data plane,
+        the ``enabled`` flag, and whether the in-process data plane currently
+        ``served`` it (``True`` when enabled and the data plane is not disabled via
+        ``FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE``).
+        """
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/cloudfront/distributions"
+        )
+        _check(resp)
+        return CloudFrontDistributionsResponse.from_dict(resp.json())
+
     async def set_distribution_status(self, distribution_id: str, status: str) -> None:
         """Force a stored CloudFront distribution into a given status.
 
@@ -918,6 +934,19 @@ class _SyncCloudFrontClient:
     def __init__(self, client: httpx.Client, base_url: str) -> None:
         self._client = client
         self._base = base_url
+
+    def get_distributions(self) -> CloudFrontDistributionsResponse:
+        """List every stored CloudFront distribution with its reachability.
+
+        Each entry carries the ``<id>.cloudfront.net`` ``domain_name`` to send as
+        the ``Host`` header to fakecloud's main endpoint to reach the data plane,
+        the ``enabled`` flag, and whether the in-process data plane currently
+        ``served`` it (``True`` when enabled and the data plane is not disabled via
+        ``FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE``).
+        """
+        resp = self._client.get(f"{self._base}/_fakecloud/cloudfront/distributions")
+        _check(resp)
+        return CloudFrontDistributionsResponse.from_dict(resp.json())
 
     def set_distribution_status(self, distribution_id: str, status: str) -> None:
         req = CloudFrontDistributionStatusRequest(status=status)

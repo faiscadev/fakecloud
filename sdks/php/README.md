@@ -346,6 +346,7 @@ $fc = new FakeCloud('http://localhost:4566'); // explicit base URL
 
 | Method                                          | Description                                          |
 | ----------------------------------------------- | ---------------------------------------------------- |
+| `getDistributions()`                            | List CloudFront distributions (id, domain, served)   |
 | `setDistributionStatus($distributionId, $status)` | Force a CloudFront distribution into a status        |
 
 #### Full test loop — asserting on Bedrock calls

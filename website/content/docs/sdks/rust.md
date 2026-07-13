@@ -90,6 +90,7 @@ Every sub-client is constructed lazily via an accessor (`fc.lambda()`, `fc.sqs()
 
 | Method                                                  | Description                                              |
 | ------------------------------------------------------- | -------------------------------------------------------- |
+| `get_distributions().await`                             | List distributions with `domainName` / `enabled` / `served` |
 | `set_distribution_status(id, req).await`                | Override a CloudFront distribution's deployment status   |
 
 ## `fc.cognito()`

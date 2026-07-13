@@ -116,6 +116,7 @@ Top-level client. Defaults to `http://localhost:4566`.
 
 | Method                           | Description                                                       |
 | -------------------------------- | ----------------------------------------------------------------- |
+| `getDistributions()`             | List every CloudFront distribution across every account           |
 | `setDistributionStatus(id, req)` | Flip a Distribution synchronously into `Deployed` or `InProgress` |
 
 ### `fc.cognito`

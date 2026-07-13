@@ -1655,6 +1655,27 @@ export interface KmsUsageResponse {
 
 // ── CloudFront ─────────────────────────────────────────────────────
 
+export interface CloudFrontDistribution {
+  id: string;
+  /**
+   * The distribution's `<id>.cloudfront.net` domain. Send this as the `Host`
+   * header to fakecloud's main endpoint to reach the distribution's data plane.
+   */
+  domainName: string;
+  enabled: boolean;
+  /**
+   * Whether the distribution is currently served by the in-process data plane
+   * on the main listener (`true` when enabled and the data plane is not
+   * disabled via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`). Data-plane
+   * extension, not part of the AWS API surface.
+   */
+  served: boolean;
+}
+
+export interface CloudFrontDistributionsResponse {
+  distributions: CloudFrontDistribution[];
+}
+
 /** Body for `POST /_fakecloud/cloudfront/distributions/{id}/status`. */
 export interface CloudFrontDistributionStatusRequest {
   /** Typically `"Deployed"` or `"InProgress"`. */

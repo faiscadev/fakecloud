@@ -17,6 +17,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/cloudfront"
+	cftypes "github.com/aws/aws-sdk-go-v2/service/cloudfront/types"
 	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	cognitotypes "github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider/types"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -213,6 +215,85 @@ func TestE2ERDS(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("expected to find sdk-go-rds-db via introspection")
+	}
+}
+
+// ── CloudFront ─────────────────────────────────────────────────────
+
+func TestE2ECloudFrontGetDistributions(t *testing.T) {
+	resetState(t)
+	ctx := context.Background()
+	cfg := awsConfig(t)
+
+	cfClient := cloudfront.NewFromConfig(cfg, func(o *cloudfront.Options) {
+		o.BaseEndpoint = aws.String(fakecloudURL)
+	})
+
+	// Minimal valid distribution: one S3-website origin + a legacy
+	// ForwardedValues default cache behavior (the smallest shape the
+	// control plane accepts).
+	create, err := cfClient.CreateDistribution(ctx, &cloudfront.CreateDistributionInput{
+		DistributionConfig: &cftypes.DistributionConfig{
+			CallerReference: aws.String("sdk-go-cf-getdist"),
+			Comment:         aws.String("sdk go e2e"),
+			Enabled:         aws.Bool(true),
+			Origins: &cftypes.Origins{
+				Quantity: aws.Int32(1),
+				Items: []cftypes.Origin{
+					{
+						Id:         aws.String("o1"),
+						DomainName: aws.String("example-bucket.s3-website-us-east-1.amazonaws.com"),
+					},
+				},
+			},
+			DefaultCacheBehavior: &cftypes.DefaultCacheBehavior{
+				TargetOriginId:       aws.String("o1"),
+				ViewerProtocolPolicy: cftypes.ViewerProtocolPolicyAllowAll,
+				ForwardedValues: &cftypes.ForwardedValues{
+					QueryString: aws.Bool(false),
+					Cookies: &cftypes.CookiePreference{
+						Forward: cftypes.ItemSelectionNone,
+					},
+					Headers: &cftypes.Headers{Quantity: aws.Int32(0)},
+				},
+				MinTTL: aws.Int64(0),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateDistribution failed: %v", err)
+	}
+	if create.Distribution == nil || create.Distribution.Id == nil {
+		t.Fatal("expected a distribution id from CreateDistribution")
+	}
+	distID := *create.Distribution.Id
+
+	fc := fakecloud.New(fakecloudURL)
+	resp, err := fc.CloudFront().GetDistributions(ctx)
+	if err != nil {
+		t.Fatalf("CloudFront().GetDistributions() failed: %v", err)
+	}
+
+	found := false
+	for _, d := range resp.Distributions {
+		if d.ID == distID {
+			found = true
+			if !strings.HasSuffix(d.DomainName, ".cloudfront.net") {
+				t.Fatalf("expected .cloudfront.net domain, got %q", d.DomainName)
+			}
+			if !d.Enabled {
+				t.Fatal("expected distribution to be enabled")
+			}
+			// The in-process data plane serves an enabled distribution
+			// unless disabled via FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE,
+			// which the e2e server does not set.
+			if !d.Served {
+				t.Fatal("expected enabled distribution to be served by the data plane")
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("expected to find %s via introspection", distID)
 	}
 }
 

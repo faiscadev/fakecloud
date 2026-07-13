@@ -89,6 +89,7 @@ const fc = new FakeCloud("http://localhost:5000");
 
 | Method                                | Description                                                              |
 | ------------------------------------- | ------------------------------------------------------------------------ |
+| `getDistributions()`                  | List every CloudFront distribution across every account                  |
 | `setDistributionStatus(id, req)`      | Flip a Distribution synchronously into `Deployed` or `InProgress`        |
 
 ## `fc.cognito`

@@ -341,6 +341,7 @@ func main() {
 
 | Method | Description |
 |--------|-------------|
+| `GetDistributions(ctx)` | List distributions, each with its `.cloudfront.net` domain and whether the in-process data plane serves it |
 | `SetDistributionStatus(ctx, id, req)` | Force a distribution into `Deployed`/`InProgress` |
 
 #### Testing Bedrock-calling code end-to-end

@@ -675,3 +675,44 @@ def test_route53_set_health_check_status_unknown_id(fc: FakeCloudSync) -> None:
     with _pytest.raises(FakeCloudError) as exc:
         fc.route53.set_health_check_status("ghost-hc", "Failure", reason="x")
     assert exc.value.status == 404
+
+
+# ── CloudFront admin ──────────────────────────────────────────────────
+
+
+def _minimal_distribution_config(caller_ref: str) -> dict:  # type: ignore[type-arg]
+    return {
+        "CallerReference": caller_ref,
+        "Comment": "py-sdk-cf",
+        "Enabled": True,
+        "Origins": {
+            "Quantity": 1,
+            "Items": [{"Id": "primary", "DomainName": "example.com"}],
+        },
+        "DefaultCacheBehavior": {
+            "TargetOriginId": "primary",
+            "ViewerProtocolPolicy": "allow-all",
+            "MinTTL": 0,
+            "ForwardedValues": {
+                "QueryString": False,
+                "Cookies": {"Forward": "none"},
+                "Headers": {"Quantity": 0},
+            },
+        },
+    }
+
+
+def test_cloudfront_get_distributions(fc: FakeCloudSync, fakecloud_url: str) -> None:
+    cf = boto3.client("cloudfront", **_boto_kwargs(fakecloud_url))
+    created = cf.create_distribution(
+        DistributionConfig=_minimal_distribution_config("py-sdk-cf-list")
+    )
+    dist_id = created["Distribution"]["Id"]
+
+    result = fc.cloudfront.get_distributions()
+    dist = next(d for d in result.distributions if d.id == dist_id)
+    # The data-plane domain lowercases the (uppercase) distribution id.
+    assert dist.domain_name == f"{dist_id.lower()}.cloudfront.net"
+    assert dist.enabled is True
+    # Data plane is enabled by default, so an enabled distribution is served.
+    assert dist.served is True

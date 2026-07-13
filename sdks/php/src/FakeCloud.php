@@ -1570,6 +1570,21 @@ final class CloudFrontClient
     public function __construct(private readonly HttpTransport $http) {}
 
     /**
+     * List the CloudFront distributions fakecloud is tracking. Each entry
+     * carries its `<id>.cloudfront.net` domain name (send as the `Host`
+     * header to fakecloud's main endpoint to reach the data plane), its
+     * enabled flag, and whether the in-process data plane currently serves
+     * it (`served` is true when enabled and the data plane is not disabled
+     * via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`).
+     */
+    public function getDistributions(): CloudFrontDistributionsResponse
+    {
+        return CloudFrontDistributionsResponse::fromArray(
+            $this->http->get('/_fakecloud/cloudfront/distributions')
+        );
+    }
+
+    /**
      * Force a CloudFront distribution into the given status (typically
      * `"Deployed"` or `"InProgress"`). Throws {@see FakeCloudError}
      * with HTTP 404 when the distribution id is unknown.
