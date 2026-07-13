@@ -1,14 +1,13 @@
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Utc;
 use serde_json::json;
 
 use fakecloud_core::delivery::DeliveryBus;
-use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
 
-use crate::state::{EventTarget, SharedEventBridgeState};
+use crate::state::SharedEventBridgeState;
 
 /// Result of firing a rule via simulation.
 #[derive(Debug)]
@@ -46,7 +45,7 @@ pub fn fire_rule(
     let logs_state = ctx.logs_state;
     let container_runtime = ctx.container_runtime;
 
-    let (targets, account_id, region) = {
+    let (targets, rule_arn, account_id, region) = {
         let eb_accounts = state.read();
         let eb_state = eb_accounts.default_ref();
 
@@ -63,6 +62,7 @@ pub fn fire_rule(
 
         (
             rule.targets.clone(),
+            rule.arn.clone(),
             eb_state.account_id.clone(),
             eb_state.region.clone(),
         )
@@ -87,7 +87,6 @@ pub fn fire_rule(
         "region": region,
         "resources": [],
     });
-    let event_str = event_json.to_string();
 
     // Record the event in state
     {
@@ -104,78 +103,35 @@ pub fn fire_rule(
         });
     }
 
+    // Deliver through the shared single-target dispatch so the simulation
+    // endpoint honours exactly the same target handling as real PutEvents /
+    // scheduler delivery — Input / InputPath / InputTransformer resolution and
+    // the SQS(FIFO) / SNS / Lambda / Logs / Kinesis / StepFunctions /
+    // api-destination / HTTP branches — instead of a reduced local copy.
+    let ctx = crate::service::EventDispatchContext {
+        state,
+        delivery,
+        lambda_state: lambda_state.as_ref(),
+        logs_state: logs_state.as_ref(),
+        container_runtime,
+        account_id: &account_id,
+        region: &region,
+    };
+
     let mut fired = Vec::new();
-
     for target in &targets {
-        let arn = &target.arn;
-        let body_str = resolve_target_body(target, &event_json, &event_str);
-
-        if arn.contains(":sqs:") {
-            // Extract MessageGroupId from SqsParameters if present (required for FIFO queues)
-            let message_group_id = target
-                .sqs_parameters
-                .as_ref()
-                .and_then(|sp| sp["MessageGroupId"].as_str())
-                .map(|s| s.to_string());
-
-            if message_group_id.is_some() {
-                delivery.send_to_sqs_with_attrs(
-                    arn,
-                    &body_str,
-                    &HashMap::new(),
-                    message_group_id.as_deref(),
-                    None,
-                );
-            } else {
-                delivery.send_to_sqs(arn, &body_str, &HashMap::new());
-            }
+        crate::service::dispatch_event_target(
+            &ctx,
+            target,
+            &event_json,
+            &event_id,
+            "Scheduled Event",
+            Some(&rule_arn),
+        );
+        if let Some(target_type) = classify_target_type(&target.arn) {
             fired.push(FiredTarget {
-                target_type: "sqs".to_string(),
-                arn: arn.clone(),
-            });
-        } else if arn.contains(":sns:") {
-            delivery.publish_to_sns(arn, &body_str, Some("Scheduled Event"));
-            fired.push(FiredTarget {
-                target_type: "sns".to_string(),
-                arn: arn.clone(),
-            });
-        } else if arn.contains(":lambda:") {
-            let mut s_accounts = state.write();
-            let s = s_accounts.default_mut();
-            s.lambda_invocations.push(crate::state::LambdaInvocation {
-                function_arn: arn.clone(),
-                payload: body_str.clone(),
-                timestamp: now,
-            });
-            drop(s_accounts);
-            if let Some(ref ls) = lambda_state {
-                ls.write().default_mut().invocations.push(LambdaInvocation {
-                    function_arn: arn.clone(),
-                    payload: body_str.clone(),
-                    timestamp: now,
-                    source: "aws:events".to_string(),
-                });
-            }
-            crate::service::invoke_lambda_async(container_runtime, lambda_state, arn, &body_str);
-            fired.push(FiredTarget {
-                target_type: "lambda".to_string(),
-                arn: arn.clone(),
-            });
-        } else if arn.contains(":logs:") {
-            let mut s_accounts = state.write();
-            let s = s_accounts.default_mut();
-            s.log_deliveries.push(crate::state::LogDelivery {
-                log_group_arn: arn.clone(),
-                payload: body_str.clone(),
-                timestamp: now,
-            });
-            drop(s_accounts);
-            if let Some(ref log_state) = logs_state {
-                crate::service::deliver_to_logs(log_state, arn, &body_str, now);
-            }
-            fired.push(FiredTarget {
-                target_type: "logs".to_string(),
-                arn: arn.clone(),
+                target_type,
+                arn: target.arn.clone(),
             });
         }
     }
@@ -183,44 +139,35 @@ pub fn fire_rule(
     Ok(fired)
 }
 
-/// Compute the message body for a target, applying Input / InputPath if
-/// present.
-///
-/// **Limitations**: `InputTransformer` is not yet implemented — if a target
-/// has one configured, we fall through to the full event envelope. Real AWS
-/// evaluates the `InputPathsMap` + `InputTemplate` to build the payload;
-/// implementing that requires a JSONPath evaluator. `InputPath` supports
-/// only the simple `$.field` case (single top-level key); deeper paths
-/// fall back to the full event.
-fn resolve_target_body(
-    target: &EventTarget,
-    event_json: &serde_json::Value,
-    event_str: &str,
-) -> String {
-    if let Some(ref input) = target.input {
-        return input.clone();
-    }
-
-    if let Some(ref input_path) = target.input_path {
-        // Support simple top-level JSONPath like "$.detail"
-        if let Some(key) = input_path.strip_prefix("$.") {
-            if !key.contains('.') && !key.contains('[') {
-                if let Some(val) = event_json.get(key) {
-                    return val.to_string();
-                }
-            }
-        }
-    }
-
-    // InputTransformer is not yet supported — fall through to full event.
-
-    event_str.to_string()
+/// Map a target ARN to the target-type label reported by the simulation
+/// endpoint. Mirrors the branch selection in `dispatch_event_target`.
+fn classify_target_type(arn: &str) -> Option<String> {
+    let ty = if arn.contains(":sqs:") {
+        "sqs"
+    } else if arn.contains(":sns:") {
+        "sns"
+    } else if arn.contains(":lambda:") {
+        "lambda"
+    } else if arn.contains(":logs:") {
+        "logs"
+    } else if arn.contains(":kinesis:") {
+        "kinesis"
+    } else if arn.contains(":states:") {
+        "stepfunctions"
+    } else if arn.contains(":api-destination/") {
+        "api-destination"
+    } else if arn.starts_with("https://") || arn.starts_with("http://") {
+        "http"
+    } else {
+        return None;
+    };
+    Some(ty.to_string())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::EventRule;
+    use crate::state::{EventRule, EventTarget};
     use fakecloud_aws::arn::Arn;
     use parking_lot::RwLock;
     use std::collections::BTreeMap;
@@ -477,63 +424,72 @@ mod tests {
     }
 
     #[test]
-    fn resolve_target_body_uses_literal_input() {
-        let target = EventTarget {
-            id: "t".to_string(),
-            arn: "arn:aws:sqs:us-east-1:123:q".to_string(),
-            input: Some("{\"literal\":true}".to_string()),
-            input_path: None,
-            input_transformer: None,
-            sqs_parameters: None,
-            ..Default::default()
+    fn fire_rule_constant_input_delivered_via_shared_dispatch() {
+        // The simulation path now reuses dispatch_event_target, so a target
+        // with a constant Input delivers that constant, and InputPath /
+        // InputTransformer resolution is honoured identically to PutEvents.
+        let state = make_state();
+        let recorder = Arc::new(TestRecorder::default());
+        let bus = Arc::new(DeliveryBus::new().with_sqs(recorder.clone()));
+        add_rule(
+            &state,
+            "default",
+            "constant",
+            true,
+            vec![EventTarget {
+                id: "t1".to_string(),
+                arn: "arn:aws:sqs:us-east-1:123456789012:q".to_string(),
+                input: Some("{\"constant\":true}".to_string()),
+                ..Default::default()
+            }],
+        );
+        let ctx = FireRuleContext {
+            state: &state,
+            delivery: &bus,
+            lambda_state: &None,
+            logs_state: &None,
+            container_runtime: &None,
         };
-        let body = resolve_target_body(&target, &json!({"ignored": 1}), "ignored");
-        assert_eq!(body, "{\"literal\":true}");
+        let fired = fire_rule(&ctx, "default", "constant").unwrap();
+        assert_eq!(fired.len(), 1);
+        let calls = recorder.sqs.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, "{\"constant\":true}");
     }
 
-    #[test]
-    fn resolve_target_body_uses_input_path_for_top_level() {
-        let target = EventTarget {
-            id: "t".to_string(),
-            arn: "arn:aws:sqs:us-east-1:123:q".to_string(),
-            input: None,
-            input_path: Some("$.detail".to_string()),
-            input_transformer: None,
-            sqs_parameters: None,
-            ..Default::default()
-        };
-        let event = json!({"detail": {"k": 1}, "other": 2});
-        let body = resolve_target_body(&target, &event, "fallback");
-        assert!(body.contains("\"k\""));
+    #[derive(Default)]
+    struct TestRecorder {
+        sqs: std::sync::Mutex<Vec<(String, String)>>,
     }
 
-    #[test]
-    fn resolve_target_body_falls_back_for_nested_input_path() {
-        let target = EventTarget {
-            id: "t".to_string(),
-            arn: "arn:aws:sqs:us-east-1:123:q".to_string(),
-            input: None,
-            input_path: Some("$.detail.nested".to_string()),
-            input_transformer: None,
-            sqs_parameters: None,
-            ..Default::default()
-        };
-        let body = resolve_target_body(&target, &json!({}), "full-event");
-        assert_eq!(body, "full-event");
-    }
+    impl fakecloud_core::delivery::SqsDelivery for TestRecorder {
+        fn deliver_to_queue(
+            &self,
+            arn: &str,
+            body: &str,
+            _attrs: &std::collections::HashMap<String, String>,
+        ) {
+            self.sqs
+                .lock()
+                .unwrap()
+                .push((arn.to_string(), body.to_string()));
+        }
 
-    #[test]
-    fn resolve_target_body_no_transform_returns_full_event() {
-        let target = EventTarget {
-            id: "t".to_string(),
-            arn: "arn:aws:sqs:us-east-1:123:q".to_string(),
-            input: None,
-            input_path: None,
-            input_transformer: None,
-            sqs_parameters: None,
-            ..Default::default()
-        };
-        let body = resolve_target_body(&target, &json!({}), "full-event");
-        assert_eq!(body, "full-event");
+        fn deliver_to_queue_with_attrs(
+            &self,
+            arn: &str,
+            body: &str,
+            _attrs: &std::collections::HashMap<
+                String,
+                fakecloud_core::delivery::SqsMessageAttribute,
+            >,
+            _group: Option<&str>,
+            _dedup: Option<&str>,
+        ) {
+            self.sqs
+                .lock()
+                .unwrap()
+                .push((arn.to_string(), body.to_string()));
+        }
     }
 }

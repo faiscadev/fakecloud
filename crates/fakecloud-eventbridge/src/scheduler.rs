@@ -7,7 +7,7 @@ use serde_json::json;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_lambda::runtime::ContainerRuntime;
-use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
 
 use crate::state::SharedEventBridgeState;
@@ -111,21 +111,41 @@ fn parse_schedule(expr: &str) -> Option<Schedule> {
     None
 }
 
+/// Returns whether `expr` is a syntactically valid EventBridge schedule
+/// expression (`rate(...)` or `cron(...)`). Used by `PutRule` to reject a
+/// malformed `ScheduleExpression` with a `ValidationException` instead of
+/// silently storing a rule that never fires.
+pub(crate) fn is_valid_schedule_expression(expr: &str) -> bool {
+    parse_schedule(expr).is_some()
+}
+
 fn parse_rate(inner: &str) -> Option<Schedule> {
     let parts: Vec<&str> = inner.split_whitespace().collect();
     if parts.len() != 2 {
         return None;
     }
     let value: u64 = parts[0].parse().ok()?;
-    let unit = parts[1];
-    let secs = match unit {
-        "second" | "seconds" => value,
-        "minute" | "minutes" => value * 60,
-        "hour" | "hours" => value * 3600,
-        "day" | "days" => value * 86400,
+    // AWS requires a positive value: `rate(0 ...)` is rejected.
+    if value == 0 {
+        return None;
+    }
+    // The unit must be singular iff the value is 1 (`rate(1 minute)` /
+    // `rate(5 minutes)`); a singular/plural mismatch is rejected.
+    let (secs_per, singular) = match parts[1] {
+        "second" => (1, true),
+        "seconds" => (1, false),
+        "minute" => (60, true),
+        "minutes" => (60, false),
+        "hour" => (3600, true),
+        "hours" => (3600, false),
+        "day" => (86400, true),
+        "days" => (86400, false),
         _ => return None,
     };
-    Some(Schedule::Rate(Duration::from_secs(secs)))
+    if singular != (value == 1) {
+        return None;
+    }
+    Some(Schedule::Rate(Duration::from_secs(value * secs_per)))
 }
 
 fn parse_cron(inner: &str) -> Option<Schedule> {
@@ -335,8 +355,15 @@ impl Scheduler {
         let now = Utc::now();
 
         // Collect rules that need to fire (to avoid holding lock during delivery)
-        // Each entry includes the account_id that owns the rule
-        let mut to_fire: Vec<(String, String, String, Vec<crate::state::EventTarget>)> = Vec::new();
+        // Each entry includes the account_id that owns the rule and the rule
+        // ARN (so InputTransformer can resolve `<aws.events.rule-arn>`).
+        let mut to_fire: Vec<(
+            String,
+            String,
+            String,
+            String,
+            Vec<crate::state::EventTarget>,
+        )> = Vec::new();
 
         {
             let mut accounts = self.state.write();
@@ -397,125 +424,57 @@ impl Scheduler {
 
                     if should_fire {
                         let targets = rule.targets.clone();
+                        let rule_arn = rule.arn.clone();
                         // Update last_fired while we hold the write lock
                         if let Some(r) = state.rules.get_mut(&key) {
                             r.last_fired = Some(now);
                         }
-                        to_fire.push((account_id.clone(), region.clone(), name, targets));
+                        to_fire.push((account_id.clone(), region.clone(), name, rule_arn, targets));
                     }
                 }
             }
         }
         // Lock is dropped here
 
-        // Deliver events
-        for (account_id, region, rule_name, targets) in to_fire {
+        // Deliver events. Reuse the shared single-target dispatch so scheduled
+        // rules honour the same target shape as PutEvents-driven rules —
+        // Input / InputPath / InputTransformer resolution plus the Kinesis,
+        // api-destination and FIFO MessageGroupId branches — instead of the
+        // scheduler's previous reduced delivery path.
+        for (account_id, region, rule_name, rule_arn, targets) in to_fire {
             let event_id = uuid::Uuid::new_v4().to_string();
             let event_json = json!({
                 "version": "0",
                 "id": event_id,
                 "source": "aws.events",
+                "account": account_id,
                 "detail-type": "Scheduled Event",
                 "detail": {},
                 "time": now.to_rfc3339(),
                 "region": region,
+                "resources": [],
             });
-            let event_str = event_json.to_string();
 
             tracing::debug!(rule = %rule_name, targets = targets.len(), "scheduler firing");
 
+            let ctx = crate::service::EventDispatchContext {
+                state: &self.state,
+                delivery: &self.delivery,
+                lambda_state: self.lambda_state.as_ref(),
+                logs_state: self.logs_state.as_ref(),
+                container_runtime: &self.container_runtime,
+                account_id: &account_id,
+                region: &region,
+            };
             for target in &targets {
-                let arn = &target.arn;
-                if arn.contains(":sqs:") {
-                    self.delivery.send_to_sqs(arn, &event_str, &HashMap::new());
-                } else if arn.contains(":sns:") {
-                    self.delivery
-                        .publish_to_sns(arn, &event_str, Some("Scheduled Event"));
-                } else if arn.contains(":lambda:") {
-                    tracing::info!(
-                        function_arn = %arn,
-                        payload = %event_str,
-                        "Scheduler delivering to Lambda function"
-                    );
-                    let mut eb_accounts = self.state.write();
-                    let eb_state = eb_accounts.get_or_create(&account_id);
-                    eb_state
-                        .lambda_invocations
-                        .push(crate::state::LambdaInvocation {
-                            function_arn: arn.clone(),
-                            payload: event_str.clone(),
-                            timestamp: now,
-                        });
-                    drop(eb_accounts);
-                    if let Some(ref ls) = self.lambda_state {
-                        ls.write()
-                            .get_or_create(&account_id)
-                            .invocations
-                            .push(LambdaInvocation {
-                                function_arn: arn.clone(),
-                                payload: event_str.clone(),
-                                timestamp: now,
-                                source: "aws:events".to_string(),
-                            });
-                    }
-                    crate::service::invoke_lambda_async(
-                        &self.container_runtime,
-                        &self.lambda_state,
-                        arn,
-                        &event_str,
-                    );
-                } else if arn.contains(":logs:") {
-                    tracing::info!(
-                        log_group_arn = %arn,
-                        payload = %event_str,
-                        "Scheduler delivering to CloudWatch Logs"
-                    );
-                    let mut eb_accounts = self.state.write();
-                    let eb_state = eb_accounts.get_or_create(&account_id);
-                    eb_state.log_deliveries.push(crate::state::LogDelivery {
-                        log_group_arn: arn.clone(),
-                        payload: event_str.clone(),
-                        timestamp: now,
-                    });
-                    drop(eb_accounts);
-                    if let Some(ref log_state) = self.logs_state {
-                        crate::service::deliver_to_logs(log_state, arn, &event_str, now);
-                    }
-                } else if arn.contains(":states:") {
-                    tracing::info!(
-                        state_machine_arn = %arn,
-                        "Scheduler delivering to Step Functions"
-                    );
-                    self.delivery.start_stepfunctions_execution(arn, &event_str);
-                    let mut eb_accounts = self.state.write();
-                    let eb_state = eb_accounts.get_or_create(&account_id);
-                    eb_state
-                        .step_function_executions
-                        .push(crate::state::StepFunctionExecution {
-                            state_machine_arn: arn.clone(),
-                            payload: event_str.clone(),
-                            timestamp: now,
-                        });
-                } else if arn.starts_with("https://") || arn.starts_with("http://") {
-                    let url = arn.clone();
-                    let payload = event_str.clone();
-                    tokio::spawn(async move {
-                        let client = reqwest::Client::new();
-                        let result = client
-                            .post(&url)
-                            .header("Content-Type", "application/json")
-                            .body(payload)
-                            .send()
-                            .await;
-                        if let Err(e) = result {
-                            tracing::warn!(
-                                endpoint = %url,
-                                error = %e,
-                                "Scheduler HTTP target delivery failed"
-                            );
-                        }
-                    });
-                }
+                crate::service::dispatch_event_target(
+                    &ctx,
+                    target,
+                    &event_json,
+                    &event_id,
+                    "Scheduled Event",
+                    Some(&rule_arn),
+                );
             }
         }
     }
@@ -580,9 +539,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_rate_zero_is_valid() {
-        let s = parse_schedule("rate(0 seconds)");
-        assert!(matches!(s, Some(Schedule::Rate(d)) if d == Duration::ZERO));
+    fn parse_rate_zero_is_rejected() {
+        // AWS requires a positive value; `rate(0 ...)` is invalid.
+        assert!(parse_schedule("rate(0 seconds)").is_none());
+        assert!(parse_schedule("rate(0 minutes)").is_none());
+    }
+
+    #[test]
+    fn parse_rate_singular_plural_mismatch_rejected() {
+        // Unit must be singular iff value == 1.
+        assert!(parse_schedule("rate(1 minutes)").is_none());
+        assert!(parse_schedule("rate(5 minute)").is_none());
+        assert!(parse_schedule("rate(1 minute)").is_some());
+        assert!(parse_schedule("rate(5 minutes)").is_some());
     }
 
     #[test]
@@ -884,6 +853,58 @@ mod tests {
             let payload: serde_json::Value = serde_json::from_str(&calls[0].1).unwrap();
             assert_eq!(payload["detail-type"], "Scheduled Event");
             assert_eq!(payload["source"], "aws.events");
+        }
+
+        #[test]
+        fn tick_delivers_constant_input_to_sqs() {
+            // H3: the scheduler now reuses the shared dispatch, so a target
+            // with a constant Input delivers that constant instead of the
+            // full scheduled-event envelope.
+            let (shared, _) = make_state();
+            let q_arn = "arn:aws:sqs:us-east-1:123456789012:q-input".to_string();
+            {
+                let mut s_accounts = shared.write();
+                let s = s_accounts.default_mut();
+                let mut rule = make_rule("r", "rate(1 second)", &q_arn);
+                rule.targets[0].input = Some("{\"constant\":42}".to_string());
+                s.rules
+                    .insert(("default".to_string(), "r".to_string()), rule);
+            }
+            let recorder = Arc::new(Recorder::default());
+            let scheduler = build_scheduler(shared.clone(), recorder.clone());
+            let mut last = HashMap::<RuleKey, (u32, u32)>::new();
+            scheduler.tick(&mut last);
+            let calls = recorder.sqs.lock().unwrap();
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].0, q_arn);
+            assert_eq!(calls[0].1, "{\"constant\":42}");
+        }
+
+        #[test]
+        fn tick_delivers_to_kinesis_target() {
+            // H3: the scheduler previously had no Kinesis branch.
+            let (shared, _) = make_state();
+            let stream_arn = "arn:aws:kinesis:us-east-1:123456789012:stream/s".to_string();
+            {
+                let mut s_accounts = shared.write();
+                let s = s_accounts.default_mut();
+                let rule = make_rule("r", "rate(1 second)", &stream_arn);
+                s.rules
+                    .insert(("default".to_string(), "r".to_string()), rule);
+            }
+            let recorder = Arc::new(Recorder::default());
+            let bus = Arc::new(DeliveryBus::new().with_kinesis(recorder.clone()));
+            let scheduler = Scheduler::new(shared.clone(), bus);
+            let mut last = HashMap::<RuleKey, (u32, u32)>::new();
+            // Should not panic and should mark the rule fired.
+            scheduler.tick(&mut last);
+            let mas = shared.read();
+            let rule = mas
+                .default_ref()
+                .rules
+                .get(&("default".to_string(), "r".to_string()))
+                .unwrap();
+            assert!(rule.last_fired.is_some());
         }
 
         #[test]
