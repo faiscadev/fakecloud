@@ -259,6 +259,57 @@ pub(super) fn dispatch(
         // the `job` wrapper (the model places it outside the Job struct).
         "DescribeJob" => Ok(Some(describe_job(svc, ctx, meta, labels)?)),
 
+        // Jobs: document read + lifecycle mutations that echo the job identity.
+        "GetJobDocument" => Ok(Some(get_job_document(svc, ctx, meta, labels)?)),
+        "AssociateTargetsWithJob" => Ok(Some(job_lifecycle(svc, ctx, meta, labels, body, false)?)),
+        "CancelJob" => Ok(Some(job_lifecycle(svc, ctx, meta, labels, body, true)?)),
+
+        // Managed IAM-style policy versioning. Versions live in their own
+        // `policy-versions` store keyed `policyName/versionId` so the policy
+        // list is not polluted; CreatePolicy seeds version 1 as the default.
+        "CreatePolicy" => Ok(Some(create_policy(svc, ctx, labels, body)?)),
+        "CreatePolicyVersion" => Ok(Some(create_policy_version(
+            svc, ctx, meta, labels, query, body,
+        )?)),
+        "GetPolicyVersion" => Ok(Some(get_policy_version(svc, ctx, meta, labels)?)),
+        "ListPolicyVersions" => Ok(Some(list_policy_versions(svc, ctx, meta, labels)?)),
+        "SetDefaultPolicyVersion" => Ok(Some(set_default_policy_version(svc, ctx, meta, labels)?)),
+        "DeletePolicyVersion" => Ok(Some(delete_policy_version(svc, ctx, meta, labels)?)),
+
+        // Provisioning templates: persist the template + its versions so the
+        // Describe / List reads (generic and version-specific) round-trip, and
+        // mint a real (persisted) certificate for the provisioning claim.
+        "CreateProvisioningTemplate" => Ok(Some(create_provisioning_template(svc, ctx, body)?)),
+        "CreateProvisioningTemplateVersion" => Ok(Some(create_provisioning_template_version(
+            svc, ctx, meta, labels, query, body,
+        )?)),
+        "DescribeProvisioningTemplateVersion" => Ok(Some(describe_provisioning_template_version(
+            svc, ctx, meta, labels,
+        )?)),
+        "ListProvisioningTemplateVersions" => Ok(Some(list_provisioning_template_versions(
+            svc, ctx, meta, labels,
+        )?)),
+        "CreateProvisioningClaim" => Ok(Some(create_provisioning_claim(svc, ctx, meta, labels)?)),
+
+        // Certificate transfer + fleet-provisioning thing registration.
+        "TransferCertificate" => Ok(Some(transfer_certificate(
+            svc, ctx, meta, labels, query, body,
+        )?)),
+        "RegisterThing" => Ok(Some(register_thing(svc, ctx))),
+
+        // Long-running tasks whose only synchronous output is a minted taskId;
+        // persist a task record so the matching Describe read round-trips.
+        "StartThingRegistrationTask"
+        | "StartOnDemandAuditTask"
+        | "StartAuditMitigationActionsTask"
+        | "StartDetectMitigationActionsTask" => Ok(Some(start_task(svc, ctx, meta, labels, body))),
+
+        // Principal <-> thing and thing <-> group listings are the inverse of
+        // the stored relation edges (mirroring ListAttachedPolicies).
+        "ListPrincipalThings" => Ok(Some(list_principal_things(svc, ctx, meta, headers, false))),
+        "ListPrincipalThingsV2" => Ok(Some(list_principal_things(svc, ctx, meta, headers, true))),
+        "ListThingGroupsForThing" => Ok(Some(list_thing_groups_for_thing(svc, ctx, labels))),
+
         // Topic rules: the rule payload is the request body (`@httpPayload`);
         // GetTopicRule nests it under `rule` alongside the `ruleArn`.
         "CreateTopicRule" | "ReplaceTopicRule" => Ok(Some(put_topic_rule(svc, ctx, labels, body))),
@@ -919,4 +970,742 @@ fn describe_job(
         }
         None => Err(super::engine::not_found(meta, &job_id)),
     }
+}
+
+fn get_job_document(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let job_id = labels.get("jobId").cloned().unwrap_or_default();
+    let g = svc.state.read();
+    match g
+        .get(&ctx.account)
+        .and_then(|d| d.get_resource("jobs", &job_id))
+        .cloned()
+    {
+        Some(record) => {
+            // CreateJob persists the inline `document` on the job record; echo it
+            // back verbatim. A job created from a `documentSource` has no inline
+            // document, so the member is simply absent (a shape-valid response).
+            let mut out = Map::new();
+            if let Some(doc) = record.get("document").filter(|v| v.is_string()) {
+                out.insert("document".to_string(), doc.clone());
+            }
+            Ok((ok_json(Value::Object(out)), false))
+        }
+        None => Err(super::engine::not_found(meta, &job_id)),
+    }
+}
+
+/// AssociateTargetsWithJob (append targets) and CancelJob (mark cancelled) both
+/// mutate the stored job and echo its identity (`jobArn` / `jobId` /
+/// `description`).
+fn job_lifecycle(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+    cancel: bool,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let job_id = labels.get("jobId").cloned().unwrap_or_default();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(mut record) = data.get_resource("jobs", &job_id).cloned() else {
+        return Err(super::engine::not_found(meta, &job_id));
+    };
+    if let Some(obj) = record.as_object_mut() {
+        if cancel {
+            obj.insert("status".to_string(), Value::String("CANCELED".to_string()));
+            for key in ["reasonCode", "comment"] {
+                if let Some(v) = body.get(key) {
+                    obj.insert(key.to_string(), v.clone());
+                }
+            }
+        } else if let Some(Value::Array(added)) = body.get("targets") {
+            let targets = obj
+                .entry("targets")
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Value::Array(existing) = targets {
+                for t in added {
+                    if !existing.contains(t) {
+                        existing.push(t.clone());
+                    }
+                }
+            }
+        }
+        obj.insert("lastUpdatedAt".to_string(), super::now_epoch());
+    }
+    let mut out = Map::new();
+    out.insert("jobId".to_string(), Value::String(job_id.clone()));
+    let arn = record
+        .get("jobArn")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| mint_arn(ctx, "jobs", &job_id));
+    out.insert("jobArn".to_string(), Value::String(arn));
+    if let Some(desc) = record.get("description").filter(|v| v.is_string()) {
+        out.insert("description".to_string(), desc.clone());
+    }
+    data.put_resource("jobs", &job_id, record);
+    Ok((ok_json(Value::Object(out)), true))
+}
+
+// ---------- policies + versions ----------
+
+fn policy_version_key(policy: &str, vid: &str) -> String {
+    format!("{policy}/{vid}")
+}
+
+/// Persist one policy version under `policy-versions`, storing both the wire
+/// name (`policyVersionId` / `creationDate`, used by GetPolicyVersion) and the
+/// list-element name (`versionId` / `createDate`, used by ListPolicyVersions).
+fn store_policy_version(
+    data: &mut IotData,
+    policy: &str,
+    arn: &str,
+    document: &str,
+    vid: &str,
+    is_default: bool,
+) {
+    let rec = json!({
+        "policyName": policy,
+        "policyArn": arn,
+        "policyDocument": document,
+        "policyVersionId": vid,
+        "versionId": vid,
+        "isDefaultVersion": is_default,
+        "creationDate": super::now_epoch(),
+        "createDate": super::now_epoch(),
+        "lastModifiedDate": super::now_epoch(),
+        "generationId": "1",
+    });
+    data.put_resource("policy-versions", &policy_version_key(policy, vid), rec);
+}
+
+/// The next monotonic numeric version id for a policy (max existing + 1).
+fn next_policy_version_id(data: &IotData, policy: &str) -> String {
+    let prefix = format!("{policy}/");
+    let max = data
+        .resources
+        .get("policy-versions")
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.strip_prefix(&prefix))
+                .filter_map(|s| s.parse::<u64>().ok())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    (max + 1).to_string()
+}
+
+fn clear_default_policy_versions(data: &mut IotData, policy: &str) {
+    let prefix = format!("{policy}/");
+    if let Some(m) = data.resources.get_mut("policy-versions") {
+        for (k, rec) in m.iter_mut() {
+            if k.starts_with(&prefix) {
+                if let Some(o) = rec.as_object_mut() {
+                    o.insert("isDefaultVersion".to_string(), Value::Bool(false));
+                }
+            }
+        }
+    }
+}
+
+/// CreatePolicy: persist the policy record and seed version 1 as the default,
+/// so GetPolicy / GetPolicyVersion / ListPolicyVersions all round-trip.
+fn create_policy(
+    svc: &IotService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("policyName").cloned().unwrap_or_default();
+    let document = body_str(body, "policyDocument").unwrap_or("").to_string();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if data.get_resource("policies", &name).is_some() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "ResourceAlreadyExistsException",
+            format!("Policy cannot be created - name already exists (name={name})"),
+        ));
+    }
+    let arn = mint_arn(ctx, "policies", &name);
+    let policy_rec = json!({
+        "policyName": name,
+        "policyArn": arn,
+        "policyDocument": document,
+        "defaultVersionId": "1",
+        "creationDate": super::now_epoch(),
+        "lastModifiedDate": super::now_epoch(),
+        "generationId": "1",
+    });
+    data.put_resource("policies", &name, policy_rec);
+    store_policy_version(data, &name, &arn, &document, "1", true);
+    Ok((
+        ok_json(json!({
+            "policyName": name,
+            "policyArn": arn,
+            "policyDocument": document,
+            "policyVersionId": "1",
+        })),
+        true,
+    ))
+}
+
+fn create_policy_version(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    query: &[(String, String)],
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("policyName").cloned().unwrap_or_default();
+    let document = body_str(body, "policyDocument").unwrap_or("").to_string();
+    let set_as_default = query_get(query, "setAsDefault") == Some("true");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(policy) = data.get_resource("policies", &name).cloned() else {
+        return Err(super::engine::not_found(meta, &name));
+    };
+    let arn = policy
+        .get("policyArn")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| mint_arn(ctx, "policies", &name));
+    let vid = next_policy_version_id(data, &name);
+    if set_as_default {
+        clear_default_policy_versions(data, &name);
+        if let Some(rec) = data
+            .resources
+            .get_mut("policies")
+            .and_then(|m| m.get_mut(&name))
+        {
+            if let Some(o) = rec.as_object_mut() {
+                o.insert("defaultVersionId".to_string(), Value::String(vid.clone()));
+            }
+        }
+    }
+    store_policy_version(data, &name, &arn, &document, &vid, set_as_default);
+    Ok((
+        ok_json(json!({
+            "policyArn": arn,
+            "policyDocument": document,
+            "policyVersionId": vid,
+            "isDefaultVersion": set_as_default,
+        })),
+        true,
+    ))
+}
+
+fn get_policy_version(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("policyName").cloned().unwrap_or_default();
+    let vid = labels.get("policyVersionId").cloned().unwrap_or_default();
+    let g = svc.state.read();
+    match g
+        .get(&ctx.account)
+        .and_then(|d| d.get_resource("policy-versions", &policy_version_key(&name, &vid)))
+    {
+        Some(rec) => Ok((ok_json(super::build_output(meta, rec)), false)),
+        None => Err(super::engine::not_found(meta, &vid)),
+    }
+}
+
+fn list_policy_versions(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("policyName").cloned().unwrap_or_default();
+    let g = svc.state.read();
+    let data = g.get(&ctx.account);
+    if data
+        .and_then(|d| d.get_resource("policies", &name))
+        .is_none()
+    {
+        return Err(super::engine::not_found(meta, &name));
+    }
+    let prefix = format!("{name}/");
+    let mut versions = Vec::new();
+    if let Some(m) = data.and_then(|d| d.resources.get("policy-versions")) {
+        for (k, rec) in m {
+            if k.starts_with(&prefix) {
+                versions.push(super::build_element(meta, rec));
+            }
+        }
+    }
+    Ok((ok_json(json!({ "policyVersions": versions })), false))
+}
+
+fn set_default_policy_version(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("policyName").cloned().unwrap_or_default();
+    let vid = labels.get("policyVersionId").cloned().unwrap_or_default();
+    let key = policy_version_key(&name, &vid);
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if data.get_resource("policy-versions", &key).is_none() {
+        return Err(super::engine::not_found(meta, &vid));
+    }
+    clear_default_policy_versions(data, &name);
+    if let Some(rec) = data
+        .resources
+        .get_mut("policy-versions")
+        .and_then(|m| m.get_mut(&key))
+    {
+        if let Some(o) = rec.as_object_mut() {
+            o.insert("isDefaultVersion".to_string(), Value::Bool(true));
+        }
+    }
+    if let Some(rec) = data
+        .resources
+        .get_mut("policies")
+        .and_then(|m| m.get_mut(&name))
+    {
+        if let Some(o) = rec.as_object_mut() {
+            o.insert("defaultVersionId".to_string(), Value::String(vid.clone()));
+        }
+    }
+    Ok((ok_json(Value::Object(Map::new())), true))
+}
+
+fn delete_policy_version(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("policyName").cloned().unwrap_or_default();
+    let vid = labels.get("policyVersionId").cloned().unwrap_or_default();
+    let key = policy_version_key(&name, &vid);
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(rec) = data.get_resource("policy-versions", &key).cloned() else {
+        return Err(super::engine::not_found(meta, &vid));
+    };
+    // AWS forbids deleting the default version (it must be deleted via
+    // DeletePolicy); the operation declares DeleteConflictException for this.
+    if rec.get("isDefaultVersion").and_then(Value::as_bool) == Some(true) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "DeleteConflictException",
+            "Cannot delete the default version of a policy.".to_string(),
+        ));
+    }
+    data.remove_resource("policy-versions", &key);
+    Ok((ok_json(Value::Object(Map::new())), true))
+}
+
+// ---------- provisioning templates + versions + claim ----------
+
+fn provisioning_version_key(name: &str, vid: i64) -> String {
+    format!("{name}/{vid}")
+}
+
+fn store_provisioning_version(
+    data: &mut IotData,
+    name: &str,
+    vid: i64,
+    template_body: &str,
+    is_default: bool,
+) {
+    let rec = json!({
+        "versionId": vid,
+        "templateBody": template_body,
+        "isDefaultVersion": is_default,
+        "creationDate": super::now_epoch(),
+    });
+    data.put_resource(
+        "provisioning-template-versions",
+        &provisioning_version_key(name, vid),
+        rec,
+    );
+}
+
+fn next_provisioning_version_id(data: &IotData, name: &str) -> i64 {
+    let prefix = format!("{name}/");
+    let max = data
+        .resources
+        .get("provisioning-template-versions")
+        .map(|m| {
+            m.keys()
+                .filter_map(|k| k.strip_prefix(&prefix))
+                .filter_map(|s| s.parse::<i64>().ok())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0);
+    max + 1
+}
+
+fn clear_default_provisioning_versions(data: &mut IotData, name: &str) {
+    let prefix = format!("{name}/");
+    if let Some(m) = data.resources.get_mut("provisioning-template-versions") {
+        for (k, rec) in m.iter_mut() {
+            if k.starts_with(&prefix) {
+                if let Some(o) = rec.as_object_mut() {
+                    o.insert("isDefaultVersion".to_string(), Value::Bool(false));
+                }
+            }
+        }
+    }
+}
+
+fn create_provisioning_template(
+    svc: &IotService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = body_str(body, "templateName").unwrap_or("").to_string();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if data.get_resource("provisioning-templates", &name).is_some() {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "ResourceAlreadyExistsException",
+            format!("Template with name {name} already exists."),
+        ));
+    }
+    let arn = mint_arn(ctx, "provisioning-templates", &name);
+    let template_body = body_str(body, "templateBody").unwrap_or("").to_string();
+    let mut rec = Map::new();
+    rec.insert("templateArn".to_string(), Value::String(arn.clone()));
+    rec.insert("templateName".to_string(), Value::String(name.clone()));
+    for key in [
+        "description",
+        "provisioningRoleArn",
+        "type",
+        "preProvisioningHook",
+    ] {
+        if let Some(v) = body.get(key) {
+            rec.insert(key.to_string(), v.clone());
+        }
+    }
+    rec.insert(
+        "templateBody".to_string(),
+        Value::String(template_body.clone()),
+    );
+    rec.insert(
+        "enabled".to_string(),
+        Value::Bool(body.get("enabled").and_then(Value::as_bool).unwrap_or(true)),
+    );
+    rec.insert("defaultVersionId".to_string(), Value::from(1));
+    rec.insert("creationDate".to_string(), super::now_epoch());
+    rec.insert("lastModifiedDate".to_string(), super::now_epoch());
+    data.put_resource("provisioning-templates", &name, Value::Object(rec));
+    store_provisioning_version(data, &name, 1, &template_body, true);
+    Ok((
+        ok_json(json!({
+            "templateArn": arn,
+            "templateName": name,
+            "defaultVersionId": 1,
+        })),
+        true,
+    ))
+}
+
+fn create_provisioning_template_version(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    query: &[(String, String)],
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("templateName").cloned().unwrap_or_default();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(template) = data.get_resource("provisioning-templates", &name).cloned() else {
+        return Err(super::engine::not_found(meta, &name));
+    };
+    let arn = template
+        .get("templateArn")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| mint_arn(ctx, "provisioning-templates", &name));
+    let template_body = body_str(body, "templateBody").unwrap_or("").to_string();
+    let vid = next_provisioning_version_id(data, &name);
+    let set_as_default = query_get(query, "setAsDefault") == Some("true");
+    if set_as_default {
+        clear_default_provisioning_versions(data, &name);
+        if let Some(rec) = data
+            .resources
+            .get_mut("provisioning-templates")
+            .and_then(|m| m.get_mut(&name))
+        {
+            if let Some(o) = rec.as_object_mut() {
+                o.insert("defaultVersionId".to_string(), Value::from(vid));
+            }
+        }
+    }
+    store_provisioning_version(data, &name, vid, &template_body, set_as_default);
+    Ok((
+        ok_json(json!({
+            "templateArn": arn,
+            "templateName": name,
+            "versionId": vid,
+            "isDefaultVersion": set_as_default,
+        })),
+        true,
+    ))
+}
+
+fn describe_provisioning_template_version(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("templateName").cloned().unwrap_or_default();
+    let vid = labels.get("versionId").cloned().unwrap_or_default();
+    let g = svc.state.read();
+    match g
+        .get(&ctx.account)
+        .and_then(|d| d.get_resource("provisioning-template-versions", &format!("{name}/{vid}")))
+    {
+        Some(rec) => Ok((ok_json(super::build_output(meta, rec)), false)),
+        None => Err(super::engine::not_found(meta, &vid)),
+    }
+}
+
+fn list_provisioning_template_versions(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("templateName").cloned().unwrap_or_default();
+    let g = svc.state.read();
+    let data = g.get(&ctx.account);
+    if data
+        .and_then(|d| d.get_resource("provisioning-templates", &name))
+        .is_none()
+    {
+        return Err(super::engine::not_found(meta, &name));
+    }
+    let prefix = format!("{name}/");
+    let mut versions = Vec::new();
+    if let Some(m) = data.and_then(|d| d.resources.get("provisioning-template-versions")) {
+        for (k, rec) in m {
+            if k.starts_with(&prefix) {
+                versions.push(super::build_element(meta, rec));
+            }
+        }
+    }
+    Ok((ok_json(json!({ "versions": versions })), false))
+}
+
+fn create_provisioning_claim(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = labels.get("templateName").cloned().unwrap_or_default();
+    {
+        let g = svc.state.read();
+        if g.get(&ctx.account)
+            .and_then(|d| d.get_resource("provisioning-templates", &name))
+            .is_none()
+        {
+            return Err(super::engine::not_found(meta, &name));
+        }
+    }
+    let seq = { svc.state.write().get_or_create(&ctx.account).next_seq() };
+    let cert_id = mint_hex64(&format!("{}:claim:{name}:{seq}", ctx.account));
+    // The claim's certificate is a real, persisted (temporary) certificate.
+    store_certificate(svc, ctx, "certificates", &cert_id, true);
+    let expiration = {
+        let millis = chrono::Utc::now().timestamp_millis() + 3_600_000;
+        Value::from(millis as f64 / 1000.0)
+    };
+    Ok((
+        ok_json(json!({
+            "certificateId": cert_id,
+            "certificatePem": placeholder_pem("CERTIFICATE", &cert_id),
+            "keyPair": key_pair(&cert_id),
+            "expiration": expiration,
+        })),
+        true,
+    ))
+}
+
+// ---------- certificate transfer + thing registration ----------
+
+fn transfer_certificate(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    query: &[(String, String)],
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let cert_id = labels.get("certificateId").cloned().unwrap_or_default();
+    let target = query_get(query, "targetAwsAccount")
+        .unwrap_or("")
+        .to_string();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(mut rec) = data.get_resource("certificates", &cert_id).cloned() else {
+        return Err(super::engine::not_found(meta, &cert_id));
+    };
+    let transferred_arn = format!("arn:aws:iot:{}:{}:cert/{}", ctx.region, target, cert_id);
+    if let Some(o) = rec.as_object_mut() {
+        o.insert(
+            "status".to_string(),
+            Value::String("PENDING_TRANSFER".to_string()),
+        );
+        o.insert("transferredTo".to_string(), Value::String(target));
+        if let Some(m) = body.get("transferMessage") {
+            o.insert("transferMessage".to_string(), m.clone());
+        }
+    }
+    data.put_resource("certificates", &cert_id, rec);
+    Ok((
+        ok_json(json!({ "transferredCertificateArn": transferred_arn })),
+        true,
+    ))
+}
+
+/// RegisterThing (fleet provisioning): mint and persist a real certificate and
+/// thing, returning the certificate PEM and the map of provisioned resource
+/// ARNs (`resourceArns`).
+fn register_thing(svc: &IotService, ctx: &Ctx) -> (AwsResponse, bool) {
+    let seq = { svc.state.write().get_or_create(&ctx.account).next_seq() };
+    let thing_name = format!("provisioned-thing-{seq}");
+    let cert_id = mint_hex64(&format!("{}:register:{seq}", ctx.account));
+    let cert_arn = store_certificate(svc, ctx, "certificates", &cert_id, true);
+    let thing_arn = mint_arn(ctx, "things", &thing_name);
+    let thing_id = super::mint_uuid(&format!("{}:things:{thing_name}", ctx.account));
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.put_resource(
+            "things",
+            &thing_name,
+            json!({
+                "thingName": thing_name,
+                "thingArn": thing_arn.clone(),
+                "thingId": thing_id,
+            }),
+        );
+    }
+    (
+        ok_json(json!({
+            "certificatePem": placeholder_pem("CERTIFICATE", &cert_id),
+            "resourceArns": {
+                "thing": thing_arn,
+                "certificate": cert_arn,
+            },
+        })),
+        true,
+    )
+}
+
+// ---------- long-running tasks ----------
+
+/// Start a long-running task. The taskId is either the client-supplied URI
+/// label or, when the operation mints it, a deterministic id; a task record is
+/// persisted under the operation's resource type so the matching Describe reads
+/// back.
+fn start_task(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let rtype = super::resource_type(meta);
+    let task_id = match labels.get("taskId") {
+        Some(id) => id.clone(),
+        None => {
+            let seq = { svc.state.write().get_or_create(&ctx.account).next_seq() };
+            super::mint_uuid(&format!("{}:{rtype}:{seq}", ctx.account))
+        }
+    };
+    let mut rec = body.clone();
+    rec.insert("taskId".to_string(), Value::String(task_id.clone()));
+    rec.entry("status")
+        .or_insert_with(|| Value::String("IN_PROGRESS".to_string()));
+    rec.entry("taskStatus")
+        .or_insert_with(|| Value::String("IN_PROGRESS".to_string()));
+    rec.insert("creationDate".to_string(), super::now_epoch());
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.put_resource(&rtype, &task_id, Value::Object(rec));
+    }
+    (ok_json(json!({ "taskId": task_id })), true)
+}
+
+// ---------- principal/thing/group inversions ----------
+
+/// The suffixes of every `prefix<a>` relation key whose value set contains
+/// `target` — i.e. the inverse of the stored edges.
+fn inverse_relation(data: Option<&IotData>, prefix: &str, target: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(d) = data {
+        for (key, values) in &d.relations {
+            if let Some(a) = key.strip_prefix(prefix) {
+                if values.iter().any(|v| v == target) {
+                    out.push(a.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+fn list_principal_things(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    headers: &HeaderMap,
+    v2: bool,
+) -> (AwsResponse, bool) {
+    let principal = header_principal(meta, headers).unwrap_or("").to_string();
+    let g = svc.state.read();
+    let things = inverse_relation(g.get(&ctx.account), "thing-principals:", &principal);
+    if v2 {
+        let objs: Vec<Value> = things
+            .into_iter()
+            .map(|t| json!({ "thingName": t }))
+            .collect();
+        (ok_json(json!({ "principalThingObjects": objs })), false)
+    } else {
+        (ok_json(json!({ "things": things })), false)
+    }
+}
+
+fn list_thing_groups_for_thing(
+    svc: &IotService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let thing = lbl(labels, "thingName").unwrap_or("").to_string();
+    let g = svc.state.read();
+    let groups = inverse_relation(g.get(&ctx.account), "group-things:", &thing);
+    let objs: Vec<Value> = groups
+        .into_iter()
+        .map(|grp| {
+            let arn = mint_arn(ctx, "thing-groups", &grp);
+            json!({ "groupName": grp, "groupArn": arn })
+        })
+        .collect();
+    (ok_json(json!({ "thingGroups": objs })), false)
 }
