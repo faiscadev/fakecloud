@@ -1722,3 +1722,44 @@ async fn logs_syslog_configurations() {
     let (_, list) = logs_json(&http, ep, "ListSyslogConfigurations", serde_json::json!({})).await;
     assert!(list["syslogConfigurations"].as_array().unwrap().is_empty());
 }
+
+#[test_action("logs", "PutStorageTierPolicy", checksum = "e4c3887b")]
+#[test_action("logs", "GetStorageTierPolicy", checksum = "5574f61e")]
+#[tokio::test]
+async fn logs_storage_tier_policy() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let ep = server.endpoint();
+
+    // Default before any policy is set is STANDARD.
+    let (status, get) = logs_json(&http, ep, "GetStorageTierPolicy", serde_json::json!({})).await;
+    assert!(status.is_success(), "GetStorageTierPolicy failed: {status}");
+    assert_eq!(get["storageTier"], "STANDARD");
+
+    // Set INTELLIGENT_TIERING and read it back.
+    let (status, put) = logs_json(
+        &http,
+        ep,
+        "PutStorageTierPolicy",
+        serde_json::json!({ "storageTier": "INTELLIGENT_TIERING" }),
+    )
+    .await;
+    assert!(status.is_success(), "PutStorageTierPolicy failed: {status}");
+    assert_eq!(put["storageTier"], "INTELLIGENT_TIERING");
+    assert!(put["lastUpdatedTime"].as_i64().is_some());
+
+    let (status, get) = logs_json(&http, ep, "GetStorageTierPolicy", serde_json::json!({})).await;
+    assert!(status.is_success(), "GetStorageTierPolicy failed: {status}");
+    assert_eq!(get["storageTier"], "INTELLIGENT_TIERING");
+    assert!(get["lastUpdatedTime"].as_i64().is_some());
+
+    // Invalid tier rejected.
+    let (status, _) = logs_json(
+        &http,
+        ep,
+        "PutStorageTierPolicy",
+        serde_json::json!({ "storageTier": "BOGUS" }),
+    )
+    .await;
+    assert_eq!(status.as_u16(), 400);
+}

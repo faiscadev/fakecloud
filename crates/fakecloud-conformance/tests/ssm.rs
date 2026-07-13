@@ -172,9 +172,9 @@ async fn ssm_get_parameter_history() {
 
 // -- Tags --
 
-#[test_action("ssm", "AddTagsToResource", checksum = "0beb4b05")]
-#[test_action("ssm", "ListTagsForResource", checksum = "9580cae3")]
-#[test_action("ssm", "RemoveTagsFromResource", checksum = "6dd59ebb")]
+#[test_action("ssm", "AddTagsToResource", checksum = "4069134f")]
+#[test_action("ssm", "ListTagsForResource", checksum = "bebed2f8")]
+#[test_action("ssm", "RemoveTagsFromResource", checksum = "782eda51")]
 #[tokio::test]
 async fn ssm_tags() {
     let server = TestServer::start().await;
@@ -682,7 +682,7 @@ async fn ssm_patch_groups() {
 #[test_action("ssm", "CreateAssociation", checksum = "507ad141")]
 #[test_action("ssm", "DescribeAssociation", checksum = "2ffc2f3f")]
 #[test_action("ssm", "UpdateAssociation", checksum = "2febcaea")]
-#[test_action("ssm", "ListAssociations", checksum = "373868d2")]
+#[test_action("ssm", "ListAssociations", checksum = "5c740b80")]
 #[test_action("ssm", "ListAssociationVersions", checksum = "6d4e7407")]
 #[test_action("ssm", "DeleteAssociation", checksum = "89e9a7ab")]
 #[tokio::test]
@@ -2129,7 +2129,7 @@ async fn ssm_deregister_managed_instance() {
         .unwrap();
 }
 
-#[test_action("ssm", "DescribeInstanceInformation", checksum = "2b439b42")]
+#[test_action("ssm", "DescribeInstanceInformation", checksum = "9026be64")]
 #[tokio::test]
 async fn ssm_describe_instance_information() {
     let server = TestServer::start().await;
@@ -2139,7 +2139,7 @@ async fn ssm_describe_instance_information() {
     assert!(resp.instance_information_list().is_empty());
 }
 
-#[test_action("ssm", "DescribeInstanceProperties", checksum = "0a3f70ed")]
+#[test_action("ssm", "DescribeInstanceProperties", checksum = "527689fe")]
 #[tokio::test]
 async fn ssm_describe_instance_properties() {
     let server = TestServer::start().await;
@@ -2167,7 +2167,7 @@ async fn ssm_update_managed_instance_role() {
 
 // -- Other --
 
-#[test_action("ssm", "ListNodes", checksum = "11c898a4")]
+#[test_action("ssm", "ListNodes", checksum = "d0693166")]
 #[tokio::test]
 async fn ssm_list_nodes() {
     let server = TestServer::start().await;
@@ -2177,7 +2177,7 @@ async fn ssm_list_nodes() {
     assert!(resp.nodes().is_empty());
 }
 
-#[test_action("ssm", "ListNodesSummary", checksum = "5f0509db")]
+#[test_action("ssm", "ListNodesSummary", checksum = "9066f8ae")]
 #[tokio::test]
 async fn ssm_list_nodes_summary() {
     let server = TestServer::start().await;
@@ -2227,4 +2227,135 @@ async fn ssm_describe_instance_associations_status() {
         .await
         .unwrap();
     assert!(resp.instance_association_status_infos().is_empty());
+}
+
+/// Drive an SSM operation over raw awsJson1.1 (the pinned SDK predates the
+/// CloudConnector APIs, so they cannot go through the typed client).
+async fn ssm_raw(
+    server: &TestServer,
+    op: &str,
+    body: serde_json::Value,
+) -> (u16, serde_json::Value) {
+    let resp = reqwest::Client::new()
+        .post(format!("{}/", server.endpoint()))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", format!("AmazonSSM.{op}"))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/ssm/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(body.to_string())
+        .send()
+        .await
+        .unwrap();
+    let status = resp.status().as_u16();
+    let json = resp
+        .json::<serde_json::Value>()
+        .await
+        .unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[test_action("ssm", "CreateCloudConnector", checksum = "86539242")]
+#[test_action("ssm", "GetCloudConnector", checksum = "21bfe237")]
+#[test_action("ssm", "ListCloudConnectors", checksum = "126ce25d")]
+#[test_action("ssm", "UpdateCloudConnector", checksum = "77d097a2")]
+#[test_action("ssm", "ValidateCloudConnector", checksum = "41b481fe")]
+#[test_action("ssm", "DeleteCloudConnector", checksum = "300b1cf1")]
+#[tokio::test]
+async fn ssm_cloud_connector_lifecycle() {
+    let server = TestServer::start().await;
+
+    let config = serde_json::json!({
+        "AzureConfiguration": {
+            "TenantId": "11111111-1111-1111-1111-111111111111",
+            "ApplicationId": "22222222-2222-2222-2222-222222222222"
+        }
+    });
+
+    // Create.
+    let (status, create) = ssm_raw(
+        &server,
+        "CreateCloudConnector",
+        serde_json::json!({
+            "DisplayName": "conf-connector",
+            "RoleArn": "arn:aws:iam::000000000000:role/ssm-cloud-connector",
+            "Description": "conformance connector",
+            "Configuration": config,
+            "ConfigConnectorArn": "arn:aws:config:us-east-1:000000000000:connector/azure-1"
+        }),
+    )
+    .await;
+    assert!(
+        status < 300,
+        "CreateCloudConnector failed: {status} {create}"
+    );
+    let id = create["CloudConnectorId"].as_str().unwrap().to_string();
+    assert_eq!(id.len(), 36);
+
+    // Get.
+    let (status, get) = ssm_raw(
+        &server,
+        "GetCloudConnector",
+        serde_json::json!({ "CloudConnectorId": id }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(get["DisplayName"], "conf-connector");
+    assert_eq!(get["Description"], "conformance connector");
+    assert!(get["CloudConnectorArn"]
+        .as_str()
+        .unwrap()
+        .contains(":cloud-connector/"));
+
+    // List.
+    let (status, list) = ssm_raw(&server, "ListCloudConnectors", serde_json::json!({})).await;
+    assert_eq!(status, 200);
+    let arr = list["CloudConnectors"].as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["CloudConnectorId"], id);
+
+    // Update.
+    let (status, upd) = ssm_raw(
+        &server,
+        "UpdateCloudConnector",
+        serde_json::json!({ "CloudConnectorId": id, "DisplayName": "renamed" }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(upd["CloudConnectorId"], id);
+    let (_, get2) = ssm_raw(
+        &server,
+        "GetCloudConnector",
+        serde_json::json!({ "CloudConnectorId": id }),
+    )
+    .await;
+    assert_eq!(get2["DisplayName"], "renamed");
+
+    // Validate.
+    let (status, val) = ssm_raw(
+        &server,
+        "ValidateCloudConnector",
+        serde_json::json!({ "CloudConnectorId": id }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert!(!val["ValidationFindings"].as_array().unwrap().is_empty());
+
+    // Delete, then Get 404-equivalent.
+    let (status, del) = ssm_raw(
+        &server,
+        "DeleteCloudConnector",
+        serde_json::json!({ "CloudConnectorId": id }),
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(del["CloudConnectorId"], id);
+    let (status, _) = ssm_raw(
+        &server,
+        "GetCloudConnector",
+        serde_json::json!({ "CloudConnectorId": id }),
+    )
+    .await;
+    assert_eq!(status, 400);
 }

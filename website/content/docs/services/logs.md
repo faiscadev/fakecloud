@@ -4,7 +4,7 @@ description = "Log groups, streams, filtering, subscriptions, queries, anomaly d
 weight = 11
 +++
 
-fakecloud implements **113 of 113** CloudWatch Logs operations at 100% Smithy conformance.
+fakecloud implements **115 of 115** CloudWatch Logs operations at 100% Smithy conformance.
 
 ## Supported features
 

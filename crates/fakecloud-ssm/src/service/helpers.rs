@@ -85,6 +85,9 @@ pub(crate) fn is_read_only_action(action: &str) -> bool {
             | "DescribeAvailablePatches"
             | "GetDefaultPatchBaseline"
             | "GetServiceSetting"
+            | "GetCloudConnector"
+            | "ListCloudConnectors"
+            | "ValidateCloudConnector"
     )
 }
 

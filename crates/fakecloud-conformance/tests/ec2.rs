@@ -2414,7 +2414,7 @@ async fn run_one(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "RunInstances", checksum = "b21a67b4")]
+#[test_action("ec2", "RunInstances", checksum = "9fa46cec")]
 #[tokio::test]
 async fn ec2_run_instances() {
     let s = TestServer::start().await;
@@ -2433,7 +2433,7 @@ async fn ec2_run_instances() {
     assert!(r.reservation_id().unwrap().starts_with("r-"));
 }
 
-#[test_action("ec2", "DescribeInstances", checksum = "94aa1152")]
+#[test_action("ec2", "DescribeInstances", checksum = "10e10375")]
 #[tokio::test]
 async fn ec2_describe_instances() {
     let s = TestServer::start().await;
@@ -2559,7 +2559,7 @@ async fn ec2_describe_instance_status() {
         .any(|x| x.instance_id() == Some(id.as_str())));
 }
 
-#[test_action("ec2", "DescribeInstanceTypes", checksum = "a9635bcd")]
+#[test_action("ec2", "DescribeInstanceTypes", checksum = "b10abc8e")]
 #[tokio::test]
 async fn ec2_describe_instance_types() {
     let s = TestServer::start().await;
@@ -3528,7 +3528,7 @@ async fn ec2_register_image() {
     assert!(r.image_id().unwrap().starts_with("ami-"));
 }
 
-#[test_action("ec2", "DescribeImages", checksum = "b00eefc4")]
+#[test_action("ec2", "DescribeImages", checksum = "a21445a1")]
 #[tokio::test]
 async fn ec2_describe_images() {
     let s = TestServer::start().await;
@@ -4594,7 +4594,7 @@ async fn make_lt(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateLaunchTemplate", checksum = "d10d065a")]
+#[test_action("ec2", "CreateLaunchTemplate", checksum = "7ad87060")]
 #[tokio::test]
 async fn ec2_create_launch_template() {
     let s = TestServer::start().await;
@@ -4618,7 +4618,7 @@ async fn ec2_create_launch_template() {
         .starts_with("lt-"));
 }
 
-#[test_action("ec2", "CreateLaunchTemplateVersion", checksum = "1782f934")]
+#[test_action("ec2", "CreateLaunchTemplateVersion", checksum = "2c5fa6be")]
 #[tokio::test]
 async fn ec2_create_launch_template_version() {
     let s = TestServer::start().await;
@@ -4656,7 +4656,7 @@ async fn ec2_describe_launch_templates() {
     assert_eq!(r.launch_templates().len(), 1);
 }
 
-#[test_action("ec2", "DescribeLaunchTemplateVersions", checksum = "43bf8e26")]
+#[test_action("ec2", "DescribeLaunchTemplateVersions", checksum = "4602b9a4")]
 #[tokio::test]
 async fn ec2_describe_launch_template_versions() {
     let s = TestServer::start().await;
@@ -4705,7 +4705,7 @@ async fn ec2_delete_launch_template_versions() {
         .unwrap();
 }
 
-#[test_action("ec2", "GetLaunchTemplateData", checksum = "8427323a")]
+#[test_action("ec2", "GetLaunchTemplateData", checksum = "01b045c5")]
 #[tokio::test]
 async fn ec2_get_launch_template_data() {
     let s = TestServer::start().await;
@@ -4740,7 +4740,7 @@ async fn ec2_modify_launch_template() {
 
 // ---- spot instance requests ----
 
-#[test_action("ec2", "RequestSpotInstances", checksum = "67f9936b")]
+#[test_action("ec2", "RequestSpotInstances", checksum = "f4328b64")]
 #[tokio::test]
 async fn ec2_request_spot_instances() {
     let s = TestServer::start().await;
@@ -4755,7 +4755,7 @@ async fn ec2_request_spot_instances() {
     assert!(!r.spot_instance_requests().is_empty());
 }
 
-#[test_action("ec2", "DescribeSpotInstanceRequests", checksum = "d76b6440")]
+#[test_action("ec2", "DescribeSpotInstanceRequests", checksum = "512b8a16")]
 #[tokio::test]
 async fn ec2_describe_spot_instance_requests() {
     let s = TestServer::start().await;
@@ -4811,7 +4811,7 @@ async fn make_sfr(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "RequestSpotFleet", checksum = "ef198fa7")]
+#[test_action("ec2", "RequestSpotFleet", checksum = "9d1cc052")]
 #[tokio::test]
 async fn ec2_request_spot_fleet() {
     let s = TestServer::start().await;
@@ -4820,7 +4820,7 @@ async fn ec2_request_spot_fleet() {
     assert!(id.starts_with("sfr-"));
 }
 
-#[test_action("ec2", "DescribeSpotFleetRequests", checksum = "c233fdb4")]
+#[test_action("ec2", "DescribeSpotFleetRequests", checksum = "a8306e32")]
 #[tokio::test]
 async fn ec2_describe_spot_fleet_requests() {
     let s = TestServer::start().await;
@@ -4846,7 +4846,7 @@ async fn ec2_cancel_spot_fleet_requests() {
     assert!(!r.successful_fleet_requests().is_empty());
 }
 
-#[test_action("ec2", "ModifySpotFleetRequest", checksum = "2e883c1b")]
+#[test_action("ec2", "ModifySpotFleetRequest", checksum = "5aec9ddf")]
 #[tokio::test]
 async fn ec2_modify_spot_fleet_request() {
     let s = TestServer::start().await;
@@ -4891,7 +4891,7 @@ async fn ec2_describe_spot_fleet_request_history() {
     assert_eq!(r.spot_fleet_request_id(), Some(id.as_str()));
 }
 
-#[test_action("ec2", "DescribeSpotPriceHistory", checksum = "4da11bc7")]
+#[test_action("ec2", "DescribeSpotPriceHistory", checksum = "2b0d4581")]
 #[tokio::test]
 async fn ec2_describe_spot_price_history() {
     let s = TestServer::start().await;
@@ -4981,7 +4981,7 @@ async fn make_fleet(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateFleet", checksum = "2e02f576")]
+#[test_action("ec2", "CreateFleet", checksum = "072f9378")]
 #[tokio::test]
 async fn ec2_create_fleet() {
     let s = TestServer::start().await;
@@ -4990,7 +4990,7 @@ async fn ec2_create_fleet() {
     assert!(id.starts_with("fleet-"));
 }
 
-#[test_action("ec2", "DescribeFleets", checksum = "e8367cfd")]
+#[test_action("ec2", "DescribeFleets", checksum = "d3e933cd")]
 #[tokio::test]
 async fn ec2_describe_fleets() {
     let s = TestServer::start().await;
@@ -5016,7 +5016,7 @@ async fn ec2_delete_fleets() {
     assert!(!r.successful_fleet_deletions().is_empty());
 }
 
-#[test_action("ec2", "ModifyFleet", checksum = "15803ab1")]
+#[test_action("ec2", "ModifyFleet", checksum = "cdc426e2")]
 #[tokio::test]
 async fn ec2_modify_fleet() {
     let s = TestServer::start().await;
@@ -5156,7 +5156,7 @@ async fn ec2_get_capacity_reservation_usage() {
     assert_eq!(r.capacity_reservation_id(), Some(id.as_str()));
 }
 
-#[test_action("ec2", "CreateCapacityReservationFleet", checksum = "a33a6641")]
+#[test_action("ec2", "CreateCapacityReservationFleet", checksum = "fcd785ab")]
 #[tokio::test]
 async fn ec2_create_capacity_reservation_fleet() {
     let s = TestServer::start().await;
@@ -5178,7 +5178,7 @@ async fn ec2_create_capacity_reservation_fleet() {
         .starts_with("crf-"));
 }
 
-#[test_action("ec2", "DescribeCapacityReservationFleets", checksum = "7e40b03a")]
+#[test_action("ec2", "DescribeCapacityReservationFleets", checksum = "919ca7d1")]
 #[tokio::test]
 async fn ec2_describe_capacity_reservation_fleets() {
     let s = TestServer::start().await;
@@ -5523,7 +5523,7 @@ async fn ec2_update_interruptible_capacity_reservation_allocation() {
 
 // ---- reserved instances ----
 
-#[test_action("ec2", "DescribeReservedInstances", checksum = "e0393329")]
+#[test_action("ec2", "DescribeReservedInstances", checksum = "03fe5a71")]
 #[tokio::test]
 async fn ec2_describe_reserved_instances() {
     let s = TestServer::start().await;
@@ -5531,7 +5531,7 @@ async fn ec2_describe_reserved_instances() {
     c.describe_reserved_instances().send().await.unwrap();
 }
 
-#[test_action("ec2", "DescribeReservedInstancesOfferings", checksum = "46de9215")]
+#[test_action("ec2", "DescribeReservedInstancesOfferings", checksum = "6a05d23e")]
 #[tokio::test]
 async fn ec2_describe_reserved_instances_offerings() {
     let s = TestServer::start().await;
@@ -5606,7 +5606,7 @@ async fn ec2_cancel_reserved_instances_listing() {
     assert!(!r.reserved_instances_listings().is_empty());
 }
 
-#[test_action("ec2", "DescribeReservedInstancesModifications", checksum = "585ddb52")]
+#[test_action("ec2", "DescribeReservedInstancesModifications", checksum = "5d3db72e")]
 #[tokio::test]
 async fn ec2_describe_reserved_instances_modifications() {
     let s = TestServer::start().await;
@@ -5617,7 +5617,7 @@ async fn ec2_describe_reserved_instances_modifications() {
         .unwrap();
 }
 
-#[test_action("ec2", "ModifyReservedInstances", checksum = "7df70278")]
+#[test_action("ec2", "ModifyReservedInstances", checksum = "aaa85497")]
 #[tokio::test]
 async fn ec2_modify_reserved_instances() {
     let s = TestServer::start().await;
@@ -10695,7 +10695,7 @@ async fn ec2_create_public_ipv4_pool() {
     c.create_public_ipv4_pool().send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateReplaceRootVolumeTask", checksum = "b6653727")]
+#[test_action("ec2", "CreateReplaceRootVolumeTask", checksum = "3d04fe73")]
 #[tokio::test]
 async fn ec2_create_replace_root_volume_task() {
     let s = TestServer::start().await;
@@ -11277,7 +11277,7 @@ async fn ec2_describe_instance_event_windows() {
     c.describe_instance_event_windows().send().await.unwrap();
 }
 
-#[test_action("ec2", "DescribeInstanceImageMetadata", checksum = "9e1e5cc9")]
+#[test_action("ec2", "DescribeInstanceImageMetadata", checksum = "80be2b11")]
 #[tokio::test]
 async fn ec2_describe_instance_image_metadata() {
     let s = TestServer::start().await;
@@ -11304,7 +11304,7 @@ async fn ec2_describe_instance_sql_ha_states() {
     c.describe_instance_sql_ha_states().send().await.unwrap();
 }
 
-#[test_action("ec2", "DescribeInstanceTypeOfferings", checksum = "6b166aa7")]
+#[test_action("ec2", "DescribeInstanceTypeOfferings", checksum = "57bac9b7")]
 #[tokio::test]
 async fn ec2_describe_instance_type_offerings() {
     let s = TestServer::start().await;
@@ -12065,7 +12065,7 @@ async fn ec2_import_image() {
     c.import_image().send().await.unwrap();
 }
 
-#[test_action("ec2", "ImportInstance", checksum = "ed6b6f7b")]
+#[test_action("ec2", "ImportInstance", checksum = "b2a73581")]
 #[tokio::test]
 async fn ec2_import_instance() {
     let s = TestServer::start().await;

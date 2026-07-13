@@ -1204,3 +1204,118 @@ async fn unknown_route_is_validation_not_routing_gap() {
     assert_eq!(status, 400);
     assert_eq!(code, "ValidationException");
 }
+
+// ---------------------------------------------------------------------------
+// Application migrations (2021 API only)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn migration_lifecycle_roundtrips() {
+    let svc = service();
+
+    // StartMigration requires applicationId + migrationOptions{source,workspace}.
+    let start = call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/app-migrations"),
+            json!({
+                "applicationId": "app-123",
+                "migrationOptions": {
+                    "source": {"datasourceArn": "arn:aws:es:us-east-1:000000000000:domain/src"},
+                    "workspace": {"createWorkspace": true, "name": "ws"}
+                }
+            }),
+        ),
+    )
+    .await;
+    let sv = json_of(&start);
+    let mig_id = sv["migrationId"].as_str().unwrap().to_string();
+    assert_eq!(sv["status"], "PENDING");
+
+    // GetMigration transitions it to SUCCEEDED and reports counts.
+    let get = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/app-migrations/{mig_id}"),
+            json!({}),
+        ),
+    )
+    .await;
+    let gv = json_of(&get);
+    assert_eq!(gv["migrationId"], mig_id);
+    assert_eq!(gv["applicationId"], "app-123");
+    assert_eq!(gv["status"], "SUCCEEDED");
+    assert_eq!(gv["exportedCount"], 1);
+    assert_eq!(gv["importedCount"], 1);
+
+    // ListMigrations filters by applicationId.
+    let list = call(
+        &svc,
+        with_query(
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/app-migrations"),
+                json!({}),
+            ),
+            "applicationId",
+            "app-123",
+        ),
+    )
+    .await;
+    let lv = json_of(&list);
+    let migs = lv["migrations"].as_array().unwrap();
+    assert_eq!(migs.len(), 1);
+    assert_eq!(migs[0]["migrationId"], mig_id);
+
+    // A different applicationId yields no results.
+    let empty = call(
+        &svc,
+        with_query(
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/app-migrations"),
+                json!({}),
+            ),
+            "applicationId",
+            "app-other",
+        ),
+    )
+    .await;
+    assert!(json_of(&empty)["migrations"].as_array().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn start_migration_requires_source_and_workspace() {
+    let svc = service();
+    // Missing migrationOptions entirely.
+    let (status, code) = call_err(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/app-migrations"),
+            json!({"applicationId": "app-1"}),
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "ValidationException");
+}
+
+#[tokio::test]
+async fn get_migration_unknown_id_is_not_found() {
+    let svc = service();
+    let (status, code) = call_err(
+        &svc,
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/app-migrations/does-not-exist"),
+            json!({}),
+        ),
+    )
+    .await;
+    // OpenSearch surfaces ResourceNotFoundException as HTTP 409.
+    assert_eq!(status, 409);
+    assert_eq!(code, "ResourceNotFoundException");
+}

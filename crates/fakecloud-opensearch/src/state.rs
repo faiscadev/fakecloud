@@ -132,6 +132,23 @@ pub struct Application {
     pub capabilities: BTreeMap<String, Value>,
 }
 
+/// An application migration (2021 API only), account-scoped.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Migration {
+    pub migration_id: String,
+    pub application_id: String,
+    pub status: String,
+    /// The `MigrationSource` JSON (`{ "datasourceArn": "..." }`).
+    pub source: Value,
+    pub exported_count: i64,
+    pub imported_count: i64,
+    /// Optional `MigrationError` JSON (`{ "code": "...", "message": "..." }`).
+    #[serde(default)]
+    pub error: Option<Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 /// A direct-query data source (2021 API), account-scoped.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DirectQueryDataSource {
@@ -160,6 +177,9 @@ pub struct OpenSearchState {
     pub applications: BTreeMap<String, Application>,
     #[serde(default)]
     pub direct_query_data_sources: BTreeMap<String, DirectQueryDataSource>,
+    /// Application migrations keyed by migration id.
+    #[serde(default)]
+    pub migrations: BTreeMap<String, Migration>,
     /// Purchased reserved instances keyed by reservation id.
     #[serde(default)]
     pub reserved_instances: BTreeMap<String, Value>,

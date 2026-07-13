@@ -85,6 +85,13 @@ pub struct LogsState {
     /// PutSyslogConfiguration / ListSyslogConfigurations / DeleteSyslogConfiguration.
     #[serde(default)]
     pub syslog_configurations: BTreeMap<String, SyslogConfiguration>,
+    /// Account-level storage-tier policy set via PutStorageTierPolicy and
+    /// read back through GetStorageTierPolicy. `STANDARD` or `INTELLIGENT_TIERING`.
+    #[serde(default)]
+    pub storage_tier: Option<String>,
+    /// Epoch-millis timestamp of the last PutStorageTierPolicy call.
+    #[serde(default)]
+    pub storage_tier_last_updated: Option<i64>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -135,6 +142,8 @@ impl LogsState {
             export_storage: BTreeMap::new(),
             anomalies: BTreeMap::new(),
             syslog_configurations: BTreeMap::new(),
+            storage_tier: None,
+            storage_tier_last_updated: None,
         }
     }
 
@@ -160,6 +169,8 @@ impl LogsState {
         self.export_storage.clear();
         self.anomalies.clear();
         self.syslog_configurations.clear();
+        self.storage_tier = None;
+        self.storage_tier_last_updated = None;
     }
 }
 

@@ -20,8 +20,8 @@ fn make_python_zip() -> Vec<u8> {
 // Function lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "CreateFunction", checksum = "708369b0")]
-#[test_action("lambda", "GetFunction", checksum = "5f44f3b7")]
+#[test_action("lambda", "CreateFunction", checksum = "ea9cdf5e")]
+#[test_action("lambda", "GetFunction", checksum = "41a0274e")]
 #[test_action("lambda", "DeleteFunction", checksum = "22b50c89")]
 #[tokio::test]
 async fn lambda_create_get_delete_function() {
@@ -72,7 +72,7 @@ async fn lambda_create_get_delete_function() {
     assert!(result.is_err());
 }
 
-#[test_action("lambda", "ListFunctions", checksum = "00e5d169")]
+#[test_action("lambda", "ListFunctions", checksum = "b1ae8ca8")]
 #[tokio::test]
 async fn lambda_list_functions() {
     let server = TestServer::start().await;
@@ -148,7 +148,7 @@ async fn lambda_invoke() {
 // PublishVersion
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "PublishVersion", checksum = "c98c71b6")]
+#[test_action("lambda", "PublishVersion", checksum = "17053ae6")]
 #[tokio::test]
 async fn lambda_publish_version() {
     let server = TestServer::start().await;
@@ -406,7 +406,7 @@ async fn lambda_alias_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "ListVersionsByFunction", checksum = "3654e09a")]
+#[test_action("lambda", "ListVersionsByFunction", checksum = "05e89b07")]
 #[tokio::test]
 async fn lambda_list_versions_by_function() {
     let server = TestServer::start().await;
@@ -420,9 +420,9 @@ async fn lambda_list_versions_by_function() {
         .unwrap();
 }
 
-#[test_action("lambda", "GetFunctionConfiguration", checksum = "4d62937b")]
-#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "3f7a88a0")]
-#[test_action("lambda", "UpdateFunctionCode", checksum = "db47265b")]
+#[test_action("lambda", "GetFunctionConfiguration", checksum = "c753d1bc")]
+#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "7111c43f")]
+#[test_action("lambda", "UpdateFunctionCode", checksum = "9850ef56")]
 #[tokio::test]
 async fn lambda_function_configuration_extras() {
     let server = TestServer::start().await;
@@ -907,11 +907,11 @@ async fn lambda_tag_resource_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "CreateCapacityProvider", checksum = "4a7d5f01")]
-#[test_action("lambda", "GetCapacityProvider", checksum = "63ccc56f")]
-#[test_action("lambda", "ListCapacityProviders", checksum = "cae7a785")]
-#[test_action("lambda", "UpdateCapacityProvider", checksum = "3ec3e35c")]
-#[test_action("lambda", "DeleteCapacityProvider", checksum = "5a43e158")]
+#[test_action("lambda", "CreateCapacityProvider", checksum = "b2feacd3")]
+#[test_action("lambda", "GetCapacityProvider", checksum = "5aa8e22d")]
+#[test_action("lambda", "ListCapacityProviders", checksum = "9edd6e29")]
+#[test_action("lambda", "UpdateCapacityProvider", checksum = "b4e9a9cc")]
+#[test_action("lambda", "DeleteCapacityProvider", checksum = "42c603ac")]
 #[test_action(
     "lambda",
     "ListFunctionVersionsByCapacityProvider",
@@ -973,14 +973,14 @@ async fn lambda_capacity_provider_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "GetDurableExecution", checksum = "99257851")]
-#[test_action("lambda", "GetDurableExecutionHistory", checksum = "9371fa69")]
-#[test_action("lambda", "GetDurableExecutionState", checksum = "467d4d29")]
-#[test_action("lambda", "CheckpointDurableExecution", checksum = "6fc282cb")]
-#[test_action("lambda", "StopDurableExecution", checksum = "dc468fea")]
-#[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "299e69a7")]
-#[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "a12a1a27")]
-#[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "638a3d2f")]
+#[test_action("lambda", "GetDurableExecution", checksum = "39fddd6c")]
+#[test_action("lambda", "GetDurableExecutionHistory", checksum = "79352114")]
+#[test_action("lambda", "GetDurableExecutionState", checksum = "38c14d0e")]
+#[test_action("lambda", "CheckpointDurableExecution", checksum = "a9768cf1")]
+#[test_action("lambda", "StopDurableExecution", checksum = "c1dacd9e")]
+#[test_action("lambda", "ListDurableExecutionsByFunction", checksum = "d4b6f4ca")]
+#[test_action("lambda", "SendDurableExecutionCallbackSuccess", checksum = "16e7c48e")]
+#[test_action("lambda", "SendDurableExecutionCallbackFailure", checksum = "9321bea7")]
 #[test_action(
     "lambda",
     "SendDurableExecutionCallbackHeartbeat",

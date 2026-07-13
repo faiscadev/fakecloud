@@ -240,9 +240,9 @@ async fn cloudwatch_dashboards() {
 // Anomaly detectors.
 // ---------------------------------------------------------------------------
 
-#[test_action("monitoring", "PutAnomalyDetector", checksum = "8b4d06a5")]
-#[test_action("monitoring", "DescribeAnomalyDetectors", checksum = "dcf18a0a")]
-#[test_action("monitoring", "DeleteAnomalyDetector", checksum = "3e029411")]
+#[test_action("monitoring", "PutAnomalyDetector", checksum = "f35e4e55")]
+#[test_action("monitoring", "DescribeAnomalyDetectors", checksum = "5cab739a")]
+#[test_action("monitoring", "DeleteAnomalyDetector", checksum = "ce6c5047")]
 #[tokio::test]
 async fn cloudwatch_anomaly_detectors() {
     let server = TestServer::start().await;

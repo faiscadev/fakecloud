@@ -635,6 +635,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateActivation`
 - `CreateAssociation`
 - `CreateAssociationBatch`
+- `CreateCloudConnector`
 - `CreateDocument`
 - `CreateMaintenanceWindow`
 - `CreateOpsItem`
@@ -643,6 +644,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateResourceDataSync`
 - `DeleteActivation`
 - `DeleteAssociation`
+- `DeleteCloudConnector`
 - `DeleteDocument`
 - `DeleteInventory`
 - `DeleteMaintenanceWindow`
@@ -694,6 +696,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetAccessToken`
 - `GetAutomationExecution`
 - `GetCalendarState`
+- `GetCloudConnector`
 - `GetCommandInvocation`
 - `GetConnectionStatus`
 - `GetDefaultPatchBaseline`
@@ -721,6 +724,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `LabelParameterVersion`
 - `ListAssociationVersions`
 - `ListAssociations`
+- `ListCloudConnectors`
 - `ListCommandInvocations`
 - `ListCommands`
 - `ListComplianceItems`
@@ -762,6 +766,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UnlabelParameterVersion`
 - `UpdateAssociation`
 - `UpdateAssociationStatus`
+- `UpdateCloudConnector`
 - `UpdateDocument`
 - `UpdateDocumentDefaultVersion`
 - `UpdateDocumentMetadata`
@@ -774,6 +779,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdatePatchBaseline`
 - `UpdateResourceDataSync`
 - `UpdateServiceSetting`
+- `ValidateCloudConnector`
 
 ## [Secrets Manager](@/docs/services/secretsmanager.md)
 
@@ -874,6 +880,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetQueryResults`
 - `GetScheduledQuery`
 - `GetScheduledQueryHistory`
+- `GetStorageTierPolicy`
 - `GetTransformer`
 - `ListAggregateLogGroupSummaries`
 - `ListAnomalies`
@@ -902,6 +909,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutQueryDefinition`
 - `PutResourcePolicy`
 - `PutRetentionPolicy`
+- `PutStorageTierPolicy`
 - `PutSubscriptionFilter`
 - `PutSyslogConfiguration`
 - `PutTransformer`
@@ -3981,6 +3989,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetDirectQueryDataSource`
 - `GetDomainMaintenanceStatus`
 - `GetIndex`
+- `GetMigration`
 - `GetPackageVersionHistory`
 - `GetUpgradeHistory`
 - `GetUpgradeStatus`
@@ -3994,6 +4003,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListDomainsForPackage`
 - `ListInsights`
 - `ListInstanceTypeDetails`
+- `ListMigrations`
 - `ListPackagesForDomain`
 - `ListScheduledActions`
 - `ListTags`
@@ -4009,6 +4019,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `RevokeVpcEndpointAccess`
 - `RollbackServiceSoftwareUpdate`
 - `StartDomainMaintenance`
+- `StartMigration`
 - `StartServiceSoftwareUpdate`
 - `UpdateApplication`
 - `UpdateDataSource`
@@ -6165,6 +6176,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteConfigurationAggregator`
 - `DeleteConfigurationRecorder`
 - `DeleteConformancePack`
+- `DeleteConnector`
 - `DeleteDeliveryChannel`
 - `DeleteEvaluationResults`
 - `DeleteOrganizationConfigRule`
@@ -6214,6 +6226,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetComplianceSummaryByResourceType`
 - `GetConformancePackComplianceDetails`
 - `GetConformancePackComplianceSummary`
+- `GetConnector`
 - `GetCustomRulePolicy`
 - `GetDiscoveredResourceCounts`
 - `GetOrganizationConfigRuleDetailedStatus`
@@ -6225,6 +6238,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListAggregateDiscoveredResources`
 - `ListConfigurationRecorders`
 - `ListConformancePackComplianceScores`
+- `ListConnectors`
 - `ListDiscoveredResources`
 - `ListResourceEvaluations`
 - `ListStoredQueries`
@@ -6234,6 +6248,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutConfigurationAggregator`
 - `PutConfigurationRecorder`
 - `PutConformancePack`
+- `PutConnector`
 - `PutDeliveryChannel`
 - `PutEvaluations`
 - `PutExternalEvaluation`
@@ -6245,6 +6260,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutRetentionConfiguration`
 - `PutServiceLinkedConfigurationRecorder`
 - `PutStoredQuery`
+- `PutThirdPartyServiceLinkedConfigurationRecorder`
 - `SelectAggregateResourceConfig`
 - `SelectResourceConfig`
 - `StartConfigRulesEvaluation`

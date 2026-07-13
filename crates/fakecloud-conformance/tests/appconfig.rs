@@ -46,7 +46,7 @@ use helpers::TestServer;
 #[test_action("appconfig", "StartDeployment", checksum = "1231ea3d")]
 #[test_action("appconfig", "StartExperimentRun", checksum = "ca99f601")]
 #[test_action("appconfig", "StopDeployment", checksum = "03cca4e1")]
-#[test_action("appconfig", "StopExperimentRun", checksum = "c28f8fd4")]
+#[test_action("appconfig", "StopExperimentRun", checksum = "e1d056cc")]
 #[test_action("appconfig", "TagResource", checksum = "30cdd61d")]
 #[test_action("appconfig", "UntagResource", checksum = "9a7e74fc")]
 #[test_action("appconfig", "UpdateAccountSettings", checksum = "2c6284b4")]

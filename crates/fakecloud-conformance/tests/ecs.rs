@@ -1735,7 +1735,7 @@ async fn ecs_continue_service_deployment_rollback_and_errors() {
     assert!(!resp.status().is_success());
 }
 
-#[test_action("ecs", "DescribeServiceRevisions", checksum = "ae62cb22")]
+#[test_action("ecs", "DescribeServiceRevisions", checksum = "bd30a612")]
 #[tokio::test]
 async fn ecs_describe_service_revisions() {
     let server = TestServer::start().await;
