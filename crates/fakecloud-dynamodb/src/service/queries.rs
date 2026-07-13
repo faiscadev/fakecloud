@@ -11,8 +11,8 @@ use super::{
     build_consumed_capacity, compare_attribute_values, evaluate_filter_expression,
     evaluate_key_condition, extract_key_for_schema, get_table, item_matches_key,
     parse_expression_attribute_names, parse_expression_attribute_values, parse_key_map,
-    project_item, require_str, return_consumed_mode, translate_legacy_conditions, DynamoDbService,
-    LegacyConditionRole,
+    project_item, require_str, resolve_attr_name, return_consumed_mode, split_on_and,
+    strip_outer_parens, translate_legacy_conditions, DynamoDbService, LegacyConditionRole,
 };
 
 impl DynamoDbService {
@@ -123,6 +123,13 @@ impl DynamoDbService {
                 table.range_key_name().map(|s| s.to_string()),
             )
         };
+
+        // The partition key MUST be constrained with `=`. Without this check a
+        // condition that omits the partition key (or uses a range operator on
+        // it, e.g. `sk = :v` or `pk > :v`) would fall through to a generic
+        // filter over EVERY partition and silently return cross-partition
+        // matches (bug-hunt 2026-07-01).
+        validate_partition_key_condition(&key_condition, &hash_key_name, &expr_attr_names)?;
 
         let mut matched: Vec<&HashMap<String, AttributeValue>> = items_to_scan
             .iter()
@@ -674,6 +681,76 @@ fn validate_limit(body: &Value) -> Result<Option<usize>, AwsServiceError> {
     }
 }
 
+/// A Query's `KeyConditionExpression` must constrain the table (or index)
+/// partition key with an equality (`=`). Real DynamoDB rejects a condition
+/// that omits the partition key with "Query condition missed key schema
+/// element: <pk>", and one that uses any non-`=` operator on the partition
+/// key with "Query key condition not supported" — rather than evaluating the
+/// expression as a generic filter over every partition.
+fn validate_partition_key_condition(
+    key_condition: &str,
+    partition_key: &str,
+    expr_attr_names: &HashMap<String, String>,
+) -> Result<(), AwsServiceError> {
+    let mut pk_seen = false;
+    for raw in split_on_and(key_condition) {
+        let part = strip_outer_parens(raw.trim()).trim();
+
+        // begins_with(...) targets the sort key, never the partition key.
+        let lower = part.to_ascii_lowercase();
+        if lower.starts_with("begins_with(") || lower.starts_with("begins_with (") {
+            continue;
+        }
+
+        // A word-boundaried BETWEEN is a range condition (sort key only). If it
+        // sits on the partition key it's an unsupported non-`=` condition.
+        let part_upper = part.to_ascii_uppercase();
+        let between_at = part_upper.match_indices("BETWEEN").find(|(i, _)| {
+            let before_ws = *i == 0 || part_upper.as_bytes()[*i - 1].is_ascii_whitespace();
+            let after = *i + "BETWEEN".len();
+            let after_ws =
+                after >= part_upper.len() || part_upper.as_bytes()[after].is_ascii_whitespace();
+            before_ws && after_ws
+        });
+
+        let (op, left): (&str, &str) = if let Some((bpos, _)) = between_at {
+            ("BETWEEN", part[..bpos].trim())
+        } else {
+            let mut found: Option<(&'static str, &str)> = None;
+            for cand in ["<=", ">=", "<>", "=", "<", ">"] {
+                if let Some(pos) = part.find(cand) {
+                    found = Some((cand, part[..pos].trim()));
+                    break;
+                }
+            }
+            match found {
+                Some(v) => v,
+                None => continue,
+            }
+        };
+
+        if resolve_attr_name(left.trim_matches('"'), expr_attr_names) == partition_key {
+            pk_seen = true;
+            if op != "=" {
+                return Err(AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Query key condition not supported",
+                ));
+            }
+        }
+    }
+
+    if !pk_seen {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!("Query condition missed key schema element: {partition_key}"),
+        ));
+    }
+    Ok(())
+}
+
 /// Validate the `Select` parameter for a Query/Scan and decide whether
 /// the operation returns only a count. `is_index_query` is true when an
 /// IndexName is present (only then is ALL_PROJECTED_ATTRIBUTES legal).
@@ -1101,6 +1178,63 @@ mod tests {
             16,
             "every item must land in exactly one segment"
         );
+    }
+
+    // bug-hunt 2026-07-01, finding 1: a Query MUST constrain the partition key
+    // with `=`. Omitting it, or using a range operator on it, is a
+    // ValidationException — not a silent cross-partition filter.
+    #[tokio::test]
+    async fn query_requires_partition_key_equality() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item("a"), item("b")]);
+        let svc = DynamoDbService::new(state);
+
+        // Condition references a non-key attribute -> partition key missing.
+        let missing = svc
+            .query(&req_for(
+                "Query",
+                json!({
+                    "TableName": "T",
+                    "KeyConditionExpression": "sk = :v",
+                    "ExpressionAttributeValues": {":v": {"S": "a"}},
+                }),
+            ))
+            .err()
+            .expect("missing partition key rejected");
+        assert!(format!("{missing:?}").contains("missed key schema element"));
+
+        // Range operator on the partition key -> unsupported.
+        let non_eq = svc
+            .query(&req_for(
+                "Query",
+                json!({
+                    "TableName": "T",
+                    "KeyConditionExpression": "pk > :v",
+                    "ExpressionAttributeValues": {":v": {"S": "a"}},
+                }),
+            ))
+            .err()
+            .expect("non-equality partition key rejected");
+        assert!(format!("{non_eq:?}").contains("Query key condition not supported"));
+    }
+
+    #[tokio::test]
+    async fn query_accepts_partition_key_equality() {
+        let state = make_state();
+        seed_table(&state, "T", vec![item("a"), item("b")]);
+        let svc = DynamoDbService::new(state);
+        let resp = svc
+            .query(&req_for(
+                "Query",
+                json!({
+                    "TableName": "T",
+                    "KeyConditionExpression": "pk = :v",
+                    "ExpressionAttributeValues": {":v": {"S": "a"}},
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["Count"].as_i64().unwrap(), 1);
     }
 
     #[tokio::test]

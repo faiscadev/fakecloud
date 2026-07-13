@@ -214,6 +214,20 @@ impl DynamoDbService {
             })?;
             let mut seen_keys: Vec<HashMap<String, AttributeValue>> = Vec::new();
             for request in reqs {
+                // A WriteRequest is a union: exactly one of PutRequest or
+                // DeleteRequest must be set. AWS rejects a request with both or
+                // neither; previously the neither case was silently skipped and
+                // the both case took the Put branch (bug-hunt 2026-07-01).
+                let has_put = request.get("PutRequest").is_some();
+                let has_delete = request.get("DeleteRequest").is_some();
+                if has_put == has_delete {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        "1 validation error detected: Member must contain exactly one \
+                         of PutRequest or DeleteRequest",
+                    ));
+                }
                 let key = if let Some(put_req) = request.get("PutRequest") {
                     let item: HashMap<String, AttributeValue> =
                         serde_json::from_value(put_req["Item"].clone()).map_err(|_| {
@@ -350,11 +364,35 @@ impl DynamoDbService {
             )
         })?;
 
+        // AWS rejects an empty TransactItems list and one over the 100-action
+        // ceiling up-front with a ValidationException, mirroring
+        // TransactWriteItems. Previously an empty batch returned success and an
+        // oversized one was processed in full (bug-hunt 2026-07-01).
+        if transact_items.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "1 validation error detected: Value '[]' at 'transactItems' \
+                 failed to satisfy constraint: Member must have length greater \
+                 than or equal to 1",
+            ));
+        }
+        if transact_items.len() > 100 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                "1 validation error detected: Value at 'transactItems' failed \
+                 to satisfy constraint: Member must have length less than or \
+                 equal to 100",
+            ));
+        }
+
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
         let mut responses: Vec<Value> = Vec::new();
         let mut per_table_count: HashMap<String, u32> = HashMap::new();
+        let mut seen_keys: Vec<(String, HashMap<String, AttributeValue>)> = Vec::new();
 
         for ti in transact_items {
             let get = &ti["Get"];
@@ -365,10 +403,34 @@ impl DynamoDbService {
                     "TableName is required in Get",
                 )
             })?;
-            let key: HashMap<String, AttributeValue> =
-                serde_json::from_value(get["Key"].clone()).unwrap_or_default();
 
             let table = get_table(&state.tables, table_name)?;
+            // Parse the Key strictly and reject an under-specified/malformed key
+            // the same way GetItem does, instead of coercing it to `{}` (which
+            // matched nothing and returned a phantom miss).
+            let key: HashMap<String, AttributeValue> = serde_json::from_value(get["Key"].clone())
+                .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Get.Key is not a valid key",
+                )
+            })?;
+            validate_key_attributes_in_key(table, &key)?;
+
+            // AWS rejects a transaction that reads the same item more than once.
+            if seen_keys
+                .iter()
+                .any(|(t, k)| t == table_name && keys_equal(table, k, &key))
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "Transaction request cannot include multiple operations on one item",
+                ));
+            }
+            seen_keys.push((table_name.to_string(), key.clone()));
+
             match table.find_item_index(&key) {
                 Some(idx) => {
                     responses.push(json!({ "Item": table.items[idx] }));
@@ -472,6 +534,26 @@ impl DynamoDbService {
                  to satisfy constraint: Member must have length less than or \
                  equal to 100",
             ));
+        }
+
+        // Each TransactWriteItem is a union: exactly one of Put / Update /
+        // Delete / ConditionCheck must be set. AWS rejects an item with zero or
+        // more than one member with a ValidationException; previously a
+        // zero-member item was silently treated as a no-op and a multi-member
+        // item processed only its first branch (bug-hunt 2026-07-01).
+        for ti in transact_items {
+            let op_count = ["Put", "Update", "Delete", "ConditionCheck"]
+                .iter()
+                .filter(|k| ti.get(**k).is_some())
+                .count();
+            if op_count != 1 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "1 validation error detected: Member must contain exactly one \
+                     of Put, Update, Delete, or ConditionCheck",
+                ));
+            }
         }
 
         // Per-operation `ReturnValuesOnConditionCheckFailure` is its own
@@ -992,7 +1074,22 @@ impl DynamoDbService {
         // itself a ValidationException.
         let statement = require_str_with_code(&body, "Statement", "ValidationException")?;
         let parameters = body["Parameters"].as_array().cloned().unwrap_or_default();
-        let limit = body["Limit"].as_i64().filter(|&n| n > 0);
+        // AWS requires Limit >= 1 when present; a `Limit: 0` (or negative) is a
+        // ValidationException, not "no limit" — silently dropping it returned
+        // the whole result set (bug-hunt 2026-07-01).
+        let limit = match body["Limit"].as_i64() {
+            Some(n) if n < 1 => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "1 validation error detected: Value '{n}' at 'limit' failed to satisfy \
+                         constraint: Member must have value greater than or equal to 1"
+                    ),
+                ));
+            }
+            other => other,
+        };
         let next_token = body["NextToken"].as_str().map(str::to_string);
 
         // Hold the write lock only long enough to mutate state and
@@ -2279,6 +2376,121 @@ mod tests {
             0,
             "no stream records on failed txn"
         );
+    }
+
+    #[tokio::test]
+    async fn transact_get_items_rejects_empty_oversized_and_malformed_key() {
+        // bug-hunt 2026-07-01, finding 5: TransactGetItems must enforce the
+        // 1..=100 bound and validate each Get.Key instead of coercing a
+        // malformed key to {}.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        let empty = svc
+            .transact_get_items(&req_for("TransactGetItems", json!({"TransactItems": []})))
+            .err()
+            .expect("empty TransactItems rejected");
+        assert!(format!("{empty:?}").contains("ValidationException"));
+
+        // A Get whose Key omits the partition key is a malformed key.
+        let malformed = svc
+            .transact_get_items(&req_for(
+                "TransactGetItems",
+                json!({"TransactItems": [
+                    {"Get": {"TableName": "Widgets", "Key": {"other": {"S": "x"}}}}
+                ]}),
+            ))
+            .err()
+            .expect("malformed key rejected");
+        assert!(format!("{malformed:?}").contains("ValidationException"));
+
+        // Duplicate keys in one transaction are rejected.
+        let dup = svc
+            .transact_get_items(&req_for(
+                "TransactGetItems",
+                json!({"TransactItems": [
+                    {"Get": {"TableName": "Widgets", "Key": {"pk": {"S": "a"}}}},
+                    {"Get": {"TableName": "Widgets", "Key": {"pk": {"S": "a"}}}}
+                ]}),
+            ))
+            .err()
+            .expect("duplicate keys rejected");
+        assert!(format!("{dup:?}").contains("ValidationException"));
+    }
+
+    #[tokio::test]
+    async fn batch_write_item_rejects_both_or_neither_put_delete() {
+        // bug-hunt 2026-07-01, finding 11.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        let neither = svc
+            .batch_write_item(&req_for(
+                "BatchWriteItem",
+                json!({"RequestItems": {"Widgets": [{}]}}),
+            ))
+            .err()
+            .expect("neither Put nor Delete rejected");
+        assert!(format!("{neither:?}").contains("ValidationException"));
+
+        let both = svc
+            .batch_write_item(&req_for(
+                "BatchWriteItem",
+                json!({"RequestItems": {"Widgets": [{
+                    "PutRequest": {"Item": {"pk": {"S": "a"}}},
+                    "DeleteRequest": {"Key": {"pk": {"S": "a"}}}
+                }]}}),
+            ))
+            .err()
+            .expect("both Put and Delete rejected");
+        assert!(format!("{both:?}").contains("ValidationException"));
+    }
+
+    #[tokio::test]
+    async fn transact_write_item_rejects_zero_or_multi_op_member() {
+        // bug-hunt 2026-07-01, finding 11.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        let none = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({"TransactItems": [{}]}),
+            ))
+            .err()
+            .expect("empty member rejected");
+        assert!(format!("{none:?}").contains("ValidationException"));
+
+        let multi = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({"TransactItems": [{
+                    "Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}}},
+                    "Delete": {"TableName": "Widgets", "Key": {"pk": {"S": "a"}}}
+                }]}),
+            ))
+            .err()
+            .expect("multi-op member rejected");
+        assert!(format!("{multi:?}").contains("ValidationException"));
+    }
+
+    #[tokio::test]
+    async fn execute_statement_rejects_zero_limit() {
+        // bug-hunt 2026-07-01, finding 10.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+        let err = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({"Statement": "SELECT * FROM Widgets", "Limit": 0}),
+            ))
+            .err()
+            .expect("Limit 0 rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
     }
 
     #[tokio::test]

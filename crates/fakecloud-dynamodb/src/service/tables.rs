@@ -20,7 +20,8 @@ use super::{
     build_table_description, build_table_description_json, find_table_by_arn,
     find_table_by_arn_mut, get_table, get_table_mut, get_table_mut_with_code, get_table_with_code,
     parse_attribute_definitions, parse_gsi, parse_gsi_throughput, parse_key_schema, parse_lsi,
-    parse_provisioned_throughput, parse_tags, require_str, DynamoDbService,
+    parse_provisioned_throughput, parse_tags, require_str, validate_index_definitions,
+    DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -33,6 +34,9 @@ impl DynamoDbService {
         // ValidationException for malformed input on this op, but the strict
         // probe rejects undeclared codes, so we surface LimitExceeded for
         // structurally-invalid table specs.
+        // A missing TableName stays LimitExceededException: CreateTable's
+        // Smithy `errors:` list omits ValidationException, and a pinned test
+        // depends on this code (the request never reaches the shared parsers).
         let table_name = body["TableName"]
             .as_str()
             .ok_or_else(|| {
@@ -44,19 +48,14 @@ impl DynamoDbService {
             })?
             .to_string();
 
-        let key_schema = parse_key_schema(&body["KeySchema"]).map_err(remap_create_table_error)?;
-        let attribute_definitions = parse_attribute_definitions(&body["AttributeDefinitions"])
-            .map_err(remap_create_table_error)?;
+        // Structural request errors below are AWS-faithful ValidationExceptions.
+        // The conformance probe accepts them via `service_common_errors`
+        // ("dynamodb" => ValidationException), since real DynamoDB returns this
+        // code across essentially every operation for malformed input.
+        let key_schema = parse_key_schema(&body["KeySchema"])?;
+        let attribute_definitions = parse_attribute_definitions(&body["AttributeDefinitions"])?;
 
-        if key_schema.is_empty() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "LimitExceededException",
-                "KeySchema must contain at least one element",
-            ));
-        }
-
-        // Validate that key schema attributes are defined
+        // Validate that the base-table key schema attributes are defined.
         for ks in &key_schema {
             if !attribute_definitions
                 .iter()
@@ -64,7 +63,7 @@ impl DynamoDbService {
             {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "LimitExceededException",
+                    "ValidationException",
                     format!(
                         "One or more parameter values were invalid: \
                          Some index key attributes are not defined in AttributeDefinitions. \
@@ -80,10 +79,31 @@ impl DynamoDbService {
             }
         }
 
-        let billing_mode = body["BillingMode"]
-            .as_str()
-            .unwrap_or("PROVISIONED")
-            .to_string();
+        // Validate GSI/LSI index key attributes against AttributeDefinitions and
+        // reject a malformed index instead of silently dropping it.
+        validate_index_definitions(
+            &body["GlobalSecondaryIndexes"],
+            &body["LocalSecondaryIndexes"],
+            &attribute_definitions,
+        )?;
+
+        // BillingMode must be one of the two documented enum values.
+        let billing_mode = match body.get("BillingMode") {
+            None | Some(Value::Null) => "PROVISIONED".to_string(),
+            Some(Value::String(s)) if s == "PROVISIONED" || s == "PAY_PER_REQUEST" => s.clone(),
+            Some(other) => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!(
+                        "1 validation error detected: Value '{}' at 'billingMode' failed to \
+                         satisfy constraint: Member must satisfy enum value set: \
+                         [PROVISIONED, PAY_PER_REQUEST]",
+                        other.as_str().unwrap_or("")
+                    ),
+                ));
+            }
+        };
 
         let provisioned_throughput = if billing_mode == "PAY_PER_REQUEST" {
             ProvisionedThroughput {
@@ -91,8 +111,17 @@ impl DynamoDbService {
                 write_capacity_units: 0,
             }
         } else {
-            parse_provisioned_throughput(&body["ProvisionedThroughput"])
-                .map_err(remap_create_table_error)?
+            // PROVISIONED billing requires an explicit ProvisionedThroughput;
+            // AWS rejects its omission rather than silently defaulting to 5/5.
+            if !body["ProvisionedThroughput"].is_object() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "One or more parameter values were invalid: \
+                     ProvisionedThroughput must be specified when BillingMode is PROVISIONED",
+                ));
+            }
+            parse_provisioned_throughput(&body["ProvisionedThroughput"])?
         };
 
         let gsi = parse_gsi(&body["GlobalSecondaryIndexes"], &billing_mode);
@@ -1857,26 +1886,4 @@ fn policy_revision_id(policy: &str) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     policy.hash(&mut h);
     format!("{:016x}", h.finish())
-}
-
-/// Rewrite a `ValidationException` from the shared schema/throughput parsers
-/// into `LimitExceededException`, which is the closest declared error on
-/// `CreateTable`. Other (non-validation) errors are passed through unchanged.
-fn remap_create_table_error(err: AwsServiceError) -> AwsServiceError {
-    match err {
-        AwsServiceError::AwsError {
-            status,
-            code,
-            message,
-            extra_fields,
-            headers,
-        } if code == "ValidationException" => AwsServiceError::AwsError {
-            status,
-            code: "LimitExceededException".to_string(),
-            message,
-            extra_fields,
-            headers,
-        },
-        other => other,
-    }
 }

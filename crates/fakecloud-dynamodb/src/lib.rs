@@ -11,4 +11,4 @@ pub use state::{
     KeySchemaElement, LocalSecondaryIndex, OnDemandThroughput, Projection, ProvisionedThroughput,
     SharedDynamoDbState, StreamRecord, DYNAMODB_SNAPSHOT_SCHEMA_VERSION,
 };
-pub use streams_dataplane::DynamoDbStreamsService;
+pub use streams_dataplane::{cmp_seq, DynamoDbStreamsService};

@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde_json::json;
 
 use fakecloud_core::delivery::LambdaDelivery;
-use fakecloud_dynamodb::SharedDynamoDbState;
+use fakecloud_dynamodb::{cmp_seq, SharedDynamoDbState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
 
@@ -137,7 +137,7 @@ impl DynamoDbStreamsLambdaPoller {
                             "LATEST" => stream_records
                                 .iter()
                                 .map(|r| r.dynamodb.sequence_number.clone())
-                                .max()
+                                .max_by(|a, b| cmp_seq(a, b))
                                 .unwrap_or_default(),
                             _ => String::new(),
                         };
@@ -170,16 +170,19 @@ impl DynamoDbStreamsLambdaPoller {
                 let mut filtered: Vec<_> = stream_records
                     .iter()
                     .filter(|r| match checkpoint.as_deref() {
-                        Some(cp) if !cp.is_empty() => r.dynamodb.sequence_number.as_str() > cp,
+                        Some(cp) if !cp.is_empty() => {
+                            cmp_seq(&r.dynamodb.sequence_number, cp) == std::cmp::Ordering::Greater
+                        }
                         _ => true,
                     })
                     .take(batch_size.max(0) as usize)
                     .cloned()
                     .collect();
 
-                // Sort by sequence number to ensure order
-                filtered
-                    .sort_by(|a, b| a.dynamodb.sequence_number.cmp(&b.dynamodb.sequence_number));
+                // Sort by sequence number (numeric) to ensure delivery order.
+                filtered.sort_by(|a, b| {
+                    cmp_seq(&a.dynamodb.sequence_number, &b.dynamodb.sequence_number)
+                });
 
                 filtered
             };

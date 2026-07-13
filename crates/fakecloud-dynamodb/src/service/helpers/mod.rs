@@ -824,9 +824,22 @@ pub(crate) enum PartiqlCond {
     AttributeNotExists(String),
 }
 
-/// Count ? parameters in a string.
+/// Count positional `?` parameters in a PartiQL clause, ignoring any `?` that
+/// appears inside a single-quoted string literal (e.g. `SET note = 'done?'`).
+/// The UPDATE executor uses this count to slice parameters between the SET and
+/// WHERE clauses, so a `?` counted inside a literal would shift every WHERE
+/// binding by one and silently no-op the update (bug-hunt 2026-07-01).
 pub(crate) fn count_params_in_str(s: &str) -> usize {
-    s.chars().filter(|c| *c == '?').count()
+    let mut in_quote = false;
+    let mut count = 0;
+    for c in s.chars() {
+        match c {
+            '\'' => in_quote = !in_quote,
+            '?' if !in_quote => count += 1,
+            _ => {}
+        }
+    }
+    count
 }
 
 mod conditions;
@@ -849,6 +862,20 @@ pub(crate) use schemas::*;
 pub(crate) use table_descriptions::*;
 pub(crate) use table_lookup::*;
 pub(crate) use updates::*;
+
+#[cfg(test)]
+mod count_params_tests {
+    use super::*;
+
+    // bug-hunt 2026-07-01: a `?` inside a single-quoted literal must NOT be
+    // counted, else the SET/WHERE parameter split shifts and no-ops the update.
+    #[test]
+    fn count_params_ignores_quoted_question_marks() {
+        assert_eq!(count_params_in_str("SET note = 'done?' WHERE id = ?"), 1);
+        assert_eq!(count_params_in_str("a = ? AND b = ?"), 2);
+        assert_eq!(count_params_in_str("note = 'a?b?c'"), 0);
+    }
+}
 
 #[cfg(test)]
 mod set_rhs_tests {

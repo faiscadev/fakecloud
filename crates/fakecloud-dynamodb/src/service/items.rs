@@ -11,7 +11,8 @@ use super::{
     evaluate_condition_with_return, extract_key, get_table, get_table_mut,
     parse_expression_attribute_names, parse_expression_attribute_values, project_item,
     require_object, require_str, resolve_write_condition, return_consumed_mode, return_icm_mode,
-    validate_key_attributes_in_key, validate_key_in_item, AttributeValue, DynamoDbService,
+    validate_item_attribute_values, validate_key_attributes_in_key, validate_key_in_item,
+    AttributeValue, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -40,6 +41,9 @@ impl DynamoDbService {
             let table = get_table_mut(&mut state.tables, table_name)?;
 
             validate_key_in_item(table, &item)?;
+            // Validate every attribute value (not just keys): a malformed number
+            // like {"N":"abc"} is a ValidationException in real DynamoDB.
+            validate_item_attribute_values(&item)?;
 
             let key = extract_key(table, &item);
             let existing_idx = table.find_item_index(&key);
