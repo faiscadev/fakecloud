@@ -1573,12 +1573,15 @@ pub struct EcsTaskMetadataResponse {
 #[serde(rename_all = "camelCase")]
 pub struct CloudFrontDistribution {
     pub id: String,
+    /// The distribution's `<id>.cloudfront.net` domain. Send this as the `Host`
+    /// header to fakecloud's main endpoint to reach the distribution's data plane.
     pub domain_name: String,
     pub enabled: bool,
-    /// In-process data-plane listener port. `None` until the supervisor binds
-    /// a listener for an enabled distribution (data-plane extension, not part
-    /// of the AWS API surface).
-    pub bound_port: Option<u16>,
+    /// Whether the distribution is currently served by the in-process data plane
+    /// on the main listener (`true` when enabled and the data plane is not
+    /// disabled via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`). Data-plane
+    /// extension, not part of the AWS API surface.
+    pub served: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

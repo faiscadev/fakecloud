@@ -365,7 +365,9 @@ pub(crate) fn cloudfront_distribution_response(
         id: dist.id.clone(),
         domain_name: dist.domain_name.clone(),
         enabled: dist.config.enabled,
-        bound_port: dist.bound_port,
+        // Served on the main listener (routed by Host) exactly when the
+        // distribution is enabled and the data plane isn't globally disabled.
+        served: dist.config.enabled && fakecloud_cloudfront::dataplane::dataplane_enabled(),
     }
 }
 

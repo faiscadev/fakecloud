@@ -89,6 +89,7 @@ curl http://localhost:4566/_fakecloud/health
 
 | Endpoint | Method | Description |
 | -------- | ------ | ----------- |
+| `/_fakecloud/cloudfront/distributions` | GET | List stored distributions with `{id, domainName, enabled, served}`. `domainName` is the `<id>.cloudfront.net` domain to send as the `Host` header when reaching a distribution's data plane on the main endpoint; `served` is `true` when the distribution is enabled and the data plane is active. |
 | `/_fakecloud/cloudfront/distributions/{id}/status` | POST | Change a distribution's status (deployed / in-progress / failed). |
 
 ## CloudWatch

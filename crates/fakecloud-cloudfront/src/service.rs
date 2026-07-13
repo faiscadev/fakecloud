@@ -229,9 +229,6 @@ pub struct CloudFrontService {
     pub(crate) propagation_delay: std::time::Duration,
     pub(crate) snapshot_store: Option<Arc<dyn SnapshotStore>>,
     pub(crate) snapshot_lock: Arc<AsyncMutex<()>>,
-    /// Guards [`CloudFrontService::start_dataplane`] so repeated calls don't
-    /// spawn duplicate supervisor loops racing to bind listeners.
-    dataplane_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Resolve the default `InProgress` -> `Deployed` delay from the
@@ -263,30 +260,7 @@ impl CloudFrontService {
             propagation_delay: default_propagation_delay(),
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
-            dataplane_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
-    }
-
-    /// Start the in-process data-plane supervisor (opt-in). `new` constructs
-    /// the service without a data plane; the server calls this once after
-    /// wiring so that enabled distributions actually serve viewer traffic. A
-    /// no-op when disabled via `FAKECLOUD_CLOUDFRONT_DISABLE_DATAPLANE`. Must be
-    /// called from within a Tokio runtime (it spawns the supervisor task).
-    /// `server_port` is fakecloud's own listen port, used to reach S3-website
-    /// origins served by this process.
-    pub fn start_dataplane(&self, server_port: u16) {
-        use std::sync::atomic::Ordering;
-        // Idempotent: only the first call spawns the supervisor. Repeat calls
-        // would otherwise start racing loops that both bind listeners and
-        // clobber each distribution's `bound_port`.
-        if self
-            .dataplane_started
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_err()
-        {
-            return;
-        }
-        crate::dataplane::spawn_dataplane(self.state.clone(), server_port);
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
@@ -763,7 +737,6 @@ impl CloudFrontService {
             in_progress_invalidation_batches: 0,
             etag: etag.clone(),
             config,
-            bound_port: None,
         };
         account.distributions.insert(id.clone(), stored.clone());
         if !tags.is_empty() {
@@ -1318,7 +1291,6 @@ impl CloudFrontService {
             in_progress_invalidation_batches: 0,
             etag: etag.clone(),
             config,
-            bound_port: None,
         };
         account.distributions.insert(new_id.clone(), stored.clone());
         drop(state);
