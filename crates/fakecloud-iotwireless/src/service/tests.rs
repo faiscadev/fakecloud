@@ -320,6 +320,298 @@ fn update_get_resource_position_round_trips_blob() {
     assert_eq!(got.body.expect_bytes(), b"dGVzdA==");
 }
 
+#[test]
+fn get_resource_position_404s_when_never_set() {
+    let err = expect_err(run(
+        &svc(),
+        "GET",
+        "/resource-positions/dev-x?resourceType=WirelessDevice",
+        &[],
+        Value::Null,
+    ));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+}
+
+// ---------- per-resource log level (finding 1) ----------
+
+#[test]
+fn put_get_reset_resource_log_level_round_trips() {
+    let s = svc();
+    // Never-set -> 404.
+    let err = expect_err(run(
+        &s,
+        "GET",
+        "/log-levels/dev1?resourceType=WirelessDevice",
+        &[],
+        Value::Null,
+    ));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+
+    run(
+        &s,
+        "PUT",
+        "/log-levels/dev1?resourceType=WirelessDevice",
+        &[],
+        json!({"LogLevel": "ERROR"}),
+    )
+    .unwrap();
+    let got = body_of(
+        &run(
+            &s,
+            "GET",
+            "/log-levels/dev1?resourceType=WirelessDevice",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(got["LogLevel"], "ERROR");
+
+    run(
+        &s,
+        "DELETE",
+        "/log-levels/dev1?resourceType=WirelessDevice",
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let err = expect_err(run(
+        &s,
+        "GET",
+        "/log-levels/dev1?resourceType=WirelessDevice",
+        &[],
+        Value::Null,
+    ));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+}
+
+// ---------- singleton configurations (finding 2) ----------
+
+#[test]
+fn metric_configuration_update_get_round_trips() {
+    let s = svc();
+    // Default before any update.
+    let got = body_of(&run(&s, "GET", "/metric-configuration", &[], Value::Null).unwrap());
+    assert_eq!(got["SummaryMetric"]["Status"], "Disabled");
+
+    run(
+        &s,
+        "PUT",
+        "/metric-configuration",
+        &[],
+        json!({"SummaryMetric": {"Status": "Enabled"}}),
+    )
+    .unwrap();
+    let got = body_of(&run(&s, "GET", "/metric-configuration", &[], Value::Null).unwrap());
+    assert_eq!(got["SummaryMetric"]["Status"], "Enabled");
+}
+
+#[test]
+fn log_levels_by_resource_types_update_get_round_trips() {
+    let s = svc();
+    let got = body_of(&run(&s, "GET", "/log-levels", &[], Value::Null).unwrap());
+    assert_eq!(got["DefaultLogLevel"], "INFO");
+
+    run(
+        &s,
+        "POST",
+        "/log-levels",
+        &[],
+        json!({"DefaultLogLevel": "ERROR"}),
+    )
+    .unwrap();
+    let got = body_of(&run(&s, "GET", "/log-levels", &[], Value::Null).unwrap());
+    assert_eq!(got["DefaultLogLevel"], "ERROR");
+}
+
+// ---------- Action output identifiers (finding 3) ----------
+
+#[test]
+fn send_data_to_wireless_device_returns_message_id() {
+    let out = body_of(
+        &run(
+            &svc(),
+            "POST",
+            "/wireless-devices/dev1/data",
+            &[],
+            json!({"TransmitMode": 1, "PayloadData": "aGk="}),
+        )
+        .unwrap(),
+    );
+    assert!(out["MessageId"].as_str().is_some_and(|m| !m.is_empty()));
+}
+
+#[test]
+fn import_task_start_get_delete_round_trips() {
+    let s = svc();
+    let started = body_of(
+        &run(
+            &s,
+            "POST",
+            "/wireless_device_import_task",
+            &[],
+            json!({"DestinationName": "dest-x", "Sidewalk": {"DeviceCreationFile": "s3://b/f"}}),
+        )
+        .unwrap(),
+    );
+    let id = started["Id"].as_str().unwrap().to_string();
+    assert!(!id.is_empty());
+    assert!(started["Arn"].as_str().unwrap().contains(":ImportTask/"));
+
+    let got = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless_device_import_task/{id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(got["Id"], id);
+    assert_eq!(got["Status"], "INITIALIZING");
+    assert_eq!(got["DestinationName"], "dest-x");
+
+    run(
+        &s,
+        "DELETE",
+        &format!("/wireless_device_import_task/{id}"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let err = expect_err(run(
+        &s,
+        "GET",
+        &format!("/wireless_device_import_task/{id}"),
+        &[],
+        Value::Null,
+    ));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+}
+
+#[test]
+fn wireless_gateway_task_create_get_delete_round_trips() {
+    let s = svc();
+    let created = body_of(
+        &run(
+            &s,
+            "POST",
+            "/wireless-gateways/gw1/tasks",
+            &[],
+            json!({"WirelessGatewayTaskDefinitionId": "def-1"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(created["WirelessGatewayTaskDefinitionId"], "def-1");
+    assert_eq!(created["Status"], "QUEUED");
+
+    let got = body_of(
+        &run(&s, "GET", "/wireless-gateways/gw1/tasks", &[], Value::Null).unwrap(),
+    );
+    assert_eq!(got["WirelessGatewayTaskDefinitionId"], "def-1");
+    assert_eq!(got["WirelessGatewayId"], "gw1");
+
+    run(&s, "DELETE", "/wireless-gateways/gw1/tasks", &[], Value::Null).unwrap();
+    let err = expect_err(run(&s, "GET", "/wireless-gateways/gw1/tasks", &[], Value::Null));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+}
+
+#[test]
+fn get_service_endpoint_returns_fixed_members() {
+    let out = body_of(
+        &run(
+            &svc(),
+            "GET",
+            "/service-endpoint?serviceType=CUPS",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(out["ServiceType"], "CUPS");
+    assert!(out["ServiceEndpoint"].as_str().unwrap().contains("cups"));
+    assert!(out["ServerTrust"]
+        .as_str()
+        .unwrap()
+        .contains("BEGIN CERTIFICATE"));
+}
+
+#[test]
+fn get_position_estimate_returns_feature_collection() {
+    let resp = run(&svc(), "POST", "/position-estimate", &[], json!({})).unwrap();
+    let payload: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(payload["type"], "FeatureCollection");
+    assert!(payload["features"].as_array().unwrap()[0]["geometry"]["coordinates"].is_array());
+}
+
+// ---------- association edges (finding 4) ----------
+
+#[test]
+fn associate_multicast_group_with_fuota_task_then_list() {
+    let s = svc();
+    run(
+        &s,
+        "PUT",
+        "/fuota-tasks/task1/multicast-group",
+        &[],
+        json!({"MulticastGroupId": "mc-1"}),
+    )
+    .unwrap();
+    run(
+        &s,
+        "PUT",
+        "/fuota-tasks/task1/multicast-group",
+        &[],
+        json!({"MulticastGroupId": "mc-2"}),
+    )
+    .unwrap();
+    let listed = body_of(
+        &run(
+            &s,
+            "GET",
+            "/fuota-tasks/task1/multicast-groups",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    let ids: Vec<&str> = listed["MulticastGroupList"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["Id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["mc-1", "mc-2"]);
+
+    // Disassociate removes the edge.
+    run(
+        &s,
+        "DELETE",
+        "/fuota-tasks/task1/multicast-groups/mc-1",
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let listed = body_of(
+        &run(
+            &s,
+            "GET",
+            "/fuota-tasks/task1/multicast-groups",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    let ids: Vec<&str> = listed["MulticastGroupList"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|g| g["Id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["mc-2"]);
+}
+
 // ---------- validation ----------
 
 #[test]
