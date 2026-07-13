@@ -7,9 +7,9 @@ use fakecloud_core::validation::*;
 use crate::state::{AccountPasswordPolicy, IamState, VirtualMfaDevice};
 
 use super::{
-    attached_policy_name, empty_response, parse_tags, required_param_with_code,
-    resolve_calling_user, tags_xml, url_encode, validate_optional_string_length_with_code,
-    validate_string_length_with_code, IamService,
+    attached_policy_name, empty_response, is_valid_iam_path, parse_tags, partition_for_region,
+    required_param_with_code, resolve_calling_user, tags_xml, url_encode,
+    validate_optional_string_length_with_code, validate_string_length_with_code, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -878,11 +878,13 @@ impl IamService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        // Include path in serial number
+        // Include path in serial number. Derive the ARN partition from the
+        // request region so gov/cn/iso callers get a partition-correct ARN.
+        let partition = partition_for_region(&req.region);
         let path_part = path.trim_start_matches('/');
         let serial_number = format!(
-            "arn:aws:iam::{}:mfa/{}{}",
-            state.account_id, path_part, virtual_mfa_device_name
+            "arn:{}:iam::{}:mfa/{}{}",
+            partition, state.account_id, path_part, virtual_mfa_device_name
         );
 
         if state.virtual_mfa_devices.contains_key(&serial_number) {
@@ -1209,27 +1211,4 @@ impl IamService {
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
-}
-
-fn is_valid_iam_path(path: &str) -> bool {
-    if !path.starts_with('/') || !path.ends_with('/') {
-        return false;
-    }
-    if path.contains("//") {
-        return false;
-    }
-    if path.len() > 512 {
-        return false;
-    }
-    path.chars().all(|c| {
-        c.is_alphanumeric()
-            || c == '/'
-            || c == '-'
-            || c == '_'
-            || c == '.'
-            || c == '+'
-            || c == '='
-            || c == '@'
-            || c == ','
-    })
 }

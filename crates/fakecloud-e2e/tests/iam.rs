@@ -3883,3 +3883,133 @@ async fn iam_get_user_no_name_is_deterministic() {
     );
     assert_eq!(ua.user_name(), ub.user_name());
 }
+
+// ---- IAM hardening: policy-existence on AttachGroupPolicy, DeleteConflict on
+//      attached policy, and region-correct instance-profile ARNs ----
+
+#[tokio::test]
+async fn iam_attach_group_policy_nonexistent_policy_fails() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_group()
+        .group_name("hardening-grp")
+        .send()
+        .await
+        .unwrap();
+
+    // Attaching a customer-managed policy ARN that does not exist must fail
+    // with NoSuchEntity, matching AttachRolePolicy/AttachUserPolicy.
+    let err = client
+        .attach_group_policy()
+        .group_name("hardening-grp")
+        .policy_arn("arn:aws:iam::123456789012:policy/does-not-exist")
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("NoSuchEntity"),
+        "expected NoSuchEntity, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn iam_delete_policy_while_attached_fails() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#;
+    let policy_arn = client
+        .create_policy()
+        .policy_name("attached-delete-pol")
+        .policy_document(policy_doc)
+        .send()
+        .await
+        .unwrap()
+        .policy()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    client
+        .create_role()
+        .role_name("delete-guard-role")
+        .assume_role_policy_document(trust)
+        .send()
+        .await
+        .unwrap();
+    client
+        .attach_role_policy()
+        .role_name("delete-guard-role")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+
+    // DeletePolicy while attached -> DeleteConflict.
+    let err = client
+        .delete_policy()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("DeleteConflict"),
+        "expected DeleteConflict, got: {msg}"
+    );
+
+    // After detaching, deletion succeeds.
+    client
+        .detach_role_policy()
+        .role_name("delete-guard-role")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_policy()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn iam_create_instance_profile_govcloud_partition() {
+    use aws_credential_types::Credentials;
+
+    let server = TestServer::start().await;
+
+    // Build an IAM client signing for a GovCloud region so the server derives
+    // the aws-us-gov partition from the SigV4 credential scope.
+    let gov_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-gov-west-1"))
+        .credentials_provider(Credentials::new(
+            "AKIAIOSFODNN7EXAMPLE",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            None,
+            None,
+            "test",
+        ))
+        .load()
+        .await;
+    let client = aws_sdk_iam::Client::new(&gov_config);
+
+    let resp = client
+        .create_instance_profile()
+        .instance_profile_name("gov-profile")
+        .send()
+        .await
+        .unwrap();
+    let arn = resp.instance_profile().unwrap().arn();
+    assert!(
+        arn.starts_with("arn:aws-us-gov:iam::"),
+        "expected aws-us-gov partition ARN, got: {arn}"
+    );
+}
