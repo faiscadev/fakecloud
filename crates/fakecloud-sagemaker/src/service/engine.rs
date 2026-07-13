@@ -475,7 +475,9 @@ fn passes_filters(id: &str, record: &Value, body: &Map<String, Value>) -> bool {
             return false;
         }
     }
-    let creation = obj.and_then(|o| o.get("CreationTime")).and_then(Value::as_f64);
+    let creation = obj
+        .and_then(|o| o.get("CreationTime"))
+        .and_then(Value::as_f64);
     if let Some(after) = body.get("CreationTimeAfter").and_then(Value::as_f64) {
         if creation.map(|c| c >= after) != Some(true) {
             return false;

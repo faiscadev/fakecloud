@@ -23,7 +23,7 @@ use fakecloud_core::service::{AwsResponse, AwsServiceError};
 
 use crate::generated::OpMeta;
 
-use super::{engine, ok_json, now_epoch, Ctx, SageMakerService};
+use super::{engine, now_epoch, ok_json, Ctx, SageMakerService};
 
 /// Dispatch an operation to a resource-specific handler. Returns `Ok(None)` if
 /// the operation is not claimed here (the caller then falls through to the
@@ -65,13 +65,20 @@ fn start_pipeline_execution(
     let pipeline_name = str_member(body, "PipelineName");
     let mut g = svc.state.write();
     let data = g.get_or_create(&ctx.account);
-    let exec_id = super::mint_id(&ctx.account, "PipelineExecution", &data.next_seq().to_string());
+    let exec_id = super::mint_id(
+        &ctx.account,
+        "PipelineExecution",
+        &data.next_seq().to_string(),
+    );
     let arn = format!(
         "arn:aws:sagemaker:{}:{}:pipeline/{}/execution/{}",
         ctx.region, ctx.account, pipeline_name, exec_id
     );
     let mut seed = body.clone();
-    seed.insert("PipelineExecutionArn".to_string(), Value::String(arn.clone()));
+    seed.insert(
+        "PipelineExecutionArn".to_string(),
+        Value::String(arn.clone()),
+    );
     seed.insert(
         "PipelineArn".to_string(),
         Value::String(format!(

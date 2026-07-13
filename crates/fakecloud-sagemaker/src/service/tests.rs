@@ -418,7 +418,10 @@ fn pipeline_execution_action_persists() {
         )
         .unwrap(),
     );
-    let arn = started["PipelineExecutionArn"].as_str().unwrap().to_string();
+    let arn = started["PipelineExecutionArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(arn.contains(":pipeline/p1/execution/"), "arn: {arn}");
 
     let described = resp_json(
@@ -432,9 +435,8 @@ fn pipeline_execution_action_persists() {
     assert_eq!(described["PipelineExecutionArn"], arn);
     assert_eq!(described["PipelineExecutionStatus"], "Executing");
 
-    let listed = resp_json(
-        &run(&s, "ListPipelineExecutions", json!({"PipelineName": "p1"})).unwrap(),
-    );
+    let listed =
+        resp_json(&run(&s, "ListPipelineExecutions", json!({"PipelineName": "p1"})).unwrap());
     let sums = listed["PipelineExecutionSummaries"].as_array().unwrap();
     assert!(sums.iter().any(|x| x["PipelineExecutionArn"] == arn));
 }
@@ -497,7 +499,10 @@ fn association_action_persists_and_deletes() {
     )
     .unwrap();
     let listed = resp_json(&run(&s, "ListAssociations", Value::Null).unwrap());
-    assert!(listed["AssociationSummaries"].as_array().unwrap().is_empty());
+    assert!(listed["AssociationSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
 }
 
 // NameContains must narrow a List result to matching records.
