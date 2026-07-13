@@ -30,8 +30,20 @@ impl S3Service {
                 return Err(malformed_object_lock("Mode", m));
             }
         }
-        let retain_until = extract_xml_value(body_str, "RetainUntilDate")
+        let retain_until_raw = extract_xml_value(body_str, "RetainUntilDate");
+        let retain_until = retain_until_raw
+            .as_deref()
             .and_then(|s| s.parse::<DateTime<Utc>>().ok());
+        // A retention with a Mode must carry a valid RetainUntilDate. AWS
+        // rejects a Mode-only (or unparseable-date) body with 400 MalformedXML
+        // rather than persisting a mode that would later round-trip into the
+        // x-amz-object-lock-mode header with no expiry.
+        if mode.is_some() && retain_until.is_none() {
+            return Err(malformed_object_lock(
+                "RetainUntilDate",
+                retain_until_raw.as_deref().unwrap_or(""),
+            ));
+        }
 
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);

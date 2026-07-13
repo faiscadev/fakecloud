@@ -4771,3 +4771,332 @@ async fn mpu_complete_on_versioned_bucket_pushes_new_version() {
         versions.len()
     );
 }
+
+// ────────────────────────────────────────────────────────────────
+// Persistence regression tests (bug-hunt 2026-07-13).
+//
+// RenameObject, UpdateObjectEncryption, and the metadata
+// inventory/journal-table updates used to mutate RAM only and never
+// call the store, so they silently reverted on restart in disk mode.
+// A recording store proves the handler now drives the store write
+// path (the harness can't restart the server in-sandbox).
+// ────────────────────────────────────────────────────────────────
+
+struct RecordingStore {
+    inner: fakecloud_persistence::MemoryS3Store,
+    calls: parking_lot::Mutex<Vec<String>>,
+}
+
+impl RecordingStore {
+    fn new() -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            inner: fakecloud_persistence::MemoryS3Store::new(),
+            calls: parking_lot::Mutex::new(Vec::new()),
+        })
+    }
+    fn record(&self, call: String) {
+        self.calls.lock().push(call);
+    }
+    fn calls(&self) -> Vec<String> {
+        self.calls.lock().clone()
+    }
+}
+
+impl fakecloud_persistence::S3Store for RecordingStore {
+    fn load(&self) -> fakecloud_persistence::StoreResult<fakecloud_persistence::S3StateSnapshot> {
+        self.inner.load()
+    }
+    fn put_bucket_meta(
+        &self,
+        bucket: &str,
+        meta: &fakecloud_persistence::BucketMeta,
+    ) -> fakecloud_persistence::StoreResult<()> {
+        self.record(format!("put_bucket_meta:{bucket}"));
+        self.inner.put_bucket_meta(bucket, meta)
+    }
+    fn put_bucket_subresource(
+        &self,
+        bucket: &str,
+        kind: fakecloud_persistence::BucketSubresource,
+        payload: &str,
+    ) -> fakecloud_persistence::StoreResult<()> {
+        self.record(format!("put_bucket_subresource:{bucket}:{kind:?}"));
+        self.inner.put_bucket_subresource(bucket, kind, payload)
+    }
+    fn delete_bucket_subresource(
+        &self,
+        bucket: &str,
+        kind: fakecloud_persistence::BucketSubresource,
+    ) -> fakecloud_persistence::StoreResult<()> {
+        self.record(format!("delete_bucket_subresource:{bucket}:{kind:?}"));
+        self.inner.delete_bucket_subresource(bucket, kind)
+    }
+    fn delete_bucket(&self, bucket: &str) -> fakecloud_persistence::StoreResult<()> {
+        self.record(format!("delete_bucket:{bucket}"));
+        self.inner.delete_bucket(bucket)
+    }
+    fn put_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        body: fakecloud_persistence::BodySource,
+        meta: &fakecloud_persistence::ObjectMeta,
+    ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+        self.record(format!("put_object:{bucket}/{key}"));
+        self.inner.put_object(bucket, key, version, body, meta)
+    }
+    fn put_object_meta(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+        meta: &fakecloud_persistence::ObjectMeta,
+    ) -> fakecloud_persistence::StoreResult<()> {
+        self.record(format!("put_object_meta:{bucket}/{key}"));
+        self.inner.put_object_meta(bucket, key, version, meta)
+    }
+    fn delete_object(
+        &self,
+        bucket: &str,
+        key: &str,
+        version: Option<&str>,
+    ) -> fakecloud_persistence::StoreResult<()> {
+        self.record(format!("delete_object:{bucket}/{key}"));
+        self.inner.delete_object(bucket, key, version)
+    }
+    fn open_object_body(
+        &self,
+        body: &fakecloud_persistence::BodyRef,
+    ) -> fakecloud_persistence::StoreResult<Bytes> {
+        self.inner.open_object_body(body)
+    }
+    fn mpu_create(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        init: &fakecloud_persistence::MpuInit,
+    ) -> fakecloud_persistence::StoreResult<()> {
+        self.inner.mpu_create(bucket, upload_id, init)
+    }
+    fn mpu_put_part(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        part_number: u32,
+        body: fakecloud_persistence::BodySource,
+        etag: &str,
+    ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+        self.inner
+            .mpu_put_part(bucket, upload_id, part_number, body, etag)
+    }
+    fn mpu_abort(&self, bucket: &str, upload_id: &str) -> fakecloud_persistence::StoreResult<()> {
+        self.inner.mpu_abort(bucket, upload_id)
+    }
+    fn mpu_complete(
+        &self,
+        bucket: &str,
+        upload_id: &str,
+        final_key: &str,
+        version: Option<&str>,
+        meta: &fakecloud_persistence::ObjectMeta,
+    ) -> fakecloud_persistence::StoreResult<fakecloud_persistence::BodyRef> {
+        self.inner
+            .mpu_complete(bucket, upload_id, final_key, version, meta)
+    }
+}
+
+fn make_recording_service() -> (S3Service, std::sync::Arc<RecordingStore>) {
+    let state: SharedS3State = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let store = RecordingStore::new();
+    let svc = S3Service::with_store(state, Arc::new(DeliveryBus::new()), store.clone());
+    (svc, store)
+}
+
+#[test]
+fn rename_object_persists_move_through_store() {
+    let (svc, store) = make_recording_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "old", b"payload");
+
+    let mut req = make_request(Method::PUT, "/b/new", &[("renameObject", "")], b"");
+    req.headers
+        .insert("x-amz-rename-source", "/old".parse().unwrap());
+    svc.rename_object("123456789012", &req, "b", "new").unwrap();
+
+    // In-memory move happened.
+    {
+        let mas = svc.state.read();
+        let b = mas.default_ref().buckets.get("b").unwrap();
+        assert!(b.objects.contains_key("new"));
+        assert!(!b.objects.contains_key("old"));
+    }
+    // …and it was persisted: the new key written, the old key deleted.
+    let calls = store.calls();
+    assert!(
+        calls.iter().any(|c| c == "put_object:b/new"),
+        "expected put_object for the new key, got {calls:?}"
+    );
+    assert!(
+        calls.iter().any(|c| c == "delete_object:b/old"),
+        "expected delete_object for the old key, got {calls:?}"
+    );
+}
+
+#[test]
+fn update_object_encryption_persists_reencrypted_body() {
+    let (svc, store) = make_recording_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "k", b"payload");
+
+    let mut req = make_request(Method::PUT, "/b/k", &[("encryption", "")], b"");
+    req.headers
+        .insert("x-amz-server-side-encryption", "AES256".parse().unwrap());
+    svc.update_object_encryption("123456789012", &req, "b", "k")
+        .unwrap();
+
+    // Algorithm changed -> the body path must be re-persisted, not RAM-only.
+    let calls = store.calls();
+    assert!(
+        calls.iter().any(|c| c == "put_object:b/k"),
+        "expected put_object to persist the re-encrypted body, got {calls:?}"
+    );
+    // Metadata reflects the new algorithm in memory too.
+    let mas = svc.state.read();
+    let obj = mas
+        .default_ref()
+        .buckets
+        .get("b")
+        .unwrap()
+        .objects
+        .get("k")
+        .unwrap();
+    assert_eq!(obj.sse_algorithm.as_deref(), Some("AES256"));
+}
+
+#[test]
+fn update_metadata_inventory_table_persists_config() {
+    let (svc, store) = make_recording_service();
+    seed_bucket(&svc, "b");
+
+    let body = b"<InventoryTableConfiguration><ConfigurationState>ENABLED</ConfigurationState></InventoryTableConfiguration>";
+    let req = make_request(Method::PUT, "/b", &[("metadataInventoryTable", "")], body);
+    svc.update_bucket_metadata_inventory_table("123456789012", &req, "b")
+        .unwrap();
+
+    let calls = store.calls();
+    assert!(
+        calls
+            .iter()
+            .any(|c| c == "put_bucket_subresource:b:MetadataConfiguration"),
+        "inventory-table update must persist the composite metadata config, got {calls:?}"
+    );
+    // Journal-table sibling persists the same way.
+    let req2 = make_request(Method::PUT, "/b", &[("metadataJournalTable", "")], body);
+    svc.update_bucket_metadata_journal_table("123456789012", &req2, "b")
+        .unwrap();
+    let calls = store.calls();
+    assert!(
+        calls
+            .iter()
+            .filter(|c| *c == "put_bucket_subresource:b:MetadataConfiguration")
+            .count()
+            >= 2,
+        "journal-table update must persist too, got {calls:?}"
+    );
+}
+
+#[test]
+fn put_object_retention_mode_without_date_is_malformed_xml() {
+    // A retention carrying a Mode but no valid RetainUntilDate is rejected by
+    // AWS with 400 MalformedXML, not silently stored (bug-hunt 2026-07-13).
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "k", b"payload");
+
+    let body = b"<Retention><Mode>GOVERNANCE</Mode></Retention>";
+    let req = make_request(Method::PUT, "/b/k", &[("retention", "")], body);
+    let err = match svc.put_object_retention("123456789012", &req, "b", "k") {
+        Ok(_) => panic!("mode without retain-until must be rejected"),
+        Err(e) => e,
+    };
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(err.code(), "MalformedXML");
+
+    // A well-formed retention (mode + date) still succeeds.
+    let ok_body =
+        b"<Retention><Mode>GOVERNANCE</Mode><RetainUntilDate>2099-01-01T00:00:00Z</RetainUntilDate></Retention>";
+    let ok_req = make_request(Method::PUT, "/b/k", &[("retention", "")], ok_body);
+    svc.put_object_retention("123456789012", &ok_req, "b", "k")
+        .expect("valid retention must succeed");
+}
+
+#[test]
+fn list_objects_v2_rejects_non_integer_max_keys() {
+    // A non-integer / out-of-range max-keys is a 400 InvalidArgument, not a
+    // silent coercion to 1000 (bug-hunt 2026-07-13).
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+
+    for bad in ["abc", "-1", "99999999999999999999"] {
+        let req = make_request(
+            Method::GET,
+            "/b",
+            &[("list-type", "2"), ("max-keys", bad)],
+            b"",
+        );
+        let err = match svc.list_objects_v2("123456789012", &req, "b") {
+            Ok(_) => panic!("max-keys={bad} must be rejected"),
+            Err(e) => e,
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST, "max-keys={bad}");
+        assert_eq!(err.code(), "InvalidArgument", "max-keys={bad}");
+    }
+
+    // A valid value still works and caps at 1000.
+    let ok = make_request(
+        Method::GET,
+        "/b",
+        &[("list-type", "2"), ("max-keys", "5000")],
+        b"",
+    );
+    let resp = svc.list_objects_v2("123456789012", &ok, "b").unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(body.contains("<MaxKeys>1000</MaxKeys>"), "body: {body}");
+}
+
+#[test]
+fn list_object_versions_keeps_low_sorting_common_prefix_on_first_page() {
+    // When plain keys fill max-keys before a lower-sorting delimiter-rolled
+    // prefix, the prefix must still appear on the page it belongs to instead
+    // of being dropped as the marker advances past it (bug-hunt 2026-07-13).
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "a/x", b"1");
+    seed_object(&svc, "b", "bb", b"2");
+    seed_object(&svc, "b", "cc", b"3");
+
+    let req = make_request(
+        Method::GET,
+        "/b",
+        &[("versions", ""), ("delimiter", "/"), ("max-keys", "2")],
+        b"",
+    );
+    let resp = svc.list_object_versions("123456789012", &req, "b").unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+
+    // "a/" sorts before "bb"/"cc" so it must be emitted on page 1, not lost.
+    assert!(
+        body.contains("<CommonPrefixes><Prefix>a/</Prefix></CommonPrefixes>"),
+        "page 1 must keep the a/ CommonPrefix, body: {body}"
+    );
+    assert!(
+        body.contains("<IsTruncated>true</IsTruncated>"),
+        "body: {body}"
+    );
+    assert!(body.contains("<Key>bb</Key>"), "body: {body}");
+    // The page is capped at max-keys: "cc" spills to the next page.
+    assert!(!body.contains("<Key>cc</Key>"), "body: {body}");
+}

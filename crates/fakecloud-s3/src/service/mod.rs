@@ -2576,7 +2576,69 @@ pub(crate) fn extract_xml_value(xml: &str, tag: &str) -> Option<String> {
     // (closing tag before opening) can't make end < start and panic the
     // slice (bug-audit 2026-05-28, 2.2).
     let end = xml[start..].find(&close)? + start;
-    Some(xml[start..end].to_string())
+    // Decode XML entities in the text node. S3 request bodies arrive
+    // XML-encoded — every SDK escapes `&`, `<`, `>` (and sometimes `"`/`'`
+    // plus numeric refs) — so a key/value like `a&b` is on the wire as
+    // `a&amp;b`. Without decoding, an object keyed `a&b` (the key arrives
+    // URL-decoded from the request path) is never matched by a
+    // DeleteObjects/PutObjectTagging body, and a tag value round-trips with
+    // an extra layer of escaping on every GET.
+    Some(decode_xml_entities(&xml[start..end]))
+}
+
+/// Decode the standard XML entities in a text node value using a single
+/// left-to-right pass. A chain of `str::replace` calls would double-decode
+/// (e.g. `&amp;lt;` — the escaped literal text `&lt;` — must decode to
+/// `&lt;`, not to `<`), so the scan resolves each `&…;` exactly once.
+/// Handles the named entities (`amp`, `lt`, `gt`, `quot`, `apos`) and both
+/// decimal (`&#38;`) and hex (`&#x26;`) numeric character references; an
+/// unrecognized `&…` sequence is emitted verbatim, matching how lenient XML
+/// readers treat a bare ampersand.
+pub(crate) fn decode_xml_entities(s: &str) -> String {
+    if !s.contains('&') {
+        return s.to_string();
+    }
+    let mut out = String::with_capacity(s.len());
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < s.len() {
+        if bytes[i] == b'&' {
+            // Bound the entity name so a stray '&' followed by a distant ';'
+            // doesn't swallow a long span of text.
+            if let Some(rel) = s[i + 1..].find(';') {
+                if rel <= 10 {
+                    let entity = &s[i + 1..i + 1 + rel];
+                    let decoded = match entity {
+                        "amp" => Some('&'),
+                        "lt" => Some('<'),
+                        "gt" => Some('>'),
+                        "quot" => Some('"'),
+                        "apos" => Some('\''),
+                        _ => entity
+                            .strip_prefix("#x")
+                            .or_else(|| entity.strip_prefix("#X"))
+                            .and_then(|hex| u32::from_str_radix(hex, 16).ok())
+                            .or_else(|| {
+                                entity.strip_prefix('#').and_then(|d| d.parse::<u32>().ok())
+                            })
+                            .and_then(char::from_u32),
+                    };
+                    if let Some(c) = decoded {
+                        out.push(c);
+                        i += 1 + rel + 1;
+                        continue;
+                    }
+                }
+            }
+            out.push('&');
+            i += 1;
+        } else {
+            let ch = s[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
 }
 
 /// Parse the CompleteMultipartUpload XML body into (part_number, etag) pairs.
@@ -3047,7 +3109,7 @@ mod s3_iam_service_prefix_tests {
 
 #[cfg(test)]
 mod extract_xml_value_tests {
-    use super::extract_xml_value;
+    use super::{decode_xml_entities, extract_xml_value};
 
     #[test]
     fn returns_inner_value() {
@@ -3055,6 +3117,42 @@ mod extract_xml_value_tests {
             extract_xml_value("<Root><Key>value</Key></Root>", "Key"),
             Some("value".to_string())
         );
+    }
+
+    // The wire form of a key `a&b` is `<Key>a&amp;b</Key>`; the parsed value
+    // must decode back to `a&b` so it matches the URL-decoded key that
+    // arrives via the request path (otherwise DeleteObjects/Tagging silently
+    // miss the object).
+    #[test]
+    fn decodes_named_and_numeric_entities() {
+        assert_eq!(
+            extract_xml_value("<Key>a&amp;b</Key>", "Key"),
+            Some("a&b".to_string())
+        );
+        assert_eq!(
+            extract_xml_value("<Key>&lt;x&gt; &quot;y&quot; &apos;z&apos;</Key>", "Key"),
+            Some("<x> \"y\" 'z'".to_string())
+        );
+        assert_eq!(
+            extract_xml_value("<Key>a&#38;b&#x26;c</Key>", "Key"),
+            Some("a&b&c".to_string())
+        );
+    }
+
+    // A single left-to-right pass must resolve each entity exactly once:
+    // `&amp;lt;` is the escaped literal text `&lt;`, so it decodes to `&lt;`,
+    // NOT to `<` (which a chain of `str::replace` calls would wrongly produce).
+    #[test]
+    fn does_not_double_decode() {
+        assert_eq!(decode_xml_entities("&amp;lt;"), "&lt;");
+        assert_eq!(decode_xml_entities("&amp;amp;"), "&amp;");
+    }
+
+    #[test]
+    fn leaves_bare_ampersand_and_unknown_entities_verbatim() {
+        assert_eq!(decode_xml_entities("a & b"), "a & b");
+        assert_eq!(decode_xml_entities("50% &bogus; done"), "50% &bogus; done");
+        assert_eq!(decode_xml_entities("no entities here"), "no entities here");
     }
 
     #[test]

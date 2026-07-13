@@ -4928,3 +4928,109 @@ async fn list_objects_max_keys_zero_is_empty_not_truncated() {
     assert_eq!(v1.is_truncated(), Some(false));
     assert!(v1.next_marker().is_none());
 }
+
+// XML entity round-trip regression (bug-hunt 2026-07-13): body-sourced keys
+// and tag values arrive XML-encoded (`&` -> `&amp;`) and must be decoded so
+// they match the URL-decoded keys stored via the request path. Before the
+// fix, DeleteObjects on an `&`-containing key falsely reported success while
+// the object survived, and a tag value gained an extra layer of escaping on
+// every GET.
+
+#[tokio::test]
+async fn s3_delete_objects_with_ampersand_key_actually_deletes() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("amp-del")
+        .send()
+        .await
+        .unwrap();
+
+    let key = "reports/2026&2027/summary.txt";
+    client
+        .put_object()
+        .bucket("amp-del")
+        .key(key)
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+
+    use aws_sdk_s3::types::{Delete, ObjectIdentifier};
+    let delete = Delete::builder()
+        .objects(ObjectIdentifier::builder().key(key).build().unwrap())
+        .build()
+        .unwrap();
+    let resp = client
+        .delete_objects()
+        .bucket("amp-del")
+        .delete(delete)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.deleted().len(), 1);
+    assert_eq!(resp.deleted()[0].key(), Some(key));
+
+    // The object must actually be gone, not merely reported deleted.
+    let list = client
+        .list_objects_v2()
+        .bucket("amp-del")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        list.key_count().unwrap_or(0),
+        0,
+        "object with & key survived delete"
+    );
+}
+
+#[tokio::test]
+async fn s3_object_tagging_round_trips_ampersand_value_unchanged() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("amp-tag")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_object()
+        .bucket("amp-tag")
+        .key("k.txt")
+        .body(ByteStream::from_static(b"data"))
+        .send()
+        .await
+        .unwrap();
+
+    use aws_sdk_s3::types::{Tag, Tagging};
+    let value = "research & development";
+    let tagging = Tagging::builder()
+        .tag_set(Tag::builder().key("dept").value(value).build().unwrap())
+        .build()
+        .unwrap();
+    client
+        .put_object_tagging()
+        .bucket("amp-tag")
+        .key("k.txt")
+        .tagging(tagging)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_object_tagging()
+        .bucket("amp-tag")
+        .key("k.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tag_set().len(), 1);
+    // The value must come back byte-for-byte, not with extra escaping layers.
+    assert_eq!(resp.tag_set()[0].key(), "dept");
+    assert_eq!(resp.tag_set()[0].value(), value);
+}

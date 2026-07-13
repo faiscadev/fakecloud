@@ -640,6 +640,16 @@ impl S3Service {
         dest_bucket: &str,
         dest_key: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Validate destination key length, matching PutObject (AWS caps keys at
+        // 1024 bytes and rejects a longer one with KeyTooLongError).
+        if dest_key.len() > 1024 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "KeyTooLongError",
+                "Your key is too long",
+            ));
+        }
+
         let copy_source = req
             .headers
             .get("x-amz-copy-source")
