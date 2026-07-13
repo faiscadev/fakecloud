@@ -1927,6 +1927,258 @@ fn modify_db_instance_no_fields_against_missing_instance_returns_not_found() {
     assert_code(svc.modify_db_instance(&req), "DBInstanceNotFound");
 }
 
+// ── M1: NewDBInstanceIdentifier rename ───────────────────────────
+
+#[test]
+fn modify_db_instance_renames_instance_and_arn() {
+    let svc = make_service();
+    seed_instance(&svc, "db-old");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-old"),
+            ("NewDBInstanceIdentifier", "db-new"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    assert!(
+        !state.instances.contains_key("db-old"),
+        "old identifier must no longer resolve after rename"
+    );
+    let renamed = state
+        .instances
+        .get("db-new")
+        .expect("instance now lives under the new identifier");
+    assert_eq!(renamed.db_instance_identifier, "db-new");
+    assert_eq!(
+        renamed.db_instance_arn, "arn:aws:rds:us-east-1:123456789012:db:db-new",
+        "ARN must track the renamed identifier"
+    );
+}
+
+#[test]
+fn modify_db_instance_rename_rejects_existing_target() {
+    let svc = make_service();
+    seed_instance(&svc, "db-a");
+    seed_instance(&svc, "db-b");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-a"),
+            ("NewDBInstanceIdentifier", "db-b"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    assert_code(svc.modify_db_instance(&req), "DBInstanceAlreadyExists");
+    // Both instances must still be intact — no silent clobber.
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    assert!(state.instances.contains_key("db-a"));
+    assert!(state.instances.contains_key("db-b"));
+}
+
+#[test]
+fn modify_db_instance_rename_updates_endpoint_host() {
+    let svc = make_service();
+    seed_instance(&svc, "db-old");
+    {
+        // Simulate an AWS-style endpoint host embedding the identifier.
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state.instances.get_mut("db-old").unwrap().endpoint_address =
+            "db-old.abc123.us-east-1.rds.amazonaws.com".to_string();
+    }
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-old"),
+            ("NewDBInstanceIdentifier", "db-new"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    assert_eq!(
+        state.instances.get("db-new").unwrap().endpoint_address,
+        "db-new.abc123.us-east-1.rds.amazonaws.com",
+        "endpoint host must follow the rename"
+    );
+}
+
+// ── M2: DBPortNumber must not break the reachable endpoint ────────
+
+#[test]
+fn modify_db_instance_port_number_keeps_endpoint_reachable() {
+    let svc = make_service();
+    // seed_instance sets host_port == port == 15432 (consistent).
+    seed_instance(&svc, "db1");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("DBPortNumber", "5433"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    let inst = state.instances.get("db1").unwrap();
+    assert_eq!(
+        inst.port,
+        i32::from(inst.host_port),
+        "advertised endpoint port must stay equal to the reachable host_port"
+    );
+    assert_eq!(inst.port, 15432);
+}
+
+#[test]
+fn modify_db_instance_port_number_honored_when_no_container() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    {
+        // Offline / no-backend instance: no live container to re-publish.
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        let inst = state.instances.get_mut("db1").unwrap();
+        inst.host_port = 0;
+        inst.port = 0;
+        inst.endpoint_address = String::new();
+    }
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("DBPortNumber", "5433"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    let state = __a.default_ref();
+    assert_eq!(state.instances.get("db1").unwrap().port, 5433);
+}
+
+// ── L2: reject storage shrink / engine-version downgrade ──────────
+
+#[test]
+fn modify_db_instance_rejects_storage_shrink() {
+    let svc = make_service();
+    seed_instance(&svc, "db1"); // allocated_storage == 20
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("AllocatedStorage", "10"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    assert_code(svc.modify_db_instance(&req), "InvalidParameterCombination");
+    // Unchanged.
+    let __a = svc.state.read();
+    assert_eq!(
+        __a.default_ref()
+            .instances
+            .get("db1")
+            .unwrap()
+            .allocated_storage,
+        20
+    );
+}
+
+#[test]
+fn modify_db_instance_allows_storage_grow() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("AllocatedStorage", "100"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    svc.modify_db_instance(&req).unwrap();
+    let __a = svc.state.read();
+    assert_eq!(
+        __a.default_ref()
+            .instances
+            .get("db1")
+            .unwrap()
+            .allocated_storage,
+        100
+    );
+}
+
+#[test]
+fn modify_db_instance_rejects_version_downgrade() {
+    let svc = make_service();
+    seed_instance(&svc, "db1"); // engine_version == 16.3
+    let req = request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("EngineVersion", "15.4"),
+            ("ApplyImmediately", "true"),
+        ],
+    );
+    assert_code(svc.modify_db_instance(&req), "InvalidParameterCombination");
+    let __a = svc.state.read();
+    assert_eq!(
+        __a.default_ref()
+            .instances
+            .get("db1")
+            .unwrap()
+            .engine_version,
+        "16.3"
+    );
+}
+
+// ── L3: no synthetic sg-default fabricated on create ──────────────
+
+#[test]
+fn create_db_instance_does_not_fabricate_sg_default() {
+    // parse_vpc_security_group_ids backs Create/Restore/RestoreFromSnapshot.
+    // With no VpcSecurityGroupIds supplied it must yield an empty list, not
+    // a synthetic `sg-default` that doesn't exist in the account.
+    let req = request("CreateDBInstance", &[("DBInstanceIdentifier", "db1")]);
+    assert!(
+        super::parse_vpc_security_group_ids(&req).is_empty(),
+        "absent VpcSecurityGroupIds must not synthesize sg-default"
+    );
+
+    let req_with = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-abc"),
+        ],
+    );
+    assert_eq!(
+        super::parse_vpc_security_group_ids(&req_with),
+        vec!["sg-abc".to_string()]
+    );
+}
+
+#[test]
+fn is_version_downgrade_detects_lower_versions() {
+    use super::is_version_downgrade;
+    assert!(is_version_downgrade("16.3", "15.4"));
+    assert!(is_version_downgrade("16.3", "16.2"));
+    assert!(!is_version_downgrade("16.3", "16.4"));
+    assert!(!is_version_downgrade("16.3", "17.1"));
+    assert!(!is_version_downgrade("16.3", "16.3"));
+    // Shorter-but-equal prefix isn't a downgrade.
+    assert!(!is_version_downgrade("16.3", "16"));
+    // Non-numeric engine strings are treated conservatively (not a downgrade).
+    assert!(!is_version_downgrade("aurora", "aurora"));
+}
+
 #[tokio::test]
 async fn reboot_db_instance_not_found() {
     let svc = make_service();
