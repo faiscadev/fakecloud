@@ -914,7 +914,8 @@ fn apply_state_catcher_matches_wildcard_and_stashes_error() {
         ]
     });
     let input = json!({ "a": 1 });
-    let (next, new_input) = apply_state_catcher(&state_def, &input, "Boom", "it exploded").unwrap();
+    let (next, new_input) =
+        apply_state_catcher(&state_def, &input, "Boom", "it exploded", true).unwrap();
     assert_eq!(next, "H");
     assert_eq!(new_input["a"], json!(1));
     assert_eq!(new_input["caught"]["Error"], json!("Boom"));
@@ -929,7 +930,7 @@ fn apply_state_catcher_returns_none_without_match() {
         ]
     });
     let input = json!({});
-    assert!(apply_state_catcher(&state_def, &input, "Other", "why").is_none());
+    assert!(apply_state_catcher(&state_def, &input, "Other", "why", true).is_none());
 }
 
 #[test]
@@ -1584,6 +1585,85 @@ fn lambda_transport_error_fails_as_lambda_unknown() {
     read_exec(&state, &arn, |exec| {
         assert_eq!(exec.status, ExecutionStatus::Failed);
         assert_eq!(exec.error.as_deref(), Some("Lambda.Unknown"));
+    });
+}
+
+// H1: Catch on States.TaskFailed is a wildcard for a task's custom errorType.
+#[test]
+fn lambda_catch_on_states_task_failed_wildcard_routes() {
+    let state = make_state();
+    let arn = arn_for("lambda-taskfailed-wildcard");
+    let (bus, _calls) = StubLambda::bus(vec![Ok(
+        br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec(),
+    )]);
+    let def = lambda_invoke_def(json!({
+        "Catch": [{
+            "ErrorEquals": ["States.TaskFailed"],
+            "Next": "Handler",
+            "ResultPath": "$.err"
+        }]
+    }));
+    let mut def = def;
+    def["States"]["Handler"] = json!({ "Type": "Pass", "End": true });
+    drive_with_delivery(&state, &arn, def, Some(r#"{"orig":"v"}"#), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        // The custom errorType was caught by the States.TaskFailed wildcard.
+        assert_eq!(output["err"]["Error"], json!("MyCustomError"));
+        assert_eq!(output["orig"], json!("v"));
+    });
+}
+
+// H1: Retry on States.TaskFailed wildcard retries a custom task errorType.
+#[test]
+fn lambda_retry_on_states_task_failed_wildcard() {
+    let state = make_state();
+    let arn = arn_for("lambda-taskfailed-retry");
+    let (bus, calls) = StubLambda::bus(vec![
+        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
+        Ok(br#"{"ok":true}"#.to_vec()),
+    ]);
+    let def = lambda_invoke_def(json!({
+        "Retry": [{ "ErrorEquals": ["States.TaskFailed"], "MaxAttempts": 2, "IntervalSeconds": 0 }]
+    }));
+    drive_with_delivery(&state, &arn, def, Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+    });
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+}
+
+// M4: an execution exceeding the old 500-transition ceiling still completes.
+#[test]
+fn long_loop_exceeds_old_ceiling_completes() {
+    let state = make_state();
+    let arn = arn_for("long-loop");
+    let def = json!({
+        "StartAt": "Init",
+        "States": {
+            "Init": { "Type": "Pass", "Result": {"count": 0}, "Next": "Check" },
+            "Check": {
+                "Type": "Choice",
+                "Choices": [{ "Variable": "$.count", "NumericLessThan": 600, "Next": "Inc" }],
+                "Default": "Done"
+            },
+            "Inc": {
+                "Type": "Pass",
+                "Parameters": { "count.$": "States.MathAdd($.count, 1)" },
+                "Next": "Check"
+            },
+            "Done": { "Type": "Succeed" }
+        }
+    });
+    drive(&state, &arn, def, Some("{}"));
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let output: Value = serde_json::from_str(exec.output.as_ref().unwrap()).unwrap();
+        assert_eq!(output["count"], json!(600));
     });
 }
 

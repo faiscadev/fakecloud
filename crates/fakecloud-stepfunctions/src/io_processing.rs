@@ -65,33 +65,62 @@ pub fn resolve_path(root: &Value, path: &str) -> Value {
     current.clone()
 }
 
-/// Set a value at a simple JsonPath within a JSON structure.
+/// Set a value at a simple JsonPath within a JSON structure. Handles both plain
+/// object fields (`$.a.b`) and array-index segments (`$.a[0].b`). An index
+/// segment `name[idx]` descends into element `idx` of the array stored at
+/// `name`, growing the array with nulls as needed.
 fn set_at_path(root: &Value, path: &str, value: &Value) -> Value {
     let mut result = root.clone();
     let path = path.strip_prefix("$.").unwrap_or(path);
-    let segments: Vec<&str> = path.split('.').collect();
+    let segments = split_path_segments(path);
 
-    let mut current = &mut result;
-    for (i, segment) in segments.iter().enumerate() {
-        if i == segments.len() - 1 {
-            // Last segment — set the value
-            if let Some(obj) = current.as_object_mut() {
-                obj.insert(segment.to_string(), value.clone());
-            }
-        } else {
-            // Intermediate — ensure object exists
-            if current.get(*segment).is_none() {
+    fn assign(current: &mut Value, segments: &[PathSegment<'_>], value: &Value) {
+        let (segment, rest) = match segments.split_first() {
+            Some(pair) => pair,
+            None => return,
+        };
+        let is_last = rest.is_empty();
+        match segment {
+            PathSegment::Field(name) => {
                 if let Some(obj) = current.as_object_mut() {
-                    obj.insert(segment.to_string(), serde_json::json!({}));
+                    if is_last {
+                        obj.insert(name.to_string(), value.clone());
+                    } else {
+                        let child = obj
+                            .entry(name.to_string())
+                            .or_insert_with(|| serde_json::json!({}));
+                        assign(child, rest, value);
+                    }
                 }
             }
-            match current.get_mut(*segment) {
-                Some(v) => current = v,
-                None => return result, // non-object intermediate, bail out
+            PathSegment::Index(name, idx) => {
+                // Ensure `name` holds an array long enough to index `idx`.
+                if let Some(obj) = current.as_object_mut() {
+                    let arr_val = obj
+                        .entry(name.to_string())
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if !arr_val.is_array() {
+                        *arr_val = Value::Array(Vec::new());
+                    }
+                    if let Some(arr) = arr_val.as_array_mut() {
+                        if arr.len() <= *idx {
+                            arr.resize(idx + 1, Value::Null);
+                        }
+                        if is_last {
+                            arr[*idx] = value.clone();
+                        } else {
+                            if !arr[*idx].is_object() && !arr[*idx].is_array() {
+                                arr[*idx] = serde_json::json!({});
+                            }
+                            assign(&mut arr[*idx], rest, value);
+                        }
+                    }
+                }
             }
         }
     }
 
+    assign(&mut result, &segments, value);
     result
 }
 
@@ -216,6 +245,34 @@ mod tests {
         let output = apply_result_path(&input, &result, Some("$.x.nested"));
         // x is a number, can't set nested on it — should return input unchanged
         assert_eq!(output, json!({"x": 42}));
+    }
+
+    // L8: ResultPath with an array-index segment must descend into the array,
+    // not insert a literal key like "a[0]".
+    #[test]
+    fn test_set_at_path_array_index_leaf() {
+        let input = json!({"a": [1, 2, 3]});
+        let result = json!(99);
+        let output = apply_result_path(&input, &result, Some("$.a[1]"));
+        assert_eq!(output, json!({"a": [1, 99, 3]}));
+        // No stray literal "a[1]" key was created.
+        assert!(output.get("a[1]").is_none());
+    }
+
+    #[test]
+    fn test_set_at_path_array_index_then_field() {
+        let input = json!({"items": [{"v": 1}]});
+        let result = json!("done");
+        let output = apply_result_path(&input, &result, Some("$.items[0].status"));
+        assert_eq!(output, json!({"items": [{"v": 1, "status": "done"}]}));
+    }
+
+    #[test]
+    fn test_set_at_path_array_index_grows_array() {
+        let input = json!({});
+        let result = json!("x");
+        let output = apply_result_path(&input, &result, Some("$.a[2]"));
+        assert_eq!(output, json!({"a": [null, null, "x"]}));
     }
 
     #[test]

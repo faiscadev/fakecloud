@@ -482,6 +482,234 @@ async fn sfn_create_with_invalid_definition_fails() {
     assert!(err.is_err());
 }
 
+// M5: a malformed InputPath nested inside a Parallel branch must be rejected at
+// CreateStateMachine, just like a top-level malformed path.
+#[tokio::test]
+async fn sfn_create_rejects_malformed_path_in_parallel_branch() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "Par",
+        "States": {
+            "Par": {
+                "Type": "Parallel",
+                "End": true,
+                "Branches": [{
+                    "StartAt": "Inner",
+                    "States": {
+                        "Inner": {
+                            "Type": "Pass",
+                            "InputPath": "not-a-valid-path",
+                            "End": true
+                        }
+                    }
+                }]
+            }
+        }
+    })
+    .to_string();
+
+    let err = client
+        .create_state_machine()
+        .name("bad-parallel-path")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await;
+    assert!(
+        err.is_err(),
+        "malformed InputPath in Parallel branch must fail"
+    );
+}
+
+// M5: a malformed ItemsPath / InputPath inside a Map ItemProcessor must be
+// rejected at CreateStateMachine.
+#[tokio::test]
+async fn sfn_create_rejects_malformed_path_in_map_processor() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "M",
+        "States": {
+            "M": {
+                "Type": "Map",
+                "End": true,
+                "ItemProcessor": {
+                    "StartAt": "Each",
+                    "States": {
+                        "Each": {
+                            "Type": "Pass",
+                            "OutputPath": "bogus",
+                            "End": true
+                        }
+                    }
+                }
+            }
+        }
+    })
+    .to_string();
+
+    let err = client
+        .create_state_machine()
+        .name("bad-map-path")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await;
+    assert!(
+        err.is_err(),
+        "malformed OutputPath in Map processor must fail"
+    );
+}
+
+// L7: a payload-template key ending in `.$` whose value is a bare literal (not a
+// JSONPath reference or intrinsic) must be rejected at CreateStateMachine.
+#[tokio::test]
+async fn sfn_create_rejects_bare_literal_parameters_ref() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "P",
+        "States": {
+            "P": {
+                "Type": "Pass",
+                "Parameters": { "value.$": "just a literal" },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let err = client
+        .create_state_machine()
+        .name("bad-params-literal")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await;
+    assert!(err.is_err(), "bare-literal .$ value must fail validation");
+}
+
+// L7: a payload-template key ending in `.$` whose value is not a string (e.g. a
+// number) must be rejected at CreateStateMachine.
+#[tokio::test]
+async fn sfn_create_rejects_non_string_parameters_ref() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "P",
+        "States": {
+            "P": {
+                "Type": "Pass",
+                "Parameters": { "value.$": 42 },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let err = client
+        .create_state_machine()
+        .name("bad-params-nonstring")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await;
+    assert!(err.is_err(), "non-string .$ value must fail validation");
+}
+
+// L7: a valid `.$` reference / intrinsic must still be accepted.
+#[tokio::test]
+async fn sfn_create_accepts_valid_parameters_ref() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let definition = serde_json::json!({
+        "StartAt": "P",
+        "States": {
+            "P": {
+                "Type": "Pass",
+                "Parameters": {
+                    "copied.$": "$.input",
+                    "computed.$": "States.MathAdd($.n, 1)"
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    client
+        .create_state_machine()
+        .name("good-params-ref")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .expect("valid .$ references must be accepted");
+}
+
+// M4: an execution that performs more than the old 500-transition ceiling must
+// still complete (AWS Standard allows up to 25,000 transitions).
+#[tokio::test]
+async fn sfn_long_loop_exceeds_old_ceiling() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    // ~600 increments => ~1,200 state transitions, well past the old 500 cap.
+    let definition = serde_json::json!({
+        "StartAt": "Init",
+        "States": {
+            "Init": { "Type": "Pass", "Result": {"count": 0}, "Next": "Check" },
+            "Check": {
+                "Type": "Choice",
+                "Choices": [{ "Variable": "$.count", "NumericLessThan": 600, "Next": "Inc" }],
+                "Default": "Done"
+            },
+            "Inc": {
+                "Type": "Pass",
+                "Parameters": { "count.$": "States.MathAdd($.count, 1)" },
+                "Next": "Check"
+            },
+            "Done": { "Type": "Succeed" }
+        }
+    })
+    .to_string();
+
+    let create = client
+        .create_state_machine()
+        .name("long-loop-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+
+    let start = client
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input("{}")
+        .send()
+        .await
+        .unwrap();
+
+    let status = wait_for_execution(&client, start.execution_arn()).await;
+    assert_eq!(status, "SUCCEEDED");
+
+    let desc = client
+        .describe_execution()
+        .execution_arn(start.execution_arn())
+        .send()
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(desc.output().unwrap_or("{}")).unwrap();
+    assert_eq!(output["count"], 600);
+}
+
 #[tokio::test]
 async fn sfn_health_includes_states() {
     let server = TestServer::start().await;

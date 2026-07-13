@@ -217,7 +217,8 @@ async fn run_task_state(
             );
             advance_from_next(state_def, output)
         }
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause),
+        // Task-originated error → the States.TaskFailed wildcard applies.
+        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, true),
     }
 }
 
@@ -268,7 +269,9 @@ async fn run_parallel_state(
             );
             advance_from_next(state_def, output)
         }
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause),
+        // A Parallel branch failure is not itself a task error; the
+        // States.TaskFailed wildcard must not swallow branch-level errors.
+        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, false),
     }
 }
 
@@ -319,7 +322,9 @@ async fn run_map_state(
             );
             advance_from_next(state_def, output)
         }
-        Err((error, cause)) => advance_from_error(state_def, &input, error, cause),
+        // A Map iteration failure is not itself a task error; the
+        // States.TaskFailed wildcard must not swallow iteration-level errors.
+        Err((error, cause)) => advance_from_error(state_def, &input, error, cause, false),
     }
 }
 
@@ -536,13 +541,12 @@ async fn execute_task_state(
                                 json!({ "error": error, "cause": cause }),
                             );
 
-                            if let Some(delay_ms) = should_retry(&retriers, &error, attempt) {
+                            if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
                                 attempt += 1;
-                                let actual_delay = delay_ms.min(5000);
-                                tokio::time::sleep(tokio::time::Duration::from_millis(
-                                    actual_delay,
-                                ))
-                                .await;
+                                // Honour the ASL-computed backoff (already bounded
+                                // by MaxDelaySeconds inside `should_retry`).
+                                tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms))
+                                    .await;
                                 continue;
                             }
 
@@ -591,10 +595,11 @@ async fn execute_task_state(
                     json!({ "error": error, "cause": cause }),
                 );
 
-                if let Some(delay_ms) = should_retry(&retriers, &error, attempt) {
+                if let Some(delay_ms) = should_retry(&retriers, &error, attempt, true) {
                     attempt += 1;
-                    let actual_delay = delay_ms.min(5000);
-                    tokio::time::sleep(tokio::time::Duration::from_millis(actual_delay)).await;
+                    // Honour the ASL-computed backoff (already bounded by
+                    // MaxDelaySeconds inside `should_retry`).
+                    tokio::time::sleep(tokio::time::Duration::from_millis(delay_ms)).await;
                     continue;
                 }
 
