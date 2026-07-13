@@ -3086,6 +3086,14 @@ impl EksService {
             .filter(|v| v.is_object())
             .ok_or_else(|| invalid_parameter("term is required"))?;
         let term_duration = term.get("duration").and_then(|v| v.as_i64()).unwrap_or(12);
+        // AWS EKS Anywhere subscriptions use month-based terms (12 or 36); bound
+        // the value so a hostile `duration` can't overflow the date arithmetic
+        // below (`DateTime + Duration` panics on overflow in all build profiles).
+        if !(1..=120).contains(&term_duration) {
+            return Err(invalid_parameter(format!(
+                "term.duration must be between 1 and 120 months, got {term_duration}"
+            )));
+        }
         let term_unit = term
             .get("unit")
             .and_then(|v| v.as_str())
@@ -3115,7 +3123,11 @@ impl EksService {
         let id = raw[..17.min(raw.len())].to_string();
         let arn = eks_anywhere_subscription_arn(&region, &account_id, &id);
         let now = Utc::now();
-        let expiration = now + chrono::Duration::days(term_duration * 30);
+        let expiration = now
+            .checked_add_signed(chrono::Duration::days(term_duration * 30))
+            .ok_or_else(|| {
+                invalid_parameter("term.duration produces an out-of-range expiration date")
+            })?;
         let subscription = EksAnywhereSubscription {
             id: id.clone(),
             arn,
@@ -6911,5 +6923,41 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    #[tokio::test]
+    async fn subscription_rejects_overflow_duration() {
+        // Regression: a hostile `term.duration` used to overflow the
+        // `DateTime + Duration` expiration arithmetic and panic the handler.
+        let svc = EksService::new(make_state());
+        let err = svc
+            .handle(make_request(
+                Method::POST,
+                "/eks-anywhere-subscriptions",
+                &json!({ "name": "sub", "term": { "duration": 100_000_000_i64, "unit": "MONTHS" } })
+                    .to_string(),
+            ))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    #[tokio::test]
+    async fn subscription_accepts_valid_duration() {
+        let svc = EksService::new(make_state());
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/eks-anywhere-subscriptions",
+                &json!({ "name": "sub-ok", "term": { "duration": 36, "unit": "MONTHS" } })
+                    .to_string(),
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["subscription"]["term"]["duration"], 36);
+        assert_eq!(v["subscription"]["status"], "ACTIVE");
     }
 }

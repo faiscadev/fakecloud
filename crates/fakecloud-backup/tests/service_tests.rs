@@ -944,3 +944,48 @@ fn percent(s: &str) -> String {
     }
     out
 }
+
+// ---------------------------------------------------------------------------
+// Vault lock
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn vault_lock_rejects_overflow_changeable_days() {
+    // Regression: a hostile ChangeableForDays used to overflow the
+    // `Utc::now() + Duration::days(d)` lock-date arithmetic and panic.
+    let svc = service();
+    make_vault(&svc, "lockvault").await;
+    let (status, code) = call_err(
+        &svc,
+        req(
+            Method::PUT,
+            "/backup-vaults/lockvault/vault-lock",
+            json!({ "ChangeableForDays": 100_000_000_i64 }),
+        ),
+    )
+    .await;
+    assert_eq!(status, 400);
+    assert_eq!(code, "InvalidParameterValueException");
+}
+
+#[tokio::test]
+async fn vault_lock_accepts_valid_changeable_days() {
+    let svc = service();
+    make_vault(&svc, "lockvault2").await;
+    // In-range value succeeds and does not lock immediately.
+    call(
+        &svc,
+        req(
+            Method::PUT,
+            "/backup-vaults/lockvault2/vault-lock",
+            json!({ "ChangeableForDays": 3 }),
+        ),
+    )
+    .await;
+    let resp = call(
+        &svc,
+        req(Method::GET, "/backup-vaults/lockvault2", json!({})),
+    )
+    .await;
+    assert_eq!(body_of(&resp)["Locked"], false);
+}
