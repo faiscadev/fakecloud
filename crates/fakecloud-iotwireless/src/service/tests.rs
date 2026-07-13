@@ -506,14 +506,25 @@ fn wireless_gateway_task_create_get_delete_round_trips() {
     assert_eq!(created["WirelessGatewayTaskDefinitionId"], "def-1");
     assert_eq!(created["Status"], "QUEUED");
 
-    let got = body_of(
-        &run(&s, "GET", "/wireless-gateways/gw1/tasks", &[], Value::Null).unwrap(),
-    );
+    let got = body_of(&run(&s, "GET", "/wireless-gateways/gw1/tasks", &[], Value::Null).unwrap());
     assert_eq!(got["WirelessGatewayTaskDefinitionId"], "def-1");
     assert_eq!(got["WirelessGatewayId"], "gw1");
 
-    run(&s, "DELETE", "/wireless-gateways/gw1/tasks", &[], Value::Null).unwrap();
-    let err = expect_err(run(&s, "GET", "/wireless-gateways/gw1/tasks", &[], Value::Null));
+    run(
+        &s,
+        "DELETE",
+        "/wireless-gateways/gw1/tasks",
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let err = expect_err(run(
+        &s,
+        "GET",
+        "/wireless-gateways/gw1/tasks",
+        &[],
+        Value::Null,
+    ));
     assert!(is_code(&err, "ResourceNotFoundException"));
 }
 

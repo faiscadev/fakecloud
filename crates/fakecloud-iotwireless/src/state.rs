@@ -189,7 +189,10 @@ mod tests {
     fn singleton_round_trips() {
         let mut d = IotWirelessData::default();
         assert!(d.get_singleton("metric-configuration").is_none());
-        d.put_singleton("metric-configuration", json!({"SummaryMetric": {"Status": "Enabled"}}));
+        d.put_singleton(
+            "metric-configuration",
+            json!({"SummaryMetric": {"Status": "Enabled"}}),
+        );
         assert_eq!(
             d.get_singleton("metric-configuration").unwrap()["SummaryMetric"]["Status"],
             "Enabled"
@@ -203,7 +206,10 @@ mod tests {
         d.add_relation("fuota-multicast:task-1", "mc-2");
         // idempotent
         d.add_relation("fuota-multicast:task-1", "mc-1");
-        assert_eq!(d.list_relation("fuota-multicast:task-1"), vec!["mc-1", "mc-2"]);
+        assert_eq!(
+            d.list_relation("fuota-multicast:task-1"),
+            vec!["mc-1", "mc-2"]
+        );
         d.remove_relation("fuota-multicast:task-1", "mc-1");
         assert_eq!(d.list_relation("fuota-multicast:task-1"), vec!["mc-2"]);
         d.remove_relation("fuota-multicast:task-1", "mc-2");

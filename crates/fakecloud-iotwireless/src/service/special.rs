@@ -52,9 +52,12 @@ pub(super) fn dispatch(
         "ResetResourceLogLevel" => Ok(Some(reset_resource_log_level(svc, ctx, labels))),
 
         // ---- account-scoped singleton configurations (finding 2) ----
-        "UpdateMetricConfiguration" => {
-            Ok(Some(update_singleton(svc, ctx, "metric-configuration", body)))
-        }
+        "UpdateMetricConfiguration" => Ok(Some(update_singleton(
+            svc,
+            ctx,
+            "metric-configuration",
+            body,
+        ))),
         "GetMetricConfiguration" => Ok(Some(get_singleton(
             svc,
             ctx,
@@ -90,25 +93,21 @@ pub(super) fn dispatch(
         ))),
 
         // ---- Action ops that mint / return output identifiers (finding 3) ----
-        "SendDataToWirelessDevice" | "SendDataToMulticastGroup" => {
-            Ok(Some(send_data(labels)))
-        }
+        "SendDataToWirelessDevice" | "SendDataToMulticastGroup" => Ok(Some(send_data(labels))),
         "StartWirelessDeviceImportTask" | "StartSingleWirelessDeviceImportTask" => {
             Ok(Some(start_import_task(svc, ctx, body)))
         }
-        "CreateWirelessGatewayTask" => Ok(Some(create_wireless_gateway_task(svc, ctx, labels, body))),
+        "CreateWirelessGatewayTask" => {
+            Ok(Some(create_wireless_gateway_task(svc, ctx, labels, body)))
+        }
         "GetWirelessGatewayTask" => Ok(Some(get_wireless_gateway_task(svc, meta, ctx, labels)?)),
         "DeleteWirelessGatewayTask" => Ok(Some(delete_wireless_gateway_task(svc, ctx, labels))),
         "TestWirelessDevice" => Ok(Some(test_wireless_device())),
         "GetServiceEndpoint" => Ok(Some(get_service_endpoint(ctx, query))),
         "GetPositionEstimate" => Ok(Some(get_position_estimate())),
         "GetMetrics" => Ok(Some(get_metrics())),
-        "GetWirelessDeviceStatistics" => {
-            Ok(Some(wireless_device_statistics(labels)))
-        }
-        "GetWirelessGatewayStatistics" => {
-            Ok(Some(wireless_gateway_statistics(labels)))
-        }
+        "GetWirelessDeviceStatistics" => Ok(Some(wireless_device_statistics(labels))),
+        "GetWirelessGatewayStatistics" => Ok(Some(wireless_gateway_statistics(labels))),
 
         // ---- association membership edges (finding 4) ----
         "AssociateWirelessDeviceWithMulticastGroup" => Ok(Some(associate(
@@ -280,10 +279,7 @@ fn get_resource_position(
 ) -> Result<(AwsResponse, bool), AwsServiceError> {
     let key = resource_position_key(labels);
     let g = svc.state.read();
-    let payload = g
-        .get(&ctx.account)
-        .and_then(|d| d.blobs.get(&key))
-        .cloned();
+    let payload = g.get(&ctx.account).and_then(|d| d.blobs.get(&key)).cloned();
     // A resource whose position was never `UpdateResourcePosition`'d has no
     // stored GeoJSON; the model declares `ResourceNotFoundException` for it.
     let Some(payload) = payload else {
@@ -299,7 +295,10 @@ fn get_resource_position(
     };
     // `GeoJsonPayload` is an `@httpPayload` blob: the response body IS the raw
     // stored GeoJSON, not a JSON envelope.
-    Ok((AwsResponse::json(StatusCode::OK, payload.into_bytes()), false))
+    Ok((
+        AwsResponse::json(StatusCode::OK, payload.into_bytes()),
+        false,
+    ))
 }
 
 // ---------- wireless-device import task ----------
@@ -462,7 +461,10 @@ fn start_import_task(
         record.insert("Sidewalk".to_string(), sw.clone());
     }
     record.insert("CreationTime".to_string(), now_epoch());
-    record.insert("Status".to_string(), Value::String("INITIALIZING".to_string()));
+    record.insert(
+        "Status".to_string(),
+        Value::String("INITIALIZING".to_string()),
+    );
     record.insert("InitializedImportedDeviceCount".to_string(), Value::from(0));
     record.insert("PendingImportedDeviceCount".to_string(), Value::from(0));
     record.insert("OnboardedImportedDeviceCount".to_string(), Value::from(0));
@@ -490,7 +492,10 @@ fn create_wireless_gateway_task(
     let status = "QUEUED".to_string();
 
     let mut record = Map::new();
-    record.insert("WirelessGatewayId".to_string(), Value::String(gateway_id.clone()));
+    record.insert(
+        "WirelessGatewayId".to_string(),
+        Value::String(gateway_id.clone()),
+    );
     record.insert(
         "WirelessGatewayTaskDefinitionId".to_string(),
         Value::String(def_id.clone()),
@@ -499,7 +504,11 @@ fn create_wireless_gateway_task(
 
     let mut g = svc.state.write();
     let data = g.get_or_create(&ctx.account);
-    data.put_resource("wireless-gateways/tasks", &gateway_id, Value::Object(record));
+    data.put_resource(
+        "wireless-gateways/tasks",
+        &gateway_id,
+        Value::Object(record),
+    );
     (
         ok_json(json!({
             "WirelessGatewayTaskDefinitionId": def_id,
@@ -517,9 +526,10 @@ fn get_wireless_gateway_task(
 ) -> Result<(AwsResponse, bool), AwsServiceError> {
     let gateway_id = labels.get("Id").cloned().unwrap_or_default();
     let g = svc.state.read();
-    let record = g
-        .get(&ctx.account)
-        .and_then(|d| d.get_resource("wireless-gateways/tasks", &gateway_id).cloned());
+    let record = g.get(&ctx.account).and_then(|d| {
+        d.get_resource("wireless-gateways/tasks", &gateway_id)
+            .cloned()
+    });
     match record {
         Some(record) => Ok((ok_json(build_output(meta, &record)), false)),
         None => Err(AwsServiceError::aws_error(
