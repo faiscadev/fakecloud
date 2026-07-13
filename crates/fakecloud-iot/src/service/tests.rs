@@ -715,6 +715,274 @@ fn create_job_document_source_round_trips() {
     assert!(desc["job"].get("documentSource").is_none());
 }
 
+#[test]
+fn get_job_document_returns_stored_document() {
+    let s = svc();
+    run(
+        &s,
+        "PUT",
+        "/jobs/j1",
+        &[],
+        json!({"targets": ["arn:aws:iot:us-east-1:000000000000:thing/t1"],
+               "document": "{\"operation\":\"reboot\"}"}),
+    )
+    .unwrap();
+    let doc = body_of(&run(&s, "GET", "/jobs/j1/job-document", &[], Value::Null).unwrap());
+    assert_eq!(doc["document"], "{\"operation\":\"reboot\"}");
+
+    // A missing job is a declared ResourceNotFoundException.
+    let err = expect_err(run(&s, "GET", "/jobs/ghost/job-document", &[], Value::Null));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+}
+
+#[test]
+fn policy_version_subsystem_round_trips() {
+    let s = svc();
+    // CreatePolicy seeds version 1 as the default.
+    let created = body_of(
+        &run(
+            &s,
+            "POST",
+            "/policies/p1",
+            &[],
+            json!({"policyDocument": "{\"Version\":\"2012-10-17\",\"Statement\":[]}"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(created["policyVersionId"], "1");
+
+    // A new version is minted with the next id; setAsDefault flips the default.
+    let v2 = body_of(
+        &run(
+            &s,
+            "POST",
+            "/policies/p1/version?setAsDefault=true",
+            &[],
+            json!({"policyDocument": "{\"Version\":\"2012-10-17\",\"Statement\":[{}]}"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(v2["policyVersionId"], "2");
+    assert_eq!(v2["isDefaultVersion"], true);
+
+    // GetPolicyVersion returns the stored document + default flag.
+    let got = body_of(&run(&s, "GET", "/policies/p1/version/2", &[], Value::Null).unwrap());
+    assert_eq!(got["policyVersionId"], "2");
+    assert_eq!(got["isDefaultVersion"], true);
+    assert!(got["policyDocument"].as_str().unwrap().contains("Statement"));
+
+    // ListPolicyVersions lists both, with exactly one default (v2).
+    let listed = body_of(&run(&s, "GET", "/policies/p1/version", &[], Value::Null).unwrap());
+    let versions = listed["policyVersions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    let defaults: Vec<&Value> = versions
+        .iter()
+        .filter(|v| v["isDefaultVersion"] == Value::Bool(true))
+        .collect();
+    assert_eq!(defaults.len(), 1);
+    assert_eq!(defaults[0]["versionId"], "2");
+
+    // Deleting the default version is rejected; a non-default version deletes.
+    let err = expect_err(run(&s, "DELETE", "/policies/p1/version/2", &[], Value::Null));
+    assert!(is_code(&err, "DeleteConflictException"));
+    run(&s, "DELETE", "/policies/p1/version/1", &[], Value::Null).unwrap();
+    let listed = body_of(&run(&s, "GET", "/policies/p1/version", &[], Value::Null).unwrap());
+    assert_eq!(listed["policyVersions"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn provisioning_template_round_trips() {
+    let s = svc();
+    let created = body_of(
+        &run(
+            &s,
+            "POST",
+            "/provisioning-templates",
+            &[],
+            json!({"templateName": "fleet-1", "templateBody": "{}",
+                   "provisioningRoleArn": "arn:aws:iam::000000000000:role/prov"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(created["templateName"], "fleet-1");
+    assert_eq!(created["defaultVersionId"], 1);
+
+    // DescribeProvisioningTemplate (generic get) round-trips the record.
+    let desc = body_of(
+        &run(&s, "GET", "/provisioning-templates/fleet-1", &[], Value::Null).unwrap(),
+    );
+    assert_eq!(desc["templateName"], "fleet-1");
+    assert_eq!(desc["enabled"], true);
+
+    // A new version + describe it back.
+    let v2 = body_of(
+        &run(
+            &s,
+            "POST",
+            "/provisioning-templates/fleet-1/versions",
+            &[],
+            json!({"templateBody": "{\"v\":2}"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(v2["versionId"], 2);
+    let dv = body_of(
+        &run(
+            &s,
+            "GET",
+            "/provisioning-templates/fleet-1/versions/2",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(dv["versionId"], 2);
+
+    // ListProvisioningTemplates must NOT include version records.
+    let listed = body_of(
+        &run(&s, "GET", "/provisioning-templates", &[], Value::Null).unwrap(),
+    );
+    assert_eq!(listed["templates"].as_array().unwrap().len(), 1);
+
+    // A provisioning claim mints a real (persisted) certificate.
+    let claim = body_of(
+        &run(
+            &s,
+            "POST",
+            "/provisioning-templates/fleet-1/provisioning-claim",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    let claim_cert = claim["certificateId"].as_str().unwrap();
+    assert_eq!(claim_cert.len(), 64);
+    run(
+        &s,
+        "GET",
+        &format!("/certificates/{claim_cert}"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+}
+
+#[test]
+fn register_thing_mints_resource_arns() {
+    let s = svc();
+    let doc = body_of(
+        &run(
+            &s,
+            "POST",
+            "/things",
+            &[],
+            json!({"templateBody": "{\"Resources\":{}}"}),
+        )
+        .unwrap(),
+    );
+    assert!(doc["certificatePem"]
+        .as_str()
+        .unwrap()
+        .contains("BEGIN CERTIFICATE"));
+    assert!(doc["resourceArns"]["thing"]
+        .as_str()
+        .unwrap()
+        .contains(":thing/"));
+}
+
+#[test]
+fn transfer_certificate_returns_target_arn() {
+    let s = svc();
+    let cert = body_of(&run(&s, "POST", "/keys-and-certificate", &[], Value::Null).unwrap());
+    let cert_id = cert["certificateId"].as_str().unwrap();
+    let out = body_of(
+        &run(
+            &s,
+            "PATCH",
+            &format!("/transfer-certificate/{cert_id}?targetAwsAccount=111122223333"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert!(out["transferredCertificateArn"]
+        .as_str()
+        .unwrap()
+        .contains(":111122223333:cert/"));
+}
+
+#[test]
+fn start_task_mints_and_persists_task_id() {
+    let s = svc();
+    let out = body_of(
+        &run(
+            &s,
+            "POST",
+            "/audit/tasks",
+            &[],
+            json!({"targetCheckNames": ["LOGGING_DISABLED_CHECK"]}),
+        )
+        .unwrap(),
+    );
+    let task_id = out["taskId"].as_str().unwrap();
+    assert!(!task_id.is_empty());
+    // DescribeAuditTask reads the persisted task back.
+    let desc = body_of(
+        &run(&s, "GET", &format!("/audit/tasks/{task_id}"), &[], Value::Null).unwrap(),
+    );
+    assert_eq!(desc["taskStatus"], "IN_PROGRESS");
+}
+
+#[test]
+fn list_principal_things_inverts_attachment() {
+    let s = svc();
+    let principal = "arn:aws:iot:us-east-1:000000000000:cert/abc";
+    run(&s, "POST", "/things/t1", &[], json!({})).unwrap();
+    run(
+        &s,
+        "PUT",
+        "/things/t1/principals",
+        &[("x-amzn-principal", principal)],
+        Value::Null,
+    )
+    .unwrap();
+    let listed = body_of(
+        &run(
+            &s,
+            "GET",
+            "/principals/things",
+            &[("x-amzn-principal", principal)],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(listed["things"], json!(["t1"]));
+}
+
+#[test]
+fn list_thing_groups_for_thing_inverts_membership() {
+    let s = svc();
+    run(&s, "POST", "/things/t1", &[], json!({})).unwrap();
+    run(&s, "POST", "/thing-groups/g1", &[], json!({})).unwrap();
+    run(
+        &s,
+        "PUT",
+        "/thing-groups/addThingToThingGroup",
+        &[],
+        json!({"thingGroupName": "g1", "thingName": "t1"}),
+    )
+    .unwrap();
+    let listed =
+        body_of(&run(&s, "GET", "/things/t1/thing-groups", &[], Value::Null).unwrap());
+    let groups = listed["thingGroups"].as_array().unwrap();
+    assert_eq!(groups.len(), 1);
+    assert_eq!(groups[0]["groupName"], "g1");
+    assert!(groups[0]["groupArn"]
+        .as_str()
+        .unwrap()
+        .contains(":thinggroup/g1"));
+}
+
 // ---------- every operation routes to a handler ----------
 
 #[test]

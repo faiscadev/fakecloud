@@ -192,4 +192,100 @@ async fn iot_control_plane_lifecycle() {
         .things()
         .iter()
         .any(|t| t.thing_name() == Some("thermostat")));
+
+    // --- Job document round-trip ---
+    let job_doc = client
+        .get_job_document()
+        .job_id("firmware-1")
+        .send()
+        .await
+        .expect("get_job_document");
+    assert_eq!(job_doc.document(), Some(r#"{"operation":"update"}"#));
+
+    // --- Principal listing is the inverse of the attachment ---
+    let principal_things = client
+        .list_principal_things()
+        .principal(&cert_arn)
+        .send()
+        .await
+        .expect("list_principal_things");
+    assert!(principal_things
+        .things()
+        .iter()
+        .any(|t| t == "thermostat"));
+}
+
+#[tokio::test]
+async fn iot_policy_versioning() {
+    let server = TestServer::start().await;
+    let client = iot_client(&server).await;
+
+    client
+        .create_policy()
+        .policy_name("versioned")
+        .policy_document(r#"{"Version":"2012-10-17","Statement":[]}"#)
+        .send()
+        .await
+        .expect("create_policy");
+
+    // A second version, set as the new default.
+    let v2 = client
+        .create_policy_version()
+        .policy_name("versioned")
+        .policy_document(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow"}]}"#)
+        .set_as_default(true)
+        .send()
+        .await
+        .expect("create_policy_version");
+    assert_eq!(v2.policy_version_id(), Some("2"));
+    assert!(v2.is_default_version());
+
+    let got = client
+        .get_policy_version()
+        .policy_name("versioned")
+        .policy_version_id("2")
+        .send()
+        .await
+        .expect("get_policy_version");
+    assert_eq!(got.policy_version_id(), Some("2"));
+    assert!(got.is_default_version());
+    assert!(got.policy_document().unwrap().contains("Allow"));
+
+    let versions = client
+        .list_policy_versions()
+        .policy_name("versioned")
+        .send()
+        .await
+        .expect("list_policy_versions");
+    assert_eq!(versions.policy_versions().len(), 2);
+    assert_eq!(
+        versions
+            .policy_versions()
+            .iter()
+            .filter(|v| v.is_default_version())
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn iot_register_thing_returns_resource_arns() {
+    let server = TestServer::start().await;
+    let client = iot_client(&server).await;
+
+    let registered = client
+        .register_thing()
+        .template_body(r#"{"Resources":{}}"#)
+        .send()
+        .await
+        .expect("register_thing");
+    assert!(registered
+        .certificate_pem()
+        .unwrap()
+        .contains("BEGIN CERTIFICATE"));
+    let arns = registered.resource_arns().expect("resourceArns");
+    assert!(arns
+        .get("thing")
+        .map(|a| a.contains(":thing/"))
+        .unwrap_or(false));
 }
