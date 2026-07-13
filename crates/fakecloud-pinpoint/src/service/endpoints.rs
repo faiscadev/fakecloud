@@ -52,10 +52,9 @@ impl PinpointService {
         let record = build_endpoint(app_id, eid, body);
         let mut guard = self.state.write();
         let app = guard
-            .get_or_create(&ctx.account)
-            .apps
-            .entry(app_id.to_string())
-            .or_default();
+            .get_mut(&ctx.account)
+            .and_then(|d| d.apps.get_mut(app_id))
+            .ok_or_else(|| super::not_found_app(app_id))?;
         app.endpoints.insert(eid.to_string(), record);
         accepted(json!({ "Message": "Accepted", "RequestID": shared::hex_id() }))
     }
@@ -90,10 +89,9 @@ impl PinpointService {
             .unwrap_or_default();
         let mut guard = self.state.write();
         let app = guard
-            .get_or_create(&ctx.account)
-            .apps
-            .entry(app_id.to_string())
-            .or_default();
+            .get_mut(&ctx.account)
+            .and_then(|d| d.apps.get_mut(app_id))
+            .ok_or_else(|| super::not_found_app(app_id))?;
         for item in &items {
             let eid = item
                 .get("Id")
@@ -111,16 +109,51 @@ impl PinpointService {
         ctx: &Ctx,
         app_id: &str,
         attr_type: &str,
-        _body: &Value,
+        body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
-        self.with_app(&ctx.account, app_id, |_| {
-            Ok(json!({
-                "ApplicationId": app_id,
-                "AttributeType": attr_type,
-                "Attributes": [],
-            }))
-        })
-        .and_then(ok)
+        // `AttributeType` selects which endpoint sub-map the blacklisted keys are
+        // stripped from, mirroring AWS: custom attributes + metrics live at the
+        // endpoint top level, user attributes under `User.UserAttributes`.
+        let field = match attr_type {
+            "endpoint-custom-metrics" => "Metrics",
+            "endpoint-user-attributes" => "UserAttributes",
+            _ => "Attributes",
+        };
+        let blacklist: Vec<String> = body
+            .get("Blacklist")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut guard = self.state.write();
+        let app = guard
+            .get_mut(&ctx.account)
+            .and_then(|d| d.apps.get_mut(app_id))
+            .ok_or_else(|| not_found_app(app_id))?;
+        for endpoint in app.endpoints.values_mut() {
+            let target = if field == "UserAttributes" {
+                endpoint
+                    .get_mut("User")
+                    .and_then(|u| u.get_mut("UserAttributes"))
+            } else {
+                endpoint.get_mut(field)
+            };
+            if let Some(Value::Object(map)) = target {
+                for key in &blacklist {
+                    map.remove(key);
+                }
+            }
+        }
+        ok(json!({
+            "ApplicationId": app_id,
+            "AttributeType": attr_type,
+            "Attributes": blacklist,
+        }))
     }
 
     pub(super) fn get_user_endpoints(

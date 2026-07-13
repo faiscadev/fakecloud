@@ -7,7 +7,7 @@
 use aws_sdk_pinpoint::types::{
     ApnsChannelRequest, CreateApplicationRequest, DirectMessageConfiguration, EmailTemplateRequest,
     EndpointRequest, GcmChannelRequest, MessageRequest, SmsChannelRequest, SmsMessage, TagsModel,
-    WriteCampaignRequest, WriteJourneyRequest, WriteSegmentRequest,
+    UpdateAttributesRequest, WriteCampaignRequest, WriteJourneyRequest, WriteSegmentRequest,
 };
 use fakecloud_testkit::TestServer;
 
@@ -242,4 +242,140 @@ async fn pinpoint_full_lifecycle() {
         .expect("delete_app");
     let after = client.get_app().application_id(&app_id).send().await;
     assert!(after.is_err(), "app should be gone after delete");
+}
+
+/// Writing to a non-existent application must 404 (AWS requires the parent app
+/// to exist) and must NOT auto-vivify a phantom app. A phantom app is stored as
+/// a null record, which corrupts the account-wide `GetApps`/`GetApp` reads
+/// (the SDK rejects a null `ApplicationResponse`). Regression guard.
+#[tokio::test]
+async fn pinpoint_write_to_missing_app_404s_without_corrupting_get_apps() {
+    let server = TestServer::start().await;
+    let client = pinpoint_client(&server).await;
+
+    let bogus = "00000000000000000000000000000000";
+
+    // A create/upsert against a missing app must error, not silently succeed.
+    let campaign = client
+        .create_campaign()
+        .application_id(bogus)
+        .write_campaign_request(WriteCampaignRequest::builder().name("nope").build())
+        .send()
+        .await;
+    assert!(campaign.is_err(), "create_campaign on missing app must 404");
+
+    let channel = client
+        .update_sms_channel()
+        .application_id(bogus)
+        .sms_channel_request(SmsChannelRequest::builder().enabled(true).build())
+        .send()
+        .await;
+    assert!(
+        channel.is_err(),
+        "update_sms_channel on missing app must 404"
+    );
+
+    let endpoint = client
+        .update_endpoint()
+        .application_id(bogus)
+        .endpoint_id("e1")
+        .endpoint_request(
+            EndpointRequest::builder()
+                .channel_type(aws_sdk_pinpoint::types::ChannelType::Sms)
+                .build(),
+        )
+        .send()
+        .await;
+    assert!(endpoint.is_err(), "update_endpoint on missing app must 404");
+
+    // The failed writes must not have poisoned the account: GetApps must still
+    // deserialize (no null element) and must not list the phantom id.
+    let apps = client
+        .get_apps()
+        .send()
+        .await
+        .expect("get_apps must still deserialize after failed writes");
+    let listed: Vec<String> = apps
+        .applications_response()
+        .map(|r| r.item())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|a| a.id().map(str::to_string))
+        .collect();
+    assert!(
+        !listed.iter().any(|id| id == bogus),
+        "phantom app must not appear in GetApps"
+    );
+}
+
+/// `RemoveAttributes` must actually strip the blacklisted keys from every
+/// endpoint's attribute map, not return an empty no-op envelope.
+#[tokio::test]
+async fn pinpoint_remove_attributes_strips_endpoint_attributes() {
+    let server = TestServer::start().await;
+    let client = pinpoint_client(&server).await;
+
+    let app = client
+        .create_app()
+        .create_application_request(CreateApplicationRequest::builder().name("attr-app").build())
+        .send()
+        .await
+        .expect("create_app");
+    let app_id = app
+        .application_response()
+        .and_then(|a| a.id())
+        .expect("app id")
+        .to_string();
+
+    client
+        .update_endpoint()
+        .application_id(&app_id)
+        .endpoint_id("ep1")
+        .endpoint_request(
+            EndpointRequest::builder()
+                .channel_type(aws_sdk_pinpoint::types::ChannelType::Sms)
+                .attributes("interests", vec!["a".into(), "b".into()])
+                .attributes("keep", vec!["x".into()])
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update_endpoint");
+
+    let removed = client
+        .remove_attributes()
+        .application_id(&app_id)
+        .attribute_type("endpoint-custom-attributes")
+        .update_attributes_request(
+            UpdateAttributesRequest::builder()
+                .blacklist("interests")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("remove_attributes");
+    assert!(
+        removed
+            .attributes_resource()
+            .map(|r| r.attributes())
+            .unwrap_or_default()
+            .iter()
+            .any(|k| k == "interests"),
+        "response should report the removed attribute"
+    );
+
+    let ep = client
+        .get_endpoint()
+        .application_id(&app_id)
+        .endpoint_id("ep1")
+        .send()
+        .await
+        .expect("get_endpoint");
+    let attrs = ep
+        .endpoint_response()
+        .and_then(|e| e.attributes())
+        .cloned()
+        .unwrap_or_default();
+    assert!(!attrs.contains_key("interests"), "removed key must be gone");
+    assert!(attrs.contains_key("keep"), "other keys must remain");
 }

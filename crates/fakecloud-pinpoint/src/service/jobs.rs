@@ -22,10 +22,9 @@ impl PinpointService {
         let record = build_import_job(app_id, &id, body);
         let mut guard = self.state.write();
         let app = guard
-            .get_or_create(&ctx.account)
-            .apps
-            .entry(app_id.to_string())
-            .or_default();
+            .get_mut(&ctx.account)
+            .and_then(|d| d.apps.get_mut(app_id))
+            .ok_or_else(|| super::not_found_app(app_id))?;
         app.import_jobs.insert(id, record.clone());
         created(record)
     }
@@ -67,10 +66,9 @@ impl PinpointService {
         let record = build_export_job(app_id, &id, body);
         let mut guard = self.state.write();
         let app = guard
-            .get_or_create(&ctx.account)
-            .apps
-            .entry(app_id.to_string())
-            .or_default();
+            .get_mut(&ctx.account)
+            .and_then(|d| d.apps.get_mut(app_id))
+            .ok_or_else(|| super::not_found_app(app_id))?;
         app.export_jobs.insert(id, record.clone());
         created(record)
     }
