@@ -854,22 +854,30 @@ fn decode_form_urlencoded(input: &[u8]) -> HashMap<String, String> {
 }
 
 fn url_decode(input: &str) -> String {
-    let mut result = String::with_capacity(input.len());
+    // Accumulate the decoded RAW BYTES first, then interpret the whole buffer
+    // as UTF-8. Decoding each `%XX` byte straight into a `char` would treat it
+    // as a Unicode codepoint (Latin-1), which corrupts multi-byte UTF-8
+    // sequences (e.g. "caf%C3%A9" -> "cafÃ©" instead of "café"). Reassembling
+    // the bytes lets multi-byte sequences round-trip correctly.
+    let mut buf: Vec<u8> = Vec::with_capacity(input.len());
     let mut bytes = input.bytes();
     while let Some(b) = bytes.next() {
         match b {
-            b'+' => result.push(' '),
+            b'+' => buf.push(b' '),
             b'%' => {
                 let high = bytes.next().and_then(from_hex);
                 let low = bytes.next().and_then(from_hex);
+                // A well-formed `%XX` escape decodes to a single raw byte.
+                // A malformed escape is dropped (best-effort, panic-free),
+                // matching the prior behaviour.
                 if let (Some(h), Some(l)) = (high, low) {
-                    result.push((h << 4 | l) as char);
+                    buf.push((h << 4) | l);
                 }
             }
-            _ => result.push(b as char),
+            _ => buf.push(b),
         }
     }
-    result
+    String::from_utf8_lossy(&buf).into_owned()
 }
 
 fn from_hex(b: u8) -> Option<u8> {
@@ -937,6 +945,67 @@ mod tests {
         let body = Bytes::from("key=value");
         let params = parse_query_body(&body);
         assert_eq!(params.get("key").unwrap(), "value");
+    }
+
+    #[test]
+    fn url_decode_plain_ascii() {
+        assert_eq!(url_decode("hello"), "hello");
+        assert_eq!(url_decode("Action=SendMessage"), "Action=SendMessage");
+    }
+
+    #[test]
+    fn url_decode_plus_is_space() {
+        assert_eq!(url_decode("hello+world"), "hello world");
+        assert_eq!(url_decode("a+b+c"), "a b c");
+    }
+
+    #[test]
+    fn url_decode_multibyte_utf8_accents() {
+        // "café" -> the é is UTF-8 0xC3 0xA9, two %-escapes for one codepoint.
+        assert_eq!(url_decode("caf%C3%A9"), "café");
+    }
+
+    #[test]
+    fn url_decode_multibyte_utf8_cjk() {
+        // "日本" (each char is 3 UTF-8 bytes).
+        assert_eq!(url_decode("%E6%97%A5%E6%9C%AC"), "日本");
+    }
+
+    #[test]
+    fn url_decode_multibyte_utf8_emoji() {
+        // "🚀" is a 4-byte UTF-8 sequence (F0 9F 9A 80).
+        assert_eq!(url_decode("%F0%9F%9A%80"), "🚀");
+    }
+
+    #[test]
+    fn url_decode_mixed_ascii_and_multibyte() {
+        assert_eq!(url_decode("Tag+%3D+caf%C3%A9%21"), "Tag = café!");
+    }
+
+    #[test]
+    fn url_decode_malformed_percent_is_graceful() {
+        // A malformed escape is dropped best-effort and must never panic.
+        assert_eq!(url_decode("100%"), "100");
+        assert_eq!(url_decode("a%zz"), "a");
+        assert_eq!(url_decode("a%4"), "a");
+        // Preceding and following ASCII are preserved either side of the drop.
+        assert_eq!(url_decode("x%y"), "x");
+    }
+
+    #[test]
+    fn url_decode_invalid_utf8_bytes_are_lossy_no_panic() {
+        // 0xFF is not valid UTF-8; must not panic, replaced lossily.
+        let out = url_decode("bad%FFbyte");
+        assert!(out.starts_with("bad"));
+        assert!(out.ends_with("byte"));
+    }
+
+    #[test]
+    fn parse_query_body_multibyte_value_round_trips() {
+        let body = Bytes::from("Tag.Value=caf%C3%A9&Name=%E6%97%A5%E6%9C%AC");
+        let params = parse_query_body(&body);
+        assert_eq!(params.get("Tag.Value").unwrap(), "café");
+        assert_eq!(params.get("Name").unwrap(), "日本");
     }
 
     #[test]
