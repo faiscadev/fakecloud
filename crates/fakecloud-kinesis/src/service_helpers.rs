@@ -30,9 +30,21 @@ pub(crate) fn next_shard_id(stream: &mut KinesisStream) -> String {
     id
 }
 
-/// Actions that mutate Kinesis state. Note: GetShardIterator also
-/// writes (it records a lease in `iterators`), and GetRecords advances
-/// that lease, so both are treated as mutating.
+/// Mark the shard with `shard_id` closed, if it is present. Idempotent, so
+/// callers can close an already-closed shard without a membership check.
+pub(crate) fn close_shard(stream: &mut KinesisStream, shard_id: &str) {
+    if let Some(shard) = stream.shards.iter_mut().find(|s| s.shard_id == shard_id) {
+        shard.is_open = false;
+    }
+}
+
+/// Actions that mutate *durable* Kinesis state and therefore warrant a
+/// snapshot save. GetShardIterator / GetRecords are deliberately excluded:
+/// the only thing they touch is the shard-iterator lease map, which is
+/// `#[serde(skip)]` (ephemeral, never persisted). Treating those read polls
+/// as mutating meant every GetRecords cloned + serialized + disk-wrote the
+/// whole multi-account state for zero durable effect — a per-read cost that
+/// turns a read-heavy consumer into a serialization bottleneck.
 pub(crate) fn is_mutating_action(action: &str) -> bool {
     matches!(
         action,
@@ -61,9 +73,36 @@ pub(crate) fn is_mutating_action(action: &str) -> bool {
             | "MergeShards"
             | "SplitShard"
             | "UpdateShardCount"
-            | "GetShardIterator"
-            | "GetRecords"
     )
+}
+
+/// PutRecord: default single-record payload limit (Data + PartitionKey) is
+/// 1 MiB. AWS raises the ceiling to `MaxRecordSizeInKiB` when the stream
+/// opts into larger records.
+pub(crate) const DEFAULT_MAX_RECORD_BYTES: usize = 1024 * 1024;
+/// PutRecords: a single call carries at most 500 records.
+pub(crate) const MAX_PUT_RECORDS_COUNT: usize = 500;
+/// PutRecords: a single call carries at most 5 MiB of aggregate payload
+/// (default). Streams that raise `MaxRecordSizeInKiB` above 5 MiB get the
+/// larger ceiling so a single legal record can never exceed the batch limit.
+pub(crate) const DEFAULT_MAX_PUT_RECORDS_BYTES: usize = 5 * 1024 * 1024;
+/// PartitionKey is a Unicode string of 1..=256 characters.
+pub(crate) const MAX_PARTITION_KEY_CHARS: usize = 256;
+
+/// Effective per-record payload ceiling for a stream: `MaxRecordSizeInKiB`
+/// when configured, otherwise the 1 MiB default.
+pub(crate) fn effective_max_record_bytes(stream: &KinesisStream) -> usize {
+    stream
+        .max_record_size_kib
+        .filter(|kib| *kib > 0)
+        .map(|kib| (kib as usize) * 1024)
+        .unwrap_or(DEFAULT_MAX_RECORD_BYTES)
+}
+
+/// Aggregate payload ceiling for a PutRecords call: the larger of the 5 MiB
+/// default and the stream's per-record ceiling.
+pub(crate) fn effective_max_batch_bytes(stream: &KinesisStream) -> usize {
+    effective_max_record_bytes(stream).max(DEFAULT_MAX_PUT_RECORDS_BYTES)
 }
 
 pub(crate) fn require_stream_name(body: &Value) -> Result<&str, AwsServiceError> {
@@ -163,10 +202,17 @@ pub fn build_stream_shards(shard_count: i32) -> Vec<KinesisShard> {
 }
 
 pub(crate) fn require_partition_key(body: &Value) -> Result<&str, AwsServiceError> {
-    body["PartitionKey"]
+    let partition_key = body["PartitionKey"]
         .as_str()
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| invalid_argument("PartitionKey is required"))
+        .ok_or_else(|| invalid_argument("PartitionKey is required"))?;
+    if partition_key.chars().count() > MAX_PARTITION_KEY_CHARS {
+        return Err(validation_exception(format!(
+            "1 validation error detected: Value at 'partitionKey' failed to satisfy \
+             constraint: Member must have length less than or equal to {MAX_PARTITION_KEY_CHARS}"
+        )));
+    }
+    Ok(partition_key)
 }
 
 pub(crate) fn require_shard_id(body: &Value) -> Result<&str, AwsServiceError> {
@@ -239,6 +285,13 @@ pub(crate) fn select_shard_mut<'a>(
     partition_key: &str,
     explicit_hash_key: Option<&str>,
 ) -> Result<&'a mut KinesisShard, AwsServiceError> {
+    // `select_shard_index_for_hash` falls back to `shards.len() - 1`, which
+    // wraps to index 0 on an empty shard list — an out-of-bounds index panic.
+    // No create path leaves a stream shard-less today, but guard it the same
+    // way the fan-in delivery path already does rather than risk a panic.
+    if stream.shards.is_empty() {
+        return Err(invalid_argument("Stream has no shards to route to"));
+    }
     let hash = routing_hash(partition_key, explicit_hash_key)?;
     let idx = select_shard_index_for_hash(stream, hash);
     Ok(&mut stream.shards[idx])
@@ -273,12 +326,34 @@ pub(crate) fn put_records_entry(
         .as_str()
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "PartitionKey is required".to_string())?;
+    if partition_key.chars().count() > MAX_PARTITION_KEY_CHARS {
+        return Err(format!(
+            "PartitionKey must have length less than or equal to {MAX_PARTITION_KEY_CHARS}"
+        ));
+    }
     let data = decode_record_data(&entry["Data"]).map_err(|error| error.message())?;
+    let max_record_bytes = effective_max_record_bytes(stream);
+    if data.len() + partition_key.len() > max_record_bytes {
+        return Err(format!(
+            "Record size (Data + PartitionKey) exceeds the {max_record_bytes}-byte per-record limit"
+        ));
+    }
     let explicit_hash_key = entry["ExplicitHashKey"].as_str();
     let shard = select_shard_mut(stream, partition_key, explicit_hash_key)
         .map_err(|error| error.message())?;
     let sequence_number = append_record(shard, partition_key, data);
     Ok((shard.shard_id.clone(), sequence_number))
+}
+
+/// Decoded byte size of a PutRecords entry's payload (Data + PartitionKey),
+/// used for the aggregate-size pre-check. Undecodable data counts as 0 here;
+/// the per-record loop reports it as a per-record failure.
+pub(crate) fn put_records_entry_size(entry: &Value) -> usize {
+    let data_len = decode_record_data(&entry["Data"])
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    let key_len = entry["PartitionKey"].as_str().map(str::len).unwrap_or(0);
+    data_len + key_len
 }
 
 pub(crate) fn shard_iterator_start_index(
@@ -291,11 +366,11 @@ pub(crate) fn shard_iterator_start_index(
         "LATEST" => Ok(shard.records.len()),
         "AT_SEQUENCE_NUMBER" => {
             let sequence_number = require_starting_sequence_number(body)?;
-            find_record_index_by_sequence_number(shard, sequence_number)
+            resolve_sequence_number_index(shard, sequence_number, false)
         }
         "AFTER_SEQUENCE_NUMBER" => {
             let sequence_number = require_starting_sequence_number(body)?;
-            Ok(find_record_index_by_sequence_number(shard, sequence_number)? + 1)
+            resolve_sequence_number_index(shard, sequence_number, true)
         }
         "AT_TIMESTAMP" => {
             // AWS encodes Timestamp as epoch seconds (float, with optional
@@ -331,15 +406,36 @@ pub(crate) fn require_starting_sequence_number(body: &Value) -> Result<&str, Aws
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is required"))
 }
 
-pub(crate) fn find_record_index_by_sequence_number(
+/// Resolve an `AT_/AFTER_SEQUENCE_NUMBER` iterator start index.
+///
+/// When the exact sequence number is still present we return its index (or
+/// the next one for `AFTER`). When it is *not* present but sorts before the
+/// earliest retained record, the record it named was aged out by the
+/// retention window, so — like real Kinesis — we resolve to the trim horizon
+/// (the earliest available record) instead of raising InvalidArgumentException.
+/// A sequence number that is neither present nor below the horizon is a
+/// genuinely invalid argument.
+pub(crate) fn resolve_sequence_number_index(
     shard: &KinesisShard,
     sequence_number: &str,
+    after: bool,
 ) -> Result<usize, AwsServiceError> {
-    shard
+    if let Some(pos) = shard
         .records
         .iter()
         .position(|record| record.sequence_number == sequence_number)
-        .ok_or_else(|| invalid_argument("StartingSequenceNumber is invalid"))
+    {
+        return Ok(if after { pos + 1 } else { pos });
+    }
+    // Sequence numbers are fixed-width, zero-padded and per-shard monotonic,
+    // so a lexicographic comparison against the earliest retained record is
+    // an exact numeric ordering — a smaller value was trimmed off the front.
+    if let Some(first) = shard.records.first() {
+        if sequence_number < first.sequence_number.as_str() {
+            return Ok(0);
+        }
+    }
+    Err(invalid_argument("StartingSequenceNumber is invalid"))
 }
 
 /// Encode a `ListShards` continuation token. AWS returns an opaque base64
@@ -442,6 +538,13 @@ pub(crate) fn resource_not_found_arn(arn: &str) -> AwsServiceError {
 
 pub(crate) fn invalid_argument(message: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidArgumentException", message)
+}
+
+/// AWS returns `ValidationException` (HTTP 400) for constraint violations the
+/// front end rejects before the operation runs — an oversized record payload,
+/// too-long partition key, or a PutRecords batch over its count/size limits.
+pub(crate) fn validation_exception(message: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", message)
 }
 
 pub(crate) fn stream_not_found(account_id: &str, stream_name: &str) -> AwsServiceError {

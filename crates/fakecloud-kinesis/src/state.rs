@@ -29,6 +29,13 @@ pub struct KinesisState {
     /// (bug-hunt 2026-06-24, 4.2).
     #[serde(skip)]
     pub iterators: BTreeMap<String, ShardIteratorLease>,
+    /// Monotonic counter feeding the shard-iterator token's tie-breaker. Using
+    /// `iterators.len()` collided when two tokens were minted in the same
+    /// millisecond after an eviction rebalanced the map size; a strictly
+    /// increasing counter guarantees a distinct token per insert. Ephemeral,
+    /// like the leases it names.
+    #[serde(skip)]
+    pub iterator_counter: u64,
     pub lambda_checkpoints: BTreeMap<String, usize>,
     pub consumers: BTreeMap<String, KinesisConsumer>,
     pub resource_policies: BTreeMap<String, String>,
@@ -102,6 +109,7 @@ impl KinesisState {
             region: region.to_string(),
             streams: BTreeMap::new(),
             iterators: BTreeMap::new(),
+            iterator_counter: 0,
             lambda_checkpoints: BTreeMap::new(),
             consumers: BTreeMap::new(),
             resource_policies: BTreeMap::new(),
@@ -142,13 +150,14 @@ impl KinesisState {
     ) -> String {
         self.iterators
             .retain(|_, lease| lease.expires_at >= Utc::now());
+        self.iterator_counter = self.iterator_counter.wrapping_add(1);
         let token = format!(
             "{}:{}:{}:{}:{}",
             stream_name,
             shard_id,
             next_record_index,
             Utc::now().timestamp_millis(),
-            self.iterators.len() + 1
+            self.iterator_counter
         );
         self.iterators.insert(
             token.clone(),
