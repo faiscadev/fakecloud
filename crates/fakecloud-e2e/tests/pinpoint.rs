@@ -270,13 +270,20 @@ async fn pinpoint_write_to_missing_app_404s_without_corrupting_get_apps() {
         .sms_channel_request(SmsChannelRequest::builder().enabled(true).build())
         .send()
         .await;
-    assert!(channel.is_err(), "update_sms_channel on missing app must 404");
+    assert!(
+        channel.is_err(),
+        "update_sms_channel on missing app must 404"
+    );
 
     let endpoint = client
         .update_endpoint()
         .application_id(bogus)
         .endpoint_id("e1")
-        .endpoint_request(EndpointRequest::builder().channel_type(aws_sdk_pinpoint::types::ChannelType::Sms).build())
+        .endpoint_request(
+            EndpointRequest::builder()
+                .channel_type(aws_sdk_pinpoint::types::ChannelType::Sms)
+                .build(),
+        )
         .send()
         .await;
     assert!(endpoint.is_err(), "update_endpoint on missing app must 404");
@@ -343,7 +350,9 @@ async fn pinpoint_remove_attributes_strips_endpoint_attributes() {
         .application_id(&app_id)
         .attribute_type("endpoint-custom-attributes")
         .update_attributes_request(
-            UpdateAttributesRequest::builder().blacklist("interests").build(),
+            UpdateAttributesRequest::builder()
+                .blacklist("interests")
+                .build(),
         )
         .send()
         .await

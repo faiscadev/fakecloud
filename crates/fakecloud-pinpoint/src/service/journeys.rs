@@ -156,12 +156,7 @@ impl PinpointService {
     /// Error `NotFoundException` unless both the app and the journey exist — the
     /// KPI / execution-metric reads are journey-scoped, so AWS 404s on a missing
     /// app or journey rather than returning an empty metric envelope.
-    fn require_journey(
-        &self,
-        ctx: &Ctx,
-        app_id: &str,
-        jid: &str,
-    ) -> Result<(), AwsServiceError> {
+    fn require_journey(&self, ctx: &Ctx, app_id: &str, jid: &str) -> Result<(), AwsServiceError> {
         self.with_app(&ctx.account, app_id, |app| {
             app.journeys
                 .get(jid)
