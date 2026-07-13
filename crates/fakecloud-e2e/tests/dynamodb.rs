@@ -6264,3 +6264,100 @@ async fn dynamodb_ttl_expiry_emits_remove_stream_record() {
     assert_eq!(ui.principal_id(), Some("dynamodb.amazonaws.com"));
     assert_eq!(ui.r#type(), Some("Service"));
 }
+
+// bug-hunt 2026-07-01, finding 1: a Query that omits the partition key from the
+// KeyConditionExpression is a ValidationException, not a silent cross-partition
+// scan.
+#[tokio::test]
+async fn dynamodb_query_missing_partition_key_errors() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    client
+        .create_table()
+        .table_name("QMissingPk")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .query()
+        .table_name("QMissingPk")
+        // References a non-key attribute -> partition key never constrained.
+        .key_condition_expression("sk = :v")
+        .expression_attribute_values(":v", AttributeValue::S("x".to_string()))
+        .send()
+        .await
+        .expect_err("a Query missing the partition key must be rejected");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("ValidationException"), "{msg}");
+}
+
+// bug-hunt 2026-07-01, finding 6: a CreateTable whose GSI references an
+// attribute that is not defined in AttributeDefinitions is a
+// ValidationException (the index is not silently dropped).
+#[tokio::test]
+async fn dynamodb_create_table_gsi_undefined_attribute_errors() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+
+    let err = client
+        .create_table()
+        .table_name("BadGsi")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .global_secondary_indexes(
+            GlobalSecondaryIndex::builder()
+                .index_name("by-ghost")
+                .key_schema(
+                    KeySchemaElement::builder()
+                        .attribute_name("ghost")
+                        .key_type(KeyType::Hash)
+                        .build()
+                        .unwrap(),
+                )
+                .projection(
+                    Projection::builder()
+                        .projection_type(ProjectionType::All)
+                        .build(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .expect_err("a GSI referencing an undefined attribute must be rejected");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("ValidationException") || msg.contains("not defined in AttributeDefinitions"),
+        "{msg}"
+    );
+}

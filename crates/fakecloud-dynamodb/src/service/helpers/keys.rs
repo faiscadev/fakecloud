@@ -95,6 +95,64 @@ pub(crate) fn extract_key_for_schema(
     key
 }
 
+/// Recursively validate the AttributeValues in an item written by PutItem.
+/// Real DynamoDB rejects a numeric attribute whose `N` value (or an `NS`
+/// member) is not a valid decimal — e.g. `{"N":"abc"}` — with a
+/// ValidationException, even for non-key attributes. Without this the bogus
+/// value persists and later corrupts numeric comparisons / arithmetic
+/// (bug-hunt 2026-07-01).
+pub(crate) fn validate_item_attribute_values(
+    item: &HashMap<String, AttributeValue>,
+) -> Result<(), AwsServiceError> {
+    for v in item.values() {
+        validate_attribute_value(v)?;
+    }
+    Ok(())
+}
+
+fn validate_attribute_value(v: &Value) -> Result<(), AwsServiceError> {
+    let Some((tag, val)) = v.as_object().and_then(|o| o.iter().next()) else {
+        return Ok(());
+    };
+    let bad_number = |n: &str| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!("The parameter cannot be converted to a numeric value: {n}"),
+        )
+    };
+    match tag.as_str() {
+        "N" => {
+            let s = val.as_str().unwrap_or_default();
+            if !is_valid_number(s) {
+                return Err(bad_number(s));
+            }
+        }
+        "NS" => {
+            for el in val.as_array().into_iter().flatten() {
+                let s = el.as_str().unwrap_or_default();
+                if !is_valid_number(s) {
+                    return Err(bad_number(s));
+                }
+            }
+        }
+        "L" => {
+            for el in val.as_array().into_iter().flatten() {
+                validate_attribute_value(el)?;
+            }
+        }
+        "M" => {
+            if let Some(m) = val.as_object() {
+                for el in m.values() {
+                    validate_attribute_value(el)?;
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_key_in_item(
     table: &DynamoTable,
     item: &HashMap<String, AttributeValue>,
@@ -190,4 +248,45 @@ fn check_key_type(
         ));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod attr_value_validation_tests {
+    use super::*;
+    use serde_json::json;
+
+    // bug-hunt 2026-07-01: a non-key attribute with a malformed Number is a
+    // ValidationException in real DynamoDB (it must not silently persist).
+    #[test]
+    fn rejects_invalid_number_attribute() {
+        let item: HashMap<String, AttributeValue> =
+            HashMap::from([("n".to_string(), json!({"N": "abc"}))]);
+        assert!(validate_item_attribute_values(&item).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_number_nested_in_list_and_map() {
+        let item: HashMap<String, AttributeValue> = HashMap::from([(
+            "l".to_string(),
+            json!({"L": [{"N": "1"}, {"M": {"x": {"N": "oops"}}}]}),
+        )]);
+        assert!(validate_item_attribute_values(&item).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_number_set_member() {
+        let item: HashMap<String, AttributeValue> =
+            HashMap::from([("ns".to_string(), json!({"NS": ["1", "x"]}))]);
+        assert!(validate_item_attribute_values(&item).is_err());
+    }
+
+    #[test]
+    fn accepts_valid_values() {
+        let item: HashMap<String, AttributeValue> = HashMap::from([
+            ("n".to_string(), json!({"N": "3.14"})),
+            ("s".to_string(), json!({"S": "hi"})),
+            ("ns".to_string(), json!({"NS": ["1", "2.5"]})),
+        ]);
+        assert!(validate_item_attribute_values(&item).is_ok());
+    }
 }

@@ -3121,9 +3121,10 @@ fn create_table_missing_key_attr_in_definitions() {
         }),
     );
     let err = expect_err(svc.create_table(&req));
-    // CreateTable doesn't declare ValidationException; we remap to
-    // LimitExceededException to stay Smithy-compliant.
-    assert!(err.to_string().contains("LimitExceededException"));
+    // A base-key attribute missing from AttributeDefinitions is a
+    // ValidationException, matching real DynamoDB (accepted by the conformance
+    // probe via service_common_errors for dynamodb).
+    assert!(err.to_string().contains("ValidationException"));
 }
 
 // ── DescribeTable ──

@@ -524,3 +524,36 @@ async fn ddb_partiql_execute_statement_paginates() {
     assert_eq!(page2.items().len(), 1, "remaining item on page 2");
     assert!(page2.next_token().is_none(), "last page has no NextToken");
 }
+
+// bug-hunt 2026-07-01, finding 2: a PartiQL SELECT whose string literal
+// contains a `<` (or other operator char) must not be split inside the quotes
+// — the operator scan skips single-quoted spans, so the equality still parses
+// and matches the stored row.
+#[tokio::test]
+async fn ddb_partiql_select_operator_char_inside_string_literal() {
+    let server = TestServer::start().await;
+    let ddb = server.dynamodb_client().await;
+    create_streamed_table(&ddb, "Urls").await;
+
+    let url = "https://x?a<b";
+    ddb.put_item()
+        .table_name("Urls")
+        .item("pk", AttributeValue::S("row1".into()))
+        .item("s", AttributeValue::S(url.into()))
+        .send()
+        .await
+        .unwrap();
+
+    let resp = ddb
+        .execute_statement()
+        .statement(format!("SELECT pk FROM \"Urls\" WHERE s = '{url}'"))
+        .send()
+        .await
+        .expect("SELECT with a `<` inside the string literal must succeed");
+    let pks: Vec<String> = resp
+        .items()
+        .iter()
+        .map(|it| it.get("pk").unwrap().as_s().unwrap().clone())
+        .collect();
+    assert_eq!(pks, vec!["row1".to_string()]);
+}

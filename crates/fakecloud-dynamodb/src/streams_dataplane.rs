@@ -177,11 +177,14 @@ impl DynamoDbStreamsService {
                 .map(|r| r.dynamodb.sequence_number.clone())
                 .max_by(|a, b| cmp_seq(a, b))
                 .unwrap_or_else(|| "0".to_string()),
-            // Inclusive of the named record: anchor just below it.
+            // Inclusive of the named record: anchor just below it. A sequence
+            // number that isn't present has aged out of the retained window (or
+            // never existed): AWS answers AT/AFTER_SEQUENCE_NUMBER for such a
+            // sequence with TrimmedDataAccessException, not ValidationException.
             "AT_SEQUENCE_NUMBER" => {
                 let seq = require_string(body, "SequenceNumber")?;
                 if !records.iter().any(|r| r.dynamodb.sequence_number == seq) {
-                    return Err(invalid_argument("SequenceNumber not found"));
+                    return Err(trimmed_data_access(&seq));
                 }
                 exclusive_before(&seq)
             }
@@ -189,7 +192,7 @@ impl DynamoDbStreamsService {
             "AFTER_SEQUENCE_NUMBER" => {
                 let seq = require_string(body, "SequenceNumber")?;
                 if !records.iter().any(|r| r.dynamodb.sequence_number == seq) {
-                    return Err(invalid_argument("SequenceNumber not found"));
+                    return Err(trimmed_data_access(&seq));
                 }
                 seq
             }
@@ -303,7 +306,11 @@ fn stream_label(stream_arn: &str) -> String {
 /// are minted by an atomic counter and zero-padded to a fixed width, so they
 /// are also lexicographically ordered; we still parse to `u128` so that an
 /// un-padded legacy value (or one of a different width) compares correctly.
-fn cmp_seq(a: &str, b: &str) -> std::cmp::Ordering {
+///
+/// Exported (via `lib.rs`) so the Streams->Lambda poller compares checkpoints
+/// with the exact same numeric ordering as GetRecords, instead of raw string
+/// order (which straddles the old->fixed-width sequence-format change).
+pub fn cmp_seq(a: &str, b: &str) -> std::cmp::Ordering {
     match (a.parse::<u128>(), b.parse::<u128>()) {
         (Ok(x), Ok(y)) => x.cmp(&y),
         // Non-numeric values fall back to byte order (deterministic, total).
@@ -335,6 +342,17 @@ fn require_string(body: &Value, field: &str) -> Result<String, AwsServiceError> 
 
 fn invalid_argument(msg: &str) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
+}
+
+/// A request to read from a sequence number that is no longer retained (or
+/// never existed) on the stream. DynamoDB Streams returns this on
+/// GetShardIterator for AT/AFTER_SEQUENCE_NUMBER against trimmed/absent data.
+fn trimmed_data_access(seq: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "TrimmedDataAccessException",
+        format!("Attempted access to a trimmed data: sequence number {seq} is no longer available in the stream"),
+    )
 }
 
 fn not_found(kind: &str, target: &str) -> AwsServiceError {
@@ -617,6 +635,35 @@ mod tests {
         );
         assert_eq!(recs2[0]["eventID"].as_str().unwrap(), "e4");
         assert_eq!(recs2[1]["eventID"].as_str().unwrap(), "e5");
+    }
+
+    // bug-hunt 2026-07-01, finding 8: AT/AFTER_SEQUENCE_NUMBER against a
+    // sequence number that has aged out (or never existed) is a
+    // TrimmedDataAccessException, not a ValidationException.
+    #[tokio::test]
+    async fn get_shard_iterator_absent_sequence_is_trimmed_data_access() {
+        let state = make_state();
+        let arn = seed_table(&state); // seeds one record, seq "1"
+        let svc = DynamoDbStreamsService::new(state);
+        for iter_type in ["AT_SEQUENCE_NUMBER", "AFTER_SEQUENCE_NUMBER"] {
+            let err = svc
+                .handle(req(
+                    "GetShardIterator",
+                    json!({
+                        "StreamArn": arn,
+                        "ShardId": "shardId-00000000000000000000-00000001",
+                        "ShardIteratorType": iter_type,
+                        "SequenceNumber": "999999999",
+                    }),
+                ))
+                .await
+                .err()
+                .expect("absent sequence must be rejected");
+            assert!(
+                format!("{err:?}").contains("TrimmedDataAccessException"),
+                "{iter_type}: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]

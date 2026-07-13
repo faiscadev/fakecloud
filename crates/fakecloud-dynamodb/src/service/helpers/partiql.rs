@@ -2,6 +2,37 @@
 
 use super::*;
 
+/// Find the first byte offset of `needle` in `hay` that lies OUTSIDE any
+/// single-quoted string literal.
+///
+/// PartiQL string literals are delimited by single quotes, so operator and
+/// clause-keyword scanning must ignore anything inside them: a `<` in
+/// `'https://x?a<b'`, a `WHERE` in `SET note = 'go WHERE you want'`, or an
+/// ` IN ` in `name = 'go IN store'` are all data, not syntax. A doubled `''`
+/// (PartiQL's escaped quote) has no characters between the two quotes, so the
+/// brief toggle it produces can never straddle a real needle.
+pub(crate) fn find_outside_quotes(hay: &str, needle: &str) -> Option<usize> {
+    if needle.is_empty() {
+        return None;
+    }
+    let bytes = hay.as_bytes();
+    let nbytes = needle.as_bytes();
+    let mut in_quote = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            in_quote = !in_quote;
+            i += 1;
+            continue;
+        }
+        if !in_quote && i + nbytes.len() <= bytes.len() && &bytes[i..i + nbytes.len()] == nbytes {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
 /// Compare two DynamoDB numeric attribute strings with full precision.
 ///
 /// DynamoDB numbers are arbitrary-precision decimals; parsing to `f64`
@@ -324,7 +355,7 @@ pub(crate) fn execute_partiql_in_state(
     let upper = trimmed.to_ascii_uppercase();
 
     if upper.starts_with("SELECT") {
-        let from_pos = upper.find("FROM").ok_or_else(|| {
+        let from_pos = find_outside_quotes(&upper, "FROM").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -353,7 +384,7 @@ pub(crate) fn execute_partiql_in_state(
             new_image: None,
         })
     } else if upper.starts_with("INSERT") {
-        let into_pos = upper.find("INTO").ok_or_else(|| {
+        let into_pos = find_outside_quotes(&upper, "INTO").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -363,7 +394,7 @@ pub(crate) fn execute_partiql_in_state(
         let after_into = trimmed[into_pos + 4..].trim();
         let (table_name, rest) = parse_partiql_table_name(after_into);
         let rest_upper = rest.trim().to_ascii_uppercase();
-        let value_pos = rest_upper.find("VALUE").ok_or_else(|| {
+        let value_pos = find_outside_quotes(&rest_upper, "VALUE").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -396,7 +427,7 @@ pub(crate) fn execute_partiql_in_state(
         let after_update = trimmed[6..].trim();
         let (table_name, rest) = parse_partiql_table_name(after_update);
         let rest_upper = rest.trim().to_ascii_uppercase();
-        let set_pos = rest_upper.find("SET").ok_or_else(|| {
+        let set_pos = find_outside_quotes(&rest_upper, "SET").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -404,7 +435,7 @@ pub(crate) fn execute_partiql_in_state(
             )
         })?;
         let after_set = rest.trim()[set_pos + 3..].trim();
-        let where_pos = after_set.to_ascii_uppercase().find("WHERE");
+        let where_pos = find_outside_quotes(&after_set.to_ascii_uppercase(), "WHERE");
         let (set_clause, where_clause) = if let Some(wp) = where_pos {
             (&after_set[..wp], after_set[wp + 5..].trim())
         } else {
@@ -456,7 +487,7 @@ pub(crate) fn execute_partiql_in_state(
             new_image: last_new,
         })
     } else if upper.starts_with("DELETE") {
-        let from_pos = upper.find("FROM").ok_or_else(|| {
+        let from_pos = find_outside_quotes(&upper, "FROM").ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -989,6 +1020,13 @@ pub(crate) fn compare_attr(lhs: Option<&Value>, rhs: &Value) -> Option<i32> {
         l.get("N").and_then(|v| v.as_str()),
         r.get("N").and_then(|v| v.as_str()),
     ) {
+        // A malformed Number operand (`{"N":"abc"}`) has no defined ordering:
+        // `compare_number_strings` falls back to `Equal` for it, which would
+        // spuriously satisfy `<=`/`>=`/BETWEEN. Return `None` so the predicate
+        // evaluates to false instead (bug-hunt 2026-07-01).
+        if !is_valid_number(a) || !is_valid_number(b) {
+            return None;
+        }
         // Compare the decimal strings directly: parsing to f64 silently rounds
         // past 2^53, so two distinct large integers would compare Equal.
         return Some(match compare_number_strings(a, b) {
@@ -1059,11 +1097,13 @@ fn parse_one_partiql_condition(
 
     // BETWEEN: `attr BETWEEN lo AND hi`. The split-on-AND step
     // already preserved the inner AND, so we see the full clause.
-    if let Some(b) = upper.find(" BETWEEN ") {
+    // Keyword scans skip single-quoted spans so a literal like
+    // `'x BETWEEN y'` on the RHS never fools the parser.
+    if let Some(b) = find_outside_quotes(&upper, " BETWEEN ") {
         let attr = cond[..b].trim().trim_matches('"').to_string();
         let rest = cond[b + 9..].trim();
         let rest_upper = rest.to_ascii_uppercase();
-        if let Some(a) = rest_upper.find(" AND ") {
+        if let Some(a) = find_outside_quotes(&rest_upper, " AND ") {
             let lo = parse_partiql_literal(rest[..a].trim(), parameters, param_idx)?;
             let hi = parse_partiql_literal(rest[a + 5..].trim(), parameters, param_idx)?;
             return Some(PartiqlCond::Between(attr, lo, hi));
@@ -1071,7 +1111,7 @@ fn parse_one_partiql_condition(
     }
 
     // IN: `attr IN (a, b, c)`.
-    if let Some(i) = upper.find(" IN ") {
+    if let Some(i) = find_outside_quotes(&upper, " IN ") {
         let attr = cond[..i].trim().trim_matches('"').to_string();
         let after = cond[i + 4..].trim();
         let inner = after
@@ -1090,7 +1130,7 @@ fn parse_one_partiql_condition(
     // LIKE: `attr LIKE 'pattern'` (with `%` and `_` wildcards). The
     // pattern is always a string; we unwrap the {"S": ...} payload at
     // parse time so the evaluator can stay scalar-only.
-    if let Some(l) = upper.find(" LIKE ") {
+    if let Some(l) = find_outside_quotes(&upper, " LIKE ") {
         let attr = cond[..l].trim().trim_matches('"').to_string();
         let rhs = cond[l + 6..].trim();
         let pattern_val = parse_partiql_literal(rhs, parameters, param_idx)?;
@@ -1103,9 +1143,11 @@ fn parse_one_partiql_condition(
     }
 
     // Operator-style. Order matters: longest operator first so `<=`
-    // doesn't get parsed as `<`.
+    // doesn't get parsed as `<`. The operator must sit OUTSIDE any
+    // single-quoted literal, so a value like `'https://x?a<b'` is not
+    // split at the `<` inside the string (bug-hunt 2026-07-01).
     for op in ["<>", "<=", ">=", "<", ">", "="] {
-        if let Some(idx) = cond.find(op) {
+        if let Some(idx) = find_outside_quotes(cond, op) {
             let attr = cond[..idx].trim().trim_matches('"').to_string();
             let rhs = cond[idx + op.len()..].trim();
 
@@ -1221,6 +1263,13 @@ pub(crate) fn parse_partiql_literal(
         let inner = &s[1..s.len() - 1];
         Some(json!({"S": inner}))
     } else if let Ok(n) = s.parse::<f64>() {
+        // `f64::parse` accepts `inf`, `-inf`, and `NaN`, and overflows a
+        // literal like `1e999` to infinity. DynamoDB Numbers are finite
+        // decimals, so reject any non-finite literal rather than persisting a
+        // bogus `{"N":"inf"}` / `{"N":"NaN"}` (bug-hunt 2026-07-01).
+        if !n.is_finite() {
+            return None;
+        }
         // Preserve the exact decimal text for integer literals — going through
         // f64 silently rounds past 2^53, so a 17+ digit id would be stored
         // wrong. Fractional/scientific literals still normalize via f64.
@@ -1391,6 +1440,65 @@ mod number_compare_tests {
         assert_eq!(decimal_add_sub("1", "0.001", false).unwrap(), "0.999");
         // Non-numeric operand is rejected.
         assert!(decimal_add_sub("abc", "1", true).is_none());
+    }
+}
+
+#[cfg(test)]
+mod quote_aware_tests {
+    use super::*;
+
+    // bug-hunt 2026-07-01: operator/keyword scans must skip single-quoted
+    // literals so a `<` or `WHERE`/`IN` inside a string is treated as data.
+    #[test]
+    fn find_outside_quotes_skips_quoted_spans() {
+        assert_eq!(find_outside_quotes("url = 'https://x?a<b'", "<"), None);
+        assert_eq!(find_outside_quotes("url = 'a<b'", "="), Some(4));
+        // The literal WHERE is skipped; the real (last) one is found.
+        let s = "note = 'go WHERE you' WHERE id = 1";
+        assert_eq!(find_outside_quotes(s, "WHERE"), s.rfind("WHERE"));
+    }
+
+    #[test]
+    fn operator_scan_ignores_operator_inside_string_literal() {
+        let mut idx = 0;
+        let cond = parse_one_partiql_condition("url = 'https://x?a<b'", &[], &mut idx).unwrap();
+        match cond {
+            PartiqlCond::Eq(attr, val) => {
+                assert_eq!(attr, "url");
+                assert_eq!(val, json!({"S": "https://x?a<b"}));
+            }
+            other => panic!("expected Eq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_literal_rejects_non_finite_numbers() {
+        let mut idx = 0;
+        assert_eq!(parse_partiql_literal("1e999", &[], &mut idx), None);
+        assert_eq!(parse_partiql_literal("inf", &[], &mut idx), None);
+        assert_eq!(parse_partiql_literal("NaN", &[], &mut idx), None);
+        assert_eq!(
+            parse_partiql_literal("42", &[], &mut idx),
+            Some(json!({"N": "42"}))
+        );
+    }
+
+    // A malformed stored Number operand must not spuriously satisfy a
+    // relational predicate (compare_attr returns None -> predicate false).
+    #[test]
+    fn compare_attr_rejects_malformed_number_operand() {
+        assert_eq!(
+            compare_attr(Some(&json!({"N": "abc"})), &json!({"N": "5"})),
+            None
+        );
+        assert_eq!(
+            compare_attr(Some(&json!({"N": "5"})), &json!({"N": "xyz"})),
+            None
+        );
+        assert_eq!(
+            compare_attr(Some(&json!({"N": "5"})), &json!({"N": "5"})),
+            Some(0)
+        );
     }
 }
 

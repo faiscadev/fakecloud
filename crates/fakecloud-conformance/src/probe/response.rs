@@ -202,6 +202,15 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // handler returning AccessDenied to the probes' synthetic (nonexistent)
         // role ARNs ran correctly. Source: STS API "Common Errors" + per-op docs.
         "sts" => &["AccessDenied"],
+        // DynamoDB returns `ValidationException` across essentially every
+        // operation for malformed/under-specified input — it is the service's
+        // canonical client-error shape. Most ops declare it, but a few (notably
+        // CreateTable, whose Smithy `errors:` list is limited to
+        // LimitExceededException / ResourceInUseException / InternalServerError)
+        // omit it even though the live API returns it for an invalid table
+        // spec. A handler returning ValidationException to the probes' synthetic
+        // inputs ran correctly. Source: DynamoDB API "Common Errors".
+        "dynamodb" => &["ValidationException"],
         // CodeConnections' CreateConnection / CreateHost require the caller to
         // resolve a provider type: CreateConnection needs a ProviderType or a
         // HostArn to inherit one from, and both reject malformed input. AWS
