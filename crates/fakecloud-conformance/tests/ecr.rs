@@ -746,6 +746,15 @@ async fn ecr_describe_image_scan_findings() {
         .send()
         .await
         .unwrap();
+    // A never-scanned image returns ScanNotFoundException; scan it first so the
+    // findings exist to describe (matches real AWS).
+    client
+        .start_image_scan()
+        .repository_name("c-disf")
+        .image_id(ImageIdentifier::builder().image_tag("v1").build())
+        .send()
+        .await
+        .unwrap();
     client
         .describe_image_scan_findings()
         .repository_name("c-disf")

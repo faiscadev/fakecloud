@@ -364,7 +364,7 @@ impl EcrService {
     /// Identical wiring to `start_image_scan` minus the request-shaped
     /// response — used both by the user-facing `StartImageScan` and the
     /// `scan_on_push=true` PutImage hook.
-    fn trigger_scan(&self, account: &str, name: &str, digest: &str) {
+    pub(crate) fn trigger_scan(&self, account: &str, name: &str, digest: &str) {
         use crate::state::ImageScanFindings;
         let layers = {
             let mut accounts = self.state.write();

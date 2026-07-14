@@ -332,6 +332,54 @@ fn manifest_not_found(name: &str, reference: &str) -> AwsServiceError {
     )
 }
 
+fn manifest_blob_unknown(name: &str, digest: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "MANIFEST_BLOB_UNKNOWN",
+        format!("manifest references unknown blob {digest} in repository {name}"),
+    )
+}
+
+fn immutable_tag(name: &str, tag: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "MANIFEST_INVALID",
+        format!(
+            "tag invalid: the image tag '{tag}' already exists in repository '{name}' and cannot \
+             be overwritten because the repository is configured for immutable tags"
+        ),
+    )
+}
+
+/// Config + layer blob digests a standard image manifest references. Returns
+/// an empty vec for manifest lists / indexes (which reference other manifests,
+/// not blobs) or anything we can't parse as an image manifest, so those pass
+/// through untouched.
+fn referenced_blob_digests(manifest: &[u8]) -> Vec<String> {
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(manifest) else {
+        return Vec::new();
+    };
+    // Only image manifests carry a `layers` array; a manifest list carries
+    // `manifests` instead and must not be blob-checked.
+    let Some(layers) = v.get("layers").and_then(|l| l.as_array()) else {
+        return Vec::new();
+    };
+    let mut digests = Vec::new();
+    if let Some(cfg) = v
+        .get("config")
+        .and_then(|c| c.get("digest"))
+        .and_then(|d| d.as_str())
+    {
+        digests.push(cfg.to_string());
+    }
+    for layer in layers {
+        if let Some(d) = layer.get("digest").and_then(|d| d.as_str()) {
+            digests.push(d.to_string());
+        }
+    }
+    digests
+}
+
 fn digest_invalid() -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -1038,36 +1086,75 @@ fn manifest_put(
         .unwrap_or("application/vnd.docker.distribution.manifest.v2+json")
         .to_string();
 
-    let mut accounts = service.state_handle().write();
-    let state = accounts
-        .get_mut(&request.account_id)
-        .ok_or_else(|| repo_not_found(name))?;
-    let repo = state
-        .repositories
-        .get_mut(name)
-        .ok_or_else(|| repo_not_found(name))?;
-    repo.images.insert(
-        digest.clone(),
-        Image {
-            image_digest: digest.clone(),
-            image_manifest: String::from_utf8_lossy(&body).to_string(),
-            image_manifest_media_type: media_type,
-            artifact_media_type: None,
-            image_size_in_bytes: body.len() as u64,
-            image_pushed_at: Utc::now(),
-            last_recorded_pull_time: None,
-            image_status: "ACTIVE".to_string(),
-            last_archived_at: None,
-            last_activated_at: None,
-            last_in_use_at: None,
-            in_use_count: 0,
-        },
-    );
-    // If the reference isn't a digest, treat it as a tag.
-    if !reference.starts_with("sha256:") {
-        repo.image_tags
-            .insert(reference.to_string(), digest.clone());
+    let referenced = referenced_blob_digests(&body);
+    let is_tag = !reference.starts_with("sha256:");
+
+    let should_scan;
+    {
+        let mut accounts = service.state_handle().write();
+        let state = accounts
+            .get_mut(&request.account_id)
+            .ok_or_else(|| repo_not_found(name))?;
+        let registry_match = crate::service::registry_scan_on_push_matches(
+            &state.registry_scanning_configuration,
+            name,
+        );
+        let repo = state
+            .repositories
+            .get_mut(name)
+            .ok_or_else(|| repo_not_found(name))?;
+
+        // Immutable-tag guard: the docker/OCI push path must enforce the same
+        // immutability the JSON PutImage path does, or `docker push` silently
+        // overwrites a tag the repo was configured to protect.
+        if is_tag && repo.image_tag_mutability == "IMMUTABLE" {
+            if let Some(existing) = repo.image_tags.get(reference) {
+                if existing != &digest {
+                    return Err(immutable_tag(name, reference));
+                }
+            }
+        }
+
+        // Reject a manifest that references a config/layer blob which was never
+        // uploaded (AWS/OCI: MANIFEST_BLOB_UNKNOWN), instead of storing a
+        // dangling manifest that fails only later at pull time.
+        for d in &referenced {
+            if !repo.layers.contains_key(d) {
+                return Err(manifest_blob_unknown(name, d));
+            }
+        }
+
+        repo.images.insert(
+            digest.clone(),
+            Image {
+                image_digest: digest.clone(),
+                image_manifest: String::from_utf8_lossy(&body).to_string(),
+                image_manifest_media_type: media_type,
+                artifact_media_type: None,
+                image_size_in_bytes: body.len() as u64,
+                image_pushed_at: Utc::now(),
+                last_recorded_pull_time: None,
+                image_status: "ACTIVE".to_string(),
+                last_archived_at: None,
+                last_activated_at: None,
+                last_in_use_at: None,
+                in_use_count: 0,
+            },
+        );
+        // If the reference isn't a digest, treat it as a tag.
+        if is_tag {
+            repo.image_tags
+                .insert(reference.to_string(), digest.clone());
+        }
+        should_scan = repo.image_scanning_configuration.scan_on_push || registry_match;
     }
+
+    // Scan-on-push + replication fire on the data-plane push path too, not just
+    // JSON PutImage. Both re-acquire the state lock, so run them after dropping it.
+    if should_scan {
+        service.trigger_scan(&request.account_id, name, &digest);
+    }
+    service.replicate_image(&request.account_id, name, &digest);
 
     let mut resp = base_response(StatusCode::CREATED, "application/json", Vec::new());
     resp.headers.insert(
@@ -1125,4 +1212,88 @@ fn resolve_reference(repo: &crate::state::Repository, reference: &str) -> Option
         return None;
     }
     repo.image_tags.get(reference).cloned()
+}
+
+#[cfg(test)]
+mod immutability_tests {
+    use super::*;
+    use crate::service::EcrService;
+    use crate::state::{Repository, SharedEcrState};
+    use bytes::Bytes;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const ACCT: &str = "111111111111";
+
+    fn svc_with_repo(mutability: &str) -> EcrService {
+        let mut mas: MultiAccountState<crate::state::EcrState> =
+            MultiAccountState::new(ACCT, "us-east-1", "http://fakecloud:4566");
+        let s = mas.get_or_create(ACCT);
+        let arn = s.repository_arn("app");
+        let mut repo = Repository::new("app", arn, ACCT, "fakecloud:4566");
+        repo.image_tag_mutability = mutability.to_string();
+        s.repositories.insert("app".to_string(), repo);
+        let state: SharedEcrState = Arc::new(RwLock::new(mas));
+        EcrService::new(state)
+    }
+
+    fn manifest_req(body: &str) -> AwsRequest {
+        AwsRequest {
+            service: "ecr".into(),
+            action: "OciManifestPut".into(),
+            region: "us-east-1".into(),
+            account_id: ACCT.into(),
+            request_id: "req-1".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(body.as_bytes().to_vec()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::PUT,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    // A manifest with no `layers` array skips the blob-existence check, so these
+    // tests isolate the immutability behaviour.
+    fn manifest(tag_hint: &str) -> String {
+        format!("{{\"schemaVersion\":2,\"config\":{{\"digest\":\"sha256:{tag_hint}\"}}}}")
+    }
+
+    #[test]
+    fn immutable_tag_push_is_rejected_on_the_oci_path() {
+        let svc = svc_with_repo("IMMUTABLE");
+        // First push of tag v1 succeeds.
+        manifest_put(&svc, &manifest_req(&manifest("aaaa")), "app", "v1").unwrap();
+        // Re-pushing DIFFERENT content to the same tag must be rejected.
+        let Err(err) = manifest_put(&svc, &manifest_req(&manifest("bbbb")), "app", "v1") else {
+            panic!("expected immutable-tag rejection");
+        };
+        assert_eq!(err.code(), "MANIFEST_INVALID");
+    }
+
+    #[test]
+    fn mutable_tag_push_overwrites_freely() {
+        let svc = svc_with_repo("MUTABLE");
+        manifest_put(&svc, &manifest_req(&manifest("aaaa")), "app", "v1").unwrap();
+        // Overwrite allowed on a MUTABLE repo.
+        manifest_put(&svc, &manifest_req(&manifest("bbbb")), "app", "v1").unwrap();
+    }
+
+    #[test]
+    fn manifest_referencing_absent_blob_is_rejected() {
+        let svc = svc_with_repo("MUTABLE");
+        let body = "{\"schemaVersion\":2,\"config\":{\"digest\":\"sha256:cfg\"},\"layers\":[{\"digest\":\"sha256:missinglayer\"}]}";
+        let Err(err) = manifest_put(&svc, &manifest_req(body), "app", "v1") else {
+            panic!("expected blob-unknown rejection");
+        };
+        assert_eq!(err.code(), "MANIFEST_BLOB_UNKNOWN");
+    }
 }
