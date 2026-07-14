@@ -76,11 +76,17 @@ impl EcsService {
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        let count = body
-            .get("count")
-            .and_then(|v| v.as_i64())
-            .filter(|n| (1..=10).contains(n))
-            .unwrap_or(1) as usize;
+        // AWS caps RunTask at 1..=10 tasks per call and rejects anything else
+        // with InvalidParameterException — it does NOT silently clamp to 1.
+        let count = match body.get("count").and_then(|v| v.as_i64()) {
+            Some(n) if (1..=10).contains(&n) => n as usize,
+            Some(n) => {
+                return Err(invalid_parameter(format!(
+                    "count should be between 1 and 10, inclusive. count={n}"
+                )))
+            }
+            None => 1,
+        };
         let group = opt_str(&body, "group").map(String::from);
         let started_by = opt_str(&body, "startedBy").map(String::from);
         let enable_execute_command = body
@@ -124,11 +130,13 @@ impl EcsService {
         let runtime = self.runtime.clone();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
+        // AWS rejects RunTask against a cluster that does not exist rather than
+        // synthesizing one; a phantom cluster returns ClusterNotFoundException.
         let cluster_arn = state
             .clusters
             .get(&cluster_name)
             .map(|c| c.cluster_arn.clone())
-            .unwrap_or_else(|| state.cluster_arn(&cluster_name));
+            .ok_or_else(|| cluster_not_found(&cluster_name))?;
         let (_, family, rev) = resolve_task_definition_ref(td_ref)?;
         let revisions = state
             .task_definitions
@@ -577,6 +585,47 @@ mod multi_container_tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    #[test]
+    fn run_task_count_over_ten_is_invalid_parameter() {
+        let svc = fresh_service();
+        // count is validated before the cluster/task-def are dereferenced.
+        let err = match svc.run_task(&make_request(
+            "RunTask",
+            json!({"taskDefinition": "x", "count": 50}),
+        )) {
+            Ok(_) => panic!("expected InvalidParameterException for count > 10"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    #[test]
+    fn create_service_negative_desired_count_is_invalid_parameter() {
+        let svc = fresh_service();
+        // desiredCount is validated before the cluster/task-def are resolved.
+        let err = match svc.create_service(&make_request(
+            "CreateService",
+            json!({"serviceName": "s", "taskDefinition": "x", "desiredCount": -3}),
+        )) {
+            Ok(_) => panic!("expected InvalidParameterException for negative desiredCount"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    #[test]
+    fn run_task_on_missing_cluster_is_cluster_not_found() {
+        let svc = fresh_service();
+        let err = match svc.run_task(&make_request(
+            "RunTask",
+            json!({"taskDefinition": "x", "cluster": "ghost", "count": 1}),
+        )) {
+            Ok(_) => panic!("expected ClusterNotFoundException for a phantom cluster"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "ClusterNotFoundException");
     }
 
     #[test]
