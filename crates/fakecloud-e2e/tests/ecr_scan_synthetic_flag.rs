@@ -54,6 +54,21 @@ async fn describe_image_scan_findings_returns_well_formed_response() {
     .error_for_status()
     .unwrap();
 
+    // A never-scanned image now returns ScanNotFoundException (matching AWS),
+    // so kick off a scan first. With no Trivy on PATH the scan still completes
+    // with an empty, well-formed findings result — which is what this test
+    // asserts the shape of.
+    ecr.start_image_scan()
+        .repository_name("scan-shape-repo")
+        .image_id(
+            aws_sdk_ecr::types::ImageIdentifier::builder()
+                .image_tag("v1")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
     // Hit the AWS JSON surface via raw HTTP.
     let resp = http
         .post(server.endpoint())
