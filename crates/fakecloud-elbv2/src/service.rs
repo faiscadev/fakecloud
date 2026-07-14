@@ -1120,6 +1120,22 @@ impl Elbv2Service {
 
     fn modify_target_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_query_param(req, "TargetGroupArn")?;
+        // AWS enforces the same @range / enum bounds on Modify as on Create;
+        // the previous code accepted out-of-range values Create rejects.
+        validate_range_i32(req, "HealthCheckIntervalSeconds", 5, 300)?;
+        validate_range_i32(req, "HealthCheckTimeoutSeconds", 2, 120)?;
+        validate_range_i32(req, "HealthyThresholdCount", 2, 10)?;
+        validate_range_i32(req, "UnhealthyThresholdCount", 2, 10)?;
+        if let Some(hp) = optional_query_param(req, "HealthCheckProtocol") {
+            const VALID: &[&str] = &[
+                "HTTP", "HTTPS", "TCP", "TLS", "UDP", "TCP_UDP", "GENEVE", "QUIC", "TCP_QUIC",
+            ];
+            if !VALID.contains(&hp.as_str()) {
+                return Err(invalid_param(format!(
+                    "HealthCheckProtocol '{hp}' is not valid"
+                )));
+            }
+        }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let tg = st

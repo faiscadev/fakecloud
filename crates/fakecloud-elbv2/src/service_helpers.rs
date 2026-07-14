@@ -42,6 +42,26 @@ pub(crate) fn parse_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
     out
 }
 
+/// Parse a rule condition's `QueryStringConfig.Values.member.N.{Key,Value}`
+/// pairs. Key is optional in AWS (a bare value matches any key), so a member
+/// with only a Value is valid.
+pub(crate) fn parse_query_string_pairs(
+    req: &AwsRequest,
+    prefix: &str,
+) -> Vec<crate::state::QueryStringKeyValuePair> {
+    let mut out = Vec::new();
+    for n in 1..=100 {
+        let base = format!("{prefix}.member.{n}");
+        let key = req.query_params.get(&format!("{base}.Key")).cloned();
+        let value = req.query_params.get(&format!("{base}.Value")).cloned();
+        if key.is_none() && value.is_none() {
+            break;
+        }
+        out.push(crate::state::QueryStringKeyValuePair { key, value });
+    }
+    out
+}
+
 pub(crate) fn parse_subnet_mappings(req: &AwsRequest) -> Vec<SubnetMapping> {
     let mut out = Vec::new();
     for n in 1..=20 {
@@ -713,7 +733,10 @@ pub(crate) fn parse_conditions(req: &AwsRequest) -> Vec<crate::state::RuleCondit
                     .get(&format!("{p}.HttpHeaderConfig.HttpHeaderName"))
                     .cloned(),
                 http_header_values: parse_member_list(req, &format!("{p}.HttpHeaderConfig.Values")),
-                query_string_values: Vec::new(),
+                query_string_values: parse_query_string_pairs(
+                    req,
+                    &format!("{p}.QueryStringConfig.Values"),
+                ),
                 http_request_method_values: parse_member_list(
                     req,
                     &format!("{p}.HttpRequestMethodConfig.Values"),
@@ -1322,4 +1345,62 @@ pub(crate) fn taggable_not_found(arn: &str) -> AwsServiceError {
         code,
         format!("{label} '{arn}' not found"),
     )
+}
+
+#[cfg(test)]
+mod query_string_tests {
+    use super::*;
+    use fakecloud_core::service::AwsRequest;
+    use http::{HeaderMap, Method};
+    use std::collections::HashMap;
+
+    fn req(pairs: &[(&str, &str)]) -> AwsRequest {
+        let mut query_params = HashMap::new();
+        for (k, v) in pairs {
+            query_params.insert((*k).to_string(), (*v).to_string());
+        }
+        AwsRequest {
+            service: "elasticloadbalancing".into(),
+            action: "CreateRule".into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "r".into(),
+            headers: HeaderMap::new(),
+            query_params,
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: true,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn query_string_condition_pairs_are_parsed_not_dropped() {
+        let r = req(&[
+            (
+                "Conditions.member.1.QueryStringConfig.Values.member.1.Key",
+                "version",
+            ),
+            (
+                "Conditions.member.1.QueryStringConfig.Values.member.1.Value",
+                "v1",
+            ),
+            (
+                "Conditions.member.1.QueryStringConfig.Values.member.2.Value",
+                "bare",
+            ),
+        ]);
+        let pairs = parse_query_string_pairs(&r, "Conditions.member.1.QueryStringConfig.Values");
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].key.as_deref(), Some("version"));
+        assert_eq!(pairs[0].value.as_deref(), Some("v1"));
+        // Key is optional: a bare value (no Key) is a valid pair.
+        assert_eq!(pairs[1].key, None);
+        assert_eq!(pairs[1].value.as_deref(), Some("bare"));
+    }
 }
