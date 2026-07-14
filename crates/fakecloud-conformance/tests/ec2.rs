@@ -2061,6 +2061,19 @@ async fn ec2_get_groups_for_capacity_reservation() {
 
 // ---- Network interfaces ----
 
+async fn make_eni(c: &aws_sdk_ec2::Client) -> String {
+    c.create_network_interface()
+        .subnet_id("subnet-1")
+        .send()
+        .await
+        .unwrap()
+        .network_interface()
+        .unwrap()
+        .network_interface_id()
+        .unwrap()
+        .to_string()
+}
+
 #[test_action("ec2", "CreateNetworkInterface", checksum = "fb8b07c5")]
 #[tokio::test]
 async fn ec2_create_network_interface() {
@@ -2373,14 +2386,15 @@ async fn ec2_unassign_private_ips() {
 async fn ec2_assign_ipv6() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let eni = make_eni(&c).await;
     let r = c
         .assign_ipv6_addresses()
-        .network_interface_id("eni-1")
+        .network_interface_id(&eni)
         .ipv6_addresses("2600:1f00::5")
         .send()
         .await
         .unwrap();
-    assert_eq!(r.network_interface_id(), Some("eni-1"));
+    assert_eq!(r.network_interface_id(), Some(eni.as_str()));
 }
 
 #[test_action("ec2", "UnassignIpv6Addresses", checksum = "0c460cb5")]
@@ -2388,14 +2402,21 @@ async fn ec2_assign_ipv6() {
 async fn ec2_unassign_ipv6() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
-    let r = c
-        .unassign_ipv6_addresses()
-        .network_interface_id("eni-1")
+    let eni = make_eni(&c).await;
+    c.assign_ipv6_addresses()
+        .network_interface_id(&eni)
         .ipv6_addresses("2600:1f00::5")
         .send()
         .await
         .unwrap();
-    assert_eq!(r.network_interface_id(), Some("eni-1"));
+    let r = c
+        .unassign_ipv6_addresses()
+        .network_interface_id(&eni)
+        .ipv6_addresses("2600:1f00::5")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.network_interface_id(), Some(eni.as_str()));
 }
 
 // ---- Instances ----
@@ -3165,8 +3186,10 @@ async fn ec2_reset_ebs_default_kms_key_id() {
 // ---- EBS snapshots ----
 
 async fn make_snap(c: &aws_sdk_ec2::Client) -> String {
+    // AWS rejects a snapshot of a phantom volume, so seed a real one first.
+    let vol = make_vol(c).await;
     c.create_snapshot()
-        .volume_id("vol-0123456789abcdef0")
+        .volume_id(vol)
         .send()
         .await
         .unwrap()
@@ -3180,9 +3203,10 @@ async fn make_snap(c: &aws_sdk_ec2::Client) -> String {
 async fn ec2_create_snapshot() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let vol = make_vol(&c).await;
     let r = c
         .create_snapshot()
-        .volume_id("vol-1")
+        .volume_id(vol)
         .description("snap")
         .send()
         .await
@@ -3195,11 +3219,22 @@ async fn ec2_create_snapshot() {
 async fn ec2_create_snapshots() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    // CreateSnapshots snapshots every volume attached to a real instance, so
+    // seed an instance with an attached volume first.
+    let instance = run_one(&c).await;
+    let vol = make_vol(&c).await;
+    c.attach_volume()
+        .volume_id(&vol)
+        .instance_id(&instance)
+        .device("/dev/sdf")
+        .send()
+        .await
+        .unwrap();
     let r = c
         .create_snapshots()
         .instance_specification(
             aws_sdk_ec2::types::InstanceSpecification::builder()
-                .instance_id("i-1")
+                .instance_id(instance)
                 .build(),
         )
         .send()
@@ -5224,9 +5259,18 @@ async fn ec2_cancel_capacity_reservation_fleets() {
 async fn ec2_modify_capacity_reservation_fleet() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let id = c
+        .create_capacity_reservation_fleet()
+        .total_target_capacity(1)
+        .send()
+        .await
+        .unwrap()
+        .capacity_reservation_fleet_id()
+        .unwrap()
+        .to_string();
     let r = c
         .modify_capacity_reservation_fleet()
-        .capacity_reservation_fleet_id("crf-1")
+        .capacity_reservation_fleet_id(id)
         .send()
         .await
         .unwrap();
