@@ -396,6 +396,16 @@ fn build_api_from_spec(
                             .and_then(|v| v.as_str())
                             .map(|s| s.to_ascii_uppercase())
                             .unwrap_or_else(|| "INTERNET".to_string()),
+                        request_parameters: integ
+                            .get("requestParameters")
+                            .and_then(|v| v.as_object())
+                            .map(|o| {
+                                o.iter()
+                                    .filter_map(|(k, v)| {
+                                        v.as_str().map(|s| (k.clone(), s.to_string()))
+                                    })
+                                    .collect()
+                            }),
                     };
                     integrations.insert(integration_id.clone(), integration);
                     target = Some(format!("integrations/{integration_id}"));
@@ -419,16 +429,25 @@ fn build_api_from_spec(
 fn export_openapi(api: &HttpApi, routes: &[Route]) -> Value {
     let mut paths = serde_json::Map::new();
     for route in routes {
-        // route_key is "<METHOD> <path>"; "$default" carries no method/path.
-        let Some((method, path)) = route.route_key.split_once(' ') else {
-            continue;
+        // route_key is "<METHOD> <path>"; the `$default` catch-all carries
+        // no method/path split. Export it under the `$default` path with the
+        // any-method key so a round-tripped spec preserves the fallback route.
+        let (method_key, path) = match route.route_key.split_once(' ') {
+            Some((method, path)) => {
+                let method_key = if method.eq_ignore_ascii_case("ANY") {
+                    "x-amazon-apigateway-any-method".to_string()
+                } else {
+                    method.to_ascii_lowercase()
+                };
+                (method_key, path.to_string())
+            }
+            None if route.route_key.trim() == "$default" => (
+                "x-amazon-apigateway-any-method".to_string(),
+                "$default".to_string(),
+            ),
+            None => continue,
         };
-        let method_key = if method.eq_ignore_ascii_case("ANY") {
-            "x-amazon-apigateway-any-method".to_string()
-        } else {
-            method.to_ascii_lowercase()
-        };
-        let entry = paths.entry(path.to_string()).or_insert_with(|| json!({}));
+        let entry = paths.entry(path.clone()).or_insert_with(|| json!({}));
         if let Some(obj) = entry.as_object_mut() {
             obj.insert(
                 method_key,

@@ -104,6 +104,120 @@ pub fn construct_event(
     })
 }
 
+/// Constructs a Lambda proxy integration event in the **1.0** payload
+/// format for an HTTP API whose integration set
+/// `payloadFormatVersion = "1.0"`. This is the same envelope REST APIs
+/// (API Gateway v1) send, so a Lambda written for a REST proxy keeps
+/// working behind an HTTP API. See the payload-format-version docs:
+/// https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-develop-integrations-lambda.html
+pub fn construct_event_v1(
+    req: &AwsRequest,
+    route_key: &str,
+    stage: &str,
+    path_parameters: HashMap<String, String>,
+    authorizer: Option<AuthorizerInfo>,
+) -> serde_json::Value {
+    let (is_base64_encoded, body) = encode_body(req);
+
+    // The `resource` field is the route's path template (the part of the
+    // route key after the method), defaulting to the raw path.
+    let resource = route_key
+        .split_once(' ')
+        .map(|(_, path)| path.to_string())
+        .unwrap_or_else(|| req.raw_path.clone());
+
+    // Single-value + multi-value header maps.
+    let mut headers = serde_json::Map::new();
+    let mut multi_value_headers = serde_json::Map::new();
+    for (k, v) in req.headers.iter() {
+        if let Ok(v_str) = v.to_str() {
+            headers.insert(k.as_str().to_string(), json!(v_str));
+            multi_value_headers
+                .entry(k.as_str().to_string())
+                .or_insert_with(|| json!([]))
+                .as_array_mut()
+                .unwrap()
+                .push(json!(v_str));
+        }
+    }
+
+    let query_string_parameters = if req.query_params.is_empty() {
+        serde_json::Value::Null
+    } else {
+        json!(req.query_params)
+    };
+    let multi_value_query_string_parameters = if req.query_params.is_empty() {
+        serde_json::Value::Null
+    } else {
+        let mut m = serde_json::Map::new();
+        for (k, v) in &req.query_params {
+            m.insert(k.clone(), json!([v]));
+        }
+        serde_json::Value::Object(m)
+    };
+
+    let path_parameters = if path_parameters.is_empty() {
+        serde_json::Value::Null
+    } else {
+        json!(path_parameters)
+    };
+
+    let mut request_context = serde_json::Map::new();
+    request_context.insert("accountId".to_string(), json!(&req.account_id));
+    request_context.insert("apiId".to_string(), json!(host_api_id(req)));
+    request_context.insert("domainName".to_string(), json!("localhost"));
+    request_context.insert("httpMethod".to_string(), json!(req.method.as_str()));
+    request_context.insert("path".to_string(), json!(req.raw_path));
+    request_context.insert("protocol".to_string(), json!("HTTP/1.1"));
+    request_context.insert("requestId".to_string(), json!(&req.request_id));
+    request_context.insert("resourcePath".to_string(), json!(resource));
+    request_context.insert("stage".to_string(), json!(stage));
+    request_context.insert("identity".to_string(), json!({ "sourceIp": "127.0.0.1" }));
+    request_context.insert(
+        "requestTimeEpoch".to_string(),
+        json!(chrono::Utc::now().timestamp_millis()),
+    );
+
+    if let Some(auth) = authorizer {
+        // 1.0 exposes the authorizer object directly under
+        // `requestContext.authorizer` (JWT claims land under a `claims`
+        // key, matching REST Cognito behaviour).
+        let value = match auth {
+            AuthorizerInfo::Jwt { claims } => json!({ "claims": claims }),
+            AuthorizerInfo::Lambda { context } => context,
+        };
+        request_context.insert("authorizer".to_string(), value);
+    }
+
+    json!({
+        "version": "1.0",
+        "resource": resource,
+        "path": req.raw_path,
+        "httpMethod": req.method.as_str(),
+        "headers": serde_json::Value::Object(headers),
+        "multiValueHeaders": serde_json::Value::Object(multi_value_headers),
+        "queryStringParameters": query_string_parameters,
+        "multiValueQueryStringParameters": multi_value_query_string_parameters,
+        "pathParameters": path_parameters,
+        "stageVariables": serde_json::Value::Null,
+        "requestContext": serde_json::Value::Object(request_context),
+        "body": body,
+        "isBase64Encoded": is_base64_encoded,
+    })
+}
+
+/// Best-effort extraction of the API id from the execute-api Host header
+/// (`{api-id}.execute-api.<region>.amazonaws.com`). Falls back to an
+/// empty string when the header is absent.
+fn host_api_id(req: &AwsRequest) -> String {
+    req.headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|h| h.split('.').next())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn encode_body(req: &AwsRequest) -> (bool, Option<String>) {
     if req.body.is_empty() {
         return (false, None);
@@ -298,6 +412,50 @@ mod tests {
         assert_eq!(event["queryStringParameters"]["filter"], "available");
         assert_eq!(event["body"], r#"{"name":"Fluffy"}"#);
         assert_eq!(event["isBase64Encoded"], false);
+    }
+
+    #[test]
+    fn test_construct_event_v1_shape() {
+        // payloadFormatVersion "1.0" produces the REST-style envelope:
+        // httpMethod / multiValueHeaders / requestContext.identity etc.
+        let req = create_test_request();
+        let path_params = HashMap::from([("id".to_string(), "123".to_string())]);
+        let event = construct_event_v1(&req, "POST /pets/{id}", "prod", path_params, None);
+
+        assert_eq!(event["version"], "1.0");
+        assert_eq!(event["httpMethod"], "POST");
+        assert_eq!(event["resource"], "/pets/{id}");
+        assert_eq!(event["path"], "/prod/pets");
+        // 2.0-only fields must be absent.
+        assert!(event["routeKey"].is_null());
+        assert!(event["rawPath"].is_null());
+        // Multi-value maps + identity present.
+        assert_eq!(
+            event["multiValueHeaders"]["content-type"][0],
+            "application/json"
+        );
+        assert_eq!(event["requestContext"]["identity"]["sourceIp"], "127.0.0.1");
+        assert_eq!(event["requestContext"]["httpMethod"], "POST");
+        assert_eq!(event["requestContext"]["stage"], "prod");
+        assert_eq!(event["pathParameters"]["id"], "123");
+        assert_eq!(
+            event["multiValueQueryStringParameters"]["filter"][0],
+            "available"
+        );
+    }
+
+    #[test]
+    fn test_construct_event_v1_lambda_authorizer_context() {
+        let req = create_test_request();
+        let ctx = json!({"principalId": "u", "role": "admin"});
+        let event = construct_event_v1(
+            &req,
+            "GET /pets",
+            "prod",
+            HashMap::new(),
+            Some(AuthorizerInfo::Lambda { context: ctx }),
+        );
+        assert_eq!(event["requestContext"]["authorizer"]["role"], "admin");
     }
 
     #[test]

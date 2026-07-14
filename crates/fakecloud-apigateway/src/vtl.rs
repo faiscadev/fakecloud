@@ -9,8 +9,42 @@ use percent_encoding::{utf8_percent_encode, NON_ALPHANUMERIC};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
+/// Maximum nesting depth for recursive block rendering (`#if`/`#foreach`).
+/// A pathological template (deeply nested or self-referential via
+/// `#set`-driven templates) would otherwise recurse until the thread's
+/// stack overflows and aborts the process; capping it turns that into a
+/// recoverable render error.
+pub const MAX_RENDER_DEPTH: usize = 64;
+
 /// Render a VTL template string using the supplied variable context.
+///
+/// Infallible wrapper around [`try_render`]: on a render error (currently
+/// only the recursion-depth cap) it yields the output accumulated so far
+/// rather than propagating, preserving the historical `-> String` API.
 pub fn render(template: &str, ctx: &mut Context) -> String {
+    match try_render(template, ctx) {
+        Ok(s) => s,
+        Err((partial, _)) => partial,
+    }
+}
+
+/// Render a VTL template, returning an error (with the partial output)
+/// when the recursion-depth cap is exceeded.
+pub fn try_render(template: &str, ctx: &mut Context) -> Result<String, (String, String)> {
+    render_depth(template, ctx, 0)
+}
+
+fn render_depth(
+    template: &str,
+    ctx: &mut Context,
+    depth: usize,
+) -> Result<String, (String, String)> {
+    if depth > MAX_RENDER_DEPTH {
+        return Err((
+            String::new(),
+            format!("VTL render exceeded maximum nesting depth of {MAX_RENDER_DEPTH}"),
+        ));
+    }
     let mut out = String::new();
     let mut i = 0;
     while i < template.len() {
@@ -40,7 +74,13 @@ pub fn render(template: &str, ctx: &mut Context) -> String {
             let (then_block, else_block, consumed) = parse_if_blocks(template, i);
             i = consumed;
             let block = if truthy { then_block } else { else_block };
-            out.push_str(&render(block, ctx));
+            match render_depth(block, ctx, depth + 1) {
+                Ok(s) => out.push_str(&s),
+                Err((partial, msg)) => {
+                    out.push_str(&partial);
+                    return Err((out, msg));
+                }
+            }
         } else if rest.starts_with("#foreach(") {
             i += 9;
             let (header, consumed) = parse_expr(template, i);
@@ -56,16 +96,30 @@ pub fn render(template: &str, ctx: &mut Context) -> String {
                 for item in arr {
                     ctx.push_scope();
                     ctx.set(item_var, item.clone());
-                    out.push_str(&render(body, ctx));
+                    let rendered = render_depth(body, ctx, depth + 1);
                     ctx.pop_scope();
+                    match rendered {
+                        Ok(s) => out.push_str(&s),
+                        Err((partial, msg)) => {
+                            out.push_str(&partial);
+                            return Err((out, msg));
+                        }
+                    }
                 }
             } else if let Some(obj) = items.as_object() {
                 for (key, val) in obj {
                     ctx.push_scope();
                     ctx.set(item_var, Value::String(key.clone()));
                     ctx.set(&format!("{item_var}_value"), val.clone());
-                    out.push_str(&render(body, ctx));
+                    let rendered = render_depth(body, ctx, depth + 1);
                     ctx.pop_scope();
+                    match rendered {
+                        Ok(s) => out.push_str(&s),
+                        Err((partial, msg)) => {
+                            out.push_str(&partial);
+                            return Err((out, msg));
+                        }
+                    }
                 }
             }
         } else if rest.starts_with("##") {
@@ -100,7 +154,7 @@ pub fn render(template: &str, ctx: &mut Context) -> String {
             i += template[i..].chars().next().unwrap().len_utf8();
         }
     }
-    out
+    Ok(out)
 }
 
 // ── Context ──
@@ -992,6 +1046,33 @@ mod tests {
         let mut ctx = Context::new().with_var("util", json!({"_type":"util"}));
         let out = render(r#"$util.urlEncode('hello world')"#, &mut ctx);
         assert_eq!(out, "hello%20world");
+    }
+
+    #[test]
+    fn recursion_depth_cap_returns_error() {
+        // A template nested far deeper than the cap must surface a render
+        // error instead of overflowing the stack.
+        let depth = MAX_RENDER_DEPTH + 5;
+        let mut tpl = String::new();
+        for _ in 0..depth {
+            tpl.push_str("#if(true)");
+        }
+        tpl.push('x');
+        for _ in 0..depth {
+            tpl.push_str("#end");
+        }
+        let mut ctx = Context::new();
+        let err = try_render(&tpl, &mut ctx);
+        assert!(err.is_err(), "deeply nested template must error");
+        assert!(err.unwrap_err().1.contains("maximum nesting depth"));
+    }
+
+    #[test]
+    fn shallow_nesting_still_renders() {
+        // Nesting well within the cap keeps working.
+        let mut ctx = Context::new().with_var("ok", true.into());
+        let out = render("#if($ok)#if($ok)deep#end#end", &mut ctx);
+        assert_eq!(out, "deep");
     }
 
     #[test]

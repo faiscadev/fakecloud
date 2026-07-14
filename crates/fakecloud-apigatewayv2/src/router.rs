@@ -12,6 +12,10 @@ struct ParsedRoute {
     method: String,
     segments: Vec<RouteSegment>,
     priority: i32,
+    /// The `$default` catch-all route: matches any method and any path
+    /// (including the root) that no more-specific route matched. Given
+    /// the lowest possible priority so specific routes always win.
+    catch_all: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -23,6 +27,20 @@ enum RouteSegment {
 
 impl ParsedRoute {
     fn from_route_key(route_key: &str) -> Option<Self> {
+        // The `$default` catch-all route key carries no `METHOD path`
+        // split — it's a single token. Treat it as a route that matches
+        // any request, ranked below every specific route. This is the
+        // canonical SAM/CDK/Serverless HTTP-API topology and, without it,
+        // an HTTP API whose only route is `$default` 404s every request.
+        if route_key.trim() == "$default" {
+            return Some(Self {
+                method: "ANY".to_string(),
+                segments: Vec::new(),
+                priority: i32::MIN,
+                catch_all: true,
+            });
+        }
+
         let parts: Vec<&str> = route_key.splitn(2, ' ').collect();
         if parts.len() != 2 {
             return None;
@@ -38,6 +56,7 @@ impl ParsedRoute {
             method,
             segments,
             priority,
+            catch_all: false,
         })
     }
 
@@ -77,6 +96,11 @@ impl ParsedRoute {
     }
 
     fn matches(&self, method: &str, path_segments: &[String]) -> Option<HashMap<String, String>> {
+        // The `$default` catch-all matches any method + any path.
+        if self.catch_all {
+            return Some(HashMap::new());
+        }
+
         // Check method match (ANY matches all methods)
         if self.method != "ANY" && self.method != method {
             return None;
@@ -313,6 +337,66 @@ mod tests {
         let router = Router::new(routes);
         assert!(router.match_route("GET", "/users").is_none());
         assert!(router.match_route("POST", "/pets").is_none());
+    }
+
+    #[test]
+    fn test_default_route_matches_any_request() {
+        // An HTTP API whose only route is `$default` must route every
+        // request to that route's integration (regression for C1: the
+        // route key was silently dropped, 404ing all traffic).
+        let routes = vec![Route {
+            route_id: "def".to_string(),
+            route_key: "$default".to_string(),
+            ..Default::default()
+        }];
+
+        let router = Router::new(routes);
+        assert_eq!(
+            router
+                .match_route("GET", "/anything")
+                .unwrap()
+                .route
+                .route_id,
+            "def"
+        );
+        assert_eq!(
+            router.match_route("POST", "/a/b/c").unwrap().route.route_id,
+            "def"
+        );
+        // Also matches the bare root path.
+        assert_eq!(
+            router.match_route("DELETE", "/").unwrap().route.route_id,
+            "def"
+        );
+    }
+
+    #[test]
+    fn test_specific_route_wins_over_default() {
+        // `$default` is the lowest-priority fallback: a specific route
+        // that matches must be preferred.
+        let routes = vec![
+            Route {
+                route_id: "def".to_string(),
+                route_key: "$default".to_string(),
+                ..Default::default()
+            },
+            Route {
+                route_id: "specific".to_string(),
+                route_key: "GET /health".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let router = Router::new(routes);
+        assert_eq!(
+            router.match_route("GET", "/health").unwrap().route.route_id,
+            "specific"
+        );
+        // A path with no specific route still falls back to `$default`.
+        assert_eq!(
+            router.match_route("GET", "/other").unwrap().route.route_id,
+            "def"
+        );
     }
 
     #[test]

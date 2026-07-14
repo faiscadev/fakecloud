@@ -40,6 +40,7 @@ impl ApiGatewayV2Service {
             .as_str()
             .unwrap_or("INTERNET")
             .to_string();
+        let request_parameters = parse_string_map(&body["requestParameters"]);
 
         let integration_id = generate_id("integration");
 
@@ -90,6 +91,7 @@ impl ApiGatewayV2Service {
             payload_format_version,
             timeout_in_millis,
             connection_type,
+            request_parameters,
         };
 
         state
@@ -256,6 +258,9 @@ impl ApiGatewayV2Service {
         }
         if let Some(expr) = body["integrationResponseSelectionExpression"].as_str() {
             integration.integration_response_selection_expression = Some(expr.to_string());
+        }
+        if let Some(params) = parse_string_map(&body["requestParameters"]) {
+            integration.request_parameters = Some(params);
         }
 
         Ok(AwsResponse::ok_json(json!(integration)))

@@ -265,7 +265,7 @@ impl ApiGatewayV2Service {
 
         let result: Result<AwsResponse, AwsServiceError> = async {
             // Try custom domain resolution first.
-            let (a, s, stage_vars) = {
+            let (a, s, stage_vars, via_custom_domain) = {
                 let accounts = self.state.read();
                 let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
                 let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -279,7 +279,40 @@ impl ApiGatewayV2Service {
                         .and_then(|stages| stages.get(&s))
                         .and_then(|st| st.stage_variables.clone())
                         .unwrap_or_default();
-                    (a, s, stage_vars)
+                    (a, s, stage_vars, true)
+                } else if let Some(a) = host_api_id(&req).filter(|id| state.apis.contains_key(id)) {
+                    // Default execute-api endpoint: the API is keyed on the
+                    // Host header (`{api-id}.execute-api.<region>...`). Scope
+                    // stage/route resolution to that API so two APIs sharing a
+                    // stage name don't collide, and honour the `$default`
+                    // stage — whose URL omits the stage segment entirely
+                    // (`https://{api-id}.execute-api.../items`).
+                    let stages = state.stages.get(&a);
+                    let first = req.path_segments.first().cloned();
+                    let stage_name = match (&first, stages) {
+                        (Some(seg), Some(st)) if st.contains_key(seg) => {
+                            // Named stage in the first path segment; consume it.
+                            req.path_segments.remove(0);
+                            seg.clone()
+                        }
+                        (_, Some(st)) if st.contains_key("$default") => {
+                            // `$default` stage serves the path directly; do not
+                            // consume a segment.
+                            "$default".to_string()
+                        }
+                        _ => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "NotFoundException",
+                                format!("Stage not found for API {}", a),
+                            ));
+                        }
+                    };
+                    let stage_vars = stages
+                        .and_then(|st| st.get(&stage_name))
+                        .and_then(|st| st.stage_variables.clone())
+                        .unwrap_or_default();
+                    (a, stage_name, stage_vars, false)
                 } else {
                     // Execute API format: /{stage}/{path...}
                     if req.path_segments.is_empty() {
@@ -314,12 +347,34 @@ impl ApiGatewayV2Service {
                             format!("Stage not found: {}", s),
                         )
                     })?;
-                    (a, s, stage_vars)
+                    (a, s, stage_vars, false)
                 }
             };
 
             api_id = a;
             stage_name = s;
+
+            // Enforce `disableExecuteApiEndpoint`: when set, the default
+            // `execute-api` endpoint returns 403. Custom-domain traffic is
+            // unaffected — that's the whole point of disabling the default
+            // endpoint.
+            if !via_custom_domain {
+                let disabled = {
+                    let accounts = self.state.read();
+                    accounts
+                        .get(&req.account_id)
+                        .and_then(|st| st.apis.get(&api_id))
+                        .map(|api| api.disable_execute_api_endpoint)
+                        .unwrap_or(false)
+                };
+                if disabled {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::FORBIDDEN,
+                        "ForbiddenException",
+                        "The execute-api endpoint is disabled for this API",
+                    ));
+                }
+            }
 
             resource_path = if req.path_segments.is_empty() {
                 "/".to_string()
@@ -442,13 +497,31 @@ impl ApiGatewayV2Service {
                         })?;
 
                     if is_lambda_arn(integration_uri) {
-                        let event = lambda_proxy::construct_event(
-                            &req,
-                            &route_match.route.route_key,
-                            &stage_name,
-                            route_match.path_parameters,
-                            authorizer_info,
-                        );
+                        // Honour the integration's payloadFormatVersion:
+                        // "1.0" sends the REST-shaped envelope, "2.0" (the
+                        // default) sends the HTTP-API envelope.
+                        let event = if integration
+                            .payload_format_version
+                            .as_deref()
+                            .map(|v| v == "1.0")
+                            .unwrap_or(false)
+                        {
+                            lambda_proxy::construct_event_v1(
+                                &req,
+                                &route_match.route.route_key,
+                                &stage_name,
+                                route_match.path_parameters,
+                                authorizer_info,
+                            )
+                        } else {
+                            lambda_proxy::construct_event(
+                                &req,
+                                &route_match.route.route_key,
+                                &stage_name,
+                                route_match.path_parameters,
+                                authorizer_info,
+                            )
+                        };
                         lambda_proxy::invoke_lambda(delivery, integration_uri, event).await?
                     } else {
                         dispatch_aws_service_integration(delivery, integration_uri, &req)?
@@ -464,8 +537,35 @@ impl ApiGatewayV2Service {
                         )
                     })?;
 
-                    http_proxy::forward_request(target_url, &req, integration.timeout_in_millis)
-                        .await?
+                    // Substitute `{proxy}` / `{var}` path placeholders from the
+                    // matched route into the backend URL.
+                    let mut url = target_url.clone();
+                    for (name, value) in &route_match.path_parameters {
+                        url = url.replace(&format!("{{{name}}}"), value);
+                    }
+                    // Apply `requestParameters` parameter mappings + append the
+                    // client query string, then forward with the integration's
+                    // method (`integrationMethod`) when configured.
+                    let (url, headers) = apply_request_parameters(
+                        &url,
+                        integration.request_parameters.as_ref(),
+                        &req,
+                    );
+                    let method = integration
+                        .integration_method
+                        .as_deref()
+                        .and_then(|m| {
+                            http::Method::from_bytes(m.to_ascii_uppercase().as_bytes()).ok()
+                        })
+                        .unwrap_or_else(|| req.method.clone());
+                    http_proxy::forward_request(
+                        &url,
+                        &method,
+                        &headers,
+                        &req.body,
+                        integration.timeout_in_millis,
+                    )
+                    .await?
                 }
                 "MOCK" => {
                     // Mock integration
@@ -504,5 +604,249 @@ impl ApiGatewayV2Service {
         self.emit_access_log(&req, &api_id, &stage_name, &matched_route_key, status_code);
 
         result
+    }
+}
+
+/// Extract the API id from the execute-api `Host` header
+/// (`{api-id}.execute-api.<region>.amazonaws.com`). Returns `None` when
+/// the header is absent/empty so the caller falls back to stage scanning.
+fn host_api_id(req: &AwsRequest) -> Option<String> {
+    let host = req.headers.get("host").and_then(|v| v.to_str().ok())?;
+    let id = host.split('.').next()?;
+    if id.is_empty() || !host.contains("execute-api") {
+        return None;
+    }
+    Some(id.to_string())
+}
+
+/// Resolve a `requestParameters` mapping value: a `$request.*` source
+/// expression pulled from the incoming request, or a literal.
+fn resolve_param_value(spec: &str, req: &AwsRequest) -> Option<String> {
+    if let Some(name) = spec.strip_prefix("$request.header.") {
+        return req
+            .headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
+    }
+    if let Some(name) = spec.strip_prefix("$request.querystring.") {
+        return req.query_params.get(name).cloned();
+    }
+    if spec.starts_with("$request.") {
+        // Unsupported source expression (e.g. $request.path.*) — drop it
+        // rather than forward a literal `$request...` string.
+        return None;
+    }
+    // Static value: accept both the plain HTTP-API form and the
+    // single-quoted REST-style form.
+    let literal = if spec.len() >= 2 && spec.starts_with('\'') && spec.ends_with('\'') {
+        &spec[1..spec.len() - 1]
+    } else {
+        spec
+    };
+    Some(literal.to_string())
+}
+
+/// Apply an HTTP-API integration's `requestParameters` parameter mappings
+/// to the outgoing request, returning the final URL (path + query) and the
+/// header map to forward. Supported keys follow the AWS format
+/// `<action>:<location>.<name>` where action ∈ {overwrite, append, remove}
+/// and location ∈ {header, querystring, path}.
+fn apply_request_parameters(
+    base_url: &str,
+    mappings: Option<&std::collections::BTreeMap<String, String>>,
+    req: &AwsRequest,
+) -> (String, http::HeaderMap) {
+    let mut headers = req.headers.clone();
+
+    // Split the base URL into `scheme://authority`, path, and query.
+    let (prefix, mut path, base_query) = match base_url.parse::<http::Uri>() {
+        Ok(u) if u.authority().is_some() => {
+            let prefix = format!(
+                "{}://{}",
+                u.scheme_str().unwrap_or("http"),
+                u.authority().map(|a| a.as_str()).unwrap_or("")
+            );
+            (
+                prefix,
+                u.path().to_string(),
+                u.query().unwrap_or("").to_string(),
+            )
+        }
+        _ => (base_url.to_string(), String::new(), String::new()),
+    };
+
+    // Seed the query params from the URL's own query plus the client's.
+    let mut query: Vec<(String, String)> = Vec::new();
+    for raw in [base_query.as_str(), req.raw_query.as_str()] {
+        for pair in raw.split('&').filter(|s| !s.is_empty()) {
+            let (k, v) = pair.split_once('=').unwrap_or((pair, ""));
+            query.push((k.to_string(), v.to_string()));
+        }
+    }
+
+    if let Some(mappings) = mappings {
+        for (key, spec) in mappings {
+            let Some((action, target)) = key.split_once(':') else {
+                continue;
+            };
+            let (location, name) = match target.split_once('.') {
+                Some((l, n)) => (l, n),
+                None => (target, ""),
+            };
+            let value = if action == "remove" {
+                None
+            } else {
+                resolve_param_value(spec, req)
+            };
+            match (action, location) {
+                ("overwrite", "header") | ("append", "header") => {
+                    if let (Ok(hn), Some(v)) = (
+                        http::HeaderName::from_bytes(name.as_bytes()),
+                        value
+                            .as_deref()
+                            .and_then(|v| http::HeaderValue::from_str(v).ok()),
+                    ) {
+                        if action == "overwrite" {
+                            headers.insert(hn, v);
+                        } else {
+                            headers.append(hn, v);
+                        }
+                    }
+                }
+                ("remove", "header") => {
+                    headers.remove(name);
+                }
+                ("overwrite", "querystring") => {
+                    query.retain(|(k, _)| k != name);
+                    if let Some(v) = value {
+                        query.push((name.to_string(), v));
+                    }
+                }
+                ("append", "querystring") => {
+                    if let Some(v) = value {
+                        query.push((name.to_string(), v));
+                    }
+                }
+                ("remove", "querystring") => {
+                    query.retain(|(k, _)| k != name);
+                }
+                ("overwrite", "path") => {
+                    if let Some(v) = value {
+                        path = if v.starts_with('/') {
+                            v
+                        } else {
+                            format!("/{v}")
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let query_string = query
+        .iter()
+        .map(|(k, v)| {
+            if v.is_empty() {
+                k.clone()
+            } else {
+                format!("{k}={v}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("&");
+    let url = if query_string.is_empty() {
+        format!("{prefix}{path}")
+    } else {
+        format!("{prefix}{path}?{query_string}")
+    };
+    (url, headers)
+}
+
+#[cfg(test)]
+mod request_param_tests {
+    use super::*;
+    use bytes::Bytes;
+    use http::HeaderMap;
+    use std::collections::HashMap;
+
+    fn req_with(headers: &[(&str, &str)], query: &[(&str, &str)]) -> AwsRequest {
+        let mut hm = HeaderMap::new();
+        for (k, v) in headers {
+            hm.insert(
+                http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                v.parse().unwrap(),
+            );
+        }
+        let qp: HashMap<String, String> = query
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let raw_query = query
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect::<Vec<_>>()
+            .join("&");
+        AwsRequest {
+            service: "apigateway".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "rid".to_string(),
+            headers: hm,
+            query_params: qp,
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/items".to_string(),
+            raw_query,
+            method: http::Method::GET,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    #[test]
+    fn host_api_id_only_for_execute_api_host() {
+        let req = req_with(
+            &[("host", "abc123.execute-api.us-east-1.amazonaws.com")],
+            &[],
+        );
+        assert_eq!(host_api_id(&req).as_deref(), Some("abc123"));
+        let custom = req_with(&[("host", "api.example.com")], &[]);
+        assert_eq!(host_api_id(&custom), None);
+        assert_eq!(host_api_id(&req_with(&[], &[])), None);
+    }
+
+    #[test]
+    fn request_parameters_overwrite_header_and_query() {
+        let req = req_with(&[("x-user", "orig")], &[("a", "1")]);
+        let mut mappings = std::collections::BTreeMap::new();
+        mappings.insert("overwrite:header.x-user".to_string(), "'admin'".to_string());
+        mappings.insert("append:querystring.trace".to_string(), "'on'".to_string());
+        mappings.insert(
+            "overwrite:header.x-from".to_string(),
+            "$request.header.x-user".to_string(),
+        );
+        let (url, headers) =
+            apply_request_parameters("http://backend.local/base", Some(&mappings), &req);
+        // Static overwrite wins.
+        assert_eq!(headers.get("x-user").unwrap(), "admin");
+        // Source-expression header copies the ORIGINAL client value.
+        assert_eq!(headers.get("x-from").unwrap(), "orig");
+        // Query carries the client param plus the appended one.
+        assert!(url.contains("a=1"), "url: {url}");
+        assert!(url.contains("trace=on"), "url: {url}");
+    }
+
+    #[test]
+    fn request_parameters_overwrite_path() {
+        let req = req_with(&[], &[]);
+        let mut mappings = std::collections::BTreeMap::new();
+        mappings.insert("overwrite:path".to_string(), "'/rewritten'".to_string());
+        let (url, _) = apply_request_parameters("http://backend.local/orig", Some(&mappings), &req);
+        assert_eq!(url, "http://backend.local/rewritten");
     }
 }

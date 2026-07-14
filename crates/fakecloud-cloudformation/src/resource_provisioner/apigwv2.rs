@@ -325,6 +325,14 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_str())
                 .unwrap_or("INTERNET")
                 .to_string(),
+            request_parameters: props
+                .get("RequestParameters")
+                .and_then(|v| v.as_object())
+                .map(|o| {
+                    o.iter()
+                        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                        .collect()
+                }),
         };
         state
             .integrations
