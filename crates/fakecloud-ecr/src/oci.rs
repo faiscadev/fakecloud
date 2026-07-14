@@ -332,14 +332,6 @@ fn manifest_not_found(name: &str, reference: &str) -> AwsServiceError {
     )
 }
 
-fn manifest_blob_unknown(name: &str, digest: &str) -> AwsServiceError {
-    AwsServiceError::aws_error(
-        StatusCode::BAD_REQUEST,
-        "MANIFEST_BLOB_UNKNOWN",
-        format!("manifest references unknown blob {digest} in repository {name}"),
-    )
-}
-
 fn immutable_tag(name: &str, tag: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -349,35 +341,6 @@ fn immutable_tag(name: &str, tag: &str) -> AwsServiceError {
              be overwritten because the repository is configured for immutable tags"
         ),
     )
-}
-
-/// Config + layer blob digests a standard image manifest references. Returns
-/// an empty vec for manifest lists / indexes (which reference other manifests,
-/// not blobs) or anything we can't parse as an image manifest, so those pass
-/// through untouched.
-fn referenced_blob_digests(manifest: &[u8]) -> Vec<String> {
-    let Ok(v) = serde_json::from_slice::<serde_json::Value>(manifest) else {
-        return Vec::new();
-    };
-    // Only image manifests carry a `layers` array; a manifest list carries
-    // `manifests` instead and must not be blob-checked.
-    let Some(layers) = v.get("layers").and_then(|l| l.as_array()) else {
-        return Vec::new();
-    };
-    let mut digests = Vec::new();
-    if let Some(cfg) = v
-        .get("config")
-        .and_then(|c| c.get("digest"))
-        .and_then(|d| d.as_str())
-    {
-        digests.push(cfg.to_string());
-    }
-    for layer in layers {
-        if let Some(d) = layer.get("digest").and_then(|d| d.as_str()) {
-            digests.push(d.to_string());
-        }
-    }
-    digests
 }
 
 fn digest_invalid() -> AwsServiceError {
@@ -1086,7 +1049,6 @@ fn manifest_put(
         .unwrap_or("application/vnd.docker.distribution.manifest.v2+json")
         .to_string();
 
-    let referenced = referenced_blob_digests(&body);
     let is_tag = !reference.starts_with("sha256:");
 
     let should_scan;
@@ -1112,15 +1074,6 @@ fn manifest_put(
                 if existing != &digest {
                     return Err(immutable_tag(name, reference));
                 }
-            }
-        }
-
-        // Reject a manifest that references a config/layer blob which was never
-        // uploaded (AWS/OCI: MANIFEST_BLOB_UNKNOWN), instead of storing a
-        // dangling manifest that fails only later at pull time.
-        for d in &referenced {
-            if !repo.layers.contains_key(d) {
-                return Err(manifest_blob_unknown(name, d));
             }
         }
 
@@ -1285,15 +1238,5 @@ mod immutability_tests {
         manifest_put(&svc, &manifest_req(&manifest("aaaa")), "app", "v1").unwrap();
         // Overwrite allowed on a MUTABLE repo.
         manifest_put(&svc, &manifest_req(&manifest("bbbb")), "app", "v1").unwrap();
-    }
-
-    #[test]
-    fn manifest_referencing_absent_blob_is_rejected() {
-        let svc = svc_with_repo("MUTABLE");
-        let body = "{\"schemaVersion\":2,\"config\":{\"digest\":\"sha256:cfg\"},\"layers\":[{\"digest\":\"sha256:missinglayer\"}]}";
-        let Err(err) = manifest_put(&svc, &manifest_req(body), "app", "v1") else {
-            panic!("expected blob-unknown rejection");
-        };
-        assert_eq!(err.code(), "MANIFEST_BLOB_UNKNOWN");
     }
 }
