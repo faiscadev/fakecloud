@@ -760,6 +760,21 @@ impl EcsService {
         let accounts = self.state.read();
         let mut found = Vec::new();
         let mut failures = Vec::new();
+        {
+            // AWS validates the referenced cluster + service exist, returning
+            // ClusterNotFoundException / ServiceNotFoundException rather than an
+            // empty task-set list.
+            let state = accounts
+                .get(&request.account_id)
+                .ok_or_else(|| service_not_found(&service_name))?;
+            if !state.clusters.contains_key(&cluster_name) {
+                return Err(cluster_not_found(&cluster_name));
+            }
+            let svc_key = EcsState::service_key(&cluster_name, &service_name);
+            if !state.services.contains_key(&svc_key) {
+                return Err(service_not_found(&service_name));
+            }
+        }
         if let Some(state) = accounts.get(&request.account_id) {
             if filter_refs.is_empty() {
                 for ts in state.task_sets.values() {

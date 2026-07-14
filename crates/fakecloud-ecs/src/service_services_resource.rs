@@ -20,11 +20,17 @@ impl EcsService {
         let td_ref = req_str(&body, "taskDefinition")?;
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
-        let desired_count = body
-            .get("desiredCount")
-            .and_then(|v| v.as_i64())
-            .filter(|n| *n >= 0)
-            .unwrap_or(1) as i32;
+        // AWS rejects a negative desiredCount with InvalidParameterException
+        // rather than silently defaulting it to 1.
+        let desired_count = match body.get("desiredCount").and_then(|v| v.as_i64()) {
+            Some(n) if n >= 0 => n as i32,
+            Some(n) => {
+                return Err(invalid_parameter(format!(
+                    "desiredCount cannot be negative. desiredCount={n}"
+                )))
+            }
+            None => 1,
+        };
         let launch_type = opt_str(&body, "launchType")
             .unwrap_or("FARGATE")
             .to_string();
@@ -133,11 +139,13 @@ impl EcsService {
             let td_arn = td.task_definition_arn.clone();
             let td_family = td.family.clone();
             let td_revision = td.revision;
+            // A phantom cluster is a ClusterNotFoundException on AWS, not an
+            // auto-created cluster.
             let cluster_arn = state
                 .clusters
                 .get(&cluster_name)
                 .map(|c| c.cluster_arn.clone())
-                .unwrap_or_else(|| state.cluster_arn(&cluster_name));
+                .ok_or_else(|| cluster_not_found(&cluster_name))?;
             let service_arn = state.service_arn(&cluster_name, &service_name);
             let key = EcsState::service_key(&cluster_name, &service_name);
             if let Some(existing) = state.services.get(&key) {
