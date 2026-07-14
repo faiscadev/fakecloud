@@ -4,12 +4,11 @@
 
 use chrono::Utc;
 use serde_json::Value;
-use uuid::Uuid;
 
 use crate::state::*;
 
 fn short_id() -> String {
-    Uuid::new_v4().to_string().replace('-', "")[..6].to_string()
+    fakecloud_core::ids::short_id(6)
 }
 
 /// `AWS::Config::ConfigurationRecorder` -> physical id (the recorder name).

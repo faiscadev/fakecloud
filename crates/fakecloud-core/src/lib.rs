@@ -4,6 +4,7 @@ pub mod container_net;
 pub mod delivery;
 pub mod dispatch;
 pub mod ecr_uri;
+pub mod ids;
 pub mod multi_account;
 pub mod pagination;
 pub mod protocol;

@@ -1304,8 +1304,7 @@ fn extract_cookie<'a>(cookies: &'a str, name: &str) -> Option<&'a str> {
 }
 
 fn short_id() -> String {
-    let id = Uuid::new_v4();
-    id.simple().to_string()[0..16].to_string()
+    fakecloud_core::ids::short_id(16)
 }
 
 #[cfg(test)]
