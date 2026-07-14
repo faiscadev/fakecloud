@@ -82,8 +82,10 @@ pub(crate) fn opt_str<'a>(body: &'a Value, field: &str) -> Option<&'a str> {
 /// `nextToken` is an opaque base64 of the last-emitted key. Resuming finds the
 /// first key strictly greater than the cursor, so pages stay correct even when
 /// items are added or removed between calls — a numeric offset would skip or
-/// duplicate rows there. A token that doesn't base64-decode restarts at the
-/// beginning (lenient, matching the previous behavior).
+/// duplicate rows there. A non-empty token that doesn't base64-decode (a stale
+/// or corrupted cursor we never emitted) is treated as past the end and yields
+/// an empty page — restarting at the beginning would silently re-list page 1
+/// and risk an infinite pagination loop for the client.
 pub(crate) fn paginate_arns(
     mut arns: Vec<String>,
     next_token: &str,
@@ -100,12 +102,18 @@ pub(crate) fn paginate_arns(
             .ok()
             .and_then(|b| String::from_utf8(b).ok())
     };
-    let start = match &cursor {
-        Some(c) => arns
-            .iter()
-            .position(|a| a.as_str() > c.as_str())
-            .unwrap_or(arns.len()),
-        None => 0,
+    let start = if next_token.is_empty() {
+        0
+    } else {
+        match &cursor {
+            Some(c) => arns
+                .iter()
+                .position(|a| a.as_str() > c.as_str())
+                .unwrap_or(arns.len()),
+            // Non-empty but undecodable token: a cursor we never emitted.
+            // Treat as past the end (empty page) rather than restarting at 0.
+            None => arns.len(),
+        }
     };
     let end = (start + max_results).min(arns.len());
     let page = arns[start..end].to_vec();
@@ -1579,8 +1587,13 @@ mod pagination_tests {
         ];
         let (page, _) = paginate_arns(dupes, "", 10);
         assert_eq!(page, vec!["a", "b", "c"]);
-        // A non-base64 token restarts from the beginning.
-        let (page, _) = paginate_arns(vec!["a".into(), "b".into()], "!!!not-base64", 1);
+        // A non-empty, undecodable token is treated as past the end: empty
+        // page + no nextToken, never a silent restart at page 1.
+        let (page, next) = paginate_arns(vec!["a".into(), "b".into()], "!!!not-base64", 1);
+        assert!(page.is_empty());
+        assert!(next.is_none());
+        // An empty token still starts at the beginning.
+        let (page, _) = paginate_arns(vec!["a".into(), "b".into()], "", 1);
         assert_eq!(page, vec!["a"]);
     }
 }
