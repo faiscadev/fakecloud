@@ -17,8 +17,8 @@
 
 pub mod persistence;
 pub mod runtime;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 mod validate;
 
 pub use service::{CodeBuildService, CODEBUILD_ACTIONS};

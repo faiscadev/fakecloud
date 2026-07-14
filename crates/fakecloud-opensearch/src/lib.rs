@@ -11,8 +11,8 @@
 //! `DomainStatus` shape).
 
 pub mod persistence;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 mod validation_gen;
 
 pub use service::{OpenSearchService, ES_ACTIONS, OPENSEARCH_ACTIONS};

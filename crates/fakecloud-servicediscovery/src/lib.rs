@@ -1,7 +1,7 @@
 //! AWS Cloud Map (`servicediscovery`) implementation for FakeCloud.
 
 pub mod persistence;
-pub mod service;
+pub(crate) mod service;
 pub mod state;
 
 pub use service::{ServiceDiscoveryService, SERVICEDISCOVERY_ACTIONS};

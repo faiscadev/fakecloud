@@ -11,8 +11,8 @@
 //! deployment configurations are always resolvable.
 
 pub mod persistence;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 mod validate;
 
 pub use service::{CodeDeployService, CODEDEPLOY_ACTIONS};
