@@ -3257,7 +3257,7 @@ fn decode(s: &str) -> String {
 }
 
 fn short_id() -> String {
-    uuid::Uuid::new_v4().simple().to_string()[..20].to_string()
+    fakecloud_core::ids::short_id(20)
 }
 
 fn req_str(b: &Value, key: &str) -> Result<String, AwsServiceError> {

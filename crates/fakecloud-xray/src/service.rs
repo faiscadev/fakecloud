@@ -1057,7 +1057,7 @@ fn not_found(msg: &str) -> AwsServiceError {
 }
 
 fn short_id() -> String {
-    Uuid::new_v4().simple().to_string()[..12].to_string()
+    fakecloud_core::ids::short_id(12)
 }
 
 fn group_arn(region: &str, account: &str, name: &str) -> String {
