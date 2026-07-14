@@ -31,7 +31,11 @@ use helpers::TestServer;
 #[test_action("neptune", "DescribeDBClusterEndpoints", checksum = "67317958")]
 #[test_action("neptune", "DescribeDBClusterParameterGroups", checksum = "fcc8e0c4")]
 #[test_action("neptune", "DescribeDBClusterParameters", checksum = "b9b68238")]
-#[test_action("neptune", "DescribeDBClusterSnapshotAttributes", checksum = "6c3b9874")]
+#[test_action(
+    "neptune",
+    "DescribeDBClusterSnapshotAttributes",
+    checksum = "6c3b9874"
+)]
 #[test_action("neptune", "DescribeDBClusterSnapshots", checksum = "14da74a4")]
 #[test_action("neptune", "DescribeDBClusters", checksum = "25bd768a")]
 #[test_action("neptune", "DescribeDBEngineVersions", checksum = "3cfbeef3")]
@@ -39,7 +43,11 @@ use helpers::TestServer;
 #[test_action("neptune", "DescribeDBParameterGroups", checksum = "ab1a6d87")]
 #[test_action("neptune", "DescribeDBParameters", checksum = "80701b2d")]
 #[test_action("neptune", "DescribeDBSubnetGroups", checksum = "22447678")]
-#[test_action("neptune", "DescribeEngineDefaultClusterParameters", checksum = "2c17609c")]
+#[test_action(
+    "neptune",
+    "DescribeEngineDefaultClusterParameters",
+    checksum = "2c17609c"
+)]
 #[test_action("neptune", "DescribeEngineDefaultParameters", checksum = "8ae25e5c")]
 #[test_action("neptune", "DescribeEventCategories", checksum = "af7c16a1")]
 #[test_action("neptune", "DescribeEventSubscriptions", checksum = "0d07d0ae")]
@@ -47,7 +55,11 @@ use helpers::TestServer;
 #[test_action("neptune", "DescribeGlobalClusters", checksum = "b8b7f4fe")]
 #[test_action("neptune", "DescribeOrderableDBInstanceOptions", checksum = "6d28934f")]
 #[test_action("neptune", "DescribePendingMaintenanceActions", checksum = "51db8514")]
-#[test_action("neptune", "DescribeValidDBInstanceModifications", checksum = "786c19f1")]
+#[test_action(
+    "neptune",
+    "DescribeValidDBInstanceModifications",
+    checksum = "786c19f1"
+)]
 #[test_action("neptune", "FailoverDBCluster", checksum = "e7f21d77")]
 #[test_action("neptune", "FailoverGlobalCluster", checksum = "8af95f1e")]
 #[test_action("neptune", "ListTagsForResource", checksum = "e2fd0f82")]
@@ -64,7 +76,11 @@ use helpers::TestServer;
 #[test_action("neptune", "RebootDBInstance", checksum = "83a085e9")]
 #[test_action("neptune", "RemoveFromGlobalCluster", checksum = "588f154a")]
 #[test_action("neptune", "RemoveRoleFromDBCluster", checksum = "5c76b75f")]
-#[test_action("neptune", "RemoveSourceIdentifierFromSubscription", checksum = "8274566e")]
+#[test_action(
+    "neptune",
+    "RemoveSourceIdentifierFromSubscription",
+    checksum = "8274566e"
+)]
 #[test_action("neptune", "RemoveTagsFromResource", checksum = "e2e69de2")]
 #[test_action("neptune", "ResetDBClusterParameterGroup", checksum = "132743ba")]
 #[test_action("neptune", "ResetDBParameterGroup", checksum = "99010cf8")]
