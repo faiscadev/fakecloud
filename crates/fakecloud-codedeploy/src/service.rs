@@ -2310,7 +2310,15 @@ impl CodeDeployService {
     /// `deploymentgroup:<app>/<group>`, or `deploymentconfig:<name>`.
     fn require_resource_exists(st: &CodeDeployState, arn: &str) -> Result<(), AwsServiceError> {
         let parts: Vec<&str> = arn.splitn(7, ':').collect();
-        let (kind, rest) = (parts[5], parts.get(6).copied().unwrap_or(""));
+        // A malformed ARN with fewer than six colon-separated segments must not
+        // index-panic; AWS rejects it as an invalid ARN.
+        let kind = parts.get(5).copied().ok_or_else(|| {
+            e(
+                "InvalidArnException",
+                format!("Invalid resource ARN: {arn}"),
+            )
+        })?;
+        let rest = parts.get(6).copied().unwrap_or("");
         let group_exists = |rest: &str| {
             let (app, group) = rest.split_once('/').unwrap_or((rest, ""));
             st.deployment_groups
@@ -2654,6 +2662,17 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(got["Tags"][0]["Key"], "env");
+    }
+
+    #[test]
+    fn require_resource_exists_rejects_short_arn() {
+        // Regression: a resource ARN with fewer than six colon segments must
+        // return InvalidArnException rather than index-panicking on parts[5].
+        let s = svc();
+        let mut guard = s.state.write();
+        let st = guard.get_or_create("000000000000");
+        let r = CodeDeployService::require_resource_exists(st, "arn:aws:codedeploy:us-east-1:0");
+        assert_eq!(r.unwrap_err().code(), "InvalidArnException");
     }
 
     // Finding 7: TagResource / UntagResource reject a syntactically valid ARN

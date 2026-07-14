@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -16,7 +16,7 @@ pub type SharedWebSocketRegistry = Arc<parking_lot::RwLock<WebSocketRegistry>>;
 
 #[derive(Debug, Default)]
 pub struct WebSocketRegistry {
-    pub connections: HashMap<String, ConnectionInfo>,
+    pub connections: BTreeMap<String, ConnectionInfo>,
 }
 
 impl WebSocketRegistry {
