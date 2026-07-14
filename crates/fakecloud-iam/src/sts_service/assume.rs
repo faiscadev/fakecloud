@@ -21,6 +21,7 @@ impl StsService {
             )
         })?;
         validate_string_length("roleSessionName", role_session_name, 2, 64)?;
+        validate_session_name(role_session_name)?;
 
         // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
@@ -305,6 +306,7 @@ impl StsService {
             )
         })?;
         validate_string_length("roleSessionName", role_session_name, 2, 64)?;
+        validate_session_name(role_session_name)?;
 
         // WebIdentityToken is required
         let web_identity_token = req.query_params.get("WebIdentityToken").ok_or_else(|| {
@@ -657,6 +659,9 @@ impl StsService {
         // the issuer/audience claims used for trust-policy enforcement.
         let role_session_name =
             extract_saml_session_name(saml_assertion).unwrap_or_else(|| "saml-session".to_string());
+        // The SAML-derived session name is attacker-influenced; reject any that
+        // breaks the AWS pattern rather than injecting it raw into the response XML.
+        validate_session_name(&role_session_name)?;
         let saml_claims = extract_saml_claims(saml_assertion);
 
         let partition = partition_for_region(&req.region);
