@@ -12,7 +12,7 @@ use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
 
-use fakecloud_servicediscovery::state::{
+use fakecloud_servicediscovery::{
     DnsConfig, DnsProps, DnsRecord, HealthCheckConfig, HealthCheckCustomConfig, Instance,
     Namespace, Service,
 };

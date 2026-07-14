@@ -74,7 +74,7 @@ impl ResourceProvisioner {
         // -- the same control-plane-only shape the direct handlers use.
         let metadata = Value::Object(metadata);
 
-        let repo = fakecloud_codecommit::state::Repo {
+        let repo = fakecloud_codecommit::Repo {
             metadata: metadata.clone(),
             triggers: cc_triggers(props),
             ..Default::default()

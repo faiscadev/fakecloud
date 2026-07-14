@@ -35,7 +35,7 @@ use chrono::Utc;
 use serde_json::Value;
 use uuid::Uuid;
 
-use fakecloud_elasticbeanstalk::state::{
+use fakecloud_elasticbeanstalk::{
     environment_status as est, Application, ApplicationVersion, ConfigurationTemplate, Environment,
     MaxAgeRule, MaxCountRule, OptionSetting, ResourceLifecycleConfig, ResourceTag,
     SourceBuildInformation,
@@ -845,8 +845,8 @@ fn eb_event(
     message: String,
     app_name: &str,
     env_name: &str,
-) -> fakecloud_elasticbeanstalk::state::Event {
-    fakecloud_elasticbeanstalk::state::Event {
+) -> fakecloud_elasticbeanstalk::Event {
+    fakecloud_elasticbeanstalk::Event {
         event_date: now,
         message,
         application_name: Some(app_name.to_string()),

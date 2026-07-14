@@ -11,13 +11,13 @@
 
 use super::*;
 
-use fakecloud_route53resolver::state::{
+use fakecloud_route53resolver::validate::{arn as r53r_arn, hex17, now_rfc3339, synth_vpc};
+use fakecloud_route53resolver::{
     EndpointRecord, FirewallConfig, FirewallDomainList, FirewallRule, FirewallRuleGroup,
     FirewallRuleGroupAssociation, IpAddressResponse, ResolverConfig, ResolverDnssecConfig,
     ResolverEndpoint, ResolverQueryLogConfig, ResolverQueryLogConfigAssociation, ResolverRule,
     ResolverRuleAssociation, Tag, TargetAddress,
 };
-use fakecloud_route53resolver::validate::{arn as r53r_arn, hex17, now_rfc3339, synth_vpc};
 
 impl ResourceProvisioner {
     /// Live-state `Fn::GetAtt` fallback for `AWS::Route53Resolver::*`. Captured
