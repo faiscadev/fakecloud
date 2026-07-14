@@ -18,7 +18,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    domain_arn, Application, Connection, DirectQueryDataSource, Domain, Package,
+    domain_arn, Application, Connection, DirectQueryDataSource, Domain, Migration, Package,
     SharedOpenSearchState, VpcEndpoint,
 };
 
@@ -313,6 +313,7 @@ pub const ALL_ACTIONS: &[&str] = &[
     "GetDirectQueryDataSource",
     "GetDomainMaintenanceStatus",
     "GetIndex",
+    "GetMigration",
     "InsightFeedback",
     "ListApplications",
     "ListDataSourceAttachments",
@@ -320,6 +321,7 @@ pub const ALL_ACTIONS: &[&str] = &[
     "ListDirectQueryDataSources",
     "ListDomainMaintenances",
     "ListInsights",
+    "ListMigrations",
     "ListInstanceTypeDetails",
     "ListScheduledActions",
     "ListVersions",
@@ -329,6 +331,7 @@ pub const ALL_ACTIONS: &[&str] = &[
     "RejectInboundConnection",
     "RollbackServiceSoftwareUpdate",
     "StartDomainMaintenance",
+    "StartMigration",
     "StartServiceSoftwareUpdate",
     "UpdateApplication",
     "UpdateDataSource",
@@ -378,6 +381,7 @@ fn is_mutating(action: &str) -> bool {
             | "DeleteInboundCrossClusterSearchConnection"
             | "DeleteOutboundConnection"
             | "DeleteOutboundCrossClusterSearchConnection"
+            | "StartMigration"
             | "CreateApplication"
             | "UpdateApplication"
             | "DeleteApplication"
@@ -761,6 +765,13 @@ fn resolve_os(method: &Method, seg: &[&str], mut l: Labels) -> Option<(&'static 
             l.domain = Some(d.to_string());
             "UpdateScheduledAction"
         }
+        // Migrations.
+        (&Method::POST, ["opensearch", "app-migrations"]) => "StartMigration",
+        (&Method::GET, ["opensearch", "app-migrations"]) => "ListMigrations",
+        (&Method::GET, ["opensearch", "app-migrations", mid]) => {
+            l.id = Some(mid.to_string());
+            "GetMigration"
+        }
         // Applications.
         (&Method::POST, ["opensearch", "application"]) => "CreateApplication",
         (&Method::GET, ["opensearch", "list-applications"]) => "ListApplications",
@@ -1008,6 +1019,10 @@ impl OpenSearchService {
             "DescribeOutboundConnections" | "DescribeOutboundCrossClusterSearchConnections" => {
                 self.describe_connections(api, req, false)
             }
+            // ---- Migrations (OpenSearch only) ----
+            "StartMigration" => self.start_migration(req),
+            "ListMigrations" => self.list_migrations(req),
+            "GetMigration" => self.get_migration(l, req),
             // ---- Applications (OpenSearch only) ----
             "CreateApplication" => self.create_application(req),
             "GetApplication" => self.get_application(l, req),
@@ -1985,6 +2000,94 @@ impl OpenSearchService {
             Api::OpenSearch => "Connections",
         };
         Ok(ok(json!({ key: list })))
+    }
+
+    // ===================================================================
+    // Migrations
+    // ===================================================================
+
+    fn start_migration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = body(req);
+        let application_id = req_str(&b, "applicationId")?;
+        let options = b
+            .get("migrationOptions")
+            .filter(|v| v.is_object())
+            .ok_or_else(|| validation("migrationOptions is required."))?;
+        // MigrationOptions.source and .workspace are both required by the model.
+        let source = options
+            .get("source")
+            .filter(|v| v.is_object())
+            .ok_or_else(|| validation("migrationOptions.source is required."))?;
+        source
+            .get("datasourceArn")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| validation("migrationOptions.source.datasourceArn is required."))?;
+        if !options.get("workspace").is_some_and(Value::is_object) {
+            return Err(validation("migrationOptions.workspace is required."));
+        }
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let migration_id = short_id();
+        let now = Utc::now();
+        let migration = Migration {
+            migration_id: migration_id.clone(),
+            application_id,
+            status: "PENDING".to_string(),
+            source: source.clone(),
+            exported_count: 0,
+            imported_count: 0,
+            error: None,
+            created_at: now,
+            updated_at: now,
+        };
+        st.migrations.insert(migration_id.clone(), migration);
+        Ok(ok(json!({
+            "migrationId": migration_id,
+            "status": "PENDING",
+        })))
+    }
+
+    fn get_migration(&self, l: &Labels, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let id = label(l.id.as_deref())?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let m = st
+            .migrations
+            .get_mut(&id)
+            .ok_or_else(|| not_found_generic(&format!("Migration {id} not found.")))?;
+        // Simulate the migration completing by the time it is polled.
+        if m.status != "SUCCEEDED" && m.status != "FAILED" {
+            m.status = "SUCCEEDED".to_string();
+            m.exported_count = 1;
+            m.imported_count = 1;
+            m.updated_at = Utc::now();
+        }
+        Ok(ok(migration_json(m)))
+    }
+
+    fn list_migrations(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let application_id = req
+            .query_params
+            .get("applicationId")
+            .cloned()
+            .ok_or_else(|| validation("applicationId is required."))?;
+        let status_filter = req.query_params.get("status").cloned();
+        let accounts = self.state.read();
+        let mut list = Vec::new();
+        if let Some(st) = accounts.get(&req.account_id) {
+            for m in st.migrations.values() {
+                if m.application_id != application_id {
+                    continue;
+                }
+                if let Some(s) = &status_filter {
+                    if &m.status != s {
+                        continue;
+                    }
+                }
+                list.push(migration_json(m));
+            }
+        }
+        Ok(ok(json!({ "migrations": list })))
     }
 
     // ===================================================================
@@ -3067,6 +3170,25 @@ fn direct_query_json(dq: &DirectQueryDataSource) -> Value {
         "OpenSearchArns": dq.open_search_arns,
         "TagList": dq.tag_list,
     })
+}
+
+/// Serialize a migration into the `MigrationSummary` shape shared by
+/// GetMigration and ListMigrations. REST-JSON uses lowerCamel member names.
+fn migration_json(m: &Migration) -> Value {
+    let mut v = json!({
+        "migrationId": m.migration_id,
+        "status": m.status,
+        "applicationId": m.application_id,
+        "source": m.source,
+        "exportedCount": m.exported_count,
+        "importedCount": m.imported_count,
+        "createdAt": m.created_at.timestamp(),
+        "updatedAt": m.updated_at.timestamp(),
+    });
+    if let Some(err) = &m.error {
+        v["error"] = err.clone();
+    }
+    v
 }
 
 fn instance_type_limits() -> Value {

@@ -1,6 +1,6 @@
 +++
 title = "OpenSearch Service"
-description = "Amazon OpenSearch Service + Amazon Elasticsearch Service (es) on fakecloud: one shared control plane for both APIs (144 operations, 100% conformance) — domains, packages, VPC endpoints, cross-cluster connections, applications, data sources. restJson1."
+description = "Amazon OpenSearch Service + Amazon Elasticsearch Service (es) on fakecloud: one shared control plane for both APIs (147 operations, 100% conformance) — domains, packages, VPC endpoints, cross-cluster connections, applications, data sources. restJson1."
 weight = 47
 +++
 
@@ -16,8 +16,8 @@ through either API's Describe/List operations. The 2015 API exposes it via the
 `ElasticsearchDomainStatus` shape, the 2021 API via the superset `DomainStatus`
 shape.
 
-**The complete 144-operation surface** ships — **51 Elasticsearch Service
-operations + 93 OpenSearch Service operations** — with **100% conformance across
+**The complete 147-operation surface** ships — **51 Elasticsearch Service
+operations + 96 OpenSearch Service operations** — with **100% conformance across
 both APIs**, backed by account-partitioned state that persists across restarts in
 persistent mode.
 
@@ -33,7 +33,7 @@ on first describe, mirroring the real control plane's eventual creation, so
 provisioning waiters complete. There is no search data plane (indexing/query
 traffic against the cluster itself).
 
-## Supported now (all 144 operations)
+## Supported now (all 147 operations)
 
 **Domains (shared across both APIs):** create, describe, delete, list domain
 names, batch describe, describe/update domain config (including `DryRun`), change

@@ -82,6 +82,7 @@ fn is_read_only_action(action: &str) -> bool {
             | "DescribeConfigurationTemplates"
             | "ListSyslogConfigurations"
             | "GetExportedData"
+            | "GetStorageTierPolicy"
     )
 }
 
@@ -299,6 +300,8 @@ impl AwsService for LogsService {
             "PutSyslogConfiguration" => self.put_syslog_configuration(&req),
             "ListSyslogConfigurations" => self.list_syslog_configurations(&req),
             "DeleteSyslogConfiguration" => self.delete_syslog_configuration(&req),
+            "GetStorageTierPolicy" => self.get_storage_tier_policy(&req),
+            "PutStorageTierPolicy" => self.put_storage_tier_policy(&req),
             // Internal action for testing export storage
             "GetExportedData" => self.get_exported_data(&req),
             _ => Err(AwsServiceError::action_not_implemented("logs", &req.action)),
@@ -431,6 +434,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "PutSyslogConfiguration",
     "ListSyslogConfigurations",
     "DeleteSyslogConfiguration",
+    "GetStorageTierPolicy",
+    "PutStorageTierPolicy",
 ];
 
 fn require_str<'a>(body: &'a Value, field: &str) -> Result<&'a str, AwsServiceError> {

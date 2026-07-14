@@ -1,5 +1,6 @@
 mod associations;
 mod automation;
+mod cloud_connectors;
 mod commands;
 mod compliance;
 mod documents;
@@ -423,6 +424,13 @@ impl AwsService for SsmService {
             "DeleteResourceDataSync" => self.delete_resource_data_sync(&req),
             "ListResourceDataSync" => self.list_resource_data_sync(&req),
             "UpdateResourceDataSync" => self.update_resource_data_sync(&req),
+            // Cloud connectors
+            "CreateCloudConnector" => self.create_cloud_connector(&req),
+            "DeleteCloudConnector" => self.delete_cloud_connector(&req),
+            "GetCloudConnector" => self.get_cloud_connector(&req),
+            "ListCloudConnectors" => self.list_cloud_connectors(&req),
+            "UpdateCloudConnector" => self.update_cloud_connector(&req),
+            "ValidateCloudConnector" => self.validate_cloud_connector(&req),
             // OpsItem related items
             "AssociateOpsItemRelatedItem" => self.associate_ops_item_related_item(&req),
             "DisassociateOpsItemRelatedItem" => self.disassociate_ops_item_related_item(&req),
@@ -601,6 +609,13 @@ impl AwsService for SsmService {
             "DeleteResourceDataSync",
             "ListResourceDataSync",
             "UpdateResourceDataSync",
+            // Cloud connectors
+            "CreateCloudConnector",
+            "DeleteCloudConnector",
+            "GetCloudConnector",
+            "ListCloudConnectors",
+            "UpdateCloudConnector",
+            "ValidateCloudConnector",
             // OpsItem related items
             "AssociateOpsItemRelatedItem",
             "DisassociateOpsItemRelatedItem",

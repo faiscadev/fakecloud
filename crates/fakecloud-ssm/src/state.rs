@@ -482,6 +482,28 @@ pub struct SsmState {
     /// existed.
     #[serde(default)]
     pub parameter_policy_events: Vec<ParameterPolicyEvent>,
+    /// Cloud connectors keyed by connector id (a UUID). Surfaced through the
+    /// Create/Get/List/Update/Delete/Validate CloudConnector operations.
+    /// Defaults to empty when deserializing pre-existing snapshots.
+    #[serde(default)]
+    pub cloud_connectors: BTreeMap<String, CloudConnector>,
+}
+
+/// A cloud connector federating an external cloud provider (Azure) into SSM.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CloudConnector {
+    pub id: String,
+    pub arn: String,
+    pub display_name: String,
+    pub description: Option<String>,
+    pub role_arn: String,
+    /// The `CloudConnectorConfiguration` union JSON, e.g.
+    /// `{ "AzureConfiguration": { ... } }`.
+    pub configuration: serde_json::Value,
+    pub config_connector_arn: String,
+    pub tags: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 /// One emission of a parameter-policy notification (Expiration/
@@ -534,6 +556,7 @@ impl SsmState {
             execution_previews: BTreeMap::new(),
             execution_preview_counter: 0,
             parameter_policy_events: Vec::new(),
+            cloud_connectors: BTreeMap::new(),
         };
         state.seed_defaults();
         state
@@ -573,6 +596,7 @@ impl SsmState {
         self.execution_previews.clear();
         self.execution_preview_counter = 0;
         self.parameter_policy_events.clear();
+        self.cloud_connectors.clear();
         self.seed_defaults();
     }
 

@@ -918,6 +918,69 @@ impl LogsService {
             .unwrap(),
         ))
     }
+
+    // ---- Storage Tier Policy ----
+
+    /// Account-level storage-tier policy. AWS accepts `STANDARD` and
+    /// `INTELLIGENT_TIERING`; the value governs how newly ingested data is tiered.
+    pub(crate) fn put_storage_tier_policy(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let tier = body["storageTier"].as_str().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "storageTier is required",
+            )
+        })?;
+        if tier != "STANDARD" && tier != "INTELLIGENT_TIERING" {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                format!("storageTier must be STANDARD or INTELLIGENT_TIERING, got {tier}"),
+            ));
+        }
+        let now = Utc::now().timestamp_millis();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.storage_tier = Some(tier.to_string());
+        state.storage_tier_last_updated = Some(now);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&json!({
+                "storageTier": tier,
+                "lastUpdatedTime": now,
+            }))
+            .unwrap(),
+        ))
+    }
+
+    pub(crate) fn get_storage_tier_policy(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let mut out = json!({});
+        if let Some(state) = accounts.get(&req.account_id) {
+            // Default to STANDARD when no policy has been set, matching AWS.
+            let tier = state
+                .storage_tier
+                .clone()
+                .unwrap_or_else(|| "STANDARD".to_string());
+            out["storageTier"] = json!(tier);
+            if let Some(ts) = state.storage_tier_last_updated {
+                out["lastUpdatedTime"] = json!(ts);
+            }
+        } else {
+            out["storageTier"] = json!("STANDARD");
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            serde_json::to_string(&out).unwrap(),
+        ))
+    }
 }
 
 #[cfg(test)]

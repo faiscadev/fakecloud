@@ -113,14 +113,14 @@ async fn put_item(server: &TestServer) {
 
 // ── Recorders ──────────────────────────────────────────────────────────────
 
-#[test_action("config", "PutConfigurationRecorder", checksum = "81c9d1c9")]
+#[test_action("config", "PutConfigurationRecorder", checksum = "c794e40f")]
 #[tokio::test]
 async fn put_configuration_recorder() {
     let server = TestServer::start().await;
     make_recorder(&server).await;
 }
 
-#[test_action("config", "DescribeConfigurationRecorders", checksum = "6a1206d5")]
+#[test_action("config", "DescribeConfigurationRecorders", checksum = "0e28bf78")]
 #[tokio::test]
 async fn describe_configuration_recorders() {
     let server = TestServer::start().await;
@@ -187,7 +187,7 @@ async fn stop_configuration_recorder() {
     assert_eq!(s, 200, "{b}");
 }
 
-#[test_action("config", "ListConfigurationRecorders", checksum = "6434d157")]
+#[test_action("config", "ListConfigurationRecorders", checksum = "b1d05f0b")]
 #[tokio::test]
 async fn list_configuration_recorders() {
     let server = TestServer::start().await;
@@ -217,7 +217,7 @@ async fn put_service_linked_configuration_recorder() {
 #[test_action(
     "config",
     "DeleteServiceLinkedConfigurationRecorder",
-    checksum = "c214ed1f"
+    checksum = "09ae42f2"
 )]
 #[tokio::test]
 async fn delete_service_linked_configuration_recorder() {
@@ -237,7 +237,7 @@ async fn delete_service_linked_configuration_recorder() {
     assert_eq!(s, 200, "{b}");
 }
 
-#[test_action("config", "AssociateResourceTypes", checksum = "3f7ce073")]
+#[test_action("config", "AssociateResourceTypes", checksum = "55790e4d")]
 #[tokio::test]
 async fn associate_resource_types() {
     let server = TestServer::start().await;
@@ -251,7 +251,7 @@ async fn associate_resource_types() {
     assert_eq!(s, 200, "{b}");
 }
 
-#[test_action("config", "DisassociateResourceTypes", checksum = "5eda3345")]
+#[test_action("config", "DisassociateResourceTypes", checksum = "80b2e7ac")]
 #[tokio::test]
 async fn disassociate_resource_types() {
     let server = TestServer::start().await;

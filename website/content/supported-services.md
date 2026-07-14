@@ -1,10 +1,10 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 7,368 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 7,379 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 7,368 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 7,379 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
@@ -52,7 +52,7 @@ fakecloud provides 100% API conformance across 7,368 operations. Unlike mocks, f
 - **Amazon MWAA**: 12 operations (complete). Full Amazon Managed Workflows for Apache Airflow control plane, signing as `airflow`: environments with the async lifecycle modelled by the control-plane state machine (created `CREATING`, settling to `AVAILABLE` on the next read; `UpdateEnvironment` moves to `UPDATING` and records a `LastUpdate` that settles `SUCCESS`; `DeleteEnvironment` moves to `DELETING` and is removed on the next read), `arn:aws:airflow:...:environment/<name>` ARNs, `EnvironmentName` pattern + name-uniqueness validation, and AWS-synthesized `WebserverUrl` / `ServiceRoleArn` / `CeleryExecutorQueue` / per-module `LoggingConfiguration`. Also the short-lived `CreateCliToken` / `CreateWebLoginToken` access tokens, `InvokeRestApi` (returns the modelled `RestApiServerException` until the Airflow web-server data plane is attached), the internal `PublishMetrics` sink, and ARN-keyed tagging; persisted (in-flight lifecycle transitions reconcile on restart). The real Docker-backed Apache Airflow web server / DAG runtime is a later batch.
 - **EventBridge**: 57 operations. Rules, Targets; EventBridge Scheduler (12 operations) and EventBridge Pipes (10 operations) are separate services.
 - **EventBridge Pipes**: 10 operations. Point-to-point source -> filter -> Lambda enrichment -> target integrations with per-target InputTemplate transforms, driven by a real background runner.
-- **OpenSearch Service**: 93 operations (complete). Full Amazon OpenSearch Service control plane, sharing one domain store with Elasticsearch Service (both sign as `es`): domains (create/describe/delete/config persist; a new domain settles `Processing=false`/`Created=true` with a synthetic search endpoint on describe), packages, VPC endpoints, cross-cluster connections, applications + capabilities, per-domain data sources + indices, direct-query data sources, reserved instances, tags, and instance-type/version/upgrade catalogues, with persistence. No real OpenSearch cluster is spawned (control-plane emulation).
+- **OpenSearch Service**: 96 operations (complete). Full Amazon OpenSearch Service control plane, sharing one domain store with Elasticsearch Service (both sign as `es`): domains (create/describe/delete/config persist; a new domain settles `Processing=false`/`Created=true` with a synthetic search endpoint on describe), packages, VPC endpoints, cross-cluster connections, applications + capabilities, application migrations (`StartMigration`/`GetMigration`/`ListMigrations`), per-domain data sources + indices, direct-query data sources, reserved instances, tags, and instance-type/version/upgrade catalogues, with persistence. No real OpenSearch cluster is spawned (control-plane emulation).
 - **Elasticsearch Service**: 51 operations (complete). The legacy Amazon Elasticsearch Service (`es`, API version 2015-01-01), exposed over the SAME shared domain store as OpenSearch Service — a domain created through either API is one entity, surfaced here via the `ElasticsearchDomainStatus` shape. Domains, packages, VPC endpoints, cross-cluster search connections, reserved instances, tags, and catalogues, with persistence.
 - **Cloud Map**: 30 operations (complete). Full AWS Cloud Map (`servicediscovery`) control plane + discovery API: HTTP/public-DNS/private-DNS namespaces, services (DnsConfig/HealthCheck + attributes), instance register/deregister/get/list + health status, `DiscoverInstances`/`DiscoverInstancesRevision` lookup, and tagging — driven by the async operation model (mutations return an `OperationId` that settles `SUCCESS` on `GetOperation`); persisted.
 - **Account Management**: 15 operations (complete). Full AWS Account control plane: alternate contacts (BILLING/OPERATIONS/SECURITY), primary contact information, account information + name, GovCloud account pairing, primary-email management (start/accept OTP flow), and Region opt-in control (ListRegions, GetRegionOptStatus, Enable/DisableRegion with `ENABLING` -> `ENABLED` settle-on-read over the real opt-in-region catalogue). Honors the optional `AccountId` member so an organization's management account can act on a member; persisted.
@@ -63,7 +63,7 @@ fakecloud provides 100% API conformance across 7,368 operations. Unlike mocks, f
 ### Security & Management
 - **IAM**: 176 operations. Policy evaluation including permission boundaries, session policies, ABAC, NotPrincipal, and KMS key policies.
 - **STS**: 11 operations. Local token generation and session management.
-- **SSM**: 146 operations. Parameter Store; Secrets Manager (23 operations) is a separate service.
+- **SSM**: 152 operations. Parameter Store; Secrets Manager (23 operations) is a separate service.
 
 ## Technical Conformance Data
 fakecloud is validated against the same Smithy models used by the official AWS SDKs. This ensures that every request and response matches the expected wire format exactly, eliminating 'works on my machine' bugs caused by shallow mocks.
