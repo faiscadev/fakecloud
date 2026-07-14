@@ -18,10 +18,12 @@
 
 pub mod persistence;
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 mod validate;
 
 pub use service::{CodeCommitService, CODECOMMIT_ACTIONS};
 pub use state::{
     CodeCommitSnapshot, CodeCommitState, SharedCodeCommitState, CODECOMMIT_SNAPSHOT_SCHEMA_VERSION,
 };
+// Re-exported for the CloudFormation resource_provisioner; `state` is pub(crate).
+pub use state::Repo;

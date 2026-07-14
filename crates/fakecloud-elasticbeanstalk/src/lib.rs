@@ -19,9 +19,15 @@
 //! control-plane-complete posture ELBv2 shipped with.
 
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 
 pub use service::ElasticBeanstalkService;
 pub use state::{
     EbAccounts, ElasticBeanstalkSnapshot, SharedEbState, ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
+};
+// Re-exported for the CloudFormation resource_provisioner; `state` is pub(crate).
+pub use state::{
+    environment_status, Application, ApplicationVersion, ConfigurationTemplate, Environment, Event,
+    MaxAgeRule, MaxCountRule, OptionSetting, ResourceLifecycleConfig, ResourceTag,
+    SourceBuildInformation,
 };

@@ -11,7 +11,7 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use fakecloud_eks::state::{
+use fakecloud_eks::{
     access_entry_arn, addon_arn, cluster_arn, fargate_profile_arn, identity_provider_config_arn,
     nodegroup_arn, pod_identity_association_arn, AccessEntry, Addon, Cluster, FargateProfile,
     IdentityProviderConfig, Nodegroup, PodIdentityAssociation, TagMap, DEFAULT_K8S_VERSION,

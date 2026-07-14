@@ -64,7 +64,7 @@ use fakecloud_ecs::{
     CapacityProvider as EcsCapacityProvider, Cluster as EcsCluster, Service as EcsService,
     SharedEcsState, TagEntry as EcsTagEntry, TaskDefinition as EcsTaskDefinition,
 };
-use fakecloud_eks::state::SharedEksState;
+use fakecloud_eks::SharedEksState;
 use fakecloud_elasticache::{
     CacheCluster as EcCacheCluster, CacheParameterGroup, CacheSecurityGroup, CacheSubnetGroup,
     ElastiCacheUser as EcUser, ElastiCacheUserGroup as EcUserGroup,
@@ -106,7 +106,7 @@ use fakecloud_route53::{
 use fakecloud_s3::persistence::bucket_meta_snapshot;
 use fakecloud_s3::{S3Bucket, SharedS3State};
 use fakecloud_secretsmanager::{RotationRules, Secret, SecretVersion, SharedSecretsManagerState};
-use fakecloud_servicediscovery::state::SharedServiceDiscoveryState;
+use fakecloud_servicediscovery::SharedServiceDiscoveryState;
 use fakecloud_ses::{
     ConfigurationSet as SesConfigurationSet, ContactList as SesContactList,
     DedicatedIpPool as SesDedicatedIpPool, EmailIdentity as SesEmailIdentity,

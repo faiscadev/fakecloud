@@ -14,7 +14,7 @@
 //! typical users exercise is control-plane.
 
 pub mod persistence;
-pub mod state;
+pub(crate) mod state;
 pub mod validate;
 
 mod service;
