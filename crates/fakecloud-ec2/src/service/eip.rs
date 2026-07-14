@@ -5,7 +5,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, parse_filters, require, validate_enum, validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, not_found, parse_filters, require, validate_enum,
+    validate_max_results, Filter,
 };
 use crate::state::{Ec2State, ElasticIp, KeyPair, PlacementGroup, Tag};
 
@@ -99,7 +100,9 @@ pub(crate) fn release_address(
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
     if let Some(id) = req.query_params.get("AllocationId") {
-        state.elastic_ips.remove(id);
+        if state.elastic_ips.remove(id).is_none() {
+            return Err(not_found("InvalidAllocationID.NotFound", id));
+        }
         state.tags.remove(id);
     } else if let Some(ip) = req.query_params.get("PublicIp") {
         let ids: Vec<String> = state
@@ -108,6 +111,13 @@ pub(crate) fn release_address(
             .filter(|e| &e.public_ip == ip)
             .map(|e| e.allocation_id.clone())
             .collect();
+        if ids.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "InvalidAddress.NotFound",
+                format!("Address '{ip}' not found."),
+            ));
+        }
         for id in ids {
             state.elastic_ips.remove(&id);
         }
@@ -159,11 +169,13 @@ fn addr_match(e: &ElasticIp, tags: &[Tag], filters: &[Filter]) -> bool {
                         .map(|t| t.value.clone())
                         .collect()
                 } else {
-                    return true;
+                    return false;
                 }
             }
         };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|v| candidates.iter().any(|c| filter_value_matches(v, c)))
     })
 }
 
@@ -387,6 +399,15 @@ pub(crate) fn describe_moving_addresses(
 
 // ---- Key pairs ----
 
+/// `InvalidKeyPair.Duplicate` — a key pair with this name already exists.
+fn duplicate_key_pair(name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "InvalidKeyPair.Duplicate",
+        format!("The keypair '{name}' already exists."),
+    )
+}
+
 const FAKE_KEY_MATERIAL: &str =
     "-----BEGIN RSA PRIVATE KEY-----\nMIIfakefakefakefakefake\n-----END RSA PRIVATE KEY-----";
 
@@ -412,6 +433,9 @@ pub(crate) fn create_key_pair(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        if state.key_pairs.contains_key(&key_name) {
+            return Err(duplicate_key_pair(&key_name));
+        }
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -441,6 +465,9 @@ pub(crate) fn import_key_pair(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        if state.key_pairs.contains_key(&key_name) {
+            return Err(duplicate_key_pair(&key_name));
+        }
         state.key_pairs.insert(
             key_name.clone(),
             KeyPair {
@@ -653,4 +680,35 @@ pub(crate) fn get_groups_for_capacity_reservation(
         &req.request_id,
         &ec2_list("capacityReservationGroupSet", &[]),
     ))
+}
+
+#[cfg(test)]
+mod keypair_tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    #[test]
+    fn create_key_pair_rejects_duplicate_name() {
+        let svc = Ec2Service::new();
+        create_key_pair(&svc, &req("CreateKeyPair", &[("KeyName", "kp")])).unwrap();
+        let err = err_of(create_key_pair(
+            &svc,
+            &req("CreateKeyPair", &[("KeyName", "kp")]),
+        ));
+        assert_eq!(err.code(), "InvalidKeyPair.Duplicate");
+    }
+
+    #[test]
+    fn import_key_pair_rejects_duplicate_name() {
+        let svc = Ec2Service::new();
+        create_key_pair(&svc, &req("CreateKeyPair", &[("KeyName", "kp")])).unwrap();
+        let err = err_of(import_key_pair(
+            &svc,
+            &req(
+                "ImportKeyPair",
+                &[("KeyName", "kp"), ("PublicKeyMaterial", "c3NoLXJzYQ==")],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidKeyPair.Duplicate");
+    }
 }

@@ -56,6 +56,15 @@ fn cr_xml(r: &CapacityReservation, tags: &[Tag], owner: &str) -> String {
     )
 }
 
+/// `InvalidCapacityReservationId.NotFound` — the reservation does not exist.
+fn cr_not_found(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "InvalidCapacityReservationId.NotFound",
+        format!("The capacity reservation ID '{id}' does not exist"),
+    )
+}
+
 fn region_of(r: &CapacityReservation) -> String {
     r.availability_zone
         .trim_end_matches(|c: char| c.is_alphabetic())
@@ -159,13 +168,12 @@ pub(crate) fn cancel_capacity_reservation(
     )?;
     {
         let mut accounts = svc.state.write();
-        if let Some(r) = accounts
+        let r = accounts
             .get_or_create(&req.account_id)
             .capacity_reservations
             .get_mut(&id)
-        {
-            r.state = "cancelled".to_string();
-        }
+            .ok_or_else(|| cr_not_found(&id))?;
+        r.state = "cancelled".to_string();
     }
     Ok(Ec2Service::respond(
         "CancelCapacityReservation",
@@ -211,19 +219,18 @@ pub(crate) fn modify_capacity_reservation(
     )?;
     {
         let mut accounts = svc.state.write();
-        if let Some(r) = accounts
+        let r = accounts
             .get_or_create(&req.account_id)
             .capacity_reservations
             .get_mut(&id)
+            .ok_or_else(|| cr_not_found(&id))?;
+        if let Some(c) = req
+            .query_params
+            .get("InstanceCount")
+            .and_then(|v| v.parse().ok())
         {
-            if let Some(c) = req
-                .query_params
-                .get("InstanceCount")
-                .and_then(|v| v.parse().ok())
-            {
-                r.total_instance_count = c;
-                r.available_instance_count = c;
-            }
+            r.total_instance_count = c;
+            r.available_instance_count = c;
         }
     }
     Ok(Ec2Service::respond(
@@ -285,10 +292,12 @@ pub(crate) fn create_capacity_reservation_fleet(
         .unwrap_or_else(|| "1".to_string());
     {
         let mut accounts = svc.state.write();
+        // The map value stores the fleet's TotalTargetCapacity so Describe /
+        // Modify can round-trip it rather than reporting a hardcoded 1.
         accounts
             .get_or_create(&req.account_id)
             .capacity_reservation_fleets
-            .insert(id.clone(), id.clone());
+            .insert(id.clone(), cap.clone());
     }
     let body = format!(
         "{}{}<totalTargetCapacity>{}</totalTargetCapacity><totalFulfilledCapacity>{}</totalFulfilledCapacity>{}{}{}{}",
@@ -318,13 +327,14 @@ pub(crate) fn describe_capacity_reservation_fleets(
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
     let mut items: Vec<String> = state
         .capacity_reservation_fleets
-        .keys()
-        .filter(|id| wanted.is_empty() || wanted.contains(id))
-        .map(|id| {
+        .iter()
+        .filter(|(id, _)| wanted.is_empty() || wanted.contains(id))
+        .map(|(id, cap)| {
             format!(
-                "{}{}<totalTargetCapacity>1</totalTargetCapacity>",
+                "{}{}<totalTargetCapacity>{}</totalTargetCapacity>",
                 ec2_elem("capacityReservationFleetId", id),
-                ec2_elem("state", "active")
+                ec2_elem("state", "active"),
+                cap,
             )
         })
         .collect();
@@ -365,10 +375,27 @@ pub(crate) fn cancel_capacity_reservation_fleets(
 }
 
 pub(crate) fn modify_capacity_reservation_fleet(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "CapacityReservationFleetId")?;
+    let id = require(&req.query_params, "CapacityReservationFleetId")?;
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let cap = state
+            .capacity_reservation_fleets
+            .get_mut(&id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "InvalidCapacityReservationFleetId.NotFound",
+                    format!("The capacity reservation fleet ID '{id}' does not exist"),
+                )
+            })?;
+        if let Some(tc) = req.query_params.get("TotalTargetCapacity") {
+            *cap = tc.clone();
+        }
+    }
     Ok(Ec2Service::respond(
         "ModifyCapacityReservationFleet",
         &req.request_id,
@@ -706,4 +733,87 @@ pub(crate) fn update_interruptible_capacity_reservation_allocation(
         &req.request_id,
         &body,
     ))
+}
+
+#[cfg(test)]
+mod crfleet_tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn cr_fleet_total_target_capacity_round_trips() {
+        let svc = Ec2Service::new();
+        let resp = create_capacity_reservation_fleet(
+            &svc,
+            &req(
+                "CreateCapacityReservationFleet",
+                &[
+                    ("TotalTargetCapacity", "10"),
+                    ("Tenancy", "default"),
+                    ("InstanceMatchCriteria", "open"),
+                ],
+            ),
+        )
+        .unwrap();
+        let created = body(resp);
+        let id = created
+            .split("<capacityReservationFleetId>")
+            .nth(1)
+            .unwrap()
+            .split("</capacityReservationFleetId>")
+            .next()
+            .unwrap()
+            .to_string();
+        let desc = body(
+            describe_capacity_reservation_fleets(
+                &svc,
+                &req("DescribeCapacityReservationFleets", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(
+            desc.contains("<totalTargetCapacity>10</totalTargetCapacity>"),
+            "{desc}"
+        );
+
+        modify_capacity_reservation_fleet(
+            &svc,
+            &req(
+                "ModifyCapacityReservationFleet",
+                &[
+                    ("CapacityReservationFleetId", &id),
+                    ("TotalTargetCapacity", "20"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc2 = body(
+            describe_capacity_reservation_fleets(
+                &svc,
+                &req("DescribeCapacityReservationFleets", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(
+            desc2.contains("<totalTargetCapacity>20</totalTargetCapacity>"),
+            "{desc2}"
+        );
+    }
+
+    #[test]
+    fn modify_cr_fleet_missing_errors() {
+        let svc = Ec2Service::new();
+        let err = err_of(modify_capacity_reservation_fleet(
+            &svc,
+            &req(
+                "ModifyCapacityReservationFleet",
+                &[("CapacityReservationFleetId", "crf-nope")],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidCapacityReservationFleetId.NotFound");
+    }
 }

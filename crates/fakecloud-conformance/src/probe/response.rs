@@ -179,6 +179,26 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "InvalidAMIID.NotFound",
             "InvalidAMIID.Malformed",
             "InvalidAMIID.Unavailable",
+            // Resource-not-found / wrong-state codes the hardened handlers now
+            // return for the probes' synthetic (non-existent / in-use / invalid)
+            // ids, each verbatim from the EC2 "Error codes" reference. AWS uses
+            // the `.NotFound` suffix per resource family; a handler returning one
+            // of these to a bogus id ran correctly.
+            "InvalidGroup.NotFound",
+            "InvalidVolume.NotFound",
+            "VolumeInUse",
+            "InvalidSnapshot.NotFound",
+            "InvalidNetworkInterfaceID.NotFound",
+            "InvalidKeyPair.Duplicate",
+            "InvalidAddress.NotFound",
+            "InvalidAllocationID.NotFound",
+            "InvalidFleetId.NotFound",
+            "InvalidSpotFleetRequestId.NotFound",
+            "InvalidCapacityReservationId.NotFound",
+            "InvalidCapacityReservationFleetId.NotFound",
+            "InvalidTransitGatewayAttachmentID.NotFound",
+            "InvalidVpcEndpointId.NotFound",
+            "InvalidID",
         ],
         // EKS under-declares two client errors that the real API returns for
         // sub-resource operations:

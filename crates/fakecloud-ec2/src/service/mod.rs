@@ -1032,8 +1032,39 @@ impl Ec2Service {
     /// Instances persisted as `stopped`/`terminated` are left as-is —
     /// StartInstances revives the former. No-op when no runtime is configured
     /// or there are no instances to recover.
+    /// Flip every `pending` (code 0) instance to `running` (code 16) in
+    /// metadata-only mode, then persist. Used on restart so an instance whose
+    /// background boot flip was lost across a restart still reaches `running`,
+    /// and directly by the RunInstances background task when no runtime is
+    /// wired so the persisted snapshot captures `running`, not `pending` (M12).
+    pub(crate) async fn reconcile_pending_metadata_only(&self) {
+        let flipped = {
+            let mut accounts = self.state.write();
+            let mut n = 0;
+            for (_, state) in accounts.iter_mut() {
+                for inst in state.instances.values_mut() {
+                    if inst.state_code == 0 {
+                        inst.state_code = 16;
+                        inst.state_name = "running".to_string();
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        if flipped > 0 {
+            self.save_snapshot().await;
+        }
+    }
+
     pub async fn recover_persisted_containers(&self) {
         let Some(runtime) = self.runtime.clone() else {
+            // Metadata-only mode: there is no container to reconcile, but an
+            // instance persisted mid-boot (state `pending`, code 0) would stay
+            // stuck pending forever because the background flip-to-running that
+            // RunInstances spawned never ran in this process. Flip any such
+            // instance to `running` so a restart self-heals (M12).
+            self.reconcile_pending_metadata_only().await;
             return;
         };
 

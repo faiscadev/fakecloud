@@ -5,7 +5,10 @@ use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
-use crate::service_helpers::{gen_id, indexed_list, parse_filters, require, validate_enum, Filter};
+use crate::service_helpers::{
+    filter_value_matches, gen_id, indexed_list, not_found, paginate, parse_filters, require,
+    validate_enum, Filter,
+};
 use crate::state::{Ec2State, Tag, Volume, VolumeAttachment};
 
 const VOLUME_TYPES: &[&str] = &["standard", "io1", "io2", "gp2", "sc1", "st1", "gp3"];
@@ -99,6 +102,7 @@ pub(crate) fn create_volume(
         auto_enable_io: false,
         attachments: Vec::new(),
         in_recycle_bin: false,
+        modification: None,
     };
     let tags = {
         let mut accounts = svc.state.write();
@@ -122,8 +126,28 @@ pub(crate) fn delete_volume(
     let id = require(&req.query_params, "VolumeId")?;
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
-    state.volumes.remove(&id);
-    state.tags.remove(&id);
+    let retention = state.recycle_bin_retention.volumes;
+    let vol = state
+        .volumes
+        .get_mut(&id)
+        .ok_or_else(|| not_found("InvalidVolume.NotFound", &id))?;
+    // AWS rejects deleting an attached volume — it must be detached first.
+    if vol.state == "in-use" || !vol.attachments.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "VolumeInUse",
+            format!("Volume '{id}' is currently attached and cannot be deleted"),
+        ));
+    }
+    if retention {
+        // A recycle-bin retention rule covers volumes: soft-delete so it can be
+        // listed and restored rather than destroying it.
+        vol.state = "deleting".to_string();
+        vol.in_recycle_bin = true;
+    } else {
+        state.volumes.remove(&id);
+        state.tags.remove(&id);
+    }
     Ok(Ec2Service::respond(
         "DeleteVolume",
         &req.request_id,
@@ -149,10 +173,22 @@ pub(crate) fn describe_volumes(
         .map(|v| volume_xml(v, state.tags_for(&v.volume_id)))
         .collect();
     items.sort();
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("volumeSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond(
         "DescribeVolumes",
         &req.request_id,
-        &ec2_list("volumeSet", &items),
+        &body,
     ))
 }
 
@@ -164,6 +200,8 @@ fn vol_match(v: &Volume, tags: &[Tag], filters: &[Filter]) -> bool {
             "status" => vec![v.state.clone()],
             "availability-zone" => vec![v.availability_zone.clone()],
             "snapshot-id" => v.snapshot_id.clone().into_iter().collect(),
+            "encrypted" => vec![v.encrypted.to_string()],
+            "size" => vec![v.size.to_string()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -172,11 +210,13 @@ fn vol_match(v: &Volume, tags: &[Tag], filters: &[Filter]) -> bool {
                         .map(|t| t.value.clone())
                         .collect()
                 } else {
-                    return true;
+                    return false;
                 }
             }
         };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|val| candidates.iter().any(|c| filter_value_matches(val, c)))
     })
 }
 
@@ -197,10 +237,12 @@ pub(crate) fn attach_volume(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(v) = state.volumes.get_mut(&volume_id) {
-            v.state = "in-use".to_string();
-            v.attachments = vec![att.clone()];
-        }
+        let v = state
+            .volumes
+            .get_mut(&volume_id)
+            .ok_or_else(|| not_found("InvalidVolume.NotFound", &volume_id))?;
+        v.state = "in-use".to_string();
+        v.attachments = vec![att.clone()];
     }
     Ok(Ec2Service::respond(
         "AttachVolume",
@@ -228,14 +270,16 @@ pub(crate) fn detach_volume(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(v) = state.volumes.get_mut(&volume_id) {
-            if let Some(a) = v.attachments.first() {
-                att.instance_id = a.instance_id.clone();
-                att.device = a.device.clone();
-            }
-            v.state = "available".to_string();
-            v.attachments.clear();
+        let v = state
+            .volumes
+            .get_mut(&volume_id)
+            .ok_or_else(|| not_found("InvalidVolume.NotFound", &volume_id))?;
+        if let Some(a) = v.attachments.first() {
+            att.instance_id = a.instance_id.clone();
+            att.device = a.device.clone();
         }
+        v.state = "available".to_string();
+        v.attachments.clear();
     }
     Ok(Ec2Service::respond(
         "DetachVolume",
@@ -244,12 +288,30 @@ pub(crate) fn detach_volume(
     ))
 }
 
-fn modification_xml(volume_id: &str) -> String {
+fn opt_elem(name: &str, v: Option<i64>) -> String {
+    v.map(|n| format!("<{name}>{n}</{name}>"))
+        .unwrap_or_default()
+}
+
+fn modification_xml(volume_id: &str, m: &crate::state::VolumeModification) -> String {
+    let progress = if m.state == "completed" { 100 } else { 0 };
     format!(
-        "{}<modificationState>modifying</modificationState><targetSize>16</targetSize>\
-         <originalSize>8</originalSize><progress>0</progress><startTime>{}</startTime>",
+        "{}<modificationState>{}</modificationState>\
+         <originalSize>{}</originalSize>{}{}{}\
+         <targetSize>{}</targetSize>{}{}{}\
+         <progress>{}</progress><startTime>{}</startTime>",
         ec2_elem("volumeId", volume_id),
-        FIXED_TIME,
+        m.state,
+        m.original_size,
+        opt_elem("originalIops", m.original_iops),
+        opt_elem("originalThroughput", m.original_throughput),
+        ec2_elem("originalVolumeType", &m.original_volume_type),
+        m.target_size,
+        opt_elem("targetIops", m.target_iops),
+        opt_elem("targetThroughput", m.target_throughput),
+        ec2_elem("targetVolumeType", &m.target_volume_type),
+        progress,
+        m.start_time,
     )
 }
 
@@ -259,25 +321,55 @@ pub(crate) fn modify_volume(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VolumeId")?;
     validate_enum(&req.query_params, "VolumeType", VOLUME_TYPES)?;
-    {
+    let rendered = {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(v) = state.volumes.get_mut(&id) {
-            if let Some(sz) = req.query_params.get("Size").and_then(|s| s.parse().ok()) {
-                v.size = sz;
-            }
-            if let Some(vt) = req.query_params.get("VolumeType") {
-                v.volume_type = vt.clone();
-            }
+        let v = state
+            .volumes
+            .get_mut(&id)
+            .ok_or_else(|| not_found("InvalidVolume.NotFound", &id))?;
+        // Snapshot the pre-modification values, then apply and record the change
+        // so DescribeVolumesModifications reflects real targets, not constants.
+        let original_size = v.size;
+        let original_iops = v.iops;
+        let original_throughput = v.throughput;
+        let original_volume_type = v.volume_type.clone();
+        if let Some(sz) = req.query_params.get("Size").and_then(|s| s.parse().ok()) {
+            v.size = sz;
         }
-    }
+        if let Some(vt) = req.query_params.get("VolumeType") {
+            v.volume_type = vt.clone();
+        }
+        if let Some(iops) = req.query_params.get("Iops").and_then(|s| s.parse().ok()) {
+            v.iops = Some(iops);
+        }
+        if let Some(tp) = req
+            .query_params
+            .get("Throughput")
+            .and_then(|s| s.parse().ok())
+        {
+            v.throughput = Some(tp);
+        }
+        let m = crate::state::VolumeModification {
+            original_size,
+            original_iops,
+            original_throughput,
+            original_volume_type,
+            target_size: v.size,
+            target_iops: v.iops,
+            target_throughput: v.throughput,
+            target_volume_type: v.volume_type.clone(),
+            state: "completed".to_string(),
+            start_time: FIXED_TIME.to_string(),
+        };
+        let xml = modification_xml(&id, &m);
+        v.modification = Some(m);
+        xml
+    };
     Ok(Ec2Service::respond(
         "ModifyVolume",
         &req.request_id,
-        &format!(
-            "<volumeModification>{}</volumeModification>",
-            modification_xml(&id)
-        ),
+        &format!("<volumeModification>{rendered}</volumeModification>"),
     ))
 }
 
@@ -293,7 +385,11 @@ pub(crate) fn describe_volumes_modifications(
         .volumes
         .values()
         .filter(|v| wanted.is_empty() || wanted.contains(&v.volume_id))
-        .map(|v| modification_xml(&v.volume_id))
+        .filter_map(|v| {
+            v.modification
+                .as_ref()
+                .map(|m| modification_xml(&v.volume_id, m))
+        })
         .collect();
     Ok(Ec2Service::respond(
         "DescribeVolumesModifications",
@@ -538,6 +634,7 @@ pub(crate) fn restore_volume_from_recycle_bin(
         let state = accounts.get_or_create(&req.account_id);
         if let Some(v) = state.volumes.get_mut(&id) {
             v.in_recycle_bin = false;
+            v.state = "available".to_string();
         }
     }
     Ok(Ec2Service::respond(
@@ -545,4 +642,185 @@ pub(crate) fn restore_volume_from_recycle_bin(
         &req.request_id,
         &ec2_return(true),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn seed_volume(svc: &Ec2Service, id: &str, state_name: &str, attached: bool) {
+        let mut accounts = svc.state.write();
+        let st = accounts.get_or_create("000000000000");
+        st.volumes.insert(
+            id.to_string(),
+            Volume {
+                volume_id: id.into(),
+                size: 8,
+                snapshot_id: None,
+                availability_zone: "us-east-1a".into(),
+                state: state_name.into(),
+                volume_type: "gp3".into(),
+                iops: Some(3000),
+                throughput: Some(125),
+                encrypted: false,
+                kms_key_id: None,
+                multi_attach_enabled: false,
+                auto_enable_io: false,
+                attachments: if attached {
+                    vec![VolumeAttachment {
+                        volume_id: id.into(),
+                        instance_id: "i-1".into(),
+                        device: "/dev/sdf".into(),
+                        status: "attached".into(),
+                        delete_on_termination: false,
+                    }]
+                } else {
+                    vec![]
+                },
+                in_recycle_bin: false,
+                modification: None,
+            },
+        );
+    }
+
+    fn body_of(resp: AwsResponse) -> String {
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn delete_volume_rejects_nonexistent() {
+        let svc = Ec2Service::new();
+        let err = err_of(delete_volume(
+            &svc,
+            &req("DeleteVolume", &[("VolumeId", "vol-nope")]),
+        ));
+        assert_eq!(err.code(), "InvalidVolume.NotFound");
+    }
+
+    #[test]
+    fn delete_volume_rejects_in_use() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "in-use", true);
+        let err = err_of(delete_volume(
+            &svc,
+            &req("DeleteVolume", &[("VolumeId", "vol-1")]),
+        ));
+        assert_eq!(err.code(), "VolumeInUse");
+        // Still present after the rejected delete.
+        assert!(svc
+            .state
+            .read()
+            .get("000000000000")
+            .unwrap()
+            .volumes
+            .contains_key("vol-1"));
+    }
+
+    #[test]
+    fn delete_volume_hard_deletes_without_retention_rule() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "available", false);
+        delete_volume(&svc, &req("DeleteVolume", &[("VolumeId", "vol-1")])).unwrap();
+        assert!(!svc
+            .state
+            .read()
+            .get("000000000000")
+            .unwrap()
+            .volumes
+            .contains_key("vol-1"));
+    }
+
+    #[test]
+    fn delete_volume_routes_to_recycle_bin_with_retention_rule() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "available", false);
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .recycle_bin_retention
+            .volumes = true;
+        delete_volume(&svc, &req("DeleteVolume", &[("VolumeId", "vol-1")])).unwrap();
+        // Present, flagged, and listed in the recycle bin.
+        let list = body_of(
+            list_volumes_in_recycle_bin(&svc, &req("ListVolumesInRecycleBin", &[])).unwrap(),
+        );
+        assert!(list.contains("<volumeId>vol-1</volumeId>"), "{list}");
+        // Hidden from normal DescribeVolumes.
+        let desc = body_of(describe_volumes(&svc, &req("DescribeVolumes", &[])).unwrap());
+        assert!(!desc.contains("<volumeId>vol-1</volumeId>"), "{desc}");
+        // Restore brings it back.
+        restore_volume_from_recycle_bin(
+            &svc,
+            &req("RestoreVolumeFromRecycleBin", &[("VolumeId", "vol-1")]),
+        )
+        .unwrap();
+        let desc2 = body_of(describe_volumes(&svc, &req("DescribeVolumes", &[])).unwrap());
+        assert!(desc2.contains("<volumeId>vol-1</volumeId>"), "{desc2}");
+    }
+
+    #[test]
+    fn modify_volume_persists_iops_and_throughput() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "available", false);
+        modify_volume(
+            &svc,
+            &req(
+                "ModifyVolume",
+                &[
+                    ("VolumeId", "vol-1"),
+                    ("Size", "100"),
+                    ("Iops", "6000"),
+                    ("Throughput", "250"),
+                ],
+            ),
+        )
+        .unwrap();
+        {
+            let st = svc.state.read();
+            let v = &st.get("000000000000").unwrap().volumes["vol-1"];
+            assert_eq!(v.size, 100);
+            assert_eq!(v.iops, Some(6000));
+            assert_eq!(v.throughput, Some(250));
+        }
+        let body = body_of(
+            describe_volumes_modifications(&svc, &req("DescribeVolumesModifications", &[]))
+                .unwrap(),
+        );
+        assert!(body.contains("<targetIops>6000</targetIops>"), "{body}");
+        assert!(
+            body.contains("<targetThroughput>250</targetThroughput>"),
+            "{body}"
+        );
+        assert!(body.contains("<targetSize>100</targetSize>"), "{body}");
+    }
+
+    #[test]
+    fn describe_volumes_paginates() {
+        let svc = Ec2Service::new();
+        for i in 0..3 {
+            seed_volume(&svc, &format!("vol-{i}"), "available", false);
+        }
+        let body = body_of(
+            describe_volumes(&svc, &req("DescribeVolumes", &[("MaxResults", "2")])).unwrap(),
+        );
+        assert!(body.contains("<nextToken>"), "expected a NextToken: {body}");
+    }
+
+    #[test]
+    fn attach_volume_rejects_nonexistent() {
+        let svc = Ec2Service::new();
+        let err = err_of(attach_volume(
+            &svc,
+            &req(
+                "AttachVolume",
+                &[
+                    ("VolumeId", "vol-nope"),
+                    ("InstanceId", "i-1"),
+                    ("Device", "/dev/sdf"),
+                ],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidVolume.NotFound");
+    }
 }

@@ -33,6 +33,20 @@ impl fakecloud_core::multi_account::AccountState for Ec2State {
     }
 }
 
+/// Recycle Bin retention rules in effect for an account, per resource type.
+/// Populated by AWS's `rbin` API (not modeled as a separate service here); when
+/// a flag is set, the corresponding `Delete*` op sends the resource to the
+/// recycle bin instead of hard-deleting it.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct RecycleBinRetention {
+    #[serde(default)]
+    pub volumes: bool,
+    #[serde(default)]
+    pub snapshots: bool,
+    #[serde(default)]
+    pub images: bool,
+}
+
 /// A single EC2 resource tag.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tag {
@@ -462,6 +476,22 @@ pub struct VolumeAttachment {
     pub delete_on_termination: bool,
 }
 
+/// A recorded `ModifyVolume` request, surfaced by `DescribeVolumesModifications`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VolumeModification {
+    pub original_size: i64,
+    pub original_iops: Option<i64>,
+    pub original_throughput: Option<i64>,
+    pub original_volume_type: String,
+    pub target_size: i64,
+    pub target_iops: Option<i64>,
+    pub target_throughput: Option<i64>,
+    pub target_volume_type: String,
+    /// `modifying` | `optimizing` | `completed` | `failed`.
+    pub state: String,
+    pub start_time: String,
+}
+
 /// An EBS volume.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Volume {
@@ -482,6 +512,9 @@ pub struct Volume {
     pub attachments: Vec<VolumeAttachment>,
     #[serde(default)]
     pub in_recycle_bin: bool,
+    /// Last `ModifyVolume` request applied to this volume, if any.
+    #[serde(default)]
+    pub modification: Option<VolumeModification>,
 }
 
 /// An EBS snapshot.
@@ -704,6 +737,9 @@ pub struct SpotRequest {
 pub struct SpotFleet {
     pub id: String,
     pub state: String,
+    /// `SpotFleetRequestConfig.TargetCapacity`.
+    #[serde(default)]
+    pub target_capacity: i64,
 }
 
 /// An EC2 fleet.
@@ -712,6 +748,9 @@ pub struct Fleet {
     pub id: String,
     pub state: String,
     pub fleet_type: String,
+    /// `TargetCapacitySpecification.TotalTargetCapacity`.
+    #[serde(default)]
+    pub target_capacity: i64,
 }
 
 /// An on-demand capacity reservation.
@@ -1330,6 +1369,13 @@ pub struct Ec2State {
     pub instances: BTreeMap<String, Instance>,
     #[serde(default)]
     pub volumes: BTreeMap<String, Volume>,
+    /// Recycle Bin retention rules by resource type. AWS's `rbin` service (a
+    /// separate front-door not modeled in this crate) creates these; when a rule
+    /// covers a resource type, `Delete*` routes the resource to the recycle bin
+    /// (`in_recycle_bin = true`) instead of hard-deleting it, so the matching
+    /// `List*InRecycleBin` / `Restore*FromRecycleBin` ops can recover it.
+    #[serde(default)]
+    pub recycle_bin_retention: RecycleBinRetention,
     /// Account-level EBS default encryption toggle.
     #[serde(default)]
     pub ebs_encryption_default: bool,

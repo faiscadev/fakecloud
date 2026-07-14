@@ -8,7 +8,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, parse_filters, require, validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, parse_filters, require, validate_max_results,
+    Filter,
 };
 use crate::state::{Ec2State, SecurityGroup, SecurityGroupRule, Tag};
 
@@ -378,7 +379,18 @@ pub(crate) fn describe_security_groups(
         .map(|g| sg_xml(g, state.tags_for(&g.group_id), &owner, &region))
         .collect();
     items.sort();
-    let body = ec2_list("securityGroupInfo", &items);
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = crate::service_helpers::paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("securityGroupInfo", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond(
         "DescribeSecurityGroups",
         &req.request_id,
@@ -401,12 +413,50 @@ fn sg_matches(g: &SecurityGroup, tags: &[Tag], filters: &[Filter]) -> bool {
                         .map(|t| t.value.clone())
                         .collect()
                 } else {
-                    return true;
+                    // Unknown filter: match nothing (never silently match all).
+                    return false;
                 }
             }
         };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|v| candidates.iter().any(|c| filter_value_matches(v, c)))
     })
+}
+
+/// `InvalidGroup.NotFound` — the referenced security group does not exist.
+fn sg_not_found(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "InvalidGroup.NotFound",
+        format!("The security group '{id}' does not exist"),
+    )
+}
+
+/// Two rules describe the same permission when protocol, port range, and the
+/// single source/target (cidr/prefix-list/referenced-group) all match. Used to
+/// revoke exactly the supplied IpPermissions instead of a whole direction.
+fn same_permission(a: &SecurityGroupRule, b: &SecurityGroupRule) -> bool {
+    a.is_egress == b.is_egress
+        && a.ip_protocol == b.ip_protocol
+        && ports_match(a, b)
+        && a.cidr_ipv4 == b.cidr_ipv4
+        && a.cidr_ipv6 == b.cidr_ipv6
+        && a.prefix_list_id == b.prefix_list_id
+        && a.referenced_group_id == b.referenced_group_id
+}
+
+/// Ports match for revoke purposes. For the all-traffic protocol (`-1`) AWS
+/// ignores port numbers entirely — it stores none — but clients round-trip the
+/// pair as `-1/-1`, `0/0`, or absent interchangeably (terraform revokes the
+/// default egress rule with `FromPort=0`/`ToPort=0`). So when the protocol is
+/// `-1` the ports are irrelevant to identity; for any real protocol they must
+/// match exactly.
+fn ports_match(a: &SecurityGroupRule, b: &SecurityGroupRule) -> bool {
+    if a.ip_protocol == "-1" {
+        return true;
+    }
+    a.from_port == b.from_port && a.to_port == b.to_port
 }
 
 fn authorize(
@@ -426,9 +476,13 @@ fn authorize(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(sg) = state.security_groups.get_mut(&group_id) {
-            sg.rules.extend(new_rules.clone());
-        }
+        // A missing or empty GroupId (or a nonexistent one) is a hard error on
+        // AWS, not a silent no-op.
+        let sg = state
+            .security_groups
+            .get_mut(&group_id)
+            .ok_or_else(|| sg_not_found(&group_id))?;
+        sg.rules.extend(new_rules.clone());
     }
     // New rules change what traffic is allowed — re-apply the firewall (ph3).
     svc.spawn_firewall_reconcile();
@@ -470,16 +524,22 @@ fn revoke(
         req.query_params.get("GroupId").cloned().unwrap_or_default()
     };
     let rule_ids = indexed_list(&req.query_params, "SecurityGroupRuleId");
+    let described = parse_ip_permissions(&req.query_params, &group_id, is_egress);
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        if let Some(sg) = state.security_groups.get_mut(&group_id) {
-            if !rule_ids.is_empty() {
-                sg.rules.retain(|r| !rule_ids.contains(&r.rule_id));
-            } else {
-                // Revoke by matching the supplied IpPermissions on egress flag.
-                sg.rules.retain(|r| r.is_egress != is_egress);
-            }
+        // A missing/empty/nonexistent GroupId is a hard error on AWS.
+        let sg = state
+            .security_groups
+            .get_mut(&group_id)
+            .ok_or_else(|| sg_not_found(&group_id))?;
+        if !rule_ids.is_empty() {
+            sg.rules.retain(|r| !rule_ids.contains(&r.rule_id));
+        } else {
+            // Revoke ONLY the specific permissions described in the request,
+            // matched by protocol/port/source — never the whole direction.
+            sg.rules
+                .retain(|r| !described.iter().any(|d| same_permission(r, d)));
         }
     }
     // Removing rules tightens the firewall — re-apply (ph3).
@@ -889,6 +949,224 @@ mod modify_tests {
         assert_eq!(r.to_port, 443);
         assert_eq!(r.cidr_ipv4.as_deref(), Some("0.0.0.0/0"));
         assert_eq!(r.description, "https");
+    }
+
+    fn ingress_rule(id: &str, port: i64, cidr: &str) -> SecurityGroupRule {
+        SecurityGroupRule {
+            rule_id: id.into(),
+            group_id: "sg-1".into(),
+            is_egress: false,
+            ip_protocol: "tcp".into(),
+            from_port: port,
+            to_port: port,
+            cidr_ipv4: Some(cidr.into()),
+            cidr_ipv6: None,
+            prefix_list_id: None,
+            referenced_group_id: None,
+            description: String::new(),
+        }
+    }
+
+    fn seed_group_rules(svc: &Ec2Service, rules: Vec<SecurityGroupRule>) {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        state.security_groups.insert(
+            "sg-1".to_string(),
+            SecurityGroup {
+                group_id: "sg-1".into(),
+                group_name: "g".into(),
+                description: "d".into(),
+                vpc_id: "vpc-1".into(),
+                rules,
+            },
+        );
+    }
+
+    #[test]
+    fn revoke_by_ip_permission_removes_only_the_matching_rule() {
+        let svc = Ec2Service::new();
+        seed_group_rules(
+            &svc,
+            vec![
+                ingress_rule("sgr-a", 22, "10.0.0.0/8"),
+                ingress_rule("sgr-b", 443, "0.0.0.0/0"),
+            ],
+        );
+        revoke_security_group_ingress(
+            &svc,
+            &req(
+                "RevokeSecurityGroupIngress",
+                &[
+                    ("GroupId", "sg-1"),
+                    ("IpPermissions.1.IpProtocol", "tcp"),
+                    ("IpPermissions.1.FromPort", "22"),
+                    ("IpPermissions.1.ToPort", "22"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/8"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let rules = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules;
+        assert_eq!(rules.len(), 1, "only the port-22 rule should be revoked");
+        assert_eq!(rules[0].rule_id, "sgr-b");
+    }
+
+    #[test]
+    fn revoke_all_traffic_egress_ignores_port_representation() {
+        // Terraform revokes the AWS-created default egress rule (protocol -1,
+        // stored as -1/-1) by sending FromPort=0/ToPort=0. The revoke must still
+        // match and remove it, or `aws_security_group` shows egress.# = 1.
+        let svc = Ec2Service::new();
+        let resp = create_security_group(
+            &svc,
+            &req(
+                "CreateSecurityGroup",
+                &[
+                    ("GroupName", "t"),
+                    ("GroupDescription", "d"),
+                    ("VpcId", "vpc-1"),
+                ],
+            ),
+        )
+        .unwrap();
+        let sg_id = {
+            let body = String::from_utf8_lossy(resp.body.expect_bytes());
+            body.split("<groupId>")
+                .nth(1)
+                .and_then(|s| s.split("</groupId>").next())
+                .unwrap()
+                .to_string()
+        };
+        revoke_security_group_egress(
+            &svc,
+            &req(
+                "RevokeSecurityGroupEgress",
+                &[
+                    ("GroupId", &sg_id),
+                    ("IpPermissions.1.IpProtocol", "-1"),
+                    ("IpPermissions.1.FromPort", "0"),
+                    ("IpPermissions.1.ToPort", "0"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "0.0.0.0/0"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let rules = &accounts.get("000000000000").unwrap().security_groups[&sg_id].rules;
+        assert!(
+            rules.iter().all(|r| !r.is_egress),
+            "default all-traffic egress rule should be revoked despite 0/0 ports"
+        );
+    }
+
+    #[test]
+    fn authorize_missing_group_errors() {
+        let svc = Ec2Service::new();
+        let err = crate::test_support::err_of(authorize_security_group_ingress(
+            &svc,
+            &req(
+                "AuthorizeSecurityGroupIngress",
+                &[
+                    ("IpPermissions.1.IpProtocol", "tcp"),
+                    ("IpPermissions.1.FromPort", "22"),
+                    ("IpPermissions.1.ToPort", "22"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "0.0.0.0/0"),
+                ],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidGroup.NotFound");
+    }
+
+    #[test]
+    fn revoke_missing_group_errors() {
+        let svc = Ec2Service::new();
+        let err = crate::test_support::err_of(revoke_security_group_ingress(
+            &svc,
+            &req("RevokeSecurityGroupIngress", &[("GroupId", "sg-nope")]),
+        ));
+        assert_eq!(err.code(), "InvalidGroup.NotFound");
+    }
+
+    #[test]
+    fn describe_unknown_filter_matches_nothing() {
+        let svc = Ec2Service::new();
+        seed_group_rules(&svc, vec![]);
+        let resp = describe_security_groups(
+            &svc,
+            &req(
+                "DescribeSecurityGroups",
+                &[
+                    ("Filter.1.Name", "not-a-real-filter"),
+                    ("Filter.1.Value.1", "whatever"),
+                ],
+            ),
+        )
+        .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            !body.contains("<groupId>sg-1</groupId>"),
+            "unknown filter must not match all: {body}"
+        );
+    }
+
+    #[test]
+    fn describe_tag_wildcard_matches() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.security_groups.insert(
+                "sg-prod".into(),
+                SecurityGroup {
+                    group_id: "sg-prod".into(),
+                    group_name: "prod".into(),
+                    description: "d".into(),
+                    vpc_id: "vpc-1".into(),
+                    rules: vec![],
+                },
+            );
+            state.upsert_tags(
+                "sg-prod",
+                &[Tag {
+                    key: "Name".into(),
+                    value: "prod-web".into(),
+                }],
+            );
+            state.security_groups.insert(
+                "sg-dev".into(),
+                SecurityGroup {
+                    group_id: "sg-dev".into(),
+                    group_name: "dev".into(),
+                    description: "d".into(),
+                    vpc_id: "vpc-1".into(),
+                    rules: vec![],
+                },
+            );
+            state.upsert_tags(
+                "sg-dev",
+                &[Tag {
+                    key: "Name".into(),
+                    value: "dev-web".into(),
+                }],
+            );
+        }
+        let resp = describe_security_groups(
+            &svc,
+            &req(
+                "DescribeSecurityGroups",
+                &[
+                    ("Filter.1.Name", "tag:Name"),
+                    ("Filter.1.Value.1", "prod-*"),
+                ],
+            ),
+        )
+        .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("<groupId>sg-prod</groupId>"), "{body}");
+        assert!(!body.contains("<groupId>sg-dev</groupId>"), "{body}");
     }
 
     #[test]

@@ -5,8 +5,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, parse_filters, require, validate_enum, validate_int_range,
-    validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, parse_filters, require, validate_enum,
+    validate_int_range, validate_max_results, Filter,
 };
 use crate::state::{
     Ec2State, InternetGateway, NatGateway, Route, RouteTable, RouteTableAssociation, Tag,
@@ -805,8 +805,10 @@ fn simple_match_multi(
                     .map(|t| t.value.clone())
                     .collect()
             } else {
-                return true;
+                return false;
             };
-        f.values.iter().any(|v| candidates.iter().any(|c| c == v))
+        f.values
+            .iter()
+            .any(|v| candidates.iter().any(|c| filter_value_matches(v, c)))
     })
 }
