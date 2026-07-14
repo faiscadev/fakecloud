@@ -15,6 +15,7 @@ impl Route53Service {
         if cfg.health_check_config.health_check_type.is_empty() {
             return Err(invalid_argument("HealthCheckConfig.Type is required"));
         }
+        validate_health_check_config(&cfg.health_check_config)?;
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -412,5 +413,116 @@ impl Route53Service {
         body.push_str("</CheckerIpRanges>");
         body.push_str("</GetCheckerIpRangesResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
+    }
+}
+
+/// Every Route 53 health-check type and the per-type fields AWS requires.
+const HEALTH_CHECK_TYPES: &[&str] = &[
+    "HTTP",
+    "HTTPS",
+    "HTTP_STR_MATCH",
+    "HTTPS_STR_MATCH",
+    "TCP",
+    "CALCULATED",
+    "CLOUDWATCH_METRIC",
+    "RECOVERY_CONTROL",
+];
+
+/// Validate a health-check config against AWS's type enum and the per-type
+/// required-field rules. Previously any string type was accepted and stored,
+/// so a `CALCULATED` check with no children (or a typo'd type) round-tripped
+/// as a broken health check instead of the `InvalidInput` AWS returns.
+fn validate_health_check_config(c: &HealthCheckConfig) -> Result<(), AwsServiceError> {
+    let ty = c.health_check_type.as_str();
+    if !HEALTH_CHECK_TYPES.contains(&ty) {
+        return Err(invalid_argument(format!("Invalid health check type: {ty}")));
+    }
+    let is_blank = |v: &Option<String>| v.as_deref().unwrap_or("").is_empty();
+    match ty {
+        "HTTP" | "HTTPS" | "HTTP_STR_MATCH" | "HTTPS_STR_MATCH" | "TCP" => {
+            if is_blank(&c.ip_address) && is_blank(&c.fully_qualified_domain_name) {
+                return Err(invalid_argument(
+                    "Endpoint health checks require IPAddress or FullyQualifiedDomainName",
+                ));
+            }
+            if matches!(ty, "HTTP_STR_MATCH" | "HTTPS_STR_MATCH") && is_blank(&c.search_string) {
+                return Err(invalid_argument(
+                    "HTTP_STR_MATCH/HTTPS_STR_MATCH health checks require SearchString",
+                ));
+            }
+        }
+        "CALCULATED" => {
+            let has_children = c
+                .child_health_checks
+                .as_ref()
+                .map(|ch| !ch.child_health_check.is_empty())
+                .unwrap_or(false);
+            if !has_children || c.health_threshold.is_none() {
+                return Err(invalid_argument(
+                    "CALCULATED health checks require ChildHealthChecks and HealthThreshold",
+                ));
+            }
+        }
+        "CLOUDWATCH_METRIC" if c.alarm_identifier.is_none() => {
+            return Err(invalid_argument(
+                "CLOUDWATCH_METRIC health checks require AlarmIdentifier",
+            ));
+        }
+        "RECOVERY_CONTROL" if is_blank(&c.routing_control_arn) => {
+            return Err(invalid_argument(
+                "RECOVERY_CONTROL health checks require RoutingControlArn",
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod hc_validation_tests {
+    use super::*;
+
+    fn cfg(ty: &str) -> HealthCheckConfig {
+        HealthCheckConfig {
+            health_check_type: ty.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn unknown_type_is_rejected() {
+        assert!(validate_health_check_config(&cfg("BOGUS")).is_err());
+    }
+
+    #[test]
+    fn endpoint_type_requires_target() {
+        assert!(validate_health_check_config(&cfg("HTTP")).is_err());
+        let mut c = cfg("HTTP");
+        c.ip_address = Some("1.2.3.4".into());
+        assert!(validate_health_check_config(&c).is_ok());
+    }
+
+    #[test]
+    fn str_match_requires_search_string() {
+        let mut c = cfg("HTTP_STR_MATCH");
+        c.fully_qualified_domain_name = Some("x.example.com".into());
+        assert!(validate_health_check_config(&c).is_err());
+        c.search_string = Some("ok".into());
+        assert!(validate_health_check_config(&c).is_ok());
+    }
+
+    #[test]
+    fn calculated_requires_children_and_threshold() {
+        assert!(validate_health_check_config(&cfg("CALCULATED")).is_err());
+    }
+
+    #[test]
+    fn recovery_control_requires_arn() {
+        assert!(validate_health_check_config(&cfg("RECOVERY_CONTROL")).is_err());
+        let mut c = cfg("RECOVERY_CONTROL");
+        c.routing_control_arn = Some(
+            "arn:aws:route53-recovery-control::111122223333:controlpanel/x/routingcontrol/y".into(),
+        );
+        assert!(validate_health_check_config(&c).is_ok());
     }
 }
