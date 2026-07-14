@@ -10,7 +10,7 @@ pub(crate) mod model_validate;
 pub(crate) mod persistence;
 pub mod provision;
 pub(crate) mod service;
-pub mod state;
+pub(crate) mod state;
 pub mod validate;
 
 #[cfg(test)]

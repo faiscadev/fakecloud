@@ -18,7 +18,7 @@
 //! and status are derived from the real modeled state, never faked - the same
 //! control-plane-complete posture ELBv2 shipped with.
 
-pub mod service;
+pub(crate) mod service;
 pub mod state;
 
 pub use service::ElasticBeanstalkService;

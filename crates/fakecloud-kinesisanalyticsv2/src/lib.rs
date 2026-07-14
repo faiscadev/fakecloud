@@ -4,8 +4,8 @@
 pub mod builders;
 pub mod persistence;
 pub mod runtime;
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 
 pub use runtime::FlinkRuntime;
 pub use service::{Ka2Service, KA2_ACTIONS};

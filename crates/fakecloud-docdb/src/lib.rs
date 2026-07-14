@@ -15,8 +15,8 @@
 //! (lifecycle, snapshots, restore, parameter/subnet/global groups, event
 //! subscriptions, tagging) is real and persisted.
 
-pub mod service;
-pub mod state;
+pub(crate) mod service;
+pub(crate) mod state;
 pub(crate) mod validation;
 pub(crate) mod xml;
 

@@ -17,7 +17,7 @@
 //! the same control-plane-only shape the sibling `Code*` services use.
 
 pub mod persistence;
-pub mod service;
+pub(crate) mod service;
 pub mod state;
 mod validate;
 

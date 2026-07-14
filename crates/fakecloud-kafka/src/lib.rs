@@ -35,9 +35,9 @@ pub mod builders;
 pub mod cfn_provision;
 pub mod persistence;
 pub mod runtime;
-pub mod service;
+pub(crate) mod service;
 pub mod shared;
-pub mod state;
+pub(crate) mod state;
 mod validate;
 
 pub use runtime::KafkaRuntime;
