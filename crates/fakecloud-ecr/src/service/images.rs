@@ -146,7 +146,7 @@ impl EcrService {
     /// Cross-account targets get a separate `EcrState`; cross-region
     /// same-account targets share the source state (fakecloud collapses
     /// regions per process) but still get their own status entry.
-    pub(super) fn replicate_image(&self, source_account: &str, repo_name: &str, digest: &str) {
+    pub(crate) fn replicate_image(&self, source_account: &str, repo_name: &str, digest: &str) {
         use crate::state::{ImageReplicationStatus, Repository};
 
         let (rules, image, layer_blobs, source_registry_id, source_region, source_uri) = {

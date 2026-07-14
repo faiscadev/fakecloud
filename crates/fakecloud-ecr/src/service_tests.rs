@@ -1149,6 +1149,26 @@ mod scan_on_push_tests {
     }
 
     #[tokio::test]
+    async fn describe_scan_findings_on_never_scanned_image_is_scan_not_found() {
+        // A pushed-but-never-scanned image must return ScanNotFoundException,
+        // NOT a fabricated COMPLETE result that would green-light a CI gate.
+        let (svc, _state) = fixture("app", false, RegistryScanningConfiguration::default());
+        let digest = put_image(&svc, "app", "{\"mediaType\":\"x\"}", "v1");
+        let req = make_request(
+            "DescribeImageScanFindings",
+            json!({
+                "repositoryName": "app",
+                "imageId": {"imageDigest": digest},
+            }),
+        );
+        let err = match svc.describe_image_scan_findings(&req) {
+            Ok(_) => panic!("expected ScanNotFoundException for never-scanned image"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "ScanNotFoundException");
+    }
+
+    #[tokio::test]
     async fn put_image_triggers_scan_via_registry_level_rule() {
         // Repo-level disabled, but registry rule says SCAN_ON_PUSH for
         // any repo whose name matches the wildcard.

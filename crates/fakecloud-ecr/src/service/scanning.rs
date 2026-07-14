@@ -53,16 +53,19 @@ impl EcrService {
             .ok_or_else(|| repository_not_found(&name))?;
         let digest = resolve_image_digest(repo, &image_id)
             .ok_or_else(|| image_not_found(&name, &image_id))?;
-        let findings = repo.scan_findings.get(&digest).cloned().unwrap_or_else(|| {
-            crate::state::ImageScanFindings {
-                image_digest: digest.clone(),
-                scan_status: "COMPLETE".to_string(),
-                scan_completed_at: Some(Utc::now()),
-                vulnerability_source_updated_at: Some(Utc::now()),
-                finding_severity_counts: BTreeMap::new(),
-                findings: Vec::new(),
-            }
-        });
+        // A never-scanned image has no findings entry. Real ECR returns
+        // ScanNotFoundException here, NOT a fabricated COMPLETE result — the
+        // fake success could green-light a CI security gate for an unscanned image.
+        let findings = repo.scan_findings.get(&digest).cloned().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                http::StatusCode::BAD_REQUEST,
+                "ScanNotFoundException",
+                format!(
+                    "Image scan does not exist for the image with '{{imageDigest:{digest}}}' in \
+                     the repository with name '{name}' in the registry with id '{account}'"
+                ),
+            )
+        })?;
         Ok(AwsResponse::ok_json(json!({
             "registryId": repo.registry_id,
             "repositoryName": name,
