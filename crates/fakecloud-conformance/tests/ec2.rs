@@ -17,9 +17,11 @@ async fn ec2_create_tags() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
 
+    // CreateTags rejects a phantom resource id, so tag a real VPC.
+    let vpc = make_vpc(&client).await;
     client
         .create_tags()
-        .resources("vpc-0123456789abcdef0")
+        .resources(vpc)
         .tags(
             aws_sdk_ec2::types::Tag::builder()
                 .key("Name")
@@ -45,9 +47,10 @@ async fn ec2_delete_tags() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
 
+    let vpc = make_vpc(&client).await;
     client
         .create_tags()
-        .resources("i-0123456789abcdef0")
+        .resources(&vpc)
         .tags(
             aws_sdk_ec2::types::Tag::builder()
                 .key("env")
@@ -61,7 +64,7 @@ async fn ec2_delete_tags() {
     // Key-only delete removes the tag regardless of value.
     client
         .delete_tags()
-        .resources("i-0123456789abcdef0")
+        .resources(&vpc)
         .tags(aws_sdk_ec2::types::Tag::builder().key("env").build())
         .send()
         .await
@@ -77,9 +80,10 @@ async fn ec2_describe_tags() {
     let server = TestServer::start().await;
     let client = server.ec2_client().await;
 
+    let subnet = make_subnet(&client).await;
     client
         .create_tags()
-        .resources("subnet-0123456789abcdef0")
+        .resources(&subnet)
         .tags(
             aws_sdk_ec2::types::Tag::builder()
                 .key("tier")
@@ -97,7 +101,7 @@ async fn ec2_describe_tags() {
         .filters(
             aws_sdk_ec2::types::Filter::builder()
                 .name("resource-id")
-                .values("subnet-0123456789abcdef0")
+                .values(&subnet)
                 .build(),
         )
         .send()
@@ -2061,6 +2065,34 @@ async fn ec2_get_groups_for_capacity_reservation() {
 
 // ---- Network interfaces ----
 
+async fn make_vpc(c: &aws_sdk_ec2::Client) -> String {
+    c.create_vpc()
+        .cidr_block("10.0.0.0/16")
+        .send()
+        .await
+        .unwrap()
+        .vpc()
+        .unwrap()
+        .vpc_id()
+        .unwrap()
+        .to_string()
+}
+
+async fn make_subnet(c: &aws_sdk_ec2::Client) -> String {
+    let vpc = make_vpc(c).await;
+    c.create_subnet()
+        .vpc_id(vpc)
+        .cidr_block("10.0.1.0/24")
+        .send()
+        .await
+        .unwrap()
+        .subnet()
+        .unwrap()
+        .subnet_id()
+        .unwrap()
+        .to_string()
+}
+
 async fn make_eni(c: &aws_sdk_ec2::Client) -> String {
     c.create_network_interface()
         .subnet_id("subnet-1")
@@ -2358,14 +2390,15 @@ async fn ec2_delete_eni_permission() {
 async fn ec2_assign_private_ips() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let eni = make_eni(&c).await;
     let r = c
         .assign_private_ip_addresses()
-        .network_interface_id("eni-1")
+        .network_interface_id(&eni)
         .private_ip_addresses("10.0.0.31")
         .send()
         .await
         .unwrap();
-    assert_eq!(r.network_interface_id(), Some("eni-1"));
+    assert_eq!(r.network_interface_id(), Some(eni.as_str()));
 }
 
 #[test_action("ec2", "UnassignPrivateIpAddresses", checksum = "65c70924")]
@@ -2373,8 +2406,15 @@ async fn ec2_assign_private_ips() {
 async fn ec2_unassign_private_ips() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let eni = make_eni(&c).await;
+    c.assign_private_ip_addresses()
+        .network_interface_id(&eni)
+        .private_ip_addresses("10.0.0.31")
+        .send()
+        .await
+        .unwrap();
     c.unassign_private_ip_addresses()
-        .network_interface_id("eni-1")
+        .network_interface_id(&eni)
         .private_ip_addresses("10.0.0.31")
         .send()
         .await
@@ -3029,6 +3069,13 @@ async fn ec2_describe_volumes_modifications() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
     let id = make_vol(&c).await;
+    // A modification record only exists after an actual ModifyVolume.
+    c.modify_volume()
+        .volume_id(&id)
+        .size(16)
+        .send()
+        .await
+        .unwrap();
     let r = c
         .describe_volumes_modifications()
         .volume_ids(&id)
