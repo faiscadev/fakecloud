@@ -25,6 +25,78 @@ pub(crate) fn check_secret_version_idempotency(
     }
 }
 
+/// Demote the version currently holding `AWSCURRENT` to `AWSPREVIOUS`, enforcing
+/// the single-`AWSPREVIOUS` invariant: strip `AWSPREVIOUS` from every other
+/// version so exactly one version ever carries it.
+///
+/// AWS keeps at most one `AWSPREVIOUS` staging label per secret. The naive
+/// "remove AWSCURRENT, add AWSPREVIOUS to the old version" logic leaves the
+/// previously-previous version still tagged `AWSPREVIOUS`, so two versions end
+/// up with the label and `GetSecretValue(AWSPREVIOUS)` returns an arbitrary one.
+/// This helper centralizes the correct behaviour already used by
+/// `PutSecretValue` / `UpdateSecretVersionStage` so `UpdateSecret`,
+/// `RotateSecret` and scheduled rotation share it.
+pub(crate) fn demote_current_to_previous(
+    versions: &mut BTreeMap<String, SecretVersion>,
+    old_vid: &str,
+) {
+    // Strip AWSPREVIOUS from any other version first so `old_vid` becomes the
+    // sole holder.
+    for (id, v) in versions.iter_mut() {
+        if id != old_vid {
+            v.stages.retain(|s| s != "AWSPREVIOUS");
+        }
+    }
+    if let Some(old_v) = versions.get_mut(old_vid) {
+        old_v.stages.retain(|s| s != "AWSCURRENT");
+        if !old_v.stages.contains(&"AWSPREVIOUS".to_string()) {
+            old_v.stages.push("AWSPREVIOUS".to_string());
+        }
+    }
+}
+
+/// Decode the optional `SecretBinary` field. Returns an error when the field is
+/// present but not valid base64, matching AWS which rejects an undecodable
+/// `SecretBinary` rather than silently dropping it (which would let a caller
+/// think binary was stored when it was not).
+pub(crate) fn parse_secret_binary(body: &Value) -> Result<Option<Vec<u8>>, AwsServiceError> {
+    match body["SecretBinary"].as_str() {
+        None => Ok(None),
+        Some(s) => base64_decode(s).map(Some).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "Invalid base64: the value of the SecretBinary field could not be decoded.",
+            )
+        }),
+    }
+}
+
+/// Whether a secret scheduled for deletion has passed its recovery window and
+/// should be treated as permanently gone. AWS purges a secret once the recovery
+/// window elapses; a lazy check on read reproduces that without a background
+/// reaper.
+pub(crate) fn secret_recovery_window_elapsed(secret: &Secret, now: chrono::DateTime<Utc>) -> bool {
+    secret.deleted && secret.deletion_date.map(|d| now >= d).unwrap_or(false)
+}
+
+/// Reject secret names outside the AWS-permitted charset. AWS allows only
+/// `[A-Za-z0-9/_+=.@-]` in a secret name.
+pub(crate) fn validate_secret_name_charset(name: &str) -> Result<(), AwsServiceError> {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "/_+=.@-".contains(c))
+    {
+        Ok(())
+    } else {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            "Invalid name. Name must contain only alphanumeric characters or the characters /_+=.@-",
+        ))
+    }
+}
+
 /// Actions that mutate Secrets Manager state.
 pub(crate) fn is_mutating_action(action: &str) -> bool {
     matches!(

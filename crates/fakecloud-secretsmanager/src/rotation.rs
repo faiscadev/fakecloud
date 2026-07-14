@@ -99,14 +99,10 @@ pub async fn check_and_rotate(
                     };
                     secret.versions.insert(version_id.clone(), version);
                 } else {
-                    // Without Lambda: simple rotation
+                    // Without Lambda: simple rotation. Demote the outgoing
+                    // AWSCURRENT to AWSPREVIOUS, keeping AWSPREVIOUS unique.
                     if let Some(old_vid) = secret.current_version_id.clone() {
-                        if let Some(old_v) = secret.versions.get_mut(&old_vid) {
-                            old_v.stages.retain(|s| s != "AWSCURRENT");
-                            if !old_v.stages.contains(&"AWSPREVIOUS".to_string()) {
-                                old_v.stages.push("AWSPREVIOUS".to_string());
-                            }
-                        }
+                        crate::service::demote_current_to_previous(&mut secret.versions, &old_vid);
                     }
                     let version = SecretVersion {
                         version_id: version_id.clone(),

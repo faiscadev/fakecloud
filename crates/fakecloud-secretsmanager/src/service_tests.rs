@@ -450,7 +450,11 @@ async fn test_rotate_secret_stores_rotation_config() {
         secret.rotation_lambda_arn.as_deref(),
         Some("arn:aws:lambda:us-east-1:123456789012:function:my-rotator")
     );
-    assert!(secret.last_rotated_at.is_some());
+    // A Lambda-driven rotation runs asynchronously and, with no delivery bus
+    // wired up, never completes. LastRotatedDate must therefore stay unset --
+    // RotateSecret must not falsely claim the value rotated before the Lambda
+    // finished (the simple, no-Lambda path is covered separately).
+    assert!(secret.last_rotated_at.is_none());
     let rules = secret.rotation_rules.as_ref().unwrap();
     assert_eq!(rules.automatically_after_days, Some(30));
 
@@ -2748,4 +2752,295 @@ async fn test_create_secret_with_add_replica_regions() {
         .collect();
     assert!(dregions.contains(&"us-west-2"));
     assert!(dregions.contains(&"eu-west-1"));
+}
+
+// ---------------------------------------------------------------------------
+// Hardening: single AWSPREVIOUS / AWSCURRENT, input validation, expiry.
+// ---------------------------------------------------------------------------
+
+/// Count how many versions of a secret carry a given staging label.
+fn stage_count(state: &SharedSecretsManagerState, name: &str, stage: &str) -> usize {
+    let accts = state.read();
+    accts.default_ref().secrets[name]
+        .versions
+        .values()
+        .filter(|v| v.stages.iter().any(|s| s == stage))
+        .count()
+}
+
+#[tokio::test]
+async fn test_update_secret_keeps_single_awsprevious() {
+    // Repeated UpdateSecret must leave exactly one AWSPREVIOUS version, and it
+    // must be the immediately-previous value -- not accumulate across updates.
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    let req = make_request("CreateSecret", r#"{"Name": "prev", "SecretString": "v1"}"#);
+    svc.handle(req).await.unwrap();
+    let req = make_request(
+        "UpdateSecret",
+        r#"{"SecretId": "prev", "SecretString": "v2"}"#,
+    );
+    svc.handle(req).await.unwrap();
+    let req = make_request(
+        "UpdateSecret",
+        r#"{"SecretId": "prev", "SecretString": "v3"}"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    assert_eq!(
+        stage_count(&state, "prev", "AWSPREVIOUS"),
+        1,
+        "exactly one version must hold AWSPREVIOUS"
+    );
+    assert_eq!(stage_count(&state, "prev", "AWSCURRENT"), 1);
+
+    // AWSPREVIOUS resolves to the immediately-previous value, deterministically.
+    let req = make_request(
+        "GetSecretValue",
+        r#"{"SecretId": "prev", "VersionStage": "AWSPREVIOUS"}"#,
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["SecretString"], "v2");
+}
+
+#[tokio::test]
+async fn test_rotate_secret_simple_keeps_single_awsprevious() {
+    // The no-Lambda rotation path must also keep AWSPREVIOUS unique across
+    // repeated rotations.
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    let req = make_request("CreateSecret", r#"{"Name": "rot", "SecretString": "v1"}"#);
+    svc.handle(req).await.unwrap();
+
+    for _ in 0..3 {
+        let req = make_request("RotateSecret", r#"{"SecretId": "rot"}"#);
+        svc.handle(req).await.unwrap();
+    }
+
+    assert_eq!(stage_count(&state, "rot", "AWSPREVIOUS"), 1);
+    assert_eq!(stage_count(&state, "rot", "AWSCURRENT"), 1);
+}
+
+#[tokio::test]
+async fn test_update_version_stage_wrong_remove_from_no_double_current() {
+    // Moving AWSCURRENT with a RemoveFromVersionId that does NOT hold AWSCURRENT
+    // must still leave exactly one AWSCURRENT (the demotion targets the real
+    // holder, not the caller-supplied id).
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    let v1 = "11111111-1111-1111-1111-111111111111";
+    let v2 = "22222222-2222-2222-2222-222222222222";
+
+    let body = serde_json::json!({
+        "Name": "stage", "SecretString": "v1", "ClientRequestToken": v1,
+    });
+    svc.handle(make_request("CreateSecret", &body.to_string()))
+        .await
+        .unwrap();
+
+    // Stage a second version as AWSPENDING.
+    let body = serde_json::json!({
+        "SecretId": "stage", "SecretString": "v2",
+        "ClientRequestToken": v2, "VersionStages": ["AWSPENDING"],
+    });
+    svc.handle(make_request("PutSecretValue", &body.to_string()))
+        .await
+        .unwrap();
+
+    // Move AWSCURRENT to v2 but pass v2 (wrong) as RemoveFromVersionId.
+    let body = serde_json::json!({
+        "SecretId": "stage", "VersionStage": "AWSCURRENT",
+        "MoveToVersionId": v2, "RemoveFromVersionId": v2,
+    });
+    svc.handle(make_request("UpdateSecretVersionStage", &body.to_string()))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        stage_count(&state, "stage", "AWSCURRENT"),
+        1,
+        "there must be exactly one AWSCURRENT"
+    );
+    // And it must be v2.
+    let req = make_request("GetSecretValue", r#"{"SecretId": "stage"}"#);
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["SecretString"], "v2");
+}
+
+#[tokio::test]
+async fn test_create_secret_invalid_binary_rejected() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name": "badbin", "SecretBinary": "!!!not_base64!!!"}"#,
+    );
+    let err = expect_err(svc.handle(req).await);
+    assert!(err.to_string().contains("InvalidParameterException"));
+}
+
+#[tokio::test]
+async fn test_put_secret_value_invalid_binary_rejected() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "bin2", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let req = make_request(
+        "PutSecretValue",
+        r#"{"SecretId": "bin2", "SecretBinary": "!!!not_base64!!!"}"#,
+    );
+    let err = expect_err(svc.handle(req).await);
+    assert!(err.to_string().contains("InvalidParameterException"));
+}
+
+#[tokio::test]
+async fn test_create_secret_invalid_name_charset_rejected() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name": "bad$name", "SecretString": "v"}"#,
+    );
+    let err = expect_err(svc.handle(req).await);
+    assert!(err.to_string().contains("InvalidParameterException"));
+
+    // A name using every allowed special character is accepted.
+    let req = make_request(
+        "CreateSecret",
+        r#"{"Name": "ok/name_+=.@-1", "SecretString": "v"}"#,
+    );
+    assert_eq!(svc.handle(req).await.unwrap().status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn test_get_random_password_short_length_includes_each_type() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    // Minimum length with all four required classes: each class must survive.
+    let req = make_request("GetRandomPassword", r#"{"PasswordLength": 4}"#);
+    let resp = svc.handle(req).await.unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let pw = body["RandomPassword"].as_str().unwrap();
+    assert_eq!(pw.chars().count(), 4);
+    assert!(pw.chars().any(|c| c.is_ascii_lowercase()), "pw={pw}");
+    assert!(pw.chars().any(|c| c.is_ascii_uppercase()), "pw={pw}");
+    assert!(pw.chars().any(|c| c.is_ascii_digit()), "pw={pw}");
+    assert!(
+        pw.chars().any(|c| !c.is_ascii_alphanumeric()),
+        "pw={pw} must contain punctuation"
+    );
+}
+
+#[tokio::test]
+async fn test_get_random_password_length_too_short_for_required_types() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    // Length 4 can't hold all four classes plus a required space.
+    let req = make_request(
+        "GetRandomPassword",
+        r#"{"PasswordLength": 4, "IncludeSpace": true}"#,
+    );
+    let err = expect_err(svc.handle(req).await);
+    assert!(err.to_string().contains("InvalidParameterException"));
+}
+
+#[tokio::test]
+async fn test_rotate_secret_simple_path_stamps_last_rotated() {
+    // The no-Lambda simple rotation completes synchronously, so LastRotatedDate
+    // is stamped.
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "rotstamp", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+
+    svc.handle(make_request("RotateSecret", r#"{"SecretId": "rotstamp"}"#))
+        .await
+        .unwrap();
+
+    let accts = state.read();
+    let secret = &accts.default_ref().secrets["rotstamp"];
+    assert!(
+        secret.last_rotated_at.is_some(),
+        "synchronous rotation must stamp LastRotatedDate"
+    );
+}
+
+#[tokio::test]
+async fn test_scheduled_deletion_expires_on_read() {
+    // Once the recovery window elapses, the secret is treated as gone.
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "expiring", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(make_request("DeleteSecret", r#"{"SecretId": "expiring"}"#))
+        .await
+        .unwrap();
+
+    // Force the recovery window to have already elapsed.
+    {
+        let mut accts = state.write();
+        accts
+            .default_mut()
+            .secrets
+            .get_mut("expiring")
+            .unwrap()
+            .deletion_date = Some(Utc::now() - chrono::Duration::days(1));
+    }
+
+    let err = expect_err(
+        svc.handle(make_request(
+            "GetSecretValue",
+            r#"{"SecretId": "expiring"}"#,
+        ))
+        .await,
+    );
+    assert!(err.to_string().contains("ResourceNotFoundException"));
+
+    // A still-within-window deletion is NOT treated as gone (it reports the
+    // marked-for-deletion error instead of not-found).
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "pending-del", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(make_request(
+        "DeleteSecret",
+        r#"{"SecretId": "pending-del"}"#,
+    ))
+    .await
+    .unwrap();
+    let err = expect_err(
+        svc.handle(make_request(
+            "GetSecretValue",
+            r#"{"SecretId": "pending-del"}"#,
+        ))
+        .await,
+    );
+    assert!(err.to_string().contains("marked for deletion"));
 }

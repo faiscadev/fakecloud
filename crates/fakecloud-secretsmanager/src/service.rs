@@ -488,7 +488,7 @@ impl SecretsManagerService {
         validate_optional_string_length("secretString", body["SecretString"].as_str(), 1, 65536)?;
 
         let secret_string = body["SecretString"].as_str().map(|s| s.to_string());
-        let secret_binary = body["SecretBinary"].as_str().and_then(base64_decode);
+        let secret_binary = parse_secret_binary(&body)?;
 
         // Validate that either SecretString or SecretBinary is provided
         if secret_string.is_none() && secret_binary.is_none() {
@@ -584,18 +584,7 @@ impl SecretsManagerService {
         // Move AWSCURRENT from old version to AWSPREVIOUS if new version has AWSCURRENT
         if version_stages.contains(&"AWSCURRENT".to_string()) {
             if let Some(ref old_vid) = secret.current_version_id.clone() {
-                if let Some(old_version) = secret.versions.get_mut(old_vid) {
-                    old_version.stages.retain(|s| s != "AWSCURRENT");
-                    if !old_version.stages.contains(&"AWSPREVIOUS".to_string()) {
-                        old_version.stages.push("AWSPREVIOUS".to_string());
-                    }
-                }
-                // Remove AWSPREVIOUS from any other version
-                for (id, v) in secret.versions.iter_mut() {
-                    if id != old_vid {
-                        v.stages.retain(|s| s != "AWSPREVIOUS");
-                    }
-                }
+                demote_current_to_previous(&mut secret.versions, old_vid);
             }
             secret.current_version_id = Some(version_id.clone());
         }
@@ -686,7 +675,7 @@ impl SecretsManagerService {
 
         // If SecretString or SecretBinary is provided, create a new version
         let secret_string = body["SecretString"].as_str().map(|s| s.to_string());
-        let secret_binary = body["SecretBinary"].as_str().and_then(base64_decode);
+        let secret_binary = parse_secret_binary(&body)?;
 
         let version_id = if secret_string.is_some() || secret_binary.is_some() {
             let vid = body["ClientRequestToken"]
@@ -731,14 +720,10 @@ impl SecretsManagerService {
 
             let now = Utc::now();
 
-            // Move AWSCURRENT -> AWSPREVIOUS on old version
+            // Move AWSCURRENT -> AWSPREVIOUS on old version, keeping AWSPREVIOUS
+            // unique across versions.
             if let Some(ref old_vid) = secret.current_version_id.clone() {
-                if let Some(old_v) = secret.versions.get_mut(old_vid) {
-                    old_v.stages.retain(|s| s != "AWSCURRENT");
-                    if !old_v.stages.contains(&"AWSPREVIOUS".to_string()) {
-                        old_v.stages.push("AWSPREVIOUS".to_string());
-                    }
-                }
+                demote_current_to_previous(&mut secret.versions, old_vid);
             }
 
             let version = SecretVersion {
@@ -1320,6 +1305,20 @@ impl SecretsManagerService {
 
         // Use simple random generation
         if require_each {
+            // Each required class (plus space, when included) consumes one
+            // guaranteed slot. If the requested length can't hold one of each,
+            // AWS rejects the request rather than silently dropping a class.
+            let mut required_count = required_chars.len();
+            if include_space && !exclude_chars.contains(' ') {
+                required_count += 1;
+            }
+            if length < required_count {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "PasswordLength is too short to include one of each required character type.",
+                ));
+            }
             // First, ensure at least one character from each required category
             for category in &required_chars {
                 let chars: Vec<char> = category.chars().collect();
@@ -1456,7 +1455,6 @@ impl SecretsManagerService {
         //   Secrets Manager). LastRotatedDate is only set on an actual rotation.
         let mut invocation = None;
         if rotate_immediately {
-            secret.last_rotated_at = Some(now);
             if let Some(current_vid) = secret.current_version_id.clone() {
                 let current_value = secret.versions.get(&current_vid).cloned();
 
@@ -1483,14 +1481,9 @@ impl SecretsManagerService {
                             });
                         }
                     } else {
-                        // Without Lambda: simple rotation - new version becomes AWSCURRENT
-                        // Move old version to AWSPREVIOUS
-                        if let Some(old_v) = secret.versions.get_mut(&current_vid) {
-                            old_v.stages.retain(|s| s != "AWSCURRENT");
-                            if !old_v.stages.contains(&"AWSPREVIOUS".to_string()) {
-                                old_v.stages.push("AWSPREVIOUS".to_string());
-                            }
-                        }
+                        // Without Lambda: simple rotation - new version becomes AWSCURRENT.
+                        // Move old version to AWSPREVIOUS (kept unique across versions).
+                        demote_current_to_previous(&mut secret.versions, &current_vid);
                         let version = SecretVersion {
                             version_id: version_id.clone(),
                             secret_string: cv.secret_string.clone(),
@@ -1500,6 +1493,11 @@ impl SecretsManagerService {
                         };
                         secret.versions.insert(version_id.clone(), version);
                         secret.current_version_id = Some(version_id.clone());
+                        // The value has now actually rotated (synchronously), so
+                        // this is the point where LastRotatedDate is stamped. The
+                        // Lambda path does not claim completion here because the
+                        // rotation runs asynchronously and may not succeed.
+                        secret.last_rotated_at = Some(now);
                     }
                 }
             }
@@ -1640,38 +1638,48 @@ impl SecretsManagerService {
             }
         }
 
-        // Remove stage from specified version
-        if let Some(ref remove_vid) = remove_from {
-            if let Some(version) = secret.versions.get_mut(remove_vid) {
-                version.stages.retain(|s| s != &version_stage);
-                // If moving AWSCURRENT away, add AWSPREVIOUS and remove from others
-                if version_stage == "AWSCURRENT" {
-                    // Remove AWSPREVIOUS from all other versions first
-                    for (id, v) in secret.versions.iter_mut() {
-                        if id != remove_vid {
-                            v.stages.retain(|s| s != "AWSPREVIOUS");
-                        }
-                    }
-                    // Now add AWSPREVIOUS to the version losing AWSCURRENT
-                    if let Some(v) = secret.versions.get_mut(remove_vid) {
-                        if !v.stages.contains(&"AWSPREVIOUS".to_string()) {
-                            v.stages.push("AWSPREVIOUS".to_string());
-                        }
+        // Moving the AWSCURRENT label needs the single-AWSCURRENT invariant. A
+        // caller-supplied RemoveFromVersionId that does not actually hold
+        // AWSCURRENT must not leave two versions labelled AWSCURRENT: demote
+        // whichever version really holds it today.
+        if version_stage == "AWSCURRENT" {
+            if let Some(ref move_vid) = move_to {
+                let current_holder = secret
+                    .versions
+                    .iter()
+                    .find(|(id, v)| {
+                        id.as_str() != move_vid.as_str()
+                            && v.stages.contains(&"AWSCURRENT".to_string())
+                    })
+                    .map(|(id, _)| id.clone());
+                if let Some(holder) = current_holder {
+                    demote_current_to_previous(&mut secret.versions, &holder);
+                }
+                if let Some(version) = secret.versions.get_mut(move_vid) {
+                    version.stages.retain(|s| s != "AWSPREVIOUS");
+                    if !version.stages.contains(&version_stage) {
+                        version.stages.push(version_stage.clone());
                     }
                 }
-            }
-        }
-
-        // Add stage to specified version
-        if let Some(ref move_vid) = move_to {
-            if let Some(version) = secret.versions.get_mut(move_vid) {
-                if !version.stages.contains(&version_stage) {
-                    version.stages.push(version_stage.clone());
-                }
-            }
-            // Update current_version_id if we moved AWSCURRENT
-            if version_stage == "AWSCURRENT" {
                 secret.current_version_id = Some(move_vid.clone());
+            } else if let Some(ref remove_vid) = remove_from {
+                // Remove-only: demote the named version, keeping it the sole
+                // AWSPREVIOUS.
+                demote_current_to_previous(&mut secret.versions, remove_vid);
+            }
+        } else {
+            // Generic (custom / AWSPENDING) stage move.
+            if let Some(ref remove_vid) = remove_from {
+                if let Some(version) = secret.versions.get_mut(remove_vid) {
+                    version.stages.retain(|s| s != &version_stage);
+                }
+            }
+            if let Some(ref move_vid) = move_to {
+                if let Some(version) = secret.versions.get_mut(move_vid) {
+                    if !version.stages.contains(&version_stage) {
+                        version.stages.push(version_stage.clone());
+                    }
+                }
             }
         }
 
@@ -2054,29 +2062,34 @@ impl SecretsManagerService {
         state: &crate::state::SecretsManagerState,
         secret_id: &str,
     ) -> Result<String, AwsServiceError> {
-        if state.secrets.contains_key(secret_id) {
-            return Ok(secret_id.to_string());
-        }
+        let key = if state.secrets.contains_key(secret_id) {
+            Some(secret_id.to_string())
+        } else if let Some(secret) = state.secrets.values().find(|s| s.arn == secret_id) {
+            Some(secret.name.clone())
+        } else if secret_id.starts_with("arn:aws:secretsmanager:") {
+            state
+                .secrets
+                .values()
+                .find(|s| s.arn.starts_with(secret_id))
+                .map(|s| s.name.clone())
+        } else {
+            None
+        };
 
-        for secret in state.secrets.values() {
-            if secret.arn == secret_id {
-                return Ok(secret.name.clone());
+        match key {
+            // A secret whose recovery window has elapsed is treated as gone.
+            Some(key)
+                if state
+                    .secrets
+                    .get(&key)
+                    .map(|s| secret_recovery_window_elapsed(s, Utc::now()))
+                    .unwrap_or(false) =>
+            {
+                Err(secret_not_found())
             }
+            Some(key) => Ok(key),
+            None => Err(secret_not_found()),
         }
-
-        if secret_id.starts_with("arn:aws:secretsmanager:") {
-            for secret in state.secrets.values() {
-                if secret.arn.starts_with(secret_id) {
-                    return Ok(secret.name.clone());
-                }
-            }
-        }
-
-        Err(AwsServiceError::aws_error(
-            StatusCode::NOT_FOUND,
-            "ResourceNotFoundException",
-            "Secrets Manager can't find the specified secret.",
-        ))
     }
 
     /// Find a secret by name, full ARN, or partial ARN (immutable).
@@ -2085,32 +2098,39 @@ impl SecretsManagerService {
         state: &'a crate::state::SecretsManagerState,
         secret_id: &str,
     ) -> Result<&'a Secret, AwsServiceError> {
-        if let Some(secret) = state.secrets.get(secret_id) {
-            return Ok(secret);
-        }
-
-        // Search by full ARN
-        for secret in state.secrets.values() {
-            if secret.arn == secret_id {
-                return Ok(secret);
-            }
-        }
-
-        // Search by partial ARN
-        if secret_id.starts_with("arn:aws:secretsmanager:") {
-            for secret in state.secrets.values() {
-                if secret.arn.starts_with(secret_id) {
-                    return Ok(secret);
+        let secret = state
+            .secrets
+            .get(secret_id)
+            .or_else(|| state.secrets.values().find(|s| s.arn == secret_id))
+            .or_else(|| {
+                if secret_id.starts_with("arn:aws:secretsmanager:") {
+                    state
+                        .secrets
+                        .values()
+                        .find(|s| s.arn.starts_with(secret_id))
+                } else {
+                    None
                 }
-            }
-        }
+            });
 
-        Err(AwsServiceError::aws_error(
-            StatusCode::NOT_FOUND,
-            "ResourceNotFoundException",
-            "Secrets Manager can't find the specified secret.",
-        ))
+        match secret {
+            // A secret whose recovery window has elapsed is treated as gone.
+            Some(secret) if secret_recovery_window_elapsed(secret, Utc::now()) => {
+                Err(secret_not_found())
+            }
+            Some(secret) => Ok(secret),
+            None => Err(secret_not_found()),
+        }
     }
+}
+
+/// The standard "secret can't be found" error, shared by the resolution helpers.
+fn secret_not_found() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "ResourceNotFoundException",
+        "Secrets Manager can't find the specified secret.",
+    )
 }
 
 /// Persist the current Secrets Manager state as a snapshot. Offloads the
@@ -2175,6 +2195,7 @@ impl CreateSecretInput {
             })?
             .to_string();
         validate_string_length("name", &name, 1, 512)?;
+        validate_secret_name_charset(&name)?;
         validate_optional_string_length(
             "clientRequestToken",
             body["ClientRequestToken"].as_str(),
@@ -2191,7 +2212,7 @@ impl CreateSecretInput {
             description: body["Description"].as_str().map(|s| s.to_string()),
             kms_key_id: body["KmsKeyId"].as_str().map(|s| s.to_string()),
             secret_string: body["SecretString"].as_str().map(|s| s.to_string()),
-            secret_binary: body["SecretBinary"].as_str().and_then(base64_decode),
+            secret_binary: parse_secret_binary(body)?,
             tags: parse_tags(&body["Tags"]),
             add_replica_regions: body["AddReplicaRegions"]
                 .as_array()
