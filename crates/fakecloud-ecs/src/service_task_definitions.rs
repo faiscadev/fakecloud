@@ -343,14 +343,12 @@ impl EcsService {
         } else {
             arns.sort();
         }
-        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
-        let end = (start + max_results).min(arns.len());
-        let page = arns[start..end].to_vec();
+        let (page, next) = paginate_arns(arns, next_token, max_results);
         let mut out = json!({"taskDefinitionArns": page});
-        if end < arns.len() {
+        if let Some(n) = next {
             out.as_object_mut()
                 .unwrap()
-                .insert("nextToken".into(), json!(end.to_string()));
+                .insert("nextToken".into(), json!(n));
         }
         Ok(AwsResponse::ok_json(out))
     }
@@ -395,14 +393,12 @@ impl EcsService {
             }
         }
         families.sort();
-        let start = next_token.parse::<usize>().unwrap_or(0).min(families.len());
-        let end = (start + max_results).min(families.len());
-        let page = families[start..end].to_vec();
+        let (page, next) = paginate_arns(families, next_token, max_results);
         let mut out = json!({"families": page});
-        if end < families.len() {
+        if let Some(n) = next {
             out.as_object_mut()
                 .unwrap()
-                .insert("nextToken".into(), json!(end.to_string()));
+                .insert("nextToken".into(), json!(n));
         }
         Ok(AwsResponse::ok_json(out))
     }

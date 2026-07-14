@@ -201,14 +201,12 @@ impl EcsService {
             None => Vec::new(),
         };
         arns.sort();
-        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
-        let end = (start + max_results).min(arns.len());
-        let page = arns[start..end].to_vec();
+        let (page, next) = paginate_arns(arns, next_token, max_results);
         let mut out = json!({"containerInstanceArns": page});
-        if end < arns.len() {
+        if let Some(n) = next {
             out.as_object_mut()
                 .unwrap()
-                .insert("nextToken".into(), json!(end.to_string()));
+                .insert("nextToken".into(), json!(n));
         }
         Ok(AwsResponse::ok_json(out))
     }
@@ -1173,9 +1171,27 @@ impl EcsService {
             .iter()
             .filter_map(|v| v.as_str().map(String::from))
             .collect();
+        let account = request.account_id.clone();
+        let accounts = self.state.read();
+        let state = accounts.get(&account);
+        let mut found = Vec::new();
+        let mut failures = Vec::new();
+        for r in &refs {
+            match state.and_then(|s| s.service_revisions.get(r)) {
+                Some(rev) => found.push(json!({
+                    "serviceRevisionArn": rev.service_revision_arn,
+                    "serviceArn": rev.service_arn,
+                    "clusterArn": rev.cluster_arn,
+                    "taskDefinition": rev.task_definition_arn,
+                    "launchType": rev.launch_type,
+                    "createdAt": rev.created_at.timestamp(),
+                })),
+                None => failures.push(json!({"arn": r, "reason": "MISSING"})),
+            }
+        }
         Ok(AwsResponse::ok_json(json!({
-            "serviceRevisions": [],
-            "failures": refs.iter().map(|r| json!({"arn": r, "reason": "MISSING"})).collect::<Vec<_>>(),
+            "serviceRevisions": found,
+            "failures": failures,
         })))
     }
 }
