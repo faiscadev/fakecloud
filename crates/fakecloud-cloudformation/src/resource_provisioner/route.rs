@@ -49,10 +49,7 @@ impl ResourceProvisioner {
             })
             .unwrap_or_default();
 
-        let id = format!(
-            "Z{}",
-            Uuid::new_v4().simple().to_string()[..14].to_uppercase()
-        );
+        let id = format!("Z{}", fakecloud_core::ids::short_id(14).to_uppercase());
         let name_servers = (1..=4)
             .map(|i| format!("ns-{}.awsdns-{:02}.com", 100 + i, i))
             .collect::<Vec<_>>();

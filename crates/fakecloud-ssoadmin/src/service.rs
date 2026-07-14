@@ -449,11 +449,11 @@ fn now() -> i64 {
 }
 
 fn hex16() -> String {
-    Uuid::new_v4().simple().to_string()[..16].to_string()
+    fakecloud_core::ids::short_id(16).to_string()
 }
 
 fn hex10() -> String {
-    Uuid::new_v4().simple().to_string()[..10].to_string()
+    fakecloud_core::ids::short_id(10).to_string()
 }
 
 /// Validate pagination inputs, then window an ordered slice of result rows.

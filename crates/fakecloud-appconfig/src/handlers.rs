@@ -146,7 +146,7 @@ fn page_response(items: Vec<Value>, req: &AwsRequest) -> Result<AwsResponse, Aws
 
 /// A 7-character lowercase alphanumeric id, AppConfig's resource-id shape.
 fn gen_id7() -> String {
-    uuid::Uuid::new_v4().simple().to_string()[..7].to_string()
+    fakecloud_core::ids::short_id(7).to_string()
 }
 
 fn gen_token() -> String {

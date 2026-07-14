@@ -504,7 +504,7 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let endpoint_id = Uuid::new_v4().simple().to_string()[..16].to_string();
+        let endpoint_id = fakecloud_core::ids::short_id(16).to_string();
         let arn = format!(
             "arn:aws:events:{}:{}:endpoint/{name}",
             self.region, self.account_id
