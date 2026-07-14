@@ -76,6 +76,47 @@ pub(crate) fn opt_str<'a>(body: &'a Value, field: &str) -> Option<&'a str> {
     body.get(field).and_then(|v| v.as_str())
 }
 
+/// Paginate a list of ARN-like strings with a key-based cursor instead of a
+/// numeric offset. The list is sorted for a stable order (HashMap/BTreeMap
+/// value order is not a contract callers can rely on), and the returned
+/// `nextToken` is an opaque base64 of the last-emitted key. Resuming finds the
+/// first key strictly greater than the cursor, so pages stay correct even when
+/// items are added or removed between calls — a numeric offset would skip or
+/// duplicate rows there. A token that doesn't base64-decode restarts at the
+/// beginning (lenient, matching the previous behavior).
+pub(crate) fn paginate_arns(
+    mut arns: Vec<String>,
+    next_token: &str,
+    max_results: usize,
+) -> (Vec<String>, Option<String>) {
+    use base64::Engine;
+    arns.sort();
+    arns.dedup();
+    let cursor = if next_token.is_empty() {
+        None
+    } else {
+        base64::engine::general_purpose::STANDARD
+            .decode(next_token)
+            .ok()
+            .and_then(|b| String::from_utf8(b).ok())
+    };
+    let start = match &cursor {
+        Some(c) => arns
+            .iter()
+            .position(|a| a.as_str() > c.as_str())
+            .unwrap_or(arns.len()),
+        None => 0,
+    };
+    let end = (start + max_results).min(arns.len());
+    let page = arns[start..end].to_vec();
+    let next = if end < arns.len() {
+        Some(base64::engine::general_purpose::STANDARD.encode(arns[end - 1].as_bytes()))
+    } else {
+        None
+    };
+    (page, next)
+}
+
 /// Validate that an optional string field, if present, is one of the allowed
 /// enum values. Returns InvalidParameterException if the field is set to a
 /// value outside `allowed`. Absent or null fields are accepted.
@@ -1507,4 +1548,39 @@ pub(crate) fn task_protection_json(task: &Task) -> Value {
         "protectionEnabled": p.map(|p| p.enabled).unwrap_or(false),
         "expirationDate": p.and_then(|p| p.expiration).map(|e| e.timestamp()),
     })
+}
+
+#[cfg(test)]
+mod pagination_tests {
+    use super::paginate_arns;
+
+    #[test]
+    fn paginate_arns_key_cursor_is_stable_across_delete() {
+        let all: Vec<String> = (0..5).map(|i| format!("arn:{i}")).collect();
+        let (p1, next) = paginate_arns(all.clone(), "", 2);
+        assert_eq!(p1, vec!["arn:0", "arn:1"]);
+        let token = next.expect("nextToken after page 1");
+
+        // Delete the first item before fetching page 2. A numeric offset (2)
+        // would skip "arn:2"; the key cursor resumes correctly after "arn:1".
+        let after: Vec<String> = all.iter().filter(|a| *a != "arn:0").cloned().collect();
+        let (p2, next2) = paginate_arns(after, &token, 2);
+        assert_eq!(p2, vec!["arn:2", "arn:3"]);
+        assert!(next2.is_some());
+    }
+
+    #[test]
+    fn paginate_arns_sorts_and_dedups_and_tolerates_garbage_token() {
+        let dupes = vec![
+            "b".to_string(),
+            "a".to_string(),
+            "a".to_string(),
+            "c".to_string(),
+        ];
+        let (page, _) = paginate_arns(dupes, "", 10);
+        assert_eq!(page, vec!["a", "b", "c"]);
+        // A non-base64 token restarts from the beginning.
+        let (page, _) = paginate_arns(vec!["a".into(), "b".into()], "!!!not-base64", 1);
+        assert_eq!(page, vec!["a"]);
+    }
 }

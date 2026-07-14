@@ -94,6 +94,25 @@ pub struct EcsState {
     /// with built-in load balancing and autoscaling.
     #[serde(default)]
     pub express_gateway_services: BTreeMap<String, ExpressGatewayService>,
+    /// Service revisions keyed by `serviceRevisionArn` (`{service_arn}:{n}`).
+    /// A revision is minted on CreateService and on each UpdateService that
+    /// changes the task definition, so DescribeServiceRevisions can return the
+    /// real configuration snapshot instead of an empty stub.
+    #[serde(default)]
+    pub service_revisions: BTreeMap<String, ServiceRevision>,
+}
+
+/// A point-in-time snapshot of a service's configuration, addressable by
+/// `serviceRevisionArn`. Mirrors the subset of AWS's ServiceRevision that
+/// callers key on when auditing a deployment.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ServiceRevision {
+    pub service_revision_arn: String,
+    pub service_arn: String,
+    pub cluster_arn: String,
+    pub task_definition_arn: String,
+    pub launch_type: String,
+    pub created_at: DateTime<Utc>,
 }
 
 impl EcsState {
@@ -118,6 +137,7 @@ impl EcsState {
             daemons: BTreeMap::new(),
             daemon_deployments: BTreeMap::new(),
             express_gateway_services: BTreeMap::new(),
+            service_revisions: BTreeMap::new(),
         }
     }
 
@@ -139,6 +159,32 @@ impl EcsState {
         self.daemons.clear();
         self.daemon_deployments.clear();
         self.express_gateway_services.clear();
+        self.service_revisions.clear();
+    }
+
+    /// Mint and store a new service revision for `service`, numbered by how
+    /// many revisions already exist for that service (`{service_arn}:{n}`).
+    /// Returns the new serviceRevisionArn.
+    pub fn record_service_revision(&mut self, service: &Service) -> String {
+        let n = self
+            .service_revisions
+            .values()
+            .filter(|r| r.service_arn == service.service_arn)
+            .count() as i32
+            + 1;
+        let arn = format!("{}:{}", service.service_arn, n);
+        self.service_revisions.insert(
+            arn.clone(),
+            ServiceRevision {
+                service_revision_arn: arn.clone(),
+                service_arn: service.service_arn.clone(),
+                cluster_arn: service.cluster_arn.clone(),
+                task_definition_arn: service.task_definition_arn.clone(),
+                launch_type: service.launch_type.clone(),
+                created_at: Utc::now(),
+            },
+        );
+        arn
     }
 
     /// Services are uniquely identified by `(cluster, name)` within an

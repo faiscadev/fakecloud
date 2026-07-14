@@ -174,14 +174,7 @@ impl EcsService {
                 .collect(),
             None => Vec::new(),
         };
-        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
-        let end = (start + max_results).min(arns.len());
-        let page = arns[start..end].to_vec();
-        let next = if end < arns.len() {
-            Some(end.to_string())
-        } else {
-            None
-        };
+        let (page, next) = paginate_arns(arns, next_token, max_results);
         let mut out = json!({ "clusterArns": page });
         if let Some(n) = next {
             out.as_object_mut()

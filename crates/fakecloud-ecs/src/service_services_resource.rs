@@ -238,6 +238,7 @@ impl EcsService {
                 volume_configurations: volume_configurations.clone(),
             };
             state.services.insert(key.clone(), service.clone());
+            state.record_service_revision(&service);
             if let Some(cluster) = state.clusters.get_mut(&cluster_name) {
                 cluster.active_services_count += 1;
             }
@@ -791,6 +792,14 @@ impl EcsService {
                 }),
             });
 
+            // A task-definition change mints a new service revision so
+            // DescribeServiceRevisions reflects the deployment history.
+            if new_deployment_triggered {
+                if let Some(svc) = state.services.get(&key).cloned() {
+                    state.record_service_revision(&svc);
+                }
+            }
+
             let svc = state.services.get(&key).unwrap();
             let mut service_json = service_to_json(svc);
             if controller == "CODE_DEPLOY" {
@@ -1080,14 +1089,12 @@ impl EcsService {
             None => Vec::new(),
         };
         arns.sort();
-        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
-        let end = (start + max_results).min(arns.len());
-        let page = arns[start..end].to_vec();
+        let (page, next) = paginate_arns(arns, next_token, max_results);
         let mut out = json!({"serviceArns": page});
-        if end < arns.len() {
+        if let Some(n) = next {
             out.as_object_mut()
                 .unwrap()
-                .insert("nextToken".into(), json!(end.to_string()));
+                .insert("nextToken".into(), json!(n));
         }
         Ok(AwsResponse::ok_json(out))
     }

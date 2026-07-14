@@ -563,14 +563,12 @@ impl EcsService {
             None => Vec::new(),
         };
         arns.sort();
-        let start = next_token.parse::<usize>().unwrap_or(0).min(arns.len());
-        let end = (start + max_results).min(arns.len());
-        let page = arns[start..end].to_vec();
+        let (page, next) = paginate_arns(arns, next_token, max_results);
         let mut out = json!({"taskArns": page});
-        if end < arns.len() {
+        if let Some(n) = next {
             out.as_object_mut()
                 .unwrap()
-                .insert("nextToken".into(), json!(end.to_string()));
+                .insert("nextToken".into(), json!(n));
         }
         Ok(AwsResponse::ok_json(out))
     }
@@ -759,6 +757,55 @@ mod multi_container_tests {
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert_eq!(body["tasks"].as_array().unwrap().len(), 1);
         assert_eq!(body["failures"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn describe_service_revisions_returns_stored_revision_or_missing() {
+        let svc = fresh_service();
+        svc.register_task_definition(&make_request(
+            "RegisterTaskDefinition",
+            json!({"family": "web", "containerDefinitions": [{"name": "app", "image": "alpine"}]}),
+        ))
+        .unwrap();
+        let created = svc
+            .create_service(&make_request(
+                "CreateService",
+                json!({"serviceName": "s", "taskDefinition": "web", "desiredCount": 0}),
+            ))
+            .unwrap();
+        let cbody: Value = serde_json::from_slice(created.body.expect_bytes()).unwrap();
+        let service_arn = cbody["service"]["serviceArn"].as_str().unwrap().to_string();
+
+        // CreateService minted revision 1.
+        let rev1 = format!("{service_arn}:1");
+        let d = svc
+            .describe_service_revisions(&make_request(
+                "DescribeServiceRevisions",
+                json!({"serviceRevisionArns": [rev1.clone()]}),
+            ))
+            .unwrap();
+        let dbody: Value = serde_json::from_slice(d.body.expect_bytes()).unwrap();
+        assert_eq!(dbody["serviceRevisions"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            dbody["serviceRevisions"][0]["serviceRevisionArn"],
+            json!(rev1)
+        );
+        assert!(dbody["serviceRevisions"][0]["taskDefinition"]
+            .as_str()
+            .unwrap()
+            .ends_with("web:1"));
+        assert_eq!(dbody["failures"].as_array().unwrap().len(), 0);
+
+        // Unknown revision -> MISSING.
+        let d2 = svc
+            .describe_service_revisions(&make_request(
+                "DescribeServiceRevisions",
+                json!({"serviceRevisionArns": [format!("{service_arn}:99")]}),
+            ))
+            .unwrap();
+        let d2body: Value = serde_json::from_slice(d2.body.expect_bytes()).unwrap();
+        assert_eq!(d2body["serviceRevisions"].as_array().unwrap().len(), 0);
+        assert_eq!(d2body["failures"][0]["reason"], "MISSING");
     }
 
     #[test]
