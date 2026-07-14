@@ -998,6 +998,63 @@ mod tests {
         assert!(svc.handle(req).await.is_err());
     }
 
+    #[tokio::test]
+    async fn assume_role_duration_exceeding_max_session_is_rejected() {
+        // The role's MaxSessionDuration is 3600; a DurationSeconds of 7200 is
+        // within the generic 900..43200 range but over the role cap, so AWS
+        // rejects it with ValidationError.
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state(&state, "capped-role");
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("DurationSeconds", "7200"),
+            ],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected ValidationError for over-cap DurationSeconds"),
+        };
+        assert_eq!(err.code(), "ValidationError");
+        assert!(format!("{err:?}").contains("MaxSessionDuration"));
+    }
+
+    #[tokio::test]
+    async fn assume_role_within_max_session_duration_succeeds() {
+        let (svc, state) = make_sts_service();
+        let role_arn = create_role_in_state(&state, "capped-role-ok");
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("DurationSeconds", "3000"),
+            ],
+        );
+        assert!(svc.handle(req).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn assume_role_unknown_account_arn_does_not_create_phantom_account() {
+        // A RoleArn naming an account that doesn't exist must be denied
+        // WITHOUT materializing that account (unbounded map growth guard).
+        let (svc, state) = make_sts_service();
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", "arn:aws:iam::999999999999:role/whatever"),
+                ("RoleSessionName", "sess"),
+            ],
+        );
+        assert!(svc.handle(req).await.is_err());
+        assert!(
+            state.read().get("999999999999").is_none(),
+            "attacker-controlled RoleArn must not insert a phantom account"
+        );
+    }
+
     // ── AssumeRoleWithWebIdentity ──
 
     #[tokio::test]
@@ -1076,6 +1133,42 @@ mod tests {
             format!("{err:?}").contains("AccessDenied"),
             "expected AccessDenied, got {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_web_identity_uses_stable_role_id_prefix() {
+        // The AssumedRoleId prefix must be the role's stable RoleId, not a
+        // fresh random AROA on every assume (so it's identical across calls).
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "web-role", trust);
+        let role_id = state
+            .read()
+            .get("123456789012")
+            .unwrap()
+            .roles
+            .get("web-role")
+            .unwrap()
+            .role_id
+            .clone();
+        let expected = format!("<AssumedRoleId>{role_id}:web-session</AssumedRoleId>");
+
+        for _ in 0..2 {
+            let req = sts_request(
+                "AssumeRoleWithWebIdentity",
+                vec![
+                    ("RoleArn", &role_arn),
+                    ("RoleSessionName", "web-session"),
+                    ("WebIdentityToken", "fake-jwt-token"),
+                ],
+            );
+            let resp = svc.handle(req).await.unwrap();
+            let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+            assert!(
+                body.contains(&expected),
+                "AssumedRoleId prefix must be the role's stable RoleId; body = {body}"
+            );
+        }
     }
 
     // ── AssumeRoleWithSAML ──

@@ -102,9 +102,15 @@ impl StsService {
         let account_id =
             extract_account_from_arn(role_arn).unwrap_or_else(|| req.account_id.clone());
 
-        // Look up role in the TARGET account's state to get its role_id
-        let target_state = accounts.get_or_create(&account_id);
         let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
+        // Look up the role WITHOUT creating the target account. An
+        // attacker-controlled RoleArn naming a non-existent account would
+        // otherwise insert an empty account that the next mutation persists
+        // (unbounded map growth + resolver-scan cost). The role-existence
+        // check below denies before any account is materialized.
+        let role = accounts
+            .get(&account_id)
+            .and_then(|s| s.roles.get(role_name).cloned());
 
         // Enforce the role's trust policy through the IAM evaluator.
         // The trust policy is a resource-style policy whose Principal
@@ -116,7 +122,8 @@ impl StsService {
         // exposes at AssumeRole time: sts:ExternalId,
         // sts:RoleSessionName, aws:MultiFactorAuthPresent, plus the
         // standard caller-identity keys.
-        if let Some(role) = target_state.roles.get(role_name).cloned() {
+        let role_id;
+        if let Some(role) = role {
             // Service-linked roles (`/aws-service-role/<service>/...`)
             // are only assumable by the matching service principal,
             // never by users or other roles. AWS rejects every other
@@ -209,6 +216,27 @@ impl StsService {
                     ));
                 }
             }
+
+            // Enforce the role's MaxSessionDuration: AWS rejects a
+            // DurationSeconds larger than the cap stored on the role,
+            // rather than silently honoring the generic 900..43200 range.
+            if let Some(ds) = req.query_params.get("DurationSeconds") {
+                if let Ok(v) = ds.parse::<i64>() {
+                    if v > role.max_session_duration as i64 {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            format!(
+                                "The requested DurationSeconds exceeds the MaxSessionDuration set for this role. \
+                                 The MaxSessionDuration for the role is {} seconds.",
+                                role.max_session_duration
+                            ),
+                        ));
+                    }
+                }
+            }
+
+            role_id = role.role_id.clone();
         } else {
             // AssumeRole against a role that does not exist must be denied
             // rather than fall through to credential minting with no trust
@@ -227,12 +255,6 @@ impl StsService {
                 ),
             ));
         }
-
-        let role_id = target_state
-            .roles
-            .get(role_name)
-            .map(|r| r.role_id.clone())
-            .unwrap_or_else(xml_responses::generate_role_id);
 
         let assumed_role_arn = format!(
             "arn:{}:sts::{}:assumed-role/{}/{}",
@@ -357,7 +379,6 @@ impl StsService {
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate();
-        let role_id = xml_responses::generate_role_id();
 
         let mut accounts = self.state.write();
         let caller_state = accounts.get_or_create(&req.account_id);
@@ -366,6 +387,13 @@ impl StsService {
             extract_account_from_arn(role_arn).unwrap_or_else(|| req.account_id.clone());
 
         let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
+        // Use the role's stable RoleId as the AssumedRoleId prefix (matching
+        // AWS), not a fresh random AROA on every assume. Fall back to a
+        // generated id only when the role isn't resolvable.
+        let role_id = accounts
+            .get(&account_id)
+            .and_then(|s| s.roles.get(role_name).map(|r| r.role_id.clone()))
+            .unwrap_or_else(xml_responses::generate_role_id);
         let assumed_role_arn = format!(
             "arn:{}:sts::{}:assumed-role/{}/{}",
             partition, account_id, role_name, role_session_name
@@ -666,7 +694,6 @@ impl StsService {
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate();
-        let role_id = xml_responses::generate_role_id();
 
         let mut accounts = self.state.write();
         let caller_state = accounts.get_or_create(&req.account_id);
@@ -675,6 +702,12 @@ impl StsService {
             extract_account_from_arn(role_arn).unwrap_or_else(|| req.account_id.clone());
 
         let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
+        // Use the role's stable RoleId as the AssumedRoleId prefix (matching
+        // AWS), not a fresh random AROA on every assume.
+        let role_id = accounts
+            .get(&account_id)
+            .and_then(|s| s.roles.get(role_name).map(|r| r.role_id.clone()))
+            .unwrap_or_else(xml_responses::generate_role_id);
         let assumed_role_arn = format!(
             "arn:{}:sts::{}:assumed-role/{}/{}",
             partition, account_id, role_name, role_session_name
