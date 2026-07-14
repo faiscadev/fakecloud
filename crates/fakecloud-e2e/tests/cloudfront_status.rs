@@ -86,21 +86,33 @@ async fn create_distribution_status_transitions_to_deployed() {
         "CreateDistribution must return InProgress synchronously"
     );
 
-    // Yield so the spawned `schedule_distribution_deploy` task gets a
-    // chance to run; 200ms is more than enough headroom for the 0s tick.
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-    let got = cf
-        .get_distribution()
-        .id(&id)
-        .send()
-        .await
-        .expect("get_distribution");
-    assert_eq!(
-        got.distribution().unwrap().status(),
-        "Deployed",
+    // Poll (bounded) for the spawned `schedule_distribution_deploy` task to
+    // flip the status, rather than racing a single fixed sleep under CI load.
+    assert!(
+        poll_for_status(&cf, &id, "Deployed").await,
         "GetDistribution after the tick should report Deployed"
     );
+}
+
+/// Poll `GetDistribution` until the distribution reports `want` or a bounded
+/// deadline elapses; returns whether the status was observed. Replaces a fixed
+/// sleep so the assertion doesn't race the spawned deploy task under CI load.
+async fn poll_for_status(cf: &aws_sdk_cloudfront::Client, id: &str, want: &str) -> bool {
+    for _ in 0..50 {
+        let st = cf
+            .get_distribution()
+            .id(id)
+            .send()
+            .await
+            .expect("get_distribution")
+            .distribution()
+            .map(|d| d.status().to_string());
+        if st.as_deref() == Some(want) {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    false
 }
 
 /// With a long delay, the auto-tick can't race the assertion, so we use
