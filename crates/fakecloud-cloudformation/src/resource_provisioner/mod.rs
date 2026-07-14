@@ -4370,7 +4370,7 @@ impl ResourceProvisioner {
             "arn:aws:application-autoscaling:{}:{}:scalable-target/{}",
             self.region,
             self.account_id,
-            &fakecloud_core::ids::short_id(10)
+            fakecloud_core::ids::short_id(10)
         );
         let role = role_arn.unwrap_or_else(|| {
             let suffix = match service_namespace.as_str() {

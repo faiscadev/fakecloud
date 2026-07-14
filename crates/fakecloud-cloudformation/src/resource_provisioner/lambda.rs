@@ -291,7 +291,7 @@ impl ResourceProvisioner {
         let statement_id = format!(
             "cfn-{}-{}",
             resource.logical_id,
-            &fakecloud_core::ids::short_id(8)
+            fakecloud_core::ids::short_id(8)
         );
         self.append_lambda_permission_statement(&function_name, &statement_id, props)?;
 
