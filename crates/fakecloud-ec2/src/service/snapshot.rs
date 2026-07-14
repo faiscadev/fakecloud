@@ -101,7 +101,7 @@ pub(crate) fn create_snapshots(
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
         if !state.instances.contains_key(&instance_id) {
-            return Err(not_found("InvalidInstanceId.NotFound", &instance_id));
+            return Err(not_found("InvalidInstanceID.NotFound", &instance_id));
         }
         // One snapshot per volume attached to the instance, each carrying the
         // real source volume id and size (not a fabricated placeholder).
