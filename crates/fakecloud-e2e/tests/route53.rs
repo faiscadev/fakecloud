@@ -824,7 +824,7 @@ async fn test_dns_answer_alias_target_resolves_against_s3_bucket_state() {
     // synthetic A record only when the bucket exists.
     let dns_name = format!("{bucket}.s3-website-us-east-1.amazonaws.com");
     let alias = ResourceRecordSet::builder()
-        .name("static.alias.example.com.")
+        .name("static.alias-s3.example.com.")
         .r#type(RrType::A)
         .alias_target(
             AliasTarget::builder()
@@ -842,7 +842,7 @@ async fn test_dns_answer_alias_target_resolves_against_s3_bucket_state() {
     let answer = r53
         .test_dns_answer()
         .hosted_zone_id(&zid)
-        .record_name("static.alias.example.com")
+        .record_name("static.alias-s3.example.com")
         .record_type(RrType::A)
         .send()
         .await

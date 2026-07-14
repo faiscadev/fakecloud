@@ -83,6 +83,19 @@ async fn r53_enable_hosted_zone_dnssec() {
     )
     .await;
     let r53 = server.route53_client().await;
+    // AWS refuses to enable signing until the zone has an ACTIVE
+    // key-signing key, so create one first.
+    r53.create_key_signing_key()
+        .caller_reference("conf-enable-dnssec-ksk")
+        .hosted_zone_id(&zone)
+        .key_management_service_arn(
+            "arn:aws:kms:us-east-1:000000000000:key/enabledns-0000-0000-0000-000000000000",
+        )
+        .name("conf_enable_dnssec_ksk")
+        .status("ACTIVE")
+        .send()
+        .await
+        .unwrap();
     r53.enable_hosted_zone_dnssec()
         .hosted_zone_id(&zone)
         .send()

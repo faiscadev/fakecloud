@@ -433,12 +433,26 @@ impl Route53Service {
             message: String::new(),
             traffic_policy_id: cfg.traffic_policy_id,
             traffic_policy_version: cfg.traffic_policy_version,
-            traffic_policy_type: policy.policy_type,
+            traffic_policy_type: policy.policy_type.clone(),
             created_time: Utc::now(),
         };
+        // Materialize the policy document into the zone's record set so the
+        // instance's DNS is visible via ListResourceRecordSets, like AWS.
+        let rrset = materialize_policy_rrset(
+            &policy.document,
+            &stored.name,
+            &stored.traffic_policy_type,
+            stored.ttl,
+            &stored.id,
+        );
         account
             .traffic_policy_instances
             .insert(id.clone(), stored.clone());
+        if let Some(zone) = account.hosted_zones.get_mut(&stored.hosted_zone_id) {
+            zone.resource_record_sets
+                .retain(|r| r.traffic_policy_instance_id.as_deref() != Some(stored.id.as_str()));
+            zone.resource_record_sets.push(rrset);
+        }
         drop(state);
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
@@ -507,9 +521,22 @@ impl Route53Service {
         i.ttl = cfg.ttl;
         i.traffic_policy_id = cfg.traffic_policy_id;
         i.traffic_policy_version = cfg.traffic_policy_version;
-        i.traffic_policy_type = policy.policy_type;
+        i.traffic_policy_type = policy.policy_type.clone();
         i.state = "Applied".to_string();
         let snap = i.clone();
+        // Re-materialize the instance's record set from the new policy doc.
+        let rrset = materialize_policy_rrset(
+            &policy.document,
+            &snap.name,
+            &snap.traffic_policy_type,
+            snap.ttl,
+            &snap.id,
+        );
+        if let Some(zone) = account.hosted_zones.get_mut(&snap.hosted_zone_id) {
+            zone.resource_record_sets
+                .retain(|r| r.traffic_policy_instance_id.as_deref() != Some(snap.id.as_str()));
+            zone.resource_record_sets.push(rrset);
+        }
         drop(state);
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
@@ -531,8 +558,13 @@ impl Route53Service {
             .accounts
             .get_mut(DEFAULT_ACCOUNT)
             .ok_or_else(|| no_such_traffic_policy_instance(&id))?;
-        if account.traffic_policy_instances.remove(&id).is_none() {
+        let Some(removed) = account.traffic_policy_instances.remove(&id) else {
             return Err(no_such_traffic_policy_instance(&id));
+        };
+        // Tear down the materialized record set for this instance.
+        if let Some(zone) = account.hosted_zones.get_mut(&removed.hosted_zone_id) {
+            zone.resource_record_sets
+                .retain(|r| r.traffic_policy_instance_id.as_deref() != Some(id.as_str()));
         }
         drop(state);
         let mut body = String::with_capacity(128);

@@ -283,6 +283,16 @@ impl Route53Service {
             ],
         )?;
         let dns_name = req.query_params.get("dnsname").cloned();
+        let start_id = req
+            .query_params
+            .get("hostedzoneid")
+            .map(|s| strip_zone_prefix(s));
+        let max_items: usize = req
+            .query_params
+            .get("maxitems")
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(100);
         let state = self.state.read();
         let mut zones: Vec<StoredHostedZone> = state
             .accounts
@@ -290,28 +300,61 @@ impl Route53Service {
             .map(|a| a.hosted_zones.values().cloned().collect())
             .unwrap_or_default();
         drop(state);
-        zones.sort_by(|a, b| a.name.cmp(&b.name));
-        if let Some(name) = &dns_name {
-            let normalized = if name.ends_with('.') {
-                name.clone()
-            } else {
-                format!("{name}.")
-            };
-            zones.retain(|z| z.name >= normalized);
-        }
+        // Route 53 orders by reversed DNS labels (com.example before
+        // com.example.a), tie-broken by zone id.
+        zones.sort_by(|a, b| {
+            reverse_dns_key(&a.name)
+                .cmp(&reverse_dns_key(&b.name))
+                .then(a.id.cmp(&b.id))
+        });
+        // Resolve the start offset from the (dnsname, hostedzoneid) cursor.
+        // A follow-up page echoes both from the prior NextDNSName /
+        // NextHostedZoneId; the first page may pass dnsname alone.
+        let start_idx = match (&dns_name, &start_id) {
+            (_, Some(hz)) => zones
+                .iter()
+                .position(|z| &z.id == hz)
+                .unwrap_or(zones.len()),
+            (Some(name), None) => {
+                let normalized = if name.ends_with('.') {
+                    name.clone()
+                } else {
+                    format!("{name}.")
+                };
+                let key = reverse_dns_key(&normalized);
+                zones
+                    .iter()
+                    .position(|z| reverse_dns_key(&z.name) >= key)
+                    .unwrap_or(zones.len())
+            }
+            (None, None) => 0,
+        };
+        let page: Vec<&StoredHostedZone> = zones.iter().skip(start_idx).take(max_items).collect();
+        let next = zones.get(start_idx + page.len());
+
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!("<ListHostedZonesByNameResponse xmlns=\"{NS}\">"));
         body.push_str("<HostedZones>");
-        for z in &zones {
+        for z in &page {
             push_hosted_zone(&mut body, z);
         }
         body.push_str("</HostedZones>");
         if let Some(name) = &dns_name {
             body.push_str(&format!("<DNSName>{}</DNSName>", esc(name)));
         }
-        body.push_str("<MaxItems>100</MaxItems>");
-        body.push_str("<IsTruncated>false</IsTruncated>");
+        if let Some(id) = &start_id {
+            body.push_str(&format!("<HostedZoneId>{}</HostedZoneId>", esc(id)));
+        }
+        body.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
+        body.push_str(&format!("<IsTruncated>{}</IsTruncated>", next.is_some()));
+        if let Some(n) = next {
+            body.push_str(&format!("<NextDNSName>{}</NextDNSName>", esc(&n.name)));
+            body.push_str(&format!(
+                "<NextHostedZoneId>{}</NextHostedZoneId>",
+                esc(&n.id)
+            ));
+        }
         body.push_str("</ListHostedZonesByNameResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }

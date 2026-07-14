@@ -70,8 +70,137 @@ pub(crate) fn rrset_matches(a: &ResourceRecordSet, b: &ResourceRecordSet) -> boo
     a.name == b.name && a.record_type == b.record_type && a.set_identifier == b.set_identifier
 }
 
+/// Sorted multiset of a record set's values (resource records + an alias
+/// target rendered as `ALIAS <zone>:<dns>`), used to compare whether two
+/// record sets carry the same data. Route 53's `DELETE` change action
+/// requires the caller to submit the record set's *current* values (and
+/// TTL) exactly; a name+type+set-identifier match alone is insufficient.
+fn rrset_value_key(r: &ResourceRecordSet) -> Vec<String> {
+    let mut vals: Vec<String> = r
+        .resource_records
+        .as_ref()
+        .map(|rr| rr.resource_record.iter().map(|x| x.value.clone()).collect())
+        .unwrap_or_default();
+    if let Some(at) = &r.alias_target {
+        vals.push(format!("ALIAS {}:{}", at.hosted_zone_id, at.dns_name));
+    }
+    vals.sort();
+    vals
+}
+
+/// True when two record sets carry identical TTL and value data, in
+/// addition to name/type/set-identifier. Used to gate `DELETE`.
+pub(crate) fn rrset_values_match(current: &ResourceRecordSet, want: &ResourceRecordSet) -> bool {
+    // AliasTarget-backed records have no TTL; only compare TTL when the
+    // caller supplied one (real Route 53 ignores TTL for alias deletes).
+    let ttl_ok = want.ttl.is_none() || current.ttl == want.ttl;
+    ttl_ok && rrset_value_key(current) == rrset_value_key(want)
+}
+
+/// Validate a record set submitted to `ChangeResourceRecordSets` for a
+/// `CREATE`/`UPSERT`. Enforces the three checks AWS applies that fakecloud
+/// previously skipped: the record name must sit within the zone, the type
+/// must be a known RR type, and value-bearing types must carry either
+/// `ResourceRecords` or an `AliasTarget`.
+pub(crate) fn validate_rrset_in_zone(
+    r: &ResourceRecordSet,
+    zone_name: &str,
+) -> Result<(), AwsServiceError> {
+    // `r.name` and `zone_name` are already normalized to a trailing dot.
+    let in_zone = r.name == zone_name
+        || r.name
+            .to_ascii_lowercase()
+            .ends_with(&format!(".{}", zone_name.to_ascii_lowercase()));
+    if !in_zone {
+        return Err(invalid_change_batch(format!(
+            "RRSet with DNS name {} is not permitted in zone {}",
+            r.name, zone_name
+        )));
+    }
+    if !RR_TYPES.contains(&r.record_type.as_str()) {
+        return Err(invalid_change_batch(format!(
+            "Invalid resource record set type: {}",
+            r.record_type
+        )));
+    }
+    let has_values = r
+        .resource_records
+        .as_ref()
+        .map(|rr| !rr.resource_record.is_empty())
+        .unwrap_or(false);
+    if !has_values && r.alias_target.is_none() {
+        return Err(invalid_change_batch(format!(
+            "Invalid resource record set [name='{}', type='{}']: must specify either ResourceRecords or AliasTarget",
+            r.name, r.record_type
+        )));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_default_record(r: &ResourceRecordSet, zone_name: &str) -> bool {
     r.name == zone_name && (r.record_type == "SOA" || r.record_type == "NS")
+}
+
+/// Reversed-label sort key for a DNS name (`www.example.com.` ->
+/// `com.example.www`). Route 53's `ListHostedZonesByName` orders zones by
+/// this key rather than plain lexicographic name order.
+pub(crate) fn reverse_dns_key(name: &str) -> String {
+    let trimmed = name.trim_end_matches('.');
+    let mut labels: Vec<&str> = trimmed.split('.').collect();
+    labels.reverse();
+    labels.join(".").to_ascii_lowercase()
+}
+
+/// Materialize a traffic-policy document into the record set AWS creates for
+/// a traffic policy instance. Real Route 53 expands the policy's rule/endpoint
+/// DAG into one or more record sets; fakecloud resolves the leaf endpoint
+/// values into a single record set carrying the instance name, type, TTL, the
+/// endpoint values, and the `TrafficPolicyInstanceId` link, so the instance's
+/// DNS shows up in `ListResourceRecordSets` exactly like any other record.
+pub(crate) fn materialize_policy_rrset(
+    document: &str,
+    name: &str,
+    record_type: &str,
+    ttl: i64,
+    instance_id: &str,
+) -> ResourceRecordSet {
+    let values = extract_endpoint_values(document);
+    ResourceRecordSet {
+        name: name.to_string(),
+        record_type: record_type.to_string(),
+        ttl: Some(ttl),
+        resource_records: if values.is_empty() {
+            None
+        } else {
+            Some(crate::model::ResourceRecords {
+                resource_record: values
+                    .into_iter()
+                    .map(|value| crate::model::ResourceRecord { value })
+                    .collect(),
+            })
+        },
+        traffic_policy_instance_id: Some(instance_id.to_string()),
+        ..Default::default()
+    }
+}
+
+/// Collect the leaf `Value` of every endpoint declared in a traffic policy
+/// document. Value endpoints carry a literal record value; ELB/S3/CloudFront
+/// endpoints carry the target DNS name as their `Value` — either way the
+/// `Value` is the record data to publish.
+fn extract_endpoint_values(document: &str) -> Vec<String> {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(document) else {
+        return Vec::new();
+    };
+    let Some(endpoints) = v.get("Endpoints").and_then(|e| e.as_object()) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = endpoints
+        .values()
+        .filter_map(|ep| ep.get("Value").and_then(|x| x.as_str()).map(String::from))
+        .collect();
+    out.sort();
+    out
 }
 
 pub(crate) fn push_hosted_zone(out: &mut String, z: &StoredHostedZone) {
@@ -2078,5 +2207,103 @@ mod log_arn_tests {
     fn rejects_non_logs_arn() {
         assert!(parse_log_group_arn("arn:aws:s3:::my-bucket").is_none());
         assert!(parse_log_group_arn("not-an-arn").is_none());
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    fn rr(vals: &[&str]) -> Option<crate::model::ResourceRecords> {
+        Some(crate::model::ResourceRecords {
+            resource_record: vals
+                .iter()
+                .map(|v| crate::model::ResourceRecord {
+                    value: v.to_string(),
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn reverse_dns_key_reverses_labels() {
+        assert_eq!(reverse_dns_key("www.example.com."), "com.example.www");
+        assert_eq!(reverse_dns_key("example.com"), "com.example");
+        // Zone apex sorts before its subdomains under the reversed key.
+        assert!(reverse_dns_key("example.com.") < reverse_dns_key("a.example.com."));
+    }
+
+    #[test]
+    fn rrset_values_match_requires_exact_values_and_ttl() {
+        let cur = ResourceRecordSet {
+            name: "a.example.com.".into(),
+            record_type: "A".into(),
+            ttl: Some(300),
+            resource_records: rr(&["1.2.3.4"]),
+            ..Default::default()
+        };
+        let same = ResourceRecordSet {
+            resource_records: rr(&["1.2.3.4"]),
+            ..cur.clone()
+        };
+        let diff_val = ResourceRecordSet {
+            resource_records: rr(&["9.9.9.9"]),
+            ..cur.clone()
+        };
+        let diff_ttl = ResourceRecordSet {
+            ttl: Some(60),
+            ..cur.clone()
+        };
+        assert!(rrset_values_match(&cur, &same));
+        assert!(!rrset_values_match(&cur, &diff_val));
+        assert!(!rrset_values_match(&cur, &diff_ttl));
+    }
+
+    #[test]
+    fn validate_rrset_rejects_out_of_zone_bad_type_and_empty() {
+        let good = ResourceRecordSet {
+            name: "a.example.com.".into(),
+            record_type: "A".into(),
+            resource_records: rr(&["1.2.3.4"]),
+            ..Default::default()
+        };
+        assert!(validate_rrset_in_zone(&good, "example.com.").is_ok());
+
+        let out_of_zone = ResourceRecordSet {
+            name: "a.other.org.".into(),
+            ..good.clone()
+        };
+        assert!(validate_rrset_in_zone(&out_of_zone, "example.com.").is_err());
+
+        let bad_type = ResourceRecordSet {
+            record_type: "ZZZ".into(),
+            ..good.clone()
+        };
+        assert!(validate_rrset_in_zone(&bad_type, "example.com.").is_err());
+
+        let empty = ResourceRecordSet {
+            name: "a.example.com.".into(),
+            record_type: "A".into(),
+            resource_records: None,
+            alias_target: None,
+            ..Default::default()
+        };
+        assert!(validate_rrset_in_zone(&empty, "example.com.").is_err());
+    }
+
+    #[test]
+    fn materialize_policy_rrset_extracts_endpoint_values() {
+        let doc = r#"{"AWSPolicyFormatVersion":"2015-10-01","RecordType":"A","Endpoints":{"a":{"Type":"value","Value":"1.1.1.1"},"b":{"Type":"value","Value":"2.2.2.2"}},"StartEndpoint":"a"}"#;
+        let rs = materialize_policy_rrset(doc, "app.example.com.", "A", 60, "tpi-1");
+        assert_eq!(rs.traffic_policy_instance_id.as_deref(), Some("tpi-1"));
+        assert_eq!(rs.ttl, Some(60));
+        let vals: Vec<String> = rs
+            .resource_records
+            .unwrap()
+            .resource_record
+            .into_iter()
+            .map(|r| r.value)
+            .collect();
+        assert_eq!(vals, vec!["1.1.1.1".to_string(), "2.2.2.2".to_string()]);
     }
 }

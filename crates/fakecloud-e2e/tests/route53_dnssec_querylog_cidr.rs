@@ -41,6 +41,19 @@ async fn dnssec_status_default_and_toggle() {
         Some("NOT_SIGNING")
     );
 
+    // AWS requires an ACTIVE key-signing key before signing can be enabled.
+    r53.create_key_signing_key()
+        .caller_reference("dnssec-toggle-ksk")
+        .hosted_zone_id(&zone)
+        .key_management_service_arn(
+            "arn:aws:kms:us-east-1:000000000000:key/toggle00-0000-0000-0000-000000000000",
+        )
+        .name("dnssec_toggle_ksk")
+        .status("ACTIVE")
+        .send()
+        .await
+        .expect("create ksk");
+
     r53.enable_hosted_zone_dnssec()
         .hosted_zone_id(&zone)
         .send()
@@ -455,12 +468,8 @@ async fn dnssec_rrsig_signs_and_verifies_against_dnskey() {
     let zone = make_zone(&server, "signed.example.com", "signed-zone").await;
     let r53 = server.route53_client().await;
 
-    // Enable DNSSEC + create an ACTIVE KSK for the zone.
-    r53.enable_hosted_zone_dnssec()
-        .hosted_zone_id(&zone)
-        .send()
-        .await
-        .expect("enable dnssec");
+    // Create an ACTIVE KSK first — AWS refuses to enable signing until the
+    // zone has one — then enable DNSSEC.
     r53.create_key_signing_key()
         .caller_reference("ksk-rrsig")
         .hosted_zone_id(&zone)
@@ -472,6 +481,11 @@ async fn dnssec_rrsig_signs_and_verifies_against_dnskey() {
         .send()
         .await
         .expect("create ksk");
+    r53.enable_hosted_zone_dnssec()
+        .hosted_zone_id(&zone)
+        .send()
+        .await
+        .expect("enable dnssec");
 
     // Fetch the public key + DS digest via the admin endpoint.
     let material = server

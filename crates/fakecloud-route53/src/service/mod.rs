@@ -280,6 +280,7 @@ const MUTATING_ACTIONS: &[&str] = &[
     "CreateTrafficPolicy",
     "CreateTrafficPolicyVersion",
     "DeleteTrafficPolicy",
+    "UpdateTrafficPolicyComment",
     "CreateTrafficPolicyInstance",
     "UpdateTrafficPolicyInstance",
     "DeleteTrafficPolicyInstance",

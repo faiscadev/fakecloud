@@ -35,6 +35,7 @@ impl Route53Service {
             let rec = normalize_rrset(&ch.resource_record_set);
             match action.as_str() {
                 "CREATE" => {
+                    validate_rrset_in_zone(&rec, &zone.name)?;
                     if working.iter().any(|r| rrset_matches(r, &rec)) {
                         return Err(invalid_change_batch(format!(
                             "Tried to create resource record set [name='{}', type='{}'] but it already exists",
@@ -44,6 +45,7 @@ impl Route53Service {
                     working.push(rec);
                 }
                 "UPSERT" => {
+                    validate_rrset_in_zone(&rec, &zone.name)?;
                     let pos = working.iter().position(|r| rrset_matches(r, &rec));
                     if let Some(p) = pos {
                         working[p] = rec;
@@ -63,6 +65,15 @@ impl Route53Service {
                         return Err(invalid_change_batch(
                             "Cannot delete default SOA or NS record",
                         ));
+                    }
+                    // Route 53 requires a DELETE to submit the record set's
+                    // current values (and TTL) exactly, not just a matching
+                    // name/type/set-identifier.
+                    if !rrset_values_match(&working[p], &rec) {
+                        return Err(invalid_change_batch(format!(
+                            "Tried to delete resource record set [name='{}', type='{}'] but the values provided do not match the current values",
+                            rec.name, rec.record_type
+                        )));
                     }
                     working.remove(p);
                 }
@@ -171,14 +182,18 @@ impl Route53Service {
         body.push_str("</ResourceRecordSets>");
         body.push_str(&format!("<IsTruncated>{}</IsTruncated>", next.is_some()));
         if let Some(n) = next {
-            body.push_str(&format!("<NextRecordName>{}</NextRecordName>", n.name));
+            body.push_str(&format!(
+                "<NextRecordName>{}</NextRecordName>",
+                esc(&n.name)
+            ));
             body.push_str(&format!(
                 "<NextRecordType>{}</NextRecordType>",
-                n.record_type
+                esc(&n.record_type)
             ));
             if let Some(si) = &n.set_identifier {
                 body.push_str(&format!(
-                    "<NextRecordIdentifier>{si}</NextRecordIdentifier>"
+                    "<NextRecordIdentifier>{}</NextRecordIdentifier>",
+                    esc(si)
                 ));
             }
         }

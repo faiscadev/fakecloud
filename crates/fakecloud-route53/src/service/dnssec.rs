@@ -207,6 +207,19 @@ impl Route53Service {
         if !account.hosted_zones.contains_key(&zone_id) {
             return Err(no_such_hosted_zone(&zone_id));
         }
+        // AWS refuses to enable signing until the zone has at least one
+        // ACTIVE key-signing key.
+        let has_active_ksk = account
+            .key_signing_keys
+            .values()
+            .any(|k| k.hosted_zone_id == zone_id && k.status.eq_ignore_ascii_case("ACTIVE"));
+        if !has_active_ksk {
+            return Err(aws_error(
+                StatusCode::BAD_REQUEST,
+                "KeySigningKeyWithActiveStatusNotFound",
+                format!("No ACTIVE key-signing key found for hosted zone {zone_id}"),
+            ));
+        }
         account
             .dnssec_status
             .insert(zone_id.clone(), "SIGNING".to_string());
