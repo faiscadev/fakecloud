@@ -560,6 +560,7 @@ impl RdsService {
             optional_query_param(request, "RotateMasterUserPassword").as_deref(),
         )?;
 
+        let new_db_instance_identifier = optional_query_param(request, "NewDBInstanceIdentifier");
         let db_instance_class = optional_query_param(request, "DBInstanceClass");
         let master_user_password = optional_query_param(request, "MasterUserPassword");
         let engine_version = optional_query_param(request, "EngineVersion");
@@ -671,13 +672,44 @@ impl RdsService {
             || domain_auth_secret_arn.is_some()
             || domain_dns_ips.is_some()
             || disable_domain.is_some()
-            || rotate_master_user_password.is_some();
+            || rotate_master_user_password.is_some()
+            || new_db_instance_identifier
+                .as_deref()
+                .is_some_and(|new_id| new_id != db_instance_identifier);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let instance = state
             .instances
             .get_mut(&db_instance_identifier)
             .ok_or_else(|| db_instance_not_found(&db_instance_identifier))?;
+
+        // Reject storage shrink / engine-version downgrade before mutating
+        // anything. Real AWS surfaces these as InvalidParameterCombination;
+        // silently accepting them corrupts the reported size/version.
+        if let Some(new_storage) = allocated_storage {
+            if new_storage < instance.allocated_storage {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterCombination",
+                    format!(
+                        "Invalid storage size for engine name {}: new allocated storage of {} is smaller than the current value of {}.",
+                        instance.engine, new_storage, instance.allocated_storage
+                    ),
+                ));
+            }
+        }
+        if let Some(ref new_version) = engine_version {
+            if is_version_downgrade(&instance.engine_version, new_version) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterCombination",
+                    format!(
+                        "Cannot downgrade the DB engine version of instance {} from {} to {}.",
+                        db_instance_identifier, instance.engine_version, new_version
+                    ),
+                ));
+            }
+        }
 
         // Smithy declares no `InvalidParameterCombination` shape on
         // ModifyDBInstance, so "no fields to mutate" treats as a no-op
@@ -813,7 +845,19 @@ impl RdsService {
                 instance.tde_credential_arn = Some(arn);
             }
             if let Some(p) = db_port_number {
-                instance.port = p;
+                // The reachable endpoint port is the container's published
+                // `host_port`; we can't re-publish a live container on a new
+                // port, so advertising an arbitrary DBPortNumber would point
+                // the endpoint at a port nothing listens on. Keep the
+                // advertised port equal to the reachable one whenever a
+                // container backs the instance; honor the requested port only
+                // when there's no live container (offline / no-backend mode),
+                // where the endpoint is suppressed anyway.
+                instance.port = if instance.host_port != 0 {
+                    i32::from(instance.host_port)
+                } else {
+                    p
+                };
             }
             if let Some(retention) = backup_retention_period {
                 instance.backup_retention_period = retention;
@@ -910,6 +954,50 @@ impl RdsService {
                 }
             }
         }
+
+        // NewDBInstanceIdentifier: rename the instance key + ARN + endpoint
+        // host. AWS applies the rename immediately when ApplyImmediately is
+        // set (otherwise at the next maintenance window); we apply it in
+        // place, mirroring the cluster rename path. Reject when the target
+        // already names another instance (or one mid-creation) so the rename
+        // can't silently clobber real data. The `&mut instance` borrow above
+        // has ended, so we can move the row inside `state.instances`.
+        let final_identifier = match new_db_instance_identifier {
+            Some(ref new_id) if *new_id != db_instance_identifier => {
+                if state.instances.contains_key(new_id)
+                    || state.in_progress_instance_ids.contains(new_id)
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "DBInstanceAlreadyExists",
+                        format!("DBInstance {new_id} already exists."),
+                    ));
+                }
+                let new_arn = state.db_instance_arn(new_id);
+                let mut moved = state
+                    .instances
+                    .remove(&db_instance_identifier)
+                    .expect("instance present after modify");
+                // Keep the advertised endpoint host consistent if it embedded
+                // the old identifier (real endpoints are `<id>.<...>`); the
+                // local 127.0.0.1 endpoint is unaffected.
+                if moved.endpoint_address.contains(&db_instance_identifier) {
+                    moved.endpoint_address = moved
+                        .endpoint_address
+                        .replace(&db_instance_identifier, new_id);
+                }
+                moved.db_instance_identifier = new_id.clone();
+                moved.db_instance_arn = new_arn;
+                state.instances.insert(new_id.clone(), moved);
+                new_id.clone()
+            }
+            _ => db_instance_identifier.clone(),
+        };
+
+        let instance = state
+            .instances
+            .get(&final_identifier)
+            .expect("instance present after modify");
         let instance_arn = instance.db_instance_arn.clone();
         let xml = query_response_xml(
             "ModifyDBInstance",
@@ -924,7 +1012,7 @@ impl RdsService {
 
         self.emit_event(
             RdsSourceType::DbInstance,
-            &db_instance_identifier,
+            &final_identifier,
             &instance_arn,
             "RDS-EVENT-0014",
             &["configuration change"],

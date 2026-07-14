@@ -169,8 +169,13 @@ pub(crate) fn parse_vpc_security_group_ids(req: &AwsRequest) -> Vec<String> {
         }
     }
 
-    // If no security groups provided, return a default one
-    vec!["sg-default".to_string()]
+    // No VPC security groups supplied. Don't fabricate a synthetic
+    // `sg-default` — real AWS attaches the VPC's actual default security
+    // group and ModifyDBInstance leaves the membership untouched (None)
+    // when the parameter is absent. Returning an empty list keeps Create
+    // consistent with Modify rather than reporting a group that doesn't
+    // exist in the account.
+    Vec::new()
 }
 
 pub(crate) fn query_param_prefix_exists(req: &AwsRequest, prefix: &str) -> bool {
@@ -196,6 +201,52 @@ pub(crate) fn parse_string_member_list(req: &AwsRequest, base: &str) -> Vec<Stri
 /// emitted on Create/Modify/Restore paths.
 pub(crate) fn parse_cloudwatch_logs_exports(req: &AwsRequest, base: &str) -> Vec<String> {
     parse_string_member_list(req, base)
+}
+
+/// Parse the leading dotted-numeric components of an engine version
+/// (e.g. `16.4` -> `[16, 4]`, `8.0.mysql_aurora.3.04.0` -> `[8, 0]`).
+/// Stops at the first non-numeric component so Aurora-style versions with
+/// embedded engine tokens don't get mis-compared. Returns `None` when the
+/// string has no leading numeric component.
+fn numeric_version_prefix(version: &str) -> Option<Vec<u64>> {
+    let parts: Vec<u64> = version
+        .split('.')
+        .map_while(|c| c.parse::<u64>().ok())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts)
+    }
+}
+
+/// True when `candidate` is a strictly-lower engine version than
+/// `current`, comparing dotted-numeric prefixes component-by-component.
+/// Conservative: when either version has no numeric prefix (unusual
+/// engine strings) we return `false` so a legitimate change isn't
+/// rejected as a downgrade.
+pub(crate) fn is_version_downgrade(current: &str, candidate: &str) -> bool {
+    match (
+        numeric_version_prefix(current),
+        numeric_version_prefix(candidate),
+    ) {
+        (Some(cur), Some(cand)) => {
+            // Compare only the components both versions share so a caller
+            // who supplies a shorter-but-equal prefix (e.g. "16" vs
+            // "16.3") isn't rejected. A downgrade is the first differing
+            // shared component being lower on the candidate side.
+            for (c, n) in cur.iter().zip(cand.iter()) {
+                if n < c {
+                    return true;
+                }
+                if n > c {
+                    return false;
+                }
+            }
+            false
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn parse_optional_i32(value: Option<&str>) -> Result<Option<i32>, AwsServiceError> {

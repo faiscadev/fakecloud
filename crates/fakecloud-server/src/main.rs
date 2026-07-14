@@ -2748,30 +2748,18 @@ async fn main() {
                                     "loaded rds persistence snapshot (migrated from v1)",
                                 );
                             }
-                            // Drop any `creating` placeholder rows the snapshot
-                            // captured mid-CreateDBInstance. The background
-                            // container-start task didn't survive the restart,
-                            // so the placeholder would otherwise be stuck in
-                            // `creating` forever. Dropping them is safe — the
-                            // user can retry CreateDBInstance.
+                            // Keep any `creating` placeholder rows the snapshot
+                            // captured mid-CreateDBInstance. CreateDBInstance
+                            // already acknowledged them to the client, so
+                            // DescribeDBInstances must not lose them on restart.
+                            // `recover_persisted_containers` (below) re-drives
+                            // `creating` rows through `ensure_*` to a live
+                            // container — dropping them here would make that
+                            // recovery branch dead code and silently vanish an
+                            // acknowledged instance.
                             {
                                 let mut mas = rds_state.write();
                                 for (_, state) in mas.iter_mut() {
-                                    let stuck: Vec<String> = state
-                                        .instances
-                                        .iter()
-                                        .filter(|(_, inst)| inst.db_instance_status == "creating")
-                                        .map(|(id, _)| id.clone())
-                                        .collect();
-                                    for id in &stuck {
-                                        state.instances.remove(id);
-                                    }
-                                    if !stuck.is_empty() {
-                                        tracing::warn!(
-                                            count = stuck.len(),
-                                            "dropped stuck `creating` rds instances after persistence load",
-                                        );
-                                    }
                                     // Clear any in-flight identifier reservations a
                                     // restore/replica op left in the snapshot. The
                                     // task that held them is dead, so a leftover
