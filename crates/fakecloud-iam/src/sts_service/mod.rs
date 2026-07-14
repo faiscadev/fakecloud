@@ -54,6 +54,28 @@ fn format_expiration(ts: DateTime<Utc>) -> String {
     ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
 }
 
+/// Enforce the AWS `RoleSessionName` pattern `[\w+=,.@-]*`. Without this, a
+/// name containing `<`, `>` or `&` is interpolated raw into the AssumedRoleId /
+/// assumed-role ARN in the XML response, producing malformed (and, for the
+/// attacker-controlled SAML session name, injectable) XML that SDK parsers
+/// reject. AWS rejects such input up front with a ValidationError.
+fn validate_session_name(name: &str) -> Result<(), AwsServiceError> {
+    if name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '+' | '=' | ',' | '.' | '@' | '-'))
+    {
+        return Ok(());
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationError",
+        format!(
+            "1 validation error detected: Value '{name}' at 'roleSessionName' failed to satisfy \
+             constraint: Member must satisfy regular expression pattern: [\\w+=,.@-]*"
+        ),
+    ))
+}
+
 /// Test-only wrapper around [`compute_expiration_at`] used by the existing
 /// duration unit tests.
 #[cfg(test)]
@@ -588,6 +610,20 @@ fn extract_saml_session_name(saml_b64: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_name_pattern_accepts_valid_and_rejects_xml_metacharacters() {
+        // AWS-legal characters pass.
+        for ok in ["testuser", "role.session-1", "a+b=c,d.e@f", "user_123"] {
+            assert!(validate_session_name(ok).is_ok(), "should accept {ok}");
+        }
+        // XML metacharacters (and anything else off-pattern) are rejected with
+        // ValidationError rather than injected raw into the response XML.
+        for bad in ["a<b", "a>b", "a&b", "a\"b", "a b", "a/b"] {
+            let err = validate_session_name(bad).unwrap_err();
+            assert_eq!(err.code(), "ValidationError", "should reject {bad:?}");
+        }
+    }
 
     #[test]
     fn test_partition_for_region() {
