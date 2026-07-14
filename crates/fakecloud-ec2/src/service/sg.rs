@@ -439,12 +439,24 @@ fn sg_not_found(id: &str) -> AwsServiceError {
 fn same_permission(a: &SecurityGroupRule, b: &SecurityGroupRule) -> bool {
     a.is_egress == b.is_egress
         && a.ip_protocol == b.ip_protocol
-        && a.from_port == b.from_port
-        && a.to_port == b.to_port
+        && ports_match(a, b)
         && a.cidr_ipv4 == b.cidr_ipv4
         && a.cidr_ipv6 == b.cidr_ipv6
         && a.prefix_list_id == b.prefix_list_id
         && a.referenced_group_id == b.referenced_group_id
+}
+
+/// Ports match for revoke purposes. For the all-traffic protocol (`-1`) AWS
+/// ignores port numbers entirely — it stores none — but clients round-trip the
+/// pair as `-1/-1`, `0/0`, or absent interchangeably (terraform revokes the
+/// default egress rule with `FromPort=0`/`ToPort=0`). So when the protocol is
+/// `-1` the ports are irrelevant to identity; for any real protocol they must
+/// match exactly.
+fn ports_match(a: &SecurityGroupRule, b: &SecurityGroupRule) -> bool {
+    if a.ip_protocol == "-1" {
+        return true;
+    }
+    a.from_port == b.from_port && a.to_port == b.to_port
 }
 
 fn authorize(
@@ -999,6 +1011,55 @@ mod modify_tests {
         let rules = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules;
         assert_eq!(rules.len(), 1, "only the port-22 rule should be revoked");
         assert_eq!(rules[0].rule_id, "sgr-b");
+    }
+
+    #[test]
+    fn revoke_all_traffic_egress_ignores_port_representation() {
+        // Terraform revokes the AWS-created default egress rule (protocol -1,
+        // stored as -1/-1) by sending FromPort=0/ToPort=0. The revoke must still
+        // match and remove it, or `aws_security_group` shows egress.# = 1.
+        let svc = Ec2Service::new();
+        let resp = create_security_group(
+            &svc,
+            &req(
+                "CreateSecurityGroup",
+                &[
+                    ("GroupName", "t"),
+                    ("GroupDescription", "d"),
+                    ("VpcId", "vpc-1"),
+                ],
+            ),
+        )
+        .unwrap();
+        let sg_id = {
+            let body = String::from_utf8_lossy(resp.body.expect_bytes());
+            body.split("<groupId>")
+                .nth(1)
+                .and_then(|s| s.split("</groupId>").next())
+                .unwrap()
+                .to_string()
+        };
+        revoke_security_group_egress(
+            &svc,
+            &req(
+                "RevokeSecurityGroupEgress",
+                &[
+                    ("GroupId", &sg_id),
+                    ("IpPermissions.1.IpProtocol", "-1"),
+                    ("IpPermissions.1.FromPort", "0"),
+                    ("IpPermissions.1.ToPort", "0"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "0.0.0.0/0"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let accounts = svc.state.read();
+        let rules = &accounts.get("000000000000").unwrap().security_groups[&sg_id].rules;
+        assert!(
+            rules.iter().all(|r| !r.is_egress),
+            "default all-traffic egress rule should be revoked despite 0/0 ports"
+        );
     }
 
     #[test]
