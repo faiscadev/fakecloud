@@ -332,6 +332,33 @@ impl LogsService {
             )
         })?;
 
+        // A PutLogEvents batch must contain at least one event, and every event
+        // must carry both a timestamp and a message (AWS rejects a batch that
+        // omits either rather than silently defaulting them).
+        if log_events.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterException",
+                "logEvents must contain at least one log event",
+            ));
+        }
+        for e in log_events.iter() {
+            if !e["timestamp"].is_i64() && !e["timestamp"].is_u64() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "each log event requires an integer timestamp",
+                ));
+            }
+            if !e["message"].is_string() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "each log event requires a message",
+                ));
+            }
+        }
+
         let now = Utc::now().timestamp_millis();
 
         // Check chronological order
@@ -381,6 +408,9 @@ impl LogsService {
                 timestamp: ts,
                 message: e["message"].as_str().unwrap_or("").to_string(),
                 ingestion_time: now,
+                // Assigned from the stream's counter once the stream is
+                // resolved below.
+                seq: 0,
             });
         }
 
@@ -419,6 +449,14 @@ impl LogsService {
                 "The specified log stream does not exist.",
             )
         })?;
+
+        // Assign each new event a stable, monotonically-increasing per-stream
+        // sequence number so a FilterLogEvents pagination cursor stays valid
+        // even after the stream is re-sorted by timestamp.
+        let base_seq = stream.events.iter().map(|e| e.seq).max().unwrap_or(0);
+        for (i, event) in new_events.iter_mut().enumerate() {
+            event.seq = base_seq + 1 + i as u64;
+        }
 
         // Update stream metadata
         for event in &new_events {
@@ -1036,7 +1074,7 @@ impl LogsService {
         };
 
         for (_, stream) in streams {
-            for (idx, event) in stream.events.iter().enumerate() {
+            for event in stream.events.iter() {
                 if let Some(cutoff) = retention_cutoff {
                     if event.timestamp < cutoff {
                         continue;
@@ -1062,11 +1100,12 @@ impl LogsService {
                     continue;
                 }
 
-                // Include the per-stream event index so two events with the
-                // same millisecond timestamp get distinct eventIds; otherwise a
-                // nextToken whose cursor is a shared eventId resumes at the
-                // first of the group and re-delivers the rest.
-                let event_id = format!("{}-{}-{}", stream.name, event.timestamp, idx);
+                // Build the eventId from the event's stable per-stream sequence
+                // number rather than its array index. The index shifts whenever
+                // an earlier event is inserted and the stream is re-sorted,
+                // which would break a nextToken cursor and silently drop the
+                // remaining page; the sequence number never shifts.
+                let event_id = format!("{}-{}-{}", stream.name, event.timestamp, event.seq);
 
                 filtered_events.push(json!({
                     "logStreamName": stream.name,
@@ -1393,6 +1432,102 @@ mod tests {
             vec!["a", "b", "c"],
             "same-timestamp events must each be delivered exactly once across pages"
         );
+    }
+
+    #[test]
+    fn filter_log_events_pagination_survives_concurrent_earlier_insert() {
+        // Regression: an index-based eventId cursor dropped the remaining page
+        // when an earlier-timestamped event was inserted between paginated
+        // calls (it shifted every subsequent array index). A stable per-event
+        // sequence number keeps the cursor valid.
+        let svc = make_service();
+        create_group(&svc, "reorder");
+        create_stream(&svc, "reorder", "s1");
+        let base = chrono::Utc::now().timestamp_millis();
+
+        let put = |ts: i64, msg: &str| {
+            svc.put_log_events(&make_request(
+                "PutLogEvents",
+                json!({
+                    "logGroupName": "reorder",
+                    "logStreamName": "s1",
+                    "logEvents": [{"timestamp": ts, "message": msg}],
+                }),
+            ))
+            .unwrap();
+        };
+
+        put(base + 1000, "first");
+        put(base + 2000, "second");
+
+        // Page 1: fetch a single event and a cursor.
+        let resp = svc
+            .filter_log_events(&make_request(
+                "FilterLogEvents",
+                json!({"logGroupName": "reorder", "limit": 1}),
+            ))
+            .unwrap();
+        let page1: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(page1["events"][0]["message"], "first");
+        let token = page1["nextToken"].as_str().unwrap().to_string();
+
+        // Insert an event with an EARLIER timestamp, forcing a re-sort that
+        // would shift array indices.
+        put(base + 500, "earlier");
+
+        // Page 2 must still deliver "second" rather than an empty page.
+        let resp = svc
+            .filter_log_events(&make_request(
+                "FilterLogEvents",
+                json!({"logGroupName": "reorder", "limit": 10, "nextToken": token}),
+            ))
+            .unwrap();
+        let page2: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let msgs: Vec<&str> = page2["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["message"].as_str().unwrap())
+            .collect();
+        assert!(
+            msgs.contains(&"second"),
+            "page 2 must still contain the later event after a reorder, got {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn put_log_events_rejects_empty_and_malformed_batch() {
+        let svc = make_service();
+        create_group(&svc, "val");
+        create_stream(&svc, "val", "s1");
+        let ts = chrono::Utc::now().timestamp_millis();
+
+        // Empty logEvents.
+        let empty = svc.put_log_events(&make_request(
+            "PutLogEvents",
+            json!({"logGroupName": "val", "logStreamName": "s1", "logEvents": []}),
+        ));
+        assert!(empty.is_err());
+
+        // Missing timestamp.
+        let no_ts = svc.put_log_events(&make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "val", "logStreamName": "s1",
+                "logEvents": [{"message": "hi"}]
+            }),
+        ));
+        assert!(no_ts.is_err());
+
+        // Missing message.
+        let no_msg = svc.put_log_events(&make_request(
+            "PutLogEvents",
+            json!({
+                "logGroupName": "val", "logStreamName": "s1",
+                "logEvents": [{"timestamp": ts}]
+            }),
+        ));
+        assert!(no_msg.is_err());
     }
 
     // ---- FilterLogEvents pattern matching tests ----

@@ -53,10 +53,11 @@ impl CloudWatchService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // AlarmName is required and the op declares ResourceNotFoundException;
-        // reject missing / unknown alarms with that declared error.
-        let alarm_name = optional_query_param(req, "AlarmName")
-            .ok_or_else(|| not_found("Alarm does not exist"))?;
+        // AlarmName is a required parameter: an omitted name is a missing-
+        // parameter validation error, whereas a present-but-unknown alarm is
+        // the declared ResourceNotFoundException.
+        let alarm_name =
+            optional_query_param(req, "AlarmName").ok_or_else(|| missing_param("AlarmName"))?;
         let state = self.state.read();
         let exists = state
             .get(&req.account_id)

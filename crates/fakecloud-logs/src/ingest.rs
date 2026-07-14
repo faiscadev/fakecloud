@@ -73,7 +73,8 @@ pub fn append_events(
             events: Vec::new(),
         });
 
-    for e in events {
+    let base_seq = stream.events.iter().map(|e| e.seq).max().unwrap_or(0);
+    for (i, e) in events.iter().enumerate() {
         if stream.first_event_timestamp.is_none() {
             stream.first_event_timestamp = Some(e.timestamp_ms);
         }
@@ -89,6 +90,8 @@ pub fn append_events(
             timestamp: e.timestamp_ms,
             message: e.message.clone(),
             ingestion_time: now,
+            // Stable, monotonically-increasing per-stream sequence number.
+            seq: base_seq + 1 + i as u64,
         });
     }
 }

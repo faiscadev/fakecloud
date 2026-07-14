@@ -247,6 +247,254 @@ async fn composite_alarm_in_describe_alarms() {
     assert!(!body_of(&after).contains("ALARM(x)"));
 }
 
+// H5: metric alarms are evaluated against PutMetricData on DescribeAlarms.
+#[tokio::test]
+async fn metric_alarm_evaluates_to_alarm_above_threshold() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "cpu-alarm"),
+            ("Namespace", "Test/App"),
+            ("MetricName", "CPU"),
+            ("ComparisonOperator", "GreaterThanThreshold"),
+            ("Threshold", "50"),
+            ("EvaluationPeriods", "1"),
+            ("Period", "60"),
+            ("Statistic", "Average"),
+        ],
+    )
+    .await;
+    // Publish a datapoint above the threshold.
+    call(
+        &svc,
+        "PutMetricData",
+        &[
+            ("Namespace", "Test/App"),
+            ("MetricData.member.1.MetricName", "CPU"),
+            ("MetricData.member.1.Value", "100"),
+        ],
+    )
+    .await;
+    let desc = call(
+        &svc,
+        "DescribeAlarms",
+        &[("AlarmNames.member.1", "cpu-alarm")],
+    )
+    .await;
+    assert!(
+        body_of(&desc).contains("<StateValue>ALARM</StateValue>"),
+        "alarm above threshold should be ALARM: {}",
+        body_of(&desc)
+    );
+}
+
+#[tokio::test]
+async fn metric_alarm_evaluates_to_ok_below_threshold() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "cpu-ok"),
+            ("Namespace", "Test/App2"),
+            ("MetricName", "CPU"),
+            ("ComparisonOperator", "GreaterThanThreshold"),
+            ("Threshold", "50"),
+            ("EvaluationPeriods", "1"),
+            ("Period", "60"),
+            ("Statistic", "Average"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "PutMetricData",
+        &[
+            ("Namespace", "Test/App2"),
+            ("MetricData.member.1.MetricName", "CPU"),
+            ("MetricData.member.1.Value", "10"),
+        ],
+    )
+    .await;
+    let desc = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "cpu-ok")]).await;
+    assert!(
+        body_of(&desc).contains("<StateValue>OK</StateValue>"),
+        "alarm below threshold should be OK: {}",
+        body_of(&desc)
+    );
+}
+
+// A manually-set state must survive DescribeAlarms re-evaluation when the
+// watched metric has no datapoints (default treat-missing-data).
+#[tokio::test]
+async fn set_alarm_state_survives_evaluation_without_data() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "manual"),
+            ("Namespace", "Test/None"),
+            ("MetricName", "M"),
+            ("ComparisonOperator", "GreaterThanThreshold"),
+            ("Threshold", "1"),
+            ("EvaluationPeriods", "1"),
+            ("Statistic", "Sum"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "manual"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "manual"),
+        ],
+    )
+    .await;
+    let desc = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "manual")]).await;
+    assert!(body_of(&desc).contains("<StateValue>ALARM</StateValue>"));
+}
+
+// H3: a composite alarm reflects ALARM when its rule is satisfied by children.
+#[tokio::test]
+async fn composite_alarm_reflects_children_states() {
+    let svc = service();
+    for name in ["child-a", "child-b"] {
+        call(
+            &svc,
+            "PutMetricAlarm",
+            &[
+                ("AlarmName", name),
+                ("Namespace", "Test/C"),
+                ("MetricName", "M"),
+                ("ComparisonOperator", "GreaterThanThreshold"),
+                ("Threshold", "1"),
+                ("EvaluationPeriods", "1"),
+                ("Statistic", "Sum"),
+            ],
+        )
+        .await;
+        call(
+            &svc,
+            "SetAlarmState",
+            &[
+                ("AlarmName", name),
+                ("StateValue", "ALARM"),
+                ("StateReason", "x"),
+            ],
+        )
+        .await;
+    }
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[
+            ("AlarmName", "comp2"),
+            ("AlarmRule", "ALARM(child-a) AND ALARM(child-b)"),
+        ],
+    )
+    .await;
+    let desc = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp2")]).await;
+    let b = body_of(&desc);
+    assert!(
+        b.contains("<CompositeAlarms>") && b.contains("<StateValue>ALARM</StateValue>"),
+        "composite should be ALARM when both children ALARM: {b}"
+    );
+
+    // Flip one child OK -> composite should evaluate back to OK.
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "child-a"),
+            ("StateValue", "OK"),
+            ("StateReason", "x"),
+        ],
+    )
+    .await;
+    let desc = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp2")]).await;
+    assert!(body_of(&desc).contains("<StateValue>OK</StateValue>"));
+}
+
+// H4: SetAlarmState can target a composite alarm.
+#[tokio::test]
+async fn set_alarm_state_targets_composite_alarm() {
+    let svc = service();
+    call(
+        &svc,
+        "PutCompositeAlarm",
+        &[("AlarmName", "comp3"), ("AlarmRule", "ALARM(x)")],
+    )
+    .await;
+    // Previously this returned ResourceNotFound (only metric alarms checked).
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "comp3"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "manual"),
+        ],
+    )
+    .await;
+    // Verify directly against state (DescribeAlarms would re-evaluate the rule).
+    let state = svc.state.read();
+    let sv = state
+        .get(ACCT)
+        .and_then(|a| a.composite_alarms_in(REGION))
+        .and_then(|c| c.get("comp3"))
+        .map(|c| c.state_value)
+        .unwrap();
+    assert_eq!(sv, crate::state::AlarmState::Alarm);
+}
+
+// H3: PutCompositeAlarm rejects a malformed AlarmRule.
+#[tokio::test]
+async fn put_composite_alarm_rejects_malformed_rule() {
+    let svc = service();
+    let err = call_err(
+        &svc,
+        "PutCompositeAlarm",
+        &[("AlarmName", "bad"), ("AlarmRule", "ALARM(")],
+    )
+    .await;
+    assert_eq!(err.code(), "ValidationError");
+}
+
+// M1: JSON-protocol epoch-second timestamps are accepted on PutMetricData.
+#[tokio::test]
+async fn put_metric_data_accepts_epoch_second_timestamp() {
+    let svc = service();
+    let now = chrono::Utc::now().timestamp();
+    call(
+        &svc,
+        "PutMetricData",
+        &[
+            ("Namespace", "Test/Epoch"),
+            ("MetricData.member.1.MetricName", "M"),
+            ("MetricData.member.1.Value", "5"),
+            ("MetricData.member.1.Timestamp", &now.to_string()),
+        ],
+    )
+    .await;
+    // Read it back over a window that includes `now`; an epoch-second timestamp
+    // that was dropped would have defaulted to ingestion time (still now), so
+    // instead assert the stored datum carries the exact epoch we sent.
+    let state = svc.state.read();
+    let datum_ts = state
+        .get(ACCT)
+        .and_then(|a| a.metrics_in(REGION))
+        .and_then(|m| m.get("Test/Epoch"))
+        .and_then(|v| v.first())
+        .map(|d| d.timestamp.timestamp())
+        .unwrap();
+    assert_eq!(datum_ts, now);
+}
+
 #[tokio::test]
 async fn mute_rule_lifecycle() {
     let svc = service();

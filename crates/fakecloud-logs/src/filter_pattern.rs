@@ -162,18 +162,22 @@ fn eval_atom(condition: &str, json: &Value) -> bool {
 
     let ops = ["!=", ">=", "<=", "=", ">", "<"];
     let mut found: Option<(&str, usize)> = None;
-    let bytes = condition.as_bytes();
+    // Iterate by character index so a multi-byte character (e.g. `é`) never
+    // leaves the cursor on a UTF-8 continuation byte, which would panic when
+    // slicing `condition[i..]`. The operator tokens are all ASCII.
     let mut in_quotes = false;
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == b'\\' && i + 1 < bytes.len() {
-            i += 2;
+    let mut escaped = false;
+    for (i, c) in condition.char_indices() {
+        if escaped {
+            escaped = false;
             continue;
         }
-        if c == b'"' {
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == '"' {
             in_quotes = !in_quotes;
-            i += 1;
             continue;
         }
         if !in_quotes {
@@ -186,7 +190,6 @@ fn eval_atom(condition: &str, json: &Value) -> bool {
                 break;
             }
         }
-        i += 1;
     }
 
     let Some((op, pos)) = found else {
@@ -525,6 +528,17 @@ mod tests {
     fn resolve_metric_value_json_path_extracts_field() {
         let v = resolve_metric_value("$.bytes", None, r#"{"bytes": 1024}"#);
         assert_eq!(v, 1024.0);
+    }
+
+    #[test]
+    fn multibyte_json_pattern_does_not_panic() {
+        // A multi-byte character in the JSON condition must not panic the
+        // byte-index scan (regression: non-char-boundary slice).
+        assert!(!matches("{ café }", r#"{"statusCode": 500}"#));
+        assert!(!matches("{ $.café = 1 }", r#"{"statusCode": 500}"#));
+        assert!(matches("{ $.café = 1 }", r#"{"café": 1}"#));
+        // Multi-byte inside a quoted value must also be safe.
+        assert!(matches("{ $.name = \"café\" }", r#"{"name": "café"}"#));
     }
 
     #[test]

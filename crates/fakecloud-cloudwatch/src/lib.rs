@@ -1,3 +1,4 @@
+pub(crate) mod alarm_eval;
 pub(crate) mod anomaly_detectors;
 pub(crate) mod composite_alarms;
 pub(crate) mod datasets;

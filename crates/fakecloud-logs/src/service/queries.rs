@@ -52,6 +52,17 @@ impl LogsService {
         }
         validate_optional_string_length("queryString", Some(&query_string), 0, 10000)?;
 
+        // Reject a malformed query up front (AWS surfaces MalformedQueryException
+        // from StartQuery) so a broken query string is never stored to later
+        // trip up GetQueryResults.
+        if let Err(e) = query::parse_query(&query_string) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedQueryException",
+                e,
+            ));
+        }
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -131,8 +142,11 @@ impl LogsService {
             )
         })?;
 
-        // Parse the query string
-        let parsed = query::parse_query(&query_info.query_string);
+        // Parse the query string. StartQuery already rejected malformed
+        // queries; treat any residual parse failure as an empty pipeline so a
+        // stored-then-corrupted query can never panic or return an undeclared
+        // error here (GetQueryResults does not declare MalformedQueryException).
+        let parsed = query::parse_query(&query_info.query_string).unwrap_or_default();
 
         // Collect events by stream from every group/identifier the query
         // referenced, not just the legacy single `log_group_name`. ARNs are
@@ -267,9 +281,20 @@ impl LogsService {
             })
             .collect();
 
+        let (page, next_token) = super::paginate_offset(
+            &queries,
+            body["maxResults"].as_i64(),
+            1000,
+            body["nextToken"].as_str(),
+        );
+        let mut result = json!({ "queries": page });
+        if let Some(token) = next_token {
+            result["nextToken"] = json!(token);
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "queries": queries })).unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 
@@ -391,9 +416,20 @@ impl LogsService {
             })
             .collect();
 
+        let (page, next_token) = super::paginate_offset(
+            &defs,
+            body["maxResults"].as_i64(),
+            1000,
+            body["nextToken"].as_str(),
+        );
+        let mut result = json!({ "queryDefinitions": page });
+        if let Some(token) = next_token {
+            result["nextToken"] = json!(token);
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "queryDefinitions": defs })).unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 
@@ -633,6 +669,56 @@ mod tests {
             }),
         );
         assert!(svc.start_query(&req).is_err());
+    }
+
+    #[test]
+    fn start_query_malformed_query_string_errors() {
+        let svc = make_service();
+        create_group(&svc, "app");
+        // A lone regex delimiter previously panicked when GetQueryResults parsed
+        // it; StartQuery now rejects it with MalformedQueryException.
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "app",
+                "startTime": 0,
+                "endTime": 0,
+                "queryString": "filter @message like /"
+            }),
+        );
+        match svc.start_query(&req) {
+            Err(e) => assert_eq!(e.code(), "MalformedQueryException"),
+            Ok(_) => panic!("expected MalformedQueryException"),
+        }
+    }
+
+    #[test]
+    fn get_query_results_does_not_panic_on_bad_stored_query() {
+        // Even if a malformed query slips into storage, GetQueryResults must
+        // return (empty) results rather than panic.
+        let svc = make_service();
+        create_group(&svc, "app");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("123456789012");
+            state.queries.insert(
+                "q-bad".to_string(),
+                crate::state::QueryInfo {
+                    query_id: "q-bad".to_string(),
+                    log_group_name: "app".to_string(),
+                    log_group_identifiers: vec!["app".to_string()],
+                    query_string: "filter x = \"".to_string(),
+                    start_time: 0,
+                    end_time: 0,
+                    status: "Complete".to_string(),
+                    create_time: 0,
+                },
+            );
+        }
+        let get = make_request("GetQueryResults", json!({"queryId": "q-bad"}));
+        let resp = svc.get_query_results(&get).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(body["results"].is_array());
     }
 
     #[test]
