@@ -450,16 +450,10 @@ impl EcrService {
             }
             None => DEFAULT_PAGE_SIZE,
         };
-        let offset = match body.get("nextToken").and_then(|v| v.as_str()) {
-            Some(raw) => raw.parse::<usize>().map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterException",
-                    "The specified parameter is invalid: nextToken",
-                )
-            })?,
-            None => 0,
-        };
+        // Key-based cursor (base64 of the last-emitted image digest) instead of
+        // a numeric offset, so pages stay stable when images are added/deleted
+        // between calls rather than skipping or duplicating rows.
+        let cursor = decode_page_token(body.get("nextToken").and_then(|v| v.as_str()))?;
         let account = target_account_id(request, &body);
         let accounts = self.state.read();
         let state = accounts
@@ -473,14 +467,21 @@ impl EcrService {
         let mut details: Vec<Value> = Vec::new();
         let mut next_token: Option<String> = None;
         if ids.is_empty() {
-            let all: Vec<&Image> = repo.images.values().collect();
-            let start = offset.min(all.len());
+            // repo.images is a BTreeMap, so keys() is sorted by digest.
+            let all: Vec<(&String, &Image)> = repo.images.iter().collect();
+            let start = match &cursor {
+                None => 0,
+                Some(c) => all
+                    .iter()
+                    .position(|(k, _)| k.as_str() > c.as_str())
+                    .unwrap_or(all.len()),
+            };
             let end = (start + max_results).min(all.len());
-            for img in &all[start..end] {
+            for (_, img) in &all[start..end] {
                 details.push(image_to_details(repo, img, &repo.registry_id));
             }
             if end < all.len() {
-                next_token = Some(end.to_string());
+                next_token = Some(encode_page_token(all[end - 1].0));
             }
         } else {
             for id in &ids {
@@ -518,16 +519,9 @@ impl EcrService {
             }
             None => DEFAULT_PAGE_SIZE,
         };
-        let offset = match body.get("nextToken").and_then(|v| v.as_str()) {
-            Some(raw) => raw.parse::<usize>().map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterException",
-                    "The specified parameter is invalid: nextToken",
-                )
-            })?,
-            None => 0,
-        };
+        // Key-based cursor over the sorted (digest, tag) list — stable across
+        // concurrent add/delete, unlike the previous numeric offset.
+        let cursor = decode_page_token(body.get("nextToken").and_then(|v| v.as_str()))?;
         let account = target_account_id(request, &body);
         let accounts = self.state.read();
         let state = accounts
@@ -557,7 +551,13 @@ impl EcrService {
         });
         all.sort();
 
-        let start = offset.min(all.len());
+        let start = match &cursor {
+            None => 0,
+            Some(c) => all
+                .iter()
+                .position(|(d, t)| list_image_key(d, t.as_deref()).as_str() > c.as_str())
+                .unwrap_or(all.len()),
+        };
         let end = (start + max_results).min(all.len());
         let ids: Vec<Value> = all[start..end]
             .iter()
@@ -571,7 +571,8 @@ impl EcrService {
             .collect();
         let mut response = json!({ "imageIds": ids });
         if end < all.len() {
-            response["nextToken"] = json!(end.to_string());
+            let (d, t) = &all[end - 1];
+            response["nextToken"] = json!(encode_page_token(&list_image_key(d, t.as_deref())));
         }
         Ok(AwsResponse::ok_json(response))
     }
@@ -870,5 +871,204 @@ impl EcrService {
             "imageId": image_id,
             "imageStatus": new_status,
         })))
+    }
+}
+
+/// Encode a pagination cursor: base64 of the last-emitted item's sort key.
+/// AWS ECR nextTokens are opaque strings; a stable key (image digest, or
+/// `digest\0tag` for ListImages) survives concurrent add/delete between pages
+/// where a numeric offset would skip or duplicate rows.
+fn encode_page_token(key: &str) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(key.as_bytes())
+}
+
+/// Decode a pagination cursor produced by [`encode_page_token`]. A malformed
+/// token yields the same `InvalidParameterException` AWS returns.
+fn decode_page_token(raw: Option<&str>) -> Result<Option<String>, AwsServiceError> {
+    use base64::Engine;
+    let Some(s) = raw else { return Ok(None) };
+    let invalid = || {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            "The specified parameter is invalid: nextToken",
+        )
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(s)
+        .map_err(|_| invalid())?;
+    let key = String::from_utf8(bytes).map_err(|_| invalid())?;
+    Ok(Some(key))
+}
+
+/// Sort/cursor key for a ListImages `(digest, tag)` row. A NUL separator keeps
+/// the ordering identical to the tuple sort (untagged `None` -> empty suffix,
+/// which sorts before any tagged variant of the same digest).
+fn list_image_key(digest: &str, tag: Option<&str>) -> String {
+    format!("{digest}\u{0}{}", tag.unwrap_or(""))
+}
+
+#[cfg(test)]
+mod pagination_and_validation_tests {
+    use super::*;
+    use crate::state::{EcrState, PullThroughCacheRule, Repository};
+    use crate::EcrService;
+    use bytes::Bytes;
+    use chrono::Utc;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use http::{HeaderMap, Method};
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const ACCT: &str = "111111111111";
+
+    fn svc() -> EcrService {
+        let mut mas: MultiAccountState<EcrState> =
+            MultiAccountState::new(ACCT, "us-east-1", "http://fakecloud:4566");
+        let s = mas.get_or_create(ACCT);
+        let arn = s.repository_arn("app");
+        s.repositories.insert(
+            "app".into(),
+            Repository::new("app", arn, ACCT, "fakecloud:4566"),
+        );
+        EcrService::new(Arc::new(RwLock::new(mas)))
+    }
+
+    fn req(action: &str, body: serde_json::Value) -> AwsRequest {
+        AwsRequest {
+            service: "ecr".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: ACCT.into(),
+            request_id: "r".into(),
+            headers: HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_of(resp: AwsResponse) -> serde_json::Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[test]
+    fn page_token_round_trips_and_rejects_garbage() {
+        let t = encode_page_token("sha256:abc");
+        assert_eq!(
+            decode_page_token(Some(&t)).unwrap().as_deref(),
+            Some("sha256:abc")
+        );
+        assert!(decode_page_token(Some("!!!not-base64!!!")).is_err());
+        assert_eq!(decode_page_token(None).unwrap(), None);
+    }
+
+    #[test]
+    fn describe_images_paginates_by_stable_digest_cursor() {
+        let svc = svc();
+        for i in 0..3 {
+            svc.put_image(&req(
+                "PutImage",
+                serde_json::json!({
+                    "repositoryName": "app",
+                    "imageManifest": format!("{{\"schemaVersion\":2,\"n\":{i}}}"),
+                }),
+            ))
+            .unwrap();
+        }
+        // Page 1: 2 of 3, with a nextToken.
+        let p1 = body_of(
+            svc.describe_images(&req(
+                "DescribeImages",
+                serde_json::json!({"repositoryName": "app", "maxResults": 2}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(p1["imageDetails"].as_array().unwrap().len(), 2);
+        let token = p1["nextToken"].as_str().expect("nextToken on page 1");
+        // Page 2: the remaining 1, no overlap with page 1.
+        let p2 = body_of(
+            svc.describe_images(&req(
+                "DescribeImages",
+                serde_json::json!({"repositoryName": "app", "maxResults": 2, "nextToken": token}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(p2["imageDetails"].as_array().unwrap().len(), 1);
+        assert!(p2.get("nextToken").is_none());
+        let d1: Vec<&str> = p1["imageDetails"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["imageDigest"].as_str().unwrap())
+            .collect();
+        let d2 = p2["imageDetails"][0]["imageDigest"].as_str().unwrap();
+        assert!(
+            !d1.contains(&d2),
+            "page 2 must not duplicate a page-1 image"
+        );
+    }
+
+    #[test]
+    fn validate_pull_through_reflects_credential_requirement() {
+        let svc = svc();
+        {
+            let state = svc.state_handle();
+            let mut accounts = state.write();
+            let s = accounts.get_mut(ACCT).unwrap();
+            // Docker Hub upstream requires credentials.
+            s.pull_through_cache_rules.insert(
+                "dockerhub".into(),
+                PullThroughCacheRule {
+                    ecr_repository_prefix: "dockerhub".into(),
+                    upstream_registry_url: "registry-1.docker.io".into(),
+                    upstream_registry: Some("docker-hub".into()),
+                    credential_arn: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    custom_role_arn: None,
+                },
+            );
+            // Public ECR needs none.
+            s.pull_through_cache_rules.insert(
+                "ecr-public".into(),
+                PullThroughCacheRule {
+                    ecr_repository_prefix: "ecr-public".into(),
+                    upstream_registry_url: "public.ecr.aws".into(),
+                    upstream_registry: Some("ecr-public".into()),
+                    credential_arn: None,
+                    created_at: Utc::now(),
+                    updated_at: Utc::now(),
+                    custom_role_arn: None,
+                },
+            );
+        }
+        let invalid = body_of(
+            svc.validate_pull_through_cache_rule(&req(
+                "ValidatePullThroughCacheRule",
+                serde_json::json!({"ecrRepositoryPrefix": "dockerhub"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(invalid["isValid"], serde_json::json!(false));
+        assert!(invalid.get("failure").is_some());
+
+        let valid = body_of(
+            svc.validate_pull_through_cache_rule(&req(
+                "ValidatePullThroughCacheRule",
+                serde_json::json!({"ecrRepositoryPrefix": "ecr-public"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(valid["isValid"], serde_json::json!(true));
     }
 }

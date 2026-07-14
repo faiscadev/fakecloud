@@ -151,8 +151,26 @@ impl EcrService {
                 )
             })?;
         let registry_id = state.map(|s| s.account_id.clone()).unwrap_or_default();
+        // Validate the rule's configuration the way AWS does: the public
+        // upstreams (ECR Public, registry.k8s.io, Quay) need no credentials,
+        // but Docker Hub / GitHub / Azure / GitLab require a credentialArn (or
+        // customRoleArn). A creds-requiring upstream with neither is invalid.
+        let url = rule.upstream_registry_url.to_ascii_lowercase();
+        let is_public_upstream = url.is_empty()
+            || url.contains("public.ecr.aws")
+            || url.contains("registry.k8s.io")
+            || url.contains("quay.io");
+        let has_credentials = rule.credential_arn.is_some() || rule.custom_role_arn.is_some();
+        let is_valid = is_public_upstream || has_credentials;
         let mut base = pull_through_rule_json(&registry_id, rule);
-        base["isValid"] = json!(true);
+        base["isValid"] = json!(is_valid);
+        if !is_valid {
+            base["failure"] = json!(format!(
+                "The pull through cache rule for upstream registry '{}' requires credentials, \
+                 but no credentialArn or customRoleArn is configured.",
+                rule.upstream_registry_url
+            ));
+        }
         Ok(AwsResponse::ok_json(base))
     }
 }

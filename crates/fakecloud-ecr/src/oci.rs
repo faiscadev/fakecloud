@@ -713,6 +713,16 @@ fn blob_upload_start(
     Ok(resp)
 }
 
+/// Parse the start offset from a blob-upload `Content-Range` header. Accepts
+/// the OCI form `<start>-<end>` and the HTTP form `bytes <start>-<end>/<total>`;
+/// returns `None` when no leading integer can be read.
+fn parse_content_range_start(value: &str) -> Option<u64> {
+    let v = value.trim();
+    let v = v.strip_prefix("bytes").map(str::trim).unwrap_or(v);
+    let start = v.split('-').next()?.trim();
+    start.parse::<u64>().ok()
+}
+
 async fn blob_upload_patch(
     service: &EcrService,
     request: &AwsRequest,
@@ -722,7 +732,7 @@ async fn blob_upload_patch(
     // Resolve the upload + spool path under a short-lived read guard
     // so the streaming append below doesn't hold a Send-unfriendly
     // `parking_lot::RwLockWriteGuard` across `.await`.
-    let spool = {
+    let (spool, expected_start) = {
         let accounts = service.state_handle().read();
         let state = accounts
             .get(&request.account_id)
@@ -734,8 +744,33 @@ async fn blob_upload_patch(
         if upload.repository_name != name {
             return Err(upload_unknown(upload_id));
         }
-        PathBuf::from(&upload.spool_path)
+        (PathBuf::from(&upload.spool_path), upload.last_byte_received)
     };
+
+    // A chunked PATCH carries a Content-Range whose start must equal the
+    // number of bytes already received. Docker retries a failed chunk by
+    // re-sending the same range; without this check the retry appends the
+    // chunk a second time and silently corrupts the blob (detected only at
+    // the finishing digest). Reject a non-contiguous range with 416 so the
+    // client resumes from the right offset instead of double-appending.
+    if let Some(cr) = request
+        .headers
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(start) = parse_content_range_start(cr) {
+            if start != expected_start {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::RANGE_NOT_SATISFIABLE,
+                    "BLOB_UPLOAD_INVALID",
+                    format!(
+                        "blob upload PATCH Content-Range start {start} does not match the current \
+                         upload offset {expected_start}"
+                    ),
+                ));
+            }
+        }
+    }
 
     // Streaming-only: dispatch flags blob-upload PATCH/PUT to keep
     // `body_stream` populated, so we always consume it here. A 1 GiB
@@ -1218,6 +1253,17 @@ mod immutability_tests {
     // tests isolate the immutability behaviour.
     fn manifest(tag_hint: &str) -> String {
         format!("{{\"schemaVersion\":2,\"config\":{{\"digest\":\"sha256:{tag_hint}\"}}}}")
+    }
+
+    #[test]
+    fn parse_content_range_start_handles_both_forms() {
+        assert_eq!(super::parse_content_range_start("0-1023"), Some(0));
+        assert_eq!(super::parse_content_range_start("1024-2047"), Some(1024));
+        assert_eq!(
+            super::parse_content_range_start("bytes 512-1023/*"),
+            Some(512)
+        );
+        assert_eq!(super::parse_content_range_start("not-a-range"), None);
     }
 
     #[test]
