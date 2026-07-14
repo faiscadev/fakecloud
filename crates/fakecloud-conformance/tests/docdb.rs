@@ -31,7 +31,11 @@ use helpers::TestServer;
 #[test_action("docdb", "DescribeDBEngineVersions", checksum = "bbccf21e")]
 #[test_action("docdb", "DescribeDBInstances", checksum = "c1f39bae")]
 #[test_action("docdb", "DescribeDBSubnetGroups", checksum = "8ce472cc")]
-#[test_action("docdb", "DescribeEngineDefaultClusterParameters", checksum = "2fbe3959")]
+#[test_action(
+    "docdb",
+    "DescribeEngineDefaultClusterParameters",
+    checksum = "2fbe3959"
+)]
 #[test_action("docdb", "DescribeEventCategories", checksum = "a53a3236")]
 #[test_action("docdb", "DescribeEventSubscriptions", checksum = "85ea84d2")]
 #[test_action("docdb", "DescribeEvents", checksum = "daf8d02e")]
@@ -50,7 +54,11 @@ use helpers::TestServer;
 #[test_action("docdb", "ModifyGlobalCluster", checksum = "dce9be8f")]
 #[test_action("docdb", "RebootDBInstance", checksum = "dc6a7a1d")]
 #[test_action("docdb", "RemoveFromGlobalCluster", checksum = "78f873cd")]
-#[test_action("docdb", "RemoveSourceIdentifierFromSubscription", checksum = "1480f1e3")]
+#[test_action(
+    "docdb",
+    "RemoveSourceIdentifierFromSubscription",
+    checksum = "1480f1e3"
+)]
 #[test_action("docdb", "RemoveTagsFromResource", checksum = "229ee44d")]
 #[test_action("docdb", "ResetDBClusterParameterGroup", checksum = "5f0e38d9")]
 #[test_action("docdb", "RestoreDBClusterFromSnapshot", checksum = "56d3c868")]
