@@ -9,6 +9,18 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use super::*;
 
+/// Extract the region field (index 3) from a standard ARN
+/// (`arn:partition:service:region:account:resource`). Returns `None` when
+/// the string isn't an ARN or the region segment is empty.
+fn region_from_arn(arn: &str) -> Option<&str> {
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    if parts.len() >= 4 && parts[0] == "arn" && !parts[3].is_empty() {
+        Some(parts[3])
+    } else {
+        None
+    }
+}
+
 impl EcsService {
     /// Spawn a task from a cross-service caller (EventBridge Scheduler /
     /// EventBridge Rules) without going through the AwsRequest dispatch
@@ -35,10 +47,17 @@ impl EcsService {
         });
         let body_bytes =
             Bytes::from(serde_json::to_vec(&body).map_err(|e| format!("encode body: {e}"))?);
+        // Derive the region from the task-definition or cluster ARN (EventBridge
+        // targets pass full ARNs) so the spawned task's ARNs carry the caller's
+        // region instead of a hardcoded us-east-1.
+        let region = region_from_arn(task_definition)
+            .or_else(|| region_from_arn(cluster))
+            .unwrap_or("us-east-1")
+            .to_string();
         let req = AwsRequest {
             service: "ecs".into(),
             action: "RunTask".into(),
-            region: "us-east-1".into(),
+            region,
             account_id: account_id.to_string(),
             request_id: uuid::Uuid::new_v4().to_string(),
             headers: HeaderMap::new(),
@@ -356,7 +375,11 @@ impl EcsService {
             // block later DeleteCluster calls.
             let mut accounts = self.state.write();
             if let Some(state) = accounts.get_mut(&account) {
-                let mut cluster_drains: Vec<String> = Vec::new();
+                // (cluster_name, container_instance_arn) for each failed task so
+                // BOTH pending counters that RunTask incremented get drained —
+                // previously only the cluster counter was decremented, leaking
+                // the container-instance pendingTasksCount for EC2/EXTERNAL tasks.
+                let mut drains: Vec<(String, Option<String>)> = Vec::new();
                 for id in &spawned_tasks {
                     if let Some(t) = state.tasks.get_mut(id) {
                         t.last_status = "STOPPED".into();
@@ -374,13 +397,24 @@ impl EcsService {
                         for c in t.containers.iter_mut() {
                             c.last_status = "STOPPED".into();
                         }
-                        cluster_drains.push(t.cluster_name.clone());
+                        drains.push((t.cluster_name.clone(), t.container_instance_arn.clone()));
                     }
                 }
-                for name in cluster_drains {
+                for (name, ci_arn) in drains {
                     if let Some(cluster) = state.clusters.get_mut(&name) {
                         if cluster.pending_tasks_count > 0 {
                             cluster.pending_tasks_count -= 1;
+                        }
+                    }
+                    if let Some(arn) = ci_arn {
+                        if let Some(ci) = state
+                            .container_instances
+                            .values_mut()
+                            .find(|ci| ci.container_instance_arn == arn)
+                        {
+                            if ci.pending_tasks_count > 0 {
+                                ci.pending_tasks_count -= 1;
+                            }
                         }
                     }
                 }
@@ -453,6 +487,9 @@ impl EcsService {
             .and_then(|v| v.as_array())
             .map(|arr| arr.iter().any(|v| v.as_str() == Some("TAGS")))
             .unwrap_or(false);
+        // AWS scopes DescribeTasks to the given cluster (default "default"):
+        // a task that exists in another cluster is reported MISSING, not found.
+        let cluster_name = EcsState::resolve_cluster_name(opt_str(&body, "cluster"));
 
         let account = request.account_id.clone();
         let accounts = self.state.read();
@@ -467,7 +504,7 @@ impl EcsService {
         for input in &refs {
             let task_id = task_id_from_ref(input);
             match state.tasks.get(&task_id) {
-                Some(t) => {
+                Some(t) if t.cluster_name == cluster_name => {
                     let mut v = task_to_json(t);
                     if include_tags {
                         v.as_object_mut()
@@ -476,7 +513,7 @@ impl EcsService {
                     }
                     found.push(v);
                 }
-                None => {
+                _ => {
                     failures.push(json!({
                         "arn": input,
                         "reason": "MISSING",
@@ -626,6 +663,102 @@ mod multi_container_tests {
             Err(e) => e,
         };
         assert_eq!(err.code(), "ClusterNotFoundException");
+    }
+
+    #[test]
+    fn region_from_arn_extracts_region_or_none() {
+        assert_eq!(
+            region_from_arn("arn:aws:ecs:eu-west-1:000000000000:task-definition/web:3"),
+            Some("eu-west-1")
+        );
+        assert_eq!(
+            region_from_arn("arn:aws:ecs:ap-southeast-2:000000000000:cluster/prod"),
+            Some("ap-southeast-2")
+        );
+        // Bare names (not ARNs) and empty-region ARNs yield None.
+        assert_eq!(region_from_arn("web:3"), None);
+        assert_eq!(
+            region_from_arn("arn:aws:ecs::000000000000:cluster/prod"),
+            None
+        );
+    }
+
+    fn insert_task(svc: &EcsService, id: &str, cluster: &str) {
+        let state = svc.state.clone();
+        let mut accounts = state.write();
+        let acct = accounts.get_or_create("000000000000");
+        let task = Task {
+            task_arn: format!("arn:aws:ecs:us-east-1:000000000000:task/{cluster}/{id}"),
+            task_id: id.into(),
+            cluster_arn: format!("arn:aws:ecs:us-east-1:000000000000:cluster/{cluster}"),
+            cluster_name: cluster.into(),
+            task_definition_arn: "arn:aws:ecs:us-east-1:000000000000:task-definition/web:1".into(),
+            family: "web".into(),
+            revision: 1,
+            container_instance_arn: None,
+            capacity_provider_name: None,
+            last_status: "RUNNING".into(),
+            desired_status: "RUNNING".into(),
+            launch_type: "FARGATE".into(),
+            platform_version: None,
+            cpu: None,
+            memory: None,
+            containers: Vec::new(),
+            overrides: serde_json::json!({}),
+            started_by: None,
+            group: None,
+            connectivity: "CONNECTED".into(),
+            stop_code: None,
+            stopped_reason: None,
+            created_at: Utc::now(),
+            started_at: None,
+            stopping_at: None,
+            stopped_at: None,
+            pull_started_at: None,
+            pull_stopped_at: None,
+            connectivity_at: None,
+            started_by_ref_id: None,
+            execution_role_arn: None,
+            task_role_arn: None,
+            tags: Vec::new(),
+            awslogs: None,
+            captured_logs: String::new(),
+            protection: None,
+            enable_execute_command: false,
+            attachments: Vec::new(),
+            volume_configurations: Vec::new(),
+            task_set_arn: None,
+        };
+        acct.tasks.insert(id.into(), task);
+    }
+
+    #[test]
+    fn describe_tasks_scopes_to_requested_cluster() {
+        let svc = fresh_service();
+        insert_task(&svc, "abc", "other");
+        let task_arn = "arn:aws:ecs:us-east-1:000000000000:task/other/abc";
+
+        // Wrong cluster (default) -> MISSING, not found.
+        let resp = svc
+            .describe_tasks(&make_request(
+                "DescribeTasks",
+                json!({"tasks": [task_arn], "cluster": "default"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["tasks"].as_array().unwrap().len(), 0);
+        assert_eq!(body["failures"][0]["reason"], "MISSING");
+
+        // Correct cluster -> found.
+        let resp = svc
+            .describe_tasks(&make_request(
+                "DescribeTasks",
+                json!({"tasks": [task_arn], "cluster": "other"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(body["failures"].as_array().unwrap().len(), 0);
     }
 
     #[test]
