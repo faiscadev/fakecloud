@@ -70,7 +70,8 @@ static CLI_AVAILABLE_CACHE: std::sync::OnceLock<
 /// and memoized per process so a dozen runtimes probing at startup don't each
 /// pay that bound.
 pub fn cli_available(cli: &str) -> bool {
-    let cache = CLI_AVAILABLE_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let cache =
+        CLI_AVAILABLE_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     if let Some(&cached) = cache.lock().unwrap().get(cli) {
         return cached;
     }
