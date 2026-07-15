@@ -42,16 +42,68 @@ pub fn detect_container_cli() -> Option<String> {
     }
 }
 
-/// True when the CLI responds to `<cli> info` with success — the same
-/// liveness probe every runtime used before this module existed.
+/// How long to wait for `<cli> info` before giving up and treating the
+/// runtime as unavailable. A healthy daemon answers in well under a second;
+/// an unreachable or wedged daemon (stale `DOCKER_HOST`, Docker Desktop mid
+/// start, a broken socket) can leave the CLI blocked on connect *forever*,
+/// which would hang fakecloud startup and the test harness. Bounding the
+/// probe turns "daemon wedged" into "no runtime detected" instead of a hang.
+pub const CLI_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Process-global memo of `<cli> info` results, keyed by CLI name/path.
+///
+/// Container-runtime liveness is fixed for the life of a process, but every
+/// service runtime (Lambda, ECS, RDS, ElastiCache, EC2, MQ, MSK, ...) probes
+/// it independently at startup — a dozen-plus `detect_container_cli()` calls.
+/// Without a memo each probe re-runs `docker info`; when the daemon is wedged
+/// (see [`CLI_PROBE_TIMEOUT`]) those probes are serial 10s hangs that stack
+/// into minutes, wedging server startup and the conformance `*_probe` tests.
+/// Caching the first answer collapses that to a single probe.
+static CLI_AVAILABLE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<String, bool>>,
+> = std::sync::OnceLock::new();
+
+/// True when the CLI responds to `<cli> info` with success within
+/// [`CLI_PROBE_TIMEOUT`] — the same liveness probe every runtime used before
+/// this module existed, but bounded so an unreachable daemon can't hang the
+/// caller indefinitely (the CLI blocks on connect with no timeout of its own),
+/// and memoized per process so a dozen runtimes probing at startup don't each
+/// pay that bound.
 pub fn cli_available(cli: &str) -> bool {
-    std::process::Command::new(cli)
+    let cache = CLI_AVAILABLE_CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(&cached) = cache.lock().unwrap().get(cli) {
+        return cached;
+    }
+    let result = probe_cli(cli);
+    cache.lock().unwrap().insert(cli.to_string(), result);
+    result
+}
+
+/// Run the bounded `<cli> info` liveness probe once (uncached).
+fn probe_cli(cli: &str) -> bool {
+    let child = std::process::Command::new(cli)
         .arg("info")
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .spawn();
+    let Ok(mut child) = child else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + CLI_PROBE_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            // Daemon is wedged: kill the blocked probe and report unavailable.
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 /// True when `cli` is podman or a podman-compatible binary. Matches on the
@@ -212,6 +264,41 @@ pub fn registry_auth_hosts(server_port: u16) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_available_false_for_missing_binary() {
+        // A binary that doesn't exist fails to spawn -> unavailable, fast.
+        assert!(!cli_available("definitely-not-a-real-cli-binary-xyz-123"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cli_available_bounds_a_hanging_probe() {
+        // A CLI whose `info` invocation blocks forever (like `docker info`
+        // against an unreachable daemon) must not hang the caller: the probe
+        // is killed at CLI_PROBE_TIMEOUT and reported unavailable. Regression
+        // test for the local-conformance-probe hang.
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("fc-clitest-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("hangcli");
+        std::fs::write(&script, "#!/bin/sh\nsleep 600\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::io::stdout().flush().ok();
+
+        let start = std::time::Instant::now();
+        let available = cli_available(script.to_str().unwrap());
+        let elapsed = start.elapsed();
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert!(!available, "a hanging probe must report unavailable");
+        assert!(
+            elapsed < CLI_PROBE_TIMEOUT + std::time::Duration::from_secs(5),
+            "probe took {elapsed:?}, expected it bounded near {CLI_PROBE_TIMEOUT:?}"
+        );
+    }
 
     #[test]
     fn is_podman_binary_matches_bare_name() {

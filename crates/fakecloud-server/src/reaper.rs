@@ -21,7 +21,11 @@ use std::process::{Command, Stdio};
 /// If no container CLI is available this is a silent no-op — fakecloud is
 /// expected to start fine without docker.
 pub fn reap_stale_containers() {
-    let Some(cli) = detect_cli() else {
+    // Uses the shared, *bounded+memoized* detection in `container_net`: an
+    // unreachable/wedged daemon leaves a raw `docker info` blocked on connect
+    // forever, and this reaper runs at startup, so a naive probe here would
+    // hang the server (and every conformance `*_probe` test) indefinitely.
+    let Some(cli) = fakecloud_core::container_net::detect_container_cli() else {
         return;
     };
 
@@ -96,29 +100,6 @@ fn reap_orphans(cli: &str, list_args: &[&str], remove_argv: impl Fn(&str) -> Vec
     reaped
 }
 
-fn detect_cli() -> Option<String> {
-    if let Ok(cli) = std::env::var("FAKECLOUD_CONTAINER_CLI") {
-        return cli_works(&cli).then_some(cli);
-    }
-    if cli_works("docker") {
-        return Some("docker".to_string());
-    }
-    if cli_works("podman") {
-        return Some("podman".to_string());
-    }
-    None
-}
-
-fn cli_works(cli: &str) -> bool {
-    Command::new(cli)
-        .arg("info")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
 /// True if the given PID is a live process on this host.
 ///
 /// On Unix we use `kill(pid, 0)`: it returns 0 if the process exists
@@ -145,7 +126,7 @@ pub fn pid_alive(_pid: u32) -> bool {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{cli_works, pid_alive};
+    use super::pid_alive;
 
     #[test]
     fn self_is_alive() {
@@ -161,10 +142,5 @@ mod tests {
     fn huge_pid_is_dead() {
         // Max u32 is far outside any reasonable PID range on any OS.
         assert!(!pid_alive(u32::MAX - 1));
-    }
-
-    #[test]
-    fn cli_works_false_for_unknown_binary() {
-        assert!(!cli_works("definitely-not-a-real-cli-name-xyz123"));
     }
 }

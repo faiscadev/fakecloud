@@ -593,14 +593,49 @@ fn detect_container_cli() -> String {
     }
 }
 
+/// True when `<cli> info` succeeds within a bounded window. A healthy daemon
+/// answers in well under a second; an unreachable or wedged daemon (stale
+/// `DOCKER_HOST`, Docker Desktop mid start, a broken socket) can leave the CLI
+/// blocked on connect *forever*. Without this bound, `detect_container_cli`
+/// hangs the whole test harness — a conformance `*_probe` that only calls
+/// `TestServer::start()` would never return. Mirrors
+/// `fakecloud_core::container_net::cli_available` (testkit can't depend on
+/// core, so the bounded pattern is duplicated here on purpose).
 fn cli_available(cli: &str) -> bool {
-    Command::new(cli)
+    static CACHE: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, bool>>> =
+        std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    if let Some(&cached) = cache.lock().unwrap().get(cli) {
+        return cached;
+    }
+    let result = probe_cli(cli);
+    cache.lock().unwrap().insert(cli.to_string(), result);
+    result
+}
+
+fn probe_cli(cli: &str) -> bool {
+    let Ok(mut child) = Command::new(cli)
         .arg("info")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
+        .spawn()
+    else {
+        return false;
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
 }
 
 /// Prefix that `fakecloud-server` prints before the bound port on stdout.
