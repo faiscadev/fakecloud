@@ -124,7 +124,7 @@ impl SsmService {
         let sync_name = body["SyncName"]
             .as_str()
             .ok_or_else(|| missing("SyncName"))?;
-        let _sync_type = body["SyncType"]
+        let sync_type = body["SyncType"]
             .as_str()
             .ok_or_else(|| missing("SyncType"))?;
         let sync_source = body
@@ -144,6 +144,16 @@ impl SsmService {
                     format!("Sync {sync_name} not found"),
                 )
             })?;
+        // UpdateResourceDataSync only updates SyncFromSource syncs, and the
+        // SyncType must match the stored sync — AWS rejects a mismatch rather
+        // than silently ignoring the field.
+        if sync.sync_type.as_deref() != Some(sync_type) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceDataSyncInvalidConfigurationException",
+                format!("SyncType '{sync_type}' does not match the existing sync's type"),
+            ));
+        }
         sync.sync_source = Some(sync_source);
         sync.sync_last_modified_time = Utc::now();
 

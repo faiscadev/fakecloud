@@ -236,20 +236,67 @@ impl SsmService {
         let body = req.json_body();
         let exec_id = body["AutomationExecutionId"]
             .as_str()
-            .ok_or_else(|| missing("AutomationExecutionId"))?;
-        let _signal_type = body["SignalType"]
+            .ok_or_else(|| missing("AutomationExecutionId"))?
+            .to_string();
+        let signal_type = body["SignalType"]
             .as_str()
-            .ok_or_else(|| missing("SignalType"))?;
+            .ok_or_else(|| missing("SignalType"))?
+            .to_string();
 
-        let accounts = self.state.read();
-        let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        if !state.automation_executions.contains_key(exec_id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "AutomationExecutionNotFoundException",
-                format!("Automation execution {exec_id} not found"),
-            ));
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let exec = state
+            .automation_executions
+            .get_mut(&exec_id)
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "AutomationExecutionNotFoundException",
+                    format!("Automation execution {exec_id} not found"),
+                )
+            })?;
+
+        // Apply the signal so approval steps actually advance rather than the
+        // execution sitting in Pending/Waiting forever (previously a no-op).
+        let now = Utc::now();
+        match signal_type.as_str() {
+            "Approve" | "Resume" | "StartStep" => {
+                for s in &mut exec.step_executions {
+                    if s.step_status == "Pending" || s.step_status == "Waiting" {
+                        s.step_status = "Success".to_string();
+                        if s.execution_end_time.is_none() {
+                            s.execution_end_time = Some(now);
+                        }
+                    }
+                }
+                let all_done = exec
+                    .step_executions
+                    .iter()
+                    .all(|s| matches!(s.step_status.as_str(), "Success" | "Skipped"));
+                exec.automation_execution_status = if all_done {
+                    exec.execution_end_time = Some(now);
+                    "Success".to_string()
+                } else {
+                    "InProgress".to_string()
+                };
+            }
+            "Reject" | "StopStep" => {
+                for s in &mut exec.step_executions {
+                    if s.step_status == "Pending" || s.step_status == "Waiting" {
+                        s.step_status = "Cancelled".to_string();
+                        s.execution_end_time = Some(now);
+                    }
+                }
+                exec.automation_execution_status = "Cancelled".to_string();
+                exec.execution_end_time = Some(now);
+            }
+            _ => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidAutomationSignalException",
+                    format!("Unknown SignalType '{signal_type}'"),
+                ));
+            }
         }
 
         Ok(AwsResponse::ok_json(json!({})))

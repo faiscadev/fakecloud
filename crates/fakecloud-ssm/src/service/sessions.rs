@@ -219,8 +219,8 @@ impl SsmService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         validate_optional_string_length("Reason", body["Reason"].as_str(), 1, 256)?;
-        let _reason = body["Reason"].as_str().ok_or_else(|| missing("Reason"))?;
-        let _targets = body["Targets"]
+        let reason = body["Reason"].as_str().ok_or_else(|| missing("Reason"))?;
+        let targets = body["Targets"]
             .as_array()
             .ok_or_else(|| missing("Targets"))?;
 
@@ -228,6 +228,19 @@ impl SsmService {
         let state = accounts.get_or_create(&req.account_id);
         state.session_counter += 1;
         let access_request_id = format!("ar-{:012x}", state.session_counter);
+        // Persist the request (auto-approved, no human approver) so
+        // GetAccessToken reflects its Reason/Targets rather than discarding
+        // them and issuing a token for any arbitrary id.
+        state.access_requests.insert(
+            access_request_id.clone(),
+            crate::state::SsmAccessRequest {
+                access_request_id: access_request_id.clone(),
+                reason: reason.to_string(),
+                targets: json!(targets),
+                status: "Approved".to_string(),
+                created: Utc::now(),
+            },
+        );
 
         Ok(AwsResponse::ok_json(
             json!({ "AccessRequestId": access_request_id }),
@@ -239,16 +252,39 @@ impl SsmService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let _access_request_id = body["AccessRequestId"]
+        let access_request_id = body["AccessRequestId"]
             .as_str()
             .ok_or_else(|| missing("AccessRequestId"))?;
 
+        let accounts = self.state.read();
+        // A token can only be issued for a real, previously-created request.
+        // Returning approved credentials for an unknown id (the old behavior)
+        // is a security-relevant fiction.
+        let request = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.access_requests.get(access_request_id))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Access request {access_request_id} does not exist"),
+                )
+            })?;
+
+        if request.status != "Approved" {
+            return Ok(AwsResponse::ok_json(json!({
+                "AccessRequestStatus": request.status,
+            })));
+        }
+
+        // Deterministic per-request session token so repeated calls are stable.
+        let session_token = format!("FwoGZXIvYXdz{access_request_id}");
         Ok(AwsResponse::ok_json(json!({
-            "AccessRequestStatus": "Approved",
+            "AccessRequestStatus": request.status,
             "Credentials": {
                 "AccessKeyId": "AKIAIOSFODNN7EXAMPLE",
                 "SecretAccessKey": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
-                "SessionToken": "FwoGZXIvYXdzEA...",
+                "SessionToken": session_token,
                 "ExpirationTime": Utc::now().timestamp_millis() as f64 / 1000.0 + 3600.0,
             },
         })))
