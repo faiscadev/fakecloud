@@ -396,6 +396,18 @@ pub struct SsmSession {
     pub reason: Option<String>,
 }
 
+/// A just-in-time access request created by StartAccessRequest and consumed
+/// by GetAccessToken. There is no human approver in the emulator, so requests
+/// are auto-approved, but the request must exist for a token to be issued.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SsmAccessRequest {
+    pub access_request_id: String,
+    pub reason: String,
+    pub targets: serde_json::Value,
+    pub status: String,
+    pub created: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SsmActivation {
     pub activation_id: String,
@@ -487,6 +499,10 @@ pub struct SsmState {
     /// Defaults to empty when deserializing pre-existing snapshots.
     #[serde(default)]
     pub cloud_connectors: BTreeMap<String, CloudConnector>,
+    /// Just-in-time access requests keyed by AccessRequestId. Defaults to
+    /// empty when deserializing pre-existing snapshots.
+    #[serde(default)]
+    pub access_requests: BTreeMap<String, SsmAccessRequest>,
 }
 
 /// A cloud connector federating an external cloud provider (Azure) into SSM.
@@ -557,6 +573,7 @@ impl SsmState {
             execution_preview_counter: 0,
             parameter_policy_events: Vec::new(),
             cloud_connectors: BTreeMap::new(),
+            access_requests: BTreeMap::new(),
         };
         state.seed_defaults();
         state
@@ -597,6 +614,7 @@ impl SsmState {
         self.execution_preview_counter = 0;
         self.parameter_policy_events.clear();
         self.cloud_connectors.clear();
+        self.access_requests.clear();
         self.seed_defaults();
     }
 

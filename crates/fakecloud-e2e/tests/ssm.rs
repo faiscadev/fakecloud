@@ -2497,3 +2497,129 @@ async fn ssm_lookup_tolerates_version_suffix() {
     assert_eq!(tag_list.len(), 1);
     assert_eq!(tag_list[0].key(), "env");
 }
+
+#[tokio::test]
+async fn ssm_get_access_token_requires_real_request() {
+    // Bug-hunt 1.23: GetAccessToken issued approved credentials for ANY id.
+    // A token must only be issued for a request created by StartAccessRequest.
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    // Unknown request id -> error, not fabricated credentials.
+    let bogus = client
+        .get_access_token()
+        .access_request_id("ar-doesnotexist")
+        .send()
+        .await;
+    assert!(
+        bogus.is_err(),
+        "unknown access request must not yield a token"
+    );
+
+    // Real flow: create a request, then exchange it.
+    let target = aws_sdk_ssm::types::Target::builder()
+        .key("InstanceIds")
+        .values("i-1234567890abcdef0")
+        .build();
+    let created = client
+        .start_access_request()
+        .reason("debugging prod incident")
+        .targets(target)
+        .send()
+        .await
+        .expect("start_access_request");
+    let id = created.access_request_id().unwrap().to_string();
+
+    let token = client
+        .get_access_token()
+        .access_request_id(&id)
+        .send()
+        .await
+        .expect("get_access_token");
+    assert_eq!(
+        token.access_request_status().map(|s| s.as_str()),
+        Some("Approved")
+    );
+    assert!(token.credentials().is_some());
+}
+
+#[tokio::test]
+async fn ssm_send_automation_signal_reject_cancels() {
+    // Bug-hunt 1.24: SendAutomationSignal was a no-op. Reject must move the
+    // execution to Cancelled.
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let start = client
+        .start_automation_execution()
+        .document_name("AWS-RunShellScript")
+        .send()
+        .await
+        .unwrap();
+    let exec_id = start.automation_execution_id().unwrap().to_string();
+
+    client
+        .send_automation_signal()
+        .automation_execution_id(&exec_id)
+        .signal_type(aws_sdk_ssm::types::SignalType::Reject)
+        .send()
+        .await
+        .expect("send_automation_signal");
+
+    let got = client
+        .get_automation_execution()
+        .automation_execution_id(&exec_id)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        got.automation_execution()
+            .unwrap()
+            .automation_execution_status()
+            .map(|s| s.as_str()),
+        Some("Cancelled"),
+        "Reject must cancel the execution"
+    );
+}
+
+#[tokio::test]
+async fn ssm_update_resource_data_sync_type_must_match() {
+    // Bug-hunt 1.25: UpdateResourceDataSync dropped SyncType; a mismatched
+    // type must be rejected.
+    let server = TestServer::start().await;
+    let client = server.ssm_client().await;
+
+    let source = aws_sdk_ssm::types::ResourceDataSyncSource::builder()
+        .source_type("SingleAccountMultiRegions")
+        .source_regions("us-east-1")
+        .build()
+        .unwrap();
+    client
+        .create_resource_data_sync()
+        .sync_name("mysync")
+        .sync_type("SyncFromSource")
+        .sync_source(source.clone())
+        .send()
+        .await
+        .expect("create_resource_data_sync");
+
+    // Wrong SyncType -> rejected.
+    let bad = client
+        .update_resource_data_sync()
+        .sync_name("mysync")
+        .sync_type("SyncToDestination")
+        .sync_source(source.clone())
+        .send()
+        .await;
+    assert!(bad.is_err(), "mismatched SyncType must be rejected");
+
+    // Matching SyncType -> ok.
+    client
+        .update_resource_data_sync()
+        .sync_name("mysync")
+        .sync_type("SyncFromSource")
+        .sync_source(source)
+        .send()
+        .await
+        .expect("matching SyncType update must succeed");
+}
