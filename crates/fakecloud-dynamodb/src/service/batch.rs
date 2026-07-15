@@ -253,7 +253,11 @@ impl DynamoDbService {
                 } else {
                     continue;
                 };
-                if seen_keys.contains(&key) {
+                // Numeric-aware comparison: {"N":"1"} and {"N":"1.0"} are the
+                // same key to DynamoDB, so a raw HashMap `==` would miss that
+                // duplicate. keys_equal normalizes numbers (as BatchGetItem
+                // already does).
+                if seen_keys.iter().any(|k| keys_equal(table, k, &key)) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "ValidationException",
@@ -606,7 +610,10 @@ impl DynamoDbService {
                 } else {
                     serde_json::from_value(op["Key"].clone()).unwrap_or_default()
                 };
-                if seen_keys.iter().any(|(t, k)| t == table_name && *k == key) {
+                if seen_keys
+                    .iter()
+                    .any(|(t, k)| t == table_name && keys_equal(table, k, &key))
+                {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "ValidationException",

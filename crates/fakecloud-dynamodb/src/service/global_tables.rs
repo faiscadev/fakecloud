@@ -150,15 +150,27 @@ impl DynamoDbService {
             3,
             255,
         )?;
-        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, i64::MAX)?;
+        validate_optional_range_i64("limit", body["Limit"].as_i64(), 1, 100)?;
         let limit = body["Limit"].as_i64().unwrap_or(100) as usize;
+        let start = body["ExclusiveStartGlobalTableName"].as_str();
 
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
-        let tables: Vec<Value> = state
+        // Resume after ExclusiveStartGlobalTableName (BTreeMap is name-ordered)
+        // and emit LastEvaluatedGlobalTableName when the page is truncated.
+        // Previously the marker was ignored and the remainder was unreachable.
+        let matched: Vec<_> = state
             .global_tables
             .values()
+            .filter(|gt| match start {
+                Some(s) => gt.global_table_name.as_str() > s,
+                None => true,
+            })
+            .collect();
+        let truncated = matched.len() > limit;
+        let tables: Vec<Value> = matched
+            .iter()
             .take(limit)
             .map(|gt| {
                 json!({
@@ -170,9 +182,11 @@ impl DynamoDbService {
             })
             .collect();
 
-        Self::ok_json(json!({
-            "GlobalTables": tables
-        }))
+        let mut resp = json!({ "GlobalTables": tables });
+        if truncated {
+            resp["LastEvaluatedGlobalTableName"] = json!(matched[limit - 1].global_table_name);
+        }
+        Self::ok_json(resp)
     }
 
     pub(super) fn update_global_table(

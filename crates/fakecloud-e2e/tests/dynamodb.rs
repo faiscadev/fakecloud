@@ -1837,6 +1837,130 @@ async fn dynamodb_backup_lifecycle() {
         .unwrap();
 }
 
+/// Regression: ListBackups must honor Limit + ExclusiveStartBackupArn and
+/// emit LastEvaluatedBackupArn when truncated. Previously it returned every
+/// backup with no continuation token, so a paginating client silently lost
+/// the remainder.
+#[tokio::test]
+async fn dynamodb_list_backups_paginates() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    client
+        .create_table()
+        .table_name("PagBackupTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+    for i in 0..3 {
+        client
+            .create_backup()
+            .table_name("PagBackupTable")
+            .backup_name(format!("bk-{i}"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut token: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut req = client.list_backups().limit(2);
+        if let Some(t) = &token {
+            req = req.exclusive_start_backup_arn(t);
+        }
+        let resp = req.send().await.unwrap();
+        assert!(
+            resp.backup_summaries().len() <= 2,
+            "Limit=2 must cap the page"
+        );
+        for s in resp.backup_summaries() {
+            assert!(
+                seen.insert(s.backup_arn().unwrap().to_string()),
+                "backup returned on more than one page"
+            );
+        }
+        pages += 1;
+        assert!(pages <= 10, "ListBackups pagination did not terminate");
+        match resp.last_evaluated_backup_arn() {
+            Some(t) => token = Some(t.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen.len(),
+        3,
+        "all 3 backups reachable across pages exactly once"
+    );
+}
+
+/// Regression: BatchWriteItem duplicate-key detection must be numeric-aware.
+/// `{"N":"1"}` and `{"N":"1.0"}` are the same DynamoDB key, so a batch with
+/// both must be rejected with ValidationException (a raw JSON compare missed
+/// this and silently applied last-writer-wins).
+#[tokio::test]
+async fn dynamodb_batch_write_numeric_duplicate_key_rejected() {
+    let server = TestServer::start().await;
+    let client = server.dynamodb_client().await;
+    client
+        .create_table()
+        .table_name("NumKeyTable")
+        .key_schema(
+            KeySchemaElement::builder()
+                .attribute_name("id")
+                .key_type(KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .attribute_definitions(
+            AttributeDefinition::builder()
+                .attribute_name("id")
+                .attribute_type(ScalarAttributeType::N)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    let put = |n: &str| {
+        WriteRequest::builder()
+            .put_request(
+                PutRequest::builder()
+                    .item("id", AttributeValue::N(n.to_string()))
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+    };
+    let err = client
+        .batch_write_item()
+        .request_items("NumKeyTable", vec![put("1"), put("1.0")])
+        .send()
+        .await
+        .expect_err("batch with numerically-equal duplicate keys must be rejected");
+    assert!(
+        format!("{err:?}").contains("ValidationException"),
+        "expected ValidationException for duplicate key, got: {err:?}"
+    );
+}
+
 #[tokio::test]
 async fn dynamodb_continuous_backups() {
     let server = TestServer::start().await;

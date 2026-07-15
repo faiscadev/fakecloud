@@ -1009,31 +1009,48 @@ impl DynamoDbService {
             }
         }
         let table_name = body["TableName"].as_str();
+        let start = body["ExclusiveStartBackupArn"].as_str();
+        let limit = body["Limit"].as_i64().map(|l| l as usize);
 
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
-        let summaries: Vec<Value> = state
+        // Resume after ExclusiveStartBackupArn (backups are arn-ordered) and,
+        // when a Limit truncates the set, emit LastEvaluatedBackupArn.
+        // Previously every backup was returned with no continuation token.
+        let matched: Vec<(&str, Value)> = state
             .backups
             .values()
             .filter(|b| table_name.is_none() || table_name == Some(b.table_name.as_str()))
+            .filter(|b| match start {
+                Some(s) => b.backup_arn.as_str() > s,
+                None => true,
+            })
             .map(|b| {
-                json!({
-                    "TableName": b.table_name,
-                    "TableArn": b.table_arn,
-                    "BackupArn": b.backup_arn,
-                    "BackupName": b.backup_name,
-                    "BackupCreationDateTime": b.backup_creation_date.timestamp() as f64,
-                    "BackupStatus": b.backup_status,
-                    "BackupType": b.backup_type,
-                    "BackupSizeBytes": b.size_bytes
-                })
+                (
+                    b.backup_arn.as_str(),
+                    json!({
+                        "TableName": b.table_name,
+                        "TableArn": b.table_arn,
+                        "BackupArn": b.backup_arn,
+                        "BackupName": b.backup_name,
+                        "BackupCreationDateTime": b.backup_creation_date.timestamp() as f64,
+                        "BackupStatus": b.backup_status,
+                        "BackupType": b.backup_type,
+                        "BackupSizeBytes": b.size_bytes
+                    }),
+                )
             })
             .collect();
+        let truncated = limit.is_some_and(|l| matched.len() > l);
+        let take = limit.unwrap_or(matched.len());
+        let summaries: Vec<Value> = matched.iter().take(take).map(|(_, v)| v.clone()).collect();
 
-        Self::ok_json(json!({
-            "BackupSummaries": summaries
-        }))
+        let mut resp = json!({ "BackupSummaries": summaries });
+        if truncated {
+            resp["LastEvaluatedBackupArn"] = json!(matched[take - 1].0);
+        }
+        Self::ok_json(resp)
     }
 
     pub(super) fn restore_table_from_backup(
@@ -1532,26 +1549,42 @@ impl DynamoDbService {
         validate_optional_string_length("tableArn", body["TableArn"].as_str(), 1, 1024)?;
         validate_optional_range_i64("maxResults", body["MaxResults"].as_i64(), 1, 25)?;
         let table_arn = body["TableArn"].as_str();
+        let start = body["NextToken"].as_str();
+        let max = body["MaxResults"].as_i64().map(|m| m as usize);
 
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
-        let summaries: Vec<Value> = state
+        // Honor MaxResults + NextToken (export-arn cursor). Previously both
+        // were validated then ignored and every export returned in one page.
+        let matched: Vec<(&str, Value)> = state
             .exports
             .values()
             .filter(|e| table_arn.is_none() || table_arn == Some(e.table_arn.as_str()))
+            .filter(|e| match start {
+                Some(s) => e.export_arn.as_str() > s,
+                None => true,
+            })
             .map(|e| {
-                json!({
-                    "ExportArn": e.export_arn,
-                    "ExportStatus": e.export_status,
-                    "TableArn": e.table_arn
-                })
+                (
+                    e.export_arn.as_str(),
+                    json!({
+                        "ExportArn": e.export_arn,
+                        "ExportStatus": e.export_status,
+                        "TableArn": e.table_arn
+                    }),
+                )
             })
             .collect();
+        let truncated = max.is_some_and(|m| matched.len() > m);
+        let take = max.unwrap_or(matched.len());
+        let summaries: Vec<Value> = matched.iter().take(take).map(|(_, v)| v.clone()).collect();
 
-        Self::ok_json(json!({
-            "ExportSummaries": summaries
-        }))
+        let mut resp = json!({ "ExportSummaries": summaries });
+        if truncated {
+            resp["NextToken"] = json!(matched[take - 1].0);
+        }
+        Self::ok_json(resp)
     }
 
     pub(super) fn import_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1852,26 +1885,42 @@ impl DynamoDbService {
             }
         }
         let table_arn = body["TableArn"].as_str();
+        let start = body["NextToken"].as_str();
+        let max = body["PageSize"].as_i64().map(|m| m as usize);
 
         let accounts = self.state.read();
         let empty_ddb = crate::state::DynamoDbState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty_ddb);
-        let summaries: Vec<Value> = state
+        // Honor PageSize + NextToken (import-arn cursor). Previously both were
+        // validated then ignored and every import returned in one page.
+        let matched: Vec<(&str, Value)> = state
             .imports
             .values()
             .filter(|i| table_arn.is_none() || table_arn == Some(i.table_arn.as_str()))
+            .filter(|i| match start {
+                Some(s) => i.import_arn.as_str() > s,
+                None => true,
+            })
             .map(|i| {
-                json!({
-                    "ImportArn": i.import_arn,
-                    "ImportStatus": i.import_status,
-                    "TableArn": i.table_arn
-                })
+                (
+                    i.import_arn.as_str(),
+                    json!({
+                        "ImportArn": i.import_arn,
+                        "ImportStatus": i.import_status,
+                        "TableArn": i.table_arn
+                    }),
+                )
             })
             .collect();
+        let truncated = max.is_some_and(|m| matched.len() > m);
+        let take = max.unwrap_or(matched.len());
+        let summaries: Vec<Value> = matched.iter().take(take).map(|(_, v)| v.clone()).collect();
 
-        Self::ok_json(json!({
-            "ImportSummaryList": summaries
-        }))
+        let mut resp = json!({ "ImportSummaryList": summaries });
+        if truncated {
+            resp["NextToken"] = json!(matched[take - 1].0);
+        }
+        Self::ok_json(resp)
     }
 }
 
