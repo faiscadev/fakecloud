@@ -330,6 +330,45 @@ pub(super) fn dispatch(
         // `group-things` relation so ListThingGroupsForThing reflects it.
         "UpdateThingGroupsForThing" => Ok(Some(update_thing_groups_for_thing(svc, ctx, body))),
 
+        // Security-profile <-> target attachment. Target ARN is a query
+        // parameter; stored as a `profile-targets` relation the two list
+        // readers project (forward + inverse).
+        "AttachSecurityProfile" => Ok(Some(relate(
+            svc,
+            ctx,
+            true,
+            &[(
+                "profile-targets",
+                lbl(labels, "securityProfileName"),
+                query_get(query, "securityProfileTargetArn"),
+            )],
+        ))),
+        "DetachSecurityProfile" => Ok(Some(relate(
+            svc,
+            ctx,
+            false,
+            &[(
+                "profile-targets",
+                lbl(labels, "securityProfileName"),
+                query_get(query, "securityProfileTargetArn"),
+            )],
+        ))),
+        "ListTargetsForSecurityProfile" => Ok(Some(list_relation_objs(
+            svc,
+            ctx,
+            "profile-targets",
+            lbl(labels, "securityProfileName"),
+            "securityProfileTargets",
+            "arn",
+        ))),
+        "ListSecurityProfilesForTarget" => {
+            Ok(Some(list_security_profiles_for_target(svc, ctx, query)))
+        }
+
+        // DeprecateThingType flips the stored thing-type's metadata so
+        // DescribeThingType reflects it (previously an accept-and-discard no-op).
+        "DeprecateThingType" => Ok(Some(deprecate_thing_type(svc, ctx, meta, labels, body)?)),
+
         _ => Ok(None),
     }
 }
@@ -967,6 +1006,84 @@ fn list_security_profiles(svc: &IotService, ctx: &Ctx) -> (AwsResponse, bool) {
         ok_json(json!({ "securityProfileIdentifiers": identifiers })),
         false,
     )
+}
+
+/// Inverse of the `profile-targets` relation: every security profile attached
+/// to `securityProfileTargetArn`. Mirrors `list_attached_policies`.
+fn list_security_profiles_for_target(
+    svc: &IotService,
+    ctx: &Ctx,
+    query: &[(String, String)],
+) -> (AwsResponse, bool) {
+    let target = query_get(query, "securityProfileTargetArn");
+    let g = svc.state.read();
+    let data = g.get(&ctx.account);
+    let mut mappings = Vec::new();
+    if let (Some(target), Some(data)) = (target, data) {
+        for (key, targets) in &data.relations {
+            let Some(profile) = key.strip_prefix("profile-targets:") else {
+                continue;
+            };
+            if targets.iter().any(|t| t == target) {
+                // Prefer the stored profile's real ARN; fall back to a minted one.
+                let arn = data
+                    .get_resource("security-profiles", profile)
+                    .and_then(|r| r.get("securityProfileArn"))
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| mint_arn(ctx, "security-profiles", profile));
+                mappings.push(json!({
+                    "securityProfileIdentifier": { "name": profile, "arn": arn },
+                    "target": { "arn": target },
+                }));
+            }
+        }
+    }
+    (
+        ok_json(json!({ "securityProfileTargetMappings": mappings })),
+        false,
+    )
+}
+
+/// DeprecateThingType / undo: flip `thingTypeMetadata.deprecated` on the
+/// stored thing-type record so DescribeThingType round-trips the state, rather
+/// than accepting the call and discarding it.
+fn deprecate_thing_type(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let name = lbl(labels, "thingTypeName")
+        .ok_or_else(|| super::engine::not_found(meta, ""))?
+        .to_string();
+    let undo = body
+        .get("undoDeprecate")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(mut record) = data.get_resource(meta.rtype, &name).cloned() else {
+        return Err(super::engine::not_found(meta, &name));
+    };
+    if let Some(obj) = record.as_object_mut() {
+        let md = obj
+            .entry("thingTypeMetadata")
+            .or_insert_with(|| Value::Object(Map::new()));
+        if let Some(md) = md.as_object_mut() {
+            if undo {
+                md.insert("deprecated".to_string(), Value::Bool(false));
+                md.remove("deprecationDate");
+            } else {
+                md.insert("deprecated".to_string(), Value::Bool(true));
+                md.insert("deprecationDate".to_string(), super::now_epoch());
+            }
+        }
+    }
+    data.put_resource(meta.rtype, &name, record);
+    Ok((ok_json(Value::Object(Map::new())), true))
 }
 
 // ---------- audit suppressions ----------
