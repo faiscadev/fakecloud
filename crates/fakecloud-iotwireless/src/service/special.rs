@@ -863,6 +863,24 @@ fn get_wireless_gateway_certificate(
     (ok_json(json!({ "IotCertificateId": cert })), false)
 }
 
+/// A deterministic 64-character hex digest of an input, standing in for the
+/// SHA-256 fingerprint AWS reports for a Sidewalk app-server private key. Built
+/// from eight salted FNV-1a folds so the same key always maps to the same
+/// digest without pulling in a crypto dependency.
+fn fingerprint_hex(input: &str) -> String {
+    let mut out = String::with_capacity(64);
+    for salt in 0u8..8 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        hash ^= salt as u64;
+        for b in input.bytes() {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        out.push_str(&format!("{hash:016x}"));
+    }
+    out
+}
+
 /// Persist a Sidewalk partner-account association keyed by its AmazonId so
 /// GetPartnerAccount / ListPartnerAccounts (generic reads) reflect it.
 fn associate_partner_account(
@@ -876,8 +894,26 @@ fn associate_partner_account(
         .and_then(Value::as_str)
         .unwrap_or("")
         .to_string();
+    // AWS returns a fingerprint of the app-server private key, never the key
+    // itself. Derive a deterministic 64-hex digest so Get/List round-trip.
+    let private_key = sidewalk
+        .get("AppServerPrivateKey")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let fingerprint = fingerprint_hex(private_key);
+    // The SidewalkAccountInfoWithFingerprint the reads project carries the
+    // AmazonId + Fingerprint (never the private key).
+    let sidewalk_with_fp = json!({
+        "AmazonId": amazon_id,
+        "Fingerprint": fingerprint,
+    });
+    // Store the projected list-element members (AmazonId/Fingerprint/Arn) at the
+    // top level so the generic ListPartnerAccounts projection finds them, and
+    // keep the nested Sidewalk object for GetPartnerAccount.
     let record = json!({
-        "Sidewalk": sidewalk,
+        "AmazonId": amazon_id,
+        "Fingerprint": fingerprint,
+        "Sidewalk": sidewalk_with_fp,
         "PartnerAccountId": amazon_id,
         "PartnerType": "Sidewalk",
     });
