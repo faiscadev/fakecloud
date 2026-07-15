@@ -1121,8 +1121,11 @@ impl Route53Service {
         };
         let rest = &summaries[start..];
         let page: Vec<&(String, String)> = rest.iter().take(max_items).collect();
+        // Token is the LAST id emitted on this page; the next request resumes
+        // strictly after it (`id > token`). Emitting the first *excluded* id
+        // here would skip it, since resume is strict-greater.
         let next_token = if page.len() < rest.len() {
-            Some(rest[page.len()].0.clone())
+            page.last().map(|(id, _)| id.clone())
         } else {
             None
         };

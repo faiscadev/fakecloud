@@ -161,8 +161,11 @@ impl Route53Service {
         };
         let remaining = &configs[start..];
         let slice: Vec<&StoredQueryLoggingConfig> = remaining.iter().take(max_items).collect();
+        // Token is the last id emitted; the next request resumes strictly
+        // after it (`id > token`). Emitting the first excluded id would skip
+        // it under strict-greater resume.
         let next = if slice.len() < remaining.len() {
-            Some(remaining[slice.len()].id.clone())
+            slice.last().map(|c| c.id.clone())
         } else {
             None
         };

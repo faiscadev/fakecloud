@@ -734,7 +734,14 @@ impl Route53Service {
         };
         let rest = &instances[start..];
         let slice: Vec<&StoredTrafficPolicyInstance> = rest.iter().take(max_items).collect();
-        let truncated = slice.len() < rest.len();
+        // Resume is strict-greater (`id > marker`), so the marker must be the
+        // LAST id emitted on this page, not the first excluded one.
+        let next_marker = if slice.len() < rest.len() {
+            slice.last().map(|i| i.id.clone())
+        } else {
+            None
+        };
+        let truncated = next_marker.is_some();
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!(
@@ -747,10 +754,10 @@ impl Route53Service {
         body.push_str("</TrafficPolicyInstances>");
         body.push_str(&format!("<IsTruncated>{}</IsTruncated>", truncated));
         body.push_str(&format!("<MaxItems>{}</MaxItems>", max_items));
-        if truncated {
+        if let Some(nm) = &next_marker {
             body.push_str(&format!(
                 "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
-                esc(&rest[slice.len()].id)
+                esc(nm)
             ));
         }
         body.push_str("</ListTrafficPolicyInstancesByHostedZoneResponse>");
@@ -841,7 +848,14 @@ impl Route53Service {
         };
         let rest = &instances[start..];
         let slice: Vec<&StoredTrafficPolicyInstance> = rest.iter().take(max_items).collect();
-        let truncated = slice.len() < rest.len();
+        // Resume is strict-greater (`id > marker`), so the marker must be the
+        // LAST id emitted on this page, not the first excluded one.
+        let next_marker = if slice.len() < rest.len() {
+            slice.last().map(|i| i.id.clone())
+        } else {
+            None
+        };
+        let truncated = next_marker.is_some();
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!(
@@ -854,10 +868,10 @@ impl Route53Service {
         body.push_str("</TrafficPolicyInstances>");
         body.push_str(&format!("<IsTruncated>{}</IsTruncated>", truncated));
         body.push_str(&format!("<MaxItems>{}</MaxItems>", max_items));
-        if truncated {
+        if let Some(nm) = &next_marker {
             body.push_str(&format!(
                 "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
-                esc(&rest[slice.len()].id)
+                esc(nm)
             ));
         }
         body.push_str("</ListTrafficPolicyInstancesByPolicyResponse>");
