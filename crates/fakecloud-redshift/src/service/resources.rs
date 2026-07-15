@@ -448,7 +448,7 @@ impl RedshiftService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = param(req, "ScheduleIdentifier")
-            .unwrap_or_else(|| format!("schedule-{}", &Uuid::new_v4().simple().to_string()[..8]));
+            .unwrap_or_else(|| format!("schedule-{}", fakecloud_core::ids::short_id(8)));
         let mut guard = self.state.write();
         let acct = guard.account(&req.account_id);
         if acct.snapshot_schedules.contains_key(&id) {
@@ -678,7 +678,7 @@ impl RedshiftService {
         let cluster = param(req, "ClusterIdentifier").unwrap_or_default();
         let feature = param(req, "FeatureType").unwrap_or_default();
         let limit_type = param(req, "LimitType").unwrap_or_default();
-        let id = format!("usagelimit-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let id = format!("usagelimit-{}", fakecloud_core::ids::short_id(12));
         let mut guard = self.state.write();
         let acct = guard.account(&req.account_id);
         // Reject duplicate feature/limit-type on the same cluster (AWS behavior).

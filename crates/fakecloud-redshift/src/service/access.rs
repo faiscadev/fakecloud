@@ -190,7 +190,7 @@ impl RedshiftService {
         if acct.endpoint_access.contains_key(&name) {
             return Err(endpoint_already_exists(&name));
         }
-        let token = &Uuid::new_v4().simple().to_string()[..12];
+        let token = &fakecloud_core::ids::short_id(12);
         let cluster_id = param(req, "ClusterIdentifier").unwrap_or_default();
         // When the caller supplies no security groups, Redshift attaches the
         // cluster's effective VPC security groups (the VPC default group when
@@ -755,7 +755,7 @@ impl RedshiftService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let offering = param(req, "ReservedNodeOfferingId").unwrap_or_default();
-        let id = format!("rn-{}", &Uuid::new_v4().simple().to_string()[..12]);
+        let id = format!("rn-{}", fakecloud_core::ids::short_id(12));
         let node = ReservedNode {
             reserved_node_id: id.clone(),
             reserved_node_offering_id: offering,
@@ -857,7 +857,7 @@ impl RedshiftService {
             "redshift",
             &req.region,
             &req.account_id,
-            &format!("integration:{}", &Uuid::new_v4().simple().to_string()[..12]),
+            &format!("integration:{}", fakecloud_core::ids::short_id(12)),
         )
         .to_string();
         let mut guard = self.state.write();
@@ -983,7 +983,7 @@ impl RedshiftService {
             &req.account_id,
             &format!(
                 "redshiftidcapplication:{}",
-                &Uuid::new_v4().simple().to_string()[..12]
+                fakecloud_core::ids::short_id(12)
             ),
         )
         .to_string();

@@ -12,7 +12,7 @@ use crate::state::Cluster;
 
 /// Build the synthetic-but-well-formed public endpoint address for a cluster.
 fn endpoint_address(cluster_id: &str, region: &str) -> String {
-    let token = &Uuid::new_v4().simple().to_string()[..12];
+    let token = &fakecloud_core::ids::short_id(12);
     format!("{cluster_id}.{token}.{region}.redshift.amazonaws.com")
 }
 

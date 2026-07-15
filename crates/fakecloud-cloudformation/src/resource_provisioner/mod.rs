@@ -4370,7 +4370,7 @@ impl ResourceProvisioner {
             "arn:aws:application-autoscaling:{}:{}:scalable-target/{}",
             self.region,
             self.account_id,
-            &Uuid::new_v4().simple().to_string()[..10]
+            fakecloud_core::ids::short_id(10)
         );
         let role = role_arn.unwrap_or_else(|| {
             let suffix = match service_namespace.as_str() {
@@ -5346,14 +5346,8 @@ impl ResourceProvisioner {
             .to_string();
         let caller_reference = format!("cfn-{}", resource.logical_id);
 
-        let id = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..13].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("E{}", fakecloud_core::ids::short_id(13).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
         let s3_canonical_user_id = format!(
             "{:0<64}",
             Uuid::new_v4().simple().to_string().to_lowercase()
@@ -5564,14 +5558,8 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let id = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..13].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("E{}", fakecloud_core::ids::short_id(13).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
         let oac = StoredOriginAccessControl {
             id: id.clone(),
             etag,
@@ -5631,14 +5619,8 @@ impl ResourceProvisioner {
             caller_reference
         };
 
-        let id = format!(
-            "K{}",
-            Uuid::new_v4().simple().to_string()[..13].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("K{}", fakecloud_core::ids::short_id(13).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
 
         let pk = StoredPublicKey {
             id: id.clone(),
@@ -5693,14 +5675,8 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let id = format!(
-            "KG{}",
-            Uuid::new_v4().simple().to_string()[..12].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("KG{}", fakecloud_core::ids::short_id(12).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
 
         let kg = StoredKeyGroup {
             id: id.clone(),
@@ -5752,14 +5728,8 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let id = format!(
-            "FN{}",
-            Uuid::new_v4().simple().to_string()[..12].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("FN{}", fakecloud_core::ids::short_id(12).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
         let function_arn =
             Arn::global("cloudfront", &self.account_id, &format!("function/{name}")).to_string();
 
@@ -5833,14 +5803,8 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let id = format!(
-            "CP{}",
-            Uuid::new_v4().simple().to_string()[..12].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("CP{}", fakecloud_core::ids::short_id(12).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
 
         let cache_policy = StoredCachePolicy {
             id: id.clone(),
@@ -5907,14 +5871,8 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let id = format!(
-            "ORP{}",
-            Uuid::new_v4().simple().to_string()[..11].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("ORP{}", fakecloud_core::ids::short_id(11).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
 
         let policy = StoredOriginRequestPolicy {
             id: id.clone(),
@@ -5971,14 +5929,8 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        let id = format!(
-            "RHP{}",
-            Uuid::new_v4().simple().to_string()[..11].to_uppercase()
-        );
-        let etag = format!(
-            "E{}",
-            Uuid::new_v4().simple().to_string()[..7].to_uppercase()
-        );
+        let id = format!("RHP{}", fakecloud_core::ids::short_id(11).to_uppercase());
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
 
         let policy = StoredResponseHeadersPolicy {
             id: id.clone(),

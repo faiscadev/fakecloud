@@ -1,7 +1,6 @@
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -20,7 +19,7 @@ pub(crate) fn create_inference_profile(
     // An application inference profile gets a lowercase-alphanumeric id and an
     // `application-inference-profile/<id>` ARN (system-defined profiles use the
     // bare `inference-profile/` resource); the provider asserts this shape.
-    let profile_id = Uuid::new_v4().simple().to_string()[..12].to_string();
+    let profile_id = fakecloud_core::ids::short_id(12).to_string();
     let profile_arn = format!(
         "arn:aws:bedrock:{}:{}:application-inference-profile/{}",
         req.region, req.account_id, profile_id

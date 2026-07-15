@@ -372,7 +372,7 @@ impl RedshiftService {
         }
         // Seed the restored cluster from the source snapshot when available.
         let source = param(req, "SnapshotIdentifier").and_then(|s| acct.snapshots.get(&s).cloned());
-        let token = &Uuid::new_v4().simple().to_string()[..12];
+        let token = &fakecloud_core::ids::short_id(12);
         let cluster = Cluster {
             cluster_identifier: id.clone(),
             node_type: param(req, "NodeType")

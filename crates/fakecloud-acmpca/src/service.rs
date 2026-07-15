@@ -1682,13 +1682,6 @@ fn parse_tags(v: Option<&Value>) -> Result<Vec<TagEntry>, AwsServiceError> {
     Ok(out)
 }
 
-// ─── Timestamp ──────────────────────────────────────────────────────
-
-#[allow(dead_code)]
-fn epoch_f64(dt: DateTime<Utc>) -> f64 {
-    dt.timestamp() as f64
-}
-
 // ─── Error constructors (declared shape names) ──────────────────────
 
 fn invalid_args(msg: impl Into<String>) -> AwsServiceError {

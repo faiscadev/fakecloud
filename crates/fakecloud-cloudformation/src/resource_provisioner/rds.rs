@@ -338,7 +338,7 @@ impl ResourceProvisioner {
                 format!(
                     "cfn-{}-{}",
                     resource.logical_id.to_lowercase(),
-                    Uuid::new_v4().simple().to_string()[..8].to_lowercase()
+                    fakecloud_core::ids::short_id(8).to_lowercase()
                 )
             });
         let class = props
@@ -668,7 +668,7 @@ impl ResourceProvisioner {
                 format!(
                     "cfn-cluster-{}-{}",
                     resource.logical_id.to_lowercase(),
-                    Uuid::new_v4().simple().to_string()[..8].to_lowercase()
+                    fakecloud_core::ids::short_id(8).to_lowercase()
                 )
             });
         let engine = props
