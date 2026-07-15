@@ -42,8 +42,81 @@ pub(super) fn dispatch(
         "ImportHubContent" => Ok(Some(import_hub_content(svc, ctx, meta, body))),
         "AddAssociation" => Ok(Some(add_association(svc, ctx, meta, body))),
         "DeleteAssociation" => Ok(Some(delete_association(svc, ctx, body))),
+        op if is_lifecycle_transition(op) => Ok(lifecycle_transition(svc, ctx, meta, body)),
         _ => Ok(None),
     }
+}
+
+/// `Start*` / `Stop*` operations that transition a stored resource's status.
+/// `StartPipelineExecution` is handled separately above (it *creates* a record),
+/// and `StartSession` opens a session rather than transitioning a resource, so
+/// both are excluded here.
+fn is_lifecycle_transition(op: &str) -> bool {
+    (op.starts_with("Start") || op.starts_with("Stop"))
+        && op != "StartPipelineExecution"
+        && op != "StartSession"
+}
+
+/// The settled status a resource reports after a `Start*` (`started=true`) or
+/// `Stop*` transition. Values are real members of each family's status enum;
+/// families not listed fall back to the generic job lifecycle
+/// (`InService` / `Stopped`).
+fn transition_status(family: &str, started: bool) -> &'static str {
+    match (family, started) {
+        ("NotebookInstance", true) => "InService",
+        ("NotebookInstance", false) => "Stopped",
+        ("MonitoringSchedule", true) => "Scheduled",
+        ("MonitoringSchedule", false) => "Stopped",
+        ("InferenceExperiment", true) => "Running",
+        ("InferenceExperiment", false) => "Cancelled",
+        ("MlflowTrackingServer", true) => "Created",
+        ("MlflowTrackingServer", false) => "Stopped",
+        // Batch/async jobs and everything else: a Stop settles to Stopped; a
+        // Start (rare for jobs) returns the resource to service.
+        (_, true) => "InService",
+        (_, false) => "Stopped",
+    }
+}
+
+/// Apply a `Start*` / `Stop*` transition to the target resource's `{Family}Status`
+/// member (or the single `*Status` member it carries) so a subsequent Describe
+/// reflects the new state instead of the stale one. Returns the standard action
+/// output. If no matching record exists, returns `None` so the caller falls back
+/// to the generic no-op action response (matching AWS, which 4xx's only when the
+/// resource is absent — but our engine has no such record to reject against).
+fn lifecycle_transition(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Option<(AwsResponse, bool)> {
+    let started = meta.op.starts_with("Start");
+    let new_status = transition_status(meta.family, started);
+    let ident = super::engine::action_key(body);
+
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let key = data.resolve_key(meta.family, &ident)?;
+    let rec = data.get_resource_mut(meta.family, &key)?;
+    let obj = rec.as_object_mut()?;
+
+    // Prefer an existing `*Status` member; otherwise write the canonical
+    // `{Family}Status`. A freshly-created record often carries no status member
+    // at all (status is server-derived), so we must insert one — otherwise a
+    // Describe would keep synthesising the default "healthy" status and the
+    // Stop/Start would appear to do nothing.
+    let canonical = format!("{}Status", meta.family);
+    let status_key = if obj.contains_key(&canonical) {
+        canonical
+    } else {
+        obj.keys()
+            .find(|k| k.ends_with("Status"))
+            .filter(|_| obj.keys().filter(|k| k.ends_with("Status")).count() == 1)
+            .cloned()
+            .unwrap_or(canonical)
+    };
+    obj.insert(status_key, Value::String(new_status.to_string()));
+    Some((super::engine::action(ctx, meta, body), true))
 }
 
 fn str_member(body: &Map<String, Value>, key: &str) -> String {

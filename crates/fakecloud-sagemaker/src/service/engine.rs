@@ -398,7 +398,7 @@ pub(super) fn get(
 /// A best-effort resource identifier from a request body, used to derive ARNs /
 /// names for an action's synthesised output members: the first `*Arn`, else the
 /// first `*Name` / `*Id`, else the first string member.
-fn action_key(body: &Map<String, Value>) -> String {
+pub(super) fn action_key(body: &Map<String, Value>) -> String {
     let str_members: Vec<(&String, &str)> = body
         .iter()
         .filter_map(|(k, v)| v.as_str().map(|s| (k, s)))

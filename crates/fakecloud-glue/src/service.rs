@@ -1101,26 +1101,27 @@ impl GlueService {
         if db.tables.contains_key(&name) {
             return Err(already_exists(format!("Table {name} already exists")));
         }
-        db.tables.insert(
-            name.clone(),
-            Table {
-                name,
-                database_name: db_name,
-                description: input["Description"].as_str().map(|s| s.to_string()),
-                owner: input["Owner"].as_str().map(|s| s.to_string()),
-                create_time: now,
-                update_time: now,
-                last_access_time: None,
-                retention: input["Retention"].as_i64().unwrap_or(0),
-                storage_descriptor: parse_storage_descriptor(&input["StorageDescriptor"]),
-                partition_keys: parse_columns(&input["PartitionKeys"]),
-                view_original_text: input["ViewOriginalText"].as_str().map(|s| s.to_string()),
-                view_expanded_text: input["ViewExpandedText"].as_str().map(|s| s.to_string()),
-                table_type: input["TableType"].as_str().map(|s| s.to_string()),
-                parameters: parse_string_map(&input["Parameters"]),
-                partitions: BTreeMap::new(),
-            },
-        );
+        let table = Table {
+            name: name.clone(),
+            database_name: db_name.clone(),
+            description: input["Description"].as_str().map(|s| s.to_string()),
+            owner: input["Owner"].as_str().map(|s| s.to_string()),
+            create_time: now,
+            update_time: now,
+            last_access_time: None,
+            retention: input["Retention"].as_i64().unwrap_or(0),
+            storage_descriptor: parse_storage_descriptor(&input["StorageDescriptor"]),
+            partition_keys: parse_columns(&input["PartitionKeys"]),
+            view_original_text: input["ViewOriginalText"].as_str().map(|s| s.to_string()),
+            view_expanded_text: input["ViewExpandedText"].as_str().map(|s| s.to_string()),
+            table_type: input["TableType"].as_str().map(|s| s.to_string()),
+            parameters: parse_string_map(&input["Parameters"]),
+            partitions: BTreeMap::new(),
+        };
+        let tv_json = table_json(&table);
+        db.tables.insert(name.clone(), table);
+        // Archive the initial version so GetTableVersion(s) return real data.
+        state.archive_table_version(&db_name, &name, tv_json);
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -1224,6 +1225,10 @@ impl GlueService {
         if let Some(r) = input["Retention"].as_i64() {
             t.retention = r;
         }
+        // Snapshot the mutated table as a new archived version (Glue bumps the
+        // VersionId on every UpdateTable).
+        let tv_json = table_json(t);
+        state.archive_table_version(db_name, name, tv_json);
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -1242,6 +1247,7 @@ impl GlueService {
         if db.tables.remove(name).is_none() {
             return Err(entity_not_found(format!("Table {name} not found")));
         }
+        state.purge_table_versions(db_name, name);
         Ok(AwsResponse::ok_json(json!({})))
     }
 

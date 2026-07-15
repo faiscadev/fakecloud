@@ -476,7 +476,12 @@ pub(crate) fn collect_topic_subscribers(
                 .get("RawMessageDelivery")
                 .map(|v| v == "true")
                 .unwrap_or(false);
-            (s.endpoint.clone(), raw, s.subscription_arn.clone())
+            (
+                s.endpoint.clone(),
+                raw,
+                s.subscription_arn.clone(),
+                s.attributes.get("RedrivePolicy").cloned(),
+            )
         })
         .collect();
 
@@ -499,7 +504,13 @@ pub(crate) fn collect_topic_subscribers(
         .values()
         .filter(|s| s.protocol == "lambda")
         .filter(confirmed_for_topic)
-        .map(|s| (s.endpoint.clone(), s.subscription_arn.clone()))
+        .map(|s| {
+            (
+                s.endpoint.clone(),
+                s.subscription_arn.clone(),
+                s.attributes.get("RedrivePolicy").cloned(),
+            )
+        })
         .collect();
 
     let email = state

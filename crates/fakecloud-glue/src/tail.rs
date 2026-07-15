@@ -779,15 +779,29 @@ impl GlueService {
         let body = req.json_body();
         let db = req_str(&body, "DatabaseName")?;
         let table = req_str(&body, "TableName")?;
-        let version = body
-            .get("VersionId")
-            .and_then(|v| v.as_str())
-            .unwrap_or("1");
+        let requested = body.get("VersionId").and_then(|v| v.as_str());
         let accounts = self.state.read();
-        // Synthesize a version from the live table when no archived version exists.
-        let tbl = accounts
+        let st = accounts
             .get(&req.account_id)
-            .and_then(|s| s.dbs_in(&req.region))
+            .ok_or_else(|| entity_not_found(format!("Table {table} not found")))?;
+        // Prefer the archived version store; default to the latest version when
+        // no VersionId is supplied.
+        let version = match requested {
+            Some(v) => v.to_string(),
+            None => st
+                .table_version_ids(db, table)
+                .last()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "1".to_string()),
+        };
+        let tv_key = Self::tv_key(db, table, &version);
+        if let Some(tv) = st.table_versions.get(&tv_key) {
+            return Ok(AwsResponse::ok_json(json!({ "TableVersion": tv })));
+        }
+        // Fall back to synthesizing from the live table (tables created before
+        // the archive existed, or restored from an older snapshot).
+        let tbl = st
+            .dbs_in(&req.region)
             .and_then(|dbs| dbs.get(db))
             .and_then(|d| d.tables.get(table))
             .ok_or_else(|| entity_not_found(format!("Table {table} not found")))?;
@@ -807,12 +821,30 @@ impl GlueService {
         let db = req_str(&body, "DatabaseName")?;
         let table = req_str(&body, "TableName")?;
         let accounts = self.state.read();
-        let tbl = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.dbs_in(&req.region))
+        let st = match accounts.get(&req.account_id) {
+            Some(s) => s,
+            None => return Ok(AwsResponse::ok_json(json!({ "TableVersions": [] }))),
+        };
+        // Return the full archive, newest first (Glue orders descending).
+        let ids = st.table_version_ids(db, table);
+        if !ids.is_empty() {
+            let versions: Vec<Value> = ids
+                .iter()
+                .rev()
+                .filter_map(|n| {
+                    st.table_versions
+                        .get(&Self::tv_key(db, table, &n.to_string()))
+                })
+                .cloned()
+                .collect();
+            return Ok(AwsResponse::ok_json(json!({ "TableVersions": versions })));
+        }
+        // Fall back to a synthesized single version for pre-archive tables.
+        let versions = match st
+            .dbs_in(&req.region)
             .and_then(|dbs| dbs.get(db))
-            .and_then(|d| d.tables.get(table));
-        let versions = match tbl {
+            .and_then(|d| d.tables.get(table))
+        {
             Some(t) => vec![json!({
                 "Table": crate::service::table_json(t), "VersionId": "1",
             })],
