@@ -528,8 +528,7 @@ async fn iot_security_profile_attach_detach_reflected() {
         profiles
             .security_profile_target_mappings()
             .iter()
-            .any(|m| m
-                .security_profile_identifier().map(|i| i.name()) == Some("sp-1")),
+            .any(|m| m.security_profile_identifier().map(|i| i.name()) == Some("sp-1")),
         "profile must map to the target"
     );
 
