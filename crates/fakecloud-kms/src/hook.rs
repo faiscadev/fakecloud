@@ -76,6 +76,10 @@ pub enum KmsHookError {
     /// Ciphertext envelope is malformed or signed by a key that no
     /// longer exists.
     InvalidCiphertext(String),
+    /// The key resolves but is disabled / pending deletion, so it can't
+    /// be used for a cryptographic operation (mirrors real KMS, which
+    /// fails Decrypt with `DisabledException` / `KMSInvalidStateException`).
+    KeyDisabled(String),
 }
 
 impl std::fmt::Display for KmsHookError {
@@ -83,6 +87,7 @@ impl std::fmt::Display for KmsHookError {
         match self {
             Self::KeyNotFound(k) => write!(f, "kms key not found: {k}"),
             Self::InvalidCiphertext(msg) => write!(f, "invalid ciphertext: {msg}"),
+            Self::KeyDisabled(k) => write!(f, "kms key is disabled: {k}"),
         }
     }
 }
@@ -181,11 +186,17 @@ impl KmsServiceHook {
             let state = mas
                 .get(account_id)
                 .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?;
-            state
+            let key = state
                 .keys
                 .get(&key_short)
-                .map(|k| k.arn.clone())
-                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?
+                .ok_or_else(|| KmsHookError::KeyNotFound(key_short.clone()))?;
+            // A disabled / pending-deletion key can't decrypt — real KMS
+            // rejects the operation, and SSE-KMS consumers (SQS/SNS/...) must
+            // surface that rather than returning stale ciphertext as plaintext.
+            if !key.enabled {
+                return Err(KmsHookError::KeyDisabled(key_short.clone()));
+            }
+            key.arn.clone()
         };
 
         self.usage.write().push(KmsUsageRecord {
