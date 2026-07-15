@@ -261,6 +261,10 @@ impl ResourceProvisioner {
                 .unwrap_or(false),
             client_secrets: Vec::new(),
             refresh_token_rotation: None,
+            analytics_configuration: props
+                .get("AnalyticsConfiguration")
+                .filter(|v| !v.is_null())
+                .cloned(),
         };
 
         state.user_pool_clients.insert(client_id.clone(), client);

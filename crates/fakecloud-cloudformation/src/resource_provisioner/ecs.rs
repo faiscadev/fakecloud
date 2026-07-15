@@ -393,6 +393,10 @@ impl ResourceProvisioner {
             capacity_provider_strategy,
             availability_zone_rebalancing,
             volume_configurations: Vec::new(),
+            service_connect_configuration: props
+                .get("ServiceConnectConfiguration")
+                .filter(|v| !v.is_null())
+                .cloned(),
         };
         state.services.insert(key.clone(), service);
         if let Some(c) = state.clusters.get_mut(&cluster_name) {
