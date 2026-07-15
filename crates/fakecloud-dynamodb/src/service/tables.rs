@@ -808,14 +808,20 @@ impl DynamoDbService {
         // ResourceNotFoundException; the strict probe rejects the latter.
         let table = get_table_with_code(&state.tables, table_name, "TableNotFoundException")?;
 
+        let now = Utc::now();
+        // AWS backup ARNs are `.../backup/<epoch-millis>-<hex>`. A
+        // second-resolution timestamp collides when several backups are
+        // created in the same second, and since `backups` is keyed by ARN the
+        // collision silently overwrote the earlier backup. Use epoch-millis
+        // plus a short unique suffix so every backup gets a distinct ARN.
         let backup_arn = format!(
-            "arn:aws:dynamodb:{}:{}:table/{}/backup/{}",
+            "arn:aws:dynamodb:{}:{}:table/{}/backup/{:013}-{}",
             state.region,
             state.account_id,
             table_name,
-            Utc::now().format("%Y%m%d%H%M%S")
+            now.timestamp_millis(),
+            &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
         );
-        let now = Utc::now();
 
         let backup = BackupDescription {
             backup_arn: backup_arn.clone(),
