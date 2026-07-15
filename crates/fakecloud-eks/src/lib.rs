@@ -1,5 +1,6 @@
 //! AWS EKS (`eks`) implementation for FakeCloud.
 
+pub(crate) mod eks_helpers;
 pub mod persistence;
 pub(crate) mod service;
 pub(crate) mod state;
