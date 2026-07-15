@@ -286,3 +286,135 @@ async fn iot_register_thing_returns_resource_arns() {
         .map(|a| a.contains(":thing/"))
         .unwrap_or(false));
 }
+
+/// Regression: CreateTopicRuleDestination is server-minted (no path label), so
+/// it used to hit the generic Action no-op and never persist — Get/List always
+/// 404/empty. Now it stores a real destination the read path reflects.
+#[tokio::test]
+async fn iot_topic_rule_destination_persists() {
+    use aws_sdk_iot::types::{HttpUrlDestinationConfiguration, TopicRuleDestinationConfiguration};
+    let server = TestServer::start().await;
+    let client = iot_client(&server).await;
+
+    let created = client
+        .create_topic_rule_destination()
+        .destination_configuration(
+            TopicRuleDestinationConfiguration::builder()
+                .http_url_configuration(
+                    HttpUrlDestinationConfiguration::builder()
+                        .confirmation_url("https://example.com/confirm")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create destination");
+    let arn = created
+        .topic_rule_destination()
+        .unwrap()
+        .arn()
+        .unwrap()
+        .to_string();
+    assert!(arn.contains(":ruledestination/"), "arn: {arn}");
+
+    // Get reflects it (previously 404).
+    let got = client
+        .get_topic_rule_destination()
+        .arn(&arn)
+        .send()
+        .await
+        .expect("get destination");
+    assert_eq!(
+        got.topic_rule_destination().unwrap().arn(),
+        Some(arn.as_str())
+    );
+
+    // List reflects it (previously empty).
+    let listed = client
+        .list_topic_rule_destinations()
+        .send()
+        .await
+        .expect("list destinations");
+    assert!(
+        listed
+            .destination_summaries()
+            .iter()
+            .any(|s| s.arn() == Some(arn.as_str())),
+        "created destination must appear in the list"
+    );
+}
+
+/// Regression: UpdateThingGroupsForThing (bulk add/remove) used to be an Action
+/// no-op, so the membership never took effect. Now it mirrors the
+/// group-things relation that ListThingGroupsForThing reads.
+#[tokio::test]
+async fn iot_update_thing_groups_for_thing_reflected() {
+    let server = TestServer::start().await;
+    let client = iot_client(&server).await;
+
+    client
+        .create_thing()
+        .thing_name("bulk-thing")
+        .send()
+        .await
+        .unwrap();
+    for g in ["grp-a", "grp-b"] {
+        client
+            .create_thing_group()
+            .thing_group_name(g)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    client
+        .update_thing_groups_for_thing()
+        .thing_name("bulk-thing")
+        .thing_groups_to_add("grp-a")
+        .thing_groups_to_add("grp-b")
+        .send()
+        .await
+        .expect("bulk add to groups");
+
+    let groups = client
+        .list_thing_groups_for_thing()
+        .thing_name("bulk-thing")
+        .send()
+        .await
+        .expect("list groups for thing");
+    let names: Vec<&str> = groups
+        .thing_groups()
+        .iter()
+        .filter_map(|g| g.group_name())
+        .collect();
+    assert!(
+        names.contains(&"grp-a") && names.contains(&"grp-b"),
+        "got: {names:?}"
+    );
+
+    // Remove one; it must drop out.
+    client
+        .update_thing_groups_for_thing()
+        .thing_name("bulk-thing")
+        .thing_groups_to_remove("grp-a")
+        .send()
+        .await
+        .expect("bulk remove");
+    let groups = client
+        .list_thing_groups_for_thing()
+        .thing_name("bulk-thing")
+        .send()
+        .await
+        .unwrap();
+    let names: Vec<&str> = groups
+        .thing_groups()
+        .iter()
+        .filter_map(|g| g.group_name())
+        .collect();
+    assert!(
+        !names.contains(&"grp-a") && names.contains(&"grp-b"),
+        "got: {names:?}"
+    );
+}

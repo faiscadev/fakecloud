@@ -317,6 +317,19 @@ pub(super) fn dispatch(
         "EnableTopicRule" => Ok(Some(set_topic_rule_disabled(svc, ctx, labels, false))),
         "DisableTopicRule" => Ok(Some(set_topic_rule_disabled(svc, ctx, labels, true))),
 
+        // Topic-rule destinations: the arn is server-minted (nlabels:0 create),
+        // so the generic engine can't key it. Store into the shared
+        // `destinations` resource family that Get/List/Delete read.
+        "CreateTopicRuleDestination" => Ok(Some(create_topic_rule_destination(svc, ctx, body))),
+        "UpdateTopicRuleDestination" => Ok(Some(update_topic_rule_destination(svc, ctx, body))),
+        // No async confirmation channel exists, so destinations are created
+        // ENABLED; Confirm is accepted idempotently (AWS returns an empty body).
+        "ConfirmTopicRuleDestination" => Ok(Some((ok_json(Value::Object(Map::new())), false))),
+
+        // Bulk thing<->group membership; mirrors AddThingToThingGroup's
+        // `group-things` relation so ListThingGroupsForThing reflects it.
+        "UpdateThingGroupsForThing" => Ok(Some(update_thing_groups_for_thing(svc, ctx, body))),
+
         _ => Ok(None),
     }
 }
@@ -658,6 +671,135 @@ fn list_attached_policies(
 }
 
 // ---------- topic rules ----------
+
+fn create_topic_rule_destination(
+    svc: &IotService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let cfg = body.get("destinationConfiguration");
+    let http = cfg.and_then(|c| c.get("httpUrlConfiguration"));
+    let vpc = cfg.and_then(|c| c.get("vpcConfiguration"));
+    let http_props = http
+        .and_then(|h| h.get("confirmationUrl"))
+        .map(|u| json!({ "confirmationUrl": u }));
+
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.seq += 1;
+    let kind = if vpc.is_some() { "vpc" } else { "http" };
+    let uid = super::mint_uuid(&format!("{}:dest:{}", ctx.account, data.seq));
+    let arn = format!(
+        "arn:aws:iot:{}:{}:ruledestination/{kind}/{uid}",
+        ctx.region, ctx.account
+    );
+    let now = super::now_epoch();
+
+    let mut dest = Map::new();
+    dest.insert("arn".into(), Value::String(arn.clone()));
+    dest.insert("status".into(), Value::String("ENABLED".into()));
+    dest.insert("createdAt".into(), now.clone());
+    dest.insert("lastUpdatedAt".into(), now.clone());
+    if let Some(hp) = &http_props {
+        dest.insert("httpUrlProperties".into(), hp.clone());
+    }
+    if let Some(v) = vpc {
+        dest.insert("vpcProperties".into(), v.clone());
+    }
+    let destination = Value::Object(dest);
+
+    // Record: top-level fields feed the List element projection; the nested
+    // `topicRuleDestination` feeds the Get struct projection.
+    let mut record = Map::new();
+    record.insert("arn".into(), Value::String(arn.clone()));
+    record.insert("status".into(), Value::String("ENABLED".into()));
+    record.insert("createdAt".into(), now.clone());
+    record.insert("lastUpdatedAt".into(), now);
+    if let Some(hp) = &http_props {
+        record.insert("httpUrlSummary".into(), hp.clone());
+    }
+    record.insert("topicRuleDestination".into(), destination.clone());
+    data.put_resource("destinations", &arn, Value::Object(record));
+
+    (
+        ok_json(json!({ "topicRuleDestination": destination })),
+        true,
+    )
+}
+
+fn update_topic_rule_destination(
+    svc: &IotService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let Some(arn) = body_str(body, "arn") else {
+        return (ok_json(Value::Object(Map::new())), false);
+    };
+    let status = body_str(body, "status").unwrap_or("ENABLED").to_string();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(Value::Object(mut record)) = data.get_resource("destinations", arn).cloned() else {
+        return (ok_json(Value::Object(Map::new())), false);
+    };
+    record.insert("status".into(), Value::String(status.clone()));
+    record.insert("lastUpdatedAt".into(), super::now_epoch());
+    if let Some(Value::Object(dest)) = record.get_mut("topicRuleDestination") {
+        dest.insert("status".into(), Value::String(status));
+    }
+    data.put_resource("destinations", arn, Value::Object(record));
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+fn update_thing_groups_for_thing(
+    svc: &IotService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let Some(thing) = body_str(body, "thingName") else {
+        return (ok_json(Value::Object(Map::new())), false);
+    };
+    let adds: Vec<String> = body
+        .get("thingGroupsToAdd")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    let removes: Vec<String> = body
+        .get("thingGroupsToRemove")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let mut mutated = false;
+    for grp in &adds {
+        let entry = data
+            .relations
+            .entry(format!("group-things:{grp}"))
+            .or_default();
+        if !entry.iter().any(|x| x == thing) {
+            entry.push(thing.to_string());
+            mutated = true;
+        }
+    }
+    for grp in &removes {
+        if let Some(entry) = data.relations.get_mut(&format!("group-things:{grp}")) {
+            if let Some(pos) = entry.iter().position(|x| x == thing) {
+                entry.remove(pos);
+                mutated = true;
+            }
+        }
+    }
+    (ok_json(Value::Object(Map::new())), mutated)
+}
 
 fn put_topic_rule(
     svc: &IotService,
