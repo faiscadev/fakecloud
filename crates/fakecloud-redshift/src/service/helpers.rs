@@ -57,10 +57,7 @@ pub(crate) fn opt_elem(name: &str, value: Option<&str>) -> String {
 }
 
 pub(crate) fn param(req: &AwsRequest, name: &str) -> Option<String> {
-    req.query_params
-        .get(name)
-        .cloned()
-        .filter(|v| !v.is_empty())
+    fakecloud_core::query::optional_query_param(req, name)
 }
 
 pub(crate) fn param_or(req: &AwsRequest, name: &str, default: &str) -> String {
