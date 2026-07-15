@@ -149,6 +149,63 @@ pub(super) fn dispatch(
             &fuota_multicast_key(labels),
             labels.get("MulticastGroupId").map(String::as_str),
         ))),
+        // Wireless device/gateway <-> IoT thing. Sets ThingArn/ThingName on
+        // the stored record so GetWirelessDevice/GetWirelessGateway reflect it.
+        "AssociateWirelessDeviceWithThing" => Ok(Some(associate_thing(
+            svc,
+            ctx,
+            "wireless-devices",
+            labels.get("Id").map(String::as_str),
+            body,
+        ))),
+        "DisassociateWirelessDeviceFromThing" => Ok(Some(disassociate_thing(
+            svc,
+            ctx,
+            "wireless-devices",
+            labels.get("Id").map(String::as_str),
+        ))),
+        "AssociateWirelessGatewayWithThing" => Ok(Some(associate_thing(
+            svc,
+            ctx,
+            "wireless-gateways",
+            labels.get("Id").map(String::as_str),
+            body,
+        ))),
+        "DisassociateWirelessGatewayFromThing" => Ok(Some(disassociate_thing(
+            svc,
+            ctx,
+            "wireless-gateways",
+            labels.get("Id").map(String::as_str),
+        ))),
+
+        // Wireless gateway <-> IoT certificate.
+        "AssociateWirelessGatewayWithCertificate" => Ok(Some(associate_gateway_certificate(
+            svc,
+            ctx,
+            labels.get("Id").map(String::as_str),
+            body,
+        ))),
+        "DisassociateWirelessGatewayFromCertificate" => Ok(Some(disassociate_thing_field(
+            svc,
+            ctx,
+            "wireless-gateways",
+            labels.get("Id").map(String::as_str),
+            &["IotCertificateId"],
+        ))),
+        "GetWirelessGatewayCertificate" => {
+            Ok(Some(get_wireless_gateway_certificate(svc, ctx, labels)))
+        }
+
+        // AWS-account <-> Sidewalk partner account.
+        "AssociateAwsAccountWithPartnerAccount" => {
+            Ok(Some(associate_partner_account(svc, ctx, body)))
+        }
+        "DisassociateAwsAccountFromPartnerAccount" => Ok(Some(disassociate_partner_account(
+            svc,
+            ctx,
+            labels.get("PartnerAccountId").map(String::as_str),
+        ))),
+
         "ListMulticastGroupsByFuotaTask" => {
             Ok(Some(list_multicast_groups_by_fuota_task(svc, ctx, labels)))
         }
@@ -700,6 +757,148 @@ fn disassociate(
         let mut g = svc.state.write();
         let data = g.get_or_create(&ctx.account);
         data.remove_relation(key, member);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// Set `ThingArn` (+ derived `ThingName`) on a stored wireless device/gateway
+/// record so the matching Get reflects the association.
+fn associate_thing(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    rtype: &str,
+    id: Option<&str>,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let (Some(id), Some(thing_arn)) = (id, body.get("ThingArn").and_then(Value::as_str)) else {
+        return (ok_json(Value::Object(Map::new())), false);
+    };
+    let thing_name = thing_arn
+        .rsplit_once("thing/")
+        .map(|(_, n)| n)
+        .unwrap_or("");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if let Some(record) = data.get_resource(rtype, id).cloned() {
+        let mut record = record;
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("ThingArn".to_string(), json!(thing_arn));
+            obj.insert("ThingName".to_string(), json!(thing_name));
+        }
+        data.put_resource(rtype, id, record);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// Clear `ThingArn`/`ThingName` on a wireless device/gateway record.
+fn disassociate_thing(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    rtype: &str,
+    id: Option<&str>,
+) -> (AwsResponse, bool) {
+    disassociate_thing_field(svc, ctx, rtype, id, &["ThingArn", "ThingName"])
+}
+
+/// Remove the named fields from a stored record (used by the disassociate ops).
+fn disassociate_thing_field(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    rtype: &str,
+    id: Option<&str>,
+    fields: &[&str],
+) -> (AwsResponse, bool) {
+    if let Some(id) = id {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        if let Some(mut record) = data.get_resource(rtype, id).cloned() {
+            if let Some(obj) = record.as_object_mut() {
+                for f in fields {
+                    obj.remove(*f);
+                }
+            }
+            data.put_resource(rtype, id, record);
+        }
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// Store `IotCertificateId` on the wireless-gateway record.
+fn associate_gateway_certificate(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    id: Option<&str>,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let (Some(id), Some(cert)) = (id, body.get("IotCertificateId").and_then(Value::as_str)) else {
+        return (ok_json(Value::Object(Map::new())), false);
+    };
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if let Some(mut record) = data.get_resource("wireless-gateways", id).cloned() {
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("IotCertificateId".to_string(), json!(cert));
+        }
+        data.put_resource("wireless-gateways", id, record);
+    }
+    (ok_json(json!({ "IotCertificateId": cert })), true)
+}
+
+/// GetWirelessGatewayCertificate (a Verb::Action, so not served by the generic
+/// engine): project the cert id stored on the gateway record.
+fn get_wireless_gateway_certificate(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let id = labels.get("Id").map(String::as_str).unwrap_or("");
+    let g = svc.state.read();
+    let cert = g
+        .get(&ctx.account)
+        .and_then(|d| d.get_resource("wireless-gateways", id))
+        .and_then(|r| r.get("IotCertificateId"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    (ok_json(json!({ "IotCertificateId": cert })), false)
+}
+
+/// Persist a Sidewalk partner-account association keyed by its AmazonId so
+/// GetPartnerAccount / ListPartnerAccounts (generic reads) reflect it.
+fn associate_partner_account(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let sidewalk = body.get("Sidewalk").cloned().unwrap_or(json!({}));
+    let amazon_id = sidewalk
+        .get("AmazonId")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let record = json!({
+        "Sidewalk": sidewalk,
+        "PartnerAccountId": amazon_id,
+        "PartnerType": "Sidewalk",
+    });
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_resource("partner-accounts", &amazon_id, record.clone());
+    (ok_json(record), true)
+}
+
+/// Remove a partner-account association.
+fn disassociate_partner_account(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    id: Option<&str>,
+) -> (AwsResponse, bool) {
+    if let Some(id) = id {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.resources
+            .get_mut("partner-accounts")
+            .map(|m| m.remove(id));
     }
     (ok_json(Value::Object(Map::new())), true)
 }
