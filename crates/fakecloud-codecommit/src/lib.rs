@@ -16,6 +16,7 @@
 //! URLs are minted in exact AWS form but no smart-HTTP endpoint is served --
 //! the same control-plane-only shape the sibling `Code*` services use.
 
+pub(crate) mod codecommit_helpers;
 pub mod persistence;
 pub(crate) mod service;
 pub(crate) mod state;
