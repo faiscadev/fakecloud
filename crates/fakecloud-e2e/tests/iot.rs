@@ -418,3 +418,136 @@ async fn iot_update_thing_groups_for_thing_reflected() {
         "got: {names:?}"
     );
 }
+
+#[tokio::test]
+async fn iot_deprecate_thing_type_reflected() {
+    // Bug-hunt 1.22: DeprecateThingType was an accept-and-discard no-op;
+    // DescribeThingType must reflect the deprecation, and undoDeprecate revert.
+    let server = TestServer::start().await;
+    let client = iot_client(&server).await;
+
+    client
+        .create_thing_type()
+        .thing_type_name("dep-type")
+        .send()
+        .await
+        .expect("create_thing_type");
+
+    client
+        .deprecate_thing_type()
+        .thing_type_name("dep-type")
+        .send()
+        .await
+        .expect("deprecate_thing_type");
+
+    let d = client
+        .describe_thing_type()
+        .thing_type_name("dep-type")
+        .send()
+        .await
+        .expect("describe_thing_type");
+    assert_eq!(
+        d.thing_type_metadata().map(|m| m.deprecated()),
+        Some(true),
+        "thing type must read as deprecated"
+    );
+
+    client
+        .deprecate_thing_type()
+        .thing_type_name("dep-type")
+        .undo_deprecate(true)
+        .send()
+        .await
+        .expect("undo deprecate");
+    let d = client
+        .describe_thing_type()
+        .thing_type_name("dep-type")
+        .send()
+        .await
+        .expect("describe_thing_type");
+    assert_eq!(
+        d.thing_type_metadata().map(|m| m.deprecated()),
+        Some(false),
+        "undoDeprecate must clear the flag"
+    );
+}
+
+#[tokio::test]
+async fn iot_security_profile_attach_detach_reflected() {
+    // Bug-hunt 1.22: Attach/DetachSecurityProfile + their list readers were
+    // no-ops. Attachment must round-trip through both list directions.
+    let server = TestServer::start().await;
+    let client = iot_client(&server).await;
+
+    client
+        .create_security_profile()
+        .security_profile_name("sp-1")
+        .send()
+        .await
+        .expect("create_security_profile");
+    // A thing group to use as the monitored target.
+    let grp = client
+        .create_thing_group()
+        .thing_group_name("sp-target")
+        .send()
+        .await
+        .expect("create_thing_group");
+    let target_arn = grp.thing_group_arn().expect("group arn").to_string();
+
+    client
+        .attach_security_profile()
+        .security_profile_name("sp-1")
+        .security_profile_target_arn(&target_arn)
+        .send()
+        .await
+        .expect("attach_security_profile");
+
+    // Forward: targets for the profile.
+    let targets = client
+        .list_targets_for_security_profile()
+        .security_profile_name("sp-1")
+        .send()
+        .await
+        .expect("list_targets_for_security_profile");
+    assert!(
+        targets
+            .security_profile_targets()
+            .iter()
+            .any(|t| t.arn() == target_arn.as_str()),
+        "attached target must be listed"
+    );
+
+    // Inverse: profiles for the target.
+    let profiles = client
+        .list_security_profiles_for_target()
+        .security_profile_target_arn(&target_arn)
+        .send()
+        .await
+        .expect("list_security_profiles_for_target");
+    assert!(
+        profiles
+            .security_profile_target_mappings()
+            .iter()
+            .any(|m| m.security_profile_identifier().map(|i| i.name()) == Some("sp-1")),
+        "profile must map to the target"
+    );
+
+    // Detach clears both directions.
+    client
+        .detach_security_profile()
+        .security_profile_name("sp-1")
+        .security_profile_target_arn(&target_arn)
+        .send()
+        .await
+        .expect("detach_security_profile");
+    let targets = client
+        .list_targets_for_security_profile()
+        .security_profile_name("sp-1")
+        .send()
+        .await
+        .expect("list after detach");
+    assert!(
+        targets.security_profile_targets().is_empty(),
+        "detach must remove the target"
+    );
+}
