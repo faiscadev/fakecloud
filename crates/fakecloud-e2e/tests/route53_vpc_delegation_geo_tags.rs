@@ -138,7 +138,7 @@ async fn list_hosted_zones_by_vpc_paginates() {
             .list_hosted_zones_by_vpc()
             .vpc_id("vpc-page")
             .vpc_region(VpcRegion::UsEast1)
-            .max_items("2");
+            .max_items(2);
         if let Some(t) = &token {
             req = req.next_token(t);
         }
