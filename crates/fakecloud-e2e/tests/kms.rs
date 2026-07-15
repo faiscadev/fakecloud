@@ -390,12 +390,31 @@ async fn kms_derive_shared_secret() {
         .unwrap();
     let key_id = resp.key_metadata().unwrap().key_id().to_string();
 
-    let fake_pub = Blob::new(vec![0x04; 65]); // Fake uncompressed EC point
+    // Real ECDH requires a valid SubjectPublicKeyInfo for the counterparty;
+    // use a second KEY_AGREEMENT key's public key.
+    let peer = client
+        .create_key()
+        .key_usage(aws_sdk_kms::types::KeyUsageType::KeyAgreement)
+        .key_spec(aws_sdk_kms::types::KeySpec::EccNistP256)
+        .send()
+        .await
+        .unwrap();
+    let peer_id = peer.key_metadata().unwrap().key_id().to_string();
+    let peer_pub = client
+        .get_public_key()
+        .key_id(&peer_id)
+        .send()
+        .await
+        .unwrap()
+        .public_key()
+        .unwrap()
+        .clone();
+
     let result = client
         .derive_shared_secret()
         .key_id(&key_id)
         .key_agreement_algorithm(aws_sdk_kms::types::KeyAgreementAlgorithmSpec::Ecdh)
-        .public_key(fake_pub)
+        .public_key(peer_pub)
         .send()
         .await
         .unwrap();
