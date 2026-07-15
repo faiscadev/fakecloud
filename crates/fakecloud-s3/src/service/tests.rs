@@ -46,6 +46,18 @@ fn valid_bucket_names() {
     assert!(!is_valid_bucket_name("-bucket"));
     assert!(!is_valid_bucket_name("Bucket"));
     assert!(!is_valid_bucket_name("bucket-"));
+    // Underscores are not permitted for general-purpose buckets.
+    assert!(!is_valid_bucket_name("my_bucket"));
+    // No two adjacent periods.
+    assert!(!is_valid_bucket_name("my..bucket"));
+    // Must not look like an IPv4 address.
+    assert!(!is_valid_bucket_name("192.168.5.4"));
+    assert!(is_valid_bucket_name("192.168.5.4.example"));
+    // Reserved prefixes / suffixes.
+    assert!(!is_valid_bucket_name("xn--bucket"));
+    assert!(!is_valid_bucket_name("sthree-bucket"));
+    assert!(!is_valid_bucket_name("my-bucket-s3alias"));
+    assert!(!is_valid_bucket_name("my-bucket--ol-s3"));
 }
 
 #[test]

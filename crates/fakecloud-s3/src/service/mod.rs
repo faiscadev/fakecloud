@@ -2340,17 +2340,56 @@ pub(crate) fn is_valid_storage_class(class: &str) -> bool {
 }
 
 pub(crate) fn is_valid_bucket_name(name: &str) -> bool {
+    // General-purpose bucket naming rules (AWS S3):
+    // https://docs.aws.amazon.com/AmazonS3/latest/userguide/bucketnamingrules.html
     if name.len() < 3 || name.len() > 63 {
         return false;
     }
-    // Must start and end with alphanumeric
+    // Only lowercase letters, digits, hyphens, and dots. Underscores are NOT
+    // permitted for general-purpose buckets.
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'.')
+    {
+        return false;
+    }
+    // Must start and end with a letter or number.
     let bytes = name.as_bytes();
     if !bytes[0].is_ascii_alphanumeric() || !bytes[bytes.len() - 1].is_ascii_alphanumeric() {
         return false;
     }
-    // Only lowercase letters, digits, hyphens, dots (also allow underscores for compatibility)
-    name.chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.' || c == '_')
+    // Must not contain two adjacent periods.
+    if name.contains("..") {
+        return false;
+    }
+    // Must not be formatted as an IPv4 address (e.g. 192.168.5.4).
+    if is_ipv4_format(name) {
+        return false;
+    }
+    // Reserved prefixes / suffixes.
+    if name.starts_with("xn--")
+        || name.starts_with("sthree-")
+        || name.starts_with("amzn-s3-demo-")
+        || name.ends_with("-s3alias")
+        || name.ends_with("--ol-s3")
+        || name.ends_with(".mrap")
+    {
+        return false;
+    }
+    true
+}
+
+/// True when `name` is four dot-separated decimal octets (0-255), i.e. looks
+/// like an IPv4 address, which S3 forbids as a bucket name.
+fn is_ipv4_format(name: &str) -> bool {
+    let parts: Vec<&str> = name.split('.').collect();
+    parts.len() == 4
+        && parts.iter().all(|p| {
+            !p.is_empty()
+                && p.len() <= 3
+                && p.bytes().all(|b| b.is_ascii_digit())
+                && p.parse::<u8>().is_ok()
+        })
 }
 
 pub(crate) fn is_valid_region(region: &str) -> bool {

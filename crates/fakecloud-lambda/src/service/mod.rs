@@ -136,6 +136,13 @@ fn check_optional_enum(
 fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceError> {
     let body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
     match action {
+        "CreateFunction" => {
+            check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
+            check_optional_len("Handler", body["Handler"].as_str(), 0, 128)?;
+            check_optional_int_range("MemorySize", body["MemorySize"].as_i64(), 128, 32768)?;
+            check_optional_int_range("Timeout", body["Timeout"].as_i64(), 1, 5400)?;
+            check_optional_enum("Runtime", body["Runtime"].as_str(), LAMBDA_RUNTIMES)?;
+        }
         "PublishVersion" => {
             check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
             check_optional_enum(
@@ -158,7 +165,7 @@ fn prevalidate_lambda(action: &str, req: &AwsRequest) -> Result<(), AwsServiceEr
             check_optional_len("Description", body["Description"].as_str(), 0, 256)?;
             check_optional_len("Handler", body["Handler"].as_str(), 0, 128)?;
             check_optional_int_range("MemorySize", body["MemorySize"].as_i64(), 128, 32768)?;
-            check_optional_int_range("Timeout", body["Timeout"].as_i64(), 1, i64::MAX)?;
+            check_optional_int_range("Timeout", body["Timeout"].as_i64(), 1, 5400)?;
             check_optional_enum("Runtime", body["Runtime"].as_str(), LAMBDA_RUNTIMES)?;
         }
         _ => {}

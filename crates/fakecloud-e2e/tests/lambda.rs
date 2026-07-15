@@ -68,6 +68,68 @@ async fn lambda_create_get_delete_function() {
 }
 
 #[tokio::test]
+async fn lambda_create_function_validates_timeout_upper_bound() {
+    // Bug-hunt 1.15: CreateFunction never validated MemorySize/Timeout/Runtime,
+    // and UpdateFunctionConfiguration used `i64::MAX` for Timeout instead of the
+    // Smithy max (5400). A Timeout above 5400 must be rejected.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let result = client
+        .create_function()
+        .function_name("bad-timeout")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .timeout(6000)
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await;
+    assert!(result.is_err(), "Timeout=6000 (> 5400) must be rejected");
+
+    // A valid Timeout at the boundary is accepted.
+    client
+        .create_function()
+        .function_name("ok-timeout")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .timeout(5400)
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(make_python_zip()))
+                .build(),
+        )
+        .send()
+        .await
+        .expect("Timeout=5400 (boundary) must be accepted");
+}
+
+#[tokio::test]
+async fn lambda_put_concurrency_on_missing_function_is_not_found() {
+    // Bug-hunt 1.16: PutFunctionConcurrency against a nonexistent function
+    // stored a ghost config and returned 200. AWS returns
+    // ResourceNotFoundException.
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+
+    let result = client
+        .put_function_concurrency()
+        .function_name("does-not-exist")
+        .reserved_concurrent_executions(5)
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "reserved concurrency on a missing function must be an error"
+    );
+}
+
+#[tokio::test]
 async fn lambda_get_function_code_location_is_downloadable() {
     // Regression for #1375: AWS Toolkit + `aws lambda get-function` need
     // Code.Location to resolve to the actual ZIP body.
