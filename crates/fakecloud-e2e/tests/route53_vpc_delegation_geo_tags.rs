@@ -107,6 +107,74 @@ async fn vpc_association_lifecycle() {
     assert!(revoke_again.is_err());
 }
 
+/// Regression: ListHostedZonesByVPC must honor maxitems + NextToken. It
+/// previously ignored both and returned every zone with a hardcoded
+/// MaxItems=100, so a paginating client either got everything in one page or
+/// (for the traffic-policy/query-logging siblings) looped forever. Here we
+/// page one-at-a-time and require every zone to be reached exactly once with
+/// the loop terminating.
+#[tokio::test]
+async fn list_hosted_zones_by_vpc_paginates() {
+    let server = TestServer::start().await;
+    let shared = vpc("vpc-page");
+    let mut expected = std::collections::BTreeSet::new();
+    for i in 0..5 {
+        let id = make_private_zone(
+            &server,
+            &format!("z{i}.paging.example.com"),
+            &format!("pg-{i}"),
+            shared.clone(),
+        )
+        .await;
+        expected.insert(id.trim_start_matches("/hostedzone/").to_string());
+    }
+    let r53 = server.route53_client().await;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut token: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut req = r53
+            .list_hosted_zones_by_vpc()
+            .vpc_id("vpc-page")
+            .vpc_region(VpcRegion::UsEast1)
+            .max_items("2");
+        if let Some(t) = &token {
+            req = req.next_token(t);
+        }
+        let resp = req.send().await.expect("list by vpc page");
+        let page: Vec<String> = resp
+            .hosted_zone_summaries()
+            .iter()
+            .map(|s| s.hosted_zone_id().to_string())
+            .collect();
+        assert!(
+            page.len() <= 2,
+            "maxitems=2 must cap the page, got {}",
+            page.len()
+        );
+        for id in page {
+            assert!(
+                seen.insert(id.clone()),
+                "zone {id} returned on more than one page"
+            );
+        }
+        pages += 1;
+        assert!(
+            pages <= 10,
+            "pagination did not terminate (infinite-loop regression)"
+        );
+        match resp.next_token() {
+            Some(t) => token = Some(t.to_string()),
+            None => break,
+        }
+    }
+    assert_eq!(
+        seen, expected,
+        "every zone must be reachable across pages exactly once"
+    );
+}
+
 #[tokio::test]
 async fn associate_vpc_rejects_public_zone() {
     let server = TestServer::start().await;

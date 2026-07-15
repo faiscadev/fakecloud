@@ -722,8 +722,19 @@ impl Route53Service {
             .collect();
         drop(state);
         instances.sort_by(|a, b| a.id.cmp(&b.id));
-        let slice: Vec<&StoredTrafficPolicyInstance> = instances.iter().take(max_items).collect();
-        let truncated = slice.len() < instances.len();
+        // Resume after the inbound marker (the id of the last instance on the
+        // previous page). Previously the marker was accepted but ignored, so
+        // paging looped on page 1 and instances past it were unreachable.
+        let start = match req.query_params.get("trafficpolicyinstancenamemarker") {
+            Some(m) => instances
+                .iter()
+                .position(|i| i.id.as_str() > m.as_str())
+                .unwrap_or(instances.len()),
+            None => 0,
+        };
+        let rest = &instances[start..];
+        let slice: Vec<&StoredTrafficPolicyInstance> = rest.iter().take(max_items).collect();
+        let truncated = slice.len() < rest.len();
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!(
@@ -739,7 +750,7 @@ impl Route53Service {
         if truncated {
             body.push_str(&format!(
                 "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
-                esc(&instances[slice.len()].id)
+                esc(&rest[slice.len()].id)
             ));
         }
         body.push_str("</ListTrafficPolicyInstancesByHostedZoneResponse>");
@@ -820,8 +831,17 @@ impl Route53Service {
             .unwrap_or_default();
         drop(state);
         instances.sort_by(|a, b| a.id.cmp(&b.id));
-        let slice: Vec<&StoredTrafficPolicyInstance> = instances.iter().take(max_items).collect();
-        let truncated = slice.len() < instances.len();
+        // Resume after the inbound marker; previously ignored -> infinite loop.
+        let start = match req.query_params.get("trafficpolicyinstancenamemarker") {
+            Some(m) => instances
+                .iter()
+                .position(|i| i.id.as_str() > m.as_str())
+                .unwrap_or(instances.len()),
+            None => 0,
+        };
+        let rest = &instances[start..];
+        let slice: Vec<&StoredTrafficPolicyInstance> = rest.iter().take(max_items).collect();
+        let truncated = slice.len() < rest.len();
         let mut body = String::with_capacity(1024);
         body.push_str(XML_DECL);
         body.push_str(&format!(
@@ -837,7 +857,7 @@ impl Route53Service {
         if truncated {
             body.push_str(&format!(
                 "<TrafficPolicyInstanceNameMarker>{}</TrafficPolicyInstanceNameMarker>",
-                esc(&instances[slice.len()].id)
+                esc(&rest[slice.len()].id)
             ));
         }
         body.push_str("</ListTrafficPolicyInstancesByPolicyResponse>");
