@@ -737,9 +737,41 @@ impl SqsService {
         // already consumed even though the caller saw an error.
         let mut plaintext_bodies: Vec<String> = Vec::with_capacity(received.len());
         if kms_key_id.is_some() && self.kms_hook.is_some() {
+            let mut decrypt_err = None;
             for msg in received.iter() {
-                let plaintext = self.decrypt_message_body(account_id, &queue_arn, &msg.body)?;
-                plaintext_bodies.push(plaintext);
+                match self.decrypt_message_body(account_id, &queue_arn, &msg.body) {
+                    Ok(plaintext) => plaintext_bodies.push(plaintext),
+                    Err(e) => {
+                        decrypt_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            // A decrypt failure (KMS key disabled / pending-deletion / deleted)
+            // must NOT destroy the batch: the messages were already popped out
+            // of `queue.messages` but not yet pushed onto `inflight`, so an
+            // early `?` here would drop them permanently. Real SQS leaves the
+            // messages visible and returns an error. Restore the popped
+            // messages to the front of the queue (preserving order), undo the
+            // receive-count bump and the receipt handle we minted, then error.
+            if let Some(e) = decrypt_err {
+                let restored: Vec<SqsMessage> = received
+                    .drain(..)
+                    .map(|mut m| {
+                        m.visible_at = None;
+                        m.receive_count = m.receive_count.saturating_sub(1);
+                        if let Some(handle) = m.receipt_handle.take() {
+                            if let Some(list) = queue.receipt_handle_map.get_mut(&m.message_id) {
+                                list.retain(|h| h != &handle);
+                            }
+                        }
+                        m
+                    })
+                    .collect();
+                for m in restored.into_iter().rev() {
+                    queue.messages.push_front(m);
+                }
+                return Err(e);
             }
         }
 

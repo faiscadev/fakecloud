@@ -78,6 +78,70 @@ async fn sqs_send_receive_encrypted_round_trips_through_kms() {
     );
 }
 
+/// Regression: ReceiveMessage against an SSE-KMS queue whose key became
+/// unusable (disabled) must return an error WITHOUT destroying the batch.
+/// Previously the messages were popped out of the queue before the decrypt
+/// `?` unwound, permanently losing them. Real SQS leaves them visible.
+#[tokio::test]
+async fn sqs_receive_decrypt_failure_does_not_destroy_messages() {
+    let server = TestServer::start().await;
+    let sqs = server.sqs_client().await;
+    let kms = server.kms_client().await;
+
+    // Customer-managed key we can disable (managed alias/aws/sqs can't be).
+    let key = kms.create_key().send().await.unwrap();
+    let key_id = key.key_metadata().unwrap().key_id().to_string();
+
+    let queue = sqs
+        .create_queue()
+        .queue_name("decrypt-fail")
+        .attributes(
+            aws_sdk_sqs::types::QueueAttributeName::KmsMasterKeyId,
+            &key_id,
+        )
+        .send()
+        .await
+        .unwrap();
+    let queue_url = queue.queue_url().unwrap().to_string();
+
+    sqs.send_message()
+        .queue_url(&queue_url)
+        .message_body("do-not-lose-me")
+        .send()
+        .await
+        .unwrap();
+
+    // Disable the key: the next receive must fail to decrypt.
+    kms.disable_key().key_id(&key_id).send().await.unwrap();
+    let failed = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(1)
+        .send()
+        .await;
+    assert!(
+        failed.is_err(),
+        "ReceiveMessage must error when the KMS key is disabled, got: {failed:?}"
+    );
+
+    // Re-enable the key: the message must still be there (not destroyed).
+    kms.enable_key().key_id(&key_id).send().await.unwrap();
+    let recovered = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(1)
+        .send()
+        .await
+        .unwrap();
+    let msgs = recovered.messages();
+    assert_eq!(
+        msgs.len(),
+        1,
+        "message must survive a decrypt failure and be receivable after the key is re-enabled"
+    );
+    assert_eq!(msgs[0].body(), Some("do-not-lose-me"));
+}
+
 #[tokio::test]
 async fn sqs_unencrypted_queue_does_not_record_kms_usage() {
     use aws_sdk_sqs::types::QueueAttributeName;

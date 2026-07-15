@@ -199,14 +199,46 @@ impl IamService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        if state.groups.remove(&group_name).is_none() {
+        // AWS rejects DeleteGroup with a 409 DeleteConflict while the group
+        // still has members or attached/inline policies — it does NOT silently
+        // destroy the group and its membership. Guard before removing.
+        let (has_members, has_attached, has_inline) = {
+            let group = state.groups.get(&group_name).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchEntity",
+                    format!("The group with name {group_name} cannot be found."),
+                )
+            })?;
+            (
+                !group.members.is_empty(),
+                !group.attached_policies.is_empty(),
+                !group.inline_policies.is_empty(),
+            )
+        };
+        if has_members {
             return Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchEntity",
-                format!("The group with name {group_name} cannot be found."),
+                StatusCode::CONFLICT,
+                "DeleteConflict",
+                "Cannot delete entity, must remove users from the group first.".to_string(),
+            ));
+        }
+        if has_attached {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DeleteConflict",
+                "Cannot delete entity, must detach all policies first.".to_string(),
+            ));
+        }
+        if has_inline {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DeleteConflict",
+                "Cannot delete entity, must delete policies first.".to_string(),
             ));
         }
 
+        state.groups.remove(&group_name);
         let xml = empty_response("DeleteGroup", &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }

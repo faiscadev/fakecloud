@@ -565,6 +565,100 @@ async fn iam_group_lifecycle() {
     assert!(list.groups().is_empty());
 }
 
+/// Regression: DeleteGroup on a group that still has members must return a
+/// 409 DeleteConflict, NOT silently destroy the group and its membership.
+#[tokio::test]
+async fn iam_delete_nonempty_group_conflicts() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_group()
+        .group_name("payroll")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_user()
+        .user_name("carol")
+        .send()
+        .await
+        .unwrap();
+    client
+        .add_user_to_group()
+        .group_name("payroll")
+        .user_name("carol")
+        .send()
+        .await
+        .unwrap();
+
+    // Member present -> DeleteConflict, group preserved.
+    let err = client
+        .delete_group()
+        .group_name("payroll")
+        .send()
+        .await
+        .expect_err("deleting a non-empty group must fail");
+    assert!(
+        format!("{err:?}").contains("DeleteConflict"),
+        "expected DeleteConflict, got: {err:?}"
+    );
+    assert_eq!(
+        client.list_groups().send().await.unwrap().groups().len(),
+        1,
+        "group must still exist after a rejected delete"
+    );
+
+    // Also blocked by an inline policy after the member is removed.
+    client
+        .remove_user_from_group()
+        .group_name("payroll")
+        .user_name("carol")
+        .send()
+        .await
+        .unwrap();
+    client
+        .put_group_policy()
+        .group_name("payroll")
+        .policy_name("inline")
+        .policy_document(r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"*"}]}"#)
+        .send()
+        .await
+        .unwrap();
+    let err = client
+        .delete_group()
+        .group_name("payroll")
+        .send()
+        .await
+        .expect_err("deleting a group with an inline policy must fail");
+    assert!(
+        format!("{err:?}").contains("DeleteConflict"),
+        "expected DeleteConflict for inline policy, got: {err:?}"
+    );
+
+    // Clear the policy -> delete succeeds.
+    client
+        .delete_group_policy()
+        .group_name("payroll")
+        .policy_name("inline")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_group()
+        .group_name("payroll")
+        .send()
+        .await
+        .unwrap();
+    assert!(client
+        .list_groups()
+        .send()
+        .await
+        .unwrap()
+        .groups()
+        .is_empty());
+}
+
 // ---- IAM Instance Profile Tests ----
 
 #[tokio::test]
