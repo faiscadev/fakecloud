@@ -388,6 +388,37 @@ impl S3Service {
             None
         };
 
+        // Integrity check for the modern precomputed checksum headers. When
+        // the client sends a checksum *value* (`x-amz-checksum-<algo>`), S3
+        // compares it against the checksum it computes over the received body
+        // and rejects a mismatch with `BadDigest` — same contract as the
+        // Content-MD5 path above. Validate every supplied value header (a
+        // client/SDK may send more than one), not just the primary detected
+        // algorithm. Both values are base64, so compare exactly. Previously the
+        // supplied value was ignored and a corrupt upload stored silently.
+        for algo in ["CRC32", "CRC32C", "CRC64NVME", "SHA1", "SHA256"] {
+            let header_name = format!("x-amz-checksum-{}", algo.to_lowercase());
+            let Some(supplied) = req
+                .headers
+                .get(header_name.as_str())
+                .and_then(|v| v.to_str().ok())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            else {
+                continue;
+            };
+            let computed = crate::service::compute_checksum_streaming(algo, &spooled.path)
+                .await
+                .map_err(crate::service::io_to_aws)?;
+            if supplied != computed {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadDigest",
+                    format!("The {algo} you specified did not match the calculated checksum."),
+                ));
+            }
+        }
+
         // Object lock - explicit headers or bucket default
         let mut lock_mode = req
             .headers

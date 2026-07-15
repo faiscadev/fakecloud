@@ -24,6 +24,13 @@ impl LambdaService {
         }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // AWS returns ResourceNotFoundException for a config-put against a
+        // function that doesn't exist; get_or_create only makes the account,
+        // so guard explicitly or we'd store a ghost config the function never
+        // owns.
+        if !state.functions.contains_key(function_name) {
+            return Err(not_found("Function", function_name));
+        }
         state
             .function_concurrency
             .insert(function_name.to_string(), n);
@@ -81,6 +88,9 @@ impl LambdaService {
         }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        if !state.functions.contains_key(function_name) {
+            return Err(not_found("Function", function_name));
+        }
         let cfg = ProvisionedConcurrencyConfig {
             requested,
             allocated: requested,
@@ -173,7 +183,7 @@ impl LambdaService {
         function_name: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _qualifier = require_qualifier(req)?;
+        let qualifier = require_qualifier(req)?;
         let body = body(req);
         let inner = body
             .get("FunctionScalingConfig")
@@ -185,7 +195,14 @@ impl LambdaService {
         };
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        state.scaling_configs.insert(function_name.to_string(), cfg);
+        if !state.functions.contains_key(function_name) {
+            return Err(not_found("Function", function_name));
+        }
+        // Scaling config is per-qualifier (version/alias); keying by bare
+        // function name collided distinct versions onto one entry.
+        state
+            .scaling_configs
+            .insert(Self::pc_key(function_name, &qualifier), cfg);
         // `PutFunctionScalingConfigResponse` only carries `FunctionState`
         // (the post-update steady state). Pending → ready is instant in
         // fakecloud since there's no real fleet to scale.
@@ -195,18 +212,14 @@ impl LambdaService {
     pub(super) fn get_scaling_config(
         &self,
         function_name: &str,
-        account_id: &str,
+        req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Caller validates `Qualifier` via `require_qualifier` before
-        // delegating here; reads don't need it post-validation since
-        // scaling config is per-function in fakecloud.
+        let qualifier = require_qualifier(req)?;
+        let account_id = &req.account_id;
         let region = self.region_for(account_id);
+        let key = Self::pc_key(function_name, &qualifier);
         self.with_state_read(account_id, &region, |state| {
-            let cfg = state
-                .scaling_configs
-                .get(function_name)
-                .cloned()
-                .unwrap_or_default();
+            let cfg = state.scaling_configs.get(&key).cloned().unwrap_or_default();
             let mut applied = serde_json::Map::new();
             if let Some(v) = cfg.min_execution_environments {
                 applied.insert("MinExecutionEnvironments".into(), json!(v));

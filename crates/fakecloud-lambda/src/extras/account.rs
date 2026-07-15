@@ -102,10 +102,7 @@ impl LambdaService {
 
             // Scaling
             "PutFunctionScalingConfig" => self.put_scaling_config(res, req),
-            "GetFunctionScalingConfig" => {
-                require_qualifier(req)?;
-                self.get_scaling_config(res, aid)
-            }
+            "GetFunctionScalingConfig" => self.get_scaling_config(res, req),
 
             // Recursion
             "PutFunctionRecursionConfig" => self.put_recursion_config(res, req),
