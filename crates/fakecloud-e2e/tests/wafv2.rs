@@ -724,6 +724,46 @@ async fn list_managed_rule_groups_returns_seeded_set() {
 }
 
 #[tokio::test]
+async fn describe_managed_rule_group_returns_real_rules_and_rejects_unknown() {
+    let server = TestServer::start().await;
+    let waf = server.wafv2_client().await;
+
+    // A known managed group returns its real capacity + rule set, not a
+    // fabricated "RuleA" placeholder.
+    let desc = waf
+        .describe_managed_rule_group()
+        .vendor_name("AWS")
+        .name("AWSManagedRulesCommonRuleSet")
+        .scope(Scope::Regional)
+        .send()
+        .await
+        .expect("describe known group");
+    assert_eq!(desc.capacity(), Some(700));
+    let rule_names: Vec<&str> = desc.rules().iter().filter_map(|r| r.name()).collect();
+    assert!(
+        rule_names.contains(&"CrossSiteScripting_BODY"),
+        "expected real CRS rules, got {rule_names:?}"
+    );
+    assert!(!rule_names.contains(&"RuleA"), "must not fabricate RuleA");
+
+    // An unknown group is rejected with WAFInvalidParameterException instead
+    // of a fabricated response.
+    let err = waf
+        .describe_managed_rule_group()
+        .vendor_name("AWS")
+        .name("AWSManagedRulesNonexistentRuleSet")
+        .scope(Scope::Regional)
+        .send()
+        .await
+        .expect_err("unknown group must error");
+    let svc = err.into_service_error();
+    assert!(
+        svc.meta().code() == Some("WAFInvalidParameterException"),
+        "unexpected error: {svc:?}"
+    );
+}
+
+#[tokio::test]
 async fn get_mobile_sdk_release_url_uses_provided_platform() {
     let server = TestServer::start().await;
     let waf = server.wafv2_client().await;

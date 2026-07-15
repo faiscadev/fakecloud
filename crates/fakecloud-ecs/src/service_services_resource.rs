@@ -236,6 +236,10 @@ impl EcsService {
                 capacity_provider_strategy: capacity_provider_strategy.clone(),
                 availability_zone_rebalancing: availability_zone_rebalancing.clone(),
                 volume_configurations: volume_configurations.clone(),
+                service_connect_configuration: body
+                    .get("serviceConnectConfiguration")
+                    .filter(|v| !v.is_null())
+                    .cloned(),
             };
             state.services.insert(key.clone(), service.clone());
             state.record_service_revision(&service);
@@ -431,6 +435,12 @@ impl EcsService {
                 }
                 if let Some(v) = body.get("networkConfiguration") {
                     svc.network_configuration = Some(v.clone());
+                }
+                if let Some(v) = body.get("serviceConnectConfiguration") {
+                    // An empty configuration ({}) disables Service Connect; a
+                    // populated one replaces it. Both round-trip on Describe.
+                    svc.service_connect_configuration =
+                        if v.is_null() { None } else { Some(v.clone()) };
                 }
                 if let Some(s) = opt_str(&body, "platformVersion") {
                     svc.platform_version = Some(s.to_string());

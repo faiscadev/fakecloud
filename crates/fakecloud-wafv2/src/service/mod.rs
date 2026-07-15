@@ -694,38 +694,137 @@ fn count_statement_leaves(stmt: &Value) -> u32 {
     total.max(1)
 }
 
-fn managed_products() -> Vec<Value> {
-    vec![
-        json!({
-            "VendorName": "AWS",
-            "ManagedRuleSetName": "AWSManagedRulesCommonRuleSet",
-            "ProductId": "prod-aws-common",
-            "ProductLink": "https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-list.html",
-            "ProductTitle": "Core rule set",
-            "ProductDescription": "OWASP Top 10 baseline rules",
-            "SnsTopicArn": "arn:aws:sns:us-east-1::aws-managed-common-notifications",
-            "IsVersioningSupported": true,
-            "IsAdvancedManagedRuleSet": false,
-        }),
-        json!({
-            "VendorName": "AWS",
-            "ManagedRuleSetName": "AWSManagedRulesSQLiRuleSet",
-            "ProductId": "prod-aws-sqli",
-            "ProductLink": "https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-list.html",
-            "ProductTitle": "SQL injection rule set",
-            "ProductDescription": "Rules that block SQL injection patterns",
-            "SnsTopicArn": "arn:aws:sns:us-east-1::aws-managed-sqli-notifications",
-            "IsVersioningSupported": true,
-            "IsAdvancedManagedRuleSet": false,
-        }),
+/// A well-known AWS managed rule group. This is the single source of truth
+/// behind ListAvailableManagedRuleGroups, DescribeAllManagedProducts, and
+/// DescribeManagedRuleGroup so the three ops never disagree about which groups
+/// exist, their capacity, or the rules they contain.
+pub(super) struct ManagedGroupDef {
+    pub vendor: &'static str,
+    pub name: &'static str,
+    pub product_id: &'static str,
+    pub product_title: &'static str,
+    pub description: &'static str,
+    pub capacity: i64,
+    pub rules: &'static [&'static str],
+}
+
+/// The AWS baseline managed rule groups fakecloud recognizes. Capacities and
+/// rule names mirror the published AWS WAF managed-rule-group reference so a
+/// DescribeManagedRuleGroup round-trips real data rather than a fabricated
+/// placeholder.
+pub(super) fn managed_rule_group_catalog() -> &'static [ManagedGroupDef] {
+    &[
+        ManagedGroupDef {
+            vendor: "AWS",
+            name: "AWSManagedRulesCommonRuleSet",
+            product_id: "prod-aws-common",
+            product_title: "Core rule set",
+            description: "OWASP Top 10 baseline rules",
+            capacity: 700,
+            rules: &[
+                "NoUserAgent_HEADER",
+                "UserAgent_BadBots_HEADER",
+                "SizeRestrictions_QUERYSTRING",
+                "SizeRestrictions_Cookie_HEADER",
+                "SizeRestrictions_BODY",
+                "SizeRestrictions_URIPATH",
+                "EC2MetaDataSSRF_BODY",
+                "EC2MetaDataSSRF_COOKIE",
+                "EC2MetaDataSSRF_URIPATH",
+                "EC2MetaDataSSRF_QUERYARGUMENTS",
+                "GenericLFI_QUERYARGUMENTS",
+                "GenericLFI_URIPATH",
+                "GenericLFI_BODY",
+                "RestrictedExtensions_URIPATH",
+                "RestrictedExtensions_QUERYARGUMENTS",
+                "GenericRFI_QUERYARGUMENTS",
+                "GenericRFI_BODY",
+                "GenericRFI_URIPATH",
+                "CrossSiteScripting_COOKIE",
+                "CrossSiteScripting_QUERYARGUMENTS",
+                "CrossSiteScripting_BODY",
+                "CrossSiteScripting_URIPATH",
+            ],
+        },
+        ManagedGroupDef {
+            vendor: "AWS",
+            name: "AWSManagedRulesKnownBadInputsRuleSet",
+            product_id: "prod-aws-known-bad-inputs",
+            product_title: "Known bad inputs rule set",
+            description: "Block request patterns associated with known exploits",
+            capacity: 200,
+            rules: &[
+                "JavaDeserializationRCE_HEADER",
+                "JavaDeserializationRCE_BODY",
+                "JavaDeserializationRCE_URIPATH",
+                "JavaDeserializationRCE_QUERYSTRING",
+                "Host_localhost_HEADER",
+                "PROPFIND_METHOD",
+                "ExploitablePaths_URIPATH",
+                "Log4JRCE_HEADER",
+                "Log4JRCE_QUERYSTRING",
+                "Log4JRCE_BODY",
+                "Log4JRCE_URIPATH",
+            ],
+        },
+        ManagedGroupDef {
+            vendor: "AWS",
+            name: "AWSManagedRulesSQLiRuleSet",
+            product_id: "prod-aws-sqli",
+            product_title: "SQL injection rule set",
+            description: "Rules that block SQL injection patterns",
+            capacity: 200,
+            rules: &[
+                "SQLi_QUERYARGUMENTS",
+                "SQLiExtendedPatterns_QUERYARGUMENTS",
+                "SQLi_BODY",
+                "SQLiExtendedPatterns_BODY",
+                "SQLi_COOKIE",
+                "SQLi_URIPATH",
+            ],
+        },
     ]
 }
 
-fn managed_rule_summaries(_vendor: &str, _name: &str) -> Vec<Value> {
-    vec![json!({
-        "Name": "RuleA",
-        "Action": {"Block": {}},
-    })]
+/// Look up a managed rule group by (vendor, name). Returns `None` for an
+/// unknown group so callers can surface WAFInvalidParameterException the way
+/// AWS does instead of fabricating a response.
+pub(super) fn managed_group_def(vendor: &str, name: &str) -> Option<&'static ManagedGroupDef> {
+    managed_rule_group_catalog()
+        .iter()
+        .find(|d| d.vendor == vendor && d.name == name)
+}
+
+fn managed_products() -> Vec<Value> {
+    managed_rule_group_catalog()
+        .iter()
+        .map(|d| {
+            json!({
+                "VendorName": d.vendor,
+                "ManagedRuleSetName": d.name,
+                "ProductId": d.product_id,
+                "ProductLink": "https://docs.aws.amazon.com/waf/latest/developerguide/aws-managed-rule-groups-list.html",
+                "ProductTitle": d.product_title,
+                "ProductDescription": d.description,
+                "SnsTopicArn": format!("arn:aws:sns:us-east-1::{}-notifications", d.product_id),
+                "IsVersioningSupported": true,
+                "IsAdvancedManagedRuleSet": false,
+            })
+        })
+        .collect()
+}
+
+/// Real rule summaries for a known managed group. Managed groups block by
+/// default, so each rule reports a Block action.
+pub(super) fn managed_rule_summaries(vendor: &str, name: &str) -> Vec<Value> {
+    managed_group_def(vendor, name)
+        .map(|d| {
+            d.rules
+                .iter()
+                .map(|r| json!({ "Name": r, "Action": {"Block": {}} }))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ─── JSON shaping ──────────────────────────────────────────────────

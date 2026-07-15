@@ -171,6 +171,61 @@ async fn api_keys_and_usage_plans() {
 }
 
 #[tokio::test]
+async fn usage_plan_api_stage_add_then_remove() {
+    use aws_sdk_apigateway::types::{Op, PatchOperation};
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+
+    let plan_id = client
+        .create_usage_plan()
+        .name("stage-plan")
+        .send()
+        .await
+        .expect("create_usage_plan")
+        .id()
+        .expect("plan id")
+        .to_string();
+
+    // Attach an API stage the way Terraform/CDK does: {op:add, /apiStages}.
+    let added = client
+        .update_usage_plan()
+        .usage_plan_id(&plan_id)
+        .patch_operations(
+            PatchOperation::builder()
+                .op(Op::Add)
+                .path("/apiStages")
+                .value("abc123:prod")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("add api stage");
+    assert_eq!(added.api_stages().len(), 1);
+    assert_eq!(added.api_stages()[0].api_id(), Some("abc123"));
+    assert_eq!(added.api_stages()[0].stage(), Some("prod"));
+
+    // Remove it via {op:remove, /apiStages/<apiId>:<stage>} — the arm that was
+    // previously dead because the op guard rejected "remove".
+    let removed = client
+        .update_usage_plan()
+        .usage_plan_id(&plan_id)
+        .patch_operations(
+            PatchOperation::builder()
+                .op(Op::Remove)
+                .path("/apiStages/abc123:prod")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("remove api stage");
+    assert!(
+        removed.api_stages().is_empty(),
+        "api stage should be removed, got {:?}",
+        removed.api_stages()
+    );
+}
+
+#[tokio::test]
 async fn get_export_returns_openapi_with_real_paths() {
     let server = TestServer::start().await;
     let client = server.apigateway_client().await;

@@ -914,6 +914,9 @@ fn user_pool_client_to_json(client: &UserPoolClient) -> Value {
         }
         obj["RefreshTokenRotation"] = r;
     }
+    if let Some(ref analytics) = client.analytics_configuration {
+        obj["AnalyticsConfiguration"] = analytics.clone();
+    }
 
     obj
 }
