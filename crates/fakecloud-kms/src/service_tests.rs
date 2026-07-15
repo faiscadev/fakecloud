@@ -320,6 +320,16 @@ fn generate_data_key_pair_ecc_returns_parseable_pkcs8_and_spki() {
     assert_eq!(secret.public_key(), public);
 }
 
+/// A fresh, valid P-256 SubjectPublicKeyInfo (base64), for use as a
+/// DeriveSharedSecret counterparty key. Real ECDH requires a parseable SPKI,
+/// so tests can no longer pass arbitrary bytes.
+fn real_p256_public_key_b64() -> String {
+    let (_priv_der, pub_der) = crate::service::asym_ecdsa::generate_keypair("ECC_NIST_P256")
+        .unwrap()
+        .unwrap();
+    base64::engine::general_purpose::STANDARD.encode(pub_der)
+}
+
 #[test]
 fn derive_shared_secret_success() {
     let svc = make_service();
@@ -331,7 +341,7 @@ fn derive_shared_secret_success() {
         }),
     );
 
-    let fake_pub = base64::engine::general_purpose::STANDARD.encode(b"fake-public-key");
+    let fake_pub = real_p256_public_key_b64();
     let req = make_request(
         "DeriveSharedSecret",
         json!({
@@ -717,7 +727,7 @@ fn derive_shared_secret_is_deterministic() {
         }),
     );
 
-    let pub_key = base64::engine::general_purpose::STANDARD.encode(b"counterparty-public-key");
+    let pub_key = real_p256_public_key_b64();
     let req = make_request(
         "DeriveSharedSecret",
         json!({
@@ -739,7 +749,7 @@ fn derive_shared_secret_is_deterministic() {
     assert_eq!(secret1, secret2, "DeriveSharedSecret must be deterministic");
 
     // Different public key must produce a different shared secret
-    let other_pub = base64::engine::general_purpose::STANDARD.encode(b"different-public-key");
+    let other_pub = real_p256_public_key_b64();
     let req2 = make_request(
         "DeriveSharedSecret",
         json!({
