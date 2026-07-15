@@ -390,12 +390,31 @@ async fn kms_derive_shared_secret() {
         .unwrap();
     let key_id = resp.key_metadata().unwrap().key_id().to_string();
 
-    let fake_pub = Blob::new(vec![0x04; 65]); // Fake uncompressed EC point
+    // Real ECDH requires a valid SubjectPublicKeyInfo for the counterparty;
+    // use a second KEY_AGREEMENT key's public key.
+    let peer = client
+        .create_key()
+        .key_usage(aws_sdk_kms::types::KeyUsageType::KeyAgreement)
+        .key_spec(aws_sdk_kms::types::KeySpec::EccNistP256)
+        .send()
+        .await
+        .unwrap();
+    let peer_id = peer.key_metadata().unwrap().key_id().to_string();
+    let peer_pub = client
+        .get_public_key()
+        .key_id(&peer_id)
+        .send()
+        .await
+        .unwrap()
+        .public_key()
+        .unwrap()
+        .clone();
+
     let result = client
         .derive_shared_secret()
         .key_id(&key_id)
         .key_agreement_algorithm(aws_sdk_kms::types::KeyAgreementAlgorithmSpec::Ecdh)
-        .public_key(fake_pub)
+        .public_key(peer_pub)
         .send()
         .await
         .unwrap();
@@ -1149,5 +1168,126 @@ async fn kms_generate_data_key_binds_encryption_context() {
             .await
             .is_err(),
         "decrypt with a different encryption context must fail"
+    );
+}
+
+#[tokio::test]
+async fn kms_generate_data_key_rejects_non_encrypt_key() {
+    // Bug-hunt 1.18: GenerateDataKey must reject a key whose usage isn't
+    // ENCRYPT_DECRYPT (InvalidKeyUsageException), not silently succeed.
+    let server = helpers::TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let key = client
+        .create_key()
+        .key_usage(aws_sdk_kms::types::KeyUsageType::SignVerify)
+        .key_spec(aws_sdk_kms::types::KeySpec::Rsa2048)
+        .send()
+        .await
+        .unwrap();
+    let key_id = key.key_metadata().unwrap().key_id().to_string();
+
+    let result = client
+        .generate_data_key()
+        .key_id(&key_id)
+        .key_spec(aws_sdk_kms::types::DataKeySpec::Aes256)
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "GenerateDataKey on a SIGN_VERIFY key must fail"
+    );
+}
+
+#[tokio::test]
+async fn kms_create_key_rejects_incompatible_spec_usage() {
+    // Bug-hunt 1.20: an HMAC spec with ENCRYPT_DECRYPT usage is unusable and
+    // must be rejected at CreateKey.
+    let server = helpers::TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let result = client
+        .create_key()
+        .key_spec(aws_sdk_kms::types::KeySpec::Hmac256)
+        .key_usage(aws_sdk_kms::types::KeyUsageType::EncryptDecrypt)
+        .send()
+        .await;
+    assert!(
+        result.is_err(),
+        "HMAC + ENCRYPT_DECRYPT is incompatible and must be rejected"
+    );
+}
+
+#[tokio::test]
+async fn kms_enable_key_rejects_pending_deletion() {
+    // Bug-hunt 1.19: EnableKey must not resurrect a key scheduled for deletion.
+    let server = helpers::TestServer::start().await;
+    let client = server.kms_client().await;
+
+    let key = client.create_key().send().await.unwrap();
+    let key_id = key.key_metadata().unwrap().key_id().to_string();
+
+    client
+        .schedule_key_deletion()
+        .key_id(&key_id)
+        .pending_window_in_days(7)
+        .send()
+        .await
+        .unwrap();
+
+    let result = client.enable_key().key_id(&key_id).send().await;
+    assert!(
+        result.is_err(),
+        "EnableKey on a PendingDeletion key must fail (KMSInvalidStateException)"
+    );
+}
+
+#[tokio::test]
+async fn kms_derive_shared_secret_converges() {
+    // Bug-hunt 1.21: two parties running DeriveSharedSecret with each other's
+    // public key must derive the SAME secret (real ECDH), which the prior
+    // SHA-256(seed || peer) construction did not.
+    let server = helpers::TestServer::start().await;
+    let client = server.kms_client().await;
+
+    async fn make_agreement_key(
+        c: &aws_sdk_kms::Client,
+    ) -> (String, aws_sdk_kms::primitives::Blob) {
+        let k = c
+            .create_key()
+            .key_spec(aws_sdk_kms::types::KeySpec::EccNistP256)
+            .key_usage(aws_sdk_kms::types::KeyUsageType::KeyAgreement)
+            .send()
+            .await
+            .unwrap();
+        let id = k.key_metadata().unwrap().key_id().to_string();
+        let pk = c.get_public_key().key_id(&id).send().await.unwrap();
+        let spki = pk.public_key().unwrap().clone();
+        (id, spki)
+    }
+    let (id_a, pub_a) = make_agreement_key(&client).await;
+    let (id_b, pub_b) = make_agreement_key(&client).await;
+
+    let secret_a = client
+        .derive_shared_secret()
+        .key_id(&id_a)
+        .key_agreement_algorithm(aws_sdk_kms::types::KeyAgreementAlgorithmSpec::Ecdh)
+        .public_key(pub_b)
+        .send()
+        .await
+        .unwrap();
+    let secret_b = client
+        .derive_shared_secret()
+        .key_id(&id_b)
+        .key_agreement_algorithm(aws_sdk_kms::types::KeyAgreementAlgorithmSpec::Ecdh)
+        .public_key(pub_a)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(
+        secret_a.shared_secret().unwrap().as_ref(),
+        secret_b.shared_secret().unwrap().as_ref(),
+        "both parties must derive identical shared secrets"
     );
 }
