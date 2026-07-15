@@ -425,6 +425,7 @@ impl KmsService {
             )
         })?;
         require_usable_key_state(key)?;
+        require_key_usage_encrypt_decrypt(key)?;
 
         let num_bytes = data_key_size_from_body(&body)?;
 
@@ -485,6 +486,7 @@ impl KmsService {
             )
         })?;
         require_usable_key_state(key)?;
+        require_key_usage_encrypt_decrypt(key)?;
 
         let num_bytes = data_key_size_from_body(&body)?;
         let data_key_bytes: Vec<u8> = rand_bytes(num_bytes);
@@ -1066,6 +1068,7 @@ impl KmsService {
             )
         })?;
         require_usable_key_state(key)?;
+        require_key_usage_encrypt_decrypt(key)?;
 
         let (private_key_bytes, public_key_bytes) = generate_data_keypair_bytes(&key_pair_spec)?;
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
@@ -1128,6 +1131,7 @@ impl KmsService {
             )
         })?;
         require_usable_key_state(key)?;
+        require_key_usage_encrypt_decrypt(key)?;
 
         let (private_key_bytes, public_key_bytes) = generate_data_keypair_bytes(&key_pair_spec)?;
         let public_key_b64 = base64::engine::general_purpose::STANDARD.encode(&public_key_bytes);
@@ -1167,7 +1171,7 @@ impl KmsService {
             .as_str()
             .unwrap_or("ECDH")
             .to_string();
-        let _public_key = body["PublicKey"].as_str().ok_or_else(|| {
+        let public_key_b64 = body["PublicKey"].as_str().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -1210,17 +1214,36 @@ impl KmsService {
             ));
         }
 
-        // Deterministic shared secret: SHA-256(private_key_seed || public_key_bytes)
-        // Both parties using the correct keys will derive the same result.
-        let public_key_bytes = base64::engine::general_purpose::STANDARD
-            .decode(_public_key)
-            .unwrap_or_default();
-
-        use sha2::{Digest, Sha256};
-        let mut hasher = Sha256::new();
-        hasher.update(&key.private_key_seed);
-        hasher.update(&public_key_bytes);
-        let shared_secret_bytes = hasher.finalize();
+        // Real ECDH so both parties converge on the same secret:
+        // ECDH(privA, pubB) == ECDH(privB, pubA). The previous
+        // SHA-256(private_seed || peer_public) was asymmetric in its inputs,
+        // so A and B derived *different* secrets and the agreement was useless.
+        // KEY_AGREEMENT keys can only be ECC_NIST_P256/P384 here (CreateKey
+        // refuses P521/SM2), so those two curves cover every case.
+        let peer_spki_der = base64::engine::general_purpose::STANDARD
+            .decode(public_key_b64)
+            .map_err(|_| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    "PublicKey is not valid base64",
+                )
+            })?;
+        let priv_der = key.asymmetric_private_key_der.as_deref().ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidKeyUsageException",
+                format!("Key '{}' has no asymmetric key material", key.arn),
+            )
+        })?;
+        let shared_secret_bytes = ecdh_shared_secret(&key.key_spec, priv_der, &peer_spki_der)
+            .map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("ECDH failed: {e}"),
+                )
+            })?;
         let shared_secret_b64 =
             base64::engine::general_purpose::STANDARD.encode(shared_secret_bytes);
 
@@ -1234,6 +1257,38 @@ impl KmsService {
             }))
             .unwrap(),
         ))
+    }
+}
+
+/// Real ECDH shared-secret derivation for KMS KEY_AGREEMENT keys. `priv_der`
+/// is our key's PKCS#8 private key; `peer_spki_der` is the counterparty's
+/// SubjectPublicKeyInfo. Returns the raw shared secret (the X coordinate),
+/// which is symmetric: `ecdh(a, B) == ecdh(b, A)`.
+fn ecdh_shared_secret(
+    key_spec: &str,
+    priv_der: &[u8],
+    peer_spki_der: &[u8],
+) -> Result<Vec<u8>, String> {
+    match key_spec {
+        "ECC_NIST_P256" => {
+            use p256::pkcs8::{DecodePrivateKey, DecodePublicKey};
+            let sk = p256::SecretKey::from_pkcs8_der(priv_der)
+                .map_err(|e| format!("bad P256 private key: {e}"))?;
+            let pk = p256::PublicKey::from_public_key_der(peer_spki_der)
+                .map_err(|e| format!("bad P256 peer public key: {e}"))?;
+            let shared = p256::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        "ECC_NIST_P384" => {
+            use p384::pkcs8::{DecodePrivateKey, DecodePublicKey};
+            let sk = p384::SecretKey::from_pkcs8_der(priv_der)
+                .map_err(|e| format!("bad P384 private key: {e}"))?;
+            let pk = p384::PublicKey::from_public_key_der(peer_spki_der)
+                .map_err(|e| format!("bad P384 peer public key: {e}"))?;
+            let shared = p384::ecdh::diffie_hellman(sk.to_nonzero_scalar(), pk.as_affine());
+            Ok(shared.raw_secret_bytes().to_vec())
+        }
+        other => Err(format!("unsupported KEY_AGREEMENT KeySpec: {other}")),
     }
 }
 
@@ -1283,4 +1338,44 @@ fn generate_data_keypair_bytes(key_pair_spec: &str) -> Result<(Vec<u8>, Vec<u8>)
         "ValidationException",
         format!("Unsupported KeyPairSpec: {key_pair_spec}"),
     ))
+}
+
+#[cfg(test)]
+mod ecdh_tests {
+    use super::ecdh_shared_secret;
+
+    /// ECDH must converge: ecdh(privA, pubB) == ecdh(privB, pubA). The prior
+    /// SHA-256(seed || peer) construction did not, making DeriveSharedSecret
+    /// useless for actual key agreement.
+    #[test]
+    fn ecdh_converges_p256() {
+        let (priv_a, pub_a) = super::super::asym_ecdsa::generate_keypair("ECC_NIST_P256")
+            .unwrap()
+            .unwrap();
+        let (priv_b, pub_b) = super::super::asym_ecdsa::generate_keypair("ECC_NIST_P256")
+            .unwrap()
+            .unwrap();
+        let a = ecdh_shared_secret("ECC_NIST_P256", &priv_a, &pub_b).unwrap();
+        let b = ecdh_shared_secret("ECC_NIST_P256", &priv_b, &pub_a).unwrap();
+        assert_eq!(a, b, "both parties must derive the same secret");
+        assert_eq!(
+            a.len(),
+            32,
+            "P256 shared secret is the 32-byte X coordinate"
+        );
+    }
+
+    #[test]
+    fn ecdh_converges_p384() {
+        let (priv_a, pub_a) = super::super::asym_ecdsa::generate_keypair("ECC_NIST_P384")
+            .unwrap()
+            .unwrap();
+        let (priv_b, pub_b) = super::super::asym_ecdsa::generate_keypair("ECC_NIST_P384")
+            .unwrap()
+            .unwrap();
+        let a = ecdh_shared_secret("ECC_NIST_P384", &priv_a, &pub_b).unwrap();
+        let b = ecdh_shared_secret("ECC_NIST_P384", &priv_b, &pub_a).unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 48);
+    }
 }

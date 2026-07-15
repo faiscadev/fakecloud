@@ -546,6 +546,9 @@ impl KmsService {
 
     fn create_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let input = CreateKeyInput::from_body(&req.json_body())?;
+        // Reject incompatible KeySpec/KeyUsage combinations (e.g. an HMAC spec
+        // with ENCRYPT_DECRYPT) before minting a key no operation can use.
+        validate_key_spec_usage(&input.key_spec, &input.key_usage)?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -825,6 +828,11 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        // EnableKey is only valid from Enabled/Disabled. A key that is
+        // PendingDeletion / PendingImport / Unavailable must not be silently
+        // resurrected to Enabled — AWS returns KMSInvalidStateException (you
+        // must CancelKeyDeletion / import material first).
+        require_enable_disable_transition(key)?;
         key.enabled = true;
         key.key_state = "Enabled".to_string();
 
@@ -844,6 +852,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        require_enable_disable_transition(key)?;
         key.enabled = false;
         key.key_state = "Disabled".to_string();
 
@@ -1209,6 +1218,9 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        // Rotation cannot be toggled on a key pending deletion / import;
+        // AWS rejects with KMSInvalidStateException (Disabled -> DisabledException).
+        require_usable_key_state(key)?;
         // RotationPeriodInDays is optional; AWS validates 90..=2560 and
         // defaults to 365. Persist it so GetKeyRotationStatus echoes it back
         // instead of dropping it (bug-audit 2026-06-20, 1.24).
@@ -1251,6 +1263,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        require_usable_key_state(key)?;
         key.key_rotation_enabled = false;
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
@@ -1269,6 +1282,7 @@ impl KmsService {
                 "Key state became inconsistent",
             )
         })?;
+        require_usable_key_state(key)?;
 
         let rotation = KeyRotation {
             key_id: key.key_id.clone(),

@@ -540,6 +540,78 @@ pub(crate) fn require_usable_key_state(key: &KmsKey) -> Result<(), AwsServiceErr
     ))
 }
 
+/// The KeyUsage values compatible with a given KeySpec, per AWS KMS. An
+/// empty slice means the spec is unknown (leave validation to later paths).
+fn allowed_usages_for_key_spec(key_spec: &str) -> &'static [&'static str] {
+    match key_spec {
+        "SYMMETRIC_DEFAULT" => &["ENCRYPT_DECRYPT"],
+        s if s.starts_with("HMAC_") => &["GENERATE_VERIFY_MAC"],
+        s if s.starts_with("RSA_") => &["ENCRYPT_DECRYPT", "SIGN_VERIFY"],
+        // NIST curves support signing and key agreement.
+        "ECC_NIST_P256" | "ECC_NIST_P384" | "ECC_NIST_P521" => &["SIGN_VERIFY", "KEY_AGREEMENT"],
+        // secp256k1 supports signing only.
+        "ECC_SECG_P256K1" => &["SIGN_VERIFY"],
+        // SM2 (China regions) supports all three.
+        "SM2" => &["SIGN_VERIFY", "ENCRYPT_DECRYPT", "KEY_AGREEMENT"],
+        _ => &[],
+    }
+}
+
+/// CreateKey must reject a KeyUsage that is incompatible with the KeySpec
+/// (e.g. HMAC_256 + ENCRYPT_DECRYPT), which would otherwise create a key that
+/// no crypto operation can use. AWS returns ValidationException.
+pub(crate) fn validate_key_spec_usage(
+    key_spec: &str,
+    key_usage: &str,
+) -> Result<(), AwsServiceError> {
+    let allowed = allowed_usages_for_key_spec(key_spec);
+    if allowed.is_empty() || allowed.contains(&key_usage) {
+        return Ok(());
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!("KeyUsage {key_usage} is not compatible with KeySpec {key_spec}"),
+    ))
+}
+
+/// EnableKey / DisableKey may only transition a key that is currently
+/// `Enabled` or `Disabled`. Any other lifecycle state
+/// (`PendingDeletion`, `PendingImport`, `Unavailable`, ...) is a
+/// `KMSInvalidStateException`; in particular a scheduled-for-deletion key must
+/// not be resurrected without CancelKeyDeletion.
+pub(crate) fn require_enable_disable_transition(key: &KmsKey) -> Result<(), AwsServiceError> {
+    if key.key_state == "Enabled" || key.key_state == "Disabled" {
+        return Ok(());
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "KMSInvalidStateException",
+        format!(
+            "Key '{}' is not in a state that allows this operation (current state: {})",
+            key.arn, key.key_state
+        ),
+    ))
+}
+
+/// GenerateDataKey / GenerateDataKeyPair (and their `WithoutPlaintext`
+/// variants) require an `ENCRYPT_DECRYPT` key. A SIGN_VERIFY /
+/// GENERATE_VERIFY_MAC / KEY_AGREEMENT key must be rejected with
+/// `InvalidKeyUsageException`, matching the Encrypt/ReEncrypt paths.
+pub(crate) fn require_key_usage_encrypt_decrypt(key: &KmsKey) -> Result<(), AwsServiceError> {
+    if key.key_usage != "ENCRYPT_DECRYPT" {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidKeyUsageException",
+            format!(
+                "The operation failed because the KMS key {} is not enabled for the requested operation. The key usage must be ENCRYPT_DECRYPT but is {}.",
+                key.arn, key.key_usage
+            ),
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_key_usage_signing(
     key: &KmsKey,
     resolved: &str,
@@ -922,4 +994,29 @@ pub(crate) fn action_matches(policy_action: &str, requested_action: &str) -> boo
         }
     }
     false
+}
+
+#[cfg(test)]
+mod key_spec_usage_tests {
+    use super::validate_key_spec_usage;
+
+    #[test]
+    fn compatible_combos_pass() {
+        assert!(validate_key_spec_usage("SYMMETRIC_DEFAULT", "ENCRYPT_DECRYPT").is_ok());
+        assert!(validate_key_spec_usage("HMAC_256", "GENERATE_VERIFY_MAC").is_ok());
+        assert!(validate_key_spec_usage("RSA_2048", "SIGN_VERIFY").is_ok());
+        assert!(validate_key_spec_usage("RSA_2048", "ENCRYPT_DECRYPT").is_ok());
+        assert!(validate_key_spec_usage("ECC_NIST_P256", "KEY_AGREEMENT").is_ok());
+        assert!(validate_key_spec_usage("ECC_NIST_P256", "SIGN_VERIFY").is_ok());
+    }
+
+    #[test]
+    fn incompatible_combos_rejected() {
+        // HMAC key can't encrypt/decrypt.
+        assert!(validate_key_spec_usage("HMAC_256", "ENCRYPT_DECRYPT").is_err());
+        // Symmetric key can't sign.
+        assert!(validate_key_spec_usage("SYMMETRIC_DEFAULT", "SIGN_VERIFY").is_err());
+        // secp256k1 supports signing only.
+        assert!(validate_key_spec_usage("ECC_SECG_P256K1", "KEY_AGREEMENT").is_err());
+    }
 }
