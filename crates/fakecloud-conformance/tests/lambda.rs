@@ -852,9 +852,11 @@ async fn lambda_recursion_config() {
 async fn lambda_scaling_config_via_route() {
     // Function scaling config — the live AWS route is
     // `/2025-11-30/functions/{name}/function-scaling-config?Qualifier=...`.
-    // We just need to exercise the dispatch path; the function
-    // doesn't need to exist for the validation guards to pass.
+    // The function must exist: AWS (and now fakecloud) returns
+    // ResourceNotFoundException for a scaling-config put on a missing function.
     let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "scaling-fn").await;
     let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0";
     let resp = reqwest::Client::new()
         .put(format!(
