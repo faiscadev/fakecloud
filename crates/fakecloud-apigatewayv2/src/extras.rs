@@ -1492,7 +1492,25 @@ impl ApiGatewayV2Service {
         } else {
             &mut state.route_responses
         };
-        let mut value = entry.clone();
+        let bucket = store.entry(api).or_default();
+        if !is_create && !bucket.contains_key(&key) {
+            return Err(not_found("Response", &id));
+        }
+        // Update is a partial patch: merge the incoming fields onto the
+        // existing record so unspecified members persist. Previously the
+        // record was replaced wholesale, wiping every field the caller
+        // didn't resend.
+        let mut value = if is_create {
+            entry.clone()
+        } else {
+            let mut existing = bucket.get(&key).cloned().unwrap_or_else(|| entry.clone());
+            if let (Some(dst), Some(src)) = (existing.as_object_mut(), entry.as_object()) {
+                for (k, v) in src {
+                    dst.insert(k.clone(), v.clone());
+                }
+            }
+            existing
+        };
         if is_integration {
             value["IntegrationResponseId"] = json!(id);
             // IntegrationResponseKey is required on the Smithy response shape.
@@ -1512,10 +1530,6 @@ impl ApiGatewayV2Service {
             {
                 value["RouteResponseKey"] = json!("$default");
             }
-        }
-        let bucket = store.entry(api).or_default();
-        if !is_create && !bucket.contains_key(&key) {
-            return Err(not_found("Response", &id));
         }
         bucket.insert(key, value.clone());
         ok(value)

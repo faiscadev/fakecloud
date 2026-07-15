@@ -448,6 +448,69 @@ async fn cognito_create_describe_user_pool_client() {
 }
 
 #[tokio::test]
+async fn cognito_user_pool_client_analytics_configuration_round_trips() {
+    use aws_sdk_cognitoidentityprovider::types::AnalyticsConfigurationType;
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool_id = client
+        .create_user_pool()
+        .pool_name("analytics-pool")
+        .send()
+        .await
+        .expect("create user pool")
+        .user_pool()
+        .unwrap()
+        .id()
+        .unwrap()
+        .to_string();
+
+    let analytics = AnalyticsConfigurationType::builder()
+        .application_id("app-1234567890abcdef")
+        .role_arn("arn:aws:iam::123456789012:role/pinpoint-role")
+        .external_id("ext-42")
+        .user_data_shared(true)
+        .build();
+
+    let created = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("analytics-client")
+        .analytics_configuration(analytics)
+        .send()
+        .await
+        .expect("create client with analytics");
+    let client_id = created
+        .user_pool_client()
+        .unwrap()
+        .client_id()
+        .unwrap()
+        .to_string();
+    let created_ac = created
+        .user_pool_client()
+        .unwrap()
+        .analytics_configuration()
+        .expect("analytics config echoed on create");
+    assert_eq!(created_ac.application_id(), Some("app-1234567890abcdef"));
+
+    // Persisted: describe reflects it, not the default.
+    let described = client
+        .describe_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_id(&client_id)
+        .send()
+        .await
+        .expect("describe client");
+    let ac = described
+        .user_pool_client()
+        .unwrap()
+        .analytics_configuration()
+        .expect("analytics config persisted");
+    assert_eq!(ac.external_id(), Some("ext-42"));
+    assert!(ac.user_data_shared());
+}
+
+#[tokio::test]
 async fn cognito_create_client_with_secret() {
     let server = TestServer::start().await;
     let client = server.cognito_client().await;

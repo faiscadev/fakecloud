@@ -609,6 +609,11 @@ pub struct UserPoolClient {
     /// (old token invalidated). Default "DISABLED".
     #[serde(default)]
     pub refresh_token_rotation: Option<RefreshTokenRotationConfig>,
+    /// Pinpoint AnalyticsConfiguration block, stored verbatim so
+    /// Create/Update round-trip it through DescribeUserPoolClient. Defaults
+    /// to absent for pre-existing snapshots.
+    #[serde(default)]
+    pub analytics_configuration: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

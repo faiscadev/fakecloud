@@ -594,6 +594,10 @@ impl CognitoService {
                 .unwrap_or(false),
             client_secrets: Vec::new(),
             refresh_token_rotation: parse_refresh_token_rotation(&body["RefreshTokenRotation"]),
+            analytics_configuration: body
+                .get("AnalyticsConfiguration")
+                .filter(|v| !v.is_null())
+                .cloned(),
         };
 
         let response = user_pool_client_to_json(&client);
@@ -774,6 +778,9 @@ impl CognitoService {
         if body["RefreshTokenRotation"].is_object() {
             client.refresh_token_rotation =
                 parse_refresh_token_rotation(&body["RefreshTokenRotation"]);
+        }
+        if let Some(analytics) = body.get("AnalyticsConfiguration").filter(|v| !v.is_null()) {
+            client.analytics_configuration = Some(analytics.clone());
         }
 
         client.last_modified_date = Utc::now();

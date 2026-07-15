@@ -640,6 +640,11 @@ pub struct Service {
     /// launched under this service. Stored as raw JSON.
     #[serde(default)]
     pub volume_configurations: Vec<Value>,
+    /// Service Connect configuration (namespace + service mappings) supplied on
+    /// Create/UpdateService. Preserved as raw JSON so every optional field
+    /// round-trips on DescribeServices instead of silently dropping.
+    #[serde(default)]
+    pub service_connect_configuration: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
