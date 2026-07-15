@@ -1105,11 +1105,35 @@ impl Route53Service {
         }
         drop(state);
         summaries.sort_by(|a, b| a.0.cmp(&b.0));
+        // Honor maxitems + nexttoken instead of returning the whole set with a
+        // hardcoded MaxItems=100. Resume after the inbound token (last zone id).
+        let max_items: usize = req
+            .query_params
+            .get("maxitems")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(100);
+        let start = match req.query_params.get("nexttoken") {
+            Some(t) => summaries
+                .iter()
+                .position(|(id, _)| id.as_str() > t.as_str())
+                .unwrap_or(summaries.len()),
+            None => 0,
+        };
+        let rest = &summaries[start..];
+        let page: Vec<&(String, String)> = rest.iter().take(max_items).collect();
+        // Token is the LAST id emitted on this page; the next request resumes
+        // strictly after it (`id > token`). Emitting the first *excluded* id
+        // here would skip it, since resume is strict-greater.
+        let next_token = if page.len() < rest.len() {
+            page.last().map(|(id, _)| id.clone())
+        } else {
+            None
+        };
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
         body.push_str(&format!("<ListHostedZonesByVPCResponse xmlns=\"{NS}\">"));
         body.push_str("<HostedZoneSummaries>");
-        for (id, name) in &summaries {
+        for (id, name) in &page {
             body.push_str("<HostedZoneSummary>");
             // HostedZoneId in a summary is the bare id (no `/hostedzone/`
             // prefix); the SDK validates the id pattern and rejects the prefix.
@@ -1121,7 +1145,10 @@ impl Route53Service {
             body.push_str("</HostedZoneSummary>");
         }
         body.push_str("</HostedZoneSummaries>");
-        body.push_str("<MaxItems>100</MaxItems>");
+        body.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
+        if let Some(t) = &next_token {
+            body.push_str(&format!("<NextToken>{}</NextToken>", esc(t)));
+        }
         body.push_str("</ListHostedZonesByVPCResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }

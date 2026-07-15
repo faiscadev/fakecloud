@@ -149,9 +149,23 @@ impl Route53Service {
             configs.retain(|c| c.hosted_zone_id == z);
         }
         configs.sort_by(|a, b| a.id.cmp(&b.id));
-        let slice: Vec<&StoredQueryLoggingConfig> = configs.iter().take(max_items).collect();
-        let next = if slice.len() < configs.len() {
-            Some(configs[slice.len()].id.clone())
+        // Resume after the inbound NextToken (the id of the last config
+        // returned on the previous page). Previously the token was accepted
+        // but never applied, so paging re-returned page 1 forever.
+        let start = match req.query_params.get("nexttoken") {
+            Some(t) => configs
+                .iter()
+                .position(|c| c.id.as_str() > t.as_str())
+                .unwrap_or(configs.len()),
+            None => 0,
+        };
+        let remaining = &configs[start..];
+        let slice: Vec<&StoredQueryLoggingConfig> = remaining.iter().take(max_items).collect();
+        // Token is the last id emitted; the next request resumes strictly
+        // after it (`id > token`). Emitting the first excluded id would skip
+        // it under strict-greater resume.
+        let next = if slice.len() < remaining.len() {
+            slice.last().map(|c| c.id.clone())
         } else {
             None
         };
