@@ -87,13 +87,29 @@ pub(crate) fn opt_str<'a>(body: &'a Value, field: &str) -> Option<&'a str> {
 /// an empty page — restarting at the beginning would silently re-list page 1
 /// and risk an infinite pagination loop for the client.
 pub(crate) fn paginate_arns(
+    arns: Vec<String>,
+    next_token: &str,
+    max_results: usize,
+) -> (Vec<String>, Option<String>) {
+    paginate_arns_dir(arns, next_token, max_results, false)
+}
+
+/// Like [`paginate_arns`] but honors a sort direction. `descending` reverses the
+/// canonical (ascending, deduped) order and adjusts the resume cursor
+/// comparison so DESC pages advance correctly instead of being silently
+/// re-sorted back to ASC.
+pub(crate) fn paginate_arns_dir(
     mut arns: Vec<String>,
     next_token: &str,
     max_results: usize,
+    descending: bool,
 ) -> (Vec<String>, Option<String>) {
     use base64::Engine;
     arns.sort();
     arns.dedup();
+    if descending {
+        arns.reverse();
+    }
     let cursor = if next_token.is_empty() {
         None
     } else {
@@ -106,9 +122,17 @@ pub(crate) fn paginate_arns(
         0
     } else {
         match &cursor {
+            // Resume just past the cursor. For ASC the next element is the first
+            // greater than the cursor; for DESC it's the first less than it.
             Some(c) => arns
                 .iter()
-                .position(|a| a.as_str() > c.as_str())
+                .position(|a| {
+                    if descending {
+                        a.as_str() < c.as_str()
+                    } else {
+                        a.as_str() > c.as_str()
+                    }
+                })
                 .unwrap_or(arns.len()),
             // Non-empty but undecodable token: a cursor we never emitted.
             // Treat as past the end (empty page) rather than restarting at 0.
@@ -1560,7 +1584,21 @@ pub(crate) fn task_protection_json(task: &Task) -> Value {
 
 #[cfg(test)]
 mod pagination_tests {
-    use super::paginate_arns;
+    use super::{paginate_arns, paginate_arns_dir};
+
+    #[test]
+    fn paginate_arns_dir_descending_pages_in_reverse() {
+        let all: Vec<String> = (0..5).map(|i| format!("arn:{i}")).collect();
+        // DESC page 1: highest first.
+        let (p1, next) = paginate_arns_dir(all.clone(), "", 2, true);
+        assert_eq!(p1, vec!["arn:4", "arn:3"]);
+        let token = next.expect("nextToken after DESC page 1");
+        // DESC page 2 continues downward, not silently re-sorted to ASC.
+        let (p2, next2) = paginate_arns_dir(all.clone(), &token, 2, true);
+        assert_eq!(p2, vec!["arn:2", "arn:1"]);
+        let (p3, _) = paginate_arns_dir(all, &next2.unwrap(), 2, true);
+        assert_eq!(p3, vec!["arn:0"]);
+    }
 
     #[test]
     fn paginate_arns_key_cursor_is_stable_across_delete() {

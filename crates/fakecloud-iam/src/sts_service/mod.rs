@@ -26,6 +26,27 @@ const DEFAULT_SESSION_TOKEN_DURATION: i64 = 43200;
 /// Default duration for GetFederationToken (12 hours).
 const DEFAULT_FEDERATION_TOKEN_DURATION: i64 = 43200;
 
+/// Validate an optional inline session `Policy` parameter is a well-formed JSON
+/// policy document (a JSON object). AWS rejects a non-JSON / non-object policy
+/// with `MalformedPolicyDocument` before minting credentials; length-only
+/// validation let garbage through.
+pub(crate) fn validate_session_policy_json(policy: Option<&str>) -> Result<(), AwsServiceError> {
+    if let Some(doc) = policy {
+        let malformed = || {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "MalformedPolicyDocument",
+                "The policy is not in the valid JSON format.".to_string(),
+            )
+        };
+        let value: serde_json::Value = serde_json::from_str(doc).map_err(|_| malformed())?;
+        if !value.is_object() {
+            return Err(malformed());
+        }
+    }
+    Ok(())
+}
+
 /// Compute an absolute expiration timestamp from an optional DurationSeconds parameter.
 fn compute_expiration_at(
     req: &AwsRequest,
@@ -610,6 +631,22 @@ fn extract_saml_session_name(saml_b64: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_session_policy_json_accepts_object_rejects_garbage() {
+        // Absent policy is fine.
+        assert!(validate_session_policy_json(None).is_ok());
+        // A well-formed JSON object passes.
+        assert!(
+            validate_session_policy_json(Some(r#"{"Version":"2012-10-17","Statement":[]}"#))
+                .is_ok()
+        );
+        // Non-JSON and non-object JSON are rejected as MalformedPolicyDocument.
+        for bad in ["not json", "[]", "\"a string\"", "42"] {
+            let err = validate_session_policy_json(Some(bad)).unwrap_err();
+            assert_eq!(err.code(), "MalformedPolicyDocument", "input {bad:?}");
+        }
+    }
 
     #[test]
     fn session_name_pattern_accepts_valid_and_rejects_xml_metacharacters() {

@@ -123,22 +123,21 @@ pub(crate) fn list_inference_profiles(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(100)
         .max(1);
-    let next_token = req.query_params.get("nextToken");
+    // The nextToken is an opaque numeric offset into the combined result list.
+    // A prior version emitted the last item's Id but resumed by comparing it to
+    // the ARN, and computed the offset against the APPLICATION-only list before
+    // prepending SYSTEM_DEFINED profiles — so page 2 skipped or duplicated rows.
+    let start = req
+        .query_params
+        .get("nextToken")
+        .and_then(|t| t.parse::<usize>().ok())
+        .unwrap_or(0);
 
     let accts = state.read();
     let empty = crate::state::BedrockState::new(&req.account_id, &req.region);
     let s = accts.get(&req.account_id).unwrap_or(&empty);
     let mut items: Vec<&InferenceProfile> = s.inference_profiles.values().collect();
     items.sort_by(|a, b| a.inference_profile_arn.cmp(&b.inference_profile_arn));
-
-    let start = if let Some(token) = next_token {
-        items
-            .iter()
-            .position(|p| p.inference_profile_arn.as_str() > token.as_str())
-            .unwrap_or(items.len())
-    } else {
-        0
-    };
 
     // SYSTEM_DEFINED (AWS-managed cross-region) profiles exist out of the box;
     // list them alongside any user-created APPLICATION profiles. A `type`
@@ -180,14 +179,8 @@ pub(crate) fn list_inference_profiles(
     let mut resp = json!({ "inferenceProfileSummaries": page });
     let end = start.saturating_add(max_results);
     if end < total {
-        // Page on the last item's id so the caller can continue.
-        if let Some(last) = resp["inferenceProfileSummaries"]
-            .as_array()
-            .and_then(|a| a.last())
-            .and_then(|v| v["inferenceProfileId"].as_str())
-        {
-            resp["nextToken"] = json!(last);
-        }
+        // Resume at the next offset into the combined list.
+        resp["nextToken"] = json!(end.to_string());
     }
 
     Ok(AwsResponse::ok_json(resp))

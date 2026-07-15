@@ -872,6 +872,26 @@ impl SnsService {
     fn subscribe(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let topic_arn = required(req, "TopicArn")?;
         let protocol = required(req, "Protocol")?;
+        // AWS rejects an unknown protocol with InvalidParameter rather than
+        // creating a phantom subscription that can never deliver.
+        const VALID_PROTOCOLS: &[&str] = &[
+            "http",
+            "https",
+            "email",
+            "email-json",
+            "sms",
+            "sqs",
+            "application",
+            "lambda",
+            "firehose",
+        ];
+        if !VALID_PROTOCOLS.contains(&protocol.as_str()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameter",
+                format!("Invalid parameter: Protocol: {protocol} is not a valid protocol"),
+            ));
+        }
         let endpoint = param(req, "Endpoint").unwrap_or_default();
 
         let accts = self.state.read();
