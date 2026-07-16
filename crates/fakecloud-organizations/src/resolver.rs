@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use fakecloud_core::auth::{Principal, PrincipalType, ScpResolver};
+use fakecloud_core::auth::{OrgMembershipResolver, Principal, PrincipalType, ScpResolver};
 
 use crate::state::SharedOrganizationsState;
 
@@ -179,6 +179,50 @@ fn slr_role_name(arn: &str) -> Option<&str> {
     let rest = arn.splitn(6, ':').nth(5)?;
     let after_prefix = rest.strip_prefix("assumed-role/")?;
     after_prefix.split('/').next()
+}
+
+/// Service principal AWS registers for centralized-root-access delegated
+/// administration. A member account delegated for this principal may perform
+/// `sts:AssumeRoot` on other org members alongside the management account.
+const ROOT_ACCESS_SERVICE_PRINCIPAL: &str = "iam.amazonaws.com";
+
+/// [`OrgMembershipResolver`] over the shared organizations state — answers
+/// whether the org topology permits a centralized-root (`AssumeRoot`) session.
+pub struct OrganizationsMembershipResolver {
+    state: SharedOrganizationsState,
+}
+
+impl OrganizationsMembershipResolver {
+    pub fn new(state: SharedOrganizationsState) -> Self {
+        Self { state }
+    }
+
+    pub fn shared(state: SharedOrganizationsState) -> Arc<dyn OrgMembershipResolver> {
+        Arc::new(Self::new(state))
+    }
+}
+
+impl OrgMembershipResolver for OrganizationsMembershipResolver {
+    fn can_assume_root_into(&self, caller_account: &str, target_account: &str) -> bool {
+        let guard = self.state.read();
+        let Some(org) = guard.as_ref() else {
+            // No organization exists — there is no centralized root access to
+            // grant, so cross-account AssumeRoot is never permitted.
+            return false;
+        };
+        // The target must be enrolled in this organization.
+        if !org.accounts.contains_key(target_account) {
+            return false;
+        }
+        // The caller must be the management account or a registered delegated
+        // administrator for centralized root access.
+        if org.is_management(caller_account) {
+            return true;
+        }
+        org.delegated_administrators
+            .get(ROOT_ACCESS_SERVICE_PRINCIPAL)
+            .is_some_and(|admins| admins.contains_key(caller_account))
+    }
 }
 
 #[cfg(test)]
@@ -361,5 +405,63 @@ mod tests {
         // this as deny-all (matches AWS when the last allow-all is
         // detached and nothing else is attached).
         assert!(docs.is_empty());
+    }
+
+    // ── OrganizationsMembershipResolver (AssumeRoot gating, §5.2) ──
+
+    #[test]
+    fn membership_resolver_denies_when_no_org() {
+        let state: SharedOrganizationsState = Arc::new(RwLock::new(None));
+        let resolver = OrganizationsMembershipResolver::new(state);
+        assert!(!resolver.can_assume_root_into("111111111111", "222222222222"));
+    }
+
+    #[test]
+    fn membership_resolver_allows_management_into_member() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enroll_account_if_missing("222222222222");
+        let resolver = OrganizationsMembershipResolver::new(shared(org));
+        // Management account -> enrolled member: allowed.
+        assert!(resolver.can_assume_root_into("111111111111", "222222222222"));
+    }
+
+    #[test]
+    fn membership_resolver_denies_non_member_target() {
+        let org = OrganizationState::bootstrap("111111111111");
+        let resolver = OrganizationsMembershipResolver::new(shared(org));
+        // Target 999... is not enrolled -> denied even for the management acct.
+        assert!(!resolver.can_assume_root_into("111111111111", "999999999999"));
+    }
+
+    #[test]
+    fn membership_resolver_denies_non_management_caller() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enroll_account_if_missing("222222222222");
+        org.enroll_account_if_missing("333333333333");
+        let resolver = OrganizationsMembershipResolver::new(shared(org));
+        // A plain member (222...) is neither management nor a delegated admin,
+        // so it cannot AssumeRoot into a sibling member (333...).
+        assert!(!resolver.can_assume_root_into("222222222222", "333333333333"));
+    }
+
+    #[test]
+    fn membership_resolver_allows_delegated_admin() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        org.enroll_account_if_missing("222222222222");
+        org.enroll_account_if_missing("333333333333");
+        org.delegated_administrators
+            .entry(ROOT_ACCESS_SERVICE_PRINCIPAL.to_string())
+            .or_default()
+            .insert(
+                "222222222222".to_string(),
+                crate::state::DelegatedAdministrator {
+                    account_id: "222222222222".to_string(),
+                    service_principal: ROOT_ACCESS_SERVICE_PRINCIPAL.to_string(),
+                    registered_at: chrono::Utc::now(),
+                },
+            );
+        let resolver = OrganizationsMembershipResolver::new(shared(org));
+        // 222... is a delegated admin for root access -> may target member 333.
+        assert!(resolver.can_assume_root_into("222222222222", "333333333333"));
     }
 }

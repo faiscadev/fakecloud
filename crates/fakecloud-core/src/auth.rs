@@ -464,6 +464,22 @@ pub trait ScpResolver: Send + Sync {
     fn scps_for(&self, principal: &Principal) -> Option<Vec<String>>;
 }
 
+/// Abstraction over "does the organization topology permit `caller_account` to
+/// mint centralized-root (`sts:AssumeRoot`) credentials for `target_account`".
+/// Implemented by `fakecloud-organizations`, which owns the membership graph
+/// the IAM/STS crate has no visibility into.
+///
+/// Returns `true` only when an organization exists, `target_account` is a
+/// member of it, and `caller_account` is that org's management account (or a
+/// registered delegated administrator for centralized root access). Any other
+/// case — no org, target not enrolled, caller not privileged — returns
+/// `false`, so a bare `sts:AssumeRoot` grant can no longer escalate to root
+/// over an arbitrary account. Same-account AssumeRoot is handled by the caller
+/// and never consults this resolver.
+pub trait OrgMembershipResolver: Send + Sync {
+    fn can_assume_root_into(&self, caller_account: &str, target_account: &str) -> bool;
+}
+
 /// Abstraction over "given a service + a fully-qualified resource ARN,
 /// return the resource-based policy attached to that resource, if any."
 ///

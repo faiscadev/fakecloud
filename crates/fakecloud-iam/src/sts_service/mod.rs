@@ -121,6 +121,10 @@ pub struct StsService {
     state: SharedIamState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: IamSnapshotLock,
+    /// Organization-membership oracle used to gate cross-account `AssumeRoot`.
+    /// `None` in single-account setups / unit tests, in which case
+    /// cross-account AssumeRoot is denied (no org topology to authorize it).
+    org_membership: Option<Arc<dyn fakecloud_core::auth::OrgMembershipResolver>>,
 }
 
 mod assume;
@@ -134,7 +138,18 @@ impl StsService {
             state,
             snapshot_store: None,
             snapshot_lock: crate::persistence::new_snapshot_lock(),
+            org_membership: None,
         }
+    }
+
+    /// Wire the organization-membership resolver used to authorize cross-account
+    /// `AssumeRoot`. Without it, cross-account AssumeRoot is always denied.
+    pub fn with_org_membership(
+        mut self,
+        resolver: Arc<dyn fakecloud_core::auth::OrgMembershipResolver>,
+    ) -> Self {
+        self.org_membership = Some(resolver);
+        self
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
@@ -899,6 +914,29 @@ mod tests {
         ));
         let sts = StsService::new(state.clone());
         (sts, state)
+    }
+
+    /// Test double for the org-membership oracle. `can_assume_root_into` is true
+    /// only for the exact (caller, target) pairs it was seeded with.
+    struct MockOrgMembership {
+        allowed: Vec<(String, String)>,
+    }
+
+    impl fakecloud_core::auth::OrgMembershipResolver for MockOrgMembership {
+        fn can_assume_root_into(&self, caller: &str, target: &str) -> bool {
+            self.allowed.iter().any(|(c, t)| c == caller && t == target)
+        }
+    }
+
+    fn org_membership_allowing(
+        pairs: &[(&str, &str)],
+    ) -> std::sync::Arc<dyn fakecloud_core::auth::OrgMembershipResolver> {
+        std::sync::Arc::new(MockOrgMembership {
+            allowed: pairs
+                .iter()
+                .map(|(c, t)| (c.to_string(), t.to_string()))
+                .collect(),
+        })
     }
 
     fn sts_request(action: &str, params: Vec<(&str, &str)>) -> AwsRequest {
@@ -1971,11 +2009,14 @@ mod tests {
     #[tokio::test]
     async fn assume_root_with_account_id_succeeds() {
         let (svc, state) = make_sts_service();
-        // AssumeRoot requires the RootSessions feature enabled (5.1).
+        // AssumeRoot requires the RootSessions feature enabled (5.1) AND, for a
+        // cross-account target, that the org topology authorizes it (5.2).
         state
             .write()
             .get_or_create("123456789012")
             .organizations_root_sessions = true;
+        let svc =
+            svc.with_org_membership(org_membership_allowing(&[("123456789012", "111122223333")]));
         let req = sts_request(
             "AssumeRoot",
             vec![
@@ -1995,11 +2036,14 @@ mod tests {
     #[tokio::test]
     async fn assume_root_with_arn_succeeds() {
         let (svc, state) = make_sts_service();
-        // AssumeRoot requires the RootSessions feature enabled (5.1).
+        // AssumeRoot requires the RootSessions feature enabled (5.1) AND, for a
+        // cross-account target, org authorization (5.2).
         state
             .write()
             .get_or_create("123456789012")
             .organizations_root_sessions = true;
+        let svc =
+            svc.with_org_membership(org_membership_allowing(&[("123456789012", "444455556666")]));
         let req = sts_request(
             "AssumeRoot",
             vec![
@@ -2040,6 +2084,63 @@ mod tests {
             .assume_root(&req)
             .err()
             .expect("AssumeRoot must be denied without RootSessions");
+        assert_eq!(err.code(), "AccessDeniedException");
+    }
+
+    #[tokio::test]
+    async fn assume_root_cross_account_denied_when_org_disallows() {
+        // §5.2: even with RootSessions enabled, a cross-account target that the
+        // organization does not authorize (target not a member, or caller not
+        // the management account) must be denied. Here the mock authorizes only
+        // 555566667777, not the 444455556666 being requested.
+        let (svc, state) = make_sts_service();
+        state
+            .write()
+            .get_or_create("123456789012")
+            .organizations_root_sessions = true;
+        let svc =
+            svc.with_org_membership(org_membership_allowing(&[("123456789012", "555566667777")]));
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                ),
+            ],
+        );
+        let err = svc
+            .assume_root(&req)
+            .err()
+            .expect("cross-account AssumeRoot must be denied when the org disallows it");
+        assert_eq!(err.code(), "AccessDeniedException");
+    }
+
+    #[tokio::test]
+    async fn assume_root_cross_account_denied_without_org_resolver() {
+        // §5.2: with no org resolver wired (single-account setup), there is no
+        // topology to authorize cross-account AssumeRoot, so it is denied even
+        // with the RootSessions flag set.
+        let (svc, state) = make_sts_service();
+        state
+            .write()
+            .get_or_create("123456789012")
+            .organizations_root_sessions = true;
+        let req = sts_request(
+            "AssumeRoot",
+            vec![
+                ("TargetPrincipal", "arn:aws:iam::444455556666:root"),
+                (
+                    "TaskPolicyArn.arn",
+                    "arn:aws:iam::aws:policy/IAMAuditRootUserCredentials",
+                ),
+            ],
+        );
+        let err = svc
+            .assume_root(&req)
+            .err()
+            .expect("cross-account AssumeRoot must be denied without an org resolver");
         assert_eq!(err.code(), "AccessDeniedException");
     }
 

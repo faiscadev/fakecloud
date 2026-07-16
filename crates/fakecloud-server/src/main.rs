@@ -1758,7 +1758,13 @@ async fn main() {
     // Share the snapshot lock between IamService and StsService so
     // writes from both services mutually serialize through one lock.
     let iam_snapshot_lock = iam_service.snapshot_lock();
-    let mut sts_service = StsService::new(iam_state.clone()).with_snapshot_lock(iam_snapshot_lock);
+    let mut sts_service = StsService::new(iam_state.clone())
+        .with_snapshot_lock(iam_snapshot_lock)
+        .with_org_membership(
+            fakecloud_organizations::resolver::OrganizationsMembershipResolver::shared(
+                organizations_state.clone(),
+            ),
+        );
     if let Some(store) = iam_snapshot_store {
         sts_service = sts_service.with_snapshot_store(store);
     }
