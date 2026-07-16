@@ -503,17 +503,8 @@ fn empty_result_ops() {
             .len(),
         0
     );
-    assert_eq!(
-        call(
-            &s,
-            "SearchSampleQueries",
-            json!({ "SearchPhrase": "errors" })
-        )["SearchResults"]
-            .as_array()
-            .unwrap()
-            .len(),
-        0
-    );
+    // SearchSampleQueries now serves a fixed catalog (see the dedicated
+    // search_sample_queries_* tests); it is intentionally no longer empty.
     let metrics = call(
         &s,
         "ListInsightsMetricData",
@@ -685,4 +676,51 @@ fn get_channel_echoes_persisted_source_config() {
     );
     assert!(got.get("IngestionStatus").is_some());
     assert!(got.get("Tags").is_none());
+}
+
+#[test]
+fn search_sample_queries_returns_catalog() {
+    let s = svc();
+    // A broad phrase matching several catalog entries returns a non-empty,
+    // relevance-ranked set of sample queries with the AWS response shape.
+    let got = call(
+        &s,
+        "SearchSampleQueries",
+        json!({ "SearchPhrase": "investigate" }),
+    );
+    let results = got["SearchResults"]
+        .as_array()
+        .expect("SearchResults array");
+    assert!(!results.is_empty(), "catalog must not be empty");
+    let first = &results[0];
+    assert!(first.get("Name").and_then(Value::as_str).is_some());
+    assert!(first.get("Description").and_then(Value::as_str).is_some());
+    let sql = first.get("SQL").and_then(Value::as_str).expect("SQL");
+    assert!(sql.to_uppercase().contains("SELECT"));
+    assert!(first.get("Relevance").and_then(Value::as_f64).is_some());
+}
+
+#[test]
+fn search_sample_queries_filters_by_phrase() {
+    let s = svc();
+    let got = call(
+        &s,
+        "SearchSampleQueries",
+        json!({ "SearchPhrase": "iam policy" }),
+    );
+    let results = got["SearchResults"].as_array().expect("array");
+    assert!(!results.is_empty());
+    // The IAM-focused entry must rank at the top for an IAM search phrase.
+    assert!(results[0]["Name"]
+        .as_str()
+        .unwrap()
+        .to_lowercase()
+        .contains("iam"));
+    // A phrase matching nothing returns an empty set (not the whole catalog).
+    let none = call(
+        &s,
+        "SearchSampleQueries",
+        json!({ "SearchPhrase": "zzzznotarealtermxyz" }),
+    );
+    assert!(none["SearchResults"].as_array().unwrap().is_empty());
 }

@@ -2090,7 +2090,7 @@ impl Elbv2Service {
             .trust_stores
             .get_mut(&arn)
             .ok_or_else(|| trust_store_not_found(&arn))?;
-        let mut added = Vec::new();
+        let mut added: Vec<(i64, String, i64)> = Vec::new();
         for n in 1..=10 {
             let bucket = req
                 .query_params
@@ -2102,27 +2102,45 @@ impl Elbv2Service {
                     .get(&format!("RevocationContents.member.{n}.S3Key"))
                     .cloned()
                     .unwrap_or_default();
+                let revocation_type = req
+                    .query_params
+                    .get(&format!("RevocationContents.member.{n}.RevocationType"))
+                    .cloned()
+                    .unwrap_or_else(|| "CRL".to_string());
+                // We don't parse the referenced CRL, so model each supplied
+                // revocation file as contributing one revoked entry. The key
+                // invariant is that the per-revocation counts sum to the trust
+                // store's TotalRevokedEntries so DescribeTrustStore and
+                // DescribeTrustStoreRevocations agree.
+                let entries = 1_i64;
                 let id = ts.next_revocation_id;
                 ts.next_revocation_id += 1;
                 let rev = crate::state::TrustStoreRevocation {
                     revocation_id: id,
-                    revocation_type: "CRL".to_string(),
-                    number_of_revoked_entries: 0,
+                    revocation_type: revocation_type.clone(),
+                    number_of_revoked_entries: entries,
                     content: format!("s3://{bucket}/{key}").into_bytes(),
                 };
                 ts.revocations.insert(id, rev);
-                added.push(id);
+                added.push((id, revocation_type, entries));
             } else {
                 break;
             }
         }
-        ts.total_revoked_entries += added.len() as i64;
+        // Keep the aggregate consistent with the sum of every stored
+        // revocation's entry count rather than a running increment.
+        ts.total_revoked_entries = ts
+            .revocations
+            .values()
+            .map(|r| r.number_of_revoked_entries)
+            .sum();
         let revs_xml = added
             .iter()
-            .map(|id| {
+            .map(|(id, revocation_type, entries)| {
                 format!(
-                    "<member><TrustStoreArn>{}</TrustStoreArn><RevocationId>{id}</RevocationId><RevocationType>CRL</RevocationType><NumberOfRevokedEntries>0</NumberOfRevokedEntries></member>",
-                    xml_escape(&arn)
+                    "<member><TrustStoreArn>{}</TrustStoreArn><RevocationId>{id}</RevocationId><RevocationType>{}</RevocationType><NumberOfRevokedEntries>{entries}</NumberOfRevokedEntries></member>",
+                    xml_escape(&arn),
+                    xml_escape(revocation_type)
                 )
             })
             .collect::<String>();
@@ -2151,6 +2169,14 @@ impl Elbv2Service {
         for id in &ids {
             ts.revocations.remove(id);
         }
+        // Keep the aggregate consistent with the surviving revocations so
+        // DescribeTrustStore and DescribeTrustStoreRevocations still agree
+        // after a removal.
+        ts.total_revoked_entries = ts
+            .revocations
+            .values()
+            .map(|r| r.number_of_revoked_entries)
+            .sum();
         Ok(xml_metadata_only(
             "RemoveTrustStoreRevocations",
             &req.request_id,

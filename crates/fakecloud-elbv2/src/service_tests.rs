@@ -710,3 +710,90 @@ async fn unimplemented_action_errors() {
         .expect("expected error");
     assert!(matches!(err, AwsServiceError::ActionNotImplemented { .. }));
 }
+
+// Regression: AddTrustStoreRevocations must record a real per-revocation
+// entry count so DescribeTrustStore (aggregate TotalRevokedEntries) and
+// DescribeTrustStoreRevocations (per-revocation NumberOfRevokedEntries)
+// agree instead of reporting a total > 0 while every entry says 0.
+#[tokio::test]
+async fn add_trust_store_revocations_counts_agree() {
+    let svc = svc();
+    let resp = svc
+        .handle(req(
+            "CreateTrustStore",
+            &[
+                ("Name", "ts1"),
+                ("CaCertificatesBundleS3Bucket", "certs"),
+                ("CaCertificatesBundleS3Key", "bundle.pem"),
+            ],
+        ))
+        .await
+        .unwrap();
+    let body = body_string(&resp);
+    let arn = body
+        .split("<TrustStoreArn>")
+        .nth(1)
+        .and_then(|s| s.split("</TrustStoreArn>").next())
+        .expect("arn in response")
+        .to_string();
+
+    let add = svc
+        .handle(req(
+            "AddTrustStoreRevocations",
+            &[
+                ("TrustStoreArn", &arn),
+                ("RevocationContents.member.1.S3Bucket", "crls"),
+                ("RevocationContents.member.1.S3Key", "a.crl"),
+                ("RevocationContents.member.2.S3Bucket", "crls"),
+                ("RevocationContents.member.2.S3Key", "b.crl"),
+            ],
+        ))
+        .await
+        .unwrap();
+    let add_body = body_string(&add);
+    // The Add response must not report 0 revoked entries per revocation.
+    assert!(!add_body.contains("<NumberOfRevokedEntries>0</NumberOfRevokedEntries>"));
+    assert_eq!(add_body.matches("<member>").count(), 2);
+
+    // Aggregate on the trust store.
+    let describe = svc
+        .handle(req("DescribeTrustStores", &[("TrustStoreArn", &arn)]))
+        .await
+        .unwrap();
+    let d_body = body_string(&describe);
+    assert!(d_body.contains("<TotalRevokedEntries>2</TotalRevokedEntries>"));
+
+    // Per-revocation view must sum to the aggregate.
+    let revs = svc
+        .handle(req(
+            "DescribeTrustStoreRevocations",
+            &[("TrustStoreArn", &arn)],
+        ))
+        .await
+        .unwrap();
+    let r_body = body_string(&revs);
+    let per_sum: i64 = r_body
+        .split("<NumberOfRevokedEntries>")
+        .skip(1)
+        .filter_map(|s| s.split("</NumberOfRevokedEntries>").next())
+        .filter_map(|s| s.parse::<i64>().ok())
+        .sum();
+    assert_eq!(
+        per_sum, 2,
+        "per-revocation counts must sum to TotalRevokedEntries"
+    );
+
+    // Removing one revocation must keep the aggregate consistent with the
+    // surviving per-revocation counts (RevocationIds are assigned from 1).
+    svc.handle(req(
+        "RemoveTrustStoreRevocations",
+        &[("TrustStoreArn", &arn), ("RevocationIds.member.1", "1")],
+    ))
+    .await
+    .unwrap();
+    let describe = svc
+        .handle(req("DescribeTrustStores", &[("TrustStoreArn", &arn)]))
+        .await
+        .unwrap();
+    assert!(body_string(&describe).contains("<TotalRevokedEntries>1</TotalRevokedEntries>"));
+}
