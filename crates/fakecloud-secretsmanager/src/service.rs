@@ -1721,6 +1721,7 @@ impl SecretsManagerService {
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let mut secret_values: Vec<Value> = Vec::new();
         let mut errors: Vec<Value> = Vec::new();
+        let mut next_token: Option<String> = None;
 
         if let Some(id_list) = secret_id_list {
             for id_val in id_list {
@@ -1821,7 +1822,20 @@ impl SecretsManagerService {
             let mut matching = matching;
             matching.sort_by(|a, b| a.name.cmp(&b.name));
 
-            for secret in matching.iter().take(limit) {
+            // Resume from the incoming NextToken (an opaque base64 offset into
+            // the sorted result set); skip consumed entries and emit a new token
+            // when more remain. Previously the extra results were silently
+            // dropped and no NextToken was ever returned.
+            let start = body["NextToken"]
+                .as_str()
+                .and_then(|t| t.parse::<usize>().ok())
+                .unwrap_or(0);
+            let end = (start + limit).min(matching.len());
+            if end < matching.len() {
+                next_token = Some(end.to_string());
+            }
+
+            for secret in matching.iter().skip(start).take(limit) {
                 if let Some(ref current_vid) = secret.current_version_id {
                     if let Some(version) = secret.versions.get(current_vid) {
                         let mut entry = json!({
@@ -1873,6 +1887,12 @@ impl SecretsManagerService {
         // Remove empty arrays
         if errors.is_empty() {
             response.as_object_mut().unwrap().remove("Errors");
+        }
+        if let Some(token) = next_token {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), json!(token));
         }
 
         Ok(AwsResponse::ok_json(response))

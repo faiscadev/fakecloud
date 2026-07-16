@@ -415,3 +415,43 @@ async fn replace_route_table_association_moves_main_to_new_table() {
         Some(new_rt_id.as_str())
     );
 }
+
+#[tokio::test]
+async fn associate_address_rejects_unknown_allocation_id() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+
+    // A real allocation associates fine.
+    let alloc = c
+        .allocate_address()
+        .domain(aws_sdk_ec2::types::DomainType::Vpc)
+        .send()
+        .await
+        .expect("allocate_address");
+    let alloc_id = alloc.allocation_id().expect("allocation_id").to_string();
+    let ok = c
+        .associate_address()
+        .allocation_id(&alloc_id)
+        .network_interface_id("eni-00000000000000000")
+        .send()
+        .await
+        .expect("associate real allocation");
+    assert!(ok.association_id().is_some());
+
+    // An unknown AllocationId must error, not fabricate a phantom association.
+    let err = c
+        .associate_address()
+        .allocation_id("eipalloc-deadbeefdeadbeef0")
+        .network_interface_id("eni-00000000000000000")
+        .send()
+        .await
+        .expect_err("unknown allocation must be rejected");
+    // EC2's query-protocol error envelope isn't parsed into meta().code() by
+    // aws-sdk-ec2 (a separate, pre-existing format gap), so assert on the raw
+    // error text which carries the code.
+    let msg = format!("{}", aws_sdk_ec2::error::DisplayErrorContext(&err));
+    assert!(
+        msg.contains("InvalidAllocationID.NotFound"),
+        "expected InvalidAllocationID.NotFound, got: {msg}"
+    );
+}

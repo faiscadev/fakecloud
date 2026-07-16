@@ -264,6 +264,45 @@ async fn sns_publish_delivers_to_sqs_subscriber() {
     assert_eq!(envelope["TopicArn"], topic_arn);
 }
 
+/// Subscribe with an unknown protocol must be rejected with InvalidParameter
+/// instead of creating a phantom subscription that can never deliver.
+#[tokio::test]
+async fn sns_subscribe_rejects_unknown_protocol() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let topic_arn = sns
+        .create_topic()
+        .name("proto-topic")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn()
+        .unwrap()
+        .to_string();
+
+    let err = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("carrier-pigeon")
+        .endpoint("nowhere")
+        .send()
+        .await
+        .expect_err("unknown protocol must be rejected");
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidParameter")
+    );
+
+    // No phantom subscription was created.
+    let subs = sns
+        .list_subscriptions_by_topic()
+        .topic_arn(&topic_arn)
+        .send()
+        .await
+        .unwrap();
+    assert!(subs.subscriptions().is_empty());
+}
+
 /// An SQS subscriber whose target queue is gone must route the notification to
 /// the subscription's RedrivePolicy DLQ instead of silently dropping it — the
 /// DLQ was previously honored for HTTP subscribers only.

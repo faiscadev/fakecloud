@@ -316,6 +316,54 @@ async fn secretsmanager_batch_get_secret_value() {
 }
 
 #[tokio::test]
+async fn secretsmanager_batch_get_secret_value_paginates_with_filters() {
+    use aws_sdk_secretsmanager::types::{Filter, FilterNameStringType};
+    let server = TestServer::start().await;
+    let client = server.secretsmanager_client().await;
+
+    for name in ["pag-a", "pag-b", "pag-c"] {
+        client
+            .create_secret()
+            .name(name)
+            .secret_string("v")
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let name_filter = Filter::builder()
+        .key(FilterNameStringType::Name)
+        .values("pag-")
+        .build();
+
+    // Page 1: MaxResults=2 must return 2 and a NextToken.
+    let page1 = client
+        .batch_get_secret_value()
+        .filters(name_filter.clone())
+        .max_results(2)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page1.secret_values().len(), 2);
+    let token = page1
+        .next_token()
+        .expect("NextToken when more results remain")
+        .to_string();
+
+    // Page 2: resumes past the first two, returning the last one, no token.
+    let page2 = client
+        .batch_get_secret_value()
+        .filters(name_filter)
+        .max_results(2)
+        .next_token(token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(page2.secret_values().len(), 1);
+    assert!(page2.next_token().is_none());
+}
+
+#[tokio::test]
 async fn secretsmanager_get_random_password() {
     let server = TestServer::start().await;
     let client = server.secretsmanager_client().await;

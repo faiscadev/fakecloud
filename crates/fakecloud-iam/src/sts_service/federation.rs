@@ -39,6 +39,7 @@ impl StsService {
             1,
             2048,
         )?;
+        super::validate_session_policy_json(req.query_params.get("Policy").map(|s| s.as_str()))?;
         let policy = req.query_params.get("Policy").cloned();
 
         // Compute expiration from DurationSeconds (default 43200s / 12 hours)

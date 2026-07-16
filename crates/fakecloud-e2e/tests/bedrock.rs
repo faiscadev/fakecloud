@@ -2353,3 +2353,53 @@ async fn bedrock_inference_profiles_catalogue_and_application_arn() {
         .inference_profile_arn()
         .contains("application-inference-profile/"));
 }
+
+#[tokio::test]
+async fn bedrock_list_inference_profiles_paginates_without_skip_or_dup() {
+    let server = TestServer::start().await;
+    let client = server.bedrock_client().await;
+
+    // Full list in one shot as the source of truth.
+    let all = client.list_inference_profiles().send().await.unwrap();
+    let expected: Vec<String> = all
+        .inference_profile_summaries()
+        .iter()
+        .map(|s| s.inference_profile_id().to_string())
+        .collect();
+    assert!(
+        expected.len() >= 2,
+        "need at least 2 profiles to exercise pagination"
+    );
+
+    // Page through with maxResults=1; the cursor must neither skip nor
+    // duplicate an entry (regression: token was an Id but resume compared ARNs
+    // and offset indexed the wrong list).
+    let mut collected: Vec<String> = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let mut req = client.list_inference_profiles().max_results(1);
+        if let Some(t) = &token {
+            req = req.next_token(t.clone());
+        }
+        let page = req.send().await.unwrap();
+        for s in page.inference_profile_summaries() {
+            collected.push(s.inference_profile_id().to_string());
+        }
+        match page.next_token() {
+            Some(t) => token = Some(t.to_string()),
+            None => break,
+        }
+    }
+
+    let mut got = collected.clone();
+    got.sort();
+    got.dedup();
+    assert_eq!(
+        got.len(),
+        collected.len(),
+        "pagination duplicated an entry: {collected:?}"
+    );
+    let mut exp_sorted = expected.clone();
+    exp_sorted.sort();
+    assert_eq!(got, exp_sorted, "pagination skipped or added entries");
+}

@@ -54,6 +54,7 @@ impl StsService {
             1,
             2048,
         )?;
+        super::validate_session_policy_json(req.query_params.get("Policy").map(|s| s.as_str()))?;
 
         // Validate optional SourceIdentity
         validate_optional_string_length(
@@ -348,6 +349,7 @@ impl StsService {
             1,
             2048,
         )?;
+        super::validate_session_policy_json(req.query_params.get("Policy").map(|s| s.as_str()))?;
 
         // Validate optional ProviderId
         validate_optional_string_length(
@@ -662,6 +664,7 @@ impl StsService {
             1,
             2048,
         )?;
+        super::validate_session_policy_json(req.query_params.get("Policy").map(|s| s.as_str()))?;
 
         // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {

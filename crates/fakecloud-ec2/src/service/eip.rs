@@ -184,14 +184,43 @@ pub(crate) fn associate_address(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let assoc_id = gen_id("eipassoc");
-    if let Some(alloc) = req.query_params.get("AllocationId") {
-        let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        if let Some(e) = state.elastic_ips.get_mut(alloc) {
-            e.association_id = Some(assoc_id.clone());
-            e.instance_id = req.query_params.get("InstanceId").cloned();
-            e.network_interface_id = req.query_params.get("NetworkInterfaceId").cloned();
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    // Resolve the target address by AllocationId (VPC) or PublicIp (Classic).
+    // An unknown identifier must error rather than fabricate a phantom
+    // association that no Describe would ever reflect.
+    let target_alloc = if let Some(alloc) = req.query_params.get("AllocationId") {
+        if !state.elastic_ips.contains_key(alloc) {
+            return Err(not_found("InvalidAllocationID.NotFound", alloc));
         }
+        alloc.clone()
+    } else if let Some(ip) = req.query_params.get("PublicIp") {
+        match state
+            .elastic_ips
+            .values()
+            .find(|e| &e.public_ip == ip)
+            .map(|e| e.allocation_id.clone())
+        {
+            Some(id) => id,
+            None => {
+                return Err(AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "InvalidAddress.NotFound",
+                    format!("Address '{ip}' not found."),
+                ));
+            }
+        }
+    } else {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "MissingParameter",
+            "The request must contain either AllocationId or PublicIp.".to_string(),
+        ));
+    };
+    if let Some(e) = state.elastic_ips.get_mut(&target_alloc) {
+        e.association_id = Some(assoc_id.clone());
+        e.instance_id = req.query_params.get("InstanceId").cloned();
+        e.network_interface_id = req.query_params.get("NetworkInterfaceId").cloned();
     }
     Ok(Ec2Service::respond(
         "AssociateAddress",

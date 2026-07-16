@@ -1569,7 +1569,9 @@ impl KinesisService {
         validate_stream_id(&body)?;
         validate_optional_string_length("NextToken", body["NextToken"].as_str(), 1, 1048576)?;
         validate_optional_json_range("MaxResults", &body["MaxResults"], 1, 10000)?;
-        let max_results = body["MaxResults"].as_i64().unwrap_or(10000) as usize;
+        // AWS returns up to 1000 shards when MaxResults is omitted (the max the
+        // caller may request is 10000). Defaulting to 10000 over-returned.
+        let max_results = body["MaxResults"].as_i64().unwrap_or(1000) as usize;
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);

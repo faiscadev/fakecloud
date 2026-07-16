@@ -337,13 +337,7 @@ impl EcsService {
                 }
             }
         }
-        if sort == "DESC" {
-            arns.sort();
-            arns.reverse();
-        } else {
-            arns.sort();
-        }
-        let (page, next) = paginate_arns(arns, next_token, max_results);
+        let (page, next) = paginate_arns_dir(arns, next_token, max_results, sort == "DESC");
         let mut out = json!({"taskDefinitionArns": page});
         if let Some(n) = next {
             out.as_object_mut()
