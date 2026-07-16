@@ -1091,11 +1091,19 @@ fn principal_user_arn_mismatch_is_deny() {
 }
 
 #[test]
-fn principal_service_matches_assumed_role_containing_service_host() {
-    let p = assumed_role_principal(
-        ACCT_A,
-        "AWSServiceRoleForLambda.lambda.amazonaws.com/session",
-    );
+fn principal_service_matches_service_linked_role() {
+    // A genuine service principal is a service-linked-role identity under the
+    // reserved `aws-service-role/<service>/` path.
+    let slr = Principal {
+        arn: format!(
+            "arn:aws:iam::{ACCT_A}:role/aws-service-role/lambda.amazonaws.com/AWSServiceRoleForLambda"
+        ),
+        user_id: "AROASLR".into(),
+        account_id: ACCT_A.into(),
+        principal_type: PrincipalType::AssumedRole,
+        source_identity: None,
+        tags: None,
+    };
     let resource = json!({
         "Statement": [{
             "Effect": "Allow",
@@ -1105,8 +1113,15 @@ fn principal_service_matches_assumed_role_containing_service_host() {
         }]
     });
     assert_eq!(
-        eval_cross(None, Some(resource), &p, ACCT_A),
+        eval_cross(None, Some(resource.clone()), &slr, ACCT_A),
         Decision::Allow
+    );
+
+    // §5.6: a role a user merely NAMED after the service host must not match.
+    let impostor = assumed_role_principal(ACCT_A, "lambda.amazonaws.com/session");
+    assert_eq!(
+        eval_cross(None, Some(resource), &impostor, ACCT_A),
+        Decision::ImplicitDeny
     );
 }
 
@@ -2151,4 +2166,50 @@ fn unseeded_aws_managed_policy_grants_nothing() {
         docs.is_empty(),
         "an unseeded managed ARN resolves to no document"
     );
+}
+
+// --- §5.6 Service-principal trust must not be satisfied by a look-alike role -
+
+fn principal_assumed_role(arn: &str) -> Principal {
+    Principal {
+        arn: arn.to_string(),
+        user_id: "AROA:sess".into(),
+        account_id: "123456789012".into(),
+        principal_type: PrincipalType::AssumedRole,
+        source_identity: None,
+        tags: None,
+    }
+}
+
+#[test]
+fn service_principal_requires_service_linked_role_path() {
+    // A genuine service principal carries the reserved
+    // `aws-service-role/<service>/` path.
+    let slr = principal_assumed_role(
+        "arn:aws:iam::123456789012:role/aws-service-role/lambda.amazonaws.com/AWSServiceRoleForLambda",
+    );
+    assert!(principal_is_service(&slr, "lambda.amazonaws.com"));
+
+    // A user-created role merely NAMED after the service host must NOT satisfy
+    // a `Principal: { Service: lambda.amazonaws.com }` trust (§5.6).
+    let impostor =
+        principal_assumed_role("arn:aws:sts::123456789012:assumed-role/lambda.amazonaws.com/sess");
+    assert!(!principal_is_service(&impostor, "lambda.amazonaws.com"));
+
+    // And a plain unrelated role never matches.
+    let unrelated =
+        principal_assumed_role("arn:aws:sts::123456789012:assumed-role/my-app-role/sess");
+    assert!(!principal_is_service(&unrelated, "lambda.amazonaws.com"));
+}
+
+#[test]
+fn arn_denotes_service_matches_only_reserved_path() {
+    assert!(arn_denotes_service(
+        "arn:aws:iam::123456789012:role/aws-service-role/ecs.amazonaws.com/AWSServiceRoleForECS",
+        "ecs.amazonaws.com"
+    ));
+    assert!(!arn_denotes_service(
+        "arn:aws:sts::123456789012:assumed-role/ecs.amazonaws.com/sess",
+        "ecs.amazonaws.com"
+    ));
 }

@@ -135,10 +135,13 @@ impl StsService {
                     .path
                     .trim_start_matches("/aws-service-role/")
                     .trim_end_matches('/');
+                // Only a genuine service principal (identified by the reserved
+                // `aws-service-role/<service>/` path) may assume the SLR — a
+                // role a user named after the service host must not qualify.
                 let caller_is_service = req
                     .principal
                     .as_ref()
-                    .map(|p| p.arn.contains(expected_service))
+                    .map(|p| crate::evaluator::arn_denotes_service(&p.arn, expected_service))
                     .unwrap_or(false);
                 if !caller_is_service {
                     return Err(AwsServiceError::aws_error(
@@ -717,25 +720,27 @@ impl StsService {
         );
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
 
-        // If the named SAML provider IS registered, enforce its
-        // metadata-derived audience against the assertion's
-        // `<Audience>` claim. Unregistered providers fall through —
-        // tests still in the pre-F1 era (and AWS itself, when the
-        // provider was nuked between assertion issue and use) get a
-        // soft pass; the trust policy below still gates the call.
+        // When the named SAML provider IS registered and its metadata declares
+        // an audience (`entityID`), the assertion must carry a *matching*
+        // audience. Previously a missing audience claim slipped through and
+        // skipped the binding entirely, so an assertion with no `<Audience>`
+        // was accepted for a provider that pins one. A registered provider
+        // whose metadata declares no audience still skips the check by design
+        // (`expected_saml_audience` returns `None`), and an unregistered
+        // provider falls through here — fakecloud tolerates it, matching the
+        // recorded conformance baseline (`sts_assume_role_with_saml`), and there
+        // is no metadata to bind an audience against in that case anyway.
         if let Some(provider) = find_saml_provider(&accounts, &saml_provider_arn) {
             if let Some(expected_aud) = expected_saml_audience(&provider.saml_metadata_document) {
-                if let Some(ref got) = saml_claims.audience {
-                    if got != &expected_aud {
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::BAD_REQUEST,
-                            "InvalidIdentityToken",
-                            format!(
-                                "SAML assertion audience '{got}' does not match SAML provider '{}'",
-                                provider.arn
-                            ),
-                        ));
-                    }
+                if saml_claims.audience.as_deref() != Some(expected_aud.as_str()) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidIdentityToken",
+                        format!(
+                            "SAML assertion audience {:?} does not match the audience '{expected_aud}' declared by SAML provider '{}'",
+                            saml_claims.audience, provider.arn
+                        ),
+                    ));
                 }
             }
         }
