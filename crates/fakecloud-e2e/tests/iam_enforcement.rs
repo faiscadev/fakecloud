@@ -907,6 +907,97 @@ async fn bucket_policy_identity_allow_no_bucket_policy_still_works() {
         .unwrap();
 }
 
+/// A hand-crafted signed Authorization header carrying `akid`'s access key in
+/// the S3 credential scope. With SigV4 verification off the dummy signature is
+/// never checked, but dispatch still parses the access key and resolves the
+/// principal — letting a test drive requests that the AWS SDK would never
+/// emit (here, an S3 sub-resource form with no IAM-action mapping).
+fn s3_signed_auth_header(akid: &str) -> String {
+    format!(
+        "AWS4-HMAC-SHA256 Credential={akid}/20240101/us-east-1/s3/aws4_request, \
+         SignedHeaders=host, Signature=deadbeef"
+    )
+}
+
+#[tokio::test]
+async fn strict_mode_denies_unmapped_enforceable_action() {
+    // Fix 5.2: strict enforcement must fail closed when an `iam_enforceable`
+    // service returns no `IamAction` for an operation. `POST /bucket?acl` is
+    // not a valid S3 op (ACL is GET/PUT only), so `s3_detect_action` returns
+    // None — the enforceable-but-unmapped branch. Previously dispatch warned
+    // and fell through to the handler, running the op with no policy check.
+    //
+    // SigV4 verification is left OFF so the hand-crafted request reaches the
+    // IAM layer (a bad signature would otherwise 403 earlier, masking the
+    // behavior under test).
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+
+    let boot = sdk_config_with(&server, "test", "test").await;
+    aws_sdk_s3::Client::new(&boot)
+        .create_bucket()
+        .bucket("unmapped-probe")
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, _secret) = bootstrap_user(&server, "unmapped_user").await;
+    // Allow-all identity policy: any *mapped* action would be permitted, so a
+    // 403 here can only come from the missing IAM-action mapping, not a policy
+    // deny. This isolates the fail-closed behavior.
+    attach_inline_policy(
+        &server,
+        "unmapped_user",
+        "AllowEverything",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}"#,
+    )
+    .await;
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/unmapped-probe?acl", server.endpoint()))
+        .header("authorization", s3_signed_auth_header(&akid))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "strict mode must deny an enforceable action with no IAM-action mapping (fail closed)"
+    );
+}
+
+#[tokio::test]
+async fn soft_mode_allows_unmapped_enforceable_action_through() {
+    // Counterpart guarantee to `strict_mode_denies_unmapped_enforceable_action`:
+    // the new deny is gated on strict mode only. In soft mode the same unmapped
+    // enforceable action is NOT denied by the IAM layer — it warns and falls
+    // through to the handler, preserving historical rollout behavior.
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "soft")]).await;
+
+    let boot = sdk_config_with(&server, "test", "test").await;
+    aws_sdk_s3::Client::new(&boot)
+        .create_bucket()
+        .bucket("unmapped-soft-probe")
+        .send()
+        .await
+        .unwrap();
+
+    let (akid, _secret) = bootstrap_user(&server, "unmapped_soft_user").await;
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .post(format!("{}/unmapped-soft-probe?acl", server.endpoint()))
+        .header("authorization", s3_signed_auth_header(&akid))
+        .send()
+        .await
+        .unwrap();
+    assert_ne!(
+        resp.status(),
+        403,
+        "soft mode must not deny an unmapped enforceable action; it falls through to the handler"
+    );
+}
+
 #[tokio::test]
 async fn bucket_policy_principal_wildcard_grants_any_user() {
     // Public bucket idiom: `"Principal": "*"`. Any non-root caller
