@@ -15,7 +15,7 @@ use serde_json::Value;
 
 /// The vendored combined Timestream Smithy model (write + query merged under a
 /// single service shape), embedded so validation needs no runtime file access.
-const MODEL_JSON: &str = include_str!("../../../aws-models/timestream.json");
+const MODEL_JSON: &str = include_str!("../model.json");
 
 /// The embedded model parses to exactly this many distinct operations (keyed by
 /// short name; the four ops shared between write and query dedup to one). A

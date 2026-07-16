@@ -15,7 +15,7 @@ use serde_json::Value;
 
 /// The vendored Shield Smithy model (byte-for-byte from aws/api-models-aws),
 /// embedded so validation needs no runtime file access.
-const MODEL_JSON: &str = include_str!("../../../aws-models/shield.json");
+const MODEL_JSON: &str = include_str!("../model.json");
 
 #[derive(Debug, Default)]
 struct MemberConstraint {
