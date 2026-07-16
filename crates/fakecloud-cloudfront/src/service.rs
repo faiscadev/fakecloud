@@ -1706,12 +1706,91 @@ pub(crate) fn build_distribution_xml(dist: &StoredDistribution) -> String {
         "<DomainName>{}</DomainName>",
         esc(&dist.domain_name)
     ));
-    out.push_str("<ActiveTrustedSigners><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedSigners>");
-    out.push_str("<ActiveTrustedKeyGroups><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedKeyGroups>");
+    out.push_str(&build_active_trusted_signers_xml(dist));
+    out.push_str(&build_active_trusted_key_groups_xml(dist));
     let inner = quick_xml::se::to_string_with_root("DistributionConfig", &dist.config)
         .unwrap_or_else(|_| String::new());
     out.push_str(&inner);
     out.push_str("</Distribution>");
+    out
+}
+
+/// Derive the top-level `ActiveTrustedSigners` block from the trusted
+/// signers configured across the default and additional cache behaviors.
+/// AWS reports the union of every configured signer here (rather than the
+/// always-empty placeholder we used to emit), mirroring the
+/// streaming-distribution derivation. We don't mint CloudFront key pairs,
+/// so each signer carries an empty `KeyPairIds` list.
+fn build_active_trusted_signers_xml(dist: &StoredDistribution) -> String {
+    let mut accounts: Vec<String> = Vec::new();
+    let mut enabled = false;
+    let iter = std::iter::once(&dist.config.default_cache_behavior.trusted_signers)
+        .chain(distribution_cache_behaviors(dist).map(|b| &b.trusted_signers));
+    for ts in iter.flatten() {
+        if ts.enabled {
+            enabled = true;
+        }
+        if let Some(items) = &ts.items {
+            for a in &items.aws_account_number {
+                if !accounts.contains(a) {
+                    accounts.push(a.clone());
+                }
+            }
+        }
+    }
+    let mut out = String::with_capacity(96);
+    out.push_str("<ActiveTrustedSigners>");
+    out.push_str(&format!("<Enabled>{enabled}</Enabled>"));
+    out.push_str(&format!("<Quantity>{}</Quantity>", accounts.len()));
+    if !accounts.is_empty() {
+        out.push_str("<Items>");
+        for a in &accounts {
+            out.push_str("<Signer>");
+            out.push_str(&format!("<AwsAccountNumber>{}</AwsAccountNumber>", esc(a)));
+            out.push_str("<KeyPairIds><Quantity>0</Quantity></KeyPairIds>");
+            out.push_str("</Signer>");
+        }
+        out.push_str("</Items>");
+    }
+    out.push_str("</ActiveTrustedSigners>");
+    out
+}
+
+/// Derive the top-level `ActiveTrustedKeyGroups` block from the trusted key
+/// groups configured across the default and additional cache behaviors,
+/// reporting the union of configured key-group ids instead of an empty set.
+fn build_active_trusted_key_groups_xml(dist: &StoredDistribution) -> String {
+    let mut key_groups: Vec<String> = Vec::new();
+    let mut enabled = false;
+    let iter = std::iter::once(&dist.config.default_cache_behavior.trusted_key_groups)
+        .chain(distribution_cache_behaviors(dist).map(|b| &b.trusted_key_groups));
+    for tkg in iter.flatten() {
+        if tkg.enabled {
+            enabled = true;
+        }
+        if let Some(items) = &tkg.items {
+            for g in &items.key_group {
+                if !key_groups.contains(g) {
+                    key_groups.push(g.clone());
+                }
+            }
+        }
+    }
+    let mut out = String::with_capacity(96);
+    out.push_str("<ActiveTrustedKeyGroups>");
+    out.push_str(&format!("<Enabled>{enabled}</Enabled>"));
+    out.push_str(&format!("<Quantity>{}</Quantity>", key_groups.len()));
+    if !key_groups.is_empty() {
+        out.push_str("<Items>");
+        for g in &key_groups {
+            out.push_str("<KeyGroup>");
+            out.push_str(&format!("<KeyGroupId>{}</KeyGroupId>", esc(g)));
+            out.push_str("<KeyPairIds><Quantity>0</Quantity></KeyPairIds>");
+            out.push_str("</KeyGroup>");
+        }
+        out.push_str("</Items>");
+    }
+    out.push_str("</ActiveTrustedKeyGroups>");
     out
 }
 
@@ -2307,6 +2386,63 @@ mod tests {
         assert_eq!(extract_body_field(xml, "Missing"), None);
 
         assert_eq!(extract_body_field(b"", "x"), None);
+    }
+
+    fn stored_dist_with_config(config: crate::model::DistributionConfig) -> StoredDistribution {
+        StoredDistribution {
+            id: "E1TEST".to_string(),
+            arn: "arn:aws:cloudfront::123456789012:distribution/E1TEST".to_string(),
+            status: "Deployed".to_string(),
+            last_modified_time: chrono::Utc::now(),
+            domain_name: "d1.cloudfront.net".to_string(),
+            in_progress_invalidation_batches: 0,
+            etag: "E2ETAG".to_string(),
+            config,
+        }
+    }
+
+    #[test]
+    fn active_trusted_key_groups_and_signers_reflect_config() {
+        use crate::model::{
+            AwsAccountNumberList, TrustedKeyGroupIdList, TrustedKeyGroups, TrustedSigners,
+        };
+        let mut config = crate::model::DistributionConfig::default();
+        // Trusted key group on the default cache behavior.
+        config.default_cache_behavior.trusted_key_groups = Some(TrustedKeyGroups {
+            enabled: true,
+            quantity: 1,
+            items: Some(TrustedKeyGroupIdList {
+                key_group: vec!["kg-abc".to_string()],
+            }),
+        });
+        // Trusted signer on the default cache behavior.
+        config.default_cache_behavior.trusted_signers = Some(TrustedSigners {
+            enabled: true,
+            quantity: 1,
+            items: Some(AwsAccountNumberList {
+                aws_account_number: vec!["self".to_string()],
+            }),
+        });
+        let dist = stored_dist_with_config(config);
+        let xml = build_distribution_xml(&dist);
+        assert!(
+            xml.contains("<ActiveTrustedKeyGroups><Enabled>true</Enabled><Quantity>1</Quantity>")
+        );
+        assert!(xml.contains("<KeyGroupId>kg-abc</KeyGroupId>"));
+        assert!(xml.contains("<ActiveTrustedSigners><Enabled>true</Enabled><Quantity>1</Quantity>"));
+        assert!(xml.contains("<AwsAccountNumber>self</AwsAccountNumber>"));
+    }
+
+    #[test]
+    fn active_trusted_blocks_empty_when_unconfigured() {
+        let dist = stored_dist_with_config(crate::model::DistributionConfig::default());
+        let xml = build_distribution_xml(&dist);
+        assert!(xml.contains(
+            "<ActiveTrustedSigners><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedSigners>"
+        ));
+        assert!(xml.contains(
+            "<ActiveTrustedKeyGroups><Enabled>false</Enabled><Quantity>0</Quantity></ActiveTrustedKeyGroups>"
+        ));
     }
 
     fn make_state() -> SharedCloudFrontState {

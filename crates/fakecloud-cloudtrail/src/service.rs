@@ -1973,7 +1973,68 @@ fn list_insights_metric_data(b: &Value) -> Result<AwsResponse, AwsServiceError> 
     ok(Value::Object(out))
 }
 
+/// Fixed catalog of CloudTrail Lake sample queries, mirroring the built-in
+/// library AWS ships. `SearchSampleQueries` is a static lookup (no query
+/// engine involved), so we can serve it faithfully: rank the catalog by how
+/// well each entry matches the caller's search phrase and return the hits.
+fn sample_query_catalog() -> &'static [(&'static str, &'static str, &'static str)] {
+    &[
+        (
+            "Investigate console logins without MFA",
+            "Find AWS Management Console sign-in events that were not authenticated with multi-factor authentication.",
+            "SELECT eventTime, userIdentity.arn, sourceIPAddress FROM $EDS_ID WHERE eventName = 'ConsoleLogin' AND element_at(additionalEventData, 'MFAUsed') = 'No'",
+        ),
+        (
+            "Investigate access denied errors",
+            "List API calls that failed with an access-denied error, grouped by the principal that made them.",
+            "SELECT userIdentity.arn, eventSource, eventName, count(*) AS total FROM $EDS_ID WHERE errorCode = 'AccessDenied' GROUP BY userIdentity.arn, eventSource, eventName ORDER BY total DESC",
+        ),
+        (
+            "Investigate top API calls by user",
+            "Count the most frequently invoked API actions per user identity over the queried period.",
+            "SELECT userIdentity.arn, eventName, count(*) AS calls FROM $EDS_ID GROUP BY userIdentity.arn, eventName ORDER BY calls DESC",
+        ),
+        (
+            "Investigate S3 bucket deletions",
+            "Find who deleted Amazon S3 buckets and when the deletions occurred.",
+            "SELECT eventTime, userIdentity.arn, requestParameters FROM $EDS_ID WHERE eventSource = 's3.amazonaws.com' AND eventName = 'DeleteBucket' ORDER BY eventTime DESC",
+        ),
+        (
+            "Investigate IAM policy changes",
+            "Track create, update, and delete actions performed against IAM policies and roles.",
+            "SELECT eventTime, eventName, userIdentity.arn, requestParameters FROM $EDS_ID WHERE eventSource = 'iam.amazonaws.com' AND eventName IN ('PutRolePolicy', 'AttachRolePolicy', 'DeleteRolePolicy', 'CreatePolicyVersion') ORDER BY eventTime DESC",
+        ),
+    ]
+}
+
 fn search_sample_queries(b: &Value) -> Result<AwsResponse, AwsServiceError> {
-    req_str(b, "SearchPhrase")?;
-    ok(json!({ "SearchResults": [] }))
+    let phrase = req_str(b, "SearchPhrase")?.to_lowercase();
+    let terms: Vec<&str> = phrase.split_whitespace().collect();
+    let mut results: Vec<Value> = Vec::new();
+    for (name, description, sql) in sample_query_catalog() {
+        let haystack = format!("{name} {description} {sql}").to_lowercase();
+        // Relevance is the fraction of search terms that appear in the entry.
+        // An empty phrase (no terms) matches everything with full relevance,
+        // matching AWS's "return the whole catalog" behavior for a broad search.
+        let matched = terms.iter().filter(|t| haystack.contains(**t)).count();
+        if terms.is_empty() || matched > 0 {
+            let relevance = if terms.is_empty() {
+                1.0
+            } else {
+                matched as f64 / terms.len() as f64
+            };
+            results.push(json!({
+                "Name": name,
+                "Description": description,
+                "SQL": sql,
+                "Relevance": relevance,
+            }));
+        }
+    }
+    results.sort_by(|a, b| {
+        let ra = a.get("Relevance").and_then(Value::as_f64).unwrap_or(0.0);
+        let rb = b.get("Relevance").and_then(Value::as_f64).unwrap_or(0.0);
+        rb.partial_cmp(&ra).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    ok(json!({ "SearchResults": results }))
 }

@@ -38,6 +38,18 @@ pub fn detect_trivy() -> Option<String> {
     None
 }
 
+/// Map the Rust build-target architecture name to the value Docker/OCI
+/// image configs use, so the synthetic manifest fed to Trivy matches the
+/// host it actually runs on (arm64 laptops, arm64 CI, etc.) instead of
+/// always claiming amd64.
+fn docker_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
 fn cli_available(cli: &str) -> bool {
     std::process::Command::new(cli)
         .arg("--version")
@@ -126,7 +138,7 @@ async fn build_image_tar(tar_path: &Path, layers: &[Layer]) -> std::io::Result<(
 
     // Minimal manifest.json so trivy treats this as a docker-format archive.
     let config = json!({
-        "architecture": "amd64",
+        "architecture": docker_arch(),
         "os": "linux",
         "rootfs": {
             "type": "layers",
@@ -301,6 +313,29 @@ mod tests {
         let sample = r#"{"Results": []}"#;
         let findings = parse_trivy_output("d", sample.as_bytes()).unwrap();
         assert!(findings.findings.is_empty());
+    }
+
+    #[test]
+    fn docker_arch_maps_rust_names_and_matches_host() {
+        // The mapping table is exhaustive for the arches we ship on and
+        // falls through to the raw name otherwise.
+        assert_eq!(map_rust_arch("x86_64"), "amd64");
+        assert_eq!(map_rust_arch("aarch64"), "arm64");
+        assert_eq!(map_rust_arch("riscv64"), "riscv64");
+        // The live helper must resolve to a non-empty docker arch for the
+        // host actually running the test.
+        assert!(!docker_arch().is_empty());
+        assert_eq!(docker_arch(), map_rust_arch(std::env::consts::ARCH));
+    }
+
+    // Pure mapping mirror of `docker_arch`, testable independent of the
+    // host's real architecture.
+    fn map_rust_arch(arch: &str) -> &str {
+        match arch {
+            "x86_64" => "amd64",
+            "aarch64" => "arm64",
+            other => other,
+        }
     }
 
     #[test]
