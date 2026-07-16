@@ -539,3 +539,122 @@ fn string_timestamp_coerced_to_number_on_read() {
         described["CreationTime"]
     );
 }
+
+// PutModelPackageGroupPolicy persists the ResourcePolicy; Get returns the
+// stored value (not the placeholder "a"); Delete removes it (bug-hunt 1.24).
+#[test]
+fn model_package_group_policy_round_trips() {
+    let s = svc();
+    let policy = r#"{"Version":"2012-10-17","Statement":[]}"#;
+    run(
+        &s,
+        "PutModelPackageGroupPolicy",
+        json!({"ModelPackageGroupName": "grp", "ResourcePolicy": policy}),
+    )
+    .unwrap();
+
+    let got = resp_json(
+        &run(
+            &s,
+            "GetModelPackageGroupPolicy",
+            json!({"ModelPackageGroupName": "grp"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(got["ResourcePolicy"], policy);
+
+    // Delete removes it; a subsequent Get no longer returns the real policy.
+    run(
+        &s,
+        "DeleteModelPackageGroupPolicy",
+        json!({"ModelPackageGroupName": "grp"}),
+    )
+    .unwrap();
+    let after = resp_json(
+        &run(
+            &s,
+            "GetModelPackageGroupPolicy",
+            json!({"ModelPackageGroupName": "grp"}),
+        )
+        .unwrap(),
+    );
+    assert_ne!(after["ResourcePolicy"], policy);
+}
+
+// RegisterDevices persists devices so DescribeDevice / ListDevices resolve
+// them; UpdateDevices merges; DeregisterDevices removes (bug-hunt 1.24).
+#[test]
+fn register_devices_visible_to_read_siblings() {
+    let s = svc();
+    run(
+        &s,
+        "RegisterDevices",
+        json!({
+            "DeviceFleetName": "fleet1",
+            "Devices": [
+                {"DeviceName": "dev-a", "Description": "first", "IotThingName": "thing-a"},
+                {"DeviceName": "dev-b", "Description": "second"},
+            ],
+        }),
+    )
+    .unwrap();
+
+    // ListDevices sees both.
+    let listed = resp_json(&run(&s, "ListDevices", json!({})).unwrap());
+    let summaries = listed["DeviceSummaries"].as_array().unwrap();
+    assert_eq!(summaries.len(), 2);
+
+    // DescribeDevice resolves a registered device with its fleet + description.
+    let described = resp_json(
+        &run(
+            &s,
+            "DescribeDevice",
+            json!({"DeviceName": "dev-a", "DeviceFleetName": "fleet1"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(described["DeviceName"], "dev-a");
+    assert_eq!(described["DeviceFleetName"], "fleet1");
+    assert_eq!(described["Description"], "first");
+    assert!(described["DeviceArn"]
+        .as_str()
+        .unwrap()
+        .contains(":device/"));
+
+    // UpdateDevices merges a new description while keeping the fleet.
+    run(
+        &s,
+        "UpdateDevices",
+        json!({
+            "DeviceFleetName": "fleet1",
+            "Devices": [{"DeviceName": "dev-a", "Description": "updated"}],
+        }),
+    )
+    .unwrap();
+    let after = resp_json(
+        &run(
+            &s,
+            "DescribeDevice",
+            json!({"DeviceName": "dev-a", "DeviceFleetName": "fleet1"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(after["Description"], "updated");
+    assert_eq!(after["DeviceFleetName"], "fleet1");
+
+    // DeregisterDevices removes one; the other remains.
+    run(
+        &s,
+        "DeregisterDevices",
+        json!({"DeviceFleetName": "fleet1", "DeviceNames": ["dev-a"]}),
+    )
+    .unwrap();
+    let listed = resp_json(&run(&s, "ListDevices", json!({})).unwrap());
+    assert_eq!(listed["DeviceSummaries"].as_array().unwrap().len(), 1);
+    let err = expect_err(run(
+        &s,
+        "DescribeDevice",
+        json!({"DeviceName": "dev-a", "DeviceFleetName": "fleet1"}),
+    ));
+    assert_eq!(err.code(), "ResourceNotFound");
+}

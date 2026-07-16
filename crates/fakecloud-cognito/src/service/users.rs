@@ -269,7 +269,7 @@ impl CognitoService {
             })?;
 
         // AdminGetUser returns a flat response (not wrapped in User)
-        let response = json!({
+        let mut response = json!({
             "Username": user.username,
             "UserAttributes": user.attributes.iter().map(|a| {
                 json!({ "Name": a.name, "Value": a.value })
@@ -279,6 +279,26 @@ impl CognitoService {
             "UserStatus": user.user_status,
             "Enabled": user.enabled,
         });
+
+        // Real AdminGetUser also reports the user's MFA configuration:
+        // MFAOptions (deprecated), UserMFASettingList and PreferredMfaSetting.
+        // These were previously dropped, so AdminSetUserMFAPreference had no
+        // observable read-back through AdminGetUser (bug-hunt 2026-07-16, 1.23).
+        response["MFAOptions"] = json!(user
+            .mfa_options
+            .iter()
+            .map(|o| json!({
+                "DeliveryMedium": o.delivery_medium,
+                "AttributeName": o.attribute_name,
+            }))
+            .collect::<Vec<Value>>());
+        let (mfa_settings, preferred) = user_mfa_settings(user);
+        if !mfa_settings.is_empty() {
+            response["UserMFASettingList"] = json!(mfa_settings);
+        }
+        if let Some(pref) = preferred {
+            response["PreferredMfaSetting"] = json!(pref);
+        }
 
         Ok(AwsResponse::ok_json(response))
     }

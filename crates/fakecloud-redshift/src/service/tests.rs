@@ -657,3 +657,44 @@ fn tag_operations_round_trip() {
     assert!(listed.contains("<Key>team</Key>"));
     assert!(listed.contains("<Value>data</Value>"));
 }
+
+#[test]
+fn scheduled_action_start_end_time_round_trip() {
+    let svc = service();
+    // Create with an explicit schedule window.
+    let out = ok(
+        &svc,
+        "CreateScheduledAction",
+        &[
+            ("ScheduledActionName", "sa1"),
+            ("Schedule", "cron(0 10 ? * MON *)"),
+            ("IamRole", "arn:aws:iam::123456789012:role/r"),
+            ("StartTime", "2026-08-01T00:00:00Z"),
+            ("EndTime", "2026-09-01T00:00:00Z"),
+        ],
+    );
+    assert!(out.contains("<StartTime>2026-08-01T00:00:00.000Z</StartTime>"));
+    assert!(out.contains("<EndTime>2026-09-01T00:00:00.000Z</EndTime>"));
+
+    // Describe returns them too (they were previously dropped).
+    let listed = ok(&svc, "DescribeScheduledActions", &[]);
+    assert!(listed.contains("<StartTime>2026-08-01T00:00:00.000Z</StartTime>"));
+    assert!(listed.contains("<EndTime>2026-09-01T00:00:00.000Z</EndTime>"));
+
+    // Modify shifts the window; the new values persist.
+    let modified = ok(
+        &svc,
+        "ModifyScheduledAction",
+        &[
+            ("ScheduledActionName", "sa1"),
+            ("StartTime", "2026-08-15T12:30:00Z"),
+        ],
+    );
+    assert!(modified.contains("<StartTime>2026-08-15T12:30:00.000Z</StartTime>"));
+    // EndTime untouched by the modify is preserved.
+    assert!(modified.contains("<EndTime>2026-09-01T00:00:00.000Z</EndTime>"));
+
+    let after = ok(&svc, "DescribeScheduledActions", &[]);
+    assert!(after.contains("<StartTime>2026-08-15T12:30:00.000Z</StartTime>"));
+    assert!(after.contains("<EndTime>2026-09-01T00:00:00.000Z</EndTime>"));
+}
