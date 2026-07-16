@@ -814,6 +814,7 @@ mod tests {
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
+            activity_stream: None,
         };
 
         let response = rds_instance_response(&instance);

@@ -453,8 +453,16 @@ fn integrations_blue_green_shard_groups_tenant_dbs() {
         "CreateDBShardGroup",
         &[("DBShardGroupIdentifier", "sg1")],
     );
-    ok_on(&svc, "ModifyDBShardGroup", &[]);
-    ok_on(&svc, "RebootDBShardGroup", &[]);
+    ok_on(
+        &svc,
+        "ModifyDBShardGroup",
+        &[("DBShardGroupIdentifier", "sg1"), ("MaxACU", "16")],
+    );
+    ok_on(
+        &svc,
+        "RebootDBShardGroup",
+        &[("DBShardGroupIdentifier", "sg1")],
+    );
     ok_on(&svc, "DescribeDBShardGroups", &[]);
     ok_on(
         &svc,
@@ -480,9 +488,8 @@ fn export_activity_replicas_recommendations_certs_pending() {
     ok("StartExportTask", &[("ExportTaskIdentifier", "ex1")]);
     ok("CancelExportTask", &[]);
     ok("DescribeExportTasks", &[]);
-    ok("StartActivityStream", &[]);
-    ok("ModifyActivityStream", &[]);
-    ok("StopActivityStream", &[]);
+    // StartActivityStream / ModifyActivityStream / StopActivityStream now
+    // persist onto a real instance; see activity_stream_persists_on_instance.
     ok("AddRoleToDBCluster", &[]);
     ok("RemoveRoleFromDBCluster", &[]);
     ok("AddRoleToDBInstance", &[]);
@@ -519,27 +526,71 @@ fn export_activity_replicas_recommendations_certs_pending() {
 
 #[test]
 fn snapshots_restores_account_events() {
-    ok("CopyDBSnapshot", &[("TargetDBSnapshotIdentifier", "s2")]);
-    ok(
-        "CopyDBParameterGroup",
-        &[("TargetDBParameterGroupIdentifier", "p2")],
-    );
+    // Copy/Modify snapshot + parameter-group + cluster-capacity + http-endpoint
+    // ops now persist real state and validate required params; they have
+    // dedicated round-trip coverage in service_tests.rs. This smoke test keeps
+    // the stateless describe-style ops.
     ok("DescribeDBParameters", &[]);
     ok("ResetDBParameterGroup", &[("DBParameterGroupName", "p1")]);
     ok("DescribeEngineDefaultParameters", &[]);
-    ok("DescribeDBSnapshotAttributes", &[]);
-    ok("ModifyDBSnapshot", &[]);
-    ok("ModifyDBSnapshotAttribute", &[]);
-    ok("RestoreDBClusterFromS3", &[]);
+    ok(
+        "RestoreDBClusterFromS3",
+        &[("DBClusterIdentifier", "s3clus")],
+    );
     ok("DescribeAccountAttributes", &[]);
     ok("DescribeEventCategories", &[]);
     ok("DescribeEvents", &[]);
     ok("DescribeSourceRegions", &[]);
     ok("DescribeDBMajorEngineVersions", &[]);
     ok("DescribeValidDBInstanceModifications", &[]);
-    ok("ModifyCurrentDBClusterCapacity", &[]);
-    ok("DisableHttpEndpoint", &[]);
-    ok("EnableHttpEndpoint", &[]);
+}
+
+#[test]
+fn activity_stream_persists_on_instance() {
+    let svc = svc();
+    // seed_replica inserts both instances; exercise the stream on the source.
+    seed_replica(&svc, "rep-a", "src-a");
+    let arn = "arn:aws:rds:us-east-1:000000000000:db:src-a";
+    ok_on(
+        &svc,
+        "StartActivityStream",
+        &[("ResourceArn", arn), ("Mode", "sync"), ("KmsKeyId", "k1")],
+    );
+    {
+        let accounts = svc.state_handle().read();
+        let stream = accounts
+            .get("000000000000")
+            .and_then(|s| s.instances.get("src-a"))
+            .and_then(|i| i.activity_stream.clone())
+            .expect("activity stream persisted");
+        assert_eq!(stream.status, "started");
+        assert_eq!(stream.mode.as_deref(), Some("sync"));
+        assert_eq!(
+            stream.kinesis_stream_name.as_deref(),
+            Some("aws-rds-das-src-a")
+        );
+    }
+    ok_on(&svc, "StopActivityStream", &[("ResourceArn", arn)]);
+    assert!(svc
+        .state_handle()
+        .read()
+        .get("000000000000")
+        .and_then(|s| s.instances.get("src-a"))
+        .and_then(|i| i.activity_stream.clone())
+        .is_none());
+}
+
+#[test]
+fn start_activity_stream_requires_existing_instance() {
+    let svc = svc();
+    let r = svc.handle_extra_action(&req(
+        "StartActivityStream",
+        &[("ResourceArn", "arn:aws:rds:us-east-1:000000000000:db:ghost")],
+    ));
+    match r {
+        Err(e) => assert_eq!(e.code(), "DBInstanceNotFound"),
+        Ok(_) => panic!("expected DBInstanceNotFound"),
+    }
 }
 
 fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
@@ -617,6 +668,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
+            activity_stream: None,
         },
     );
     // Replica points at source.
@@ -686,6 +738,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
+            activity_stream: None,
         },
     );
 }
@@ -1494,6 +1547,7 @@ fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
+            activity_stream: None,
         },
     );
 }
@@ -2136,6 +2190,7 @@ fn copy_db_cluster_snapshot_unknown_source_errors() {
 #[test]
 fn start_activity_stream_returns_full_kms_arn() {
     let svc = svc();
+    ok_on(&svc, "CreateDBCluster", &[("DBClusterIdentifier", "c1")]);
     let resp = svc
         .handle_extra_action(&req(
             "StartActivityStream",
@@ -2156,15 +2211,36 @@ fn start_activity_stream_returns_full_kms_arn() {
     );
     assert!(body.contains("<KinesisStreamName>aws-rds-das-c1</KinesisStreamName>"));
     assert!(body.contains("<Mode>sync</Mode>"));
+    // Persisted on the cluster: DescribeDBClusters round-trips the stream.
+    let describe = String::from_utf8(
+        svc.handle_extra_action(&req("DescribeDBClusters", &[("DBClusterIdentifier", "c1")]))
+            .expect("DescribeDBClusters")
+            .body
+            .expect_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        describe.contains("<ActivityStreamStatus>started</ActivityStreamStatus>"),
+        "{describe}"
+    );
+    assert!(describe.contains("<ActivityStreamMode>sync</ActivityStreamMode>"));
 }
 
 #[test]
 fn start_activity_stream_passes_through_existing_arn() {
     let svc = svc();
+    ok_on(&svc, "CreateDBCluster", &[("DBClusterIdentifier", "c1")]);
     let resp = svc
         .handle_extra_action(&req(
             "StartActivityStream",
-            &[("KmsKeyId", "arn:aws:kms:eu-west-1:222:key/abcd")],
+            &[
+                (
+                    "ResourceArn",
+                    "arn:aws:rds:us-east-1:000000000000:cluster:c1",
+                ),
+                ("KmsKeyId", "arn:aws:kms:eu-west-1:222:key/abcd"),
+            ],
         ))
         .expect("StartActivityStream");
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
@@ -2174,10 +2250,17 @@ fn start_activity_stream_passes_through_existing_arn() {
 #[test]
 fn start_activity_stream_accepts_alias() {
     let svc = svc();
+    ok_on(&svc, "CreateDBCluster", &[("DBClusterIdentifier", "c1")]);
     let resp = svc
         .handle_extra_action(&req(
             "StartActivityStream",
-            &[("KmsKeyId", "alias/aws/rds")],
+            &[
+                (
+                    "ResourceArn",
+                    "arn:aws:rds:us-east-1:000000000000:cluster:c1",
+                ),
+                ("KmsKeyId", "alias/aws/rds"),
+            ],
         ))
         .expect("StartActivityStream");
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();

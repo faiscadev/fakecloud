@@ -236,6 +236,9 @@ impl RdsService {
 
         subnet_group.subnet_ids = subnet_ids;
         subnet_group.subnet_availability_zones = subnet_availability_zones;
+        if let Some(description) = optional_query_param(request, "DBSubnetGroupDescription") {
+            subnet_group.db_subnet_group_description = description;
+        }
 
         let subnet_group_clone = subnet_group.clone();
 

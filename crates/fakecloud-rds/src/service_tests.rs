@@ -208,6 +208,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
+        activity_stream: None,
     };
 
     let xml = db_instance_xml(&instance, Some("creating"));
@@ -303,6 +304,7 @@ fn db_snapshot_xml_emits_extended_fields() {
         iam_database_authentication_enabled: true,
         timezone: None,
         storage_throughput: Some(125),
+        snapshot_attributes: std::collections::BTreeMap::new(),
     };
 
     let xml = db_snapshot_xml(&snapshot);
@@ -390,6 +392,7 @@ fn make_instance_with_defaults(id: &str) -> DbInstance {
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
+        activity_stream: None,
     }
 }
 
@@ -668,6 +671,7 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
+            activity_stream: None,
         },
     );
     arn
@@ -1817,6 +1821,7 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
             iam_database_authentication_enabled: false,
             timezone: None,
             storage_throughput: None,
+            snapshot_attributes: std::collections::BTreeMap::new(),
         },
     );
 }
@@ -2527,6 +2532,7 @@ async fn restore_db_instance_from_db_snapshot_persists_tags() {
         iam_database_authentication_enabled: false,
         timezone: None,
         storage_throughput: None,
+        snapshot_attributes: std::collections::BTreeMap::new(),
     };
     let running = crate::runtime::RunningDbContainer {
         container_id: "c-restored".to_string(),
@@ -2922,6 +2928,7 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
+            activity_stream: None,
         }
     }
 
@@ -3166,5 +3173,476 @@ async fn create_without_engine_version_uses_engine_default() {
         "InsufficientDBInstanceCapacity",
         "version-less mysql create must pass validation via the engine default, \
          not fail on a hardcoded postgres version"
+    );
+}
+
+// ── bug-hunt: Copy/Modify/Restore extras + activity-stream + PI fields ──
+// Each op below previously returned canned XML without persisting; these
+// tests assert the write now round-trips through the matching Describe.
+
+fn create_cluster(svc: &RdsService, id: &str) {
+    svc.handle_extra_action(&request(
+        "CreateDBCluster",
+        &[("DBClusterIdentifier", id), ("Engine", "aurora-postgresql")],
+    ))
+    .expect("CreateDBCluster");
+}
+
+#[test]
+fn copy_db_snapshot_persists_and_describe_finds_target() {
+    let svc = make_service();
+    seed_snapshot(&svc, "src-snap", "db1");
+    let body = body_of(
+        svc.handle_extra_action(&request(
+            "CopyDBSnapshot",
+            &[
+                ("SourceDBSnapshotIdentifier", "src-snap"),
+                ("TargetDBSnapshotIdentifier", "copy-snap"),
+            ],
+        ))
+        .expect("CopyDBSnapshot"),
+    );
+    assert!(
+        body.contains("<DBSnapshotIdentifier>copy-snap</DBSnapshotIdentifier>"),
+        "{body}"
+    );
+    assert!(body.contains("<Status>available</Status>"));
+    // The copy is now describable instead of DBSnapshotNotFoundFault.
+    let d = body_of(
+        svc.describe_db_snapshots(&request(
+            "DescribeDBSnapshots",
+            &[("DBSnapshotIdentifier", "copy-snap")],
+        ))
+        .expect("DescribeDBSnapshots"),
+    );
+    assert!(d.contains("copy-snap"));
+    assert!(d.contains("<Engine>postgres</Engine>"));
+}
+
+#[test]
+fn copy_db_snapshot_unknown_source_errors() {
+    let svc = make_service();
+    assert_code(
+        svc.handle_extra_action(&request(
+            "CopyDBSnapshot",
+            &[
+                ("SourceDBSnapshotIdentifier", "ghost"),
+                ("TargetDBSnapshotIdentifier", "t"),
+            ],
+        )),
+        "DBSnapshotNotFound",
+    );
+}
+
+#[test]
+fn copy_db_parameter_group_persists_and_describe_finds_target() {
+    let svc = make_service();
+    svc.create_db_parameter_group(&request(
+        "CreateDBParameterGroup",
+        &[
+            ("DBParameterGroupName", "src-pg"),
+            ("DBParameterGroupFamily", "postgres16"),
+            ("Description", "source"),
+        ],
+    ))
+    .expect("CreateDBParameterGroup");
+    let body = body_of(
+        svc.handle_extra_action(&request(
+            "CopyDBParameterGroup",
+            &[
+                ("SourceDBParameterGroupIdentifier", "src-pg"),
+                ("TargetDBParameterGroupIdentifier", "copy-pg"),
+                ("TargetDBParameterGroupDescription", "the copy"),
+            ],
+        ))
+        .expect("CopyDBParameterGroup"),
+    );
+    assert!(body.contains("copy-pg"), "{body}");
+    let d = body_of(
+        svc.describe_db_parameter_groups(&request(
+            "DescribeDBParameterGroups",
+            &[("DBParameterGroupName", "copy-pg")],
+        ))
+        .expect("DescribeDBParameterGroups"),
+    );
+    assert!(d.contains("copy-pg"));
+    assert!(d.contains("the copy"));
+    assert!(d.contains("postgres16"));
+}
+
+#[test]
+fn modify_db_snapshot_attribute_round_trips_describe() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap-attr", "db1");
+    svc.handle_extra_action(&request(
+        "ModifyDBSnapshotAttribute",
+        &[
+            ("DBSnapshotIdentifier", "snap-attr"),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "111111111111"),
+            ("ValuesToAdd.AttributeValue.2", "222222222222"),
+        ],
+    ))
+    .expect("ModifyDBSnapshotAttribute add");
+    let body = body_of(
+        svc.handle_extra_action(&request(
+            "DescribeDBSnapshotAttributes",
+            &[("DBSnapshotIdentifier", "snap-attr")],
+        ))
+        .expect("DescribeDBSnapshotAttributes"),
+    );
+    assert!(
+        body.contains("<AttributeName>restore</AttributeName>"),
+        "{body}"
+    );
+    assert!(body.contains("<AttributeValue>111111111111</AttributeValue>"));
+    assert!(body.contains("<AttributeValue>222222222222</AttributeValue>"));
+    // Removing a value drops it; removing the last empties the attribute.
+    svc.handle_extra_action(&request(
+        "ModifyDBSnapshotAttribute",
+        &[
+            ("DBSnapshotIdentifier", "snap-attr"),
+            ("AttributeName", "restore"),
+            ("ValuesToRemove.AttributeValue.1", "111111111111"),
+        ],
+    ))
+    .expect("ModifyDBSnapshotAttribute remove");
+    let body2 = body_of(
+        svc.handle_extra_action(&request(
+            "DescribeDBSnapshotAttributes",
+            &[("DBSnapshotIdentifier", "snap-attr")],
+        ))
+        .expect("DescribeDBSnapshotAttributes 2"),
+    );
+    assert!(!body2.contains("111111111111"), "{body2}");
+    assert!(body2.contains("222222222222"));
+}
+
+#[test]
+fn describe_db_snapshot_attributes_unknown_errors() {
+    let svc = make_service();
+    assert_code(
+        svc.handle_extra_action(&request(
+            "DescribeDBSnapshotAttributes",
+            &[("DBSnapshotIdentifier", "ghost")],
+        )),
+        "DBSnapshotNotFound",
+    );
+}
+
+#[test]
+fn modify_db_snapshot_applies_engine_version_and_option_group() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap-mod", "db1");
+    svc.handle_extra_action(&request(
+        "ModifyDBSnapshot",
+        &[
+            ("DBSnapshotIdentifier", "snap-mod"),
+            ("EngineVersion", "16.4"),
+            ("OptionGroupName", "custom-og"),
+        ],
+    ))
+    .expect("ModifyDBSnapshot");
+    let d = body_of(
+        svc.describe_db_snapshots(&request(
+            "DescribeDBSnapshots",
+            &[("DBSnapshotIdentifier", "snap-mod")],
+        ))
+        .expect("DescribeDBSnapshots"),
+    );
+    assert!(d.contains("<EngineVersion>16.4</EngineVersion>"), "{d}");
+    assert!(d.contains("<OptionGroupName>custom-og</OptionGroupName>"));
+}
+
+#[test]
+fn enable_disable_http_endpoint_round_trips_describe() {
+    let svc = make_service();
+    create_cluster(&svc, "aur1");
+    let arn = "arn:aws:rds:us-east-1:123456789012:cluster:aur1";
+    svc.handle_extra_action(&request("EnableHttpEndpoint", &[("ResourceArn", arn)]))
+        .expect("EnableHttpEndpoint");
+    let d = body_of(
+        svc.handle_extra_action(&request(
+            "DescribeDBClusters",
+            &[("DBClusterIdentifier", "aur1")],
+        ))
+        .expect("DescribeDBClusters"),
+    );
+    assert!(
+        d.contains("<HttpEndpointEnabled>true</HttpEndpointEnabled>"),
+        "{d}"
+    );
+    svc.handle_extra_action(&request("DisableHttpEndpoint", &[("ResourceArn", arn)]))
+        .expect("DisableHttpEndpoint");
+    let d2 = body_of(
+        svc.handle_extra_action(&request(
+            "DescribeDBClusters",
+            &[("DBClusterIdentifier", "aur1")],
+        ))
+        .expect("DescribeDBClusters 2"),
+    );
+    assert!(
+        d2.contains("<HttpEndpointEnabled>false</HttpEndpointEnabled>"),
+        "{d2}"
+    );
+}
+
+#[test]
+fn enable_http_endpoint_unknown_cluster_errors() {
+    let svc = make_service();
+    assert_code(
+        svc.handle_extra_action(&request(
+            "EnableHttpEndpoint",
+            &[(
+                "ResourceArn",
+                "arn:aws:rds:us-east-1:123456789012:cluster:ghost",
+            )],
+        )),
+        // EnableHttpEndpoint declares ResourceNotFoundFault (not the typed
+        // DBClusterNotFoundFault) in its Smithy error set.
+        "ResourceNotFoundFault",
+    );
+}
+
+#[test]
+fn modify_current_db_cluster_capacity_echoes_requested_capacity() {
+    let svc = make_service();
+    create_cluster(&svc, "aur-cap");
+    let body = body_of(
+        svc.handle_extra_action(&request(
+            "ModifyCurrentDBClusterCapacity",
+            &[("DBClusterIdentifier", "aur-cap"), ("Capacity", "8")],
+        ))
+        .expect("ModifyCurrentDBClusterCapacity"),
+    );
+    assert!(
+        body.contains("<DBClusterIdentifier>aur-cap</DBClusterIdentifier>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<CurrentCapacity>8</CurrentCapacity>"),
+        "{body}"
+    );
+    // No longer the hardcoded id/capacity.
+    assert!(!body.contains("<DBClusterIdentifier>x</DBClusterIdentifier>"));
+    assert!(!body.contains("<CurrentCapacity>4</CurrentCapacity>"));
+    // The applied capacity round-trips through DescribeDBClusters.
+    let described = body_of(
+        svc.handle_extra_action(&request(
+            "DescribeDBClusters",
+            &[("DBClusterIdentifier", "aur-cap")],
+        ))
+        .expect("DescribeDBClusters"),
+    );
+    assert!(described.contains("<Capacity>8</Capacity>"), "{described}");
+}
+
+#[test]
+fn modify_db_snapshot_attribute_rejects_value_in_add_and_remove() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap-dup", "db1");
+    assert_code(
+        svc.handle_extra_action(&request(
+            "ModifyDBSnapshotAttribute",
+            &[
+                ("DBSnapshotIdentifier", "snap-dup"),
+                ("AttributeName", "restore"),
+                ("ValuesToAdd.AttributeValue.1", "111111111111"),
+                ("ValuesToRemove.AttributeValue.1", "111111111111"),
+            ],
+        )),
+        "InvalidParameterCombination",
+    );
+}
+
+#[test]
+fn restore_db_cluster_from_s3_creates_persisted_cluster() {
+    let svc = make_service();
+    svc.handle_extra_action(&request(
+        "RestoreDBClusterFromS3",
+        &[
+            ("DBClusterIdentifier", "s3clus"),
+            ("Engine", "aurora-mysql"),
+        ],
+    ))
+    .expect("RestoreDBClusterFromS3");
+    let d = body_of(
+        svc.handle_extra_action(&request(
+            "DescribeDBClusters",
+            &[("DBClusterIdentifier", "s3clus")],
+        ))
+        .expect("DescribeDBClusters"),
+    );
+    assert!(
+        d.contains("<DBClusterIdentifier>s3clus</DBClusterIdentifier>"),
+        "{d}"
+    );
+    assert!(d.contains("<Status>available</Status>"));
+}
+
+#[test]
+fn modify_db_shard_group_persists_capacity() {
+    let svc = make_service();
+    svc.handle_extra_action(&request(
+        "CreateDBShardGroup",
+        &[
+            ("DBShardGroupIdentifier", "sg1"),
+            ("DBClusterIdentifier", "c1"),
+            ("MaxACU", "16"),
+            ("MinACU", "2"),
+        ],
+    ))
+    .expect("CreateDBShardGroup");
+    let d = body_of(
+        svc.handle_extra_action(&request("DescribeDBShardGroups", &[]))
+            .expect("DescribeDBShardGroups"),
+    );
+    assert!(d.contains("<MaxACU>16</MaxACU>"), "{d}");
+    assert!(d.contains("<MinACU>2</MinACU>"));
+    svc.handle_extra_action(&request(
+        "ModifyDBShardGroup",
+        &[
+            ("DBShardGroupIdentifier", "sg1"),
+            ("MaxACU", "32"),
+            ("ComputeRedundancy", "1"),
+        ],
+    ))
+    .expect("ModifyDBShardGroup");
+    let d2 = body_of(
+        svc.handle_extra_action(&request("DescribeDBShardGroups", &[]))
+            .expect("DescribeDBShardGroups 2"),
+    );
+    assert!(d2.contains("<MaxACU>32</MaxACU>"), "{d2}");
+    assert!(d2.contains("<ComputeRedundancy>1</ComputeRedundancy>"));
+    // MinACU from create is retained through the modify.
+    assert!(d2.contains("<MinACU>2</MinACU>"));
+}
+
+#[test]
+fn activity_stream_start_stop_round_trips_instance_xml() {
+    let svc = make_service();
+    seed_instance(&svc, "das-db");
+    let arn = "arn:aws:rds:us-east-1:123456789012:db:das-db";
+    svc.handle_extra_action(&request(
+        "StartActivityStream",
+        &[
+            ("ResourceArn", arn),
+            ("Mode", "async"),
+            ("KmsKeyId", "key-123"),
+        ],
+    ))
+    .expect("StartActivityStream");
+    {
+        let accounts = svc.state.read();
+        let inst = accounts
+            .default_ref()
+            .instances
+            .get("das-db")
+            .expect("instance");
+        let xml = db_instance_xml(inst, None);
+        assert!(
+            xml.contains("<ActivityStreamStatus>started</ActivityStreamStatus>"),
+            "{xml}"
+        );
+        assert!(xml.contains(
+            "<ActivityStreamKinesisStreamName>aws-rds-das-das-db</ActivityStreamKinesisStreamName>"
+        ));
+        assert!(xml.contains("<ActivityStreamMode>async</ActivityStreamMode>"));
+    }
+    svc.handle_extra_action(&request("StopActivityStream", &[("ResourceArn", arn)]))
+        .expect("StopActivityStream");
+    {
+        let accounts = svc.state.read();
+        let inst = accounts
+            .default_ref()
+            .instances
+            .get("das-db")
+            .expect("instance");
+        assert!(inst.activity_stream.is_none());
+        let xml = db_instance_xml(inst, None);
+        assert!(
+            xml.contains("<ActivityStreamStatus>stopped</ActivityStreamStatus>"),
+            "{xml}"
+        );
+    }
+}
+
+#[test]
+fn start_activity_stream_unknown_instance_errors() {
+    let svc = make_service();
+    assert_code(
+        svc.handle_extra_action(&request(
+            "StartActivityStream",
+            &[("ResourceArn", "arn:aws:rds:us-east-1:123456789012:db:ghost")],
+        )),
+        "DBInstanceNotFound",
+    );
+}
+
+#[test]
+fn modify_db_instance_applies_monitoring_role_and_pi_fields() {
+    let svc = make_service();
+    seed_instance(&svc, "pi-db");
+    svc.modify_db_instance(&request(
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "pi-db"),
+            (
+                "MonitoringRoleArn",
+                "arn:aws:iam::123456789012:role/rds-monitor",
+            ),
+            (
+                "PerformanceInsightsKMSKeyId",
+                "arn:aws:kms:us-east-1:123456789012:key/pi-key",
+            ),
+            ("PerformanceInsightsRetentionPeriod", "731"),
+        ],
+    ))
+    .expect("ModifyDBInstance");
+    let accounts = svc.state.read();
+    let inst = accounts
+        .default_ref()
+        .instances
+        .get("pi-db")
+        .expect("instance");
+    assert_eq!(
+        inst.monitoring_role_arn.as_deref(),
+        Some("arn:aws:iam::123456789012:role/rds-monitor")
+    );
+    assert_eq!(
+        inst.performance_insights_kms_key_id.as_deref(),
+        Some("arn:aws:kms:us-east-1:123456789012:key/pi-key")
+    );
+    assert_eq!(inst.performance_insights_retention_period, Some(731));
+}
+
+#[test]
+fn modify_db_subnet_group_applies_description() {
+    let svc = make_service();
+    svc.create_db_subnet_group(&request(
+        "CreateDBSubnetGroup",
+        &[
+            ("DBSubnetGroupName", "sng1"),
+            ("DBSubnetGroupDescription", "original"),
+            ("SubnetIds.SubnetIdentifier.1", "subnet-aaaa1111"),
+            ("SubnetIds.SubnetIdentifier.2", "subnet-bbbb2222"),
+        ],
+    ))
+    .expect("CreateDBSubnetGroup");
+    let body = body_of(
+        svc.modify_db_subnet_group(&request(
+            "ModifyDBSubnetGroup",
+            &[
+                ("DBSubnetGroupName", "sng1"),
+                ("DBSubnetGroupDescription", "updated desc"),
+                ("SubnetIds.SubnetIdentifier.1", "subnet-aaaa1111"),
+                ("SubnetIds.SubnetIdentifier.2", "subnet-bbbb2222"),
+            ],
+        ))
+        .expect("ModifyDBSubnetGroup"),
+    );
+    assert!(
+        body.contains("<DBSubnetGroupDescription>updated desc</DBSubnetGroupDescription>"),
+        "{body}"
     );
 }

@@ -113,6 +113,7 @@ impl RdsService {
                 .iam_database_authentication_enabled,
             timezone: None,
             storage_throughput: None,
+            snapshot_attributes: std::collections::BTreeMap::new(),
         };
 
         state.snapshots.insert(snapshot_id.to_string(), snapshot);
@@ -223,6 +224,7 @@ impl RdsService {
             iam_database_authentication_enabled: instance.iam_database_authentication_enabled,
             timezone: None,
             storage_throughput: None,
+            snapshot_attributes: std::collections::BTreeMap::new(),
         };
 
         state

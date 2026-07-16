@@ -98,6 +98,19 @@ fn missing(name: &str) -> AwsServiceError {
     )
 }
 
+/// `ResourceNotFoundFault` — the generic "no such RDS resource" error
+/// declared on `EnableHttpEndpoint` / `DisableHttpEndpoint` /
+/// `ModifyActivityStream` (which take a `ResourceArn` rather than a typed
+/// cluster/instance id, so the typed `DBClusterNotFoundFault` isn't in their
+/// Smithy error set).
+fn resource_not_found(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "ResourceNotFoundFault",
+        format!("The specified resource ARN {arn} could not be found."),
+    )
+}
+
 impl RdsService {
     pub(crate) fn handle_extra_action(
         &self,
@@ -1455,13 +1468,53 @@ impl RdsService {
             // ── Shard groups ──
             "CreateDBShardGroup" => {
                 let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
-                let entry = json!({"DBShardGroupIdentifier": id, "Status": "available"});
+                let mut entry = json!({"DBShardGroupIdentifier": id, "Status": "available"});
+                if let Some(obj) = entry.as_object_mut() {
+                    if let Some(cluster) = get_param(req, "DBClusterIdentifier") {
+                        obj.insert("DBClusterIdentifier".to_string(), json!(cluster));
+                    }
+                    apply_shard_group_capacity(obj, req);
+                }
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "shard_groups").insert(id.clone(), entry.clone());
                 Ok(xml_response("CreateDBShardGroup", shard_group_xml(&entry), &rid))
             }
-            "ModifyDBShardGroup" | "RebootDBShardGroup" => Ok(xml_response(action.as_str(), "    <DBShardGroup/>".to_string(), &rid)),
+            "ModifyDBShardGroup" => {
+                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let entry = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let entry = state
+                        .extras
+                        .get_mut("shard_groups")
+                        .and_then(|m| m.get_mut(&id))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBShardGroupNotFound",
+                                format!("DBShardGroup {id} not found."),
+                            )
+                        })?;
+                    if let Some(obj) = entry.as_object_mut() {
+                        apply_shard_group_capacity(obj, req);
+                    }
+                    entry.clone()
+                };
+                Ok(xml_response("ModifyDBShardGroup", shard_group_xml(&entry), &rid))
+            }
+            "RebootDBShardGroup" => {
+                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let entry = self
+                    .state_handle()
+                    .read()
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("shard_groups"))
+                    .and_then(|m| m.get(&id))
+                    .cloned()
+                    .unwrap_or_else(|| json!({"DBShardGroupIdentifier": id, "Status": "available"}));
+                Ok(xml_response("RebootDBShardGroup", shard_group_xml(&entry), &rid))
+            }
             "DeleteDBShardGroup" => {
                 let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let mut accounts = write_state!();
@@ -1544,21 +1597,95 @@ impl RdsService {
             "DescribeExportTasks" => list_extras_xml(self, &aid, "export_tasks", "ExportTasks", "DescribeExportTasks", export_task_xml, &rid),
 
             // ── Activity stream ──
+            // ResourceArn names either an Aurora DB cluster or an RDS DB
+            // instance; the stream state is persisted on whichever exists so
+            // DescribeDBClusters / DescribeDBInstances round-trips it.
             "StartActivityStream" => {
+                let resource_arn =
+                    get_param(req, "ResourceArn").ok_or_else(|| missing("ResourceArn"))?;
                 let kms_input = get_param(req, "KmsKeyId").unwrap_or_default();
                 let kms_arn = format_kms_arn(&kms_input, region, &aid);
                 let mode = get_param(req, "Mode").unwrap_or_else(|| "async".to_string());
-                let resource_arn = get_param(req, "ResourceArn").unwrap_or_default();
-                let stream = if resource_arn.is_empty() {
-                    "aws-rds-das".to_string()
-                } else {
-                    let id = resource_arn.rsplit(':').next().unwrap_or("default");
-                    format!("aws-rds-das-{id}")
-                };
+                let (_, id) = parse_rds_resource_arn(&resource_arn);
+                let stream = format!("aws-rds-das-{id}");
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let cfg = crate::state::ActivityStreamConfig {
+                        status: "started".to_string(),
+                        mode: Some(mode.clone()),
+                        kms_key_id: if kms_arn.is_empty() {
+                            None
+                        } else {
+                            Some(kms_arn.clone())
+                        },
+                        kinesis_stream_name: Some(stream.clone()),
+                    };
+                    if !apply_activity_stream(state, &id, Some(cfg)) {
+                        return Err(
+                            crate::service::service_helpers::db_instance_not_found(&id),
+                        );
+                    }
+                }
                 Ok(xml_response("StartActivityStream", format!("    <Status>started</Status>\n    <KmsKeyId>{}</KmsKeyId>\n    <KinesisStreamName>{}</KinesisStreamName>\n    <Mode>{}</Mode>\n    <ApplyImmediately>true</ApplyImmediately>", xml_escape(&kms_arn), xml_escape(&stream), xml_escape(&mode)), &rid))
             }
-            "StopActivityStream" => Ok(xml_response("StopActivityStream", "    <Status>stopped</Status>".to_string(), &rid)),
-            "ModifyActivityStream" => Ok(xml_response("ModifyActivityStream", "    <Status>started</Status>".to_string(), &rid)),
+            "StopActivityStream" => {
+                let resource_arn =
+                    get_param(req, "ResourceArn").ok_or_else(|| missing("ResourceArn"))?;
+                let (_, id) = parse_rds_resource_arn(&resource_arn);
+                let (kms, kinesis) = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    // Echo the pre-stop kms/kinesis as AWS does, then clear.
+                    let prev = read_activity_stream(state, &id);
+                    if !apply_activity_stream(state, &id, None) {
+                        return Err(
+                            crate::service::service_helpers::db_instance_not_found(&id),
+                        );
+                    }
+                    (
+                        prev.as_ref()
+                            .and_then(|c| c.kms_key_id.clone())
+                            .unwrap_or_default(),
+                        prev.and_then(|c| c.kinesis_stream_name).unwrap_or_default(),
+                    )
+                };
+                Ok(xml_response("StopActivityStream", format!("    <Status>stopped</Status>\n    <KmsKeyId>{}</KmsKeyId>\n    <KinesisStreamName>{}</KinesisStreamName>", xml_escape(&kms), xml_escape(&kinesis)), &rid))
+            }
+            "ModifyActivityStream" => {
+                // ResourceArn is optional in the Smithy model, so an absent or
+                // unknown value must surface the declared ResourceNotFoundFault
+                // rather than an undeclared InvalidParameterValue.
+                let resource_arn = get_param(req, "ResourceArn").unwrap_or_default();
+                let (_, id) = parse_rds_resource_arn(&resource_arn);
+                let (status, kms, kinesis, mode) = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let mut cfg = read_activity_stream(state, &id).unwrap_or_else(|| {
+                        crate::state::ActivityStreamConfig {
+                            status: "started".to_string(),
+                            ..Default::default()
+                        }
+                    });
+                    if cfg.status.is_empty() {
+                        cfg.status = "started".to_string();
+                    }
+                    if let Some(m) = get_param(req, "Mode") {
+                        cfg.mode = Some(m);
+                    }
+                    let echo = (
+                        cfg.status.clone(),
+                        cfg.kms_key_id.clone().unwrap_or_default(),
+                        cfg.kinesis_stream_name.clone().unwrap_or_default(),
+                        cfg.mode.clone().unwrap_or_default(),
+                    );
+                    if !apply_activity_stream(state, &id, Some(cfg)) {
+                        return Err(resource_not_found(&resource_arn));
+                    }
+                    echo
+                };
+                Ok(xml_response("ModifyActivityStream", format!("    <Status>{}</Status>\n    <KmsKeyId>{}</KmsKeyId>\n    <KinesisStreamName>{}</KinesisStreamName>\n    <Mode>{}</Mode>", xml_escape(&status), xml_escape(&kms), xml_escape(&kinesis), xml_escape(&mode)), &rid))
+            }
 
             // ── Database read replicas ──
             "PromoteReadReplica" => promote_read_replica_action(self, &aid, req, &rid),
@@ -1608,12 +1735,112 @@ impl RdsService {
 
             // ── Snapshots / restores / copy ──
             "CopyDBSnapshot" => {
-                let id = get_param(req, "TargetDBSnapshotIdentifier").ok_or_else(|| missing("TargetDBSnapshotIdentifier"))?;
-                Ok(xml_response("CopyDBSnapshot", format!("    <DBSnapshot>\n      <DBSnapshotIdentifier>{}</DBSnapshotIdentifier>\n      <Status>available</Status>\n    </DBSnapshot>", xml_escape(&id)), &rid))
+                let target_id = get_param(req, "TargetDBSnapshotIdentifier")
+                    .ok_or_else(|| missing("TargetDBSnapshotIdentifier"))?;
+                let source_id = get_param(req, "SourceDBSnapshotIdentifier")
+                    .ok_or_else(|| missing("SourceDBSnapshotIdentifier"))?;
+                // Source may be passed as a bare id or a full ARN; key state
+                // by the trailing identifier segment either way.
+                let source_key = source_id.rsplit(':').next().unwrap_or(&source_id).to_string();
+                let option_group_name = get_param(req, "OptionGroupName");
+                let kms_key_id = get_param(req, "KmsKeyId");
+                let (snapshot, arn) = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if state.snapshots.contains_key(&target_id) {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::CONFLICT,
+                            "DBSnapshotAlreadyExists",
+                            format!("DBSnapshot {target_id} already exists."),
+                        ));
+                    }
+                    let mut snapshot = state
+                        .snapshots
+                        .get(&source_key)
+                        .cloned()
+                        .ok_or_else(|| crate::service::service_helpers::db_snapshot_not_found(&source_id))?;
+                    let arn = state.db_snapshot_arn(&target_id);
+                    snapshot.db_snapshot_identifier = target_id.clone();
+                    snapshot.db_snapshot_arn = arn.clone();
+                    snapshot.snapshot_create_time = chrono::Utc::now();
+                    snapshot.snapshot_type = "manual".to_string();
+                    snapshot.status = "available".to_string();
+                    snapshot.percent_progress = Some(100);
+                    if let Some(og) = option_group_name {
+                        snapshot.option_group_name = Some(og);
+                    }
+                    if let Some(kms) = kms_key_id {
+                        snapshot.encrypted = true;
+                        snapshot.kms_key_id = Some(format_kms_arn(&kms, region, &aid));
+                    }
+                    // A copy is a fresh sharing surface; it does not inherit
+                    // the source snapshot's restore attributes.
+                    snapshot.snapshot_attributes = BTreeMap::new();
+                    state.snapshots.insert(target_id.clone(), snapshot.clone());
+                    (snapshot, arn)
+                };
+                self.emit_event(
+                    RdsSourceType::DbSnapshot,
+                    &target_id,
+                    &arn,
+                    "RDS-EVENT-0042",
+                    &["creation"],
+                    "Manual snapshot created",
+                );
+                Ok(xml_response(
+                    "CopyDBSnapshot",
+                    format!(
+                        "    <DBSnapshot>{}</DBSnapshot>",
+                        crate::service::service_helpers::db_snapshot_xml(&snapshot)
+                    ),
+                    &rid,
+                ))
             }
             "CopyDBParameterGroup" => {
-                let name = get_param(req, "TargetDBParameterGroupIdentifier").ok_or_else(|| missing("TargetDBParameterGroupIdentifier"))?;
-                Ok(xml_response("CopyDBParameterGroup", format!("    <DBParameterGroup>\n      <DBParameterGroupName>{}</DBParameterGroupName>\n    </DBParameterGroup>", xml_escape(&name)), &rid))
+                let target = get_param(req, "TargetDBParameterGroupIdentifier")
+                    .ok_or_else(|| missing("TargetDBParameterGroupIdentifier"))?;
+                let source = get_param(req, "SourceDBParameterGroupIdentifier")
+                    .ok_or_else(|| missing("SourceDBParameterGroupIdentifier"))?;
+                let source_key = source.rsplit(':').next().unwrap_or(&source).to_string();
+                let description = get_param(req, "TargetDBParameterGroupDescription");
+                let group = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if state.parameter_groups.contains_key(&target) {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::CONFLICT,
+                            "DBParameterGroupAlreadyExists",
+                            format!("DBParameterGroup {target} already exists."),
+                        ));
+                    }
+                    let mut group = state
+                        .parameter_groups
+                        .get(&source_key)
+                        .cloned()
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBParameterGroupNotFound",
+                                format!("DBParameterGroup {source} not found."),
+                            )
+                        })?;
+                    group.db_parameter_group_name = target.clone();
+                    group.db_parameter_group_arn = state.db_parameter_group_arn(&target);
+                    if let Some(desc) = description {
+                        group.description = desc;
+                    }
+                    group.tags = Vec::new();
+                    state.parameter_groups.insert(target.clone(), group.clone());
+                    group
+                };
+                Ok(xml_response(
+                    "CopyDBParameterGroup",
+                    format!(
+                        "    <DBParameterGroup>{}</DBParameterGroup>",
+                        crate::service::service_helpers::db_parameter_group_xml(&group)
+                    ),
+                    &rid,
+                ))
             }
             "DescribeDBParameters" => Ok(xml_response("DescribeDBParameters", "    <Parameters/>".to_string(), &rid)),
             "ResetDBParameterGroup" => {
@@ -1659,8 +1886,98 @@ impl RdsService {
                 );
                 Ok(xml_response("DescribeEngineDefaultParameters", body, &rid))
             }
-            "DescribeDBSnapshotAttributes" => Ok(xml_response("DescribeDBSnapshotAttributes", "    <DBSnapshotAttributesResult>\n      <DBSnapshotAttributes/>\n    </DBSnapshotAttributesResult>".to_string(), &rid)),
-            "ModifyDBSnapshot" | "ModifyDBSnapshotAttribute" => Ok(xml_response(action.as_str(), "    <DBSnapshot/>".to_string(), &rid)),
+            "DescribeDBSnapshotAttributes" => {
+                let id = get_param(req, "DBSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                let attrs = {
+                    let accounts = self.state_handle().read();
+                    let snapshot = accounts
+                        .get(&aid)
+                        .and_then(|s| s.snapshots.get(&id))
+                        .ok_or_else(|| crate::service::service_helpers::db_snapshot_not_found(&id))?;
+                    snapshot.snapshot_attributes.clone()
+                };
+                Ok(xml_response(
+                    "DescribeDBSnapshotAttributes",
+                    snapshot_attributes_result_xml(&id, &attrs),
+                    &rid,
+                ))
+            }
+            "ModifyDBSnapshotAttribute" => {
+                let id = get_param(req, "DBSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                let attribute_name = get_param(req, "AttributeName")
+                    .ok_or_else(|| missing("AttributeName"))?;
+                let to_add = parse_attribute_values(req, "ValuesToAdd");
+                let to_remove = parse_attribute_values(req, "ValuesToRemove");
+                // AWS rejects a value that appears in both add and remove lists.
+                if let Some(dup) = to_add.iter().find(|v| to_remove.contains(v)) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterCombination",
+                        format!("The value {dup} is present in both ValuesToAdd and ValuesToRemove."),
+                    ));
+                }
+                let attrs = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let snapshot = state
+                        .snapshots
+                        .get_mut(&id)
+                        .ok_or_else(|| crate::service::service_helpers::db_snapshot_not_found(&id))?;
+                    let values = snapshot
+                        .snapshot_attributes
+                        .entry(attribute_name.clone())
+                        .or_default();
+                    values.retain(|v| !to_remove.contains(v));
+                    for v in to_add {
+                        if !values.contains(&v) {
+                            values.push(v);
+                        }
+                    }
+                    // Drop the attribute entirely once it has no values so
+                    // Describe reports an empty (unshared) snapshot rather
+                    // than an empty `restore` list, matching AWS.
+                    if values.is_empty() {
+                        snapshot.snapshot_attributes.remove(&attribute_name);
+                    }
+                    snapshot.snapshot_attributes.clone()
+                };
+                Ok(xml_response(
+                    "ModifyDBSnapshotAttribute",
+                    snapshot_attributes_result_xml(&id, &attrs),
+                    &rid,
+                ))
+            }
+            "ModifyDBSnapshot" => {
+                let id = get_param(req, "DBSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                let engine_version = get_param(req, "EngineVersion");
+                let option_group_name = get_param(req, "OptionGroupName");
+                let snapshot = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let snapshot = state
+                        .snapshots
+                        .get_mut(&id)
+                        .ok_or_else(|| crate::service::service_helpers::db_snapshot_not_found(&id))?;
+                    if let Some(v) = engine_version {
+                        snapshot.engine_version = v;
+                    }
+                    if let Some(og) = option_group_name {
+                        snapshot.option_group_name = Some(og);
+                    }
+                    snapshot.clone()
+                };
+                Ok(xml_response(
+                    "ModifyDBSnapshot",
+                    format!(
+                        "    <DBSnapshot>{}</DBSnapshot>",
+                        crate::service::service_helpers::db_snapshot_xml(&snapshot)
+                    ),
+                    &rid,
+                ))
+            }
             "RestoreDBClusterFromSnapshot" => {
                 let target = get_param(req, "DBClusterIdentifier")
                     .ok_or_else(|| missing("DBClusterIdentifier"))?;
@@ -1834,11 +2151,50 @@ impl RdsService {
                     &rid,
                 ))
             }
-            "RestoreDBClusterFromS3" => Ok(xml_response(
-                action.as_str(),
-                "    <DBCluster/>".to_string(),
-                &rid,
-            )),
+            "RestoreDBClusterFromS3" => {
+                let id = get_param(req, "DBClusterIdentifier")
+                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
+                let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
+                let engine =
+                    get_param(req, "Engine").unwrap_or_else(|| "aurora-mysql".to_string());
+                let port = get_param(req, "Port")
+                    .and_then(|p| p.parse::<i64>().ok())
+                    .unwrap_or(if engine.contains("postgresql") { 5432 } else { 3306 });
+                let entry = json!({
+                    "DBClusterIdentifier": id, "DBClusterArn": arn,
+                    "DbClusterResourceId": new_cluster_resource_id(),
+                    "Status": "available", "Engine": engine,
+                    "EngineVersion": get_param(req, "EngineVersion").unwrap_or_else(|| "8.0.mysql_aurora.3.04.0".to_string()),
+                    "Endpoint": format!("{id}.cluster-xxx.{region}.rds.amazonaws.com"),
+                    "ReaderEndpoint": format!("{id}.cluster-ro-xxx.{region}.rds.amazonaws.com"),
+                    "Port": port,
+                    "MasterUsername": get_param(req, "MasterUsername").unwrap_or_else(|| "admin".to_string()),
+                });
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    if state.extras.get("clusters").is_some_and(|m| m.contains_key(&id)) {
+                        return Err(cluster_already_exists(&id));
+                    }
+                    store(&mut state.extras, "clusters").insert(id.clone(), entry.clone());
+                }
+                self.emit_event(
+                    RdsSourceType::DbCluster,
+                    &id,
+                    &arn,
+                    "RDS-EVENT-0170",
+                    &["creation"],
+                    "DB cluster created",
+                );
+                Ok(xml_response(
+                    "RestoreDBClusterFromS3",
+                    format!(
+                        "    <DBCluster>\n{}\n    </DBCluster>",
+                        db_cluster_member_xml(&entry)
+                    ),
+                    &rid,
+                ))
+            }
 
             // ── Recommendations ──
             "DescribeDBRecommendations" => Ok(xml_response("DescribeDBRecommendations", "    <DBRecommendations/>".to_string(), &rid)),
@@ -1902,9 +2258,73 @@ impl RdsService {
                 ))
             }
             "DescribeValidDBInstanceModifications" => Ok(xml_response("DescribeValidDBInstanceModifications", "    <ValidDBInstanceModificationsMessage>\n      <ValidProcessorFeatures/>\n      <Storage/>\n    </ValidDBInstanceModificationsMessage>".to_string(), &rid)),
-            "ModifyCurrentDBClusterCapacity" => Ok(xml_response("ModifyCurrentDBClusterCapacity", "    <DBClusterIdentifier>x</DBClusterIdentifier>\n    <CurrentCapacity>4</CurrentCapacity>".to_string(), &rid)),
-            "DisableHttpEndpoint" => Ok(xml_response("DisableHttpEndpoint", "    <HttpEndpointEnabled>false</HttpEndpointEnabled>".to_string(), &rid)),
-            "EnableHttpEndpoint" => Ok(xml_response("EnableHttpEndpoint", "    <HttpEndpointEnabled>true</HttpEndpointEnabled>".to_string(), &rid)),
+            "ModifyCurrentDBClusterCapacity" => {
+                let id = get_param(req, "DBClusterIdentifier")
+                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
+                let capacity = get_param(req, "Capacity")
+                    .and_then(|c| c.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let seconds_before_timeout = get_param(req, "SecondsBeforeTimeout")
+                    .and_then(|c| c.parse::<i64>().ok())
+                    .unwrap_or(300);
+                let timeout_action = get_param(req, "TimeoutAction")
+                    .unwrap_or_else(|| "ForceApplyCapacityChange".to_string());
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let entry = state
+                        .extras
+                        .get_mut("clusters")
+                        .and_then(|m| m.get_mut(&id))
+                        .ok_or_else(|| cluster_not_found(&id))?;
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("Capacity".to_string(), json!(capacity));
+                    }
+                }
+                Ok(xml_response(
+                    "ModifyCurrentDBClusterCapacity",
+                    format!(
+                        "    <DBClusterIdentifier>{}</DBClusterIdentifier>\n    <PendingCapacity>{}</PendingCapacity>\n    <CurrentCapacity>{}</CurrentCapacity>\n    <SecondsBeforeTimeout>{}</SecondsBeforeTimeout>\n    <TimeoutAction>{}</TimeoutAction>",
+                        xml_escape(&id),
+                        capacity,
+                        capacity,
+                        seconds_before_timeout,
+                        xml_escape(&timeout_action),
+                    ),
+                    &rid,
+                ))
+            }
+            "EnableHttpEndpoint" | "DisableHttpEndpoint" => {
+                let resource_arn =
+                    get_param(req, "ResourceArn").ok_or_else(|| missing("ResourceArn"))?;
+                let enabled = action == "EnableHttpEndpoint";
+                // ResourceArn is the cluster ARN; recover the cluster id from
+                // its trailing segment (bare ids are tolerated too).
+                let (_, cluster_id) = parse_rds_resource_arn(&resource_arn);
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let entry = state
+                        .extras
+                        .get_mut("clusters")
+                        .and_then(|m| m.get_mut(&cluster_id))
+                        // These ops declare ResourceNotFoundFault (not the typed
+                        // DBClusterNotFoundFault) for an unknown ResourceArn.
+                        .ok_or_else(|| resource_not_found(&resource_arn))?;
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("HttpEndpointEnabled".to_string(), json!(enabled));
+                    }
+                }
+                Ok(xml_response(
+                    action.as_str(),
+                    format!(
+                        "    <ResourceArn>{}</ResourceArn>\n    <HttpEndpointEnabled>{}</HttpEndpointEnabled>",
+                        xml_escape(&resource_arn),
+                        enabled,
+                    ),
+                    &rid,
+                ))
+            }
 
             _ => Err(AwsServiceError::action_not_implemented("rds", &action)),
         }
@@ -1912,6 +2332,161 @@ impl RdsService {
 }
 
 // ── XML helpers per resource ──
+
+/// Parse a repeated attribute-value list (`ValuesToAdd` / `ValuesToRemove`)
+/// from the query body. AWS serializes these as
+/// `ValuesToAdd.AttributeValue.N`; some SDKs and the conformance probe emit
+/// the generic `.member.N` form. Accept both.
+fn parse_attribute_values(req: &AwsRequest, prefix: &str) -> Vec<String> {
+    for member in ["AttributeValue", "member"] {
+        let mut out = Vec::new();
+        for index in 1.. {
+            match get_param(req, &format!("{prefix}.{member}.{index}")) {
+                Some(v) => out.push(v),
+                None => break,
+            }
+        }
+        if !out.is_empty() {
+            return out;
+        }
+    }
+    Vec::new()
+}
+
+/// Persist a Database Activity Stream state onto whichever resource the
+/// `ResourceArn` names — an Aurora DB cluster (stored as JSON keys on the
+/// cluster entry) or an RDS DB instance (stored in `DbInstance::activity_stream`).
+/// `stream` of `None` clears the stream to `stopped`. Returns `false` when
+/// neither a matching instance nor cluster exists.
+fn apply_activity_stream(
+    state: &mut crate::state::RdsState,
+    id: &str,
+    stream: Option<crate::state::ActivityStreamConfig>,
+) -> bool {
+    if let Some(inst) = state.instances.get_mut(id) {
+        inst.activity_stream = stream;
+        return true;
+    }
+    if let Some(entry) = state.extras.get_mut("clusters").and_then(|m| m.get_mut(id)) {
+        if let Some(obj) = entry.as_object_mut() {
+            match stream {
+                Some(cfg) => {
+                    let status = if cfg.status.is_empty() {
+                        "started".to_string()
+                    } else {
+                        cfg.status
+                    };
+                    obj.insert("ActivityStreamStatus".to_string(), json!(status));
+                    set_or_remove(obj, "ActivityStreamKmsKeyId", cfg.kms_key_id);
+                    set_or_remove(
+                        obj,
+                        "ActivityStreamKinesisStreamName",
+                        cfg.kinesis_stream_name,
+                    );
+                    set_or_remove(obj, "ActivityStreamMode", cfg.mode);
+                }
+                None => {
+                    obj.insert("ActivityStreamStatus".to_string(), json!("stopped"));
+                    obj.remove("ActivityStreamKmsKeyId");
+                    obj.remove("ActivityStreamKinesisStreamName");
+                    obj.remove("ActivityStreamMode");
+                }
+            }
+        }
+        return true;
+    }
+    false
+}
+
+/// Read the current activity-stream config from an instance or cluster entry.
+fn read_activity_stream(
+    state: &crate::state::RdsState,
+    id: &str,
+) -> Option<crate::state::ActivityStreamConfig> {
+    if let Some(inst) = state.instances.get(id) {
+        return inst.activity_stream.clone();
+    }
+    let entry = state.extras.get("clusters").and_then(|m| m.get(id))?;
+    let status = entry["ActivityStreamStatus"].as_str()?;
+    if status == "stopped" {
+        return None;
+    }
+    Some(crate::state::ActivityStreamConfig {
+        status: status.to_string(),
+        mode: entry["ActivityStreamMode"].as_str().map(str::to_string),
+        kms_key_id: entry["ActivityStreamKmsKeyId"].as_str().map(str::to_string),
+        kinesis_stream_name: entry["ActivityStreamKinesisStreamName"]
+            .as_str()
+            .map(str::to_string),
+    })
+}
+
+fn set_or_remove(obj: &mut serde_json::Map<String, Value>, key: &str, value: Option<String>) {
+    match value {
+        Some(v) => {
+            obj.insert(key.to_string(), json!(v));
+        }
+        None => {
+            obj.remove(key);
+        }
+    }
+}
+
+/// Apply the serverless capacity knobs (`MaxACU`/`MinACU` as doubles,
+/// `ComputeRedundancy` as an integer) from a Create/Modify DBShardGroup
+/// request onto the stored shard-group JSON object. Absent params are left
+/// untouched so a Modify only overwrites what the caller sent.
+fn apply_shard_group_capacity(obj: &mut serde_json::Map<String, Value>, req: &AwsRequest) {
+    for key in ["MaxACU", "MinACU"] {
+        if let Some(n) = get_param(req, key).and_then(|v| v.parse::<f64>().ok()) {
+            obj.insert(key.to_string(), json!(n));
+        }
+    }
+    if let Some(n) = get_param(req, "ComputeRedundancy").and_then(|v| v.parse::<i64>().ok()) {
+        obj.insert("ComputeRedundancy".to_string(), json!(n));
+    }
+}
+
+/// Render the `DBSnapshotAttributesResult` block shared by
+/// `DescribeDBSnapshotAttributes` and `ModifyDBSnapshotAttribute`.
+fn snapshot_attributes_result_xml(id: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
+    let attributes = if attrs.is_empty() {
+        "      <DBSnapshotAttributes/>".to_string()
+    } else {
+        let members = attrs
+            .iter()
+            .map(|(name, values)| {
+                let value_members = if values.is_empty() {
+                    "            <AttributeValues/>".to_string()
+                } else {
+                    let inner = values
+                        .iter()
+                        .map(|v| {
+                            format!(
+                                "              <AttributeValue>{}</AttributeValue>",
+                                xml_escape(v)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("            <AttributeValues>\n{inner}\n            </AttributeValues>")
+                };
+                format!(
+                    "        <DBSnapshotAttribute>\n          <AttributeName>{}</AttributeName>\n{}\n        </DBSnapshotAttribute>",
+                    xml_escape(name),
+                    value_members,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("      <DBSnapshotAttributes>\n{members}\n      </DBSnapshotAttributes>")
+    };
+    format!(
+        "    <DBSnapshotAttributesResult>\n      <DBSnapshotIdentifier>{}</DBSnapshotIdentifier>\n{}\n    </DBSnapshotAttributesResult>",
+        xml_escape(id),
+        attributes,
+    )
+}
 
 /// Generate a `DbClusterResourceId` in AWS's `cluster-XXXX` form. The suffix
 /// is immutable and survives rename, so IAM auth / CloudWatch dimensions key

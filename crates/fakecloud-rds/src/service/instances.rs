@@ -206,6 +206,7 @@ impl RdsService {
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
                 db_cluster_identifier: db_cluster_identifier.clone(),
+                activity_stream: None,
             };
             state.finish_instance_creation(placeholder.clone());
             placeholder
@@ -526,6 +527,12 @@ impl RdsService {
         let ca_certificate_identifier = optional_query_param(request, "CACertificateIdentifier");
         let monitoring_interval =
             parse_optional_i32(optional_query_param(request, "MonitoringInterval").as_deref())?;
+        let monitoring_role_arn = optional_query_param(request, "MonitoringRoleArn");
+        let performance_insights_kms_key_id =
+            optional_query_param(request, "PerformanceInsightsKMSKeyId");
+        let performance_insights_retention_period = parse_optional_i32(
+            optional_query_param(request, "PerformanceInsightsRetentionPeriod").as_deref(),
+        )?;
         let option_group_name = optional_query_param(request, "OptionGroupName");
         let auto_minor_version_upgrade = parse_optional_bool(
             optional_query_param(request, "AutoMinorVersionUpgrade").as_deref(),
@@ -751,6 +758,18 @@ impl RdsService {
         }
         if let Some(n) = max_allocated_storage {
             instance.max_allocated_storage = Some(n);
+        }
+        // Enhanced Monitoring role and Performance Insights settings apply
+        // immediately in AWS (no reboot), mirroring their already-applied
+        // companions MonitoringInterval / EnablePerformanceInsights.
+        if let Some(arn) = monitoring_role_arn {
+            instance.monitoring_role_arn = Some(arn);
+        }
+        if let Some(kms) = performance_insights_kms_key_id {
+            instance.performance_insights_kms_key_id = Some(kms);
+        }
+        if let Some(days) = performance_insights_retention_period {
+            instance.performance_insights_retention_period = Some(days);
         }
         if let Some(nt) = network_type {
             instance.network_type = Some(nt);
