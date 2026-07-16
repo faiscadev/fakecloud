@@ -11,6 +11,29 @@ use super::{extract_log_group_from_arn, resolve_log_group_name};
 
 use crate::state::LogGroup;
 
+/// Ordered grouping key for `ListAggregateLogGroupSummaries`:
+/// (dataSource.Name, dataSource.Type, optional dataSource.Format).
+type DataSourceGroupKey = (String, String, Option<String>);
+
+/// Derive a data-source name for a log group from its name.
+///
+/// fakecloud does not model per-log-group telemetry data sources, so the only
+/// real signal available is the log group name. AWS-managed log groups follow
+/// the `/aws/<service>/...` convention that identifies the originating service
+/// (e.g. `/aws/lambda`, `/aws/vpc`); everything else is grouped by its leading
+/// name segment. This is what `ListAggregateLogGroupSummaries` groups on.
+fn derive_log_group_data_source(name: &str) -> String {
+    let segs: Vec<&str> = name.split('/').filter(|s| !s.is_empty()).collect();
+    if segs.is_empty() {
+        return "custom".to_string();
+    }
+    if segs[0] == "aws" && segs.len() >= 2 {
+        format!("/aws/{}", segs[1])
+    } else {
+        segs[0].to_string()
+    }
+}
+
 impl LogsService {
     // ---- Log Groups ----
 
@@ -533,10 +556,81 @@ impl LogsService {
             129,
         )?;
         validate_optional_string_length("nextToken", body["nextToken"].as_str(), 1, 4096)?;
-        // Stub: return empty summaries
+
+        let group_by = body["groupBy"].as_str().unwrap_or("");
+        let include_format = group_by == "DATA_SOURCE_NAME_TYPE_AND_FORMAT";
+        let class_filter = body["logGroupClass"].as_str();
+        let pattern = body["logGroupNamePattern"].as_str().unwrap_or("");
+        let limit = body["limit"].as_i64().unwrap_or(50) as usize;
+        let next_token = body["nextToken"].as_str();
+
+        let accounts = self.state.read();
+        let empty = crate::state::LogsState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        // Aggregate the actual stored log groups by their derived data-source
+        // characteristics. fakecloud stores raw plaintext events with no OCSF
+        // transformation, so every group's Type is a plain LogGroup and its
+        // Format is Plain; the Name is derived from the log group name. Under
+        // both groupBy modes this collapses to grouping by data-source name.
+        let mut counts: std::collections::BTreeMap<DataSourceGroupKey, i64> =
+            std::collections::BTreeMap::new();
+        for g in state.log_groups.values() {
+            let class = g.log_group_class.as_deref().unwrap_or("STANDARD");
+            if let Some(f) = class_filter {
+                if class != f {
+                    continue;
+                }
+            }
+            if !pattern.is_empty() && !g.name.contains(pattern) {
+                continue;
+            }
+            let ds_name = derive_log_group_data_source(&g.name);
+            let key = (
+                ds_name,
+                "LogGroup".to_string(),
+                include_format.then(|| "Plain".to_string()),
+            );
+            *counts.entry(key).or_insert(0) += 1;
+        }
+
+        let all: Vec<(DataSourceGroupKey, i64)> = counts.into_iter().collect();
+
+        // Opaque integer offset token. An unresolvable/garbage token ends the
+        // listing (empty page, no token) rather than restarting at offset 0,
+        // which would loop a client that resumes while a token is present.
+        let start = match next_token {
+            Some(t) => t.parse::<usize>().unwrap_or(usize::MAX),
+            None => 0,
+        }
+        .min(all.len());
+        let end = (start + limit).min(all.len());
+
+        let summaries: Vec<Value> = all[start..end]
+            .iter()
+            .map(|((ds_name, ds_type, ds_format), count)| {
+                let mut ids = vec![
+                    json!({ "key": "dataSource.Name", "value": ds_name }),
+                    json!({ "key": "dataSource.Type", "value": ds_type }),
+                ];
+                if let Some(fmt) = ds_format {
+                    ids.push(json!({ "key": "dataSource.Format", "value": fmt }));
+                }
+                json!({
+                    "logGroupCount": count,
+                    "groupingIdentifiers": ids,
+                })
+            })
+            .collect();
+
+        let mut result = json!({ "aggregateLogGroupSummaries": summaries });
+        if end < all.len() {
+            result["nextToken"] = json!(end.to_string());
+        }
+
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "aggregateLogGroupSummaries": [] })).unwrap(),
+            serde_json::to_string(&result).unwrap(),
         ))
     }
 
@@ -601,7 +695,14 @@ impl LogsService {
                 json!({
                     "logGroupName": g.name,
                     "logGroupArn": log_group_arn,
-                    "logGroupClass": "STANDARD",
+                    // Render the group's actual stored class, matching
+                    // DescribeLogGroups. CreateLogGroup persists
+                    // INFREQUENT_ACCESS / DELIVERY, so hardcoding STANDARD
+                    // reported the wrong class for those groups.
+                    "logGroupClass": g
+                        .log_group_class
+                        .as_deref()
+                        .unwrap_or("STANDARD"),
                 })
             })
             .collect();
@@ -899,5 +1000,168 @@ mod tests {
         let svc = make_service();
         let req = make_request("ListAggregateLogGroupSummaries", json!({}));
         assert!(svc.list_aggregate_log_group_summaries(&req).is_err());
+    }
+
+    fn create_group_with_class(svc: &crate::LogsService, name: &str, class: &str) {
+        let req = make_request(
+            "CreateLogGroup",
+            json!({ "logGroupName": name, "logGroupClass": class }),
+        );
+        svc.create_log_group(&req).unwrap();
+    }
+
+    #[test]
+    fn list_log_groups_reports_stored_class() {
+        let svc = make_service();
+        create_group_with_class(&svc, "/infrequent", "INFREQUENT_ACCESS");
+        create_group(&svc, "/standard");
+
+        let req = make_request("ListLogGroups", json!({}));
+        let resp = svc.list_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let by_name: std::collections::HashMap<&str, &str> = body["logGroups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|g| {
+                (
+                    g["logGroupName"].as_str().unwrap(),
+                    g["logGroupClass"].as_str().unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(by_name["/infrequent"], "INFREQUENT_ACCESS");
+        assert_eq!(by_name["/standard"], "STANDARD");
+    }
+
+    #[test]
+    fn list_aggregate_log_group_summaries_aggregates_created_groups() {
+        let svc = make_service();
+        create_group(&svc, "/aws/lambda/fn-a");
+        create_group(&svc, "/aws/lambda/fn-b");
+        create_group(&svc, "/aws/vpc/flowlogs");
+        create_group(&svc, "myapp/web");
+
+        let req = make_request(
+            "ListAggregateLogGroupSummaries",
+            json!({ "groupBy": "DATA_SOURCE_NAME_AND_TYPE" }),
+        );
+        let resp = svc.list_aggregate_log_group_summaries(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let summaries = body["aggregateLogGroupSummaries"].as_array().unwrap();
+
+        // Three data sources: /aws/lambda (2), /aws/vpc (1), myapp (1).
+        assert_eq!(summaries.len(), 3);
+        let total: i64 = summaries
+            .iter()
+            .map(|s| s["logGroupCount"].as_i64().unwrap())
+            .sum();
+        assert_eq!(total, 4);
+
+        let find = |name: &str| -> i64 {
+            summaries
+                .iter()
+                .find(|s| {
+                    s["groupingIdentifiers"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|id| id["key"] == "dataSource.Name" && id["value"] == name)
+                })
+                .map(|s| s["logGroupCount"].as_i64().unwrap())
+                .unwrap_or(0)
+        };
+        assert_eq!(find("/aws/lambda"), 2);
+        assert_eq!(find("/aws/vpc"), 1);
+        assert_eq!(find("myapp"), 1);
+
+        // NAME_AND_TYPE must not emit a Format identifier.
+        assert!(!summaries[0]["groupingIdentifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id["key"] == "dataSource.Format"));
+    }
+
+    #[test]
+    fn list_aggregate_log_group_summaries_format_and_class_filter() {
+        let svc = make_service();
+        create_group_with_class(&svc, "/aws/lambda/fn", "INFREQUENT_ACCESS");
+        create_group(&svc, "/aws/lambda/other"); // STANDARD
+
+        // Filter to INFREQUENT_ACCESS only -> one group.
+        let req = make_request(
+            "ListAggregateLogGroupSummaries",
+            json!({
+                "groupBy": "DATA_SOURCE_NAME_TYPE_AND_FORMAT",
+                "logGroupClass": "INFREQUENT_ACCESS",
+            }),
+        );
+        let resp = svc.list_aggregate_log_group_summaries(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let summaries = body["aggregateLogGroupSummaries"].as_array().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0]["logGroupCount"], json!(1));
+        // FORMAT groupBy emits a dataSource.Format identifier.
+        assert!(summaries[0]["groupingIdentifiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id["key"] == "dataSource.Format"));
+    }
+
+    #[test]
+    fn list_aggregate_log_group_summaries_paginates() {
+        let svc = make_service();
+        create_group(&svc, "/aws/a/x");
+        create_group(&svc, "/aws/b/x");
+        create_group(&svc, "/aws/c/x");
+
+        let req = make_request(
+            "ListAggregateLogGroupSummaries",
+            json!({ "groupBy": "DATA_SOURCE_NAME_AND_TYPE", "limit": 2 }),
+        );
+        let resp = svc.list_aggregate_log_group_summaries(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["aggregateLogGroupSummaries"].as_array().unwrap().len(),
+            2
+        );
+        let token = body["nextToken"].as_str().expect("nextToken on page 1");
+
+        let req2 = make_request(
+            "ListAggregateLogGroupSummaries",
+            json!({ "groupBy": "DATA_SOURCE_NAME_AND_TYPE", "limit": 2, "nextToken": token }),
+        );
+        let resp2 = svc.list_aggregate_log_group_summaries(&req2).unwrap();
+        let body2: Value = serde_json::from_slice(resp2.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body2["aggregateLogGroupSummaries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(body2["nextToken"].is_null());
+    }
+
+    #[test]
+    fn list_aggregate_log_group_summaries_garbage_token_ends_listing() {
+        let svc = make_service();
+        create_group(&svc, "/aws/a/x");
+        create_group(&svc, "/aws/b/x");
+
+        // A non-integer token must end the listing rather than restart page 1.
+        let req = make_request(
+            "ListAggregateLogGroupSummaries",
+            json!({ "groupBy": "DATA_SOURCE_NAME_AND_TYPE", "nextToken": "not-a-number" }),
+        );
+        let resp = svc.list_aggregate_log_group_summaries(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["aggregateLogGroupSummaries"].as_array().unwrap().len(),
+            0
+        );
+        assert!(body["nextToken"].is_null());
     }
 }

@@ -1098,6 +1098,12 @@ pub(crate) fn check_filter_values_typed(
                     _ => false,
                 }
             } else if let Some(numeric_arr) = obj.get("numeric").and_then(|v| v.as_array()) {
+                // The numeric operator only matches Number-typed values, like
+                // every sibling operator above. A String-typed attribute such
+                // as price="100" must NOT match {"numeric":[">",50]}.
+                if is_numeric == Some(false) {
+                    return false;
+                }
                 let attr_num: f64 = match attr_value.parse() {
                     Ok(n) => n,
                     Err(_) => return false,
@@ -1127,6 +1133,12 @@ pub(crate) fn numbers_equal(a: f64, b: f64) -> bool {
 
 /// Evaluate a numeric filter
 pub(crate) fn matches_numeric_filter(value: f64, conditions: &[Value]) -> bool {
+    // A numeric condition is one or two (operator, threshold) pairs, so a
+    // well-formed list is non-empty and even-length. A malformed odd-length
+    // list like {"numeric":["="]} (operator with no threshold) is not a match.
+    if conditions.is_empty() || !conditions.len().is_multiple_of(2) {
+        return false;
+    }
     let mut i = 0;
     while i + 1 < conditions.len() {
         let op = match conditions[i].as_str() {
@@ -1663,5 +1675,50 @@ mod filter_consistency_tests {
         let mut string_attrs = BTreeMap::new();
         string_attrs.insert("price".to_string(), str_attr("100"));
         assert!(!matches_filter_policy(&sub, &string_attrs, ""));
+    }
+
+    #[test]
+    fn numeric_operator_is_type_aware() {
+        // {"numeric":[">",50]} must only match Number-typed attributes.
+        let filter = vec![json!({ "numeric": [">", 50] })];
+        // Number attribute 100 -> matches.
+        assert!(check_filter_values_typed(&filter, "100", Some(true)));
+        // String attribute "100" (numeric-looking text) -> no match.
+        assert!(!check_filter_values_typed(&filter, "100", Some(false)));
+        // Untyped (None) still parses -> matches (untyped body-array behaviour).
+        assert!(check_filter_values_typed(&filter, "100", None));
+    }
+
+    #[test]
+    fn numeric_operator_on_string_attr_via_message_attributes() {
+        // End-to-end through the MessageAttributes path: a String attribute
+        // price="100" must NOT satisfy a numeric range filter.
+        let policy = json!({ "price": [{ "numeric": [">", 50] }] });
+        let sub = sub_with_filter(policy);
+
+        let mut number_attrs = BTreeMap::new();
+        number_attrs.insert("price".to_string(), num_attr("100"));
+        assert!(matches_filter_policy(&sub, &number_attrs, ""));
+
+        let mut string_attrs = BTreeMap::new();
+        string_attrs.insert("price".to_string(), str_attr("100"));
+        assert!(!matches_filter_policy(&sub, &string_attrs, ""));
+    }
+
+    #[test]
+    fn malformed_numeric_condition_does_not_match() {
+        // Odd-length condition list (operator without a threshold) is malformed
+        // and must not match, rather than trivially returning true.
+        let filter = vec![json!({ "numeric": ["="] })];
+        assert!(!check_filter_values_typed(&filter, "100", Some(true)));
+        assert!(!check_filter_values_typed(&filter, "100", None));
+
+        // Empty numeric list is likewise not a match.
+        let empty = vec![json!({ "numeric": [] })];
+        assert!(!check_filter_values_typed(&empty, "100", Some(true)));
+
+        // A well-formed range still works.
+        let ok = vec![json!({ "numeric": [">", 0, "<", 200] })];
+        assert!(check_filter_values_typed(&ok, "100", Some(true)));
     }
 }
