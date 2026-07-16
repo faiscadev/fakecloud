@@ -187,6 +187,19 @@ pub struct Job {
     pub notification_property: Option<serde_json::Value>,
     #[serde(default)]
     pub non_overridable_arguments: BTreeMap<String, String>,
+    /// Standard Job fields that were previously accepted then dropped
+    /// (bug-hunt 2026-07-16). Round-tripped verbatim. `CodeGenConfigurationNodes`
+    /// is a large nested shape stored opaquely rather than dropped.
+    #[serde(default)]
+    pub source_control_details: Option<serde_json::Value>,
+    #[serde(default)]
+    pub code_gen_configuration_nodes: Option<serde_json::Value>,
+    #[serde(default)]
+    pub maintenance_window: Option<String>,
+    #[serde(default)]
+    pub log_uri: Option<String>,
+    #[serde(default)]
+    pub allocated_capacity: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -283,6 +296,9 @@ pub struct Database {
 pub struct Table {
     pub name: String,
     pub database_name: String,
+    /// Owning Data Catalog id (the account id). Reported on read as `CatalogId`.
+    #[serde(default)]
+    pub catalog_id: String,
     pub description: Option<String>,
     pub owner: Option<String>,
     pub create_time: DateTime<Utc>,

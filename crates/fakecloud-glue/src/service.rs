@@ -920,6 +920,12 @@ pub(crate) fn table_json(t: &Table) -> Value {
         "CreateTime": t.create_time.timestamp() as f64,
         "UpdateTime": t.update_time.timestamp() as f64,
     });
+    // Emit CatalogId only when populated: AWS omits absent members rather than
+    // returning an empty string, and tables restored from a pre-`catalog_id`
+    // snapshot carry an empty default.
+    if !t.catalog_id.is_empty() {
+        o["CatalogId"] = json!(t.catalog_id);
+    }
     if let Some(ref d) = t.description {
         o["Description"] = json!(d);
     }
@@ -942,6 +948,15 @@ pub(crate) fn table_json(t: &Table) -> Value {
         o["LastAccessTime"] = json!(la.timestamp() as f64);
     }
     o
+}
+
+/// The current (latest) archived VersionId for a table, defaulting to "1" for
+/// tables predating the version archive. Glue reports this on GetTable(s).
+fn current_table_version(st: &crate::state::GlueState, db: &str, table: &str) -> String {
+    st.table_version_ids(db, table)
+        .last()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|| "1".to_string())
 }
 
 pub(crate) fn partition_json(p: &Partition) -> Value {
@@ -1038,13 +1053,19 @@ impl GlueService {
     }
 
     pub(crate) fn get_databases(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
         let accounts = self.state.read();
         let dbs: Vec<Value> = accounts
             .get(&req.account_id)
             .and_then(|s| s.dbs_in(&req.region))
             .map(|map| map.values().map(database_json).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({"DatabaseList": dbs})))
+        let (page, token) = crate::common::paginate_body(&body, dbs);
+        let mut resp = json!({ "DatabaseList": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn update_database(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1104,6 +1125,7 @@ impl GlueService {
         let table = Table {
             name: name.clone(),
             database_name: db_name.clone(),
+            catalog_id: req.account_id.clone(),
             description: input["Description"].as_str().map(|s| s.to_string()),
             owner: input["Owner"].as_str().map(|s| s.to_string()),
             create_time: now,
@@ -1145,7 +1167,9 @@ impl GlueService {
             .tables
             .get(name)
             .ok_or_else(|| entity_not_found(format!("Table {name} not found")))?;
-        Ok(AwsResponse::ok_json(json!({"Table": table_json(t)})))
+        let mut tj = table_json(t);
+        tj["VersionId"] = json!(current_table_version(state, db_name, name));
+        Ok(AwsResponse::ok_json(json!({"Table": tj})))
     }
 
     pub(crate) fn get_tables(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1161,19 +1185,24 @@ impl GlueService {
             .filter(|e| !e.is_empty())
             .and_then(|e| regex::Regex::new(e).ok());
         let accounts = self.state.read();
-        let tables: Vec<Value> = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.dbs_in(&req.region))
-            .and_then(|dbs| dbs.get(db_name))
-            .map(|db| {
-                db.tables
-                    .values()
-                    .filter(|t| name_filter.as_ref().is_none_or(|re| re.is_match(&t.name)))
-                    .map(table_json)
-                    .collect()
-            })
-            .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({"TableList": tables})))
+        let mut tables: Vec<Value> = Vec::new();
+        if let Some(s) = accounts.get(&req.account_id) {
+            if let Some(db) = s.dbs_in(&req.region).and_then(|dbs| dbs.get(db_name)) {
+                for t in db.tables.values() {
+                    if name_filter.as_ref().is_none_or(|re| re.is_match(&t.name)) {
+                        let mut tj = table_json(t);
+                        tj["VersionId"] = json!(current_table_version(s, db_name, &t.name));
+                        tables.push(tj);
+                    }
+                }
+            }
+        }
+        let (page, token) = crate::common::paginate_body(&body, tables);
+        let mut resp = json!({ "TableList": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn update_table(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1341,6 +1370,19 @@ impl GlueService {
             .as_str()
             .ok_or_else(|| missing("TableName"))?;
         let expression = body["Expression"].as_str().unwrap_or("");
+        // Parallel-scan support: when a `Segment{SegmentNumber, TotalSegments}`
+        // is supplied, each worker must see a disjoint slice of the matching
+        // partitions so the union across all segments equals the full set with
+        // no duplicates. Partition the deterministic (BTreeMap-ordered) match
+        // list by index modulo TotalSegments.
+        let segment = &body["Segment"];
+        let (segment_number, total_segments) = if segment.is_object() {
+            let total = segment["TotalSegments"].as_u64().unwrap_or(1).max(1);
+            let number = segment["SegmentNumber"].as_u64().unwrap_or(0);
+            (number, total)
+        } else {
+            (0, 1)
+        };
         let accounts = self.state.read();
         let parts: Vec<Value> = accounts
             .get(&req.account_id)
@@ -1358,11 +1400,20 @@ impl GlueService {
                             &p.values,
                         )
                     })
-                    .map(partition_json)
+                    .enumerate()
+                    .filter(|(i, _)| {
+                        total_segments == 1 || (*i as u64) % total_segments == segment_number
+                    })
+                    .map(|(_, p)| partition_json(p))
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({"Partitions": parts})))
+        let (page, token) = crate::common::paginate_body(&body, parts);
+        let mut resp = json!({ "Partitions": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn update_partition(

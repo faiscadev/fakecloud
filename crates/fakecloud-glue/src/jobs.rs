@@ -68,6 +68,11 @@ pub(crate) fn job_to_json(j: &Job) -> Value {
         "SecurityConfiguration": j.security_configuration,
         "NotificationProperty": j.notification_property,
         "NonOverridableArguments": j.non_overridable_arguments,
+        "SourceControlDetails": j.source_control_details,
+        "CodeGenConfigurationNodes": j.code_gen_configuration_nodes,
+        "MaintenanceWindow": j.maintenance_window,
+        "LogUri": j.log_uri,
+        "AllocatedCapacity": j.allocated_capacity,
     })
 }
 
@@ -138,6 +143,11 @@ impl GlueService {
             security_configuration: body["SecurityConfiguration"].as_str().map(String::from),
             notification_property: opt_value(&body["NotificationProperty"]),
             non_overridable_arguments: parse_string_map(&body["NonOverridableArguments"]),
+            source_control_details: opt_value(&body["SourceControlDetails"]),
+            code_gen_configuration_nodes: opt_value(&body["CodeGenConfigurationNodes"]),
+            maintenance_window: body["MaintenanceWindow"].as_str().map(String::from),
+            log_uri: body["LogUri"].as_str().map(String::from),
+            allocated_capacity: body["AllocatedCapacity"].as_i64(),
         };
         state.jobs.insert(name.to_string(), job);
         Ok(AwsResponse::ok_json(json!({ "Name": name })))
@@ -155,21 +165,33 @@ impl GlueService {
     }
 
     pub(crate) fn get_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
         let accounts = self.state.read();
         let jobs: Vec<Value> = accounts
             .get(&req.account_id)
             .map(|s| s.jobs.values().map(job_to_json).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "Jobs": jobs })))
+        let (page, token) = crate::common::paginate_body(&body, jobs);
+        let mut resp = json!({ "Jobs": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn list_jobs(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
         let accounts = self.state.read();
-        let names: Vec<String> = accounts
+        let names: Vec<Value> = accounts
             .get(&req.account_id)
-            .map(|s| s.jobs.keys().cloned().collect())
+            .map(|s| s.jobs.keys().map(|k| json!(k)).collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "JobNames": names })))
+        let (page, token) = crate::common::paginate_body(&body, names);
+        let mut resp = json!({ "JobNames": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn update_job(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -229,6 +251,21 @@ impl GlueService {
         }
         if update["NonOverridableArguments"].is_object() {
             job.non_overridable_arguments = parse_string_map(&update["NonOverridableArguments"]);
+        }
+        if !update["SourceControlDetails"].is_null() {
+            job.source_control_details = opt_value(&update["SourceControlDetails"]);
+        }
+        if !update["CodeGenConfigurationNodes"].is_null() {
+            job.code_gen_configuration_nodes = opt_value(&update["CodeGenConfigurationNodes"]);
+        }
+        if let Some(s) = update["MaintenanceWindow"].as_str() {
+            job.maintenance_window = Some(s.to_string());
+        }
+        if let Some(s) = update["LogUri"].as_str() {
+            job.log_uri = Some(s.to_string());
+        }
+        if let Some(n) = update["AllocatedCapacity"].as_i64() {
+            job.allocated_capacity = Some(n);
         }
         job.last_modified_on = Utc::now();
         Ok(AwsResponse::ok_json(json!({ "JobName": name })))

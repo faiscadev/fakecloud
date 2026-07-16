@@ -511,3 +511,295 @@ fn update_table_applies_view_text_and_retention() {
     assert_eq!(got["Table"]["ViewExpandedText"], "SELECT 2 FROM db.t");
     assert_eq!(got["Table"]["Retention"], 9);
 }
+
+// --- bug-hunt 2026-07-16 regressions ---
+
+/// Create a database `db` with table `t` (no partition keys), so version and
+/// partition tests share a fixture.
+fn setup_table(svc: &GlueService) {
+    svc.create_database(&req(
+        "CreateDatabase",
+        json!({"DatabaseInput": {"Name": "db"}}),
+    ))
+    .unwrap();
+    svc.create_table(&req(
+        "CreateTable",
+        json!({"DatabaseName": "db", "TableInput": {"Name": "t"}}),
+    ))
+    .unwrap();
+}
+
+#[test]
+fn get_table_version_missing_id_returns_not_found() {
+    let svc = GlueService::default();
+    setup_table(&svc);
+    // The initial version (1) is archived and returns real data.
+    let v1 = body_of(
+        svc.get_table_version(&req(
+            "GetTableVersion",
+            json!({"DatabaseName": "db", "TableName": "t", "VersionId": "1"}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(v1["TableVersion"]["VersionId"], "1");
+    // A phantom VersionId must 404 instead of returning the live table stamped
+    // with the bogus id.
+    let err = svc
+        .get_table_version(&req(
+            "GetTableVersion",
+            json!({"DatabaseName": "db", "TableName": "t", "VersionId": "9999"}),
+        ))
+        .err()
+        .unwrap();
+    assert!(format!("{err:?}").contains("EntityNotFound"));
+}
+
+#[test]
+fn batch_delete_table_version_removes_and_reports_errors() {
+    let svc = GlueService::default();
+    setup_table(&svc);
+    // UpdateTable archives version 2.
+    svc.update_table(&req(
+        "UpdateTable",
+        json!({"DatabaseName": "db", "TableInput": {"Name": "t", "Description": "v2"}}),
+    ))
+    .unwrap();
+    let versions = body_of(
+        svc.get_table_versions(&req(
+            "GetTableVersions",
+            json!({"DatabaseName": "db", "TableName": "t"}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(versions["TableVersions"].as_array().unwrap().len(), 2);
+
+    // Delete v1 (exists) and v9999 (missing).
+    let out = body_of(
+        svc.batch_delete_table_version(&req(
+            "BatchDeleteTableVersion",
+            json!({"DatabaseName": "db", "TableName": "t", "VersionIds": ["1", "9999"]}),
+        ))
+        .unwrap(),
+    );
+    let errors = out["Errors"].as_array().unwrap();
+    assert_eq!(errors.len(), 1, "only the missing id errors: {out}");
+    assert_eq!(errors[0]["VersionId"], "9999");
+    assert_eq!(
+        errors[0]["ErrorDetail"]["ErrorCode"],
+        "EntityNotFoundException"
+    );
+
+    // v1 is really gone; only v2 remains.
+    let versions = body_of(
+        svc.get_table_versions(&req(
+            "GetTableVersions",
+            json!({"DatabaseName": "db", "TableName": "t"}),
+        ))
+        .unwrap(),
+    );
+    let ids: Vec<&str> = versions["TableVersions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v["VersionId"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["2"]);
+}
+
+#[test]
+fn get_partitions_parallel_scan_union_equals_full_set_no_dups() {
+    let svc = GlueService::default();
+    setup_table(&svc);
+    for i in 0..10 {
+        svc.create_partition(&req(
+            "CreatePartition",
+            json!({
+                "DatabaseName": "db",
+                "TableName": "t",
+                "PartitionInput": {"Values": [format!("p{i}")]}
+            }),
+        ))
+        .unwrap();
+    }
+    let total = 3u64;
+    let mut seen: Vec<String> = Vec::new();
+    for seg in 0..total {
+        let out = body_of(
+            svc.get_partitions(&req(
+                "GetPartitions",
+                json!({
+                    "DatabaseName": "db",
+                    "TableName": "t",
+                    "Segment": {"SegmentNumber": seg, "TotalSegments": total}
+                }),
+            ))
+            .unwrap(),
+        );
+        for p in out["Partitions"].as_array().unwrap() {
+            seen.push(p["Values"][0].as_str().unwrap().to_string());
+        }
+    }
+    seen.sort();
+    let unique: std::collections::BTreeSet<_> = seen.iter().cloned().collect();
+    assert_eq!(seen.len(), 10, "no duplicates across segments: {seen:?}");
+    assert_eq!(unique.len(), 10, "union covers the full set");
+}
+
+#[test]
+fn resume_workflow_run_returns_observable_run_id() {
+    let svc = GlueService::default();
+    svc.create_workflow(&req("CreateWorkflow", json!({"Name": "wf"})))
+        .unwrap();
+    let started = body_of(
+        svc.start_workflow_run(&req("StartWorkflowRun", json!({"Name": "wf"})))
+            .unwrap(),
+    );
+    let run_id = started["RunId"].as_str().unwrap().to_string();
+    let resumed = body_of(
+        svc.resume_workflow_run(&req(
+            "ResumeWorkflowRun",
+            json!({"Name": "wf", "RunId": run_id, "NodeIds": ["n1"]}),
+        ))
+        .unwrap(),
+    );
+    let new_id = resumed["RunId"].as_str().unwrap().to_string();
+    assert_ne!(new_id, "");
+    // The resumed run must be persisted and readable.
+    let got = body_of(
+        svc.get_workflow_run(&req(
+            "GetWorkflowRun",
+            json!({"Name": "wf", "RunId": new_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["Run"]["WorkflowRunId"], new_id);
+    assert_eq!(got["Run"]["Status"], "RUNNING");
+}
+
+#[test]
+fn create_job_persists_source_control_and_extra_fields() {
+    let svc = GlueService::default();
+    svc.create_job(&req(
+        "CreateJob",
+        json!({
+            "Name": "j",
+            "Role": "r",
+            "Command": {"Name": "glueetl"},
+            "LogUri": "s3://logs/j",
+            "MaintenanceWindow": "Sun:23:00",
+            "AllocatedCapacity": 5,
+            "SourceControlDetails": {"Provider": "GITHUB", "Repository": "repo", "Branch": "main"}
+        }),
+    ))
+    .unwrap();
+    let j = body_of(
+        svc.get_job(&req("GetJob", json!({"JobName": "j"})))
+            .unwrap(),
+    )["Job"]
+        .clone();
+    assert_eq!(j["LogUri"], "s3://logs/j");
+    assert_eq!(j["MaintenanceWindow"], "Sun:23:00");
+    assert_eq!(j["AllocatedCapacity"], 5);
+    assert_eq!(j["SourceControlDetails"]["Provider"], "GITHUB");
+
+    // UpdateJobFromSourceControl persists new SourceControlDetails.
+    svc.update_job_from_source_control(&req(
+        "UpdateJobFromSourceControl",
+        json!({
+            "JobName": "j",
+            "Provider": "GITHUB",
+            "RepositoryName": "repo2",
+            "BranchName": "dev",
+            "CommitId": "abc123"
+        }),
+    ))
+    .unwrap();
+    let j = body_of(
+        svc.get_job(&req("GetJob", json!({"JobName": "j"})))
+            .unwrap(),
+    )["Job"]
+        .clone();
+    assert_eq!(j["SourceControlDetails"]["Repository"], "repo2");
+    assert_eq!(j["SourceControlDetails"]["Branch"], "dev");
+    assert_eq!(j["SourceControlDetails"]["LastCommitId"], "abc123");
+}
+
+#[test]
+fn get_connection_hide_password_redacts() {
+    let svc = GlueService::default();
+    svc.create_connection(&req(
+        "CreateConnection",
+        json!({
+            "ConnectionInput": {
+                "Name": "c",
+                "ConnectionType": "JDBC",
+                "ConnectionProperties": {"USERNAME": "u", "PASSWORD": "secret"}
+            }
+        }),
+    ))
+    .unwrap();
+    // Default (HidePassword absent) returns the password verbatim.
+    let shown = body_of(
+        svc.get_connection(&req("GetConnection", json!({"Name": "c"})))
+            .unwrap(),
+    );
+    assert_eq!(
+        shown["Connection"]["ConnectionProperties"]["PASSWORD"],
+        "secret"
+    );
+    // HidePassword=true strips it.
+    let hidden = body_of(
+        svc.get_connection(&req(
+            "GetConnection",
+            json!({"Name": "c", "HidePassword": true}),
+        ))
+        .unwrap(),
+    );
+    assert!(hidden["Connection"]["ConnectionProperties"]["PASSWORD"].is_null());
+    assert_eq!(
+        hidden["Connection"]["ConnectionProperties"]["USERNAME"],
+        "u"
+    );
+}
+
+#[test]
+fn get_tables_pagination_round_trips_next_token() {
+    let svc = GlueService::default();
+    svc.create_database(&req(
+        "CreateDatabase",
+        json!({"DatabaseInput": {"Name": "db"}}),
+    ))
+    .unwrap();
+    for n in ["a", "b", "c"] {
+        svc.create_table(&req(
+            "CreateTable",
+            json!({"DatabaseName": "db", "TableInput": {"Name": n}}),
+        ))
+        .unwrap();
+    }
+    let page1 = body_of(
+        svc.get_tables(&req(
+            "GetTables",
+            json!({"DatabaseName": "db", "MaxResults": 2}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(page1["TableList"].as_array().unwrap().len(), 2);
+    let token = page1["NextToken"].as_str().unwrap().to_string();
+    // Each table reports CatalogId + VersionId.
+    assert_eq!(page1["TableList"][0]["CatalogId"], "123456789012");
+    assert_eq!(page1["TableList"][0]["VersionId"], "1");
+
+    let page2 = body_of(
+        svc.get_tables(&req(
+            "GetTables",
+            json!({"DatabaseName": "db", "MaxResults": 2, "NextToken": token}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(page2["TableList"].as_array().unwrap().len(), 1);
+    assert!(
+        page2["NextToken"].is_null(),
+        "last page has no token: {page2}"
+    );
+}

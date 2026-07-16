@@ -97,6 +97,7 @@ impl ResourceProvisioner {
             fakecloud_glue::Table {
                 name: name.clone(),
                 database_name: db_name.clone(),
+                catalog_id: self.account_id.clone(),
                 description: input
                     .get("Description")
                     .and_then(|v| v.as_str())

@@ -93,6 +93,25 @@ pub(crate) fn resource_arn(account: &str, region: &str, kind: &str, name: &str) 
     format!("arn:aws:glue:{region}:{account}:{kind}/{name}")
 }
 
+/// Paginate a Glue list op using the request's `MaxResults`/`NextToken`.
+///
+/// Uses the offset-token scheme in [`fakecloud_core::pagination::paginate`]:
+/// the token is the numeric offset of the next page. When `MaxResults` is
+/// absent the full remaining list (from any incoming offset) is returned in a
+/// single page with no continuation token — matching how AWS returns an
+/// unbounded page when the caller omits a page size.
+pub(crate) fn paginate_body(body: &Value, items: Vec<Value>) -> (Vec<Value>, Option<String>) {
+    let token = body.get("NextToken").and_then(|v| v.as_str());
+    let max = body
+        .get("MaxResults")
+        .and_then(|v| v.as_u64())
+        .map(|n| n as usize);
+    match max {
+        Some(m) => fakecloud_core::pagination::paginate(&items, token, m),
+        None => fakecloud_core::pagination::paginate(&items, token, usize::MAX),
+    }
+}
+
 /// A small UUID-ish identifier (32 hex chars). Glue uses these for run ids,
 /// transform ids, etc.
 pub(crate) fn new_id() -> String {

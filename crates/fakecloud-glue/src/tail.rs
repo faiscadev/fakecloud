@@ -7,7 +7,9 @@ use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::common::{entity_not_found, new_id, now_ts, req_present, req_str, resource_arn};
+use crate::common::{
+    entity_not_found, error_detail, new_id, now_ts, req_present, req_str, resource_arn,
+};
 use crate::service::GlueService;
 
 impl GlueService {
@@ -748,22 +750,60 @@ impl GlueService {
         })))
     }
 
+    /// Build a `SourceControlDetails` object from the flat request fields the
+    /// two source-control ops accept (Provider/RepositoryName/…), so the job's
+    /// stored details reflect the last sync rather than being discarded.
+    fn source_control_details_from_body(body: &Value) -> Value {
+        let mut d = serde_json::Map::new();
+        for (src, dst) in [
+            ("Provider", "Provider"),
+            ("RepositoryName", "Repository"),
+            ("RepositoryOwner", "Owner"),
+            ("BranchName", "Branch"),
+            ("Folder", "Folder"),
+            ("CommitId", "LastCommitId"),
+            ("AuthStrategy", "AuthStrategy"),
+            ("AuthToken", "AuthToken"),
+        ] {
+            if let Some(v) = body.get(src) {
+                if !v.is_null() {
+                    d.insert(dst.to_string(), v.clone());
+                }
+            }
+        }
+        Value::Object(d)
+    }
+
+    /// Shared body for UpdateJobFromSourceControl / UpdateSourceControlFromJob:
+    /// both synchronise a job with its Git source-control repository and, per
+    /// AWS, persist the resulting `SourceControlDetails` on the job definition.
+    fn sync_job_source_control(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let job_name = req_str(&body, "JobName")?.to_string();
+        let details = Self::source_control_details_from_body(&body);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let job = st
+            .jobs
+            .get_mut(&job_name)
+            .ok_or_else(|| entity_not_found(format!("Job {job_name} not found")))?;
+        job.source_control_details = Some(details);
+        job.last_modified_on = chrono::Utc::now();
+        Ok(AwsResponse::ok_json(json!({ "JobName": job_name })))
+    }
+
     pub(crate) fn update_job_from_source_control(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body = req.json_body();
-        let job = body.get("JobName").and_then(|v| v.as_str()).unwrap_or("");
-        Ok(AwsResponse::ok_json(json!({ "JobName": job })))
+        self.sync_job_source_control(req)
     }
 
     pub(crate) fn update_source_control_from_job(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let body = req.json_body();
-        let job = body.get("JobName").and_then(|v| v.as_str()).unwrap_or("");
-        Ok(AwsResponse::ok_json(json!({ "JobName": job })))
+        self.sync_job_source_control(req)
     }
 
     // ===================== table versions =====================
@@ -798,8 +838,17 @@ impl GlueService {
         if let Some(tv) = st.table_versions.get(&tv_key) {
             return Ok(AwsResponse::ok_json(json!({ "TableVersion": tv })));
         }
-        // Fall back to synthesizing from the live table (tables created before
-        // the archive existed, or restored from an older snapshot).
+        // A specific VersionId was requested but isn't archived: AWS returns
+        // EntityNotFoundException. Never fabricate a phantom version by stamping
+        // the live table with the requested id.
+        if requested.is_some() {
+            return Err(entity_not_found(format!(
+                "Version {version} not found for table {table}"
+            )));
+        }
+        // No VersionId supplied and no archive exists: synthesize v1 from the
+        // live table (tables created before the archive existed, or restored
+        // from an older snapshot).
         let tbl = st
             .dbs_in(&req.region)
             .and_then(|dbs| dbs.get(db))
@@ -827,30 +876,34 @@ impl GlueService {
         };
         // Return the full archive, newest first (Glue orders descending).
         let ids = st.table_version_ids(db, table);
-        if !ids.is_empty() {
-            let versions: Vec<Value> = ids
-                .iter()
+        let versions: Vec<Value> = if !ids.is_empty() {
+            ids.iter()
                 .rev()
                 .filter_map(|n| {
                     st.table_versions
                         .get(&Self::tv_key(db, table, &n.to_string()))
                 })
                 .cloned()
-                .collect();
-            return Ok(AwsResponse::ok_json(json!({ "TableVersions": versions })));
-        }
-        // Fall back to a synthesized single version for pre-archive tables.
-        let versions = match st
-            .dbs_in(&req.region)
-            .and_then(|dbs| dbs.get(db))
-            .and_then(|d| d.tables.get(table))
-        {
-            Some(t) => vec![json!({
-                "Table": crate::service::table_json(t), "VersionId": "1",
-            })],
-            None => vec![],
+                .collect()
+        } else {
+            // Fall back to a synthesized single version for pre-archive tables.
+            match st
+                .dbs_in(&req.region)
+                .and_then(|dbs| dbs.get(db))
+                .and_then(|d| d.tables.get(table))
+            {
+                Some(t) => vec![json!({
+                    "Table": crate::service::table_json(t), "VersionId": "1",
+                })],
+                None => vec![],
+            }
         };
-        Ok(AwsResponse::ok_json(json!({ "TableVersions": versions })))
+        let (page, token) = crate::common::paginate_body(&body, versions);
+        let mut resp = json!({ "TableVersions": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn delete_table_version(
@@ -873,10 +926,35 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        req_str(&body, "DatabaseName")?;
-        req_str(&body, "TableName")?;
-        req_present(&body, "VersionIds")?;
-        Ok(AwsResponse::ok_json(json!({ "Errors": [] })))
+        let db = req_str(&body, "DatabaseName")?.to_string();
+        let table = req_str(&body, "TableName")?.to_string();
+        let version_ids: Vec<String> = req_present(&body, "VersionIds")?
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        // Actually remove each requested version; report a per-id
+        // `TableVersionError` for versions that don't exist (AWS shape).
+        let mut errors: Vec<Value> = Vec::new();
+        for vid in &version_ids {
+            let key = Self::tv_key(&db, &table, vid);
+            if st.table_versions.remove(&key).is_none() {
+                errors.push(json!({
+                    "TableName": table,
+                    "VersionId": vid,
+                    "ErrorDetail": error_detail(
+                        "EntityNotFoundException",
+                        format!("Version {vid} not found for table {table}"),
+                    ),
+                }));
+            }
+        }
+        Ok(AwsResponse::ok_json(json!({ "Errors": errors })))
     }
 
     // ===================== partition indexes & extra partition/table batches =====================
@@ -983,9 +1061,12 @@ impl GlueService {
                     .collect()
             })
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({
-            "PartitionIndexDescriptorList": list,
-        })))
+        let (page, token) = crate::common::paginate_body(&body, list);
+        let mut resp = json!({ "PartitionIndexDescriptorList": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn batch_delete_table(
