@@ -230,6 +230,10 @@ pub(super) fn db_cluster_member_xml(v: &Value) -> String {
         "AwsBackupRecoveryPointArn",
         "GlobalWriteForwardingStatus",
         "LocalWriteForwardingStatus",
+        "ActivityStreamStatus",
+        "ActivityStreamKmsKeyId",
+        "ActivityStreamKinesisStreamName",
+        "ActivityStreamMode",
     ] {
         if let Some(s) = v[key].as_str() {
             out.push_str(&format!("          <{key}>{}</{key}>\n", xml_escape(s)));
@@ -240,6 +244,9 @@ pub(super) fn db_cluster_member_xml(v: &Value) -> String {
         "BacktrackWindow",
         "MonitoringInterval",
         "PerformanceInsightsRetentionPeriod",
+        // Aurora Serverless v1 current capacity, set by
+        // ModifyCurrentDBClusterCapacity.
+        "Capacity",
     ] {
         if let Some(n) = v[key].as_i64() {
             out.push_str(&format!("          <{key}>{n}</{key}>\n"));
@@ -443,11 +450,30 @@ pub(super) fn blue_green_xml(v: &Value) -> String {
 }
 
 pub(super) fn shard_group_xml(v: &Value) -> String {
-    format!(
+    let mut out = format!(
         "          <DBShardGroupIdentifier>{}</DBShardGroupIdentifier>\n          <Status>{}</Status>",
         xml_escape(v["DBShardGroupIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["Status"].as_str().unwrap_or("available")),
-    )
+    );
+    if let Some(s) = v["DBClusterIdentifier"].as_str() {
+        out.push_str(&format!(
+            "\n          <DBClusterIdentifier>{}</DBClusterIdentifier>",
+            xml_escape(s)
+        ));
+    }
+    // MaxACU / MinACU are serverless capacity units (doubles); ComputeRedundancy
+    // is an integer. Render whichever the caller set on Create/Modify.
+    for key in ["MaxACU", "MinACU"] {
+        if let Some(n) = v[key].as_f64() {
+            out.push_str(&format!("\n          <{key}>{n}</{key}>"));
+        }
+    }
+    if let Some(n) = v["ComputeRedundancy"].as_i64() {
+        out.push_str(&format!(
+            "\n          <ComputeRedundancy>{n}</ComputeRedundancy>"
+        ));
+    }
+    out
 }
 
 pub(super) fn engine_version_xml(v: &Value) -> String {

@@ -581,6 +581,7 @@ pub(crate) fn build_restored_instance(
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
+        activity_stream: None,
     }
 }
 
@@ -665,6 +666,7 @@ pub(crate) fn build_s3_restored_instance(
         domain_auth_secret_arn: None,
         domain_dns_ips: Vec::new(),
         db_cluster_identifier: None,
+        activity_stream: None,
     }
 }
 
@@ -756,6 +758,7 @@ pub(crate) fn build_pit_restored_instance(
         domain_auth_secret_arn: source.domain_auth_secret_arn.clone(),
         domain_dns_ips: source.domain_dns_ips.clone(),
         db_cluster_identifier: source.db_cluster_identifier.clone(),
+        activity_stream: source.activity_stream.clone(),
     }
 }
 
@@ -836,6 +839,7 @@ pub(crate) fn build_read_replica_instance(
         domain_auth_secret_arn: source.domain_auth_secret_arn.clone(),
         domain_dns_ips: source.domain_dns_ips.clone(),
         db_cluster_identifier: source.db_cluster_identifier.clone(),
+        activity_stream: source.activity_stream.clone(),
     }
 }
 
@@ -1395,6 +1399,48 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
     } else {
         "<DomainMemberships/>".to_string()
     };
+    // Database Activity Stream: reflect the persisted stream state so
+    // Start/Stop/Modify ActivityStream round-trips through describe. A
+    // `None` config reads back as a stopped stream (no kms/kinesis/mode).
+    let activity_stream_xml = match instance.activity_stream.as_ref() {
+        Some(stream) => {
+            let status = if stream.status.is_empty() {
+                "stopped"
+            } else {
+                stream.status.as_str()
+            };
+            let kms = stream
+                .kms_key_id
+                .as_ref()
+                .map(|k| {
+                    format!(
+                        "<ActivityStreamKmsKeyId>{}</ActivityStreamKmsKeyId>",
+                        xml_escape(k)
+                    )
+                })
+                .unwrap_or_default();
+            let kinesis = stream
+                .kinesis_stream_name
+                .as_ref()
+                .map(|s| {
+                    format!(
+                        "<ActivityStreamKinesisStreamName>{}</ActivityStreamKinesisStreamName>",
+                        xml_escape(s)
+                    )
+                })
+                .unwrap_or_default();
+            let mode = stream
+                .mode
+                .as_ref()
+                .map(|m| format!("<ActivityStreamMode>{}</ActivityStreamMode>", xml_escape(m)))
+                .unwrap_or_default();
+            format!(
+                "<ActivityStreamStatus>{}</ActivityStreamStatus>{kms}{kinesis}{mode}",
+                xml_escape(status)
+            )
+        }
+        None => "<ActivityStreamStatus>stopped</ActivityStreamStatus>".to_string(),
+    };
 
     format!(
         "<DBInstanceIdentifier>{identifier}</DBInstanceIdentifier>\
@@ -1445,7 +1491,7 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
          {copy_tags_xml}\
          {master_user_secret_xml}\
          <ProcessorFeatures/>\
-         <ActivityStreamStatus>stopped</ActivityStreamStatus>\
+         {activity_stream_xml}\
          <DbiResourceId>{dbi_resource_id}</DbiResourceId>\
          <DeletionProtection>{deletion_protection}</DeletionProtection>\
          {pending_modified_values_xml}\

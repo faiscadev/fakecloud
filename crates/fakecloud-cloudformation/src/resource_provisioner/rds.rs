@@ -614,6 +614,7 @@ impl ResourceProvisioner {
                 .get("DBClusterIdentifier")
                 .and_then(|v| v.as_str())
                 .map(String::from),
+            activity_stream: None,
         };
         let endpoint = inst.endpoint_address.clone();
         let endpoint_port = inst.port;

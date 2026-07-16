@@ -135,6 +135,28 @@ pub struct DbInstance {
     /// snapshot/restore paths can find the writer for a given cluster.
     #[serde(default)]
     pub db_cluster_identifier: Option<String>,
+    /// Database Activity Stream configuration, written by
+    /// `StartActivityStream` / `ModifyActivityStream` and cleared to
+    /// `stopped` by `StopActivityStream`. `None` reads back as a stopped
+    /// stream in describe responses.
+    #[serde(default)]
+    pub activity_stream: Option<ActivityStreamConfig>,
+}
+
+/// Database Activity Stream state for a DB instance. Persisted so that
+/// `StartActivityStream` / `StopActivityStream` / `ModifyActivityStream`
+/// round-trip through `DescribeDBInstances` instead of always reporting
+/// `stopped`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ActivityStreamConfig {
+    /// One of `starting` | `started` | `stopping` | `stopped`.
+    pub status: String,
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub kms_key_id: Option<String>,
+    #[serde(default)]
+    pub kinesis_stream_name: Option<String>,
 }
 
 #[derive(Clone, Default, serde::Serialize, serde::Deserialize)]
@@ -309,6 +331,13 @@ pub struct DbSnapshot {
     pub timezone: Option<String>,
     #[serde(default)]
     pub storage_throughput: Option<i32>,
+    /// Snapshot share attributes keyed by attribute name (currently only
+    /// `restore`), written by `ModifyDBSnapshotAttribute` and surfaced by
+    /// `DescribeDBSnapshotAttributes`. The `restore` list holds the AWS
+    /// account ids the snapshot is shared with (or the literal `all` for a
+    /// public snapshot).
+    #[serde(default)]
+    pub snapshot_attributes: BTreeMap<String, Vec<String>>,
 }
 
 impl fmt::Debug for DbSnapshot {
@@ -981,6 +1010,7 @@ mod tests {
                 domain_auth_secret_arn: None,
                 domain_dns_ips: Vec::new(),
                 db_cluster_identifier: None,
+                activity_stream: None,
             },
         );
 
@@ -1127,6 +1157,7 @@ mod tests {
             domain_auth_secret_arn: None,
             domain_dns_ips: Vec::new(),
             db_cluster_identifier: None,
+            activity_stream: None,
         }
     }
 
