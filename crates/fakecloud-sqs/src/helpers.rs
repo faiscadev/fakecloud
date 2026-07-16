@@ -559,28 +559,42 @@ pub(crate) fn parse_body(req: &AwsRequest) -> Value {
         for (k, v) in &req.query_params {
             map.insert(k.clone(), Value::String(v.clone()));
         }
-        // Handle nested Attribute.N.Name/Value patterns
+        // Handle nested Attribute.N.Name/Value patterns. SQS numbers these
+        // contiguously starting at 1, so iterate until the next index is
+        // absent rather than capping at a fixed count — SQS now exposes ~22
+        // queue attributes and a hardcoded cap would drop the tail.
         let mut attrs = serde_json::Map::new();
-        for i in 1..=20 {
+        let mut i = 1;
+        loop {
             let name_key = format!("Attribute.{i}.Name");
             let value_key = format!("Attribute.{i}.Value");
-            if let (Some(name), Some(value)) = (
+            match (
                 req.query_params.get(&name_key),
                 req.query_params.get(&value_key),
             ) {
-                attrs.insert(name.clone(), Value::String(value.clone()));
+                (Some(name), Some(value)) => {
+                    attrs.insert(name.clone(), Value::String(value.clone()));
+                }
+                _ => break,
             }
+            i += 1;
         }
         if !attrs.is_empty() {
             map.insert("Attributes".to_string(), Value::Object(attrs));
         }
-        // Handle AttributeName.N patterns (used by GetQueueAttributes in query protocol)
+        // Handle AttributeName.N patterns (used by GetQueueAttributes in query
+        // protocol). Same contiguous enumeration — stop at the first missing
+        // index instead of a fixed cap so a client requesting more than 20
+        // individual names still gets them all.
         let mut attr_names = Vec::new();
-        for i in 1..=20 {
+        let mut i = 1;
+        loop {
             let key = format!("AttributeName.{i}");
-            if let Some(val) = req.query_params.get(&key) {
-                attr_names.push(Value::String(val.clone()));
+            match req.query_params.get(&key) {
+                Some(val) => attr_names.push(Value::String(val.clone())),
+                None => break,
             }
+            i += 1;
         }
         if !attr_names.is_empty() {
             map.insert("AttributeNames".to_string(), Value::Array(attr_names));
@@ -1309,6 +1323,65 @@ pub(crate) fn resolve_queue_url(input: &str, state: &crate::state::SqsState) -> 
     None
 }
 
+/// Resolve the base endpoint (`<scheme>://<host>`) that rendered QueueUrls
+/// should carry, in priority order:
+///
+/// 1. an explicit `FAKECLOUD_EXTERNAL_URL` override (for docker-compose /
+///    remote setups where the app reaches fakecloud under a service name),
+/// 2. the request `Host` header (scheme from `X-Forwarded-Proto`, else `http`),
+///    so frameworks that treat the QueueUrl as the endpoint (Celery/kombu,
+///    Spring Cloud AWS) get a URL routable from the caller's network, then
+/// 3. the static boot-time endpoint (`fallback`) — which keeps the default,
+///    header-less behaviour at `http://localhost:<port>`.
+///
+/// The stored queue identity stays host-independent; only the rendered URL
+/// reflects the caller's host, and `resolve_queue_url` accepts any host on the
+/// way back in.
+///
+/// Takes the request headers directly (rather than the whole `AwsRequest`) so
+/// the same resolution can back the `/_fakecloud/sqs/messages` introspection
+/// endpoint, keeping every client-facing QueueUrl consistent.
+pub fn resolve_endpoint_base(headers: &http::HeaderMap, fallback: &str) -> String {
+    if let Ok(ext) = std::env::var("FAKECLOUD_EXTERNAL_URL") {
+        let ext = ext.trim().trim_end_matches('/');
+        if !ext.is_empty() {
+            return ext.to_string();
+        }
+    }
+    if let Some(host) = headers
+        .get("host")
+        .and_then(|h| h.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())
+    {
+        let scheme = headers
+            .get("x-forwarded-proto")
+            .and_then(|h| h.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("http");
+        return format!("{scheme}://{host}");
+    }
+    fallback.to_string()
+}
+
+/// Re-render a stored QueueUrl (`<scheme>://<host>/<account>/<name>`) so its
+/// authority becomes `base`, preserving the `/account/name` path. Used to make
+/// the returned URL reflect the caller's host without mutating the stored
+/// identity.
+pub fn render_queue_url(stored: &str, base: &str) -> String {
+    let base = base.trim_end_matches('/');
+    for prefix in ["http://", "https://"] {
+        if let Some(rest) = stored.strip_prefix(prefix) {
+            return match rest.find('/') {
+                Some(slash) => format!("{base}{}", &rest[slash..]),
+                None => base.to_string(),
+            };
+        }
+    }
+    stored.to_string()
+}
+
 pub(crate) fn missing_param(name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -1517,6 +1590,45 @@ pub(crate) fn parse_numbered_params(body: &Value, prefix: &str) -> Vec<String> {
         }
     }
     result
+}
+
+#[cfg(test)]
+mod render_queue_url_tests {
+    use super::render_queue_url;
+
+    #[test]
+    fn swaps_authority_preserving_path() {
+        assert_eq!(
+            render_queue_url(
+                "http://localhost:4566/123456789012/my-queue",
+                "http://fakecloud:4566"
+            ),
+            "http://fakecloud:4566/123456789012/my-queue"
+        );
+    }
+
+    #[test]
+    fn honors_https_base_and_trims_trailing_slash() {
+        assert_eq!(
+            render_queue_url(
+                "http://localhost:4566/123456789012/q",
+                "https://sqs.example.test/"
+            ),
+            "https://sqs.example.test/123456789012/q"
+        );
+    }
+
+    #[test]
+    fn identical_base_is_a_no_op() {
+        let stored = "http://localhost:4566/123456789012/q";
+        assert_eq!(render_queue_url(stored, "http://localhost:4566"), stored);
+    }
+
+    #[test]
+    fn non_http_input_is_returned_unchanged() {
+        // Defensive: an unexpected stored form is passed through verbatim.
+        assert_eq!(render_queue_url("weird-value", "http://x"), "weird-value");
+    }
 }
 
 #[cfg(test)]

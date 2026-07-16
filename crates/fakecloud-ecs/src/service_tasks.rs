@@ -106,6 +106,8 @@ impl EcsService {
             }
             None => 1,
         };
+        // Defaulted to `family:<taskDefinitionFamily>` below once the task
+        // definition is resolved, mirroring how real AWS labels a bare RunTask.
         let group = opt_str(&body, "group").map(String::from);
         let started_by = opt_str(&body, "startedBy").map(String::from);
         let enable_execute_command = body
@@ -176,6 +178,10 @@ impl EcsService {
         }
         let td_arn = td.task_definition_arn.clone();
         let td_family = td.family.clone();
+        // Real AWS assigns a bare RunTask (no explicit `group`) the default
+        // group `family:<taskDefinitionFamily>`. Service/daemon tasks set their
+        // own group upstream, so only default it when the caller omitted one.
+        let group = group.or_else(|| Some(format!("family:{td_family}")));
         let td_revision = td.revision;
         let td_cpu = td.cpu.clone();
         let td_memory = td.memory.clone();
@@ -859,6 +865,47 @@ mod multi_container_tests {
             .filter_map(|c| c.get("containerArn").and_then(|v| v.as_str()))
             .collect();
         assert_eq!(arns.len(), 2);
+    }
+
+    #[test]
+    fn run_task_defaults_group_to_family() {
+        // A bare RunTask (no `group`) gets `family:<taskDefinitionFamily>`,
+        // matching real AWS. eventing/consumers filter tasks by group, so a
+        // null group hides RunTask-spawned tasks from them.
+        let svc = fresh_service();
+        svc.register_task_definition(&make_request(
+            "RegisterTaskDefinition",
+            json!({"family": "web", "containerDefinitions": [{"name": "app", "image": "alpine"}]}),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .run_task(&make_request(
+                "RunTask",
+                json!({"cluster": "default", "taskDefinition": "web"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["tasks"][0]["group"], "family:web");
+    }
+
+    #[test]
+    fn run_task_preserves_explicit_group() {
+        let svc = fresh_service();
+        svc.register_task_definition(&make_request(
+            "RegisterTaskDefinition",
+            json!({"family": "web", "containerDefinitions": [{"name": "app", "image": "alpine"}]}),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .run_task(&make_request(
+                "RunTask",
+                json!({"cluster": "default", "taskDefinition": "web", "group": "my-group"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["tasks"][0]["group"], "my-group");
     }
 
     #[test]

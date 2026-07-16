@@ -501,6 +501,18 @@ pub(crate) fn build_logging(req: Option<&Value>) -> Value {
 }
 
 pub(crate) fn cluster_json(c: &Cluster, id: &str) -> Value {
+    // Real AWS scopes the OIDC issuer host to the cluster's region:
+    // `https://oidc.eks.<region>.amazonaws.com/id/<ID>`. Tooling (eksctl IRSA,
+    // Terraform `aws_iam_openid_connect_provider { url = ...oidc[0].issuer }`)
+    // parses `<region>` out of the host, so a region-less issuer breaks on any
+    // non-default region. The cluster's region is embedded in its ARN
+    // (`arn:PARTITION:eks:REGION:ACCOUNT:cluster/NAME`) at field index 3.
+    let region = c
+        .arn
+        .split(':')
+        .nth(3)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("us-east-1");
     let mut out = json!({
         "name": c.name,
         "arn": c.arn,
@@ -513,7 +525,10 @@ pub(crate) fn cluster_json(c: &Cluster, id: &str) -> Value {
         "logging": c.logging,
         "identity": {
             "oidc": {
-                "issuer": format!("https://oidc.eks.amazonaws.com/id/{}", id.to_uppercase()),
+                "issuer": format!(
+                    "https://oidc.eks.{region}.amazonaws.com/id/{}",
+                    id.to_uppercase()
+                ),
             },
         },
         "status": c.status,

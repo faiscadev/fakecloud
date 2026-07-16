@@ -109,6 +109,52 @@ async fn create_describe_round_trip_settles_active() {
     );
 }
 
+fn make_request_in_region(method: Method, path: &str, body: &str, region: &str) -> AwsRequest {
+    let mut req = make_request(method, path, body);
+    req.region = region.to_string();
+    req
+}
+
+#[tokio::test]
+async fn describe_cluster_oidc_issuer_includes_region() {
+    // Real AWS scopes the OIDC issuer host to the cluster's region:
+    // `https://oidc.eks.<region>.amazonaws.com/id/<ID>`. Tools (eksctl IRSA,
+    // Terraform aws_iam_openid_connect_provider) parse the region from the
+    // host and break on a region-less issuer. The region flows from the
+    // request (which is what the cluster's ARN records).
+    for region in ["us-east-1", "eu-west-1", "ap-southeast-2"] {
+        let svc = EksService::new(make_state());
+        svc.handle(make_request_in_region(
+            Method::POST,
+            "/clusters",
+            &create_body("oidc"),
+            region,
+        ))
+        .await
+        .unwrap();
+        let resp = svc
+            .handle(make_request_in_region(
+                Method::GET,
+                "/clusters/oidc",
+                "",
+                region,
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let issuer = v["cluster"]["identity"]["oidc"]["issuer"].as_str().unwrap();
+        let expected_prefix = format!("https://oidc.eks.{region}.amazonaws.com/id/");
+        assert!(
+            issuer.starts_with(&expected_prefix),
+            "issuer {issuer} should start with {expected_prefix}"
+        );
+        // The trailing segment is the uppercased cluster id.
+        let id = issuer.strip_prefix(&expected_prefix).unwrap();
+        assert!(!id.is_empty());
+        assert_eq!(id, id.to_uppercase());
+    }
+}
+
 #[tokio::test]
 async fn create_rejects_duplicate() {
     let svc = EksService::new(make_state());

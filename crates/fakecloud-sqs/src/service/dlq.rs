@@ -22,7 +22,10 @@ impl SqsService {
             .ok_or_else(queue_not_found)?;
         let queue_arn = queue.arn.clone();
 
-        // Find all queues whose redrive policy targets this queue
+        // Find all queues whose redrive policy targets this queue. Render each
+        // URL against the caller's host so it stays consistent with the
+        // host-aware URLs returned by CreateQueue/GetQueueUrl/ListQueues.
+        let base = resolve_endpoint_base(&req.headers, &state.endpoint);
         let source_urls: Vec<String> = state
             .queues
             .values()
@@ -32,7 +35,7 @@ impl SqsService {
                     .map(|rp| rp.dead_letter_target_arn == queue_arn)
                     .unwrap_or(false)
             })
-            .map(|q| q.queue_url.clone())
+            .map(|q| render_queue_url(&q.queue_url, &base))
             .collect();
 
         Ok(sqs_response(
