@@ -43,7 +43,15 @@ impl ResourceProvisioner {
         let mut __s3_mas = self.s3_state.write();
         let state = __s3_mas.get_or_create(&self.account_id);
         let region = state.region.clone();
-        let bucket = S3Bucket::new(bucket_name, &state.region, &state.account_id);
+        let mut bucket = S3Bucket::new(bucket_name, &state.region, &state.account_id);
+        // Translate every modeled CFN property (VersioningConfiguration,
+        // BucketEncryption, PublicAccessBlockConfiguration,
+        // NotificationConfiguration, Tags, Website/Cors/Lifecycle/Logging) into
+        // the S3 bucket state and persist each subresource through the SAME
+        // store path the PutBucket* handlers use. Previously only BucketName was
+        // read, so a CREATE_COMPLETE bucket surfaced with none of its
+        // protections and S3->Lambda/SQS/SNS notifications never fired.
+        fakecloud_s3::apply_cfn_bucket_properties(&mut bucket, props, &self.s3_store)?;
         // Write the bucket through to the S3 disk store, exactly as the real
         // CreateBucket handler does, so a CFN-provisioned bucket survives a
         // restart instead of living only in the in-memory map.
@@ -59,6 +67,45 @@ impl ResourceProvisioner {
         let dual_stack_domain_name = format!("{bucket_name}.s3.dualstack.{region}.amazonaws.com");
         let website_url = format!("http://{bucket_name}.s3-website-{region}.amazonaws.com");
         Ok(ProvisionResult::new(bucket_name)
+            .with("Arn", arn)
+            .with("DomainName", domain_name)
+            .with("RegionalDomainName", regional_domain_name)
+            .with("DualStackDomainName", dual_stack_domain_name)
+            .with("WebsiteURL", website_url))
+    }
+
+    /// Apply a CFN stack update to an existing bucket in place. Re-runs the
+    /// same property translation `create_s3_bucket` uses so a follow-up update
+    /// that turns on versioning/encryption/etc. is applied instead of being a
+    /// silent no-op. The bucket's objects are preserved; only its config
+    /// (sub)resources are re-derived from the new template properties.
+    pub(super) fn update_s3_bucket(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let bucket_name = &existing.physical_id;
+        let mut __s3_mas = self.s3_state.write();
+        let state = __s3_mas.get_or_create(&self.account_id);
+        let region = state.region.clone();
+        {
+            let bucket = state
+                .buckets
+                .get_mut(bucket_name)
+                .ok_or_else(|| format!("Bucket {bucket_name} not yet provisioned"))?;
+            fakecloud_s3::apply_cfn_bucket_properties(
+                bucket,
+                &resource.properties,
+                &self.s3_store,
+            )?;
+        }
+
+        let arn = Arn::s3(bucket_name).to_string();
+        let domain_name = format!("{bucket_name}.s3.amazonaws.com");
+        let regional_domain_name = format!("{bucket_name}.s3.{region}.amazonaws.com");
+        let dual_stack_domain_name = format!("{bucket_name}.s3.dualstack.{region}.amazonaws.com");
+        let website_url = format!("http://{bucket_name}.s3-website-{region}.amazonaws.com");
+        Ok(ProvisionResult::new(bucket_name.clone())
             .with("Arn", arn)
             .with("DomainName", domain_name)
             .with("RegionalDomainName", regional_domain_name)

@@ -62,6 +62,11 @@ impl ResourceProvisioner {
                 .attributes
                 .insert("SqsManagedSseEnabled".to_string(), "false".to_string());
         }
+        // Apply a Tags update in place so a stack update that changes tags is
+        // reflected by ListQueueTags rather than being dropped.
+        if props.get("Tags").is_some() {
+            queue.tags = parse_cfn_queue_tags(props.get("Tags"));
+        }
         Ok(ProvisionResult::new(url.clone()))
     }
 
@@ -141,6 +146,12 @@ impl ResourceProvisioner {
             .get("RedrivePolicy")
             .and_then(|s| fakecloud_sqs::parse_redrive_policy(s));
 
+        // Translate the CFN `Tags` property into the queue's tag map. Every
+        // other property is applied above; tags were skipped, so ListQueueTags
+        // on a CFN-created queue came back empty (Terraform then reported tag
+        // drift on every plan).
+        let tags = parse_cfn_queue_tags(props.get("Tags"));
+
         let queue = SqsQueue {
             queue_name: queue_name.to_string(),
             queue_url: queue_url.clone(),
@@ -152,7 +163,7 @@ impl ResourceProvisioner {
             is_fifo,
             dedup_cache: std::collections::BTreeMap::new(),
             redrive_policy,
-            tags: std::collections::BTreeMap::new(),
+            tags,
             next_sequence_number: 0,
             permission_labels: Vec::new(),
             receipt_handle_map: std::collections::BTreeMap::new(),
@@ -256,6 +267,36 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+}
+
+/// Translate the CFN `AWS::SQS::Queue` `Tags` property into the queue's tag
+/// map. CFN models tags as a list of `{ "Key": .., "Value": .. }` objects; a
+/// resolved intrinsic can also produce a plain `{key: value}` map, so both
+/// shapes are accepted.
+fn parse_cfn_queue_tags(
+    tags: Option<&serde_json::Value>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut map = std::collections::BTreeMap::new();
+    match tags {
+        Some(serde_json::Value::Array(arr)) => {
+            for t in arr {
+                let key = t.get("Key").and_then(|v| v.as_str());
+                let value = t.get("Value").and_then(|v| v.as_str());
+                if let (Some(k), Some(v)) = (key, value) {
+                    map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+        Some(serde_json::Value::Object(obj)) => {
+            for (k, v) in obj {
+                if let Some(v) = v.as_str() {
+                    map.insert(k.clone(), v.to_string());
+                }
+            }
+        }
+        _ => {}
+    }
+    map
 }
 
 /// Resolve the `Queues` property (a list of Refs already resolved to queue

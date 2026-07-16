@@ -1633,6 +1633,7 @@ impl ResourceProvisioner {
             "AWS::SQS::QueuePolicy" => Some(self.update_sqs_queue_policy(existing, new_def)?),
             "AWS::SNS::Topic" => Some(self.update_sns_topic(existing, new_def)?),
             "AWS::SNS::TopicPolicy" => Some(self.update_sns_topic_policy(existing, new_def)?),
+            "AWS::S3::Bucket" => Some(self.update_s3_bucket(existing, new_def)?),
             "AWS::S3::BucketPolicy" => Some(self.update_s3_bucket_policy(existing, new_def)?),
             "AWS::Pipes::Pipe" => Some(self.update_pipes_pipe(existing, new_def)?),
             "AWS::CodeArtifact::Domain" => {
@@ -4896,6 +4897,164 @@ mod tests {
         );
         let sr = prov.create_resource(&res).unwrap();
         assert!(sr.physical_id.ends_with(".fifo"));
+    }
+
+    // ── S3 bucket config-property provisioning (bug-hunt 1.26) ──
+
+    #[test]
+    fn s3_bucket_provisions_all_config_properties() {
+        let prov = make_provisioner();
+        let bucket = make_resource(
+            "AWS::S3::Bucket",
+            "MyBucket",
+            serde_json::json!({
+                "BucketName": "protected-bucket",
+                "VersioningConfiguration": { "Status": "Enabled" },
+                "BucketEncryption": {
+                    "ServerSideEncryptionConfiguration": [{
+                        "ServerSideEncryptionByDefault": { "SSEAlgorithm": "AES256" }
+                    }]
+                },
+                "PublicAccessBlockConfiguration": {
+                    "BlockPublicAcls": true,
+                    "BlockPublicPolicy": true,
+                    "IgnorePublicAcls": true,
+                    "RestrictPublicBuckets": true
+                },
+                "NotificationConfiguration": {
+                    "QueueConfigurations": [{
+                        "Event": "s3:ObjectCreated:*",
+                        "Queue": "arn:aws:sqs:us-east-1:123456789012:q"
+                    }],
+                    "EventBridgeConfiguration": {}
+                },
+                "Tags": [{ "Key": "env", "Value": "prod" }]
+            }),
+        );
+        let sr = prov.create_resource(&bucket).unwrap();
+        assert_eq!(sr.physical_id, "protected-bucket");
+
+        let s3 = prov.s3_state.read();
+        let acct = s3.get("123456789012").unwrap();
+        let b = acct.buckets.get("protected-bucket").unwrap();
+        // GetBucketVersioning
+        assert_eq!(b.versioning.as_deref(), Some("Enabled"));
+        // GetBucketEncryption
+        assert!(b
+            .encryption_config
+            .as_deref()
+            .unwrap()
+            .contains("<SSEAlgorithm>AES256</SSEAlgorithm>"));
+        // GetPublicAccessBlock
+        assert!(b
+            .public_access_block
+            .as_deref()
+            .unwrap()
+            .contains("<BlockPublicAcls>true</BlockPublicAcls>"));
+        // GetBucketNotification + EventBridge
+        assert!(b
+            .notification_config
+            .as_deref()
+            .unwrap()
+            .contains("<Queue>arn:aws:sqs:us-east-1:123456789012:q</Queue>"));
+        assert!(b.eventbridge_enabled);
+        // GetBucketTagging
+        assert_eq!(b.tags.get("env").map(String::as_str), Some("prod"));
+    }
+
+    #[test]
+    fn s3_bucket_update_enables_versioning() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::S3::Bucket",
+                "MyBucket",
+                serde_json::json!({ "BucketName": "later-versioned" }),
+            ))
+            .unwrap();
+        // Freshly created: no versioning.
+        {
+            let s3 = prov.s3_state.read();
+            let b = s3
+                .get("123456789012")
+                .unwrap()
+                .buckets
+                .get("later-versioned")
+                .unwrap();
+            assert!(b.versioning.is_none());
+        }
+        // A follow-up update turning on versioning must be applied, not a no-op.
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::S3::Bucket",
+                "MyBucket",
+                serde_json::json!({
+                    "BucketName": "later-versioned",
+                    "VersioningConfiguration": { "Status": "Enabled" }
+                }),
+            ),
+        )
+        .unwrap();
+        let s3 = prov.s3_state.read();
+        let b = s3
+            .get("123456789012")
+            .unwrap()
+            .buckets
+            .get("later-versioned")
+            .unwrap();
+        assert_eq!(b.versioning.as_deref(), Some("Enabled"));
+    }
+
+    #[test]
+    fn sqs_queue_provisions_tags() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SQS::Queue",
+                "TaggedQ",
+                serde_json::json!({
+                    "QueueName": "tagged-q",
+                    "Tags": [
+                        { "Key": "team", "Value": "core" },
+                        { "Key": "env", "Value": "prod" }
+                    ]
+                }),
+            ))
+            .unwrap();
+        {
+            let sqs = prov.sqs_state.read();
+            let q = sqs
+                .get("123456789012")
+                .unwrap()
+                .queues
+                .get(&created.physical_id)
+                .unwrap();
+            assert_eq!(q.tags.get("team").map(String::as_str), Some("core"));
+            assert_eq!(q.tags.get("env").map(String::as_str), Some("prod"));
+        }
+        // Update replaces the tag set.
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::SQS::Queue",
+                "TaggedQ",
+                serde_json::json!({
+                    "QueueName": "tagged-q",
+                    "Tags": [{ "Key": "team", "Value": "platform" }]
+                }),
+            ),
+        )
+        .unwrap();
+        let sqs = prov.sqs_state.read();
+        let q = sqs
+            .get("123456789012")
+            .unwrap()
+            .queues
+            .get(&created.physical_id)
+            .unwrap();
+        assert_eq!(q.tags.get("team").map(String::as_str), Some("platform"));
+        assert!(!q.tags.contains_key("env"));
     }
 
     // ── get_att dispatch ──
