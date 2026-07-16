@@ -1034,14 +1034,14 @@ impl ApiGatewayV2Service {
                 req_object(&b, "PortalContent")?;
                 check_length(&b, "LogoUri", None, Some(1092))?;
                 check_length(&b, "RumAppMonitorName", None, Some(255))?;
-                self.put_keyed(req, resource_id, "PortalId", "portals", aid)
+                self.put_keyed(req, resource_id, "PortalId", "portals", aid, true)
             }
             "UpdatePortal" => {
                 resource_id.ok_or_else(|| missing("PortalId"))?;
                 let b = body(req);
                 check_length(&b, "LogoUri", None, Some(1092))?;
                 check_length(&b, "RumAppMonitorName", None, Some(255))?;
-                self.put_keyed(req, resource_id, "PortalId", "portals", aid)
+                self.put_keyed(req, resource_id, "PortalId", "portals", aid, false)
             }
             "GetPortal" => self.get_keyed(resource_id, "portals", aid, &region),
             "ListPortals" => self.list_keyed("portals", aid, &region),
@@ -1091,14 +1091,28 @@ impl ApiGatewayV2Service {
                 req_str(&b, "DisplayName")?;
                 check_length(&b, "DisplayName", Some(1), Some(255))?;
                 check_length(&b, "Description", None, Some(1024))?;
-                self.put_keyed(req, resource_id, "PortalProductId", "portal_products", aid)
+                self.put_keyed(
+                    req,
+                    resource_id,
+                    "PortalProductId",
+                    "portal_products",
+                    aid,
+                    true,
+                )
             }
             "UpdatePortalProduct" => {
                 resource_id.ok_or_else(|| missing("PortalProductId"))?;
                 let b = body(req);
                 check_length(&b, "DisplayName", Some(1), Some(255))?;
                 check_length(&b, "Description", None, Some(1024))?;
-                self.put_keyed(req, resource_id, "PortalProductId", "portal_products", aid)
+                self.put_keyed(
+                    req,
+                    resource_id,
+                    "PortalProductId",
+                    "portal_products",
+                    aid,
+                    false,
+                )
             }
             "GetPortalProduct" => self.get_keyed(resource_id, "portal_products", aid, &region),
             "ListPortalProducts" => self.list_keyed("portal_products", aid, &region),
@@ -1319,21 +1333,60 @@ impl ApiGatewayV2Service {
                 no_content()
             }
             "DeleteRouteRequestParameter" => {
-                api_id.ok_or_else(|| missing("ApiId"))?;
-                resource_id.ok_or_else(|| missing("RouteId"))?;
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let route = resource_id.ok_or_else(|| missing("RouteId"))?;
                 // RequestParameterKey is segs[6]; enforce non-empty too.
-                let key = segs.get(6).map(|s| s.as_str()).unwrap_or("");
-                if !valid_path_id(key) {
+                let raw_key = segs.get(6).map(|s| s.as_str()).unwrap_or("");
+                if !valid_path_id(raw_key) {
                     return Err(missing("RequestParameterKey"));
+                }
+                // The key may be percent-encoded in the URL; match the stored
+                // (decoded) key. Previously this validated then returned 204
+                // WITHOUT removing anything, so GetRoute kept returning the
+                // parameter (bug-hunt 2026-07-16, 1.22).
+                let key = percent_encoding::percent_decode_str(raw_key)
+                    .decode_utf8_lossy()
+                    .into_owned();
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                let route_obj = state
+                    .routes
+                    .get_mut(api)
+                    .and_then(|r| r.get_mut(route))
+                    .ok_or_else(|| not_found("Route", route))?;
+                if let Some(params) = route_obj.request_parameters.as_mut() {
+                    params.remove(&key);
+                    if params.is_empty() {
+                        route_obj.request_parameters = None;
+                    }
                 }
                 no_content()
             }
             "DeleteRouteSettings" => {
-                api_id.ok_or_else(|| missing("ApiId"))?;
-                resource_id.ok_or_else(|| missing("StageName"))?;
-                let key = segs.get(6).map(|s| s.as_str()).unwrap_or("");
-                if !valid_path_id(key) {
+                let api = api_id.ok_or_else(|| missing("ApiId"))?;
+                let stage_name = resource_id.ok_or_else(|| missing("StageName"))?;
+                let raw_key = segs.get(6).map(|s| s.as_str()).unwrap_or("");
+                if !valid_path_id(raw_key) {
                     return Err(missing("RouteKey"));
+                }
+                // Actually remove the per-route entry from the stage's
+                // route_settings. Previously this no-op'd and left the override
+                // in place (bug-hunt 2026-07-16, 1.22).
+                let key = percent_encoding::percent_decode_str(raw_key)
+                    .decode_utf8_lossy()
+                    .into_owned();
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(aid);
+                let stage = state
+                    .stages
+                    .get_mut(api)
+                    .and_then(|s| s.get_mut(stage_name))
+                    .ok_or_else(|| not_found("Stage", stage_name))?;
+                if let Some(settings) = stage.route_settings.as_mut() {
+                    settings.remove(&key);
+                    if settings.is_empty() {
+                        stage.route_settings = None;
+                    }
                 }
                 no_content()
             }
@@ -1651,13 +1704,85 @@ impl ApiGatewayV2Service {
         id_field: &str,
         store: &str,
         account_id: &str,
+        is_create: bool,
     ) -> Result<AwsResponse, AwsServiceError> {
         let id = id_opt.map(String::from).unwrap_or_else(rand_id);
         let input = body(req);
-        // Build response from scratch with Smithy-required fields. Don't
+        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+
+        // Update is a partial patch: start from the stored record and overlay
+        // only the fields the caller actually sent. Rebuilding from defaults
+        // on every update clobbered PublishStatus back to UNPUBLISHED and reset
+        // Tags/Authorization/EndpointConfiguration — a Create->Publish->Update
+        // round-trip lost the publish state (bug-hunt 2026-07-16, 1.22). Mirror
+        // the partial-update semantics already used by `put_model`.
+        if !is_create {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(account_id);
+            let map = match store {
+                "portals" => &mut state.portals,
+                "portal_products" => &mut state.portal_products,
+                _ => return Err(missing("Store")),
+            };
+            let mut entry = map.get(&id).cloned().ok_or_else(|| not_found(store, &id))?;
+            entry["LastModified"] = json!(now);
+            match store {
+                "portals" => {
+                    if let Some(pc) = input.get("PortalContent").filter(|v| !v.is_null()) {
+                        // Merge onto the existing content so DisplayName/Theme
+                        // defaults survive a partial content patch.
+                        if let (Some(dst), Some(src)) = (
+                            entry
+                                .get_mut("PortalContent")
+                                .and_then(|v| v.as_object_mut()),
+                            pc.as_object(),
+                        ) {
+                            for (k, v) in src {
+                                dst.insert(k.clone(), v.clone());
+                            }
+                        } else {
+                            entry["PortalContent"] = pc.clone();
+                        }
+                    }
+                    if let Some(in_ec) = input.get("EndpointConfiguration") {
+                        let ec = entry
+                            .get_mut("EndpointConfiguration")
+                            .filter(|v| v.is_object());
+                        if let Some(ec) = ec {
+                            for key in [
+                                "CertificateArn",
+                                "DomainName",
+                                "certificateArn",
+                                "domainName",
+                            ] {
+                                if let Some(v) = in_ec.get(key).filter(|v| !v.is_null()) {
+                                    ec[key] = v.clone();
+                                }
+                            }
+                        }
+                    }
+                    for field in ["Authorization", "Tags", "RumAppMonitorName"] {
+                        if let Some(v) = input.get(field).filter(|v| !v.is_null()) {
+                            entry[field] = v.clone();
+                        }
+                    }
+                }
+                "portal_products" => {
+                    for field in ["Description", "DisplayName", "Tags"] {
+                        if let Some(v) = input.get(field).filter(|v| !v.is_null()) {
+                            entry[field] = v.clone();
+                        }
+                    }
+                }
+                _ => return Err(missing("Store")),
+            }
+            map.insert(id.clone(), entry.clone());
+            return ok(entry);
+        }
+
+        // Create: build response from scratch with Smithy-required fields. Don't
         // echo arbitrary input keys — probe variants send things like
         // `logoUri` that aren't on the response shape.
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
         let entry = match store {
             "portals" => {
                 let mut portal_content = input
@@ -2591,20 +2716,117 @@ mod tests {
             .map(|st| st.access_log_settings.is_none())
             .unwrap_or(false));
 
-        ok(
+        // DeleteRouteRequestParameter now actually removes the key from the
+        // route's request_parameters (1.22). Seed a route with two params,
+        // delete one, confirm only that one is gone.
+        {
+            let mut accounts = s.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.routes.entry(api.clone()).or_default().insert(
+                "r1".to_string(),
+                crate::state::Route {
+                    route_id: "r1".to_string(),
+                    route_key: "GET /p".to_string(),
+                    target: None,
+                    authorization_type: None,
+                    authorizer_id: None,
+                    api_key_required: None,
+                    authorization_scopes: None,
+                    model_selection_expression: None,
+                    operation_name: None,
+                    request_models: None,
+                    request_parameters: Some(
+                        [
+                            (
+                                "route.request.querystring.id".to_string(),
+                                serde_json::json!({"required": true}),
+                            ),
+                            (
+                                "route.request.header.x".to_string(),
+                                serde_json::json!({"required": false}),
+                            ),
+                        ]
+                        .into_iter()
+                        .collect(),
+                    ),
+                    route_response_selection_expression: None,
+                },
+            );
+            state
+                .stages
+                .get_mut(&api)
+                .and_then(|m| m.get_mut("prod"))
+                .unwrap()
+                .route_settings = Some(
+                [
+                    (
+                        "GET /p".to_string(),
+                        serde_json::json!({"throttlingBurstLimit": 5}),
+                    ),
+                    (
+                        "POST /p".to_string(),
+                        serde_json::json!({"throttlingBurstLimit": 7}),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            );
+        }
+        run(
+            &s,
             "DeleteRouteRequestParameter",
             "",
-            &["v2", "apis", "a1", "routes", "r1", "requestparameters", "p"],
-            Some("a1"),
+            &[
+                "v2",
+                "apis",
+                &api,
+                "routes",
+                "r1",
+                "requestparameters",
+                "route.request.querystring.id",
+            ],
+            Some(&api),
             Some("r1"),
         );
-        ok(
+        assert!(s
+            .state
+            .read()
+            .get("000000000000")
+            .and_then(|st| st.routes.get(&api))
+            .and_then(|m| m.get("r1"))
+            .map(|r| {
+                let p = r.request_parameters.as_ref().unwrap();
+                !p.contains_key("route.request.querystring.id")
+                    && p.contains_key("route.request.header.x")
+            })
+            .unwrap_or(false));
+        run(
+            &s,
             "DeleteRouteSettings",
             "",
-            &["v2", "apis", "a1", "stages", "prod", "routesettings", "X"],
-            Some("a1"),
+            &[
+                "v2",
+                "apis",
+                &api,
+                "stages",
+                "prod",
+                "routesettings",
+                "GET %2Fp",
+            ],
+            Some(&api),
             Some("prod"),
         );
+        assert!(s
+            .state
+            .read()
+            .get("000000000000")
+            .and_then(|st| st.stages.get(&api))
+            .and_then(|m| m.get("prod"))
+            .map(|st| {
+                let rs = st.route_settings.as_ref().unwrap();
+                !rs.contains_key("GET /p") && rs.contains_key("POST /p")
+            })
+            .unwrap_or(false));
         // DeleteDeployment now validates + removes. Seed one, delete it,
         // confirm it's gone, and that a second delete 404s (1.23).
         {

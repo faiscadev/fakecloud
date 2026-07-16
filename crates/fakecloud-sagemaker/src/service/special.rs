@@ -42,9 +42,176 @@ pub(super) fn dispatch(
         "ImportHubContent" => Ok(Some(import_hub_content(svc, ctx, meta, body))),
         "AddAssociation" => Ok(Some(add_association(svc, ctx, meta, body))),
         "DeleteAssociation" => Ok(Some(delete_association(svc, ctx, body))),
+        "PutModelPackageGroupPolicy" => Ok(Some(put_mpg_policy(svc, ctx, meta, body))),
+        "GetModelPackageGroupPolicy" => Ok(get_mpg_policy(svc, ctx, body)),
+        "DeleteModelPackageGroupPolicy" => Ok(Some(delete_mpg_policy(svc, ctx, meta, body))),
+        "RegisterDevices" => Ok(Some(register_devices(svc, ctx, meta, body))),
+        "DeregisterDevices" => Ok(Some(deregister_devices(svc, ctx, meta, body))),
+        "UpdateDevices" => Ok(Some(update_devices(svc, ctx, meta, body))),
         op if is_lifecycle_transition(op) => Ok(lifecycle_transition(svc, ctx, meta, body)),
         _ => Ok(None),
     }
+}
+
+// ── Model package group resource policy ──────────────────────────────────
+//
+// `PutModelPackageGroupPolicy` / `GetModelPackageGroupPolicy` /
+// `DeleteModelPackageGroupPolicy` are all Action verbs. The generic Action arm
+// discarded the `ResourcePolicy` on Put and synthesised a placeholder `"a"` on
+// Get, so the policy never round-tripped. Persist it in account-scoped state
+// keyed by the group name (bug-hunt 2026-07-16, 1.24).
+
+fn mpg_policy_singleton(name: &str) -> String {
+    format!("ModelPackageGroupPolicy:{name}")
+}
+
+fn put_mpg_policy(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let name = str_member(body, "ModelPackageGroupName");
+    let policy = body.get("ResourcePolicy").cloned().unwrap_or(Value::Null);
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.singletons.insert(mpg_policy_singleton(&name), policy);
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+fn get_mpg_policy(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> Option<(AwsResponse, bool)> {
+    let name = str_member(body, "ModelPackageGroupName");
+    let g = svc.state.read();
+    let stored = g
+        .get(&ctx.account)
+        .and_then(|data| data.singletons.get(&mpg_policy_singleton(&name)))
+        .filter(|v| !v.is_null())
+        .cloned();
+    // Return the stored policy when present; otherwise return None so the caller
+    // falls through to the generic Action arm, keeping a valid output shape for a
+    // stateless probe that never called Put.
+    let policy = stored?;
+    let mut out = Map::new();
+    out.insert("ResourcePolicy".to_string(), policy);
+    Some((ok_json(Value::Object(out)), false))
+}
+
+fn delete_mpg_policy(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let name = str_member(body, "ModelPackageGroupName");
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.singletons.remove(&mpg_policy_singleton(&name));
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+// ── Edge devices ─────────────────────────────────────────────────────────
+//
+// `RegisterDevices` wrote nothing (generic Action no-op) and the read siblings
+// `ListDevices` / `DescribeDevice` read the `Device` (singular) family, so
+// registration was invisible. Persist each device under the `Device` family
+// keyed by its `DeviceName` so the read siblings resolve it, and route
+// `DeregisterDevices` / `UpdateDevices` to the same family (bug-hunt
+// 2026-07-16, 1.24).
+
+const DEVICE_FAMILY: &str = "Device";
+
+fn register_devices(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let fleet = str_member(body, "DeviceFleetName");
+    let devices = body.get("Devices").and_then(Value::as_array).cloned();
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        for dev in devices.into_iter().flatten() {
+            let Some(obj) = dev.as_object() else { continue };
+            let Some(name) = obj.get("DeviceName").and_then(Value::as_str) else {
+                continue;
+            };
+            let mut record = obj.clone();
+            record
+                .entry("DeviceFleetName".to_string())
+                .or_insert_with(|| Value::String(fleet.clone()));
+            record.insert(
+                "DeviceArn".to_string(),
+                Value::String(super::mint_arn(ctx, "device", name)),
+            );
+            record
+                .entry("RegistrationTime".to_string())
+                .or_insert_with(now_epoch);
+            data.put_resource(DEVICE_FAMILY, name, Value::Object(record));
+        }
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+fn deregister_devices(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let names = body.get("DeviceNames").and_then(Value::as_array).cloned();
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        for name in names.into_iter().flatten() {
+            if let Some(n) = name.as_str() {
+                data.remove_resource(DEVICE_FAMILY, n);
+            }
+        }
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+fn update_devices(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let devices = body.get("Devices").and_then(Value::as_array).cloned();
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        for dev in devices.into_iter().flatten() {
+            let Some(obj) = dev.as_object() else { continue };
+            let Some(name) = obj.get("DeviceName").and_then(Value::as_str) else {
+                continue;
+            };
+            // Merge the update onto the existing record so registration-time
+            // fields (DeviceArn, DeviceFleetName, RegistrationTime) survive.
+            let mut record = data
+                .get_resource(DEVICE_FAMILY, name)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            for (k, v) in obj {
+                record.insert(k.clone(), v.clone());
+            }
+            record
+                .entry("DeviceArn".to_string())
+                .or_insert_with(|| Value::String(super::mint_arn(ctx, "device", name)));
+            data.put_resource(DEVICE_FAMILY, name, Value::Object(record));
+        }
+    }
+    (engine::action(ctx, meta, body), true)
 }
 
 /// `Start*` / `Stop*` operations that transition a stored resource's status.

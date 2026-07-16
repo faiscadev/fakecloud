@@ -3424,3 +3424,176 @@ async fn export_api_includes_default_route() {
         "exported spec must contain the $default path, got: {spec}"
     );
 }
+
+/// DeleteRouteRequestParameter must actually drop the key from the route's
+/// requestParameters so GetRoute no longer returns it (bug-hunt 1.22).
+#[tokio::test]
+async fn delete_route_request_parameter_removes_key() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "routeKey": "GET /pets",
+        "requestParameters": {
+            "route.request.querystring.id": {"required": true},
+            "route.request.header.x-tenant": {"required": false},
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/routes"),
+        &body.to_string(),
+    );
+    let route_id = body_json(&svc.handle(req).await.unwrap())["routeId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Delete one parameter.
+    let req = make_request(
+        Method::DELETE,
+        &format!(
+            "/v2/apis/{api_id}/routes/{route_id}/requestparameters/route.request.querystring.id"
+        ),
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert!(resp.status.is_success());
+
+    // GetRoute no longer reports the deleted key, but keeps the other.
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/routes/{route_id}"),
+        "",
+    );
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let params = b["requestParameters"].as_object().unwrap();
+    assert!(!params.contains_key("route.request.querystring.id"));
+    assert!(params.contains_key("route.request.header.x-tenant"));
+}
+
+/// DeleteRouteSettings must remove the per-route override from the stage's
+/// routeSettings while leaving defaultRouteSettings and other keys intact
+/// (bug-hunt 1.22).
+#[tokio::test]
+async fn delete_route_settings_removes_entry() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    let body = serde_json::json!({
+        "stageName": "prod",
+        "defaultRouteSettings": {"throttlingBurstLimit": 100},
+        "routeSettings": {
+            "GET /items": {"throttlingBurstLimit": 5},
+            "POST /items": {"throttlingBurstLimit": 7},
+        },
+    });
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Delete the "GET /items" per-route setting. The routeKey is
+    // percent-encoded in the URL path.
+    let encoded = "GET%20%2Fitems";
+    let req = make_request(
+        Method::DELETE,
+        &format!("/v2/apis/{api_id}/stages/prod/routesettings/{encoded}"),
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert!(resp.status.is_success());
+
+    let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/prod"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    let rs = b["routeSettings"].as_object().unwrap();
+    assert!(!rs.contains_key("GET /items"));
+    assert!(rs.contains_key("POST /items"));
+    // defaultRouteSettings untouched.
+    assert_eq!(b["defaultRouteSettings"]["throttlingBurstLimit"], 100);
+}
+
+/// UpdatePortal is a partial patch: a Create->Publish->Update->Get round-trip
+/// must keep PublishStatus PUBLISHED and preserve Tags the update didn't
+/// resend (bug-hunt 1.22).
+#[tokio::test]
+async fn update_portal_preserves_publish_status_and_tags() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+
+    let body = serde_json::json!({
+        "Authorization": {"AuthorizationProviderArns": []},
+        "EndpointConfiguration": {},
+        "PortalContent": {"DisplayName": "orig"},
+        "Tags": {"team": "platform"},
+    });
+    let req = make_request(Method::POST, "/v2/portals", &body.to_string());
+    let created = body_json(&svc.handle(req).await.unwrap());
+    // Portal responses are camelCased by the handler.
+    let portal_id = created["portalId"].as_str().unwrap().to_string();
+    assert_eq!(created["publishStatus"], "UNPUBLISHED");
+
+    // Publish it.
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/portals/{portal_id}/publish"),
+        r#"{"Description":"first"}"#,
+    );
+    svc.handle(req).await.unwrap();
+
+    // Update only PortalContent (not Tags, not PublishStatus).
+    let body = serde_json::json!({
+        "PortalContent": {"DisplayName": "renamed"},
+    });
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/portals/{portal_id}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    // Get it: publish state and tags survived the partial update.
+    let req = make_request(Method::GET, &format!("/v2/portals/{portal_id}"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["publishStatus"], "PUBLISHED");
+    assert_eq!(b["lastPublishedDescription"], "first");
+    assert_eq!(b["tags"]["team"], "platform");
+    assert_eq!(b["portalContent"]["displayName"], "renamed");
+}
+
+/// UpdatePortalProduct partial patch preserves fields the update omits
+/// (bug-hunt 1.22).
+#[tokio::test]
+async fn update_portal_product_preserves_untouched_fields() {
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+
+    let body = serde_json::json!({
+        "DisplayName": "product",
+        "Description": "the original description",
+        "Tags": {"owner": "team-a"},
+    });
+    let req = make_request(Method::POST, "/v2/portalproducts", &body.to_string());
+    let created = body_json(&svc.handle(req).await.unwrap());
+    let id = created["portalProductId"].as_str().unwrap().to_string();
+
+    // Update only the DisplayName.
+    let body = serde_json::json!({"DisplayName": "renamed-product"});
+    let req = make_request(
+        Method::PATCH,
+        &format!("/v2/portalproducts/{id}"),
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+
+    let req = make_request(Method::GET, &format!("/v2/portalproducts/{id}"), "");
+    let b = body_json(&svc.handle(req).await.unwrap());
+    assert_eq!(b["displayName"], "renamed-product");
+    // Description and Tags preserved.
+    assert_eq!(b["description"], "the original description");
+    assert_eq!(b["tags"]["owner"], "team-a");
+}

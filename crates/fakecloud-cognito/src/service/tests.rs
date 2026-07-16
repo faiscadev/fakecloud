@@ -3562,6 +3562,49 @@ fn admin_get_user_not_found() {
     assert_eq!(err.code(), "UserNotFoundException");
 }
 
+/// AdminGetUser must render the MFA preferences AdminSetUserMFAPreference
+/// persisted (UserMFASettingList / PreferredMfaSetting), like real Cognito and
+/// the access-token GetUser (bug-hunt 1.23).
+#[test]
+fn admin_get_user_reports_mfa_preferences() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    admin_create_user_helper(&svc, &pool_id, "mfauser");
+
+    // Before setting a preference, the fields are absent (empty list omitted),
+    // but MFAOptions is always present.
+    let req = make_req(
+        "AdminGetUser",
+        &json!({"UserPoolId": pool_id, "Username": "mfauser"}).to_string(),
+    );
+    let b = resp_json(&svc.admin_get_user(&req).unwrap());
+    assert!(b.get("UserMFASettingList").is_none());
+    assert!(b.get("MFAOptions").is_some());
+
+    // Enable software-token MFA as the preferred method.
+    let set_req = make_req(
+        "AdminSetUserMFAPreference",
+        &json!({
+            "UserPoolId": pool_id,
+            "Username": "mfauser",
+            "SoftwareTokenMfaSettings": {"Enabled": true, "PreferredMfa": true},
+            "SMSMfaSettings": {"Enabled": false, "PreferredMfa": false},
+        })
+        .to_string(),
+    );
+    svc.admin_set_user_mfa_preference(&set_req).unwrap();
+
+    // AdminGetUser now surfaces the setting + preferred method.
+    let req = make_req(
+        "AdminGetUser",
+        &json!({"UserPoolId": pool_id, "Username": "mfauser"}).to_string(),
+    );
+    let b = resp_json(&svc.admin_get_user(&req).unwrap());
+    let list = b["UserMFASettingList"].as_array().unwrap();
+    assert!(list.iter().any(|v| v == "SOFTWARE_TOKEN_MFA"));
+    assert_eq!(b["PreferredMfaSetting"], "SOFTWARE_TOKEN_MFA");
+}
+
 // ── AdminDeleteUser ──
 
 #[test]

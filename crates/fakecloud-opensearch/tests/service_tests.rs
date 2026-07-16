@@ -1319,3 +1319,108 @@ async fn get_migration_unknown_id_is_not_found() {
     assert_eq!(status, 409);
     assert_eq!(code, "ResourceNotFoundException");
 }
+
+// ---------------------------------------------------------------------------
+// Data sources — Update must persist Status and DataSourceType (bug-hunt 1.23)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn update_data_source_persists_status() {
+    let svc = service();
+    // Seed a domain, then add a data source (defaults to ACTIVE).
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "dom1", "EngineVersion": "OpenSearch_2.11"}),
+        ),
+    )
+    .await;
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain/dom1/dataSource"),
+            json!({
+                "Name": "s3ds",
+                "DataSourceType": {"S3GlueDataCatalog": {"RoleArn": "arn:aws:iam::0:role/r"}},
+                "Description": "orig",
+            }),
+        ),
+    )
+    .await;
+
+    // Disable it via UpdateDataSource.
+    call(
+        &svc,
+        req(
+            Method::PUT,
+            &format!("{OS}/opensearch/domain/dom1/dataSource/s3ds"),
+            // DataSourceType is @required on UpdateDataSource.
+            json!({
+                "Status": "DISABLED",
+                "Description": "updated",
+                "DataSourceType": {"S3GlueDataCatalog": {"RoleArn": "arn:aws:iam::0:role/r"}},
+            }),
+        ),
+    )
+    .await;
+
+    // GetDataSource reflects the persisted Status + Description.
+    let resp = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/domain/dom1/dataSource/s3ds"),
+            json!({}),
+        ),
+    )
+    .await;
+    let v = json_of(&resp);
+    assert_eq!(v["Status"], "DISABLED");
+    assert_eq!(v["Description"], "updated");
+}
+
+#[tokio::test]
+async fn update_direct_query_data_source_persists_type() {
+    let svc = service();
+    // Add a direct-query data source with an initial S3 type.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/directQueryDataSource"),
+            json!({
+                "DataSourceName": "dq1",
+                "DataSourceType": {"CloudWatchLog": {"RoleArn": "arn:aws:iam::0:role/a"}},
+                "Description": "orig",
+            }),
+        ),
+    )
+    .await;
+
+    // Switch the connection config to a SecurityLake type.
+    let new_type = json!({"SecurityLake": {"RoleArn": "arn:aws:iam::0:role/b"}});
+    call(
+        &svc,
+        req(
+            Method::PUT,
+            &format!("{OS}/opensearch/directQueryDataSource/dq1"),
+            json!({"DataSourceType": new_type.clone()}),
+        ),
+    )
+    .await;
+
+    let resp = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/directQueryDataSource/dq1"),
+            json!({}),
+        ),
+    )
+    .await;
+    let v = json_of(&resp);
+    assert_eq!(v["DataSourceType"], new_type);
+}

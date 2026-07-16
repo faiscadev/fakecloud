@@ -577,8 +577,11 @@ impl RedshiftService {
             } else {
                 "DISABLED".to_string()
             },
-            start_time: None,
-            end_time: None,
+            // StartTime/EndTime were hardcoded None, so the values a caller
+            // passed were dropped and DescribeScheduledActions never returned
+            // them, drifting the Terraform resource (bug-hunt 2026-07-16, 1.23).
+            start_time: timestamp_param(req, "StartTime"),
+            end_time: timestamp_param(req, "EndTime"),
             enable: bool_param(req, "Enable").unwrap_or(true),
         };
         acct.scheduled_actions.insert(name, a.clone());
@@ -649,6 +652,14 @@ impl RedshiftService {
         }
         if let Some(t) = extract_target_action(req) {
             a.target_action = Some(t);
+        }
+        // Modify previously never touched StartTime/EndTime, so a schedule
+        // window change silently no-op'd (bug-hunt 2026-07-16, 1.23).
+        if let Some(t) = timestamp_param(req, "StartTime") {
+            a.start_time = Some(t);
+        }
+        if let Some(t) = timestamp_param(req, "EndTime") {
+            a.end_time = Some(t);
         }
         Ok(xml_resp(
             "ModifyScheduledAction",

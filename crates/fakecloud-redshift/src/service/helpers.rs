@@ -76,6 +76,18 @@ pub(crate) fn long_param(req: &AwsRequest, name: &str) -> Option<i64> {
     param(req, name).and_then(|v| v.parse().ok())
 }
 
+/// Parse an ISO8601/RFC3339 timestamp query param (e.g. `StartTime`) into a
+/// UTC datetime. Returns `None` when absent or unparseable.
+pub(crate) fn timestamp_param(
+    req: &AwsRequest,
+    name: &str,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let raw = param(req, name)?;
+    chrono::DateTime::parse_from_rfc3339(&raw)
+        .ok()
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+}
+
 /// Collect a flat scalar list serialized as `{prefix}.member.N` (also accepts
 /// the alternate `{prefix}.{alt}.N` wire form some SDKs emit).
 pub(crate) fn member_list(req: &AwsRequest, prefix: &str, alt: &str) -> Vec<String> {

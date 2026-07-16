@@ -2388,6 +2388,12 @@ impl OpenSearchService {
         if let Some(desc) = b.get("Description") {
             ds["Description"] = desc.clone();
         }
+        // Status (ACTIVE|DISABLED) was previously dropped, so disabling a data
+        // source never persisted and GetDataSource kept reporting ACTIVE
+        // (bug-hunt 2026-07-16, 1.23).
+        if let Some(status) = b.get("Status").filter(|v| !v.is_null()) {
+            ds["Status"] = status.clone();
+        }
         Ok(ok(json!({ "Message": "Data source updated" })))
     }
 
@@ -2486,6 +2492,13 @@ impl OpenSearchService {
         }
         if let Some(a) = b.get("OpenSearchArns") {
             dq.open_search_arns = a.clone();
+        }
+        // DataSourceType (the S3/Glue connection config) was dropped, so a
+        // caller switching connection type never persisted and
+        // GetDirectQueryDataSource kept returning the old type
+        // (bug-hunt 2026-07-16, 1.23).
+        if let Some(dst) = b.get("DataSourceType").filter(|v| !v.is_null()) {
+            dq.data_source_type = dst.clone();
         }
         Ok(ok(json!({ "DataSourceArn": dq.arn })))
     }
