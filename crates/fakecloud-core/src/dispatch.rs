@@ -710,16 +710,39 @@ pub async fn dispatch(
                             // through to the handler.
                         }
                     } else {
-                        // Service opted in but didn't return an IamAction
-                        // for this specific operation — programming bug,
-                        // surface it loudly in soft/strict mode so it's
-                        // visible during rollout.
+                        // Service opted in via `iam_enforceable()` but its
+                        // `iam_action_for` returned no `IamAction` for this
+                        // specific operation (e.g. S3's `s3_detect_action`
+                        // has `_ => return None` arms for unrecognized
+                        // sub-resources). Under strict enforcement that must
+                        // fail closed: an operation we cannot map to an IAM
+                        // action cannot be authorized, so serving it would be
+                        // a fail-open bypass of `--iam strict`. Deny by
+                        // default. In soft mode we preserve the historical
+                        // warn-and-allow so an incomplete mapping surfaces
+                        // during rollout without blocking traffic.
                         tracing::warn!(
                             target: "fakecloud::iam::audit",
                             service = %detected.service,
                             action = %aws_request.action,
-                            "service is iam_enforceable but has no IamAction mapping for this action; skipping evaluation"
+                            mode = %config.iam_mode,
+                            request_id = %request_id,
+                            "service is iam_enforceable but has no IamAction mapping for this action; denying under strict, allowing under soft"
                         );
+                        if config.iam_mode.is_strict() {
+                            return build_error_response(
+                                StatusCode::FORBIDDEN,
+                                "AccessDeniedException",
+                                &format!(
+                                    "User: {} is not authorized to perform: {}: no IAM action mapping exists for this operation, so it cannot be authorized under strict IAM enforcement",
+                                    principal.arn, aws_request.action,
+                                ),
+                                &request_id,
+                                detected.protocol,
+                            );
+                        }
+                        // Soft mode: audit log emitted; fall through to the
+                        // handler.
                     }
                 }
             } else if aws_request.access_key_id.is_none() {
