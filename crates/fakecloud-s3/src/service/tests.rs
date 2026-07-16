@@ -4721,6 +4721,84 @@ fn access_point_data_plane_routes_to_bucket() {
     assert_eq!(req.raw_path, "/ap-data-bucket/key.txt");
 }
 
+#[test]
+fn iam_action_for_maps_access_point_control_ops() {
+    let state: SharedS3State = Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("000000000000", "us-east-1", ""),
+    ));
+    let delivery = Arc::new(fakecloud_core::delivery::DeliveryBus::new());
+    let service = crate::S3Service::new(state, delivery);
+
+    let s3_control_req = |method: http::Method, segs: &[&str]| {
+        let mut h = http::HeaderMap::new();
+        h.insert(
+            "host",
+            "000000000000.s3-control.us-east-1.localhost.localstack.cloud:4566"
+                .parse()
+                .unwrap(),
+        );
+        AwsRequest {
+            service: "s3".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "000000000000".to_string(),
+            request_id: "req".to_string(),
+            headers: h,
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: segs.iter().map(|s| s.to_string()).collect(),
+            raw_path: format!("/{}", segs.join("/")),
+            raw_query: String::new(),
+            method,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    };
+
+    // Create: PUT /v20180820/accesspoint/my-ap -> s3:CreateAccessPoint, not PutObject.
+    let a = service
+        .iam_action_for(&s3_control_req(
+            http::Method::PUT,
+            &["v20180820", "accesspoint", "my-ap"],
+        ))
+        .expect("access-point PUT must map to an IAM action");
+    assert_eq!(a.action, "CreateAccessPoint");
+    assert_eq!(a.resource, "arn:aws:s3:::accesspoint/my-ap");
+
+    let g = service
+        .iam_action_for(&s3_control_req(
+            http::Method::GET,
+            &["v20180820", "accesspoint", "my-ap"],
+        ))
+        .unwrap();
+    assert_eq!(g.action, "GetAccessPoint");
+
+    let d = service
+        .iam_action_for(&s3_control_req(
+            http::Method::DELETE,
+            &["v20180820", "accesspoint", "my-ap"],
+        ))
+        .unwrap();
+    assert_eq!(d.action, "DeleteAccessPoint");
+
+    let l = service
+        .iam_action_for(&s3_control_req(
+            http::Method::GET,
+            &["v20180820", "accesspoint"],
+        ))
+        .unwrap();
+    assert_eq!(l.action, "ListAccessPoints");
+    assert_eq!(l.resource, "*");
+
+    // Sanity: a normal object GET still maps to GetObject, unaffected.
+    let mut obj = s3_control_req(http::Method::GET, &["my-bucket", "key.txt"]);
+    obj.headers = http::HeaderMap::new(); // plain S3 host, not s3-control
+    let o = service.iam_action_for(&obj).unwrap();
+    assert_eq!(o.action, "GetObject");
+}
+
 #[tokio::test]
 async fn mpu_complete_on_versioned_bucket_pushes_new_version() {
     // On a versioned bucket, CompleteMultipartUpload must add a NEW version

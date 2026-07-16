@@ -736,20 +736,26 @@ pub async fn dispatch(
                         .resource_policy_provider
                         .as_ref()
                         .and_then(|p| p.resource_policy(&detected.service, &iam_action.resource));
-                    let policy_allows = evaluator
-                        .evaluate_anonymous(
-                            &iam_action,
-                            &condition_context,
-                            resource_policy_json.as_deref(),
-                        )
-                        .is_allow();
-                    let acl_allows = config.resource_policy_provider.as_ref().is_some_and(|p| {
-                        p.public_acl_allows(
-                            &detected.service,
-                            &iam_action.resource,
-                            iam_action.action,
-                        )
-                    });
+                    let policy_decision = evaluator.evaluate_anonymous(
+                        &iam_action,
+                        &condition_context,
+                        resource_policy_json.as_deref(),
+                    );
+                    let policy_allows = policy_decision.is_allow();
+                    // An explicit Deny in the resource policy always wins, even
+                    // over a public-read ACL — matching AWS's Deny-overrides
+                    // precedence. Collapsing the decision to a bool and ORing the
+                    // ACL let a public ACL override an explicit anonymous Deny.
+                    let policy_explicit_deny =
+                        matches!(policy_decision, crate::auth::IamDecision::ExplicitDeny);
+                    let acl_allows = !policy_explicit_deny
+                        && config.resource_policy_provider.as_ref().is_some_and(|p| {
+                            p.public_acl_allows(
+                                &detected.service,
+                                &iam_action.resource,
+                                iam_action.action,
+                            )
+                        });
                     if !policy_allows && !acl_allows {
                         tracing::warn!(
                             target: "fakecloud::iam::audit",

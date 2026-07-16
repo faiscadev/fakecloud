@@ -190,3 +190,51 @@ async fn anonymous_get_object_iam_strict_public_acl() {
         .unwrap();
     assert_eq!(resp.status(), 403, "private object must stay denied");
 }
+
+/// IAM strict mode: an explicit `Deny` in the bucket policy overrides a
+/// public-read object ACL, matching AWS's Deny-overrides precedence. Before the
+/// fix the anonymous gate ORed the ACL onto the policy decision, so a public
+/// ACL could grant access the bucket owner had explicitly denied.
+#[tokio::test]
+async fn anonymous_get_explicit_deny_overrides_public_acl() {
+    const EXPLICIT_DENY_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"}]}"#;
+
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let s3 = server.s3_client().await;
+
+    s3.create_bucket().bucket("probe").send().await.unwrap();
+    s3.put_object()
+        .bucket("probe")
+        .key("public.txt")
+        .body(b"world".to_vec().into())
+        .acl(ObjectCannedAcl::PublicRead)
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let url = format!("{}/probe/public.txt", server.endpoint());
+
+    // With only the public-read ACL, the object is served.
+    let resp = http.get(&url).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "public-read ACL object must be readable"
+    );
+
+    // After an explicit-Deny bucket policy, the anonymous GET must be denied
+    // even though the public ACL still grants it.
+    s3.put_bucket_policy()
+        .bucket("probe")
+        .policy(EXPLICIT_DENY_POLICY)
+        .send()
+        .await
+        .unwrap();
+    let resp = http.get(&url).send().await.unwrap();
+    assert_eq!(
+        resp.status(),
+        403,
+        "explicit Deny must override the public-read ACL"
+    );
+}
