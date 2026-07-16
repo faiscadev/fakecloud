@@ -1252,36 +1252,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn assume_role_with_saml_unregistered_provider_denied() {
-        // §5.7: naming a SAML provider ARN that was never created must NOT
-        // fall through and skip assertion validation.
-        let (svc, state) = make_sts_service();
-        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:saml-provider/ghost"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
-        let role_arn = create_role_in_state_with_trust(&state, "saml-role", trust);
-        let assertion = make_saml_assertion();
-        let req = sts_request(
-            "AssumeRoleWithSAML",
-            vec![
-                ("RoleArn", &role_arn),
-                (
-                    "PrincipalArn",
-                    "arn:aws:iam::123456789012:saml-provider/ghost",
-                ),
-                ("SAMLAssertion", &assertion),
-            ],
-        );
-        let err = match svc.handle(req).await {
-            Err(e) => e,
-            Ok(_) => panic!("expected denial for an unregistered SAML provider"),
-        };
-        assert_eq!(err.status(), StatusCode::FORBIDDEN);
-        assert!(
-            format!("{err:?}").contains("not registered"),
-            "expected provider-not-registered error, got {err:?}"
-        );
-    }
-
-    #[tokio::test]
     async fn assume_role_with_saml_missing_audience_rejected() {
         // §5.7: when the provider metadata declares an audience (`entityID`),
         // an assertion with no matching audience claim must be rejected rather

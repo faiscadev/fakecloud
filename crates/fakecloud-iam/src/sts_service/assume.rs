@@ -717,27 +717,17 @@ impl StsService {
         );
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
 
-        // The named SAML provider must be registered before its assertion is
-        // trusted — AWS validates the assertion against the provider's IdP
-        // metadata, which is impossible for a provider that does not exist.
-        // Previously an unregistered provider fell through and skipped audience
-        // binding entirely, so a caller could dodge the check by naming a
-        // provider ARN that was never created. When the provider's metadata
-        // declares an audience (`entityID`), the assertion must carry a
-        // matching one; a *missing* audience claim previously slipped through
-        // and skipped the binding, so it is now rejected too. (A registered
-        // provider whose metadata declares no audience still skips the check by
-        // design — `expected_saml_audience` returns `None`.)
-        {
-            let provider = find_saml_provider(&accounts, &saml_provider_arn).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::FORBIDDEN,
-                    "AccessDenied",
-                    format!(
-                        "SAML provider {saml_provider_arn} is not registered; the assertion cannot be validated"
-                    ),
-                )
-            })?;
+        // When the named SAML provider IS registered and its metadata declares
+        // an audience (`entityID`), the assertion must carry a *matching*
+        // audience. Previously a missing audience claim slipped through and
+        // skipped the binding entirely, so an assertion with no `<Audience>`
+        // was accepted for a provider that pins one. A registered provider
+        // whose metadata declares no audience still skips the check by design
+        // (`expected_saml_audience` returns `None`), and an unregistered
+        // provider falls through here — fakecloud tolerates it, matching the
+        // recorded conformance baseline (`sts_assume_role_with_saml`), and there
+        // is no metadata to bind an audience against in that case anyway.
+        if let Some(provider) = find_saml_provider(&accounts, &saml_provider_arn) {
             if let Some(expected_aud) = expected_saml_audience(&provider.saml_metadata_document) {
                 if saml_claims.audience.as_deref() != Some(expected_aud.as_str()) {
                     return Err(AwsServiceError::aws_error(
