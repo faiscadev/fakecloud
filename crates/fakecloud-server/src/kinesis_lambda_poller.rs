@@ -17,6 +17,7 @@ use fakecloud_core::delivery::LambdaDelivery;
 use fakecloud_kinesis::SharedKinesisState;
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_persistence::SnapshotHook;
 
 #[derive(Clone)]
 struct Mapping {
@@ -38,6 +39,11 @@ pub struct KinesisLambdaPoller {
     kinesis_state: SharedKinesisState,
     lambda_state: SharedLambdaState,
     lambda_delivery: Option<Arc<dyn LambdaDelivery>>,
+    /// Persists Kinesis state after the poller advances a lambda checkpoint.
+    /// Without it a checkpoint advance only reached disk on the next unrelated
+    /// Kinesis API write, so a restart in the window re-delivered records the
+    /// mapping had already consumed (bug-audit 4.5).
+    snapshot_hook: Option<SnapshotHook>,
 }
 
 impl KinesisLambdaPoller {
@@ -46,12 +52,27 @@ impl KinesisLambdaPoller {
             kinesis_state,
             lambda_state,
             lambda_delivery: None,
+            snapshot_hook: None,
         }
     }
 
     pub fn with_lambda_delivery(mut self, delivery: Arc<dyn LambdaDelivery>) -> Self {
         self.lambda_delivery = Some(delivery);
         self
+    }
+
+    pub fn with_snapshot_hook(mut self, hook: SnapshotHook) -> Self {
+        self.snapshot_hook = Some(hook);
+        self
+    }
+
+    /// Persist Kinesis state through the same snapshot path a mutating Kinesis
+    /// API call uses. Called only after the write guard is released so the
+    /// blocking snapshot IO never runs under the lock.
+    async fn persist(&self) {
+        if let Some(hook) = &self.snapshot_hook {
+            hook().await;
+        }
     }
 
     pub async fn run(self) {
@@ -224,10 +245,13 @@ impl KinesisLambdaPoller {
             // checkpoint past them — AWS treats filtered-out records
             // as consumed and never retries them.
             if matched.is_empty() {
-                let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
-                let mut kinesis_accounts = self.kinesis_state.write();
-                let kinesis = kinesis_accounts.get_or_create(account_id);
-                kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, end);
+                {
+                    let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
+                    let mut kinesis_accounts = self.kinesis_state.write();
+                    let kinesis = kinesis_accounts.get_or_create(account_id);
+                    kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, end);
+                }
+                self.persist().await;
                 continue;
             }
 
@@ -290,6 +314,9 @@ impl KinesisLambdaPoller {
                 let kinesis = kinesis_accounts.get_or_create(account_id);
                 kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, new_checkpoint);
             }
+            // Persist the advanced checkpoint so a restart resumes past the
+            // records this batch already delivered.
+            self.persist().await;
 
             if !used_real_delivery {
                 let fn_account = mapping.function_arn.split(':').nth(4).unwrap_or("");

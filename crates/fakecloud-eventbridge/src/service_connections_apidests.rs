@@ -81,6 +81,16 @@ impl EventBridgeService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Reject duplicate connection names (real AWS retains the existing one).
+        if state.connections.contains_key(&name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceAlreadyExistsException",
+                format!("Connection {name} already exists."),
+            ));
+        }
+
         let now = Utc::now();
         let conn_uuid = uuid::Uuid::new_v4();
         let arn = format!(
@@ -342,6 +352,16 @@ impl EventBridgeService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+
+        // Reject duplicate api-destination names (real AWS retains the existing one).
+        if state.api_destinations.contains_key(&name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceAlreadyExistsException",
+                format!("An api-destination {name} already exists."),
+            ));
+        }
+
         let now = Utc::now();
         let dest_uuid = uuid::Uuid::new_v4();
         let arn = format!(

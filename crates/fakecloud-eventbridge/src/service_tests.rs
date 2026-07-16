@@ -674,6 +674,98 @@ fn list_connections_pagination_with_filter() {
 // -- ListApiDestinations tests --
 
 #[test]
+fn create_connection_duplicate_name_rejected() {
+    let svc = make_service();
+    create_connection(&svc, "prod");
+    let arn_first = {
+        let mas = svc.state.read();
+        mas.default_ref()
+            .connections
+            .get("prod")
+            .unwrap()
+            .arn
+            .clone()
+    };
+
+    // A second CreateConnection with the same name must fail, not overwrite.
+    let req = make_request(
+        "CreateConnection",
+        json!({
+            "Name": "prod",
+            "AuthorizationType": "API_KEY",
+            "AuthParameters": {
+                "ApiKeyAuthParameters": { "ApiKeyName": "x-api-key", "ApiKeyValue": "secret2" }
+            }
+        }),
+    );
+    let err = svc.create_connection(&req).err().expect("expected error");
+    assert_eq!(err.code(), "ResourceAlreadyExistsException");
+
+    // The original connection (ARN + secret) must be retained unchanged.
+    let arn_after = {
+        let mas = svc.state.read();
+        mas.default_ref()
+            .connections
+            .get("prod")
+            .unwrap()
+            .arn
+            .clone()
+    };
+    assert_eq!(arn_first, arn_after, "duplicate must not mint a fresh ARN");
+}
+
+#[test]
+fn create_api_destination_duplicate_name_rejected() {
+    let svc = make_service();
+    create_connection(&svc, "my-conn");
+    create_api_destination(&svc, "dest", "my-conn");
+    let arn_first = {
+        let mas = svc.state.read();
+        mas.default_ref()
+            .api_destinations
+            .get("dest")
+            .unwrap()
+            .arn
+            .clone()
+    };
+
+    let conn_arn = {
+        let mas = svc.state.read();
+        mas.default_ref()
+            .connections
+            .get("my-conn")
+            .unwrap()
+            .arn
+            .clone()
+    };
+    let req = make_request(
+        "CreateApiDestination",
+        json!({
+            "Name": "dest",
+            "ConnectionArn": conn_arn,
+            "InvocationEndpoint": "https://example.com",
+            "HttpMethod": "POST"
+        }),
+    );
+    let err = svc
+        .create_api_destination(&req)
+        .err()
+        .expect("expected error");
+    assert_eq!(err.code(), "ResourceAlreadyExistsException");
+
+    let arn_after = {
+        let mas = svc.state.read();
+        mas.default_ref()
+            .api_destinations
+            .get("dest")
+            .unwrap()
+            .arn
+            .clone()
+    };
+    assert_eq!(arn_first, arn_after, "duplicate must not mint a fresh ARN");
+}
+
+#[test]
 fn list_api_destinations_returns_all_by_default() {
     let svc = make_service();
     create_connection(&svc, "my-conn");

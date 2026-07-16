@@ -1272,6 +1272,29 @@ pub(crate) fn add_event(
     }
 }
 
+/// Apply a terminal transition to `exec` only if it is still `Running`.
+/// Returns `true` when the transition was applied.
+///
+/// This centralizes the write-guard re-check that `succeed_execution` /
+/// `fail_execution` perform: a concurrent `StopExecution` may set the
+/// execution to `Aborted` (or a timeout to `TimedOut`) in the window after the
+/// interpreter's initial read-guard check but before it re-acquires the write
+/// guard. Overwriting that terminal state would make `DescribeExecution` report
+/// `SUCCEEDED`/`FAILED` for an execution the caller already stopped. Keeping the
+/// guard here means the whole terminal-transition stays atomic under the held
+/// write guard.
+pub(crate) fn apply_terminal_transition_if_running(
+    exec: &mut crate::state::Execution,
+    transition: impl FnOnce(&mut crate::state::Execution),
+) -> bool {
+    if exec.status == ExecutionStatus::Running {
+        transition(exec);
+        true
+    } else {
+        false
+    }
+}
+
 pub(crate) fn succeed_execution(
     state: &SharedStepFunctionsState,
     execution_arn: &str,
@@ -1304,9 +1327,11 @@ pub(crate) fn succeed_execution(
     let mut accounts = state.write();
     let s = accounts.get_or_create(&account_id);
     if let Some(exec) = s.executions.get_mut(execution_arn) {
-        exec.status = ExecutionStatus::Succeeded;
-        exec.output = Some(output_str);
-        exec.stop_date = Some(Utc::now());
+        apply_terminal_transition_if_running(exec, |exec| {
+            exec.status = ExecutionStatus::Succeeded;
+            exec.output = Some(output_str);
+            exec.stop_date = Some(Utc::now());
+        });
     }
 }
 
@@ -1340,10 +1365,12 @@ pub(crate) fn fail_execution(
     let mut accounts = state.write();
     let s = accounts.get_or_create(&account_id);
     if let Some(exec) = s.executions.get_mut(execution_arn) {
-        exec.status = ExecutionStatus::Failed;
-        exec.error = Some(error.to_string());
-        exec.cause = Some(cause.to_string());
-        exec.stop_date = Some(Utc::now());
+        apply_terminal_transition_if_running(exec, |exec| {
+            exec.status = ExecutionStatus::Failed;
+            exec.error = Some(error.to_string());
+            exec.cause = Some(cause.to_string());
+            exec.stop_date = Some(Utc::now());
+        });
     }
 }
 

@@ -14,12 +14,18 @@ use fakecloud_core::delivery::LambdaDelivery;
 use fakecloud_dynamodb::{cmp_seq, SharedDynamoDbState};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_persistence::SnapshotHook;
 
 /// DynamoDB Streams -> Lambda event source mapping poller.
 pub struct DynamoDbStreamsLambdaPoller {
     dynamodb_state: SharedDynamoDbState,
     lambda_state: SharedLambdaState,
     lambda_delivery: Option<Arc<dyn LambdaDelivery>>,
+    /// Persists DynamoDB state after the poller advances a stream checkpoint.
+    /// Without it the checkpoint only reached disk on the next unrelated
+    /// DynamoDB API write, so a restart in the window re-delivered records the
+    /// mapping had already consumed (bug-audit 4.5).
+    snapshot_hook: Option<SnapshotHook>,
 }
 
 impl DynamoDbStreamsLambdaPoller {
@@ -28,12 +34,27 @@ impl DynamoDbStreamsLambdaPoller {
             dynamodb_state,
             lambda_state,
             lambda_delivery: None,
+            snapshot_hook: None,
         }
     }
 
     pub fn with_lambda_delivery(mut self, delivery: Arc<dyn LambdaDelivery>) -> Self {
         self.lambda_delivery = Some(delivery);
         self
+    }
+
+    pub fn with_snapshot_hook(mut self, hook: SnapshotHook) -> Self {
+        self.snapshot_hook = Some(hook);
+        self
+    }
+
+    /// Persist DynamoDB state through the same snapshot path a mutating
+    /// DynamoDB API call uses. Called only after the write guard is released
+    /// so the blocking snapshot IO never runs under the lock.
+    async fn persist(&self) {
+        if let Some(hook) = &self.snapshot_hook {
+            hook().await;
+        }
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -273,6 +294,9 @@ impl DynamoDbStreamsLambdaPoller {
             // the invocation when no real Lambda runtime is wired.
             if let Some(seq) = last_seq.clone() {
                 self.advance_checkpoint(&ddb_account, &mapping_id, seq);
+                // Persist the advanced checkpoint so a restart resumes past the
+                // records this batch already delivered.
+                self.persist().await;
             }
 
             if self.lambda_delivery.is_none() {
