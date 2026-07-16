@@ -30,6 +30,33 @@ use crate::xml_responses;
 /// supplement the eagerly-captured `ProvisionResult::attributes` with
 /// live-state lookups via `ResourceProvisioner::get_att`. Resources not
 /// listed here just use whatever the create handler captured.
+/// Build the full GetAtt attribute set for a resource: start from `base` (the
+/// create-time attributes, so values like `CreationTime` survive an update),
+/// overlay the resource's own attributes (the handler's fresh values), then
+/// overlay any well-known attribute the provisioner can still resolve from live
+/// state. Used by both create and update so a 2nd deploy's GetAtt/Outputs don't
+/// collapse to the update handler's subset (and resolve to literal
+/// `"Logical.Attr"`).
+fn merged_resource_attributes(
+    provisioner: &ResourceProvisioner,
+    resource: &StackResource,
+    base: std::collections::BTreeMap<String, String>,
+) -> std::collections::BTreeMap<String, String> {
+    let mut attr_map = base;
+    for (k, v) in &resource.attributes {
+        attr_map.insert(k.clone(), v.clone());
+    }
+    for attr in well_known_attributes_for(&resource.resource_type) {
+        if attr_map.contains_key(*attr) {
+            continue;
+        }
+        if let Some(v) = provisioner.get_att(resource, attr) {
+            attr_map.insert((*attr).to_string(), v);
+        }
+    }
+    attr_map
+}
+
 fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
     match resource_type {
         "AWS::S3::Bucket" => &[
@@ -290,15 +317,11 @@ pub(crate) fn provision_stack_resources(
                     // overlay anything the provisioner can resolve from
                     // live state (e.g. attributes that depend on side-effects
                     // recorded after the create handler returned).
-                    let mut attr_map = stack_resource.attributes.clone();
-                    for attr in well_known_attributes_for(&stack_resource.resource_type) {
-                        if attr_map.contains_key(*attr) {
-                            continue;
-                        }
-                        if let Some(v) = provisioner.get_att(&stack_resource, attr) {
-                            attr_map.insert((*attr).to_string(), v);
-                        }
-                    }
+                    let attr_map = merged_resource_attributes(
+                        provisioner,
+                        &stack_resource,
+                        std::collections::BTreeMap::new(),
+                    );
                     attributes.insert(stack_resource.logical_id.clone(), attr_map.clone());
                     // Persist the live-resolved attributes onto the stored
                     // resource so later readers — notably resolve_template_outputs,
@@ -2778,7 +2801,7 @@ pub(crate) fn apply_resource_updates(
                 .cloned();
             if let Some(existing) = existing {
                 match provisioner.update_resource(&existing, &resolved_def) {
-                    Ok(Some(updated)) => {
+                    Ok(Some(mut updated)) => {
                         changes.push(ResourceChange {
                             action: ResourceChangeAction::Update,
                             logical_id: updated.logical_id.clone(),
@@ -2787,7 +2810,18 @@ pub(crate) fn apply_resource_updates(
                         });
                         physical_ids
                             .insert(updated.logical_id.clone(), updated.physical_id.clone());
-                        attributes.insert(updated.logical_id.clone(), updated.attributes.clone());
+                        // Merge onto the create-time attribute set + well-known
+                        // GetAtt overlay so a 2nd deploy doesn't collapse Outputs
+                        // to the update handler's subset (dropping e.g.
+                        // CreationTime and making GetAtt resolve to literal
+                        // "Logical.Attr").
+                        let merged = merged_resource_attributes(
+                            provisioner,
+                            &updated,
+                            existing.attributes.clone(),
+                        );
+                        attributes.insert(updated.logical_id.clone(), merged.clone());
+                        updated.attributes = merged;
                         if let Some(slot) = stack
                             .resources
                             .iter_mut()
