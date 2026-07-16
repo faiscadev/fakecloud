@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::service::Ec2Service;
 use crate::service_helpers::{
     filter_value_matches, gen_id, indexed_list, not_found, paginate, parse_filters, require,
-    validate_enum, Filter,
+    validate_enum, validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Tag, Volume, VolumeAttachment};
 
@@ -159,6 +159,7 @@ pub(crate) fn describe_volumes(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    validate_max_results(&req.query_params, 5, 1000)?;
     let filters = parse_filters(&req.query_params);
     let wanted = indexed_list(&req.query_params, "VolumeId");
     let accounts = svc.state.read();
@@ -798,13 +799,41 @@ mod tests {
     #[test]
     fn describe_volumes_paginates() {
         let svc = Ec2Service::new();
-        for i in 0..3 {
+        // MaxResults must be within [5, 1000]; seed enough volumes to force a
+        // second page at the minimum page size.
+        for i in 0..6 {
             seed_volume(&svc, &format!("vol-{i}"), "available", false);
         }
         let body = body_of(
-            describe_volumes(&svc, &req("DescribeVolumes", &[("MaxResults", "2")])).unwrap(),
+            describe_volumes(&svc, &req("DescribeVolumes", &[("MaxResults", "5")])).unwrap(),
         );
         assert!(body.contains("<nextToken>"), "expected a NextToken: {body}");
+    }
+
+    #[test]
+    fn describe_volumes_rejects_max_results_zero() {
+        // MaxResults=0 with >=1 volume previously produced a self-referential
+        // NextToken=0 that looped forever (bug-hunt finding 1.1). Like its
+        // sibling paginators, DescribeVolumes must reject out-of-range
+        // MaxResults with InvalidParameterValue instead.
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "available", false);
+        let err = err_of(describe_volumes(
+            &svc,
+            &req("DescribeVolumes", &[("MaxResults", "0")]),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn describe_volumes_rejects_max_results_above_max() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "available", false);
+        let err = err_of(describe_volumes(
+            &svc,
+            &req("DescribeVolumes", &[("MaxResults", "1001")]),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
     }
 
     #[test]

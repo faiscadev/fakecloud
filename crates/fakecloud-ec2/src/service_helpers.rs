@@ -255,8 +255,11 @@ pub fn validate_length(
 /// Collect a 1-based indexed list, e.g. `ResourceId.1`, `ResourceId.2`, ….
 ///
 /// EC2 list members are contiguous from index 1; collection stops at the first
-/// missing index. Empty values terminate the list too (matching how the SDKs
-/// never emit a gap).
+/// missing index. A present-but-empty value terminates the list too — for
+/// id-lists (`InstanceId.N`, `GroupId.N`, `VolumeId.N`, …) an empty member is
+/// meaningless, and treating it as a terminator matches how the SDKs never emit
+/// a gap. Filter *values* differ (an empty value is a legitimate member); use
+/// [`indexed_list_keep_empty`] there.
 pub fn indexed_list(params: &HashMap<String, String>, prefix: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 1usize;
@@ -265,6 +268,25 @@ pub fn indexed_list(params: &HashMap<String, String>, prefix: &str) -> Vec<Strin
         match params.get(&key) {
             Some(v) if !v.is_empty() => out.push(v.clone()),
             _ => break,
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Like [`indexed_list`], but a present-but-empty value (`Filter.1.Value.1=`)
+/// is preserved as a legitimate empty-string member rather than terminating the
+/// list — the terminator is "next index absent", not "value empty". Used for
+/// filter values, where filtering for an absent/empty tag value is valid and an
+/// empty value must NOT truncate (or self-referentially loop) the list.
+pub fn indexed_list_keep_empty(params: &HashMap<String, String>, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 1usize;
+    loop {
+        let key = format!("{prefix}.{i}");
+        match params.get(&key) {
+            Some(v) => out.push(v.clone()),
+            None => break,
         }
         i += 1;
     }
@@ -280,7 +302,7 @@ pub fn parse_filters(params: &HashMap<String, String>) -> Vec<Filter> {
         let Some(name) = params.get(&name_key).filter(|v| !v.is_empty()) else {
             break;
         };
-        let values = indexed_list(params, &format!("Filter.{i}.Value"));
+        let values = indexed_list_keep_empty(params, &format!("Filter.{i}.Value"));
         out.push(Filter {
             name: name.clone(),
             values,
@@ -337,6 +359,46 @@ mod tests {
     fn indexed_list_stops_at_gap() {
         let params = p(&[("ResourceId.1", "vpc-1"), ("ResourceId.3", "vpc-3")]);
         assert_eq!(indexed_list(&params, "ResourceId"), vec!["vpc-1"]);
+    }
+
+    #[test]
+    fn indexed_list_empty_value_terminates_for_id_lists() {
+        // Plain id-lists keep the original semantics: a present-but-empty member
+        // is meaningless and terminates (SDKs never emit an empty id member).
+        let params = p(&[("InstanceId.1", ""), ("InstanceId.2", "i-2")]);
+        assert_eq!(indexed_list(&params, "InstanceId"), Vec::<String>::new());
+    }
+
+    #[test]
+    fn indexed_list_keep_empty_preserves_present_but_empty_value() {
+        // `Filter.1.Value.1=` (explicit empty string) is a legitimate member,
+        // not a terminator: it must be kept, and a following contiguous index
+        // must still be collected rather than truncated at the empty one.
+        let params = p(&[("Value.1", ""), ("Value.2", "x")]);
+        assert_eq!(indexed_list_keep_empty(&params, "Value"), vec!["", "x"]);
+    }
+
+    #[test]
+    fn indexed_list_keep_empty_then_absent_stops() {
+        // A trailing empty value followed by an absent index still terminates
+        // (no infinite loop on a genuinely-absent index).
+        let params = p(&[("Value.1", "")]);
+        assert_eq!(indexed_list_keep_empty(&params, "Value"), vec![""]);
+    }
+
+    #[test]
+    fn parse_filters_keeps_empty_filter_value() {
+        // Filtering for an empty/absent tag value: `Filter.1.Value.1=` must be
+        // preserved as a single empty-string value, not dropped.
+        let params = p(&[("Filter.1.Name", "tag:env"), ("Filter.1.Value.1", "")]);
+        let filters = parse_filters(&params);
+        assert_eq!(
+            filters,
+            vec![Filter {
+                name: "tag:env".into(),
+                values: vec!["".into()]
+            }]
+        );
     }
 
     #[test]

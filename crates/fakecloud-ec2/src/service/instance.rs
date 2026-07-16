@@ -820,6 +820,41 @@ fn transition_allowed(current: i64, new_code: i64) -> bool {
     true
 }
 
+/// Validate a single instance's state transition + stop/termination protection,
+/// returning the exact error AWS returns when it is illegal. Shared by the
+/// pre-flight read check and the re-check under the write lock so both critical
+/// sections enforce identical rules (TOCTOU-safe: a concurrent Terminate/Stop
+/// landing between the read and the write must fail this call, not be silently
+/// clobbered — bug-hunt 2026-07 finding 4.1).
+fn check_transition(inst: &Instance, id: &str, new_code: i64) -> Result<(), AwsServiceError> {
+    if !transition_allowed(inst.state_code, new_code) {
+        return Err(crate::service_helpers::incorrect_instance_state(
+            id,
+            &inst.state_name,
+        ));
+    }
+    // Termination / stop protection.
+    if new_code == 48 && inst.disable_api_termination {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "OperationNotPermitted",
+            format!(
+                "The instance '{id}' may not be terminated. Modify its 'disableApiTermination' instance attribute and try again."
+            ),
+        ));
+    }
+    if new_code == 80 && inst.disable_api_stop {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "OperationNotPermitted",
+            format!(
+                "The instance '{id}' may not be stopped. Modify its 'disableApiStop' instance attribute and try again."
+            ),
+        ));
+    }
+    Ok(())
+}
+
 async fn change_state(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -841,31 +876,7 @@ async fn change_state(
                 .instances
                 .get(id)
                 .ok_or_else(|| crate::service_helpers::instance_not_found(id))?;
-            if !transition_allowed(inst.state_code, new_code) {
-                return Err(crate::service_helpers::incorrect_instance_state(
-                    id,
-                    &inst.state_name,
-                ));
-            }
-            // Termination / stop protection.
-            if new_code == 48 && inst.disable_api_termination {
-                return Err(AwsServiceError::aws_error(
-                    http::StatusCode::BAD_REQUEST,
-                    "OperationNotPermitted",
-                    format!(
-                        "The instance '{id}' may not be terminated. Modify its 'disableApiTermination' instance attribute and try again."
-                    ),
-                ));
-            }
-            if new_code == 80 && inst.disable_api_stop {
-                return Err(AwsServiceError::aws_error(
-                    http::StatusCode::BAD_REQUEST,
-                    "OperationNotPermitted",
-                    format!(
-                        "The instance '{id}' may not be stopped. Modify its 'disableApiStop' instance attribute and try again."
-                    ),
-                ));
-            }
+            check_transition(inst, id, new_code)?;
         }
     }
 
@@ -882,6 +893,22 @@ async fn change_state(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // Re-run existence + transition/protection checks against the freshly
+        // re-read state INSIDE the write lock before mutating anything. The
+        // read-phase check above ran under a different (dropped) lock, so a
+        // concurrent Terminate/Stop could have landed in between; without this
+        // re-check a StartInstances that passed the read check would overwrite
+        // a terminated instance's state code, resurrecting it past the boot
+        // task's terminal guard (bug-hunt 2026-07 finding 4.1). AWS applies the
+        // whole call atomically, so any id now failing fails the entire call
+        // with nothing mutated (the guard is still held, so no partial writes).
+        for id in &ids {
+            let inst = state
+                .instances
+                .get(id)
+                .ok_or_else(|| crate::service_helpers::instance_not_found(id))?;
+            check_transition(inst, id, new_code)?;
+        }
         for id in &ids {
             let (prev_code, prev_name) = state
                 .instances
@@ -2327,5 +2354,112 @@ mod modify_tests {
         let inst = &accounts.get("000000000000").unwrap().instances["i-1"];
         assert_eq!(inst.state_code, 16);
         assert_eq!(inst.state_name, "running");
+    }
+
+    fn state_of(svc: &Ec2Service, id: &str) -> (i64, Option<String>) {
+        let accounts = svc.state.read();
+        let inst = &accounts.get("000000000000").unwrap().instances[id];
+        (inst.state_code, inst.container_id.clone())
+    }
+
+    #[test]
+    fn check_transition_enforces_terminal_and_protection() {
+        // Direct unit test of the shared re-check helper the write-lock TOCTOU
+        // guard relies on (bug-hunt finding 4.1).
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        let inst = state.instances.get_mut("i-1").unwrap();
+
+        // Running -> start/stop/terminate all legal.
+        assert!(check_transition(inst, "i-1", 16).is_ok());
+        assert!(check_transition(inst, "i-1", 80).is_ok());
+        assert!(check_transition(inst, "i-1", 48).is_ok());
+
+        // Terminated is terminal: no Start (16) allowed, only re-terminate.
+        inst.state_code = 48;
+        inst.state_name = "terminated".into();
+        assert_eq!(
+            check_transition(inst, "i-1", 16).unwrap_err().code(),
+            "IncorrectInstanceState"
+        );
+        assert!(check_transition(inst, "i-1", 48).is_ok());
+
+        // Protection flags map to OperationNotPermitted.
+        inst.state_code = 16;
+        inst.state_name = "running".into();
+        inst.disable_api_termination = true;
+        assert_eq!(
+            check_transition(inst, "i-1", 48).unwrap_err().code(),
+            "OperationNotPermitted"
+        );
+        inst.disable_api_termination = false;
+        inst.disable_api_stop = true;
+        assert_eq!(
+            check_transition(inst, "i-1", 80).unwrap_err().code(),
+            "OperationNotPermitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_after_terminate_does_not_resurrect() {
+        // End-to-end: once terminated, a StartInstances must be rejected rather
+        // than overwriting code 48 with pending (the resurrection the write-lock
+        // re-check closes). Metadata-only mode has no runtime, so the terminal
+        // state is fully determined by the control-plane path.
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+
+        terminate_instances(&svc, &req("TerminateInstances", &[("InstanceId.1", "i-1")]))
+            .await
+            .unwrap();
+        let (code, container) = state_of(&svc, "i-1");
+        assert_eq!(code, 48, "terminate must set code 48");
+        assert_eq!(container, None, "terminate must drop the container handle");
+
+        let err = start_instances(&svc, &req("StartInstances", &[("InstanceId.1", "i-1")]))
+            .await
+            .err()
+            .expect("starting a terminated instance must fail");
+        assert_eq!(err.code(), "IncorrectInstanceState");
+
+        // State is untouched: still terminated, no partial resurrection.
+        let (code, _) = state_of(&svc, "i-1");
+        assert_eq!(code, 48, "instance must stay terminated");
+    }
+
+    #[tokio::test]
+    async fn change_state_is_atomic_on_mixed_ids() {
+        // AWS applies the whole call or none: a batch where one id is illegal
+        // (terminated) must fail entirely and leave the other id untouched.
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-ok");
+        seed_instance(&svc, "i-dead");
+        terminate_instances(
+            &svc,
+            &req("TerminateInstances", &[("InstanceId.1", "i-dead")]),
+        )
+        .await
+        .unwrap();
+
+        let err = start_instances(
+            &svc,
+            &req(
+                "StartInstances",
+                &[("InstanceId.1", "i-ok"), ("InstanceId.2", "i-dead")],
+            ),
+        )
+        .await
+        .err()
+        .expect("batch with a terminated id must fail");
+        assert_eq!(err.code(), "IncorrectInstanceState");
+
+        // i-ok must NOT have been flipped to pending by a partial write.
+        let (code, _) = state_of(&svc, "i-ok");
+        assert_eq!(
+            code, 16,
+            "healthy instance must be untouched on atomic fail"
+        );
     }
 }
