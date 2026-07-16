@@ -1201,16 +1201,45 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
     // 500-shard ceiling so a corrupt stored value can't cause an
     // unbounded XML allocation here.
     const MAX_SHARDS: i32 = 500;
+    // AWS caps a Redis/Valkey node group at 5 read replicas. Clamp so a
+    // corrupt stored value can't drive an unbounded member allocation.
+    const MAX_REPLICAS_PER_SHARD: i32 = 5;
     let shard_count = g.num_node_groups.clamp(1, MAX_SHARDS);
+    // Emit one primary NodeGroupMember plus one member per configured replica.
+    // The Terraform provider derives `replicas_per_node_group` from
+    // `len(NodeGroupMembers) - 1`; emitting only the primary reported 0
+    // replicas and produced a perpetual plan diff. bug-hunt 2026-07-16, 1.8.
+    let replicas_per_shard = current_replicas_per_shard(g).clamp(0, MAX_REPLICAS_PER_SHARD);
+    let members_per_shard = replicas_per_shard + 1;
     let node_groups_inner: String = (1..=shard_count)
         .map(|shard| {
-            // Pull the matching member cluster id when possible so multi-shard
-            // describe responses round-trip the requested NumNodeGroups.
-            let primary_cluster = g
-                .member_clusters
-                .get((shard - 1) as usize)
-                .map(|s| s.as_str())
-                .unwrap_or_else(|| g.member_clusters.first().map(|s| s.as_str()).unwrap_or(""));
+            // Members for this shard: 1 primary + N replicas. AWS names the
+            // per-node clusters `<rg>-001` (primary), `-002..` (replicas);
+            // reuse the stored member_clusters slice when it lines up so
+            // multi-shard describe responses round-trip the requested shape.
+            let base = ((shard - 1) * members_per_shard) as usize;
+            let members_xml: String = (0..members_per_shard)
+                .map(|i| {
+                    let global_idx = base + i as usize;
+                    let cluster_id =
+                        g.member_clusters
+                            .get(global_idx)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                format!("{}-{:03}", g.replication_group_id, global_idx + 1)
+                            });
+                    let role = if i == 0 { "primary" } else { "replica" };
+                    format!(
+                        "<NodeGroupMember>\
+                         <CacheClusterId>{cluster_id}</CacheClusterId>\
+                         <CacheNodeId>0001</CacheNodeId>\
+                         <PreferredAvailabilityZone>{primary_az_xml}</PreferredAvailabilityZone>\
+                         <CurrentRole>{role}</CurrentRole>\
+                         </NodeGroupMember>",
+                        cluster_id = xml_escape(&cluster_id),
+                    )
+                })
+                .collect();
             format!(
                 "<NodeGroup>\
                  <NodeGroupId>{shard:04}</NodeGroupId>\
@@ -1223,16 +1252,8 @@ pub(crate) fn replication_group_xml(g: &ReplicationGroup, region: &str) -> Strin
                  <Address>{endpoint_address}</Address>\
                  <Port>{endpoint_port}</Port>\
                  </ReaderEndpoint>\
-                 <NodeGroupMembers>\
-                 <NodeGroupMember>\
-                 <CacheClusterId>{primary_cluster}</CacheClusterId>\
-                 <CacheNodeId>0001</CacheNodeId>\
-                 <PreferredAvailabilityZone>{primary_az_xml}</PreferredAvailabilityZone>\
-                 <CurrentRole>primary</CurrentRole>\
-                 </NodeGroupMember>\
-                 </NodeGroupMembers>\
+                 <NodeGroupMembers>{members_xml}</NodeGroupMembers>\
                  </NodeGroup>",
-                primary_cluster = xml_escape(primary_cluster),
             )
         })
         .collect();
