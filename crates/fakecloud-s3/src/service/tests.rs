@@ -842,13 +842,16 @@ async fn upload_part_rejects_invalid_part_number() {
     seed_bucket(&svc, "b");
     let upload_id = initiate_mpu(&svc, "b", "k");
 
-    // part_number < 1 is masked as NoSuchUpload (matching AWS behavior).
+    // part_number < 1 is an out-of-range argument: 400 InvalidArgument, same
+    // as the > 10000 case (previously masked as a 404 NoSuchUpload).
     let req = make_request(Method::PUT, "/b/k", &[("partNumber", "0")], b"body");
-    assert_aws_err(
-        svc.upload_part("123456789012", &req, "b", "k", &upload_id, 0)
-            .await,
-        "NoSuchUpload",
-    );
+    let err = svc
+        .upload_part("123456789012", &req, "b", "k", &upload_id, 0)
+        .await
+        .err()
+        .expect("partNumber 0 must error");
+    assert_eq!(err.code(), "InvalidArgument");
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
 
     // part_number > 10000 returns InvalidArgument.
     let req2 = make_request(Method::PUT, "/b/k", &[("partNumber", "10001")], b"body");

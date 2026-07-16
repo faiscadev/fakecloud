@@ -63,7 +63,7 @@ impl StsService {
                 "The request must contain the parameter AccessKeyId",
             )
         })?;
-        validate_string_length("accessKeyId", access_key_id, 16, 128)?;
+        sts_validate_string_length("accessKeyId", access_key_id, 16, 128)?;
 
         // Try to resolve account from known access keys across all accounts
         let accounts = self.state.read();

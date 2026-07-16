@@ -11,7 +11,7 @@ impl StsService {
                 "The request must contain the parameter RoleArn",
             )
         })?;
-        validate_string_length("roleArn", role_arn, 20, 2048)?;
+        sts_validate_string_length("roleArn", role_arn, 20, 2048)?;
 
         let role_session_name = req.query_params.get("RoleSessionName").ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -20,7 +20,7 @@ impl StsService {
                 "The request must contain the parameter RoleSessionName",
             )
         })?;
-        validate_string_length("roleSessionName", role_session_name, 2, 64)?;
+        sts_validate_string_length("roleSessionName", role_session_name, 2, 64)?;
         validate_session_name(role_session_name)?;
 
         // Validate optional DurationSeconds (used below for expiration)
@@ -36,7 +36,7 @@ impl StsService {
                     ),
                 )
             })?;
-            validate_range_i64("durationSeconds", v, 900, 43200)?;
+            sts_validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
         // Validate optional ExternalId
@@ -318,7 +318,7 @@ impl StsService {
                 "The request must contain the parameter RoleArn",
             )
         })?;
-        validate_string_length("roleArn", role_arn, 20, 2048)?;
+        sts_validate_string_length("roleArn", role_arn, 20, 2048)?;
 
         let role_session_name = req.query_params.get("RoleSessionName").ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -327,7 +327,7 @@ impl StsService {
                 "The request must contain the parameter RoleSessionName",
             )
         })?;
-        validate_string_length("roleSessionName", role_session_name, 2, 64)?;
+        sts_validate_string_length("roleSessionName", role_session_name, 2, 64)?;
         validate_session_name(role_session_name)?;
 
         // WebIdentityToken is required
@@ -338,7 +338,7 @@ impl StsService {
                 "The request must contain the parameter WebIdentityToken",
             )
         })?;
-        validate_string_length("webIdentityToken", web_identity_token, 4, 20000)?;
+        sts_validate_string_length("webIdentityToken", web_identity_token, 4, 20000)?;
         let web_identity_token_owned = web_identity_token.clone();
 
         // Validate optional Policy
@@ -370,7 +370,7 @@ impl StsService {
                     ),
                 )
             })?;
-            validate_range_i64("durationSeconds", v, 900, 43200)?;
+            sts_validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
         // Compute expiration from DurationSeconds (default 3600s)
@@ -630,7 +630,7 @@ impl StsService {
                 "The request must contain the parameter RoleArn",
             )
         })?;
-        validate_string_length("roleArn", role_arn, 20, 2048)?;
+        sts_validate_string_length("roleArn", role_arn, 20, 2048)?;
 
         // PrincipalArn is required
         let principal_arn = req.query_params.get("PrincipalArn").ok_or_else(|| {
@@ -640,7 +640,7 @@ impl StsService {
                 "The request must contain the parameter PrincipalArn",
             )
         })?;
-        validate_string_length("principalArn", principal_arn, 20, 2048)?;
+        sts_validate_string_length("principalArn", principal_arn, 20, 2048)?;
         // Snapshot the SAML provider ARN so we can stash it on the
         // session as `aws:FederatedProvider` after this scope ends.
         let saml_provider_arn = principal_arn.clone();
@@ -653,7 +653,7 @@ impl StsService {
                 "The request must contain the parameter SAMLAssertion",
             )
         })?;
-        validate_string_length("sAMLAssertion", saml_assertion, 4, 100000)?;
+        sts_validate_string_length("sAMLAssertion", saml_assertion, 4, 100000)?;
 
         // Validate optional Policy
         validate_optional_string_length(
@@ -676,7 +676,7 @@ impl StsService {
                     ),
                 )
             })?;
-            validate_range_i64("durationSeconds", v, 900, 43200)?;
+            sts_validate_range_i64("durationSeconds", v, 900, 43200)?;
         }
 
         // Compute expiration from DurationSeconds (default 3600s)

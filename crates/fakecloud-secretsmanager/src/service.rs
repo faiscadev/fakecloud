@@ -1215,14 +1215,14 @@ impl SecretsManagerService {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterException",
-                "InvalidParameterException",
+                "Invalid value for parameter PasswordLength; must be 4..=4096.",
             ));
         }
         if length > 4096 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
-                "InvalidParameterValue",
-                "InvalidParameterValue",
+                "InvalidParameterException",
+                "Invalid value for parameter PasswordLength; must be 4..=4096.",
             ));
         }
 

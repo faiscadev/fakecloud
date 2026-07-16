@@ -757,7 +757,13 @@ async fn test_get_random_password_too_long() {
     let svc = SecretsManagerService::new(state);
 
     let req = make_request("GetRandomPassword", r#"{"PasswordLength": 4097}"#);
-    assert!(svc.handle(req).await.is_err());
+    let err = svc
+        .handle(req)
+        .await
+        .err()
+        .expect("over-long PasswordLength errors");
+    // AWS SecretsManager uses InvalidParameterException, not InvalidParameterValue.
+    assert_eq!(err.code(), "InvalidParameterException");
 }
 
 #[tokio::test]

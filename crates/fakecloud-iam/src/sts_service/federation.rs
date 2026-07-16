@@ -14,7 +14,7 @@ impl StsService {
                 "The request must contain the parameter Name",
             )
         })?;
-        validate_string_length("name", name, 2, 32)?;
+        sts_validate_string_length("name", name, 2, 32)?;
 
         // Validate optional DurationSeconds (used below for expiration)
         if let Some(ds) = req.query_params.get("DurationSeconds") {
@@ -29,7 +29,7 @@ impl StsService {
                     ),
                 )
             })?;
-            validate_range_i64("durationSeconds", v, 900, 129600)?;
+            sts_validate_range_i64("durationSeconds", v, 900, 129600)?;
         }
 
         // Validate and store optional policy

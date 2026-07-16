@@ -20,7 +20,7 @@ impl StsService {
                     ),
                 )
             })?;
-            validate_range_i64("durationSeconds", v, 900, 129600)?;
+            sts_validate_range_i64("durationSeconds", v, 900, 129600)?;
         }
 
         // Validate and accept optional MFA SerialNumber (no verification in emulator)
@@ -118,7 +118,7 @@ impl StsService {
                 "The request must contain the parameter EncodedMessage",
             )
         })?;
-        validate_string_length("encodedMessage", encoded_message, 1, 10240)?;
+        sts_validate_string_length("encodedMessage", encoded_message, 1, 10240)?;
 
         // Round-trip the deflated/base64'd token produced by
         // `auth_message::encode_deny`. Tokens that don't decode are

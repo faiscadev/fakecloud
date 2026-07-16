@@ -948,7 +948,11 @@ fn resource_policy_lifecycle() {
     // Get should now return PolicyNotFoundException, matching real DynamoDB.
     let req = make_request("GetResourcePolicy", json!({ "ResourceArn": table_arn }));
     match svc.get_resource_policy(&req) {
-        Err(e) => assert_eq!(e.code(), "PolicyNotFoundException"),
+        Err(e) => {
+            assert_eq!(e.code(), "PolicyNotFoundException");
+            // awsJson1.0: client errors are HTTP 400, never 404.
+            assert_eq!(e.status(), http::StatusCode::BAD_REQUEST);
+        }
         Ok(_) => panic!("GetResourcePolicy after delete must error"),
     }
 }

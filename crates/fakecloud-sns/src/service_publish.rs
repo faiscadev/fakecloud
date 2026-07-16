@@ -35,9 +35,10 @@ impl SnsService {
         let message_dedup_id = param(req, "MessageDeduplicationId");
         let message_structure = param(req, "MessageStructure");
 
-        // Validate subject length
+        // Validate subject length. AWS caps Subject at 100 *characters*, not
+        // bytes — count chars so a multibyte subject is not wrongly rejected.
         if let Some(ref subj) = subject {
-            if subj.len() > 100 {
+            if subj.chars().count() > 100 {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "InvalidParameter",
