@@ -50,6 +50,48 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
     }
 
+    /// Apply a CFN property update to an existing CloudWatch Logs log group in
+    /// place. `RetentionInDays` and `KmsKeyId` are updatable-without-replacement
+    /// in real CloudFormation, so a stack update must reach the log group and be
+    /// reflected by `DescribeLogGroups` instead of being silently dropped.
+    /// Omitting `RetentionInDays` clears retention (never expire), matching the
+    /// direct `DeleteRetentionPolicy` semantics CFN applies when the property
+    /// is removed.
+    pub(crate) fn update_log_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = &existing.physical_id;
+
+        let retention_in_days = props
+            .get("RetentionInDays")
+            .and_then(|v| v.as_i64())
+            .map(|v| v as i32);
+        let kms_key_id = props
+            .get("KmsKeyId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+
+        let mut logs_accounts = self.logs_state.write();
+        let state = logs_accounts.get_or_create(&self.account_id);
+        let group = state
+            .log_groups
+            .values_mut()
+            .find(|g| g.arn == *arn)
+            .ok_or_else(|| format!("Log group {arn} not yet provisioned"))?;
+        group.retention_in_days = retention_in_days;
+        if kms_key_id.is_some() {
+            group.kms_key_id = kms_key_id;
+        }
+        if let Some(class) = props.get("LogGroupClass").and_then(|v| v.as_str()) {
+            group.log_group_class = Some(class.to_string());
+        }
+
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn.clone()))
+    }
+
     /// Look up an S3 object's bytes from the in-process S3 state. Used by
     /// the Lambda function provisioner to hydrate `Code.S3Bucket` /
     /// `Code.S3Key` references into real ZIP content. Returns an error

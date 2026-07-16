@@ -636,6 +636,116 @@ impl ResourceProvisioner {
             .with("DbiResourceId", dbi_resource_id_attr))
     }
 
+    /// Apply a CFN property update to an existing RDS DB instance in place.
+    /// Mirrors the property extraction in `create_rds_db_instance` for the
+    /// fields that `ModifyDBInstance` mutates without replacement (instance
+    /// class, allocated storage, engine version, master password, backup
+    /// retention, multi-AZ, deletion protection, IOPS, storage type, etc.) so a
+    /// stack update reaches the instance and `DescribeDBInstances` reflects the
+    /// new config instead of the stale one. The identifier, ARN, endpoint,
+    /// backing container and creation time are preserved.
+    pub(super) fn update_rds_db_instance(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let identifier = &existing.physical_id;
+
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let inst = state
+            .instances
+            .get_mut(identifier)
+            .ok_or_else(|| format!("DB instance {identifier} not yet provisioned"))?;
+
+        if let Some(class) = props.get("DBInstanceClass").and_then(|v| v.as_str()) {
+            inst.db_instance_class = class.to_string();
+        }
+        if let Some(ev) = props.get("EngineVersion").and_then(|v| v.as_str()) {
+            inst.engine_version = ev.to_string();
+        }
+        if let Some(pw) = props.get("MasterUserPassword").and_then(|v| v.as_str()) {
+            inst.master_user_password = pw.to_string();
+        }
+        if let Some(storage) = props.get("AllocatedStorage").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        }) {
+            inst.allocated_storage = storage as i32;
+        }
+        if let Some(b) = props.get("PubliclyAccessible").and_then(|v| v.as_bool()) {
+            inst.publicly_accessible = b;
+        }
+        if let Some(b) = props.get("DeletionProtection").and_then(|v| v.as_bool()) {
+            inst.deletion_protection = b;
+        }
+        if let Some(n) = props.get("BackupRetentionPeriod").and_then(|v| v.as_i64()) {
+            inst.backup_retention_period = n as i32;
+        }
+        if let Some(b) = props.get("MultiAZ").and_then(|v| v.as_bool()) {
+            inst.multi_az = b;
+        }
+        if let Some(st) = props.get("StorageType").and_then(|v| v.as_str()) {
+            inst.storage_type = Some(st.to_string());
+        }
+        if let Some(n) = props.get("Iops").and_then(|v| v.as_i64()) {
+            inst.iops = Some(n as i32);
+        }
+        if let Some(pg) = props.get("DBParameterGroupName").and_then(|v| v.as_str()) {
+            inst.db_parameter_group_name = Some(pg.to_string());
+        }
+        if let Some(og) = props.get("OptionGroupName").and_then(|v| v.as_str()) {
+            inst.option_group_name = Some(og.to_string());
+        }
+        if let Some(n) = props.get("MaxAllocatedStorage").and_then(|v| v.as_i64()) {
+            inst.max_allocated_storage = Some(n as i32);
+        }
+        if let Some(b) = props
+            .get("AutoMinorVersionUpgrade")
+            .and_then(|v| v.as_bool())
+        {
+            inst.auto_minor_version_upgrade = Some(b);
+        }
+        if let Some(b) = props.get("CopyTagsToSnapshot").and_then(|v| v.as_bool()) {
+            inst.copy_tags_to_snapshot = Some(b);
+        }
+        if let Some(n) = props.get("MonitoringInterval").and_then(|v| v.as_i64()) {
+            inst.monitoring_interval = Some(n as i32);
+        }
+        if let Some(vsgs) = props.get("VPCSecurityGroups").and_then(|v| v.as_array()) {
+            inst.vpc_security_group_ids = vsgs
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(exports) = props
+            .get("EnableCloudwatchLogsExports")
+            .and_then(|v| v.as_array())
+        {
+            inst.enabled_cloudwatch_logs_exports = exports
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(ca) = props
+            .get("CACertificateIdentifier")
+            .and_then(|v| v.as_str())
+        {
+            inst.ca_certificate_identifier = Some(ca.to_string());
+        }
+
+        let arn = inst.db_instance_arn.clone();
+        let endpoint = inst.endpoint_address.clone();
+        let port = inst.port;
+        let dbi_resource_id = inst.dbi_resource_id.clone();
+        Ok(ProvisionResult::new(identifier.clone())
+            .with("DBInstanceArn", arn)
+            .with("Endpoint.Address", endpoint)
+            .with("Endpoint.Port", port.to_string())
+            .with("DbiResourceId", dbi_resource_id))
+    }
+
     pub(super) fn delete_rds_db_instance(&self, physical_id: &str) -> Result<(), String> {
         {
             let mut accounts = self.rds_state.write();

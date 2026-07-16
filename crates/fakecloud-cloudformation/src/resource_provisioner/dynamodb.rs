@@ -239,6 +239,107 @@ impl ResourceProvisioner {
         Ok(result)
     }
 
+    /// Apply a CFN property update to an existing DynamoDB table in place.
+    /// `BillingMode`, `ProvisionedThroughput`, `GlobalSecondaryIndexes`,
+    /// `OnDemandThroughput`, `DeletionProtectionEnabled`, `TableClass` and
+    /// `SSESpecification` are all update-without-replacement in real
+    /// CloudFormation, so a stack update must reach the table and be reflected
+    /// by `DescribeTable` instead of being silently dropped. Key schema and
+    /// attribute definitions are replacement-only and left untouched here.
+    pub(super) fn update_dynamodb_table(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = &existing.physical_id;
+
+        let mut __ddb_mas = self.dynamodb_state.write();
+        let state = __ddb_mas.get_or_create(&self.account_id);
+        let table = state
+            .tables
+            .values_mut()
+            .find(|t| &t.arn == arn)
+            .ok_or_else(|| format!("DynamoDB table {arn} not yet provisioned"))?;
+
+        if let Some(billing_mode) = props.get("BillingMode").and_then(|v| v.as_str()) {
+            table.billing_mode = billing_mode.to_string();
+        }
+        // Provisioned throughput only applies under PROVISIONED billing; when
+        // switching to PAY_PER_REQUEST the units go to zero, matching Describe.
+        if table.billing_mode == "PROVISIONED" {
+            if let Some(pt) = props.get("ProvisionedThroughput") {
+                table.provisioned_throughput = ProvisionedThroughput {
+                    read_capacity_units: pt
+                        .get("ReadCapacityUnits")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(table.provisioned_throughput.read_capacity_units),
+                    write_capacity_units: pt
+                        .get("WriteCapacityUnits")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(table.provisioned_throughput.write_capacity_units),
+                };
+            }
+        } else {
+            table.provisioned_throughput = ProvisionedThroughput {
+                read_capacity_units: 0,
+                write_capacity_units: 0,
+            };
+        }
+        if let Some(gsi) = props.get("GlobalSecondaryIndexes") {
+            table.gsi = fakecloud_dynamodb::parse_gsi(gsi, &table.billing_mode);
+        }
+        if let Some(odt) = props.get("OnDemandThroughput") {
+            table.on_demand_throughput = Some(OnDemandThroughput {
+                max_read_request_units: odt
+                    .get("MaxReadRequestUnits")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(-1),
+                max_write_request_units: odt
+                    .get("MaxWriteRequestUnits")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or(-1),
+            });
+        }
+        if let Some(dp) = props
+            .get("DeletionProtectionEnabled")
+            .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+        {
+            table.deletion_protection_enabled = dp;
+        }
+        if let Some(class) = props.get("TableClass").and_then(|v| v.as_str()) {
+            table.table_class = class.to_string();
+        }
+        if let Some(sse_spec) = props.get("SSESpecification") {
+            let enabled = sse_spec
+                .get("SSEEnabled")
+                .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+                .unwrap_or(false);
+            if enabled {
+                table.sse_type = Some(
+                    sse_spec
+                        .get("SSEType")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("KMS")
+                        .to_string(),
+                );
+                table.sse_kms_key_arn = sse_spec
+                    .get("KMSMasterKeyId")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+            } else {
+                table.sse_type = None;
+                table.sse_kms_key_arn = None;
+            }
+        }
+
+        let mut result = ProvisionResult::new(arn.clone()).with("Arn", arn.clone());
+        if let Some(stream_arn) = table.stream_arn.clone() {
+            result = result.with("StreamArn", stream_arn);
+        }
+        Ok(result)
+    }
+
     pub(super) fn delete_dynamodb_table(&self, physical_id: &str) -> Result<(), String> {
         let mut __ddb_mas = self.dynamodb_state.write();
         let state = __ddb_mas.get_or_create(&self.account_id);

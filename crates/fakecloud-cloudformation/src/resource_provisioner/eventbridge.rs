@@ -96,6 +96,67 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
     }
 
+    /// Apply a CFN property update to an existing EventBridge rule in place.
+    /// Mirrors the property extraction in `create_eventbridge_rule` so a stack
+    /// update re-applies ScheduleExpression / EventPattern / State / Targets /
+    /// Description / RoleArn — all update-without-replacement in real
+    /// CloudFormation — instead of being silently dropped. Without this a
+    /// `cdk deploy` that changes a schedule or its targets reports success but
+    /// the rule keeps firing on the stale schedule into the old targets.
+    pub(super) fn update_eventbridge_rule(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = &existing.physical_id;
+
+        let mut eb_accounts = self.eventbridge_state.write();
+        let state = eb_accounts.get_or_create(&self.account_id);
+        let rule = state
+            .rules
+            .values_mut()
+            .find(|r| &r.arn == arn)
+            .ok_or_else(|| format!("EventBridge rule {arn} not yet provisioned"))?;
+
+        rule.event_pattern = props.get("EventPattern").map(|v| {
+            if v.is_string() {
+                v.as_str().unwrap_or_default().to_string()
+            } else {
+                serde_json::to_string(v).unwrap_or_default()
+            }
+        });
+        rule.schedule_expression = props
+            .get("ScheduleExpression")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        rule.state = props
+            .get("State")
+            .and_then(|v| v.as_str())
+            .unwrap_or("ENABLED")
+            .to_string();
+        rule.description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        rule.role_arn = props
+            .get("RoleArn")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        rule.targets = props
+            .get("Targets")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter(|t| t.get("Arn").and_then(|v| v.as_str()).is_some())
+                    .map(fakecloud_eventbridge::parse_target)
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(ProvisionResult::new(arn.clone()).with("Arn", arn.clone()))
+    }
+
     pub(super) fn delete_eventbridge_rule(&self, physical_id: &str) -> Result<(), String> {
         let mut eb_accounts = self.eventbridge_state.write();
         let state = eb_accounts.default_mut();
