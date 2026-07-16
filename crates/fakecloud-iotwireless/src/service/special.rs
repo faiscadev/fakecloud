@@ -210,6 +210,33 @@ pub(super) fn dispatch(
             Ok(Some(list_multicast_groups_by_fuota_task(svc, ctx, labels)))
         }
 
+        // ---- multicast-group LoRaWAN session lifecycle ----
+        // Start persists the requested LoRaWAN session under `multicast-sessions`
+        // keyed by group id; Get projects it; Cancel clears it.
+        "StartMulticastGroupSession" => Ok(Some(start_multicast_session(svc, ctx, labels, body))),
+        "GetMulticastGroupSession" => Ok(Some(get_multicast_session(svc, ctx, labels))),
+        "CancelMulticastGroupSession" => Ok(Some(cancel_multicast_session(svc, ctx, labels))),
+
+        // ---- FUOTA task session start (transitions the task's Status) ----
+        "StartFuotaTask" => Ok(Some(start_fuota_task(svc, ctx, labels))),
+
+        // ---- bulk device <-> multicast-group membership ----
+        // The bulk ops select devices by a tag query we do not model; the
+        // faithful approximation associates / disassociates every wireless device
+        // registered in the account, persisting to the same `multicast-devices`
+        // relation the single-device variant writes.
+        "StartBulkAssociateWirelessDeviceWithMulticastGroup" => {
+            Ok(Some(bulk_multicast_membership(svc, ctx, labels, true)))
+        }
+        "StartBulkDisassociateWirelessDeviceFromMulticastGroup" => {
+            Ok(Some(bulk_multicast_membership(svc, ctx, labels, false)))
+        }
+
+        // ---- low-frequency mutators with a concrete state effect ----
+        "DeleteQueuedMessages" => Ok(Some(delete_queued_messages(svc, ctx, labels))),
+        "DeregisterWirelessDevice" => Ok(Some(deregister_wireless_device(svc, ctx, labels))),
+        "ResetAllResourceLogLevels" => Ok(Some(reset_all_resource_log_levels(svc, ctx))),
+
         _ => Ok(None),
     }
 }
@@ -936,6 +963,146 @@ fn disassociate_partner_account(
             .get_mut("partner-accounts")
             .map(|m| m.remove(id));
     }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+// ---------- multicast-group LoRaWAN session ----------
+
+/// `StartMulticastGroupSession`: persist the requested LoRaWAN session so
+/// `GetMulticastGroupSession` reflects it. AWS returns no output members.
+fn start_multicast_session(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let id = labels.get("Id").map(String::as_str).unwrap_or("");
+    let lorawan = body.get("LoRaWAN").cloned().unwrap_or_else(|| json!({}));
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_resource("multicast-sessions", id, json!({ "LoRaWAN": lorawan }));
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `GetMulticastGroupSession`: project the stored LoRaWAN session. A group with
+/// no active session returns an empty (shape-valid) body.
+fn get_multicast_session(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let id = labels.get("Id").map(String::as_str).unwrap_or("");
+    let g = svc.state.read();
+    let lorawan = g
+        .get(&ctx.account)
+        .and_then(|d| d.get_resource("multicast-sessions", id))
+        .and_then(|r| r.get("LoRaWAN"))
+        .cloned();
+    match lorawan {
+        Some(l) => (ok_json(json!({ "LoRaWAN": l })), false),
+        None => (ok_json(Value::Object(Map::new())), false),
+    }
+}
+
+/// `CancelMulticastGroupSession`: clear the stored LoRaWAN session.
+fn cancel_multicast_session(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let id = labels.get("Id").map(String::as_str).unwrap_or("");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.remove_resource("multicast-sessions", id);
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `StartFuotaTask`: transition the addressed FUOTA task into an in-session
+/// status so `GetFuotaTask` reflects it. No-op when the task does not exist.
+fn start_fuota_task(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let id = labels.get("Id").map(String::as_str).unwrap_or("");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if let Some(mut record) = data.get_resource("fuota-tasks", id).cloned() {
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("Status".to_string(), json!("In_FuotaSession"));
+        }
+        data.put_resource("fuota-tasks", id, record);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `StartBulkAssociate/DisassociateWirelessDeviceWithMulticastGroup`: the tag
+/// query is not modelled, so associate / disassociate every wireless device in
+/// the account, writing to the same `multicast-devices` relation the
+/// single-device variant uses.
+fn bulk_multicast_membership(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+    associate: bool,
+) -> (AwsResponse, bool) {
+    let key = multicast_devices_key(labels);
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let device_ids: Vec<String> = data
+        .resources
+        .get("wireless-devices")
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    for device in device_ids {
+        if associate {
+            data.add_relation(&key, &device);
+        } else {
+            data.remove_relation(&key, &device);
+        }
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `DeleteQueuedMessages`: purge the addressed device's persisted downlink queue
+/// store (idempotent — there is no live radio plane enqueuing messages).
+fn delete_queued_messages(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let id = labels.get("Id").map(String::as_str).unwrap_or("");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.remove_resource("wireless-devices/data", id);
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `DeregisterWirelessDevice`: persist the deregistered state on the device
+/// record rather than accepting-and-discarding the call.
+fn deregister_wireless_device(
+    svc: &IotWirelessService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let id = labels.get("Identifier").map(String::as_str).unwrap_or("");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if let Some(mut record) = data.get_resource("wireless-devices", id).cloned() {
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("DeviceRegistrationState".to_string(), json!("Deregistered"));
+        }
+        data.put_resource("wireless-devices", id, record);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `ResetAllResourceLogLevels`: clear every per-resource log level written by
+/// `PutResourceLogLevel`.
+fn reset_all_resource_log_levels(svc: &IotWirelessService, ctx: &Ctx) -> (AwsResponse, bool) {
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.resources.remove("log-levels");
     (ok_json(Value::Object(Map::new())), true)
 }
 

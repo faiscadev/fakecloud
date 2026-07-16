@@ -683,6 +683,241 @@ fn list_paginates_with_round_tripping_token() {
     assert_eq!(page2["DeviceProfileList"].as_array().unwrap().len(), 2);
 }
 
+// ---------- multicast session / fuota / bulk / low-frequency mutators ----------
+
+#[test]
+fn multicast_group_session_start_get_cancel_round_trips() {
+    let s = svc();
+    // No session yet -> empty body.
+    let empty = body_of(
+        &run(
+            &s,
+            "GET",
+            "/multicast-groups/mc-1/session",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert!(empty.get("LoRaWAN").is_none());
+
+    // Start persists the LoRaWAN session.
+    run(
+        &s,
+        "PUT",
+        "/multicast-groups/mc-1/session",
+        &[],
+        json!({"LoRaWAN": {"SessionStartTime": 1_752_324_947.0, "SessionTimeout": 60}}),
+    )
+    .unwrap();
+    let got = body_of(
+        &run(
+            &s,
+            "GET",
+            "/multicast-groups/mc-1/session",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(got["LoRaWAN"]["SessionTimeout"], 60);
+
+    // Cancel clears it.
+    run(
+        &s,
+        "DELETE",
+        "/multicast-groups/mc-1/session",
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let cleared = body_of(
+        &run(
+            &s,
+            "GET",
+            "/multicast-groups/mc-1/session",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert!(cleared.get("LoRaWAN").is_none());
+}
+
+#[test]
+fn start_fuota_task_transitions_status() {
+    let s = svc();
+    let created = body_of(
+        &run(
+            &s,
+            "POST",
+            "/fuota-tasks",
+            &[],
+            json!({"FirmwareUpdateImage": "img", "FirmwareUpdateRole": "arn:role"}),
+        )
+        .unwrap(),
+    );
+    let id = created["Id"].as_str().unwrap().to_string();
+
+    run(
+        &s,
+        "PUT",
+        &format!("/fuota-tasks/{id}"),
+        &[],
+        json!({"LoRaWAN": {}, "DestinationName": "dest"}),
+    )
+    .unwrap();
+    let got = body_of(&run(&s, "GET", &format!("/fuota-tasks/{id}"), &[], Value::Null).unwrap());
+    assert_eq!(got["Status"], "In_FuotaSession");
+}
+
+#[test]
+fn bulk_associate_wireless_devices_with_multicast_group_persists_edges() {
+    let s = svc();
+    // Register two wireless devices.
+    let d1 = body_of(
+        &run(
+            &s,
+            "POST",
+            "/wireless-devices",
+            &[],
+            json!({"Type": "Sidewalk", "DestinationName": "d"}),
+        )
+        .unwrap(),
+    );
+    let id1 = d1["Id"].as_str().unwrap().to_string();
+    let d2 = body_of(
+        &run(
+            &s,
+            "POST",
+            "/wireless-devices",
+            &[],
+            json!({"Type": "Sidewalk", "DestinationName": "d"}),
+        )
+        .unwrap(),
+    );
+    let id2 = d2["Id"].as_str().unwrap().to_string();
+
+    run(
+        &s,
+        "PATCH",
+        "/multicast-groups/mc-9/bulk",
+        &[],
+        json!({"QueryString": "thingName:*"}),
+    )
+    .unwrap();
+    {
+        let g = s.state.read();
+        let members = g
+            .get("000000000000")
+            .unwrap()
+            .list_relation("multicast-devices:mc-9");
+        assert!(members.contains(&id1) && members.contains(&id2));
+    }
+
+    run(
+        &s,
+        "POST",
+        "/multicast-groups/mc-9/bulk",
+        &[],
+        json!({"QueryString": "thingName:*"}),
+    )
+    .unwrap();
+    {
+        let g = s.state.read();
+        let members = g
+            .get("000000000000")
+            .unwrap()
+            .list_relation("multicast-devices:mc-9");
+        assert!(members.is_empty());
+    }
+}
+
+#[test]
+fn reset_all_resource_log_levels_clears_store() {
+    let s = svc();
+    run(
+        &s,
+        "PUT",
+        "/log-levels/res-1?resourceType=WirelessDevice",
+        &[],
+        json!({"LogLevel": "INFO"}),
+    )
+    .unwrap();
+    // Present before reset.
+    assert!(run(
+        &s,
+        "GET",
+        "/log-levels/res-1?resourceType=WirelessDevice",
+        &[],
+        Value::Null
+    )
+    .is_ok());
+    run(&s, "DELETE", "/log-levels", &[], Value::Null).unwrap();
+    // Gone after reset (GetResourceLogLevel 404s).
+    let err = expect_err(run(
+        &s,
+        "GET",
+        "/log-levels/res-1?resourceType=WirelessDevice",
+        &[],
+        Value::Null,
+    ));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+}
+
+#[test]
+fn deregister_wireless_device_persists_state() {
+    let s = svc();
+    let d = body_of(
+        &run(
+            &s,
+            "POST",
+            "/wireless-devices",
+            &[],
+            json!({"Type": "Sidewalk", "DestinationName": "d"}),
+        )
+        .unwrap(),
+    );
+    let id = d["Id"].as_str().unwrap().to_string();
+    run(
+        &s,
+        "PATCH",
+        &format!("/wireless-devices/{id}/deregister?WirelessDeviceType=Sidewalk"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let g = s.state.read();
+    let rec = g
+        .get("000000000000")
+        .unwrap()
+        .get_resource("wireless-devices", &id)
+        .cloned()
+        .unwrap();
+    assert_eq!(rec["DeviceRegistrationState"], "Deregistered");
+}
+
+#[test]
+fn read_only_action_classifier_separates_reads_from_mutators() {
+    let find = |op: &str| crate::generated::OPS.iter().find(|m| m.op == op).unwrap();
+    // GET-shaped actions are accepted as empty no-ops when unclaimed.
+    assert!(super::is_read_only_action(find(
+        "GetWirelessGatewayFirmwareInformation"
+    )));
+    assert!(super::is_read_only_action(find("GetServiceEndpoint")));
+    // Mutating actions must NOT be classified read-only (they fail loud if they
+    // ever reach the fall-through).
+    assert!(!super::is_read_only_action(find(
+        "StartMulticastGroupSession"
+    )));
+    assert!(!super::is_read_only_action(find(
+        "DeregisterWirelessDevice"
+    )));
+    assert!(!super::is_read_only_action(find(
+        "AssociateWirelessDeviceWithThing"
+    )));
+}
+
 // ---------- every operation routes to a handler ----------
 
 #[test]
