@@ -7839,40 +7839,49 @@ async fn main() {
             "/_fakecloud/sqs/messages",
             axum::routing::get({
                 let ss = sqs_introspection_state;
-                move || async move {
+                // Render each queue_url against the caller's Host so the
+                // introspection view matches the QueueUrls returned by the SQS
+                // API (host-aware, bug-hunt 1.10).
+                move |headers: axum::http::HeaderMap| async move {
                     let mas = ss.read();
                     let queues = mas
                         .iter()
-                        .flat_map(|(_, state)| state.queues.values())
-                        .map(|queue| {
-                            let mut messages: Vec<types::SqsMessageInfo> = queue
-                                .messages
-                                .iter()
-                                .map(|msg| types::SqsMessageInfo {
-                                    message_id: msg.message_id.clone(),
-                                    body: msg.body.clone(),
-                                    receive_count: msg.receive_count as u64,
-                                    in_flight: false,
-                                    created_at: msg.created_at.to_rfc3339(),
-                                })
-                                .collect();
-                            let inflight: Vec<types::SqsMessageInfo> = queue
-                                .inflight
-                                .iter()
-                                .map(|msg| types::SqsMessageInfo {
-                                    message_id: msg.message_id.clone(),
-                                    body: msg.body.clone(),
-                                    receive_count: msg.receive_count as u64,
-                                    in_flight: true,
-                                    created_at: msg.created_at.to_rfc3339(),
-                                })
-                                .collect();
-                            messages.extend(inflight);
-                            types::SqsQueueMessages {
-                                queue_url: queue.queue_url.clone(),
-                                queue_name: queue.queue_name.clone(),
-                                messages,
-                            }
+                        .flat_map(|(_, state)| {
+                            let base =
+                                fakecloud_sqs::resolve_endpoint_base(&headers, &state.endpoint);
+                            state.queues.values().map(move |queue| {
+                                let mut messages: Vec<types::SqsMessageInfo> = queue
+                                    .messages
+                                    .iter()
+                                    .map(|msg| types::SqsMessageInfo {
+                                        message_id: msg.message_id.clone(),
+                                        body: msg.body.clone(),
+                                        receive_count: msg.receive_count as u64,
+                                        in_flight: false,
+                                        created_at: msg.created_at.to_rfc3339(),
+                                    })
+                                    .collect();
+                                let inflight: Vec<types::SqsMessageInfo> = queue
+                                    .inflight
+                                    .iter()
+                                    .map(|msg| types::SqsMessageInfo {
+                                        message_id: msg.message_id.clone(),
+                                        body: msg.body.clone(),
+                                        receive_count: msg.receive_count as u64,
+                                        in_flight: true,
+                                        created_at: msg.created_at.to_rfc3339(),
+                                    })
+                                    .collect();
+                                messages.extend(inflight);
+                                types::SqsQueueMessages {
+                                    queue_url: fakecloud_sqs::render_queue_url(
+                                        &queue.queue_url,
+                                        &base,
+                                    ),
+                                    queue_name: queue.queue_name.clone(),
+                                    messages,
+                                }
+                            })
                         })
                         .collect();
                     axum::Json(types::SqsMessagesResponse { queues })

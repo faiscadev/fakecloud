@@ -50,6 +50,10 @@ impl SqsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // Render the returned QueueUrl against the caller's host (external-URL
+        // override -> request Host -> boot-time endpoint). The stored URL stays
+        // host-independent; only the rendered value reflects the caller.
+        let endpoint_base = resolve_endpoint_base(&req.headers, &state.endpoint);
 
         if let Some(url) = state.name_to_url.get(&queue_name) {
             // Queue exists - check if attributes match
@@ -78,9 +82,10 @@ impl SqsService {
                     }
                 }
             }
+            let rendered = render_queue_url(url, &endpoint_base);
             return Ok(sqs_response(
                 "CreateQueue",
-                json!({ "QueueUrl": url }),
+                json!({ "QueueUrl": rendered }),
                 &req.request_id,
                 req.is_query_protocol,
             ));
@@ -207,9 +212,10 @@ impl SqsService {
         state.name_to_url.insert(queue_name, queue_url.clone());
         state.queues.insert(queue_url.clone(), queue);
 
+        let rendered = render_queue_url(&queue_url, &endpoint_base);
         Ok(sqs_response(
             "CreateQueue",
-            json!({ "QueueUrl": queue_url }),
+            json!({ "QueueUrl": rendered }),
             &req.request_id,
             req.is_query_protocol,
         ))
@@ -282,7 +288,12 @@ impl SqsService {
             .collect();
         let has_more = start_idx + page.len() < all_urls.len();
 
-        let mut result = json!({ "QueueUrls": page.clone() });
+        // Render each emitted QueueUrl against the caller's host. The pagination
+        // marker keeps using the stored (host-independent) URL so `partition_point`
+        // resume still matches on the next page fetch.
+        let base = resolve_endpoint_base(&req.headers, &state.endpoint);
+        let rendered: Vec<String> = page.iter().map(|u| render_queue_url(u, &base)).collect();
+        let mut result = json!({ "QueueUrls": rendered });
         if has_more {
             if let Some(last) = page.last() {
                 result["NextToken"] = json!(encode_list_queues_token(last));
@@ -311,9 +322,10 @@ impl SqsService {
             .get(queue_name)
             .ok_or_else(queue_not_found)?;
 
+        let rendered = render_queue_url(url, &resolve_endpoint_base(&req.headers, &state.endpoint));
         Ok(sqs_response(
             "GetQueueUrl",
-            json!({ "QueueUrl": url }),
+            json!({ "QueueUrl": rendered }),
             &req.request_id,
             req.is_query_protocol,
         ))

@@ -3234,3 +3234,168 @@ fn queue_arn_uses_region_partition_and_resolves() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0]["Body"], "ni-hao");
 }
+
+// ── Host-aware QueueUrl rendering (bug-hunt 1.10) ───────────────
+
+fn make_request_with_host(action: &str, body: Value, host: &str) -> AwsRequest {
+    let mut req = make_request(action, body);
+    req.headers
+        .insert("host", http::HeaderValue::from_str(host).unwrap());
+    req
+}
+
+#[test]
+fn create_queue_url_defaults_to_localhost_without_host_header() {
+    // No Host header, no override -> falls back to the boot-time endpoint,
+    // preserving the historical `http://localhost:<port>` shape that existing
+    // conformance/e2e tests depend on.
+    let svc = make_service();
+    let resp = svc
+        .create_queue(&make_request(
+            "CreateQueue",
+            json!({ "QueueName": "loc-q" }),
+        ))
+        .unwrap();
+    let url = body_json(resp)["QueueUrl"].as_str().unwrap().to_string();
+    assert_eq!(url, "http://localhost:4566/123456789012/loc-q");
+}
+
+#[test]
+fn create_queue_url_reflects_host_header() {
+    // docker-compose / remote setups reach fakecloud under a service name; the
+    // returned QueueUrl must be routable from the caller's network.
+    let svc = make_service();
+    let resp = svc
+        .create_queue(&make_request_with_host(
+            "CreateQueue",
+            json!({ "QueueName": "svc-q" }),
+            "fakecloud:4566",
+        ))
+        .unwrap();
+    let url = body_json(resp)["QueueUrl"].as_str().unwrap().to_string();
+    assert_eq!(url, "http://fakecloud:4566/123456789012/svc-q");
+}
+
+#[test]
+fn get_and_list_queue_url_reflect_host_header() {
+    let svc = make_service();
+    // Create under the default endpoint (stored identity stays localhost).
+    create_queue_url(&svc, "host-q");
+
+    // GetQueueUrl reflects the caller's Host.
+    let resp = svc
+        .get_queue_url(&make_request_with_host(
+            "GetQueueUrl",
+            json!({ "QueueName": "host-q" }),
+            "fakecloud:4566",
+        ))
+        .unwrap();
+    assert_eq!(
+        body_json(resp)["QueueUrl"].as_str().unwrap(),
+        "http://fakecloud:4566/123456789012/host-q"
+    );
+
+    // ListQueues reflects it too.
+    let resp = svc
+        .list_queues(&make_request_with_host(
+            "ListQueues",
+            json!({}),
+            "fakecloud:4566",
+        ))
+        .unwrap();
+    let urls = body_json(resp)["QueueUrls"].clone();
+    assert_eq!(urls, json!(["http://fakecloud:4566/123456789012/host-q"]));
+}
+
+#[test]
+fn external_url_override_wins_over_host_header() {
+    // The explicit external-URL override (FAKECLOUD_EXTERNAL_URL in production,
+    // read once at startup) wins over the request Host header. Exercised via the
+    // pure resolver with an injected override rather than the process-global env
+    // var — under `cargo test` all lib tests share one process, so mutating that
+    // env var mid-run would race sibling tests (which is exactly what regressed
+    // the host-header/localhost cases in CI).
+    let mut headers = http::HeaderMap::new();
+    headers.insert("host", http::HeaderValue::from_static("fakecloud:4566"));
+    let base = crate::resolve_endpoint_base_with(
+        &headers,
+        "http://localhost:4566",
+        Some("https://sqs.example.test/"),
+    );
+    assert_eq!(base, "https://sqs.example.test");
+
+    // With no override, the Host header wins over the fallback.
+    let base = crate::resolve_endpoint_base_with(&headers, "http://localhost:4566", None);
+    assert_eq!(base, "http://fakecloud:4566");
+}
+
+#[test]
+fn queue_url_host_independent_lookup_still_resolves() {
+    // A queue created under one host must still be found when the caller sends
+    // its SendMessage against a differently-hosted QueueUrl.
+    let svc = make_service();
+    create_queue_url(&svc, "lookup-q");
+    let id = send_msg(
+        &svc,
+        "http://some-other-host:9999/123456789012/lookup-q",
+        "hi",
+    );
+    assert!(!id.is_empty());
+}
+
+// ── Query-protocol attribute enumeration is contiguous, not capped (1.13) ──
+
+#[test]
+fn get_queue_attributes_reads_more_than_twenty_individual_names() {
+    // A client enumerating >20 individual AttributeName.N entries must get the
+    // whole list back, not a 20-entry prefix.
+    let names: Vec<String> = (1..=22).map(|i| format!("Attr{i}")).collect();
+    let mut params: Vec<(String, String)> = Vec::new();
+    for (idx, name) in names.iter().enumerate() {
+        params.push((format!("AttributeName.{}", idx + 1), name.clone()));
+    }
+    let param_refs: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let req = make_query_request("GetQueueAttributes", &param_refs);
+    let parsed = parse_body(&req);
+    let out = parsed["AttributeNames"].as_array().unwrap();
+    assert_eq!(out.len(), 22);
+    assert_eq!(out.last().unwrap(), "Attr22");
+}
+
+#[test]
+fn set_queue_attributes_reads_more_than_twenty_individual_pairs() {
+    let mut params: Vec<(String, String)> = Vec::new();
+    for i in 1..=22 {
+        params.push((format!("Attribute.{i}.Name"), format!("Name{i}")));
+        params.push((format!("Attribute.{i}.Value"), format!("Val{i}")));
+    }
+    let param_refs: Vec<(&str, &str)> = params
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
+    let req = make_query_request("SetQueueAttributes", &param_refs);
+    let parsed = parse_body(&req);
+    let attrs = parsed["Attributes"].as_object().unwrap();
+    assert_eq!(attrs.len(), 22);
+    assert_eq!(attrs.get("Name22").unwrap(), "Val22");
+}
+
+#[test]
+fn attribute_name_enumeration_stops_at_first_gap() {
+    // Contiguous enumeration: a hole at index 3 stops the scan (matches how
+    // AWS SDKs serialize the list — always 1..N contiguous).
+    let req = make_query_request(
+        "GetQueueAttributes",
+        &[
+            ("AttributeName.1", "A"),
+            ("AttributeName.2", "B"),
+            ("AttributeName.4", "D"),
+        ],
+    );
+    let parsed = parse_body(&req);
+    let out = parsed["AttributeNames"].as_array().unwrap();
+    assert_eq!(out.len(), 2);
+}
