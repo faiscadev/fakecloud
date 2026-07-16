@@ -826,6 +826,56 @@ async fn put_metric_data_json_and_query_roundtrip() {
 }
 
 #[tokio::test]
+async fn list_metrics_name_only_dimension_filter_narrows_results() {
+    // Regression: a DimensionFilter with only a Name (no Value) must still
+    // narrow the results. Before the fix such a filter was dropped and every
+    // metric in the namespace was returned.
+    let svc = service();
+    call_json(
+        &svc,
+        "PutMetricData",
+        serde_json::json!({
+            "Namespace": "NS",
+            "MetricData": [{
+                "MetricName": "M1",
+                "Value": 1.0,
+                "Dimensions": [{"Name": "Host", "Value": "a"}]
+            }]
+        }),
+    )
+    .await;
+    call_json(
+        &svc,
+        "PutMetricData",
+        serde_json::json!({
+            "Namespace": "NS",
+            "MetricData": [{
+                "MetricName": "M2",
+                "Value": 2.0,
+                "Dimensions": [{"Name": "Region", "Value": "us"}]
+            }]
+        }),
+    )
+    .await;
+
+    let resp = call(
+        &svc,
+        "ListMetrics",
+        &[("Namespace", "NS"), ("Dimensions.member.1.Name", "Host")],
+    )
+    .await;
+    let body = body_of(&resp);
+    assert!(
+        body.contains("<MetricName>M1</MetricName>"),
+        "M1 (has dimension Host) expected: {body}"
+    );
+    assert!(
+        !body.contains("<MetricName>M2</MetricName>"),
+        "M2 (no Host dimension) must be filtered out: {body}"
+    );
+}
+
+#[tokio::test]
 async fn get_metric_statistics_json_roundtrip() {
     let svc = service();
     // Publish a couple of points via JSON at a fixed timestamp so both land in

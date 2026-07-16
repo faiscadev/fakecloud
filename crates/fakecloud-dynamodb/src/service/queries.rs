@@ -134,6 +134,21 @@ impl DynamoDbService {
         let mut matched: Vec<&HashMap<String, AttributeValue>> = items_to_scan
             .iter()
             .filter(|item| {
+                // Sparse index: an item only appears in a GSI/LSI when it
+                // carries every one of that index's key attributes. AWS never
+                // returns (or counts) an item missing the index hash/range key
+                // on an index query, so skip those before evaluating the key
+                // condition (mirrors the scan() guard, bug-hunt 2026-07-16).
+                if index_name.is_some() {
+                    if !item.contains_key(hash_key_name.as_str()) {
+                        return false;
+                    }
+                    if let Some(ref rk) = range_key_name {
+                        if !item.contains_key(rk.as_str()) {
+                            return false;
+                        }
+                    }
+                }
                 evaluate_key_condition(&key_condition, item, &expr_attr_names, &expr_attr_values)
             })
             .collect();

@@ -3908,6 +3908,67 @@ async fn get_object_attributes_basic() {
     assert_eq!(resp.status, StatusCode::OK);
 }
 
+#[tokio::test]
+async fn get_object_attributes_etag_is_unquoted() {
+    // Regression: GetObjectAttributes returns the ETag WITHOUT the
+    // surrounding quotes that GetObject/HeadObject wrap it in.
+    let svc = make_service();
+    seed_bucket(&svc, "goaetag");
+    let req = make_request(Method::PUT, "/goaetag/k", &[], b"hi");
+    svc.put_object("123456789012", &req, "goaetag", "k")
+        .await
+        .unwrap();
+
+    let mut req = make_request(Method::GET, "/goaetag/k", &[("attributes", "")], b"");
+    req.headers
+        .insert("x-amz-object-attributes", "ETag".parse().unwrap());
+    let resp = svc
+        .get_object_attributes("123456789012", &req, "goaetag", "k")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    let md5 = compute_md5(b"hi");
+    assert!(
+        body.contains(&format!("<ETag>{md5}</ETag>")),
+        "ETag must be unquoted: {body}"
+    );
+    assert!(!body.contains("&quot;"), "ETag must not be quoted: {body}");
+}
+
+#[test]
+fn get_object_attributes_multipart_etag_is_unquoted() {
+    // Regression: a multipart ETag (`md5-N`) is also returned unquoted.
+    let svc = make_service();
+    seed_bucket(&svc, "goampu");
+    {
+        let mut mas = svc.state.write();
+        let state = mas.default_mut();
+        let b = state.buckets.get_mut("goampu").expect("bucket seeded");
+        let obj = S3Object {
+            key: "k".to_string(),
+            body: fakecloud_persistence::BodyRef::Memory(Bytes::from_static(b"x")),
+            content_type: "application/octet-stream".to_string(),
+            etag: "d41d8cd98f00b204e9800998ecf8427e-3".to_string(),
+            size: 1,
+            parts_count: Some(3),
+            last_modified: chrono::Utc::now(),
+            ..Default::default()
+        };
+        b.objects.insert("k".to_string(), obj);
+    }
+    let mut req = make_request(Method::GET, "/goampu/k", &[("attributes", "")], b"");
+    req.headers
+        .insert("x-amz-object-attributes", "ETag".parse().unwrap());
+    let resp = svc
+        .get_object_attributes("123456789012", &req, "goampu", "k")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<ETag>d41d8cd98f00b204e9800998ecf8427e-3</ETag>"),
+        "multipart ETag must be unquoted: {body}"
+    );
+    assert!(!body.contains("&quot;"), "ETag must not be quoted: {body}");
+}
+
 #[test]
 fn get_object_attributes_bucket_not_found() {
     let svc = make_service();

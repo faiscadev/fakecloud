@@ -120,9 +120,11 @@ impl Route53Service {
             .ok_or_else(|| no_such_hosted_zone(&id))?;
         drop(state);
 
-        // Route 53 returns record sets ordered by (name, type) and paginates
-        // with maxitems + the StartRecordName/Type/Identifier cursor. Names,
-        // record types, and set identifiers are XML-safe DNS/enum values.
+        // Route 53 orders record sets by reversed-label DNS name
+        // (`www.example.com.` sorts under `com.example.www`) then by record
+        // type, and paginates with maxitems + the StartRecordName/Type/
+        // Identifier cursor. Names, record types, and set identifiers are
+        // XML-safe DNS/enum values.
         let max_items = req
             .query_params
             .get("maxitems")
@@ -136,32 +138,36 @@ impl Route53Service {
         let mut sorted: Vec<&crate::model::ResourceRecordSet> =
             zone.resource_record_sets.iter().collect();
         sorted.sort_by(|a, b| {
-            a.name
-                .to_ascii_lowercase()
-                .cmp(&b.name.to_ascii_lowercase())
+            reverse_dns_key(&a.name)
+                .cmp(&reverse_dns_key(&b.name))
                 .then(a.record_type.cmp(&b.record_type))
                 .then(a.set_identifier.cmp(&b.set_identifier))
         });
 
         let start_idx = match &start_name {
             None => 0,
-            Some(sn) => sorted
-                .iter()
-                .position(|r| match r.name.to_ascii_lowercase().cmp(sn) {
-                    std::cmp::Ordering::Greater => true,
-                    std::cmp::Ordering::Less => false,
-                    std::cmp::Ordering::Equal => match &start_type {
-                        None => true,
-                        Some(st) => match r.record_type.cmp(st) {
-                            std::cmp::Ordering::Greater => true,
-                            std::cmp::Ordering::Less => false,
-                            std::cmp::Ordering::Equal => start_ident
-                                .as_deref()
-                                .is_none_or(|si| r.set_identifier.as_deref().unwrap_or("") >= si),
+            Some(sn) => {
+                let start_key = reverse_dns_key(sn);
+                sorted
+                    .iter()
+                    .position(|r| match reverse_dns_key(&r.name).cmp(&start_key) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Less => false,
+                        std::cmp::Ordering::Equal => match &start_type {
+                            None => true,
+                            Some(st) => match r.record_type.cmp(st) {
+                                std::cmp::Ordering::Greater => true,
+                                std::cmp::Ordering::Less => false,
+                                std::cmp::Ordering::Equal => {
+                                    start_ident.as_deref().is_none_or(|si| {
+                                        r.set_identifier.as_deref().unwrap_or("") >= si
+                                    })
+                                }
+                            },
                         },
-                    },
-                })
-                .unwrap_or(sorted.len()),
+                    })
+                    .unwrap_or(sorted.len())
+            }
         };
 
         let page: Vec<&crate::model::ResourceRecordSet> = sorted

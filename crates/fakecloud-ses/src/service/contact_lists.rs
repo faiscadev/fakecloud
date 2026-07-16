@@ -361,11 +361,32 @@ impl SesV2Service {
             ));
         }
 
+        // ListContacts Filter (optional): FilteredStatus (OPT_IN/OPT_OUT)
+        // and/or TopicFilter (TopicName + UseDefaultIfPreferenceUnavailable).
+        // Parsed from the request body; a GET or empty body means no filter.
+        let filter_body: Value = serde_json::from_slice(&req.body).unwrap_or(Value::Null);
+        let filter = &filter_body["Filter"];
+        let filtered_status = filter["FilteredStatus"].as_str();
+        let topic_filter_name = filter["TopicFilter"]["TopicName"].as_str();
+        let use_default = filter["TopicFilter"]["UseDefaultIfPreferenceUnavailable"]
+            .as_bool()
+            .unwrap_or(false);
+        let list_def = state.contact_lists.get(list_name).unwrap();
+
         let contacts: Vec<Value> = state
             .contacts
             .get(list_name)
             .map(|m| {
                 m.values()
+                    .filter(|c| {
+                        contact_matches_filter(
+                            c,
+                            list_def,
+                            filtered_status,
+                            topic_filter_name,
+                            use_default,
+                        )
+                    })
                     .map(|c| {
                         let topic_prefs: Vec<Value> = c
                             .topic_preferences
@@ -489,5 +510,60 @@ impl SesV2Service {
         }
 
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+}
+
+/// Apply a `ListContacts` `Filter` to a single contact. A `None` facet
+/// (status or topic) is unconstrained.
+///
+/// * With a `TopicFilter`: resolve the contact's effective subscription
+///   status for that topic — an explicit `UnsubscribeAll` forces `OPT_OUT`,
+///   otherwise the contact's explicit topic preference is used, falling back
+///   to the topic's default only when `UseDefaultIfPreferenceUnavailable`.
+///   The contact matches when it has a resolved status and (if
+///   `FilteredStatus` is set) that status equals the requested one.
+/// * Without a `TopicFilter`: match by the contact's overall status
+///   (`OPT_OUT` when `UnsubscribeAll`, else `OPT_IN`).
+fn contact_matches_filter(
+    contact: &Contact,
+    list: &ContactList,
+    filtered_status: Option<&str>,
+    topic_name: Option<&str>,
+    use_default_if_unavailable: bool,
+) -> bool {
+    match topic_name {
+        Some(topic) => {
+            let status: Option<&str> = if contact.unsubscribe_all {
+                Some("OPT_OUT")
+            } else if let Some(pref) = contact
+                .topic_preferences
+                .iter()
+                .find(|tp| tp.topic_name == topic)
+            {
+                Some(pref.subscription_status.as_str())
+            } else if use_default_if_unavailable {
+                list.topics
+                    .iter()
+                    .find(|t| t.topic_name == topic)
+                    .map(|t| t.default_subscription_status.as_str())
+            } else {
+                None
+            };
+            match status {
+                None => false,
+                Some(s) => filtered_status.is_none_or(|want| s == want),
+            }
+        }
+        None => match filtered_status {
+            None => true,
+            Some(want) => {
+                let status = if contact.unsubscribe_all {
+                    "OPT_OUT"
+                } else {
+                    "OPT_IN"
+                };
+                status == want
+            }
+        },
     }
 }

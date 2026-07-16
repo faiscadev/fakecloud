@@ -1228,6 +1228,99 @@ mod tests {
     }
 
     #[test]
+    fn get_query_results_paginates_large_result_set() {
+        // Regression: GetQueryResults honors MaxResults + NextToken. Before
+        // the fix it returned only the first MaxResults rows and emitted no
+        // NextToken, leaving the rest of a large result set unreachable.
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let id = "qe-paginate";
+        {
+            let mut state = svc.state.write();
+            let account = super::account_mut(&mut state, "123456789012");
+            let now = Utc::now();
+            account.query_executions.insert(
+                id.to_string(),
+                crate::state::QueryExecution {
+                    query_execution_id: id.to_string(),
+                    query: "SELECT n FROM t".to_string(),
+                    statement_type: "DML".to_string(),
+                    work_group: "primary".to_string(),
+                    state: "SUCCEEDED".to_string(),
+                    state_change_reason: None,
+                    submission_time: now,
+                    completion_time: Some(now),
+                    query_execution_context: None,
+                    result_configuration: None,
+                    engine_version: None,
+                    data_scanned_bytes: 0,
+                    engine_execution_time_ms: 1,
+                    query_planning_time_ms: 1,
+                    total_execution_time_ms: 2,
+                    result_rows: (0..5).map(|n| vec![n.to_string()]).collect(),
+                    result_columns: vec![("n".to_string(), "integer".to_string())],
+                },
+            );
+        }
+
+        let mut data_rows: Vec<String> = Vec::new();
+        let mut next: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            let mut body = json!({ "QueryExecutionId": id, "MaxResults": 3 });
+            if let Some(t) = &next {
+                body["NextToken"] = json!(t);
+            }
+            let resp = svc
+                .get_query_results(&req("GetQueryResults", body))
+                .unwrap();
+            let parsed = parse_json(&resp);
+            let rows = parsed["ResultSet"]["Rows"].as_array().unwrap();
+            // The column-header row is emitted only on the first page.
+            let start = if pages == 1 { 1 } else { 0 };
+            for row in &rows[start..] {
+                data_rows.push(row["Data"][0]["VarCharValue"].as_str().unwrap().to_string());
+            }
+            match parsed.get("NextToken").and_then(|v| v.as_str()) {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
+            assert!(pages < 10, "pagination did not terminate");
+        }
+
+        assert!(pages >= 2, "large result set must span multiple pages");
+        assert_eq!(data_rows, vec!["0", "1", "2", "3", "4"]);
+
+        // MaxResults=1 (header consumes the only slot on page 1) must still
+        // terminate and surface every data row rather than loop forever.
+        let mut data_rows: Vec<String> = Vec::new();
+        let mut next: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            pages += 1;
+            let mut body = json!({ "QueryExecutionId": id, "MaxResults": 1 });
+            if let Some(t) = &next {
+                body["NextToken"] = json!(t);
+            }
+            let resp = svc
+                .get_query_results(&req("GetQueryResults", body))
+                .unwrap();
+            let parsed = parse_json(&resp);
+            let rows = parsed["ResultSet"]["Rows"].as_array().unwrap();
+            let start = if pages == 1 { 1 } else { 0 };
+            for row in &rows[start..] {
+                data_rows.push(row["Data"][0]["VarCharValue"].as_str().unwrap().to_string());
+            }
+            match parsed.get("NextToken").and_then(|v| v.as_str()) {
+                Some(t) => next = Some(t.to_string()),
+                None => break,
+            }
+            assert!(pages < 100, "MaxResults=1 pagination did not terminate");
+        }
+        assert_eq!(data_rows, vec!["0", "1", "2", "3", "4"]);
+    }
+
+    #[test]
     fn substitute_parameters_replaces_placeholders() {
         let out = substitute_parameters(
             "SELECT * FROM t WHERE id = ? AND name = ?",

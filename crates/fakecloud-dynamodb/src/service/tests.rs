@@ -1984,6 +1984,72 @@ fn gsi_query_last_evaluated_key_includes_table_pk() {
 }
 
 #[test]
+fn gsi_query_excludes_items_missing_index_sort_key() {
+    // Regression: an item lacking the index's sort key is not part of a
+    // sparse GSI and must not appear in (or be counted by) an index Query.
+    // Before the fix, query() filtered only by the key condition (which
+    // constrains the hash key) and returned the phantom item.
+    let svc = make_service();
+    create_gsi_table(&svc);
+
+    // Two full items carry both GSI key attributes.
+    for i in 0..2 {
+        let req = make_request(
+            "PutItem",
+            json!({
+                "TableName": "gsi-table",
+                "Item": {
+                    "pk": { "S": format!("full{i}") },
+                    "gsi_pk": { "S": "shared" },
+                    "gsi_sk": { "S": format!("sort{i}") }
+                }
+            }),
+        );
+        svc.put_item(&req).unwrap();
+    }
+    // One item carries the GSI hash key but NOT the GSI sort key, so it is
+    // absent from the sparse index.
+    let req = make_request(
+        "PutItem",
+        json!({
+            "TableName": "gsi-table",
+            "Item": {
+                "pk": { "S": "phantom" },
+                "gsi_pk": { "S": "shared" }
+            }
+        }),
+    );
+    svc.put_item(&req).unwrap();
+
+    let req = make_request(
+        "Query",
+        json!({
+            "TableName": "gsi-table",
+            "IndexName": "gsi-index",
+            "KeyConditionExpression": "gsi_pk = :v",
+            "ExpressionAttributeValues": { ":v": { "S": "shared" } }
+        }),
+    );
+    let resp = svc.query(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["Count"], 2,
+        "phantom item missing gsi_sk must be excluded"
+    );
+    assert_eq!(body["ScannedCount"], 2);
+    let pks: Vec<&str> = body["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|it| it["pk"]["S"].as_str().unwrap())
+        .collect();
+    assert!(
+        !pks.contains(&"phantom"),
+        "phantom must not be returned: {pks:?}"
+    );
+}
+
+#[test]
 fn gsi_query_pagination_returns_all_items() {
     let svc = make_service();
     create_gsi_table(&svc);

@@ -755,6 +755,23 @@ impl FirehoseService {
         let name = body["DeliveryStreamName"]
             .as_str()
             .ok_or_else(|| missing("DeliveryStreamName"))?;
+        // AWS: Limit @range(1,50) caps the page (default 50);
+        // ExclusiveStartTagKey resumes after that key. Tags are ordered by
+        // key (BTreeMap iteration). Without this, large tag sets were
+        // returned whole with HasMoreTags hardcoded to false (bug-hunt
+        // 2026-07-16).
+        let limit = match body["Limit"].as_i64() {
+            Some(l) => {
+                if !(1..=50).contains(&l) {
+                    return Err(invalid_argument(format!(
+                        "Limit must be between 1 and 50, got {l}"
+                    )));
+                }
+                l as usize
+            }
+            None => 50,
+        };
+        let exclusive_start = body["ExclusiveStartTagKey"].as_str();
         let accounts = self.state.read();
         let state = accounts
             .get(&req.account_id)
@@ -763,14 +780,20 @@ impl FirehoseService {
             .streams(&req.region)
             .and_then(|s| s.get(name))
             .ok_or_else(|| not_found(name))?;
-        let tags: Vec<Value> = stream
+        let remaining: Vec<(&String, &String)> = stream
             .tags
             .iter()
+            .filter(|(k, _)| exclusive_start.is_none_or(|start| k.as_str() > start))
+            .collect();
+        let has_more = remaining.len() > limit;
+        let tags: Vec<Value> = remaining
+            .into_iter()
+            .take(limit)
             .map(|(k, v)| json!({"Key": k, "Value": v}))
             .collect();
         Ok(AwsResponse::ok_json(json!({
             "Tags": tags,
-            "HasMoreTags": false,
+            "HasMoreTags": has_more,
         })))
     }
 
@@ -1381,5 +1404,57 @@ mod tests {
             Ok(_) => panic!("mismatched DestinationId must be rejected"),
         };
         assert_eq!(err.code(), "InvalidArgumentException");
+    }
+
+    #[test]
+    fn list_tags_for_delivery_stream_paginates() {
+        // Regression: ListTagsForDeliveryStream honors Limit +
+        // ExclusiveStartTagKey and sets HasMoreTags when a page is truncated,
+        // instead of returning every tag with HasMoreTags hardcoded false.
+        let svc = service();
+        create(&svc, "tagged");
+        svc.tag_delivery_stream(&request(
+            "TagDeliveryStream",
+            json!({
+                "DeliveryStreamName": "tagged",
+                "Tags": [
+                    {"Key": "a", "Value": "1"},
+                    {"Key": "b", "Value": "2"},
+                    {"Key": "c", "Value": "3"}
+                ]
+            }),
+        ))
+        .unwrap();
+
+        // Page 1: Limit 2 -> first two keys, more remain.
+        let resp = svc
+            .list_tags_for_delivery_stream(&request(
+                "ListTagsForDeliveryStream",
+                json!({ "DeliveryStreamName": "tagged", "Limit": 2 }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let tags = body["Tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+        assert_eq!(tags[0]["Key"], "a");
+        assert_eq!(tags[1]["Key"], "b");
+        assert_eq!(body["HasMoreTags"], true);
+
+        // Page 2: resume after "b".
+        let resp = svc
+            .list_tags_for_delivery_stream(&request(
+                "ListTagsForDeliveryStream",
+                json!({
+                    "DeliveryStreamName": "tagged",
+                    "Limit": 2,
+                    "ExclusiveStartTagKey": "b"
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let tags = body["Tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0]["Key"], "c");
+        assert_eq!(body["HasMoreTags"], false);
     }
 }
