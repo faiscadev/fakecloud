@@ -15,7 +15,7 @@ use serde_json::Value;
 
 /// The vendored SWF Smithy model (byte-for-byte from aws/api-models-aws),
 /// embedded so validation needs no runtime file access.
-const MODEL_JSON: &str = include_str!("../../../aws-models/swf.json");
+const MODEL_JSON: &str = include_str!("../model.json");
 
 /// The embedded model parses to exactly this many operations; a mismatch means
 /// the vendored model drifted from the implemented surface.
