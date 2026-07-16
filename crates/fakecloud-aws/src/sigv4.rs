@@ -509,21 +509,12 @@ fn build_canonical_request(
             .cloned()
             .unwrap_or_else(|| "UNSIGNED-PAYLOAD".to_string())
     } else if let Some(h) = header_map.get("x-amz-content-sha256") {
-        // A concrete payload hash must actually match the request body, or a
-        // caller could keep a valid signature over the original payload and swap
-        // the body — the canonical request would still use the (signed) header
-        // hash and verify. S3's `UNSIGNED-PAYLOAD` / `STREAMING-*` markers are
-        // signed literally (the body is chunk-framed or deliberately unsigned),
-        // so they flow through without rehashing.
-        let is_special = h == "UNSIGNED-PAYLOAD" || h.starts_with("STREAMING");
-        if !is_special {
-            let actual = hex::encode(Sha256::digest(req.body));
-            if !actual.eq_ignore_ascii_case(h) {
-                return Err(SigV4Error::Malformed(
-                    "x-amz-content-sha256 does not match the request body",
-                ));
-            }
-        }
+        // Use the signed `x-amz-content-sha256` value verbatim in the canonical
+        // request (that is what the client signed). Binding it to the actual
+        // body belongs at the S3 service layer (`XAmzContentSHA256Mismatch`,
+        // 400) — not here, where `req.body` is not reliably the signed payload
+        // (streaming/aws-chunked routes empty it), so re-hashing wrongly
+        // rejected legitimate signed requests.
         h.clone()
     } else {
         hex::encode(Sha256::digest(req.body))
@@ -833,82 +824,4 @@ mod tests {
         assert_eq!(collapse_ws("foo\tbar"), "foo bar");
     }
 
-    fn content_sha_parsed() -> ParsedSigV4 {
-        ParsedSigV4 {
-            access_key: AWS_EXAMPLE_ACCESS_KEY.into(),
-            date_stamp: "20260101".into(),
-            region: "us-east-1".into(),
-            service: "s3".into(),
-            signed_headers: vec!["host".into(), "x-amz-content-sha256".into()],
-            signature: String::new(),
-            amz_date: "20260101T120000Z".into(),
-            is_presigned: false,
-        }
-    }
-
-    #[test]
-    fn content_sha256_mismatch_rejected() {
-        // A signed x-amz-content-sha256 that does not hash the actual body must
-        // be rejected — otherwise a captured signature could be replayed over a
-        // swapped payload.
-        let parsed = content_sha_parsed();
-        let body: &[u8] = b"real-body";
-        let wrong_hash = hex::encode(Sha256::digest(b"a-different-body"));
-        let headers = vec![
-            ("host".to_string(), "s3.amazonaws.com".to_string()),
-            ("x-amz-content-sha256".to_string(), wrong_hash),
-        ];
-        let req = VerifyRequest {
-            method: "PUT",
-            path: "/obj",
-            query: "",
-            headers: &headers,
-            body,
-        };
-        assert!(matches!(
-            build_canonical_request(&parsed, &req),
-            Err(SigV4Error::Malformed(_))
-        ));
-    }
-
-    #[test]
-    fn content_sha256_matching_body_accepted() {
-        let parsed = content_sha_parsed();
-        let body: &[u8] = b"real-body";
-        let good_hash = hex::encode(Sha256::digest(body));
-        let headers = vec![
-            ("host".to_string(), "s3.amazonaws.com".to_string()),
-            ("x-amz-content-sha256".to_string(), good_hash),
-        ];
-        let req = VerifyRequest {
-            method: "PUT",
-            path: "/obj",
-            query: "",
-            headers: &headers,
-            body,
-        };
-        assert!(build_canonical_request(&parsed, &req).is_ok());
-    }
-
-    #[test]
-    fn content_sha256_unsigned_payload_marker_skips_rehash() {
-        // UNSIGNED-PAYLOAD is signed literally; the body is intentionally not
-        // hashed, so an arbitrary body must still pass this stage.
-        let parsed = content_sha_parsed();
-        let headers = vec![
-            ("host".to_string(), "s3.amazonaws.com".to_string()),
-            (
-                "x-amz-content-sha256".to_string(),
-                "UNSIGNED-PAYLOAD".to_string(),
-            ),
-        ];
-        let req = VerifyRequest {
-            method: "PUT",
-            path: "/obj",
-            query: "",
-            headers: &headers,
-            body: b"anything at all",
-        };
-        assert!(build_canonical_request(&parsed, &req).is_ok());
-    }
 }
