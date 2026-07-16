@@ -160,6 +160,13 @@ pub struct SpooledBody {
     pub path: PathBuf,
     pub size: u64,
     pub md5_hex: String,
+    /// Lowercase-hex SHA-256 of the decoded payload, computed in the same
+    /// single streaming pass as the MD5. Lets the S3 layer verify a client's
+    /// `x-amz-content-sha256` header against the bytes actually received
+    /// (returning `XAmzContentSHA256Mismatch` on divergence) for plain,
+    /// non-`aws-chunked` uploads where the header carries the real payload
+    /// hash rather than a `STREAMING-…`/`UNSIGNED-PAYLOAD` marker.
+    pub sha256_hex: String,
 }
 
 /// Incremental decoder for the `aws-chunked` content-encoding that modern AWS
@@ -360,6 +367,7 @@ pub async fn spool_request_stream(
 
     let mut file = tokio::fs::File::from_std(std_file);
     let mut hasher = Md5::new();
+    let mut sha = sha2::Sha256::new();
     let mut size: u64 = 0;
     let mut body = stream;
     let mut decoder = aws_chunked.then(AwsChunkedDecoder::default);
@@ -396,6 +404,7 @@ pub async fn spool_request_stream(
                         };
                         if !payload.is_empty() {
                             hasher.update(&payload);
+                            sha.update(&payload);
                             size += payload.len() as u64;
                             if let Err(e) = file.write_all(&payload).await {
                                 cleanup(file, &path).await;
@@ -430,10 +439,12 @@ pub async fn spool_request_stream(
     drop(file);
 
     let md5_hex = hex_lower(&hasher.finalize());
+    let sha256_hex = hex_lower(&sha.finalize());
     Ok(SpooledBody {
         path,
         size,
         md5_hex,
+        sha256_hex,
     })
 }
 
@@ -851,6 +862,38 @@ mod tests {
     fn aws_chunked_decoder_handles_empty_payload() {
         let body = aws_chunked_body(b"", 1024, false);
         assert_eq!(decode_all(&body, 3), Vec::<u8>::new());
+    }
+
+    fn sha256_hex(bytes: &[u8]) -> String {
+        let mut h = sha2::Sha256::new();
+        h.update(bytes);
+        hex_lower(&h.finalize())
+    }
+
+    #[tokio::test]
+    async fn spool_computes_sha256_over_plain_payload() {
+        let payload = b"hello world".to_vec();
+        let spooled = spool_request_stream(axum::body::Body::from(payload.clone()), None, false)
+            .await
+            .expect("spool ok");
+        assert_eq!(spooled.size, payload.len() as u64);
+        assert_eq!(spooled.sha256_hex, sha256_hex(&payload));
+        let _ = std::fs::remove_file(&spooled.path);
+    }
+
+    #[tokio::test]
+    async fn spool_sha256_is_over_decoded_aws_chunked_payload() {
+        // The header the client sends over aws-chunked framing is a STREAMING
+        // marker, but the spool's sha256 must still describe the DECODED bytes
+        // (so the S3 layer never compares against the framed wire form).
+        let payload: Vec<u8> = (0..9000u32).map(|i| (i % 251) as u8).collect();
+        let body = aws_chunked_body(&payload, 1024, true);
+        let spooled = spool_request_stream(axum::body::Body::from(body), None, true)
+            .await
+            .expect("spool ok");
+        assert_eq!(spooled.size, payload.len() as u64);
+        assert_eq!(spooled.sha256_hex, sha256_hex(&payload));
+        let _ = std::fs::remove_file(&spooled.path);
     }
 
     #[test]

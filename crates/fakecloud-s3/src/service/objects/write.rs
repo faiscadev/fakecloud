@@ -201,6 +201,39 @@ impl S3Service {
                 }
             }
         }
+
+        // x-amz-content-sha256 payload-integrity check (bug-hunt 5.4). When a
+        // client sends the header as a real lowercase-hex SHA-256 digest — the
+        // default for SigV4-signed, non-chunked PutObject — AWS verifies it
+        // against the received bytes and rejects a mismatch with
+        // `XAmzContentSHA256Mismatch` (400). This lives at the S3 layer, NOT in
+        // sigv4 verification: the signed payload is not reliably re-derivable
+        // there (aws-chunked / streaming empties the buffered body). Here we
+        // hold the fully-decoded object bytes, so the hash is authoritative.
+        //
+        // Skip markers that are not a plain body hash: `UNSIGNED-PAYLOAD`, any
+        // `STREAMING-…` value, and aws-chunked uploads (the header then covers
+        // the chunk framing, and the spool's sha256 is over the decoded
+        // payload, so they would never match). Only a 64-char hex value is
+        // treated as an assertion about the payload.
+        if !fakecloud_core::service::is_aws_chunked(&req.headers) {
+            if let Some(hdr) = req
+                .headers
+                .get("x-amz-content-sha256")
+                .and_then(|v| v.to_str().ok())
+            {
+                let supplied = hdr.trim();
+                let is_hex_digest =
+                    supplied.len() == 64 && supplied.bytes().all(|b| b.is_ascii_hexdigit());
+                if is_hex_digest && !supplied.eq_ignore_ascii_case(&spooled.sha256_hex) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "XAmzContentSHA256Mismatch",
+                        "The provided 'x-amz-content-sha256' header does not match what was computed.",
+                    ));
+                }
+            }
+        }
         let content_type = req
             .headers
             .get("content-type")
