@@ -722,12 +722,12 @@ pub(crate) fn fan_out_to_subscribers(
 
 pub(crate) fn deliver_to_sqs_subscribers(
     delivery: &Arc<DeliveryBus>,
-    subs: &[(String, bool, String)],
+    subs: &[(String, bool, String, Option<String>)],
     ctx: &TopicFanoutContext<'_>,
 ) {
     let sqs_message = ctx.body_for_protocol("sqs");
-    for (queue_arn, raw, subscription_arn) in subs {
-        if *raw {
+    for (queue_arn, raw, subscription_arn, redrive_policy) in subs {
+        let (body, attrs) = if *raw {
             let mut sqs_msg_attrs = HashMap::new();
             for (k, v) in ctx.message_attributes {
                 let mut attr = fakecloud_core::delivery::SqsMessageAttribute {
@@ -740,13 +740,7 @@ pub(crate) fn deliver_to_sqs_subscribers(
                 }
                 sqs_msg_attrs.insert(k.clone(), attr);
             }
-            delivery.send_to_sqs_with_attrs(
-                queue_arn,
-                &sqs_message,
-                &sqs_msg_attrs,
-                ctx.message_group_id,
-                ctx.message_dedup_id,
-            );
+            (sqs_message.clone(), sqs_msg_attrs)
         } else {
             let envelope_str = build_sns_envelope(
                 ctx.msg_id,
@@ -757,16 +751,31 @@ pub(crate) fn deliver_to_sqs_subscribers(
                 ctx.envelope_attrs,
                 ctx.endpoint,
             );
-            // Even non-raw delivery forwards FIFO ordering metadata so
-            // the downstream queue can preserve group ordering /
-            // dedup — SNS does this on real AWS.
-            delivery.send_to_sqs_with_attrs(
-                queue_arn,
-                &envelope_str,
-                &HashMap::new(),
-                ctx.message_group_id,
-                ctx.message_dedup_id,
-            );
+            (envelope_str, HashMap::new())
+        };
+        // Even non-raw delivery forwards FIFO ordering metadata so the
+        // downstream queue can preserve group ordering / dedup — SNS does this
+        // on real AWS. A fallible send lets us route to the subscription's DLQ
+        // when the target queue is gone, instead of silently dropping (the DLQ
+        // was previously honored for HTTP subscribers only).
+        let result = delivery.try_send_to_sqs_with_attrs(
+            queue_arn,
+            &body,
+            &attrs,
+            ctx.message_group_id,
+            ctx.message_dedup_id,
+        );
+        if let Err(err) = result {
+            if let Some(dlq_arn) = parse_redrive_dlq(redrive_policy.as_deref()) {
+                let dlq_body = build_dlq_envelope(&body, &err.to_string(), subscription_arn);
+                delivery.send_to_sqs(&dlq_arn, &dlq_body, &HashMap::new());
+            } else {
+                tracing::warn!(
+                    queue = %queue_arn,
+                    error = %err,
+                    "SNS SQS delivery failed and no RedrivePolicy configured; message dropped"
+                );
+            }
         }
     }
 }
@@ -832,7 +841,7 @@ pub(crate) fn deliver_to_http_subscribers(
 pub(crate) fn deliver_to_lambda_subscribers(
     state: &SharedSnsState,
     delivery: &Arc<DeliveryBus>,
-    subs: &[(String, String)],
+    subs: &[(String, String, Option<String>)],
     ctx: &TopicFanoutContext<'_>,
 ) {
     if subs.is_empty() {
@@ -842,9 +851,10 @@ pub(crate) fn deliver_to_lambda_subscribers(
     let subject_owned = ctx.subject.map(|s| s.to_string());
     let lambda_message = ctx.body_for_protocol("lambda");
 
-    let lambda_payloads: Vec<(String, String)> = subs
+    // (function_arn, payload, subscription_arn, redrive_policy)
+    let lambda_payloads: Vec<(String, String, String, Option<String>)> = subs
         .iter()
-        .map(|(function_arn, subscription_arn)| {
+        .map(|(function_arn, subscription_arn, redrive_policy)| {
             let payload = build_sns_lambda_event(&SnsLambdaEventInput {
                 message_id: ctx.msg_id,
                 topic_arn: ctx.topic_arn,
@@ -855,7 +865,12 @@ pub(crate) fn deliver_to_lambda_subscribers(
                 timestamp: &now,
                 endpoint: ctx.endpoint,
             });
-            (function_arn.clone(), payload)
+            (
+                function_arn.clone(),
+                payload,
+                subscription_arn.clone(),
+                redrive_policy.clone(),
+            )
         })
         .collect();
 
@@ -863,7 +878,7 @@ pub(crate) fn deliver_to_lambda_subscribers(
         let acct = ctx.topic_arn.split(':').nth(4).unwrap_or("");
         let mut accounts = state.write();
         let state = accounts.get_or_create(acct);
-        for (function_arn, _) in &lambda_payloads {
+        for (function_arn, ..) in &lambda_payloads {
             state
                 .lambda_invocations
                 .push(crate::state::LambdaInvocation {
@@ -877,7 +892,7 @@ pub(crate) fn deliver_to_lambda_subscribers(
 
     let delivery = delivery.clone();
     tokio::spawn(async move {
-        for (function_arn, payload) in lambda_payloads {
+        for (function_arn, payload, subscription_arn, redrive_policy) in lambda_payloads {
             tracing::info!(function_arn = %function_arn, "SNS invoking Lambda function");
             match delivery.invoke_lambda(&function_arn, &payload).await {
                 Some(Ok(_)) => {
@@ -892,6 +907,13 @@ pub(crate) fn deliver_to_lambda_subscribers(
                         error = %e,
                         "SNS->Lambda invocation failed"
                     );
+                    // Route the failed notification to the subscription's DLQ
+                    // (previously only HTTP subscribers honored RedrivePolicy).
+                    if let Some(dlq_arn) = parse_redrive_dlq(redrive_policy.as_deref()) {
+                        let dlq_body =
+                            build_dlq_envelope(&payload, &e.to_string(), &subscription_arn);
+                        delivery.send_to_sqs(&dlq_arn, &dlq_body, &HashMap::new());
+                    }
                 }
                 None => {
                     tracing::debug!(

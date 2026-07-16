@@ -19,6 +19,8 @@ pub struct DeliveryBus {
     kinesis_sender: Option<Arc<dyn KinesisDelivery>>,
     /// Start Step Functions executions.
     stepfunctions_starter: Option<Arc<dyn StepFunctionsDelivery>>,
+    /// Start SageMaker pipeline executions (Scheduler sagemaker target).
+    sagemaker_pipeline_starter: Option<Arc<dyn SageMakerPipelineDelivery>>,
     /// Write objects to S3 buckets.
     s3_writer: Option<Arc<dyn S3Delivery>>,
     /// Put records into Firehose delivery streams.
@@ -194,6 +196,14 @@ pub trait StepFunctionsDelivery: Send + Sync {
     /// Start a state machine execution with the given input.
     /// The state machine is identified by ARN.
     fn start_execution(&self, state_machine_arn: &str, input: &str);
+}
+
+/// Cross-service SageMaker pipeline dispatch used by EventBridge Scheduler's
+/// `sagemaker:pipeline` target. The pipeline is identified by ARN
+/// (`arn:aws:sagemaker:<region>:<account>:pipeline/<name>`); `parameters` is the
+/// target's `PipelineParameterList`.
+pub trait SageMakerPipelineDelivery: Send + Sync {
+    fn start_pipeline_execution(&self, pipeline_arn: &str, parameters: &serde_json::Value);
 }
 
 /// Cross-service Kinesis Data Firehose dispatch used by services
@@ -385,6 +395,7 @@ impl DeliveryBus {
             lambda_invoker: None,
             kinesis_sender: None,
             stepfunctions_starter: None,
+            sagemaker_pipeline_starter: None,
             s3_writer: None,
             firehose_sender: None,
             ses_dispatcher: None,
@@ -676,6 +687,18 @@ impl DeliveryBus {
     pub fn put_record_to_kinesis(&self, stream_arn: &str, data: &str, partition_key: &str) {
         if let Some(ref sender) = self.kinesis_sender {
             sender.put_record(stream_arn, data, partition_key);
+        }
+    }
+
+    pub fn with_sagemaker_pipeline(mut self, starter: Arc<dyn SageMakerPipelineDelivery>) -> Self {
+        self.sagemaker_pipeline_starter = Some(starter);
+        self
+    }
+
+    /// Start a SageMaker pipeline execution if a starter is wired.
+    pub fn start_sagemaker_pipeline(&self, pipeline_arn: &str, parameters: &serde_json::Value) {
+        if let Some(ref starter) = self.sagemaker_pipeline_starter {
+            starter.start_pipeline_execution(pipeline_arn, parameters);
         }
     }
 

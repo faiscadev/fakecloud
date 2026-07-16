@@ -6608,6 +6608,11 @@ async fn main() {
             Arc::new(EcsTaskRunnerImpl {
                 service: ecs_service_for_scheduler.clone(),
             });
+        let sagemaker_pipeline_for_scheduler: Arc<
+            dyn fakecloud_core::delivery::SageMakerPipelineDelivery,
+        > = Arc::new(hooks::SageMakerPipelineDeliveryImpl {
+            state: sagemaker_state.clone(),
+        });
         let mut bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery_for_scheduler)
@@ -6615,7 +6620,8 @@ async fn main() {
             .with_stepfunctions(sfn_delivery_for_scheduler)
             .with_kinesis(kinesis_delivery_for_scheduler)
             .with_ses_dispatcher(ses_dispatcher_for_scheduler)
-            .with_ecs_task_runner(ecs_runner_for_scheduler);
+            .with_ecs_task_runner(ecs_runner_for_scheduler)
+            .with_sagemaker_pipeline(sagemaker_pipeline_for_scheduler);
         if let Some(ref ld) = lambda_delivery {
             bus = bus.with_lambda(ld.clone());
         }

@@ -221,6 +221,50 @@ impl GlueState {
     pub fn dbs_in_mut(&mut self, region: &str) -> &mut BTreeMap<String, Database> {
         self.databases.entry(region.to_string()).or_default()
     }
+
+    fn tv_prefix(db: &str, table: &str) -> String {
+        format!("{db}\u{1f}{table}\u{1f}")
+    }
+
+    /// Version ids currently archived for a table, sorted ascending.
+    pub fn table_version_ids(&self, db: &str, table: &str) -> Vec<i64> {
+        let prefix = Self::tv_prefix(db, table);
+        let mut ids: Vec<i64> = self
+            .table_versions
+            .keys()
+            .filter_map(|k| k.strip_prefix(&prefix))
+            .filter_map(|v| v.parse::<i64>().ok())
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Archive a new version of a table (`table_json` is the projected Table
+    /// object) and return the assigned VersionId. Glue assigns monotonically
+    /// increasing integer version ids per table starting at 1.
+    pub fn archive_table_version(&mut self, db: &str, table: &str, table_json: Value) -> String {
+        let next = self
+            .table_version_ids(db, table)
+            .last()
+            .copied()
+            .unwrap_or(0)
+            + 1;
+        let key = format!("{}{next}", Self::tv_prefix(db, table));
+        self.table_versions.insert(
+            key,
+            serde_json::json!({
+                "Table": table_json,
+                "VersionId": next.to_string(),
+            }),
+        );
+        next.to_string()
+    }
+
+    /// Drop every archived version of a table (used on DeleteTable).
+    pub fn purge_table_versions(&mut self, db: &str, table: &str) {
+        let prefix = Self::tv_prefix(db, table);
+        self.table_versions.retain(|k, _| !k.starts_with(&prefix));
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

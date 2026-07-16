@@ -66,17 +66,29 @@ pub fn deliver_target(bus: &Arc<DeliveryBus>, schedule: &Schedule) -> Result<(),
     if arn.contains(":events:") {
         let bus_name = event_bus_name_from_arn(arn);
         let target_account = account_id_from_arn(arn);
+        // EventBridgeParameters.{Source, DetailType} are REQUIRED by AWS for an
+        // EventBridge bus target and populate the emitted event's source /
+        // detail-type; falling back to the scheduler defaults only when absent.
+        let eb_params = schedule.target.eventbridge_parameters.as_ref();
+        let source = eb_params
+            .and_then(|p| p.get("Source"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("aws.scheduler");
+        let detail_type = eb_params
+            .and_then(|p| p.get("DetailType"))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("Scheduled Event");
         match target_account {
             Some(account) => bus.put_event_to_eventbridge_for_account(
-                "aws.scheduler",
-                "Scheduled Event",
+                source,
+                detail_type,
                 body,
                 &bus_name,
                 &account,
             ),
-            None => {
-                bus.put_event_to_eventbridge("aws.scheduler", "Scheduled Event", body, &bus_name)
-            }
+            None => bus.put_event_to_eventbridge(source, detail_type, body, &bus_name),
         }
         return Ok(());
     }
@@ -93,6 +105,20 @@ pub fn deliver_target(bus: &Arc<DeliveryBus>, schedule: &Schedule) -> Result<(),
             .unwrap_or(&schedule.name)
             .to_string();
         bus.send_to_kinesis(arn, body, &partition_key);
+        return Ok(());
+    }
+
+    // Templated SageMaker pipeline target: ARN names the pipeline,
+    // SageMakerPipelineParameters carries the PipelineParameterList.
+    if arn.contains(":sagemaker:") && arn.contains(":pipeline/") {
+        let params = schedule
+            .target
+            .sagemaker_pipeline_parameters
+            .as_ref()
+            .and_then(|p| p.get("PipelineParameterList"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(vec![]));
+        bus.start_sagemaker_pipeline(arn, &params);
         return Ok(());
     }
 
@@ -580,6 +606,72 @@ mod tests {
         assert_eq!(calls[0].0, "arn:aws:kinesis:us-east-1:1:stream/orders");
         assert_eq!(calls[0].1, r#"{"order":42}"#);
         assert_eq!(calls[0].2, "tenant-7");
+    }
+
+    #[test]
+    fn deliver_target_eventbridge_uses_source_and_detail_type_params() {
+        struct EbRec(Mutex<Vec<(String, String, String, String)>>);
+        impl fakecloud_core::delivery::EventBridgeDelivery for EbRec {
+            fn put_event(&self, source: &str, detail_type: &str, detail: &str, bus_name: &str) {
+                self.0.lock().unwrap().push((
+                    source.to_string(),
+                    detail_type.to_string(),
+                    detail.to_string(),
+                    bus_name.to_string(),
+                ));
+            }
+        }
+        let eb = Arc::new(EbRec(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_eventbridge(eb.clone()));
+        let mut sched = make_schedule(
+            "arn:aws:events:us-east-1:1:event-bus/app-bus",
+            None,
+            Some(r#"{"k":"v"}"#),
+        );
+        sched.target.eventbridge_parameters =
+            Some(serde_json::json!({"Source": "my.app", "DetailType": "OrderPlaced"}));
+        let result = deliver_target(&bus, &sched);
+        assert!(result.is_ok());
+        let calls = eb.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "my.app", "Source must come from params");
+        assert_eq!(
+            calls[0].1, "OrderPlaced",
+            "DetailType must come from params"
+        );
+        assert_eq!(calls[0].3, "app-bus");
+    }
+
+    #[test]
+    fn deliver_target_sagemaker_pipeline_starts_execution() {
+        struct SmRec(Mutex<Vec<(String, serde_json::Value)>>);
+        impl fakecloud_core::delivery::SageMakerPipelineDelivery for SmRec {
+            fn start_pipeline_execution(&self, pipeline_arn: &str, parameters: &serde_json::Value) {
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push((pipeline_arn.to_string(), parameters.clone()));
+            }
+        }
+        let sm = Arc::new(SmRec(Mutex::new(Vec::new())));
+        let bus = Arc::new(DeliveryBus::new().with_sagemaker_pipeline(sm.clone()));
+        let mut sched = make_schedule(
+            "arn:aws:sagemaker:us-east-1:1:pipeline/my-pipeline",
+            None,
+            Some("{}"),
+        );
+        sched.target.sagemaker_pipeline_parameters = Some(serde_json::json!({
+            "PipelineParameterList": [{"Name": "p1", "Value": "v1"}]
+        }));
+        let result = deliver_target(&bus, &sched);
+        assert!(result.is_ok());
+        let calls = sm.0.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(
+            calls[0].0,
+            "arn:aws:sagemaker:us-east-1:1:pipeline/my-pipeline"
+        );
+        assert_eq!(calls[0].1[0]["Name"], "p1");
     }
 
     #[test]

@@ -48,3 +48,57 @@ pub use service::{SageMakerService, SAGEMAKER_ACTIONS};
 pub use state::{
     SageMakerData, SageMakerSnapshot, SharedSageMakerState, SAGEMAKER_SNAPSHOT_SCHEMA_VERSION,
 };
+
+/// Start a SageMaker pipeline execution from a cross-service delivery (an
+/// EventBridge Scheduler `sagemaker:pipeline` target). Persists a
+/// `PipelineExecution` record keyed by its minted ARN so
+/// DescribePipelineExecution / ListPipelineExecutions resolve it — the same
+/// shape the `StartPipelineExecution` API produces. `pipeline_arn` is
+/// `arn:aws:sagemaker:<region>:<account>:pipeline/<name>`; `parameters` is the
+/// target's `PipelineParameterList` (a JSON array, echoed onto the record).
+pub fn start_pipeline_execution_from_delivery(
+    state: &SharedSageMakerState,
+    pipeline_arn: &str,
+    parameters: &serde_json::Value,
+) {
+    let parts: Vec<&str> = pipeline_arn.split(':').collect();
+    let region = parts.get(3).copied().unwrap_or("us-east-1");
+    let account = parts.get(4).copied().unwrap_or_default();
+    let pipeline_name = pipeline_arn
+        .rsplit_once("pipeline/")
+        .map(|(_, n)| n)
+        .unwrap_or_default();
+    if account.is_empty() || pipeline_name.is_empty() {
+        tracing::warn!(%pipeline_arn, "scheduler->sagemaker: malformed pipeline ARN, skipping");
+        return;
+    }
+
+    let mut g = state.write();
+    let data = g.get_or_create(account);
+    let exec_id = service::mint_id(account, "PipelineExecution", &data.next_seq().to_string());
+    let exec_arn = format!(
+        "arn:aws:sagemaker:{region}:{account}:pipeline/{pipeline_name}/execution/{exec_id}"
+    );
+    let mut record = serde_json::Map::new();
+    record.insert(
+        "PipelineExecutionArn".to_string(),
+        serde_json::Value::String(exec_arn.clone()),
+    );
+    record.insert(
+        "PipelineArn".to_string(),
+        serde_json::Value::String(pipeline_arn.to_string()),
+    );
+    record.insert(
+        "PipelineExecutionStatus".to_string(),
+        serde_json::Value::String("Executing".to_string()),
+    );
+    record.insert("StartTime".to_string(), service::now_epoch());
+    if parameters.is_array() {
+        record.insert("PipelineParameters".to_string(), parameters.clone());
+    }
+    data.put_resource(
+        "PipelineExecution",
+        &exec_arn,
+        serde_json::Value::Object(record),
+    );
+}

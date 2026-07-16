@@ -24,7 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use base64::Engine;
@@ -68,6 +68,14 @@ struct RunningPipe {
     /// AT_TIMESTAMP); ignored for SQS.
     starting_position: Option<String>,
     starting_position_timestamp: Option<f64>,
+    /// `SourceParameters.{Kinesis,DynamoDB}StreamParameters.MaximumRetryAttempts`.
+    /// `None` (or a negative value) means retry forever — AWS's default. A
+    /// non-negative value caps retries before the poison batch is routed to the
+    /// DLQ and the checkpoint advances past it.
+    max_retry_attempts: Option<i64>,
+    /// `...StreamParameters.DeadLetterConfig.Arn` — where an exhausted batch is
+    /// sent so a poison record can't wedge the stream forever.
+    dlq_arn: Option<String>,
 }
 
 pub struct PipesRunner {
@@ -89,6 +97,11 @@ pub struct PipesRunner {
     /// Set by `set_checkpoint`; drained once per poll to flush at most one
     /// snapshot per cycle rather than one per delivered record.
     checkpoints_dirty: Arc<AtomicBool>,
+    /// Per-window delivery-failure counts for stream sources, keyed by
+    /// `{pipe_arn}\u{1f}{window_head_sequence}`. Drives MaximumRetryAttempts:
+    /// once a window's count exceeds the cap it is routed to the DLQ and the
+    /// checkpoint advances past it so a poison record can't wedge the stream.
+    retry_counts: Mutex<HashMap<String, i64>>,
 }
 
 impl PipesRunner {
@@ -106,6 +119,7 @@ impl PipesRunner {
             kms_hook: None,
             persist_hook: None,
             checkpoints_dirty: Arc::new(AtomicBool::new(false)),
+            retry_counts: Mutex::new(HashMap::new()),
         }
     }
 
@@ -218,6 +232,8 @@ impl PipesRunner {
                 let batch_size = source_batch_size(source_params, &source_kind);
                 let (starting_position, starting_position_timestamp) =
                     starting_position(source_params, &source_kind);
+                let (max_retry_attempts, dlq_arn) =
+                    stream_retry_config(source_params, &source_kind);
                 let target_params = pipe.get("TargetParameters").cloned();
                 let input_template = target_params
                     .as_ref()
@@ -254,6 +270,8 @@ impl PipesRunner {
                     batch_size,
                     starting_position,
                     starting_position_timestamp,
+                    max_retry_attempts,
+                    dlq_arn,
                 });
             }
         }
@@ -511,9 +529,8 @@ impl PipesRunner {
                 .map(|r| kinesis_source_event(r, &window.shard_id, &pipe.source_arn, &region))
                 .collect();
             let key = format!("{}#{}", pipe.arn, window.shard_id);
-            if self.process_stream_window(pipe, events).await {
-                self.set_checkpoint(&account, &key, window.last_seq);
-            }
+            self.deliver_stream_window(&account, &key, window.last_seq, pipe, events)
+                .await;
         }
     }
 
@@ -591,8 +608,83 @@ impl PipesRunner {
         let Some(last_seq) = last_seq else {
             return;
         };
+        let arn = pipe.arn.clone();
+        self.deliver_stream_window(&account, &arn, last_seq, pipe, events)
+            .await;
+    }
+
+    /// Deliver one stream window and apply the checkpoint + retry policy:
+    ///
+    /// * On success the checkpoint advances and the window's failure count is
+    ///   cleared.
+    /// * On failure the window's failure count is bumped. Once it exceeds
+    ///   `MaximumRetryAttempts` (a non-negative cap), the batch is routed to the
+    ///   configured DLQ (if any) and the checkpoint advances past it so a poison
+    ///   record can't wedge the stream forever. A negative/absent cap means
+    ///   retry indefinitely (AWS default), so the checkpoint stays put.
+    async fn deliver_stream_window(
+        &self,
+        account: &str,
+        checkpoint_key: &str,
+        window_head_seq: String,
+        pipe: &RunningPipe,
+        events: Vec<Value>,
+    ) {
+        let retry_key = format!("{checkpoint_key}\u{1f}{window_head_seq}");
+        // Retain a copy for the DLQ before delivery consumes the batch.
+        let events_for_dlq = events.clone();
         if self.process_stream_window(pipe, events).await {
-            self.set_checkpoint(&account, &pipe.arn, last_seq);
+            self.set_checkpoint(account, checkpoint_key, window_head_seq);
+            self.retry_counts.lock().unwrap().remove(&retry_key);
+            return;
+        }
+        let attempts = {
+            let mut counts = self.retry_counts.lock().unwrap();
+            let c = counts.entry(retry_key.clone()).or_insert(0);
+            *c += 1;
+            *c
+        };
+        if let Some(max) = pipe.max_retry_attempts {
+            if max >= 0 && attempts > max {
+                tracing::warn!(
+                    pipe = %pipe.arn,
+                    seq = %window_head_seq,
+                    attempts,
+                    "pipes: stream window exceeded MaximumRetryAttempts; routing to DLQ and advancing"
+                );
+                self.route_stream_batch_to_dlq(pipe, &window_head_seq, &events_for_dlq);
+                self.set_checkpoint(account, checkpoint_key, window_head_seq);
+                self.retry_counts.lock().unwrap().remove(&retry_key);
+            }
+        }
+    }
+
+    /// Send an exhausted stream batch to the pipe's DeadLetterConfig target
+    /// (SQS or SNS). The DLQ record carries the failed batch's metadata plus the
+    /// records, mirroring the envelope AWS Pipes writes. A no-op when no DLQ is
+    /// configured — the batch is still dropped so the stream unblocks.
+    fn route_stream_batch_to_dlq(
+        &self,
+        pipe: &RunningPipe,
+        window_head_seq: &str,
+        events: &[Value],
+    ) {
+        let Some(dlq_arn) = pipe.dlq_arn.as_deref() else {
+            return;
+        };
+        let payload = serde_json::json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "pipeArn": pipe.arn,
+            "sourceArn": pipe.source_arn,
+            "endSequenceNumber": window_head_seq,
+            "recordCount": events.len(),
+            "records": events,
+        });
+        let body = serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string());
+        if dlq_arn.contains(":sqs:") {
+            self.delivery.send_to_sqs(dlq_arn, &body, &HashMap::new());
+        } else if dlq_arn.contains(":sns:") {
+            self.delivery.publish_to_sns(dlq_arn, &body, None);
         }
     }
 
@@ -700,10 +792,30 @@ impl PipesRunner {
                 None => false,
             }
         } else if target_arn.contains(":sqs:") {
+            // FIFO queues need MessageGroupId (and optionally
+            // MessageDeduplicationId) from TargetParameters.SqsQueueParameters,
+            // else the SQS send is rejected for a .fifo target.
+            let sqs_params = target_params.and_then(|p| p.get("SqsQueueParameters"));
+            let group_id = sqs_params
+                .and_then(|p| p.get("MessageGroupId"))
+                .and_then(Value::as_str);
+            let dedup_id = sqs_params
+                .and_then(|p| p.get("MessageDeduplicationId"))
+                .and_then(Value::as_str);
             for event in batch {
                 let body = event_to_payload(event);
-                self.delivery
-                    .send_to_sqs(target_arn, &body, &HashMap::new());
+                if group_id.is_some() || dedup_id.is_some() {
+                    self.delivery.send_to_sqs_with_attrs(
+                        target_arn,
+                        &body,
+                        &HashMap::new(),
+                        group_id,
+                        dedup_id,
+                    );
+                } else {
+                    self.delivery
+                        .send_to_sqs(target_arn, &body, &HashMap::new());
+                }
             }
             true
         } else if target_arn.contains(":sns:") {
@@ -818,6 +930,31 @@ fn source_batch_size(source_params: Option<&Value>, kind: &SourceKind) -> usize 
         .filter(|n| *n > 0)
         .unwrap_or(default)
         .min(max) as usize
+}
+
+/// Resolve `MaximumRetryAttempts` + `DeadLetterConfig.Arn` for a stream source.
+/// Returns `(None, None)` for SQS (which has its own redrive) or when the
+/// parameters are absent.
+fn stream_retry_config(
+    source_params: Option<&Value>,
+    kind: &SourceKind,
+) -> (Option<i64>, Option<String>) {
+    let param_key = match kind {
+        SourceKind::Kinesis => "KinesisStreamParameters",
+        SourceKind::DynamoDbStream => "DynamoDBStreamParameters",
+        SourceKind::Sqs => return (None, None),
+    };
+    let params = source_params.and_then(|p| p.get(param_key));
+    let max_retry = params
+        .and_then(|p| p.get("MaximumRetryAttempts"))
+        .and_then(Value::as_i64);
+    let dlq = params
+        .and_then(|p| p.get("DeadLetterConfig"))
+        .and_then(|d| d.get("Arn"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    (max_retry, dlq)
 }
 
 /// Resolve `StartingPosition` (+ timestamp) for a stream source.
@@ -1136,6 +1273,38 @@ mod tests {
         assert_eq!(source_batch_size(Some(&params), &SourceKind::Sqs), 10);
         let params = json!({"KinesisStreamParameters": {"BatchSize": 500}});
         assert_eq!(source_batch_size(Some(&params), &SourceKind::Kinesis), 500);
+    }
+
+    #[test]
+    fn stream_retry_config_reads_max_attempts_and_dlq() {
+        let params = json!({
+            "KinesisStreamParameters": {
+                "MaximumRetryAttempts": 3,
+                "DeadLetterConfig": {"Arn": "arn:aws:sqs:us-east-1:1:pipe-dlq"}
+            }
+        });
+        let (max, dlq) = stream_retry_config(Some(&params), &SourceKind::Kinesis);
+        assert_eq!(max, Some(3));
+        assert_eq!(dlq.as_deref(), Some("arn:aws:sqs:us-east-1:1:pipe-dlq"));
+
+        // DynamoDB stream parameters key.
+        let ddb = json!({
+            "DynamoDBStreamParameters": {"MaximumRetryAttempts": 0}
+        });
+        let (max, dlq) = stream_retry_config(Some(&ddb), &SourceKind::DynamoDbStream);
+        assert_eq!(max, Some(0));
+        assert!(dlq.is_none());
+
+        // SQS sources have their own redrive; no stream retry config.
+        assert_eq!(
+            stream_retry_config(Some(&params), &SourceKind::Sqs),
+            (None, None)
+        );
+        // Absent parameters => defaults (retry forever, no DLQ).
+        assert_eq!(
+            stream_retry_config(None, &SourceKind::Kinesis),
+            (None, None)
+        );
     }
 
     fn rec(seq: &str) -> fakecloud_kinesis::KinesisRecord {
