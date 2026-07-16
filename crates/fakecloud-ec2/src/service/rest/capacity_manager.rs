@@ -100,10 +100,17 @@ pub(crate) fn describe_capacity_manager_data_exports(
 /// Render `<capacityManagerStatus>` + `<organizationsAccess>`, shared by the
 /// enable/disable/update-org-access ops.
 fn cm_status_body(enabled: bool, org_access: &str) -> String {
+    // `OrganizationsAccess` is modeled as `Boolean` (com.amazonaws.ec2#Boolean),
+    // so it must render as `true`/`false` — emitting a status string like
+    // "disabled" makes the SDK's XML decoder reject the response.
+    let org_bool = matches!(
+        org_access.trim().to_ascii_lowercase().as_str(),
+        "enabled" | "true"
+    );
     format!(
         "{}{}",
         ec2_elem("capacityManagerStatus", cm_status(enabled)),
-        ec2_elem("organizationsAccess", org_access),
+        ec2_elem("organizationsAccess", if org_bool { "true" } else { "false" }),
     )
 }
 

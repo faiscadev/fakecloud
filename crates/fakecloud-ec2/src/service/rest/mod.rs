@@ -369,6 +369,10 @@ fn public_ipv4_pool_xml(p: &PublicIpv4Pool, tags: &[Tag]) -> String {
         .filter_map(|c| ipv4_cidr_range(c))
         .map(|(first, last, count)| {
             total += count;
+            // `AddressCount`/`AvailableAddressCount` are modeled as Integer
+            // (i32); a wide CIDR (e.g. /1) overflows i32 and the SDK rejects
+            // the response, so clamp to i32::MAX.
+            let count = count.min(i32::MAX as u64);
             format!(
                 "{}{}<addressCount>{count}</addressCount><availableAddressCount>{count}</availableAddressCount>",
                 ec2_elem("firstAddress", &first),
@@ -376,6 +380,7 @@ fn public_ipv4_pool_xml(p: &PublicIpv4Pool, tags: &[Tag]) -> String {
             )
         })
         .collect();
+    let total = total.min(i32::MAX as u64);
     format!(
         "{}{}{}{}<totalAddressCount>{total}</totalAddressCount><totalAvailableAddressCount>{total}</totalAvailableAddressCount>{}",
         ec2_elem("poolId", &p.pool_id),
@@ -1732,6 +1737,9 @@ pub(crate) fn provision_public_ipv4_pool_cidr(
     };
     let range = ipv4_cidr_range(&cidr)
         .map(|(first, last, count)| {
+            // AddressCount/AvailableAddressCount are Integer (i32); clamp so a
+            // wide CIDR (e.g. /1 -> 2^31) doesn't overflow and break decoding.
+            let count = count.min(i32::MAX as u64);
             format!(
                 "{}{}<addressCount>{count}</addressCount><availableAddressCount>{count}</availableAddressCount>",
                 ec2_elem("firstAddress", &first),
