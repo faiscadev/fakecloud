@@ -27,6 +27,7 @@ use serde_json::{json, Value};
 use fakecloud_core::delivery::{KmsHook, LambdaDelivery};
 use fakecloud_lambda::filter::FilterSet;
 use fakecloud_lambda::{LambdaInvocation, SharedLambdaState};
+use fakecloud_persistence::SnapshotHook;
 use fakecloud_sqs::SharedSqsState;
 
 #[derive(Clone)]
@@ -59,6 +60,12 @@ pub struct SqsLambdaPoller {
     /// mapping on a managed-SSE queue would deliver opaque envelope
     /// bytes and break every consumer.
     kms_hook: Option<Arc<dyn KmsHook>>,
+    /// Persists SQS state after the poller acks/redelivers messages. Without
+    /// this the poller's durable mutations (removed acked messages, bumped
+    /// receive_count / cleared visibility) only reached disk on the next
+    /// unrelated SQS API write, so a restart in the window re-delivered acked
+    /// messages or reset DLQ progress (bug-audit 4.5).
+    snapshot_hook: Option<SnapshotHook>,
 }
 
 impl SqsLambdaPoller {
@@ -68,6 +75,7 @@ impl SqsLambdaPoller {
             lambda_state,
             lambda_delivery: None,
             kms_hook: None,
+            snapshot_hook: None,
         }
     }
 
@@ -79,6 +87,20 @@ impl SqsLambdaPoller {
     pub fn with_kms_hook(mut self, hook: Arc<dyn KmsHook>) -> Self {
         self.kms_hook = Some(hook);
         self
+    }
+
+    pub fn with_snapshot_hook(mut self, hook: SnapshotHook) -> Self {
+        self.snapshot_hook = Some(hook);
+        self
+    }
+
+    /// Persist SQS state through the same snapshot path a mutating SQS API
+    /// call uses. Called only after the write guard is released so the
+    /// blocking snapshot IO never runs under the lock.
+    async fn persist(&self) {
+        if let Some(hook) = &self.snapshot_hook {
+            hook().await;
+        }
     }
 
     pub async fn run(self) {
@@ -303,15 +325,20 @@ impl SqsLambdaPoller {
         // Drop filtered-out messages — AWS treats them as acked so the
         // queue stops redelivering them.
         if !dropped_ids.is_empty() {
-            let mut sqs_mas = self.sqs_state.write();
-            let default_acct = sqs_mas.default_account_id().to_string();
-            let acct = mapping.queue_arn.split(':').nth(4).unwrap_or(&default_acct);
-            let sqs = sqs_mas.get_or_create(acct);
-            if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn) {
-                queue
-                    .messages
-                    .retain(|m| !dropped_ids.contains(&m.message_id));
+            {
+                let mut sqs_mas = self.sqs_state.write();
+                let default_acct = sqs_mas.default_account_id().to_string();
+                let acct = mapping.queue_arn.split(':').nth(4).unwrap_or(&default_acct);
+                let sqs = sqs_mas.get_or_create(acct);
+                if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn) {
+                    queue
+                        .messages
+                        .retain(|m| !dropped_ids.contains(&m.message_id));
+                }
             }
+            // Persist the filter-dropped (acked) removals so a restart doesn't
+            // re-deliver messages the mapping already discarded.
+            self.persist().await;
         }
 
         if matched_records.is_empty() {
@@ -364,24 +391,29 @@ impl SqsLambdaPoller {
         };
 
         if !acked_ids.is_empty() || !failed_ids.is_empty() {
-            let mut sqs_mas = self.sqs_state.write();
-            let default_acct = sqs_mas.default_account_id().to_string();
-            let acct = mapping.queue_arn.split(':').nth(4).unwrap_or(&default_acct);
-            let sqs = sqs_mas.get_or_create(acct);
-            if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn) {
-                queue
-                    .messages
-                    .retain(|m| !acked_ids.contains(&m.message_id));
-                // Failed messages stay; bump receive_count and clear
-                // any pending visibility timeout so the queue
-                // immediately considers them again on the next poll.
-                for msg in queue.messages.iter_mut() {
-                    if failed_ids.contains(&msg.message_id) {
-                        msg.receive_count = msg.receive_count.saturating_add(1);
-                        msg.visible_at = None;
+            {
+                let mut sqs_mas = self.sqs_state.write();
+                let default_acct = sqs_mas.default_account_id().to_string();
+                let acct = mapping.queue_arn.split(':').nth(4).unwrap_or(&default_acct);
+                let sqs = sqs_mas.get_or_create(acct);
+                if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn) {
+                    queue
+                        .messages
+                        .retain(|m| !acked_ids.contains(&m.message_id));
+                    // Failed messages stay; bump receive_count and clear
+                    // any pending visibility timeout so the queue
+                    // immediately considers them again on the next poll.
+                    for msg in queue.messages.iter_mut() {
+                        if failed_ids.contains(&msg.message_id) {
+                            msg.receive_count = msg.receive_count.saturating_add(1);
+                            msg.visible_at = None;
+                        }
                     }
                 }
             }
+            // Persist acked removals + receive_count/visibility bumps so a
+            // restart preserves delivery progress instead of re-delivering.
+            self.persist().await;
         }
 
         let fn_account = mapping.function_arn.split(':').nth(4).unwrap_or("");
@@ -670,6 +702,45 @@ mod tests {
                 .iter()
                 .map(|m| &m.message_id)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    /// Regression (bug-audit 4.5): after the poller acks + removes a
+    /// delivered message it must persist SQS state through the snapshot hook,
+    /// so a restart in the window doesn't re-deliver the acked message.
+    #[tokio::test]
+    async fn poller_persists_after_acking_messages() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let invocations = Arc::new(Mutex::new(Vec::<String>::new()));
+        let delivery: Arc<dyn LambdaDelivery> = Arc::new(RecordingLambda { invocations });
+        let (poller, sqs_state, _lambda_state) = build_states();
+
+        let snapshot_calls = Arc::new(AtomicUsize::new(0));
+        let counter = snapshot_calls.clone();
+        let hook: SnapshotHook = Arc::new(move || {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+
+        let poller = poller
+            .with_lambda_delivery(delivery)
+            .with_snapshot_hook(hook);
+        let mut batching = BatchingState::default();
+        poller.poll(&mut batching).await;
+
+        // The delivered message was acked + removed.
+        {
+            let sqs = sqs_state.read();
+            let queue = sqs.default_ref().queues.values().next().unwrap();
+            assert!(queue.messages.is_empty(), "acked message must be removed");
+        }
+        // ...and the removal must have been persisted through the hook.
+        assert!(
+            snapshot_calls.load(Ordering::SeqCst) >= 1,
+            "poller must snapshot after acking messages"
         );
     }
 

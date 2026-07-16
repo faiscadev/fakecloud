@@ -1594,6 +1594,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn redrive_execution_reruns_to_terminal() {
+        let svc = StepFunctionsService::new(make_state());
+        let sm_arn = create_sm(&svc, "redrive-sm");
+
+        let body = json!({"stateMachineArn": sm_arn, "name": "redrive-e"});
+        let req = make_request("StartExecution", &body.to_string());
+        let resp = svc.start_execution(&req).unwrap();
+        let exec_arn = body_json(&resp)["executionArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Stop before the spawned interpreter runs -> terminal ABORTED.
+        let req = make_request(
+            "StopExecution",
+            &json!({"executionArn": exec_arn, "error": "UserAborted", "cause": "stop"}).to_string(),
+        );
+        svc.stop_execution(&req).unwrap();
+
+        // Redrive: must reset to RUNNING and re-spawn the interpreter.
+        let req = make_request(
+            "RedriveExecution",
+            &json!({"executionArn": exec_arn}).to_string(),
+        );
+        let resp = svc.redrive_execution(&req).unwrap();
+        assert!(body_json(&resp)["redriveDate"].as_i64().is_some());
+
+        // The redriven Pass-state execution must reach a terminal state
+        // (SUCCEEDED) instead of hanging RUNNING forever.
+        let mut status = String::new();
+        for _ in 0..100 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let req = make_request(
+                "DescribeExecution",
+                &json!({"executionArn": exec_arn}).to_string(),
+            );
+            let b = body_json(&svc.describe_execution(&req).unwrap());
+            status = b["status"].as_str().unwrap().to_string();
+            if status != "RUNNING" {
+                break;
+            }
+        }
+        assert_eq!(
+            status, "SUCCEEDED",
+            "redriven execution must run to completion"
+        );
+    }
+
+    #[tokio::test]
+    async fn redrive_execution_running_rejected() {
+        let svc = StepFunctionsService::new(make_state());
+        let sm_arn = create_sm(&svc, "redrive-running-sm");
+        let body = json!({"stateMachineArn": sm_arn, "name": "still-running"});
+        let req = make_request("StartExecution", &body.to_string());
+        let exec_arn = body_json(&svc.start_execution(&req).unwrap())["executionArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // A still-RUNNING execution is not redrivable (it already has a driver).
+        let req = make_request(
+            "RedriveExecution",
+            &json!({"executionArn": exec_arn}).to_string(),
+        );
+        let err = expect_err(svc.redrive_execution(&req));
+        assert!(err.to_string().contains("ExecutionNotRedrivable"));
+    }
+
+    #[tokio::test]
     async fn stop_execution_not_found() {
         let svc = StepFunctionsService::new(make_state());
         let req = make_request(

@@ -1189,6 +1189,68 @@ fn fail_execution_is_noop_when_already_terminal() {
     assert!(exec.error.is_none());
 }
 
+fn make_exec(status: ExecutionStatus) -> Execution {
+    Execution {
+        execution_arn: "arn:aws:states:us-east-1:123456789012:execution:test:x".to_string(),
+        state_machine_arn: "arn:aws:states:us-east-1:123456789012:stateMachine:test".to_string(),
+        state_machine_name: "test".to_string(),
+        name: "x".to_string(),
+        status,
+        input: None,
+        output: None,
+        start_date: Utc::now(),
+        stop_date: None,
+        error: None,
+        cause: None,
+        history_events: vec![],
+        parent_execution_arn: None,
+        is_sync: false,
+        billed_duration_ms: None,
+        billed_memory_mb: None,
+    }
+}
+
+// Deterministic unit test of the write-guard re-check: a concurrent
+// StopExecution sets Aborted in the TOCTOU window, and the late terminal
+// transition from the interpreter must NOT overwrite it.
+#[test]
+fn terminal_transition_skips_when_aborted() {
+    let mut exec = make_exec(ExecutionStatus::Aborted);
+    exec.stop_date = Some(Utc::now());
+    let applied = apply_terminal_transition_if_running(&mut exec, |e| {
+        e.status = ExecutionStatus::Succeeded;
+        e.output = Some("clobbered".to_string());
+    });
+    assert!(
+        !applied,
+        "must not transition an already-terminal execution"
+    );
+    assert_eq!(exec.status, ExecutionStatus::Aborted);
+    assert!(exec.output.is_none(), "Aborted output must be preserved");
+}
+
+#[test]
+fn terminal_transition_skips_when_timed_out() {
+    let mut exec = make_exec(ExecutionStatus::TimedOut);
+    let applied = apply_terminal_transition_if_running(&mut exec, |e| {
+        e.status = ExecutionStatus::Failed;
+    });
+    assert!(!applied);
+    assert_eq!(exec.status, ExecutionStatus::TimedOut);
+}
+
+#[test]
+fn terminal_transition_applies_when_running() {
+    let mut exec = make_exec(ExecutionStatus::Running);
+    let applied = apply_terminal_transition_if_running(&mut exec, |e| {
+        e.status = ExecutionStatus::Succeeded;
+        e.output = Some("ok".to_string());
+    });
+    assert!(applied);
+    assert_eq!(exec.status, ExecutionStatus::Succeeded);
+    assert_eq!(exec.output.as_deref(), Some("ok"));
+}
+
 // ── Pass state with ResultPath ──
 
 #[test]

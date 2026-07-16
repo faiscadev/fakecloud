@@ -317,17 +317,81 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("executionArn"))?
             .to_string();
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let exec = state.executions.get_mut(&arn).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ExecutionDoesNotExist",
-                format!("Execution does not exist: {arn}"),
+
+        // Reset the execution to Running and re-spawn the interpreter so a
+        // redriven execution actually runs to completion. Without spawning a
+        // driver the execution would hang RUNNING forever (bug-audit 4.6).
+        let (definition, input, logging_config) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            let exec = state.executions.get(&arn).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ExecutionDoesNotExist",
+                    format!("Execution does not exist: {arn}"),
+                )
+            })?;
+
+            // Only terminal executions can be redriven; a RUNNING one already has
+            // a driver, and redriving it would spawn a duplicate interpreter.
+            if exec.status == crate::state::ExecutionStatus::Running {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ExecutionNotRedrivable",
+                    format!("Execution is not redrivable: {arn}"),
+                ));
+            }
+
+            let sm_arn = exec.state_machine_arn.clone();
+            let input = exec.input.clone();
+            let sm = state.state_machines.get(&sm_arn).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ExecutionNotRedrivable",
+                    format!("State machine does not exist for execution: {arn}"),
+                )
+            })?;
+            let definition = sm.definition.clone();
+            let logging_config = sm.logging_configuration.clone();
+
+            // Reset execution to a clean RUNNING state before re-running.
+            let exec = state
+                .executions
+                .get_mut(&arn)
+                .expect("execution presence checked above");
+            exec.status = crate::state::ExecutionStatus::Running;
+            exec.stop_date = None;
+            exec.output = None;
+            exec.error = None;
+            exec.cause = None;
+            exec.history_events.clear();
+
+            (definition, input, logging_config)
+        };
+
+        // Spawn async execution (mirrors StartExecution).
+        let shared_state = self.state.clone();
+        let exec_arn_clone = arn.clone();
+        let delivery = self.delivery.clone();
+        let dynamodb_state = self.dynamodb_state.clone();
+        let registry = self.registry.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            interpreter::execute_state_machine(
+                shared_state.clone(),
+                exec_arn_clone,
+                definition,
+                input,
+                delivery,
+                dynamodb_state,
+                registry,
+                logging_config,
             )
-        })?;
-        exec.status = crate::state::ExecutionStatus::Running;
-        exec.stop_date = None;
+            .await;
+            super::save_stepfunctions_snapshot(&shared_state, snapshot_store, &snapshot_lock).await;
+        });
+
         Ok(AwsResponse::ok_json(json!({
             "redriveDate": chrono::Utc::now().timestamp(),
         })))

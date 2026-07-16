@@ -1518,7 +1518,10 @@ async fn main() {
     if let Some(store) = sqs_snapshot_store.clone() {
         sqs_service = sqs_service.with_snapshot_store(store);
     }
-    if let Some(h) = sqs_service.snapshot_hook() {
+    // Capture the SQS snapshot hook once: shared by the CFN provisioner and the
+    // SQS->Lambda event source poller so poller-driven acks/checkpoints persist.
+    let sqs_poller_snapshot_hook = sqs_service.snapshot_hook();
+    if let Some(h) = sqs_poller_snapshot_hook.clone() {
         cfn_snapshot_hooks.insert("sqs", h);
     }
     // Resume any in-progress message-move task left RUNNING/CANCELLING by a
@@ -2443,7 +2446,10 @@ async fn main() {
     if let Some(store) = dynamodb_snapshot_store {
         dynamodb_service = dynamodb_service.with_snapshot_store(store);
     }
-    if let Some(h) = dynamodb_service.snapshot_hook() {
+    // Capture the DynamoDB snapshot hook once: shared by the CFN provisioner and
+    // the DynamoDB-Streams->Lambda poller so poller-driven checkpoints persist.
+    let dynamodb_poller_snapshot_hook = dynamodb_service.snapshot_hook();
+    if let Some(h) = dynamodb_poller_snapshot_hook.clone() {
         cfn_snapshot_hooks.insert("dynamodb", h);
     }
     let dynamodb_service = Arc::new(dynamodb_service);
@@ -2701,7 +2707,10 @@ async fn main() {
     if let Some(store) = kinesis_snapshot_store.clone() {
         kinesis_service = kinesis_service.with_snapshot_store(store);
     }
-    if let Some(h) = kinesis_service.snapshot_hook() {
+    // Capture the Kinesis snapshot hook once: shared by the CFN provisioner and
+    // the Kinesis->Lambda poller so poller-driven checkpoints persist.
+    let kinesis_poller_snapshot_hook = kinesis_service.snapshot_hook();
+    if let Some(h) = kinesis_poller_snapshot_hook.clone() {
         cfn_snapshot_hooks.insert("kinesis", h);
     }
     registry.register(Arc::new(kinesis_service));
@@ -6658,17 +6667,26 @@ async fn main() {
     if let Some(ref ld) = lambda_delivery {
         sqs_lambda_poller = sqs_lambda_poller.with_lambda_delivery(ld.clone());
     }
+    if let Some(h) = sqs_poller_snapshot_hook {
+        sqs_lambda_poller = sqs_lambda_poller.with_snapshot_hook(h);
+    }
     tokio::spawn(sqs_lambda_poller.run());
     let mut kinesis_lambda_poller =
         KinesisLambdaPoller::new(kinesis_state.clone(), lambda_invocations_state.clone());
     if let Some(ref ld) = lambda_delivery {
         kinesis_lambda_poller = kinesis_lambda_poller.with_lambda_delivery(ld.clone());
     }
+    if let Some(h) = kinesis_poller_snapshot_hook {
+        kinesis_lambda_poller = kinesis_lambda_poller.with_snapshot_hook(h);
+    }
     tokio::spawn(kinesis_lambda_poller.run());
     let mut dynamodb_streams_poller =
         DynamoDbStreamsLambdaPoller::new(dynamodb_state.clone(), lambda_invocations_state.clone());
     if let Some(ref ld) = lambda_delivery {
         dynamodb_streams_poller = dynamodb_streams_poller.with_lambda_delivery(ld.clone());
+    }
+    if let Some(h) = dynamodb_poller_snapshot_hook {
+        dynamodb_streams_poller = dynamodb_streams_poller.with_snapshot_hook(h);
     }
     tokio::spawn(Arc::new(dynamodb_streams_poller).run());
     // EventBridge Pipes runner: executes RUNNING pipes with an SQS / Kinesis /
