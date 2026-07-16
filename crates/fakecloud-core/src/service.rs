@@ -91,6 +91,19 @@ impl AwsRequest {
     pub fn take_body_stream(&self) -> Option<RequestBodyStream> {
         self.body_stream.lock().take()
     }
+
+    /// All values supplied for a repeated `@httpQuery` parameter, in wire
+    /// order. [`AwsRequest::query_params`] is a `HashMap`, so `?a=1&a=2` keeps
+    /// only `2` there; this re-parses [`AwsRequest::raw_query`] to recover every
+    /// occurrence. Use it for list-style query params (filters, ids) where a
+    /// client legitimately repeats the key. Returns an empty vec when the key
+    /// is absent.
+    pub fn query_param_all(&self, key: &str) -> Vec<String> {
+        crate::protocol::form_urlencoded_pairs(&self.raw_query)
+            .into_iter()
+            .filter_map(|(k, v)| (k == key).then_some(v))
+            .collect()
+    }
 }
 
 /// Drain a streaming request body into a single [`Bytes`] buffer with no

@@ -837,6 +837,26 @@ fn flatten_json_value(prefix: &str, value: &serde_json::Value, out: &mut HashMap
     }
 }
 
+/// Decode a query / form-urlencoded string into ordered `(key, value)` pairs,
+/// **preserving repeated keys**. The [`HashMap`] form
+/// ([`decode_form_urlencoded`]) collapses `a=1&a=2` to a single entry, which
+/// loses multi-value `@httpQuery` params; this variant keeps every occurrence
+/// in wire order for callers that need them (e.g. list-style query params).
+pub(crate) fn form_urlencoded_pairs(input: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    for pair in input.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = match pair.find('=') {
+            Some(pos) => (&pair[..pos], &pair[pos + 1..]),
+            None => (pair, ""),
+        };
+        pairs.push((url_decode(key), url_decode(value)));
+    }
+    pairs
+}
+
 fn decode_form_urlencoded(input: &[u8]) -> HashMap<String, String> {
     let s = std::str::from_utf8(input).unwrap_or("");
     let mut result = HashMap::new();
@@ -892,6 +912,31 @@ fn from_hex(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn form_urlencoded_pairs_preserves_repeated_keys() {
+        // The HashMap decoder collapses repeats; the ordered-pairs variant must
+        // keep every occurrence in wire order (1.45 multi-value @httpQuery).
+        let pairs = form_urlencoded_pairs("Id=a&Id=b&Id=c&Other=x");
+        let ids: Vec<&str> = pairs
+            .iter()
+            .filter(|(k, _)| k == "Id")
+            .map(|(_, v)| v.as_str())
+            .collect();
+        assert_eq!(ids, vec!["a", "b", "c"]);
+        // Sanity: the HashMap form keeps only the last value.
+        assert_eq!(
+            decode_form_urlencoded(b"Id=a&Id=b&Id=c").get("Id").unwrap(),
+            "c"
+        );
+    }
+
+    #[test]
+    fn form_urlencoded_pairs_decodes_percent_and_plus() {
+        let pairs = form_urlencoded_pairs("q=caf%C3%A9+bar&empty=");
+        assert_eq!(pairs[0], ("q".to_string(), "café bar".to_string()));
+        assert_eq!(pairs[1], ("empty".to_string(), String::new()));
+    }
 
     #[test]
     fn parse_amz_target_events() {
