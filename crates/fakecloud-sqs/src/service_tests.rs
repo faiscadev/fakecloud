@@ -1394,6 +1394,18 @@ fn redrive_with_unresolvable_dlq_arn_keeps_message_on_source_queue() {
         .unwrap(),
     );
     assert_eq!(attrs["Attributes"]["ApproximateNumberOfMessages"], "1");
+
+    // Loop-prevention (4.3): the message was returned to source with its
+    // receive history reset, so a fresh receive delivers it again for normal
+    // reprocessing. Before the fix its receive_count stayed past
+    // maxReceiveCount with visible_at=None, so the next receive re-redrove it
+    // into the same unresolvable target and spun in a hot loop (0 delivered
+    // forever).
+    assert_eq!(
+        receive_msgs(&svc, &src_url, 1).len(),
+        1,
+        "returned message must be re-receivable, not hot-looping through redrive"
+    );
 }
 
 // ── Error branch tests ──

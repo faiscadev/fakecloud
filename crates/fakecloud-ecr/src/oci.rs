@@ -52,7 +52,12 @@ pub(crate) fn create_upload_spool(upload_id: &str) -> std::io::Result<PathBuf> {
 /// `UploadLayerPart` route, where the SDK sends a base64-encoded chunk.
 pub(crate) fn append_bytes_sync(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().append(true).open(path)?;
+    // `create(true)`: a spool lost to a restart (temp-dir, non-durable) is
+    // recreated rather than 500-ing the chunk.
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)?;
     f.write_all(bytes)?;
     f.sync_data()?;
     Ok(())
@@ -69,6 +74,7 @@ pub(crate) async fn append_stream(
     use tokio::io::AsyncWriteExt;
     let mut file = tokio::fs::OpenOptions::new()
         .append(true)
+        .create(true)
         .open(path)
         .await
         .map_err(|e| {

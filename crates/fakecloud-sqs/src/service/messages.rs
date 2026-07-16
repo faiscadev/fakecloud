@@ -812,6 +812,17 @@ impl SqsService {
                     "redrive target queue not found; returning message to source queue"
                 );
                 if let Some(source) = state.queues.values_mut().find(|q| q.arn == queue_arn) {
+                    // Reset the receive history before returning the message.
+                    // It re-enters the source with `receive_count` still past
+                    // `maxReceiveCount` (that is what triggered the redrive) and
+                    // `visible_at = None` (immediately visible), so without this
+                    // the very next ReceiveMessage would re-redrive it, hit the
+                    // same unresolvable target, and spin in a hot loop. Resetting
+                    // gives the consumer a fresh `maxReceiveCount` attempts —
+                    // the message is reprocessed rather than tight-looping, and
+                    // is still never destroyed.
+                    msg.receive_count = 0;
+                    msg.first_received_at = None;
                     source.messages.push_back(msg);
                 }
             }

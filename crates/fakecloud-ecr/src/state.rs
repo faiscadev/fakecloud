@@ -45,7 +45,14 @@ pub struct EcrState {
     pub account_settings: BTreeMap<String, String>,
     /// Layer upload state machine keyed by `uploadId`. Each entry is
     /// tied to a specific repository.
-    #[serde(default)]
+    ///
+    /// NOT persisted: the per-upload spool file lives under the system temp
+    /// dir (`spool_path`) and never survives a restart, so persisting the
+    /// upload metadata alone would leave orphan entries whose next
+    /// `UploadLayerPart` opens a missing spool and 500s. Dropping in-flight
+    /// uploads on restart keeps the map consistent with the (gone) spools; a
+    /// stale client simply re-initiates, matching ECR's finite upload lifetime.
+    #[serde(skip)]
     pub layer_uploads: BTreeMap<String, LayerUpload>,
     /// Pull-time update exclusions keyed by IAM principal ARN. These
     /// are registry-level per the Smithy model.
@@ -410,4 +417,40 @@ pub struct ReplicationRule {
 pub struct ReplicationDestination {
     pub region: String,
     pub registry_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn layer_uploads_are_not_persisted_across_snapshot() {
+        // In-progress uploads spool to the system temp dir, which does not
+        // survive a restart. Persisting the upload metadata alone would leave
+        // an orphan entry whose next `UploadLayerPart` opens a missing spool
+        // and 500s (bug-hunt 4.2), so `layer_uploads` is `#[serde(skip)]`.
+        let mut state = EcrState::new("123456789012", "us-east-1");
+        state.layer_uploads.insert(
+            "upload-1".to_string(),
+            LayerUpload {
+                upload_id: "upload-1".to_string(),
+                repository_name: "repo".to_string(),
+                created_at: Utc::now(),
+                spool_path: "/tmp/fakecloud-ecr-upload-upload-1".to_string(),
+                last_byte_received: 42,
+            },
+        );
+
+        let json = serde_json::to_string(&state).unwrap();
+        assert!(
+            !json.contains("upload-1"),
+            "in-progress uploads must not be serialized"
+        );
+
+        let restored: EcrState = serde_json::from_str(&json).unwrap();
+        assert!(
+            restored.layer_uploads.is_empty(),
+            "in-progress uploads must not survive a restart"
+        );
+    }
 }
