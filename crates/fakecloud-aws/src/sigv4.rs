@@ -823,5 +823,4 @@ mod tests {
         assert_eq!(collapse_ws("  foo   bar  "), "foo bar");
         assert_eq!(collapse_ws("foo\tbar"), "foo bar");
     }
-
 }
