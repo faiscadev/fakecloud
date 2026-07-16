@@ -150,7 +150,7 @@ impl EcsService {
             let key = EcsState::service_key(&cluster_name, &service_name);
             if let Some(existing) = state.services.get(&key) {
                 if existing.status != "INACTIVE" {
-                    return Err(service_already_exists(&service_name));
+                    return Err(service_already_exists());
                 }
             }
             let is_code_deploy = deployment_controller == "CODE_DEPLOY";
@@ -350,6 +350,16 @@ impl EcsService {
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
         let new_desired = body.get("desiredCount").and_then(|v| v.as_i64());
+        // AWS rejects a negative desiredCount with InvalidParameterException
+        // rather than silently clamping it to 0 (which would scale the service
+        // to zero and cause a silent outage). Matches CreateService's message.
+        if let Some(n) = new_desired {
+            if n < 0 {
+                return Err(invalid_parameter(format!(
+                    "desiredCount cannot be negative. desiredCount={n}"
+                )));
+            }
+        }
         let new_td_ref = opt_str(&body, "taskDefinition");
         let update_lifecycle_hooks: Vec<Value> = body
             .get("deploymentConfiguration")
@@ -371,8 +381,15 @@ impl EcsService {
                 .get_mut(&account)
                 .ok_or_else(|| service_not_found(&service_name))?;
             let key = EcsState::service_key(&cluster_name, &service_name);
-            if !state.services.contains_key(&key) {
-                return Err(service_not_found(&service_name));
+            // A deleted service transitions to DRAINING then INACTIVE but stays
+            // describable. UpdateService must not respawn one: AWS returns
+            // ServiceNotActiveException for any non-ACTIVE service.
+            match state.services.get(&key) {
+                None => return Err(service_not_found(&service_name)),
+                Some(svc) if svc.status != "ACTIVE" => {
+                    return Err(service_not_active(&service_name));
+                }
+                Some(_) => {}
             }
 
             // Resolve new task definition (may stay on current one).
@@ -486,7 +503,8 @@ impl EcsService {
                 }
 
                 if let Some(n) = new_desired {
-                    let n = n.max(0) as i32;
+                    // Negatives are already rejected above; n is >= 0 here.
+                    let n = n as i32;
                     svc.desired_count = n;
                     if svc.deployment_controller != "CODE_DEPLOY" {
                         if let Some(d) = svc.deployments.iter_mut().find(|d| d.status == "PRIMARY")
@@ -1073,12 +1091,14 @@ impl EcsService {
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
         let launch_type = opt_str(&body, "launchType");
         let scheduling = opt_str(&body, "schedulingStrategy");
+        // The ListServices model defaults maxResults to 10 (unlike sibling ECS
+        // list ops which default to 100).
         let max_results = body
             .get("maxResults")
             .and_then(|v| v.as_i64())
             .filter(|n| (1..=100).contains(n))
             .map(|n| n as usize)
-            .unwrap_or(100);
+            .unwrap_or(10);
         let next_token = opt_str(&body, "nextToken").unwrap_or("");
 
         let account = request.account_id.clone();
