@@ -149,6 +149,13 @@ pub struct SecurityGroupRule {
     pub cidr_ipv6: Option<String>,
     pub prefix_list_id: Option<String>,
     pub referenced_group_id: Option<String>,
+    /// Source-group reference by name (EC2-Classic / default-VPC form) when the
+    /// rule references a group without an id.
+    #[serde(default)]
+    pub referenced_group_name: Option<String>,
+    /// Owning account of a cross-account source-group reference.
+    #[serde(default)]
+    pub referenced_user_id: Option<String>,
     pub description: String,
 }
 
@@ -898,6 +905,8 @@ pub struct VpnConnection {
     pub customer_gateway_id: String,
     pub vpn_gateway_id: Option<String>,
     #[serde(default)]
+    pub transit_gateway_id: Option<String>,
+    #[serde(default)]
     pub routes: Vec<String>,
 }
 
@@ -1324,6 +1333,106 @@ pub struct FpgaImage {
     pub load_permission_groups: Vec<String>,
 }
 
+/// An IAM instance-profile association (AssociateIamInstanceProfile).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IamInstanceProfileAssociation {
+    pub association_id: String,
+    pub instance_id: String,
+    pub iam_instance_profile_arn: String,
+    pub iam_instance_profile_id: String,
+    /// `associating` | `associated` | `disassociating` | `disassociated`.
+    pub state: String,
+}
+
+/// A security-group-to-VPC association (AssociateSecurityGroupVpc).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SecurityGroupVpcAssociation {
+    pub group_id: String,
+    pub vpc_id: String,
+    /// `associating` | `associated` | `disassociating` | `disassociated`.
+    pub state: String,
+}
+
+/// A route-server endpoint (CreateRouteServerEndpoint).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RouteServerEndpoint {
+    pub id: String,
+    pub route_server_id: String,
+    pub vpc_id: String,
+    pub subnet_id: String,
+    pub eni_id: String,
+    pub eni_address: String,
+    pub state: String,
+}
+
+/// A route-server BGP peer (CreateRouteServerPeer).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RouteServerPeer {
+    pub id: String,
+    pub route_server_endpoint_id: String,
+    pub route_server_id: String,
+    pub vpc_id: String,
+    pub subnet_id: String,
+    pub endpoint_eni_id: String,
+    pub endpoint_eni_address: String,
+    pub peer_address: String,
+    pub peer_asn: i64,
+    pub state: String,
+}
+
+/// A provisioned BYOIP CIDR (ProvisionByoipCidr).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ByoipCidr {
+    pub cidr: String,
+    #[serde(default)]
+    pub description: String,
+    /// `provisioned` | `advertised` | `pending-deprovision` | `deprovisioned`.
+    pub state: String,
+}
+
+/// A public IPv4 address pool (CreatePublicIpv4Pool).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PublicIpv4Pool {
+    pub pool_id: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub network_border_group: String,
+    /// Provisioned CIDR blocks (ProvisionPublicIpv4PoolCidr).
+    #[serde(default)]
+    pub cidrs: Vec<String>,
+}
+
+/// A Capacity Manager data-export configuration (CreateCapacityManagerDataExport).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CapacityManagerDataExport {
+    pub id: String,
+    pub s3_bucket_name: String,
+    #[serde(default)]
+    pub s3_bucket_prefix: String,
+    pub schedule: String,
+    pub output_format: String,
+}
+
+/// A Transit Gateway multicast-domain subnet association.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwMcastAssociation {
+    pub attachment_id: String,
+    pub subnet_id: String,
+    pub resource_id: String,
+    pub resource_type: String,
+    pub state: String,
+}
+
+/// A Transit Gateway multicast group member or source registration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TgwMcastGroup {
+    pub group_ip: String,
+    pub eni_id: String,
+    /// `true` = group member, `false` = group source.
+    pub is_member: bool,
+}
+
 /// Per-account, per-region EC2 state. Resource families are added to this
 /// struct as their batches land.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1639,6 +1748,39 @@ pub struct Ec2State {
     /// back by DescribeIpamPoolAllocations.
     #[serde(default)]
     pub ipam_allocation_descriptions: BTreeMap<String, String>,
+    /// IAM instance-profile associations, keyed by association id.
+    #[serde(default)]
+    pub iam_instance_profile_associations: BTreeMap<String, IamInstanceProfileAssociation>,
+    /// Security-group-to-VPC associations, keyed by `<group-id>:<vpc-id>`.
+    #[serde(default)]
+    pub security_group_vpc_associations: BTreeMap<String, SecurityGroupVpcAssociation>,
+    #[serde(default)]
+    pub route_server_endpoints: BTreeMap<String, RouteServerEndpoint>,
+    #[serde(default)]
+    pub route_server_peers: BTreeMap<String, RouteServerPeer>,
+    /// BYOIP CIDRs, keyed by CIDR.
+    #[serde(default)]
+    pub byoip_cidrs: BTreeMap<String, ByoipCidr>,
+    #[serde(default)]
+    pub public_ipv4_pools: BTreeMap<String, PublicIpv4Pool>,
+    /// Whether Capacity Manager is enabled for this account/region.
+    #[serde(default)]
+    pub capacity_manager_enabled: bool,
+    /// Capacity Manager Organizations access (`enabled` | `disabled`); `None`
+    /// reports the default `disabled`.
+    #[serde(default)]
+    pub capacity_manager_org_access: Option<String>,
+    /// Capacity Manager monitored tag keys.
+    #[serde(default)]
+    pub capacity_manager_monitored_tag_keys: Vec<String>,
+    #[serde(default)]
+    pub capacity_manager_data_exports: BTreeMap<String, CapacityManagerDataExport>,
+    /// TGW multicast-domain subnet associations, keyed by domain id.
+    #[serde(default)]
+    pub tgw_mcast_associations: BTreeMap<String, Vec<TgwMcastAssociation>>,
+    /// TGW multicast group members/sources, keyed by domain id.
+    #[serde(default)]
+    pub tgw_mcast_groups: BTreeMap<String, Vec<TgwMcastGroup>>,
 }
 
 impl Ec2State {

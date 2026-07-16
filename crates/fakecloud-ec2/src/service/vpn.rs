@@ -261,7 +261,11 @@ fn vpn_conn_xml(c: &VpnConnection, tags: &[Tag]) -> String {
         c.state,
         ec2_elem("type", "ipsec.1"),
         ec2_elem("customerGatewayId", &c.customer_gateway_id),
-        c.vpn_gateway_id.as_ref().map(|g| ec2_elem("vpnGatewayId", g)).unwrap_or_default(),
+        format_args!(
+            "{}{}",
+            c.vpn_gateway_id.as_ref().map(|g| ec2_elem("vpnGatewayId", g)).unwrap_or_default(),
+            c.transit_gateway_id.as_ref().map(|g| ec2_elem("transitGatewayId", g)).unwrap_or_default(),
+        ),
         ec2_list("routes", &routes),
         ec2_list("vgwTelemetry", &[]),
         super::tags::tag_set_xml(tags),
@@ -284,6 +288,7 @@ pub(crate) fn create_vpn_connection(
         state: "available".to_string(),
         customer_gateway_id: cgw,
         vpn_gateway_id: req.query_params.get("VpnGatewayId").cloned(),
+        transit_gateway_id: req.query_params.get("TransitGatewayId").cloned(),
         routes: Vec::new(),
     };
     let tags = {
@@ -354,6 +359,7 @@ fn vpn_conn_lookup(svc: &Ec2Service, req: &AwsRequest, id: &str) -> (VpnConnecti
             state: "available".to_string(),
             customer_gateway_id: "cgw-0".to_string(),
             vpn_gateway_id: None,
+            transit_gateway_id: None,
             routes: Vec::new(),
         });
     let tags = accounts
@@ -381,7 +387,36 @@ pub(crate) fn modify_vpn_connection(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    modify_vpn_conn(svc, req, "ModifyVpnConnection")
+    let id = require(&req.query_params, "VpnConnectionId")?;
+    // Apply the target gateway(s) to the persisted connection so the paired
+    // DescribeVpnConnections reflects them (fixes re-rendering the old gateway).
+    // AWS moves the VPN's attachment: setting one gateway type clears the other.
+    {
+        let mut accounts = svc.state.write();
+        if let Some(c) = accounts
+            .get_or_create(&req.account_id)
+            .vpn_connections
+            .get_mut(&id)
+        {
+            if let Some(v) = req.query_params.get("CustomerGatewayId") {
+                c.customer_gateway_id = v.clone();
+            }
+            if let Some(v) = req.query_params.get("VpnGatewayId") {
+                c.vpn_gateway_id = Some(v.clone());
+                c.transit_gateway_id = None;
+            }
+            if let Some(v) = req.query_params.get("TransitGatewayId") {
+                c.transit_gateway_id = Some(v.clone());
+                c.vpn_gateway_id = None;
+            }
+        }
+    }
+    let (c, tags) = vpn_conn_lookup(svc, req, &id);
+    Ok(Ec2Service::respond(
+        "ModifyVpnConnection",
+        &req.request_id,
+        &format!("<vpnConnection>{}</vpnConnection>", vpn_conn_xml(&c, &tags)),
+    ))
 }
 
 pub(crate) fn modify_vpn_connection_options(
@@ -620,4 +655,75 @@ pub(crate) fn describe_vpn_concentrators(
         &req.request_id,
         &ec2_list("vpnConcentratorSet", &items),
     ))
+}
+
+#[cfg(test)]
+mod modify_vpn_tests {
+    use super::*;
+    use crate::test_support::ec2_request;
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn modify_vpn_connection_applies_new_gateway() {
+        let svc = Ec2Service::new();
+        // Create with a VPN gateway...
+        let out = body(
+            create_vpn_connection(
+                &svc,
+                &ec2_request(
+                    "CreateVpnConnection",
+                    &[
+                        ("CustomerGatewayId", "cgw-1"),
+                        ("Type", "ipsec.1"),
+                        ("VpnGatewayId", "vgw-1"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let id = out
+            .split("<vpnConnectionId>")
+            .nth(1)
+            .and_then(|s| s.split("</vpnConnectionId>").next())
+            .unwrap()
+            .to_string();
+        assert!(out.contains("<vpnGatewayId>vgw-1</vpnGatewayId>"), "{out}");
+
+        // ...then modify to a transit gateway; the new gateway must persist.
+        let modified = body(
+            modify_vpn_connection(
+                &svc,
+                &ec2_request(
+                    "ModifyVpnConnection",
+                    &[("VpnConnectionId", &id), ("TransitGatewayId", "tgw-9")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            modified.contains("<transitGatewayId>tgw-9</transitGatewayId>"),
+            "{modified}"
+        );
+        assert!(
+            !modified.contains("vgw-1"),
+            "old gateway re-rendered: {modified}"
+        );
+
+        // Describe reflects the change (not the original gateway).
+        let described = body(
+            describe_vpn_connections(
+                &svc,
+                &ec2_request("DescribeVpnConnections", &[("VpnConnectionId.1", &id)]),
+            )
+            .unwrap(),
+        );
+        assert!(
+            described.contains("<transitGatewayId>tgw-9</transitGatewayId>"),
+            "{described}"
+        );
+        assert!(!described.contains("vgw-1"), "{described}");
+    }
 }

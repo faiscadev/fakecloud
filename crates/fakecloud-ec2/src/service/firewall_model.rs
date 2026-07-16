@@ -263,6 +263,8 @@ mod tests {
             cidr_ipv6: None,
             prefix_list_id: None,
             referenced_group_id: refg.map(str::to_string),
+            referenced_group_name: None,
+            referenced_user_id: None,
             description: String::new(),
         }
     }
