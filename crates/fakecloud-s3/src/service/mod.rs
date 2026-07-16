@@ -1069,6 +1069,42 @@ impl AwsService for S3Service {
         } else {
             None
         };
+        // S3 Control access-point management (host `s3-control...`, path
+        // `/v20180820/accesspoint[/name]`) is authorized under the dedicated
+        // s3:CreateAccessPoint / GetAccessPoint / DeleteAccessPoint /
+        // ListAccessPoints actions — NOT the object-level GetObject/PutObject/
+        // DeleteObject the generic method-based detection would pick, which made
+        // access-point policies ineffective.
+        let host = request
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        if host.to_ascii_lowercase().contains("s3-control")
+            && request.path_segments.first().map(|s| s.as_str()) == Some("v20180820")
+            && request.path_segments.get(1).map(|s| s.as_str()) == Some("accesspoint")
+        {
+            let has_name = request.path_segments.get(2).is_some();
+            let ap_action = match (request.method.as_str(), has_name) {
+                ("PUT", true) => Some("CreateAccessPoint"),
+                ("GET", true) => Some("GetAccessPoint"),
+                ("DELETE", true) => Some("DeleteAccessPoint"),
+                ("GET", false) => Some("ListAccessPoints"),
+                _ => None,
+            };
+            if let Some(action) = ap_action {
+                let resource = request
+                    .path_segments
+                    .get(2)
+                    .map(|name| format!("arn:aws:s3:::accesspoint/{name}"))
+                    .unwrap_or_else(|| "*".to_string());
+                return Some(fakecloud_core::auth::IamAction {
+                    service: "s3",
+                    action,
+                    resource,
+                });
+            }
+        }
         let action = s3_detect_action(
             request.method.as_str(),
             bucket,

@@ -509,6 +509,12 @@ fn build_canonical_request(
             .cloned()
             .unwrap_or_else(|| "UNSIGNED-PAYLOAD".to_string())
     } else if let Some(h) = header_map.get("x-amz-content-sha256") {
+        // Use the signed `x-amz-content-sha256` value verbatim in the canonical
+        // request (that is what the client signed). Binding it to the actual
+        // body belongs at the S3 service layer (`XAmzContentSHA256Mismatch`,
+        // 400) — not here, where `req.body` is not reliably the signed payload
+        // (streaming/aws-chunked routes empty it), so re-hashing wrongly
+        // rejected legitimate signed requests.
         h.clone()
     } else {
         hex::encode(Sha256::digest(req.body))
