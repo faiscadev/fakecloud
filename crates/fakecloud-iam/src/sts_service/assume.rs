@@ -925,11 +925,13 @@ impl StsService {
         // managing itself) is always allowed and matches the recorded AWS
         // baseline; only cross-account targets require the feature enabled.
         if target_account != req.account_id {
-            let accounts = self.state.read();
-            let enabled = accounts
-                .get(&req.account_id)
-                .map(|s| s.organizations_root_sessions)
-                .unwrap_or(false);
+            let enabled = {
+                let accounts = self.state.read();
+                accounts
+                    .get(&req.account_id)
+                    .map(|s| s.organizations_root_sessions)
+                    .unwrap_or(false)
+            };
             if !enabled {
                 return Err(AwsServiceError::aws_error(
                     StatusCode::FORBIDDEN,
@@ -937,6 +939,25 @@ impl StsService {
                     "AssumeRoot into another account requires centralized root access \
                      (RootSessions) to be enabled for the organization \
                      (EnableOrganizationsRootSessions).",
+                ));
+            }
+            // The RootSessions flag alone is not sufficient: the target must be
+            // a member of the caller's organization and the caller must be the
+            // management account (or a delegated administrator for centralized
+            // root access). Without this an account that merely enabled
+            // RootSessions could mint :root credentials for ANY account, in or
+            // out of its org (bug-hunt 5.2).
+            let org_permits = self
+                .org_membership
+                .as_ref()
+                .is_some_and(|r| r.can_assume_root_into(&req.account_id, &target_account));
+            if !org_permits {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::FORBIDDEN,
+                    "AccessDeniedException",
+                    "AssumeRoot into another account is permitted only for the organization's \
+                     management account (or a delegated administrator for centralized root \
+                     access) targeting a member account of the same organization.",
                 ));
             }
         }
