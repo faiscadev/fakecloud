@@ -1,6 +1,9 @@
 //! ElastiCache `snapshots` family handlers extracted from service.rs
 //! by audit-2026-05-19 file-split.
 
+use bytes::Bytes;
+use md5::{Digest, Md5};
+
 use super::*;
 
 /// Per-snapshot RDB dump path. Roots under the platform temp dir rather than a
@@ -540,21 +543,31 @@ impl ElastiCacheService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let snap_name = required_query_param(request, "ServerlessCacheSnapshotName")?;
         let bucket = required_query_param(request, "S3BucketName")?;
-        let accounts = self.state.read();
-        let empty = ElastiCacheState::new(&request.account_id, &request.region);
-        let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let snap = state
-            .serverless_cache_snapshots
-            .get(&snap_name)
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ServerlessCacheSnapshotNotFoundFault",
-                    format!("ServerlessCacheSnapshot {snap_name} not found."),
-                )
-            })?;
-        let xml = serverless_cache_snapshot_xml(snap);
-        let _ = bucket;
+        let snap = {
+            let accounts = self.state.read();
+            let empty = ElastiCacheState::new(&request.account_id, &request.region);
+            let state = accounts.get(&request.account_id).unwrap_or(&empty);
+            state
+                .serverless_cache_snapshots
+                .get(&snap_name)
+                .cloned()
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "ServerlessCacheSnapshotNotFoundFault",
+                        format!("ServerlessCacheSnapshot {snap_name} not found."),
+                    )
+                })?
+        };
+
+        // Actually perform the export: AWS drops the snapshot's RDB artifact
+        // into the caller's S3 bucket. We synthesize a small artifact carrying
+        // the snapshot metadata and write it through the shared S3 state so a
+        // follow-up GetObject returns it. The bucket must already exist in this
+        // account (AWS rejects otherwise). bug-hunt 2026-07-16, 1.25.
+        self.export_snapshot_artifact_to_s3(&request.account_id, &bucket, &snap)?;
+
+        let xml = serverless_cache_snapshot_xml(&snap);
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
@@ -564,6 +577,59 @@ impl ElastiCacheService {
                 &request.request_id,
             ),
         ))
+    }
+
+    /// Write the serverless snapshot export artifact into the target S3 bucket.
+    /// Returns `InvalidParameterValue` when the bucket does not exist in the
+    /// account (matching AWS), and is a no-op when S3 isn't wired (unit tests).
+    fn export_snapshot_artifact_to_s3(
+        &self,
+        account_id: &str,
+        bucket: &str,
+        snap: &ServerlessCacheSnapshot,
+    ) -> Result<(), AwsServiceError> {
+        let Some(ref s3) = self.s3 else {
+            return Ok(());
+        };
+        let object_key = format!("{}.rdb", snap.serverless_cache_snapshot_name);
+        let body_bytes = serde_json::json!({
+            "serverlessCacheSnapshotName": snap.serverless_cache_snapshot_name,
+            "serverlessCacheName": snap.serverless_cache_name,
+            "arn": snap.arn,
+            "engine": snap.engine,
+            "majorEngineVersion": snap.major_engine_version,
+            "snapshotType": snap.snapshot_type,
+            "createTime": snap.create_time,
+        })
+        .to_string()
+        .into_bytes();
+
+        let mut hasher = Md5::new();
+        hasher.update(&body_bytes);
+        let etag = format!("\"{:x}\"", hasher.finalize());
+        let size = body_bytes.len() as u64;
+
+        let mut s3_state = s3.write();
+        let s3_account = s3_state.get_or_create(account_id);
+        let bucket_state = s3_account.buckets.get_mut(bucket).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValue",
+                format!("The S3 bucket {bucket} does not exist or is not owned by you."),
+            )
+        })?;
+        let object = S3Object {
+            key: object_key.clone(),
+            body: memory_body(Bytes::from(body_bytes)),
+            content_type: "application/octet-stream".to_string(),
+            etag,
+            size,
+            last_modified: chrono::Utc::now(),
+            storage_class: "STANDARD".to_string(),
+            ..Default::default()
+        };
+        bucket_state.objects.insert(object_key, object);
+        Ok(())
     }
 }
 

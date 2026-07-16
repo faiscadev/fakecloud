@@ -12,10 +12,13 @@ fakecloud-aws = { workspace = true }
 fakecloud-core = { workspace = true }
 fakecloud-k8s = { workspace = true }
 fakecloud-persistence = { workspace = true }
+fakecloud-s3 = { workspace = true }
 k8s-openapi = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 chrono = { workspace = true }
 http = { workspace = true }
+md-5 = { workspace = true }
 parking_lot = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
@@ -25,7 +28,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-bytes = { workspace = true }
 # The opt-in k8s-integration test drives a real cluster directly.
 kube = { workspace = true }
 

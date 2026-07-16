@@ -9,6 +9,7 @@ use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
+use fakecloud_s3::{memory_body, S3Object, SharedS3State};
 
 use crate::runtime::ElastiCacheRuntime;
 use crate::state::{
@@ -172,6 +173,10 @@ pub struct ElastiCacheService {
     runtime: Option<Arc<ElastiCacheRuntime>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// Shared S3 state so `ExportServerlessCacheSnapshot` can write the
+    /// exported artifact into the target bucket, matching AWS. `None` in
+    /// unit tests / when S3 isn't wired.
+    s3: Option<SharedS3State>,
 }
 
 mod clusters;
@@ -191,11 +196,19 @@ impl ElastiCacheService {
             runtime: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            s3: None,
         }
     }
 
     pub fn with_runtime(mut self, runtime: Arc<ElastiCacheRuntime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+
+    /// Wire the shared S3 state used by `ExportServerlessCacheSnapshot` to
+    /// write the exported snapshot artifact into the target bucket.
+    pub fn with_s3(mut self, s3: SharedS3State) -> Self {
+        self.s3 = Some(s3);
         self
     }
 

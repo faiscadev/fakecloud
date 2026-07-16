@@ -5015,6 +5015,177 @@ async fn snapshot_hook_fires_with_store() {
     hook().await;
 }
 
+#[tokio::test]
+async fn create_serverless_cache_without_runtime_assigns_default_port() {
+    // No container runtime: the cache is created directly "available", so it
+    // must advertise a real port (6379 for redis/valkey) rather than 0, which
+    // would make every connection string end in `:0` (unconnectable).
+    // bug-hunt 2026-07-16, 1.7.
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let service = ElastiCacheService::new(shared);
+
+    let resp = service
+        .create_serverless_cache(&request(
+            "CreateServerlessCache",
+            &[("ServerlessCacheName", "sc-redis"), ("Engine", "redis")],
+        ))
+        .await
+        .expect("metadata-only create");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<Status>available</Status>"));
+    assert!(body.contains("<Port>6379</Port>"), "body: {body}");
+    assert!(
+        !body.contains("<Port>0</Port>"),
+        "endpoint port must not be 0"
+    );
+
+    // Describe round-trips the non-zero port too.
+    let desc = service
+        .describe_serverless_caches(&request(
+            "DescribeServerlessCaches",
+            &[("ServerlessCacheName", "sc-redis")],
+        ))
+        .unwrap();
+    let desc_body = String::from_utf8(desc.body.expect_bytes().to_vec()).unwrap();
+    assert!(desc_body.contains("<Port>6379</Port>"), "desc: {desc_body}");
+    assert!(!desc_body.contains("<Port>0</Port>"));
+}
+
+#[tokio::test]
+async fn replication_group_emits_primary_and_replica_members() {
+    // A replication group created with NumCacheClusters=3 has 1 primary + 2
+    // replicas. The Terraform provider derives replicas_per_node_group from
+    // len(NodeGroupMembers) - 1, so all three must be emitted or the plan
+    // perpetually diffs. bug-hunt 2026-07-16, 1.8.
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let service = ElastiCacheService::new(shared);
+
+    service
+        .create_replication_group(&request(
+            "CreateReplicationGroup",
+            &[
+                ("ReplicationGroupId", "rg-repl"),
+                ("ReplicationGroupDescription", "test"),
+                ("NumCacheClusters", "3"),
+            ],
+        ))
+        .await
+        .expect("create replication group");
+
+    let resp = service
+        .describe_replication_groups(&request(
+            "DescribeReplicationGroups",
+            &[("ReplicationGroupId", "rg-repl")],
+        ))
+        .unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert_eq!(
+        body.matches("<NodeGroupMember>").count(),
+        3,
+        "expected 1 primary + 2 replicas, body: {body}"
+    );
+    assert_eq!(
+        body.matches("<CurrentRole>primary</CurrentRole>").count(),
+        1
+    );
+    assert_eq!(
+        body.matches("<CurrentRole>replica</CurrentRole>").count(),
+        2
+    );
+    assert!(body.contains("<CacheClusterId>rg-repl-001</CacheClusterId>"));
+    assert!(body.contains("<CacheClusterId>rg-repl-002</CacheClusterId>"));
+    assert!(body.contains("<CacheClusterId>rg-repl-003</CacheClusterId>"));
+}
+
+#[tokio::test]
+async fn export_serverless_cache_snapshot_writes_object_to_s3() {
+    // ExportServerlessCacheSnapshot must actually drop the export artifact into
+    // the caller's S3 bucket rather than discard S3BucketName. bug-hunt
+    // 2026-07-16, 1.25.
+    use fakecloud_s3::{S3Bucket, SharedS3State};
+    let s3: SharedS3State = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    {
+        let mut guard = s3.write();
+        let acc = guard.get_or_create("123456789012");
+        acc.buckets.insert(
+            "export-bucket".to_string(),
+            S3Bucket::new("export-bucket", "us-east-1", "123456789012"),
+        );
+    }
+
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let service = ElastiCacheService::new(shared).with_s3(s3.clone());
+    {
+        let mut __a = service.state.write();
+        let state = __a.default_mut();
+        state.serverless_cache_snapshots.insert(
+            "snap-x".to_string(),
+            ServerlessCacheSnapshot {
+                serverless_cache_snapshot_name: "snap-x".to_string(),
+                arn: "arn:aws:elasticache:us-east-1:123456789012:serverlesssnapshot:snap-x"
+                    .to_string(),
+                kms_key_id: None,
+                snapshot_type: "manual".to_string(),
+                status: "available".to_string(),
+                create_time: "2024-01-01T00:00:00Z".to_string(),
+                expiry_time: None,
+                bytes_used_for_cache: None,
+                serverless_cache_name: "cache-a".to_string(),
+                engine: "redis".to_string(),
+                major_engine_version: "7.1".to_string(),
+            },
+        );
+    }
+
+    let resp = service
+        .export_serverless_cache_snapshot(&request(
+            "ExportServerlessCacheSnapshot",
+            &[
+                ("ServerlessCacheSnapshotName", "snap-x"),
+                ("S3BucketName", "export-bucket"),
+            ],
+        ))
+        .expect("export succeeds");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(body.contains("<ServerlessCacheSnapshotName>snap-x</ServerlessCacheSnapshotName>"));
+
+    // The export object now exists in the target bucket with real bytes + ETag.
+    {
+        let guard = s3.read();
+        let acc = guard.get("123456789012").expect("s3 account");
+        let bucket = acc.buckets.get("export-bucket").expect("bucket");
+        let obj = bucket
+            .objects
+            .get("snap-x.rdb")
+            .expect("export object written to S3");
+        assert!(obj.size > 0);
+        assert!(obj.etag.starts_with('"') && obj.etag.ends_with('"'));
+    }
+
+    // A missing bucket is rejected the way AWS does, not silently dropped.
+    match service.export_serverless_cache_snapshot(&request(
+        "ExportServerlessCacheSnapshot",
+        &[
+            ("ServerlessCacheSnapshotName", "snap-x"),
+            ("S3BucketName", "nonexistent-bucket"),
+        ],
+    )) {
+        Ok(_) => panic!("expected missing-bucket rejection"),
+        Err(e) => {
+            assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(e.code(), "InvalidParameterValue");
+        }
+    }
+}
+
 #[test]
 fn recovery_predicate_redrives_transient_states() {
     use crate::service::is_recoverable_status;

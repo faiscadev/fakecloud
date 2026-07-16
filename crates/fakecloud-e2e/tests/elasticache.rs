@@ -953,6 +953,20 @@ async fn elasticache_create_replication_group_round_trips_extended_fields() {
     assert!(ids.contains(&"0001"));
     assert!(ids.contains(&"0002"));
     assert!(ids.contains(&"0003"));
+    // replicas_per_node_group=1 -> each shard exposes 1 primary + 1 replica
+    // NodeGroupMember. The Terraform provider derives replicas_per_node_group
+    // from len(NodeGroupMembers) - 1, so a single member perpetually diffs.
+    for ng in node_groups {
+        let members = ng.node_group_members();
+        assert_eq!(
+            members.len(),
+            2,
+            "each shard must expose 1 primary + 1 replica member"
+        );
+        let roles: Vec<&str> = members.iter().filter_map(|m| m.current_role()).collect();
+        assert!(roles.contains(&"primary"), "roles: {roles:?}");
+        assert!(roles.contains(&"replica"), "roles: {roles:?}");
+    }
     assert_eq!(described.snapshot_retention_limit(), Some(7));
     assert_eq!(described.snapshot_window(), Some("03:00-04:00"));
     // AuthToken is never echoed on describe, even when stored internally.

@@ -67,17 +67,30 @@ impl ElastiCacheService {
             (arn, "127.0.0.1".to_string())
         };
 
-        // The backing container is started off the request path (below); the
-        // cache begins with no endpoint port and is filled in once ready, so the
-        // response doesn't block on the cold image pull + readiness (which made
-        // the AWS CLI hit its 60s read timeout). bug-audit 2026-05-28, 3.2.
+        // The backing container is started off the request path (below); with a
+        // runtime the cache begins with no endpoint port and is filled in once
+        // ready, so the response doesn't block on the cold image pull +
+        // readiness (which made the AWS CLI hit its 60s read timeout).
+        // bug-audit 2026-05-28, 3.2.
+        //
+        // Without a runtime (the default in local/CI setups) the cache is
+        // created directly as "available", so it must advertise a real port
+        // immediately — the Docker-tick backfill never runs, so leaving it 0
+        // makes every connection string end in `:0` (unconnectable). Use the
+        // conventional engine port (6379 redis/valkey, 11211 memcached).
+        // bug-hunt 2026-07-16, 1.7.
+        let initial_port = if self.runtime.is_some() {
+            0
+        } else {
+            engine_default_port(&engine)
+        };
         let endpoint = ServerlessCacheEndpoint {
             address: endpoint_address.clone(),
-            port: 0,
+            port: initial_port,
         };
         let reader_endpoint = ServerlessCacheEndpoint {
             address: endpoint_address,
-            port: 0,
+            port: initial_port,
         };
         let cache = ServerlessCache {
             serverless_cache_name: serverless_cache_name.clone(),

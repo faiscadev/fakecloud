@@ -3006,7 +3006,8 @@ async fn main() {
         } else {
             None
         };
-    let mut elasticache_service = ElastiCacheService::new(elasticache_state);
+    let mut elasticache_service =
+        ElastiCacheService::new(elasticache_state).with_s3(s3_state.clone());
     if let Some(ref rt) = elasticache_runtime {
         elasticache_service = elasticache_service.with_runtime(rt.clone());
     }
