@@ -1342,7 +1342,37 @@ pub(crate) fn resolve_queue_url(input: &str, state: &crate::state::SqsState) -> 
 /// the same resolution can back the `/_fakecloud/sqs/messages` introspection
 /// endpoint, keeping every client-facing QueueUrl consistent.
 pub fn resolve_endpoint_base(headers: &http::HeaderMap, fallback: &str) -> String {
-    if let Ok(ext) = std::env::var("FAKECLOUD_EXTERNAL_URL") {
+    resolve_endpoint_base_with(headers, fallback, external_url_override())
+}
+
+/// The `FAKECLOUD_EXTERNAL_URL` override, read from the environment exactly
+/// once per process and cached. Reading it once (rather than on every request)
+/// keeps the resolution deterministic under `cargo test`'s shared-process model
+/// — a test cannot make a sibling test observe a mid-run env mutation. In
+/// production the variable is set at startup, so the single read is correct.
+fn external_url_override() -> Option<&'static str> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Option<String>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            std::env::var("FAKECLOUD_EXTERNAL_URL").ok().and_then(|v| {
+                let v = v.trim().trim_end_matches('/').to_string();
+                (!v.is_empty()).then_some(v)
+            })
+        })
+        .as_deref()
+}
+
+/// Resolve the endpoint base from an explicit override (if any), then the
+/// request `Host` header, then the fallback. Split out from
+/// [`resolve_endpoint_base`] so tests can exercise the override precedence with
+/// an injected value instead of mutating the process-global env var.
+pub fn resolve_endpoint_base_with(
+    headers: &http::HeaderMap,
+    fallback: &str,
+    external: Option<&str>,
+) -> String {
+    if let Some(ext) = external {
         let ext = ext.trim().trim_end_matches('/');
         if !ext.is_empty() {
             return ext.to_string();

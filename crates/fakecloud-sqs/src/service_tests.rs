@@ -3308,22 +3308,25 @@ fn get_and_list_queue_url_reflect_host_header() {
 }
 
 #[test]
-fn create_queue_url_honors_external_url_override() {
-    // The explicit external-URL override wins over the request Host header.
-    // nextest isolates each test in its own process, so mutating this
-    // process-global env var cannot race concurrent tests.
-    std::env::set_var("FAKECLOUD_EXTERNAL_URL", "https://sqs.example.test");
-    let svc = make_service();
-    let resp = svc
-        .create_queue(&make_request_with_host(
-            "CreateQueue",
-            json!({ "QueueName": "ext-q" }),
-            "fakecloud:4566",
-        ))
-        .unwrap();
-    let url = body_json(resp)["QueueUrl"].as_str().unwrap().to_string();
-    std::env::remove_var("FAKECLOUD_EXTERNAL_URL");
-    assert_eq!(url, "https://sqs.example.test/123456789012/ext-q");
+fn external_url_override_wins_over_host_header() {
+    // The explicit external-URL override (FAKECLOUD_EXTERNAL_URL in production,
+    // read once at startup) wins over the request Host header. Exercised via the
+    // pure resolver with an injected override rather than the process-global env
+    // var — under `cargo test` all lib tests share one process, so mutating that
+    // env var mid-run would race sibling tests (which is exactly what regressed
+    // the host-header/localhost cases in CI).
+    let mut headers = http::HeaderMap::new();
+    headers.insert("host", http::HeaderValue::from_static("fakecloud:4566"));
+    let base = crate::resolve_endpoint_base_with(
+        &headers,
+        "http://localhost:4566",
+        Some("https://sqs.example.test/"),
+    );
+    assert_eq!(base, "https://sqs.example.test");
+
+    // With no override, the Host header wins over the fallback.
+    let base = crate::resolve_endpoint_base_with(&headers, "http://localhost:4566", None);
+    assert_eq!(base, "http://fakecloud:4566");
 }
 
 #[test]
