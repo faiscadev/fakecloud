@@ -3,6 +3,21 @@
 
 use super::*;
 
+/// Per-snapshot RDB dump path. Roots under the platform temp dir rather than a
+/// hardcoded `/tmp` (absent on Windows, sometimes non-writable in containers).
+/// The PID keeps concurrent servers from colliding on the same file.
+fn snapshot_rdb_temp_path(account_id: &str, snapshot_name: &str) -> String {
+    std::env::temp_dir()
+        .join(format!(
+            "fakecloud-ec-{}-{}-{}.rdb",
+            account_id,
+            snapshot_name,
+            std::process::id()
+        ))
+        .to_string_lossy()
+        .into_owned()
+}
+
 impl ElastiCacheService {
     pub(super) fn create_serverless_cache_snapshot(
         &self,
@@ -289,12 +304,7 @@ impl ElastiCacheService {
         };
 
         if let Some(ref runtime) = self.runtime {
-            let tmp_path = format!(
-                "/tmp/fakecloud-ec-{}-{}-{}.rdb",
-                request.account_id,
-                snapshot_name,
-                std::process::id()
-            );
+            let tmp_path = snapshot_rdb_temp_path(&request.account_id, &snapshot_name);
             match runtime.dump_rdb(&group_id, &tmp_path).await {
                 Ok(()) => {
                     snapshot.rdb_path = Some(tmp_path);
@@ -554,5 +564,25 @@ impl ElastiCacheService {
                 &request.request_id,
             ),
         ))
+    }
+}
+
+#[cfg(test)]
+mod snapshot_path_tests {
+    use super::snapshot_rdb_temp_path;
+
+    #[test]
+    fn rdb_temp_path_roots_under_platform_temp_dir() {
+        // Portability (4.4): the RDB dump must live under the platform temp
+        // dir, not a hardcoded `/tmp` that is absent on Windows / some
+        // containers.
+        let path = snapshot_rdb_temp_path("123456789012", "nightly");
+        let temp = std::env::temp_dir();
+        assert!(
+            std::path::Path::new(&path).starts_with(&temp),
+            "{path} must root under {}",
+            temp.display()
+        );
+        assert!(path.contains("nightly") && path.ends_with(".rdb"));
     }
 }
