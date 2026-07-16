@@ -494,7 +494,7 @@ pub struct CloudFormationService {
     /// is written through to disk, the same persistence a direct mutating API
     /// call would trigger. Empty by default (memory mode, or no services
     /// wired); the server populates it via `with_snapshot_hooks`.
-    snapshot_hooks: BTreeMap<&'static str, SnapshotHook>,
+    pub(crate) snapshot_hooks: BTreeMap<&'static str, SnapshotHook>,
 }
 
 /// Everything the async CreateStack provisioning task needs to provision
@@ -541,6 +541,15 @@ pub(crate) struct ContainerBackingHandles {
     mq_runtime: Option<Arc<fakecloud_mq::MqRuntime>>,
     kafka_state: fakecloud_kafka::SharedKafkaState,
     kafka_runtime: Option<Arc<fakecloud_kafka::KafkaRuntime>>,
+    /// Snapshot hooks for the services whose DETACHED container-backing task
+    /// mutates snapshot-backed state AFTER the stack op has already serialized
+    /// it. `persist_touched_services` fires right after the op returns, which
+    /// races (and usually loses to) the still-running background reconcile, so
+    /// an Auto Scaling Group's launched `instances` (and their EC2 records) were
+    /// serialized empty and vanished on restart. The background task fires these
+    /// hooks itself once it has finished mutating (bug-hunt restart-dataloss).
+    autoscaling_snapshot_hook: Option<SnapshotHook>,
+    ec2_snapshot_hook: Option<SnapshotHook>,
 }
 
 impl ContainerBackingHandles {
@@ -561,7 +570,24 @@ impl ContainerBackingHandles {
             mq_runtime: p.mq_runtime.clone(),
             kafka_state: p.kafka_state.clone(),
             kafka_runtime: p.kafka_runtime.clone(),
+            autoscaling_snapshot_hook: None,
+            ec2_snapshot_hook: None,
         }
+    }
+
+    /// Attach the autoscaling + EC2 snapshot hooks so a detached ASG capacity
+    /// reconcile can persist the instances it launches (and their EC2 records)
+    /// once it completes, instead of relying on the racing
+    /// `persist_touched_services` that runs before the reconcile finishes. The
+    /// hooks come from `CloudFormationService::snapshot_hooks`; `None` (memory
+    /// mode) leaves the reconcile's persist a no-op.
+    pub(crate) fn with_snapshot_hooks(
+        mut self,
+        hooks: &BTreeMap<&'static str, SnapshotHook>,
+    ) -> Self {
+        self.autoscaling_snapshot_hook = hooks.get("autoscaling").cloned();
+        self.ec2_snapshot_hook = hooks.get("ec2").cloned();
+        self
     }
 
     /// Back each freshly-inserted container resource with a REAL container in a
@@ -593,6 +619,10 @@ impl ContainerBackingHandles {
                     let ec2_runtime = self.ec2_runtime.clone();
                     let account = self.account_id.clone();
                     let region = self.region.clone();
+                    let persist = fakecloud_autoscaling::cfn_provision::CfnReconcilePersistHooks {
+                        autoscaling: self.autoscaling_snapshot_hook.clone(),
+                        ec2: self.ec2_snapshot_hook.clone(),
+                    };
                     tokio::spawn(async move {
                         fakecloud_autoscaling::cfn_provision::cfn_reconcile_capacity(
                             asg_state,
@@ -601,6 +631,7 @@ impl ContainerBackingHandles {
                             group_name,
                             account,
                             region,
+                            persist,
                         )
                         .await;
                     });
@@ -1024,7 +1055,8 @@ impl CloudFormationService {
         // Reject a TypeName fakecloud has no provisioner for, so Cloud Control
         // never records a resource with no backing service state.
         provisioner.strict_unknown_types = true;
-        let backing = ContainerBackingHandles::from_provisioner(&provisioner);
+        let backing = ContainerBackingHandles::from_provisioner(&provisioner)
+            .with_snapshot_hooks(&self.snapshot_hooks);
         let spawns = provisioner.pending_container_spawns.clone();
         let def = template::ResourceDefinition {
             logical_id: "Resource".to_string(),
@@ -1671,7 +1703,8 @@ impl CloudFormationService {
         // into spawn_blocking, so the post-provision drain (below) can back
         // freshly-inserted container resources with REAL containers.
         let container_spawns = provisioner.pending_container_spawns.clone();
-        let backing_handles = ContainerBackingHandles::from_provisioner(&provisioner);
+        let backing_handles = ContainerBackingHandles::from_provisioner(&provisioner)
+            .with_snapshot_hooks(&snapshot_hooks);
 
         // The provisioning loop is fully synchronous (it may block on cold
         // image pulls / custom-resource Lambda invokes). Hand it to a
@@ -2355,7 +2388,8 @@ impl CloudFormationService {
         // reaching the update path), then run any deferred custom-resource
         // invokes.
         {
-            let handles = ContainerBackingHandles::from_provisioner(&provisioner);
+            let handles = ContainerBackingHandles::from_provisioner(&provisioner)
+                .with_snapshot_hooks(&self.snapshot_hooks);
             handles.spawn_container_intents(std::mem::take(
                 &mut *provisioner.pending_container_spawns.lock(),
             ));

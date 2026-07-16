@@ -1057,6 +1057,8 @@ impl Ec2Service {
         }
     }
 
+    // (helper `recovery_terminal_wins` is defined at module scope below.)
+
     pub async fn recover_persisted_containers(&self) {
         let Some(runtime) = self.runtime.clone() else {
             // Metadata-only mode: there is no container to reconcile, but an
@@ -1161,8 +1163,16 @@ impl Ec2Service {
                         running,
                     ) {
                         (Some(inst), Ok(r)) => {
-                            if inst.state_code == 48 {
-                                // Terminated during recovery: drop the container.
+                            // A concurrent Terminate (code 48) or Stop (code 80)
+                            // during the recovery window wins: don't resurrect the
+                            // instance to `running`, and drop the container we just
+                            // started (a terminated/stopped instance owns none).
+                            // Mirrors the both-terminal guard in
+                            // `instance::reconcile_started`. Guarding only code 48
+                            // let a concurrent StopInstances get clobbered back to
+                            // `running` with a fresh container (bug-hunt
+                            // restart-dataloss).
+                            if recovery_terminal_wins(inst.state_code) {
                                 true
                             } else {
                                 inst.state_code = 16;
@@ -1173,15 +1183,25 @@ impl Ec2Service {
                             }
                         }
                         (Some(inst), Err(error)) => {
-                            tracing::error!(
-                                %error,
-                                instance_id = %p.id,
-                                "failed to recover ec2 backing container after restart",
-                            );
-                            inst.state_code = 80;
-                            inst.state_name = "stopped".to_string();
-                            inst.container_id = None;
-                            false
+                            // A concurrent Terminate (code 48) or Stop (code 80)
+                            // wins over a boot failure too: leave the terminal
+                            // state as-is rather than overwriting it to `stopped`.
+                            // The unguarded write here previously clobbered a
+                            // concurrent TerminateInstances (code 48) to `stopped`
+                            // (bug-hunt restart-dataloss).
+                            if recovery_terminal_wins(inst.state_code) {
+                                false
+                            } else {
+                                tracing::error!(
+                                    %error,
+                                    instance_id = %p.id,
+                                    "failed to recover ec2 backing container after restart",
+                                );
+                                inst.state_code = 80;
+                                inst.state_name = "stopped".to_string();
+                                inst.container_id = None;
+                                false
+                            }
                         }
                         // Deleted during recovery: stop the container we just
                         // started so it isn't orphaned (mirrors ElastiCache).
@@ -1253,6 +1273,18 @@ pub async fn save_ec2_snapshot(
         Ok(Err(err)) => tracing::error!(%err, "failed to write ec2 snapshot"),
         Err(err) => tracing::error!(%err, "ec2 snapshot task panicked"),
     }
+}
+
+/// True if a concurrent Terminate (code 48) or Stop (code 80) has already
+/// claimed an instance during the restart recovery window, so
+/// `recover_persisted_containers` must NOT overwrite that terminal state with a
+/// recovered `running`/`stopped` row. Mirrors the both-terminal guard in
+/// [`instance::reconcile_started`]; applies to BOTH the boot-success and
+/// boot-failure arms (a boot failure previously clobbered a concurrent
+/// Terminate to `stopped`; a boot success clobbered a concurrent Stop back to
+/// `running` with a fresh container). bug-hunt restart-dataloss.
+fn recovery_terminal_wins(state_code: i64) -> bool {
+    state_code == 48 || state_code == 80
 }
 
 #[async_trait]
@@ -2703,5 +2735,106 @@ impl Ec2Service {
             StatusCode::OK,
             fakecloud_aws::ec2query::ec2_response(action, request_id, body),
         )
+    }
+}
+
+#[cfg(test)]
+mod recover_guard_tests {
+    use super::recovery_terminal_wins;
+
+    // A minimal stand-in for the `state_code`/`state_name` fields the recovery
+    // closure mutates. Kept independent of the full `Instance` struct so this
+    // regression stays pinned to the guard behavior, not to unrelated field
+    // churn (the struct-field repo-wide-ctor hazard).
+    struct Row {
+        state_code: i64,
+        state_name: &'static str,
+    }
+
+    // Boot-success arm of `recover_persisted_containers`, driven by the guard.
+    // Returns whether the just-started container must be reaped.
+    fn apply_boot_success(row: &mut Row) -> bool {
+        if recovery_terminal_wins(row.state_code) {
+            true
+        } else {
+            row.state_code = 16;
+            row.state_name = "running";
+            false
+        }
+    }
+
+    // Boot-failure arm of `recover_persisted_containers`, driven by the guard.
+    fn apply_boot_failure(row: &mut Row) -> bool {
+        if recovery_terminal_wins(row.state_code) {
+            false
+        } else {
+            row.state_code = 80;
+            row.state_name = "stopped";
+            false
+        }
+    }
+
+    // Instance state codes: 0 pending, 16 running, 48 terminated, 80 stopped.
+    #[test]
+    fn terminal_states_win_over_recovery() {
+        assert!(recovery_terminal_wins(48), "terminated wins");
+        assert!(recovery_terminal_wins(80), "stopped wins");
+        assert!(!recovery_terminal_wins(16), "running is recoverable");
+        assert!(!recovery_terminal_wins(0), "pending is recoverable");
+    }
+
+    #[test]
+    fn boot_success_does_not_resurrect_concurrent_stop() {
+        // Concurrent StopInstances set code 80 during the recovery window.
+        let mut row = Row {
+            state_code: 80,
+            state_name: "stopped",
+        };
+        let reap = apply_boot_success(&mut row);
+        assert!(reap, "the just-started container must be reaped");
+        assert_eq!(row.state_code, 80, "stop must not be clobbered to running");
+        assert_eq!(row.state_name, "stopped");
+    }
+
+    #[test]
+    fn boot_failure_does_not_clobber_concurrent_terminate() {
+        // Concurrent TerminateInstances set code 48 during the recovery window,
+        // and the backing container failed to boot.
+        let mut row = Row {
+            state_code: 48,
+            state_name: "terminated",
+        };
+        let reap = apply_boot_failure(&mut row);
+        assert!(!reap, "boot failed: nothing to reap");
+        assert_eq!(
+            row.state_code, 48,
+            "terminate must not be overwritten to stopped"
+        );
+        assert_eq!(row.state_name, "terminated");
+    }
+
+    #[test]
+    fn boot_success_recovers_a_still_pending_instance() {
+        // No concurrent op: a persisted pending row recovers to running.
+        let mut row = Row {
+            state_code: 0,
+            state_name: "pending",
+        };
+        let reap = apply_boot_success(&mut row);
+        assert!(!reap);
+        assert_eq!(row.state_code, 16, "pending recovers to running");
+        assert_eq!(row.state_name, "running");
+    }
+
+    #[test]
+    fn boot_failure_stops_a_still_pending_instance() {
+        // No concurrent op, boot failed: a pending row is marked stopped.
+        let mut row = Row {
+            state_code: 0,
+            state_name: "pending",
+        };
+        let reap = apply_boot_failure(&mut row);
+        assert!(!reap);
+        assert_eq!(row.state_code, 80, "failed boot marks stopped");
     }
 }
