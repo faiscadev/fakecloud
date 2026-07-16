@@ -44,7 +44,10 @@ fn no_include_str_escapes_its_crate() {
         .parent()
         .unwrap()
         .to_path_buf();
-    assert!(crates_dir.ends_with("crates"), "unexpected layout: {crates_dir:?}");
+    assert!(
+        crates_dir.ends_with("crates"),
+        "unexpected layout: {crates_dir:?}"
+    );
 
     let re_arg = regex_lite_arg;
     let mut offenders = Vec::new();
