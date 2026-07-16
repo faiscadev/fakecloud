@@ -162,6 +162,121 @@ async fn test_api_with_tags() {
     assert_eq!(tags.get("team"), Some(&"platform".to_string()));
 }
 
+/// bug-hunt: CreateApi wrote inline tags onto `HttpApi.tags`, while
+/// TagResource/GetTags used a separate ARN-keyed store — the two never
+/// synced, so create-time tags were invisible to GetTags and TagResource
+/// tags invisible to GetApi (permanent Terraform tag drift). All tag verbs
+/// must now round-trip through a single source of truth.
+#[tokio::test]
+async fn test_api_tags_single_source_of_truth_round_trip() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let created = client
+        .create_api()
+        .name("tagged-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .tags("env", "test")
+        .send()
+        .await
+        .unwrap();
+    let api_id = created.api_id().unwrap().to_string();
+    let arn = format!("arn:aws:apigateway:us-east-1::/apis/{api_id}");
+
+    // Create-time inline tags must be visible to GetTags.
+    let gt = client.get_tags().resource_arn(&arn).send().await.unwrap();
+    assert_eq!(gt.tags().unwrap().get("env"), Some(&"test".to_string()));
+
+    // TagResource tags must be visible to GetApi.
+    client
+        .tag_resource()
+        .resource_arn(&arn)
+        .tags("team", "platform")
+        .send()
+        .await
+        .unwrap();
+    let ga = client.get_api().api_id(&api_id).send().await.unwrap();
+    let ga_tags = ga.tags().expect("GetApi must surface tags");
+    assert_eq!(ga_tags.get("env"), Some(&"test".to_string()));
+    assert_eq!(ga_tags.get("team"), Some(&"platform".to_string()));
+
+    // GetTags reflects both create-time and TagResource tags.
+    let gt2 = client.get_tags().resource_arn(&arn).send().await.unwrap();
+    assert_eq!(
+        gt2.tags().unwrap().get("team"),
+        Some(&"platform".to_string())
+    );
+
+    // UntagResource round-trips through both read paths.
+    client
+        .untag_resource()
+        .resource_arn(&arn)
+        .tag_keys("env")
+        .send()
+        .await
+        .unwrap();
+    let ga2 = client.get_api().api_id(&api_id).send().await.unwrap();
+    let ga2_tags = ga2.tags().unwrap();
+    assert_eq!(ga2_tags.get("env"), None);
+    assert_eq!(ga2_tags.get("team"), Some(&"platform".to_string()));
+    let gt3 = client.get_tags().resource_arn(&arn).send().await.unwrap();
+    assert_eq!(gt3.tags().unwrap().get("env"), None);
+    assert_eq!(
+        gt3.tags().unwrap().get("team"),
+        Some(&"platform".to_string())
+    );
+}
+
+/// Stages exhibit the identical create-vs-TagResource tag split as APIs;
+/// verify they now share one source of truth too.
+#[tokio::test]
+async fn test_stage_tags_single_source_of_truth_round_trip() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api = client
+        .create_api()
+        .name("stage-tag-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id().unwrap().to_string();
+
+    client
+        .create_stage()
+        .api_id(&api_id)
+        .stage_name("prod")
+        .tags("env", "test")
+        .send()
+        .await
+        .unwrap();
+    let arn = format!("arn:aws:apigateway:us-east-1::/apis/{api_id}/stages/prod");
+
+    // Create-time stage tags visible to GetTags.
+    let gt = client.get_tags().resource_arn(&arn).send().await.unwrap();
+    assert_eq!(gt.tags().unwrap().get("env"), Some(&"test".to_string()));
+
+    // TagResource visible to GetStage.
+    client
+        .tag_resource()
+        .resource_arn(&arn)
+        .tags("team", "platform")
+        .send()
+        .await
+        .unwrap();
+    let gs = client
+        .get_stage()
+        .api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+    let gs_tags = gs.tags().expect("GetStage must surface tags");
+    assert_eq!(gs_tags.get("env"), Some(&"test".to_string()));
+    assert_eq!(gs_tags.get("team"), Some(&"platform".to_string()));
+}
+
 #[tokio::test]
 async fn test_create_route() {
     let server = TestServer::start().await;

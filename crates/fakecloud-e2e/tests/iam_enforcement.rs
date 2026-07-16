@@ -125,6 +125,56 @@ async fn unknown_access_key_rejected_when_sigv4_verification_enabled() {
     );
 }
 
+/// bug-hunt: strict IAM enforcement WITHOUT `--verify-sigv4` used to fail open
+/// on an unresolvable access key id — the request resolved to `principal=None`
+/// with `access_key_id=Some`, so both the identity-policy branch (needs a
+/// principal) and the anonymous branch (needs no access key) were skipped and
+/// the request fell through to the handler, bypassing enforcement (and any
+/// explicit Deny). Strict mode must now fail closed on an unknown key.
+#[tokio::test]
+async fn unknown_access_key_denied_in_strict_without_sigv4() {
+    // Strict IAM, SigV4 verification OFF — the fail-open configuration.
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+
+    let cfg = sdk_config_with(&server, "AKIABOGUS000000000000", "bogus-secret").await;
+    let iam = IamClient::new(&cfg);
+    let err =
+        iam.list_users().send().await.expect_err(
+            "an unknown access key must fail closed under strict IAM even without SigV4",
+        );
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("InvalidClientTokenId"),
+        "expected InvalidClientTokenId for an unknown access key under strict/no-sigv4, got {msg}"
+    );
+}
+
+/// Companion no-regression check for the fail-closed change above: with strict
+/// IAM and SigV4 off, a *resolved* principal carrying an explicit Allow still
+/// succeeds (the root-bypass bootstrap that creates the user and the user's own
+/// resolvable key are both unaffected by the unknown-key deny).
+#[tokio::test]
+async fn resolved_principal_still_allowed_in_strict_without_sigv4() {
+    let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
+    let (akid, secret) = bootstrap_user(&server, "carol").await;
+    attach_inline_policy(
+        &server,
+        "carol",
+        "allow-gci",
+        r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"sts:GetCallerIdentity","Resource":"*"}]}"#,
+    )
+    .await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let sts = StsClient::new(&cfg);
+    let ident = sts
+        .get_caller_identity()
+        .send()
+        .await
+        .expect("a resolved principal with an explicit Allow must still succeed");
+    assert!(ident.account().is_some());
+}
+
 #[tokio::test]
 async fn sts_get_caller_identity_allowed_with_explicit_policy() {
     let server = start_strict().await;

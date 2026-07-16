@@ -106,12 +106,24 @@ impl ApiGatewayV2Service {
             }
         }
 
+        let arn = api_resource_arn(region, &api.api_id);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // Unify create-time inline tags into the ARN-keyed tag store that the
+        // tag verbs (TagResource/UntagResource/GetTags) operate on. Previously
+        // create-time tags lived only on `HttpApi.tags` and were invisible to
+        // GetTags, while TagResource tags lived only in `state.tags` and were
+        // invisible to GetApi — a permanent Terraform tag drift.
+        if let Some(t) = api.tags.clone() {
+            if !t.is_empty() {
+                state.tags.insert(arn.clone(), t);
+            }
+        }
         let api_clone = api.clone();
         state.apis.insert(api.api_id.clone(), api);
+        let resp = overlay_resource_tags(json!(api_clone), state.tags.get(&arn));
 
-        Ok(AwsResponse::ok_json(json!(api_clone)))
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn get_api(
@@ -138,14 +150,23 @@ impl ApiGatewayV2Service {
             )
         })?;
 
-        Ok(AwsResponse::ok_json(json!(api)))
+        let arn = api_resource_arn(&req.region, api_id);
+        let resp = overlay_resource_tags(json!(api), state.tags.get(&arn));
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn get_apis(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let accounts = self.state.read();
         let empty = ApiGatewayV2State::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let apis: Vec<&HttpApi> = state.apis.values().collect();
+        let apis: Vec<serde_json::Value> = state
+            .apis
+            .values()
+            .map(|api| {
+                let arn = api_resource_arn(&req.region, &api.api_id);
+                overlay_resource_tags(json!(api), state.tags.get(&arn))
+            })
+            .collect();
 
         Ok(AwsResponse::ok_json(json!({
             "items": apis,
@@ -175,6 +196,9 @@ impl ApiGatewayV2Service {
                 format!("API not found: {}", api_id),
             )
         })?;
+        // Drop the ARN-keyed tags alongside the API so a re-created API with the
+        // same id doesn't inherit stale tags.
+        state.tags.remove(&api_resource_arn(&req.region, api_id));
 
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, vec![]))
     }

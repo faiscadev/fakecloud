@@ -967,9 +967,16 @@ impl ApiGatewayV2Service {
 
             // ── Tags ──
             "TagResource" => {
-                let arn = resource_id
-                    .ok_or_else(|| missing("ResourceArn"))?
-                    .to_string();
+                // `ResourceArn` is a non-greedy @httpLabel, so the SDK
+                // percent-encodes its `/` and `:` on the wire; decode back to
+                // the plain ARN so `state.tags` is keyed by the same value that
+                // CreateApi/CreateStage compute (`arn:aws:apigateway:...`),
+                // unifying create-time tags with the tag verbs.
+                let arn = percent_encoding::percent_decode_str(
+                    resource_id.ok_or_else(|| missing("ResourceArn"))?,
+                )
+                .decode_utf8_lossy()
+                .into_owned();
                 let body = body(req);
                 let tags_in = req_object(&body, "Tags")?.clone();
                 let mut accounts = self.state.write();
@@ -983,7 +990,12 @@ impl ApiGatewayV2Service {
                 no_content()
             }
             "UntagResource" => {
-                let arn = resource_id.ok_or_else(|| missing("ResourceArn"))?;
+                // Decode the percent-encoded @httpLabel ARN (see TagResource).
+                let arn = percent_encoding::percent_decode_str(
+                    resource_id.ok_or_else(|| missing("ResourceArn"))?,
+                )
+                .decode_utf8_lossy()
+                .into_owned();
                 // TagKeys is a required @httpQuery list per Smithy — the SDK
                 // renders each entry as repeated `tagKeys={key}` pairs.
                 // `query_params` collapses repeats to the last value, so parse
@@ -1008,7 +1020,7 @@ impl ApiGatewayV2Service {
                     .collect();
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
-                if let Some(tags) = state.tags.get_mut(arn) {
+                if let Some(tags) = state.tags.get_mut(&arn) {
                     for key in &keys {
                         tags.remove(key);
                     }
@@ -1016,9 +1028,14 @@ impl ApiGatewayV2Service {
                 no_content()
             }
             "GetTags" => {
-                let arn = resource_id.ok_or_else(|| missing("ResourceArn"))?;
+                // Decode the percent-encoded @httpLabel ARN (see TagResource).
+                let arn = percent_encoding::percent_decode_str(
+                    resource_id.ok_or_else(|| missing("ResourceArn"))?,
+                )
+                .decode_utf8_lossy()
+                .into_owned();
                 self.read_state(aid, &region, |state| {
-                    let tags = state.tags.get(arn).cloned().unwrap_or_default();
+                    let tags = state.tags.get(&arn).cloned().unwrap_or_default();
                     ok(json!({"Tags": tags}))
                 })
             }

@@ -820,6 +820,35 @@ pub async fn dispatch(
                         // Soft mode: audit log emitted; fall through to the handler.
                     }
                 }
+            } else if config.iam_mode.is_strict() && config.credential_resolver.is_some() {
+                // Signed request under an access key id that resolved to no
+                // principal (unknown / unresolvable credential) while SigV4
+                // verification is off — with `--verify-sigv4` on, such a key is
+                // already rejected upstream with InvalidClientTokenId before
+                // reaching here. Under strict IAM enforcement this must fail
+                // closed: letting it fall through to the handler would bypass
+                // authorization entirely (including any explicit Deny), the
+                // fail-open gap this branch closes. The reserved `test*`
+                // root-bypass credentials never reach here (skipped above via
+                // `is_root_bypass`), so the local-dev bootstrap is unaffected.
+                // Guarded on a configured credential resolver so we only reject
+                // keys we actually attempted to resolve. In soft mode we
+                // preserve the historical leave-alone behavior (no branch taken).
+                tracing::warn!(
+                    target: "fakecloud::iam::audit",
+                    service = %detected.service,
+                    action = %aws_request.action,
+                    mode = %config.iam_mode,
+                    request_id = %request_id,
+                    "signed request under an unresolvable access key id denied under strict IAM enforcement (enable --verify-sigv4 for cryptographic rejection)"
+                );
+                return build_error_response(
+                    StatusCode::FORBIDDEN,
+                    "InvalidClientTokenId",
+                    "The security token included in the request is invalid",
+                    &request_id,
+                    detected.protocol,
+                );
             }
         }
     }

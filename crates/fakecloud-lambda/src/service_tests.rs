@@ -65,6 +65,32 @@ fn normalize_function_name_strips_qualified_full_arn() {
 }
 
 #[test]
+fn normalize_function_name_strips_non_aws_partition_arns() {
+    // China + GovCloud partitions must be recognized, not dropped on the
+    // floor by a hardcoded `arn:aws:lambda:` prefix.
+    assert_eq!(
+        normalize_function_name("arn:aws-cn:lambda:cn-north-1:123456789012:function:MyFunction"),
+        "MyFunction"
+    );
+    assert_eq!(
+        normalize_function_name(
+            "arn:aws-us-gov:lambda:us-gov-west-1:123456789012:function:MyFunction:PROD"
+        ),
+        "MyFunction"
+    );
+}
+
+#[test]
+fn qualifier_from_non_aws_partition_arn() {
+    assert_eq!(
+        qualifier_from_function_ref(
+            "arn:aws-cn:lambda:cn-north-1:123456789012:function:MyFunction:PROD"
+        ),
+        Some("PROD".to_string())
+    );
+}
+
+#[test]
 fn normalize_function_name_strips_partial_arn() {
     assert_eq!(
         normalize_function_name("123456789012:function:MyFunction"),
@@ -121,6 +147,30 @@ async fn get_function_accepts_full_arn() {
         "",
     );
     let resp = svc.handle(req).await.expect("get function by ARN");
+    assert_eq!(resp.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn get_function_accepts_china_partition_arn() {
+    let svc = LambdaService::new(make_state());
+    let create_body = json!({
+        "FunctionName": "MyFunc",
+        "Runtime": "nodejs20.x",
+        "Role": "arn:aws:iam::123456789012:role/lambda-role",
+        "Handler": "index.handler",
+        "Code": {"ZipFile": ""},
+    })
+    .to_string();
+    let req = make_request(Method::POST, "/2015-03-31/functions", &create_body);
+    svc.handle(req).await.expect("create function");
+
+    // A China-partition ARN in the path must resolve the function.
+    let req = make_request(
+        Method::GET,
+        "/2015-03-31/functions/arn:aws-cn:lambda:cn-north-1:123456789012:function:MyFunc",
+        "",
+    );
+    let resp = svc.handle(req).await.expect("get function by aws-cn ARN");
     assert_eq!(resp.status, StatusCode::OK);
 }
 

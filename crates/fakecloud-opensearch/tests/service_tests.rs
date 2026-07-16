@@ -105,6 +105,70 @@ async fn create_domain_via_opensearch_roundtrips() {
 }
 
 #[tokio::test]
+async fn vpc_domain_reports_endpoints_vpc_not_public_endpoint() {
+    let svc = service();
+    // Create a VPC domain, then Describe it and assert the status exposes the
+    // endpoint via `Endpoints.vpc` (what Terraform reads) and omits the
+    // public-style top-level `Endpoint`, matching AWS for VPC domains.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({
+                "DomainName": "vpc-dom",
+                "EngineVersion": "OpenSearch_2.11",
+                "VPCOptions": {
+                    "SubnetIds": ["subnet-123"],
+                    "SecurityGroupIds": ["sg-123"]
+                }
+            }),
+        ),
+    )
+    .await;
+
+    let described = call(
+        &svc,
+        req(
+            Method::GET,
+            &format!("{OS}/opensearch/domain/vpc-dom"),
+            Value::Null,
+        ),
+    )
+    .await;
+    let v = json_of(&described);
+    let status = &v["DomainStatus"];
+    assert!(
+        status["Endpoint"].is_null(),
+        "VPC domains must omit the top-level Endpoint, got {:?}",
+        status["Endpoint"]
+    );
+    assert!(
+        status["Endpoints"]["vpc"].as_str().is_some(),
+        "VPC domains must expose Endpoints.vpc, got {:?}",
+        status["Endpoints"]
+    );
+}
+
+#[tokio::test]
+async fn non_vpc_domain_reports_public_endpoint() {
+    let svc = service();
+    let created = call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "public-dom", "EngineVersion": "OpenSearch_2.11"}),
+        ),
+    )
+    .await;
+    let v = json_of(&created);
+    // Public domains keep the top-level Endpoint and no Endpoints map.
+    assert!(v["DomainStatus"]["Endpoint"].as_str().is_some());
+    assert!(v["DomainStatus"]["Endpoints"].is_null());
+}
+
+#[tokio::test]
 async fn create_domain_via_elasticsearch_roundtrips() {
     let svc = service();
     let resp = call(

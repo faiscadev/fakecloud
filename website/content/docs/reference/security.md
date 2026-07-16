@@ -49,6 +49,8 @@ Three modes, in order of aggressiveness:
 - **`soft`**: policies are evaluated and each deny is logged on the `fakecloud::iam::audit` tracing target, but the request is allowed through. Useful for onboarding: you can see which statements would fire without breaking your test suite.
 - **`strict`**: policies are evaluated and denied requests fail with a protocol-correct `AccessDeniedException` before the service handler runs.
 
+Strict mode also **fails closed on an unknown access key**: a signed request whose access key id resolves to no identity is rejected with `InvalidClientTokenId` before the handler runs, even when `--verify-sigv4` is off (with `--verify-sigv4` on the same key is rejected earlier, at signature verification). Only the reserved `test*` root-bypass credentials skip this check. This closes a fail-open gap where an unresolvable key previously fell through to the handler unenforced. `soft` mode leaves such requests untouched.
+
 Filter the audit events with `RUST_LOG=fakecloud::iam::audit=warn`.
 
 ### Root is always allowed

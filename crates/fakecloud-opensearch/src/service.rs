@@ -2868,7 +2868,16 @@ fn domain_status(d: &Domain, api: Api, created: bool, processing: bool) -> Value
     m.insert("Processing".into(), json!(processing && !d.deleted));
     m.insert("UpgradeProcessing".into(), json!(false));
     if !d.deleted {
-        m.insert("Endpoint".into(), json!(d.endpoint));
+        // VPC domains expose their endpoint through the `Endpoints` map under
+        // the `vpc` key and omit the top-level `Endpoint` (which AWS reserves
+        // for public-access domains). Terraform reads `Endpoints["vpc"]` for
+        // VPC domains, so a public-style top-level `Endpoint` caused perpetual
+        // drift / an empty endpoint attribute.
+        if d.config.get("VPCOptions").is_some_and(|v| v.is_object()) {
+            m.insert("Endpoints".into(), json!({ "vpc": d.endpoint }));
+        } else {
+            m.insert("Endpoint".into(), json!(d.endpoint));
+        }
     }
     // Version + cluster config with the API-appropriate spelling.
     let cluster = cfg_get(d, &["ClusterConfig", "ElasticsearchClusterConfig"])
