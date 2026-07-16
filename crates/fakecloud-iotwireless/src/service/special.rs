@@ -928,26 +928,36 @@ fn associate_partner_account(
         .and_then(Value::as_str)
         .unwrap_or("");
     let fingerprint = fingerprint_hex(private_key);
+    let arn = mint_arn(ctx, "partner-accounts", &amazon_id);
     // The SidewalkAccountInfoWithFingerprint the reads project carries the
-    // AmazonId + Fingerprint (never the private key).
+    // AmazonId + Fingerprint + Arn (never the private key).
     let sidewalk_with_fp = json!({
         "AmazonId": amazon_id,
         "Fingerprint": fingerprint,
+        "Arn": arn,
     });
-    // Store the projected list-element members (AmazonId/Fingerprint/Arn) at the
-    // top level so the generic ListPartnerAccounts projection finds them, and
-    // keep the nested Sidewalk object for GetPartnerAccount.
+    // Persist enough for both reads: `Sidewalk` (struct) + `AccountLinked` for
+    // GetPartnerAccount, and top-level `AmazonId`/`Fingerprint`/`Arn` for the
+    // ListPartnerAccounts element projection.
     let record = json!({
         "AmazonId": amazon_id,
         "Fingerprint": fingerprint,
+        "Arn": arn,
+        "AccountLinked": true,
         "Sidewalk": sidewalk_with_fp,
         "PartnerAccountId": amazon_id,
         "PartnerType": "Sidewalk",
     });
     let mut g = svc.state.write();
     let data = g.get_or_create(&ctx.account);
-    data.put_resource("partner-accounts", &amazon_id, record.clone());
-    (ok_json(record), true)
+    data.put_resource("partner-accounts", &amazon_id, record);
+    // AssociateAwsAccountWithPartnerAccountResponse.Sidewalk is `SidewalkAccountInfo`
+    // (AmazonId only — never the fingerprint/arn variant, which belongs to the
+    // Get/List reads), plus a top-level Arn.
+    (
+        ok_json(json!({ "Sidewalk": { "AmazonId": amazon_id }, "Arn": arn })),
+        true,
+    )
 }
 
 /// Remove a partner-account association.

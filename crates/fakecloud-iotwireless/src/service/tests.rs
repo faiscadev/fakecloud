@@ -898,6 +898,140 @@ fn deregister_wireless_device_persists_state() {
 }
 
 #[test]
+fn partner_account_associate_get_list_disassociate_round_trips() {
+    let s = svc();
+    // Associate: the only create path for a Sidewalk partner account.
+    let out = body_of(
+        &run(
+            &s,
+            "POST",
+            "/partner-accounts",
+            &[],
+            json!({"Sidewalk": {"AmazonId": "amzn-1", "AppServerPrivateKey": "secret-key"}}),
+        )
+        .unwrap(),
+    );
+    // Associate response Sidewalk is the SidewalkAccountInfo shape (AmazonId
+    // only) + a top-level Arn; the fingerprint variant belongs to the reads.
+    assert_eq!(out["Sidewalk"]["AmazonId"], "amzn-1");
+    assert!(out["Sidewalk"].get("Fingerprint").is_none());
+    assert!(out["Arn"]
+        .as_str()
+        .unwrap()
+        .contains(":PartnerAccount/amzn-1"));
+    assert!(out.get("PartnerType").is_none());
+
+    // GetPartnerAccount reflects Sidewalk (with Fingerprint) + AccountLinked.
+    let got = body_of(
+        &run(
+            &s,
+            "GET",
+            "/partner-accounts/amzn-1?partnerType=Sidewalk",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(got["Sidewalk"]["AmazonId"], "amzn-1");
+    let fp = got["Sidewalk"]["Fingerprint"].as_str().unwrap();
+    assert!(!fp.is_empty() && fp.chars().all(|c| c.is_ascii_hexdigit()));
+    assert_eq!(got["AccountLinked"], true);
+
+    // ListPartnerAccounts reflects it (element carries AmazonId/Fingerprint/Arn).
+    let listed = body_of(&run(&s, "GET", "/partner-accounts", &[], Value::Null).unwrap());
+    let accounts = listed["Sidewalk"].as_array().unwrap();
+    assert_eq!(accounts.len(), 1);
+    assert_eq!(accounts[0]["AmazonId"], "amzn-1");
+    assert!(accounts[0]["Arn"]
+        .as_str()
+        .unwrap()
+        .contains(":PartnerAccount/amzn-1"));
+
+    // Disassociate removes it.
+    run(
+        &s,
+        "DELETE",
+        "/partner-accounts/amzn-1?partnerType=Sidewalk",
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let listed = body_of(&run(&s, "GET", "/partner-accounts", &[], Value::Null).unwrap());
+    assert!(listed["Sidewalk"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn wireless_gateway_certificate_associate_get_disassociate_round_trips() {
+    let s = svc();
+    let gw = body_of(
+        &run(
+            &s,
+            "POST",
+            "/wireless-gateways",
+            &[],
+            json!({"Name": "gw-1", "LoRaWAN": {"GatewayEui": "0000000000000000"}}),
+        )
+        .unwrap(),
+    );
+    let id = gw["Id"].as_str().unwrap().to_string();
+
+    // No cert yet -> empty id.
+    let empty = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless-gateways/{id}/certificate"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(empty["IotCertificateId"], "");
+
+    // Associate the cert binding.
+    run(
+        &s,
+        "PUT",
+        &format!("/wireless-gateways/{id}/certificate"),
+        &[],
+        json!({"IotCertificateId": "cert-abc"}),
+    )
+    .unwrap();
+    let got = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless-gateways/{id}/certificate"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(got["IotCertificateId"], "cert-abc");
+
+    // Disassociate clears it.
+    run(
+        &s,
+        "DELETE",
+        &format!("/wireless-gateways/{id}/certificate"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let cleared = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless-gateways/{id}/certificate"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(cleared["IotCertificateId"], "");
+}
+
+#[test]
 fn read_only_action_classifier_separates_reads_from_mutators() {
     let find = |op: &str| crate::generated::OPS.iter().find(|m| m.op == op).unwrap();
     // GET-shaped actions are accepted as empty no-ops when unclaimed.
