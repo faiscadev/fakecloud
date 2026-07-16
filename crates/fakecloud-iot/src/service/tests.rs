@@ -1264,6 +1264,77 @@ fn put_verification_state_round_trips_through_list_violation_events() {
     assert_eq!(events[0]["verificationState"], "FALSE_POSITIVE");
 }
 
+// ---------- Thing attributePayload round-trip (bug-hunt read-shape) ----------
+
+#[test]
+fn create_thing_attribute_payload_surfaces_in_describe_and_list() {
+    let s = svc();
+    run(
+        &s,
+        "POST",
+        "/things/sensor-1",
+        &[],
+        json!({"attributePayload": {"attributes": {"color": "red", "zone": "a"}}}),
+    )
+    .unwrap();
+
+    // DescribeThing must project the attributes at the top level, not swallow
+    // them inside the stored `attributePayload`.
+    let described = body_of(&run(&s, "GET", "/things/sensor-1", &[], Value::Null).unwrap());
+    assert_eq!(described["attributes"]["color"], "red");
+    assert_eq!(described["attributes"]["zone"], "a");
+    assert!(described.get("attributePayload").is_none());
+
+    // ListThings projects the same attributes onto each element.
+    let listed = body_of(&run(&s, "GET", "/things", &[], Value::Null).unwrap());
+    let things = listed["things"].as_array().unwrap();
+    let sensor = things
+        .iter()
+        .find(|t| t["thingName"] == "sensor-1")
+        .unwrap();
+    assert_eq!(sensor["attributes"]["color"], "red");
+}
+
+#[test]
+fn update_thing_attribute_payload_merge_semantics() {
+    let s = svc();
+    run(
+        &s,
+        "POST",
+        "/things/sensor-2",
+        &[],
+        json!({"attributePayload": {"attributes": {"color": "red", "zone": "a"}}}),
+    )
+    .unwrap();
+
+    // merge=true overlays onto the existing attributes: `zone` survives, `color`
+    // is updated, and an empty-string value removes the attribute.
+    run(
+        &s,
+        "PATCH",
+        "/things/sensor-2",
+        &[],
+        json!({"attributePayload": {"merge": true, "attributes": {"color": "blue", "zone": ""}}}),
+    )
+    .unwrap();
+    let described = body_of(&run(&s, "GET", "/things/sensor-2", &[], Value::Null).unwrap());
+    assert_eq!(described["attributes"]["color"], "blue");
+    assert!(described["attributes"].get("zone").is_none());
+
+    // merge=false (default) replaces the whole attribute set.
+    run(
+        &s,
+        "PATCH",
+        "/things/sensor-2",
+        &[],
+        json!({"attributePayload": {"attributes": {"shape": "round"}}}),
+    )
+    .unwrap();
+    let described = body_of(&run(&s, "GET", "/things/sensor-2", &[], Value::Null).unwrap());
+    assert_eq!(described["attributes"]["shape"], "round");
+    assert!(described["attributes"].get("color").is_none());
+}
+
 // ---------- every operation routes to a handler ----------
 
 #[test]

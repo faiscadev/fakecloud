@@ -367,6 +367,28 @@ fn state_machine_alias_to_json(alias: &crate::state::StateMachineAlias) -> Value
 }
 
 fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
+    // Iterations still in flight while the map run is RUNNING; zero once it has
+    // reached a terminal status.
+    let accounted = mr.succeeded_count + mr.failed_count;
+    let running = if mr.status == "RUNNING" {
+        (mr.total_count - accounted).max(0)
+    } else {
+        0
+    };
+    // AWS reports parallel `itemCounts` and `executionCounts` maps; with one
+    // child execution per item they carry identical tallies here.
+    let counts = json!({
+        "pending": 0,
+        "running": running,
+        "succeeded": mr.succeeded_count,
+        "failed": mr.failed_count,
+        "timedOut": 0,
+        "aborted": 0,
+        "results": mr.succeeded_count,
+        "total": mr.total_count,
+        "failuresNotRedrivable": 0,
+        "pendingRedrive": 0,
+    });
     json!({
         "mapRunArn": mr.map_run_arn,
         "executionArn": mr.execution_arn,
@@ -376,6 +398,8 @@ fn map_run_to_json(mr: &crate::state::MapRun) -> Value {
         "status": mr.status,
         "startDate": mr.start_date.timestamp(),
         "stopDate": mr.stop_date.map(|d| d.timestamp()),
+        "itemCounts": counts,
+        "executionCounts": counts,
     })
 }
 
@@ -2128,6 +2152,115 @@ mod tests {
         assert!(running.stop_date.is_some());
         assert_eq!(running.error.as_deref(), Some("Fakecloud.Restart"));
         assert_eq!(s.executions["done"].status, ExecutionStatus::Succeeded);
+    }
+
+    // ── Distributed Map -> MapRun population (bug-hunt read-shape) ──
+
+    #[tokio::test]
+    async fn distributed_map_populates_map_run() {
+        let state = make_state();
+        let svc = StepFunctionsService::new(state.clone());
+        let execution_arn =
+            "arn:aws:states:us-east-1:123456789012:execution:dist-sm:exec-1".to_string();
+
+        let def = json!({
+            "StartAt": "M",
+            "States": {
+                "M": {
+                    "Type": "Map",
+                    "ItemsPath": "$.items",
+                    "ItemProcessor": {
+                        "ProcessorConfig": { "Mode": "DISTRIBUTED", "ExecutionType": "STANDARD" },
+                        "StartAt": "Item",
+                        "States": { "Item": { "Type": "Pass", "End": true } }
+                    },
+                    "End": true
+                }
+            }
+        });
+
+        interpreter::execute_state_machine(
+            state.clone(),
+            execution_arn.clone(),
+            def.to_string(),
+            Some(r#"{"items":[1,2,3]}"#.to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        // ListMapRuns(executionArn) surfaces the newly created MapRun.
+        let req = make_request(
+            "ListMapRuns",
+            &json!({ "executionArn": execution_arn }).to_string(),
+        );
+        let listed = body_json(&svc.list_map_runs(&req).unwrap());
+        let runs = listed["mapRuns"].as_array().unwrap();
+        assert_eq!(
+            runs.len(),
+            1,
+            "distributed map must create exactly one MapRun"
+        );
+        let map_run_arn = runs[0]["mapRunArn"].as_str().unwrap().to_string();
+        assert!(map_run_arn.contains(":mapRun:"));
+        assert_eq!(runs[0]["executionArn"], execution_arn);
+
+        // DescribeMapRun(mapRunArn) returns the record with real counts.
+        let req = make_request(
+            "DescribeMapRun",
+            &json!({ "mapRunArn": map_run_arn }).to_string(),
+        );
+        let mr = body_json(&svc.describe_map_run(&req).unwrap());
+        assert_eq!(mr["status"], "SUCCEEDED");
+        assert_eq!(mr["itemCounts"]["total"], 3);
+        assert_eq!(mr["itemCounts"]["succeeded"], 3);
+        assert_eq!(mr["itemCounts"]["failed"], 0);
+        assert_eq!(mr["executionCounts"]["succeeded"], 3);
+    }
+
+    #[tokio::test]
+    async fn inline_map_does_not_create_map_run() {
+        let state = make_state();
+        let svc = StepFunctionsService::new(state.clone());
+        let execution_arn =
+            "arn:aws:states:us-east-1:123456789012:execution:inline-sm:exec-1".to_string();
+
+        // No ProcessorConfig.Mode => inline Map: AWS creates no MapRun.
+        let def = json!({
+            "StartAt": "M",
+            "States": {
+                "M": {
+                    "Type": "Map",
+                    "ItemsPath": "$.items",
+                    "ItemProcessor": {
+                        "StartAt": "Item",
+                        "States": { "Item": { "Type": "Pass", "End": true } }
+                    },
+                    "End": true
+                }
+            }
+        });
+
+        interpreter::execute_state_machine(
+            state.clone(),
+            execution_arn.clone(),
+            def.to_string(),
+            Some(r#"{"items":[1,2]}"#.to_string()),
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        let req = make_request(
+            "ListMapRuns",
+            &json!({ "executionArn": execution_arn }).to_string(),
+        );
+        let listed = body_json(&svc.list_map_runs(&req).unwrap());
+        assert!(listed["mapRuns"].as_array().unwrap().is_empty());
     }
 }
 
