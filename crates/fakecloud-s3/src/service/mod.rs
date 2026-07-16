@@ -24,7 +24,7 @@ mod buckets;
 pub(crate) mod config;
 mod lock;
 mod multipart;
-mod notifications;
+pub(crate) mod notifications;
 mod objects;
 mod tags;
 

@@ -214,3 +214,227 @@ async fn cfn_provisioner_carries_resource_properties() {
     );
     assert_eq!(subs.subscriptions()[0].protocol(), Some("sqs"));
 }
+
+/// `AWS::S3::Bucket` used to be provisioned from `BucketName` alone, dropping
+/// every config property. Provision a fully-configured bucket (plus a tagged
+/// SQS queue) and read each setting back through the matching S3/SQS API.
+const S3_TEMPLATE: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "NotifyQueue": {"Type": "AWS::SQS::Queue", "Properties": {"QueueName": "cfn-s3-notify"}},
+    "TaggedQueue": {
+      "Type": "AWS::SQS::Queue",
+      "Properties": {
+        "QueueName": "cfn-s3-tagged",
+        "Tags": [{"Key": "team", "Value": "core"}, {"Key": "env", "Value": "prod"}]
+      }
+    },
+    "Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": {
+        "BucketName": "cfn-props-bucket",
+        "VersioningConfiguration": {"Status": "Enabled"},
+        "BucketEncryption": {
+          "ServerSideEncryptionConfiguration": [{
+            "BucketKeyEnabled": true,
+            "ServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"}
+          }]
+        },
+        "PublicAccessBlockConfiguration": {
+          "BlockPublicAcls": true,
+          "BlockPublicPolicy": true,
+          "IgnorePublicAcls": true,
+          "RestrictPublicBuckets": true
+        },
+        "NotificationConfiguration": {
+          "QueueConfigurations": [{
+            "Event": "s3:ObjectCreated:*",
+            "Queue": {"Fn::GetAtt": ["NotifyQueue", "Arn"]}
+          }]
+        },
+        "Tags": [{"Key": "owner", "Value": "platform"}]
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_s3_bucket_carries_config_and_sqs_tags() {
+    let server = TestServer::start().await;
+
+    server
+        .cloudformation_client()
+        .await
+        .create_stack()
+        .stack_name("s3-props")
+        .template_body(S3_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let s3 = server.s3_client().await;
+
+    // GetBucketVersioning
+    let ver = s3
+        .get_bucket_versioning()
+        .bucket("cfn-props-bucket")
+        .send()
+        .await
+        .expect("get_bucket_versioning");
+    assert_eq!(
+        ver.status(),
+        Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled),
+        "versioning not applied from CFN"
+    );
+
+    // GetBucketEncryption
+    let enc = s3
+        .get_bucket_encryption()
+        .bucket("cfn-props-bucket")
+        .send()
+        .await
+        .expect("get_bucket_encryption");
+    let rules = enc
+        .server_side_encryption_configuration()
+        .expect("encryption config present")
+        .rules();
+    assert_eq!(rules.len(), 1, "encryption rule dropped");
+    assert_eq!(
+        rules[0]
+            .apply_server_side_encryption_by_default()
+            .map(|d| d.sse_algorithm()),
+        Some(&aws_sdk_s3::types::ServerSideEncryption::Aes256)
+    );
+
+    // GetPublicAccessBlock
+    let pab = s3
+        .get_public_access_block()
+        .bucket("cfn-props-bucket")
+        .send()
+        .await
+        .expect("get_public_access_block");
+    let cfg = pab
+        .public_access_block_configuration()
+        .expect("pab present");
+    assert_eq!(cfg.block_public_acls(), Some(true));
+    assert_eq!(cfg.restrict_public_buckets(), Some(true));
+
+    // GetBucketNotificationConfiguration
+    let notif = s3
+        .get_bucket_notification_configuration()
+        .bucket("cfn-props-bucket")
+        .send()
+        .await
+        .expect("get_bucket_notification_configuration");
+    assert_eq!(
+        notif.queue_configurations().len(),
+        1,
+        "notification queue config dropped"
+    );
+    assert!(notif.queue_configurations()[0]
+        .queue_arn()
+        .ends_with(":cfn-s3-notify"));
+
+    // GetBucketTagging
+    let tagging = s3
+        .get_bucket_tagging()
+        .bucket("cfn-props-bucket")
+        .send()
+        .await
+        .expect("get_bucket_tagging");
+    assert!(
+        tagging
+            .tag_set()
+            .iter()
+            .any(|t| t.key() == "owner" && t.value() == "platform"),
+        "bucket tags dropped: {:?}",
+        tagging.tag_set()
+    );
+
+    // SQS ListQueueTags on the CFN-created queue must be non-empty.
+    let sqs = server.sqs_client().await;
+    let url = sqs
+        .get_queue_url()
+        .queue_name("cfn-s3-tagged")
+        .send()
+        .await
+        .expect("get_queue_url")
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let tags = sqs
+        .list_queue_tags()
+        .queue_url(&url)
+        .send()
+        .await
+        .expect("list_queue_tags");
+    let map = tags.tags().expect("queue tags present");
+    assert_eq!(map.get("team").map(String::as_str), Some("core"));
+    assert_eq!(map.get("env").map(String::as_str), Some("prod"));
+}
+
+/// A CFN stack UPDATE that turns on versioning must be applied, not silently
+/// dropped (there was no `AWS::S3::Bucket` arm in `update_resource`).
+#[tokio::test]
+async fn cfn_s3_bucket_update_enables_versioning() {
+    let server = TestServer::start().await;
+    let cf = server.cloudformation_client().await;
+
+    let v1 = r#"{
+      "Resources": {
+        "Bucket": {
+          "Type": "AWS::S3::Bucket",
+          "Properties": {"BucketName": "cfn-update-versioning"}
+        }
+      }
+    }"#;
+    cf.create_stack()
+        .stack_name("s3-update")
+        .template_body(v1)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let s3 = server.s3_client().await;
+    let before = s3
+        .get_bucket_versioning()
+        .bucket("cfn-update-versioning")
+        .send()
+        .await
+        .expect("get_bucket_versioning v1");
+    assert_ne!(
+        before.status(),
+        Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled),
+        "versioning should be off before the update"
+    );
+
+    let v2 = r#"{
+      "Resources": {
+        "Bucket": {
+          "Type": "AWS::S3::Bucket",
+          "Properties": {
+            "BucketName": "cfn-update-versioning",
+            "VersioningConfiguration": {"Status": "Enabled"}
+          }
+        }
+      }
+    }"#;
+    cf.update_stack()
+        .stack_name("s3-update")
+        .template_body(v2)
+        .send()
+        .await
+        .expect("update_stack");
+
+    let after = s3
+        .get_bucket_versioning()
+        .bucket("cfn-update-versioning")
+        .send()
+        .await
+        .expect("get_bucket_versioning v2");
+    assert_eq!(
+        after.status(),
+        Some(&aws_sdk_s3::types::BucketVersioningStatus::Enabled),
+        "versioning update was a silent no-op"
+    );
+}
