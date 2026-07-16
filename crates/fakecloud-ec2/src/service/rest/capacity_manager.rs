@@ -110,7 +110,10 @@ fn cm_status_body(enabled: bool, org_access: &str) -> String {
     format!(
         "{}{}",
         ec2_elem("capacityManagerStatus", cm_status(enabled)),
-        ec2_elem("organizationsAccess", if org_bool { "true" } else { "false" }),
+        ec2_elem(
+            "organizationsAccess",
+            if org_bool { "true" } else { "false" }
+        ),
     )
 }
 
