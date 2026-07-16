@@ -1043,9 +1043,14 @@ impl SecretsManagerService {
             .collect();
         secrets.sort_by_key(|a| a.created_at);
 
-        // Simple pagination with name-based token
+        // Simple pagination with name-based token. When the token's secret was
+        // deleted between pages the lookup fails; end the listing (empty page,
+        // no token) rather than restarting at offset 0 (which could loop).
         let start_idx = if let Some(token) = next_token {
-            secrets.iter().position(|s| s.name == token).unwrap_or(0)
+            secrets
+                .iter()
+                .position(|s| s.name == token)
+                .unwrap_or(secrets.len())
         } else {
             0
         };

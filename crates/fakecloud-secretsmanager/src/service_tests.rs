@@ -1828,6 +1828,79 @@ async fn batch_get_secret_value_with_filters() {
     assert_eq!(b["SecretValues"].as_array().unwrap().len(), 2);
 }
 
+#[tokio::test]
+async fn batch_get_secret_value_filters_paginate() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    // Five matching secrets; MaxResults=2 forces three pages.
+    for i in 0..5 {
+        let body = serde_json::json!({"Name": format!("batch-page-{i}"), "SecretString": "v"});
+        let req = make_request("CreateSecret", &body.to_string());
+        svc.handle(req).await.unwrap();
+    }
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut token: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut body = serde_json::json!({
+            "Filters": [{"Key": "name", "Values": ["batch-page"]}],
+            "MaxResults": 2,
+        });
+        if let Some(t) = &token {
+            body["NextToken"] = serde_json::json!(t);
+        }
+        let req = make_request("BatchGetSecretValue", &body.to_string());
+        let resp = svc.handle(req).await.unwrap();
+        let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        for v in b["SecretValues"].as_array().unwrap() {
+            seen.insert(v["Name"].as_str().unwrap().to_string());
+        }
+        pages += 1;
+        match b["NextToken"].as_str() {
+            Some(t) => token = Some(t.to_string()),
+            None => break,
+        }
+        assert!(pages < 10, "pagination did not terminate");
+    }
+    // All five reachable across pages, not just the first page of 2.
+    assert_eq!(seen.len(), 5);
+    assert_eq!(pages, 3);
+}
+
+#[tokio::test]
+async fn list_secrets_stale_token_ends_listing() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    for i in 0..4 {
+        let body = serde_json::json!({"Name": format!("stale-{i}"), "SecretString": "v"});
+        let req = make_request("CreateSecret", &body.to_string());
+        svc.handle(req).await.unwrap();
+    }
+
+    // First page of 2 yields a NextToken (the name of the next secret).
+    let body = serde_json::json!({"MaxResults": 2});
+    let req = make_request("ListSecrets", &body.to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let token = b["NextToken"].as_str().unwrap().to_string();
+
+    // Delete the token's secret, then resume: the token no longer resolves.
+    // Listing must END (empty page, no token) instead of restarting at page 1.
+    let del = serde_json::json!({"SecretId": token, "ForceDeleteWithoutRecovery": true});
+    let req = make_request("DeleteSecret", &del.to_string());
+    svc.handle(req).await.unwrap();
+
+    let body = serde_json::json!({"MaxResults": 2, "NextToken": token});
+    let req = make_request("ListSecrets", &body.to_string());
+    let resp = svc.handle(req).await.unwrap();
+    let b: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(b["SecretList"].as_array().unwrap().len(), 0);
+    assert!(b["NextToken"].is_null());
+}
+
 // ── RotateSecret validation ──
 
 #[tokio::test]
