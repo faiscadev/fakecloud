@@ -17,6 +17,37 @@ use crate::state::{CredentialIdentity, IamState, SharedIamState, StsTempCredenti
 use crate::xml_responses::{self, StsCredentials};
 use fakecloud_core::auth::{Principal, PrincipalType};
 
+/// STS speaks the awsQuery protocol, whose constraint violations surface as
+/// `ValidationError` (no `Exception` suffix). The shared awsJson validators
+/// emit `ValidationException`; these wrappers reuse their logic/messages but
+/// re-stamp the code so STS matches the AWS wire shape (bug-hunt: STS length /
+/// range checks were leaking `ValidationException`).
+fn to_validation_error(e: AwsServiceError) -> AwsServiceError {
+    if e.code() == "ValidationException" {
+        AwsServiceError::aws_error(e.status(), "ValidationError", e.message())
+    } else {
+        e
+    }
+}
+
+fn sts_validate_string_length(
+    field: &str,
+    value: &str,
+    min: usize,
+    max: usize,
+) -> Result<(), AwsServiceError> {
+    validate_string_length(field, value, min, max).map_err(to_validation_error)
+}
+
+fn sts_validate_range_i64(
+    field: &str,
+    value: i64,
+    min: i64,
+    max: i64,
+) -> Result<(), AwsServiceError> {
+    validate_range_i64(field, value, min, max).map_err(to_validation_error)
+}
+
 /// Default duration for AssumeRole and similar operations (1 hour).
 const DEFAULT_ASSUME_ROLE_DURATION: i64 = 3600;
 
@@ -1859,6 +1890,24 @@ mod tests {
         let (svc, _) = make_sts_service();
         let req = sts_request("BogusAction", vec![]);
         assert!(svc.handle(req).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn assume_role_length_violation_uses_query_protocol_error_code() {
+        // STS is awsQuery: a length-constraint violation must surface as
+        // `ValidationError`, not the awsJson `ValidationException` the shared
+        // validator emits (bug-hunt LOW error-code).
+        let (svc, _) = make_sts_service();
+        // RoleArn shorter than the 20-char minimum.
+        let req = sts_request(
+            "AssumeRole",
+            vec![("RoleArn", "arn:short"), ("RoleSessionName", "sess")],
+        );
+        let err = svc
+            .assume_role(&req)
+            .err()
+            .expect("too-short RoleArn errors");
+        assert_eq!(err.code(), "ValidationError");
     }
 
     #[tokio::test]

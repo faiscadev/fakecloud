@@ -709,6 +709,40 @@ fn list_subscriptions_by_topic_filters_correctly() {
 // --- Publish / PublishBatch ---
 
 #[test]
+fn publish_subject_length_counts_characters_not_bytes() {
+    // AWS caps Subject at 100 characters. A 100-char multibyte subject is 200
+    // bytes; a byte-length check wrongly rejected it. A 101-char subject is
+    // still rejected.
+    let (svc, _state) = make_sns();
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "subj-topic")])));
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:subj-topic";
+
+    let ok_subject = "é".repeat(100); // 100 chars, 200 bytes
+    assert_ok(&svc.publish(&sns_request(
+        "Publish",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Message", "hi"),
+            ("Subject", &ok_subject),
+        ],
+    )));
+
+    let too_long = "é".repeat(101);
+    let err = svc
+        .publish(&sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Message", "hi"),
+                ("Subject", &too_long),
+            ],
+        ))
+        .err()
+        .expect("101-char subject must be rejected");
+    assert_eq!(err.code(), "InvalidParameter");
+}
+
+#[test]
 fn publish_to_topic_stores_message() {
     let (svc, state) = make_sns();
     assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "pub-topic")])));

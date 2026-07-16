@@ -201,11 +201,10 @@ impl S3Service {
         upload_id: &str,
         part_number: i64,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Validate part number
-        if part_number < 1 {
-            return Err(no_such_upload(upload_id));
-        }
-        if part_number > 10000 {
+        // Validate part number. An out-of-range partNumber is an invalid
+        // argument (400 InvalidArgument), not a missing upload (404) — the
+        // low end previously returned NoSuchUpload.
+        if !(1..=10000).contains(&part_number) {
             return Err(AwsServiceError::aws_error_with_fields(
                 StatusCode::BAD_REQUEST,
                 "InvalidArgument",

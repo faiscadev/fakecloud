@@ -772,8 +772,10 @@ impl DynamoDbService {
                 "Policy": policy,
                 "RevisionId": policy_revision_id(policy)
             })),
+            // DynamoDB is awsJson1.0 — client errors are HTTP 400 with the
+            // error type in the body, never 404.
             None => Err(AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
                 "PolicyNotFoundException",
                 "No resource-based policy is attached to the resource.",
             )),
