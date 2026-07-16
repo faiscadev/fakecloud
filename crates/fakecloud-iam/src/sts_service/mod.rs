@@ -920,6 +920,26 @@ mod tests {
         arn
     }
 
+    /// Register a SAML provider in state so `AssumeRoleWithSAML` accepts its
+    /// assertion. The metadata deliberately carries no `entityID`, so
+    /// `expected_saml_audience` returns `None` and the audience check is
+    /// skipped (mirroring a provider whose metadata declares no audience).
+    fn register_saml_provider_in_state(state: &SharedIamState, arn: &str) {
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        s.saml_providers.insert(
+            arn.to_string(),
+            crate::state::SamlProvider {
+                arn: arn.to_string(),
+                name: arn.rsplit('/').next().unwrap_or("idp").to_string(),
+                saml_metadata_document: "fake-saml-metadata-no-entity-id".to_string(),
+                created_at: Utc::now(),
+                valid_until: Utc::now() + chrono::Duration::days(365),
+                tags: Vec::new(),
+            },
+        );
+    }
+
     // ── GetCallerIdentity ──
 
     #[tokio::test]
@@ -1185,6 +1205,7 @@ mod tests {
         let (svc, state) = make_sts_service();
         let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:saml-provider/idp"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
         let role_arn = create_role_in_state_with_trust(&state, "saml-role", trust);
+        register_saml_provider_in_state(&state, "arn:aws:iam::123456789012:saml-provider/idp");
         let assertion = make_saml_assertion();
         let req = sts_request(
             "AssumeRoleWithSAML",
@@ -1205,7 +1226,8 @@ mod tests {
     #[tokio::test]
     async fn assume_role_with_saml_nonexistent_role_denied() {
         // §5.2: a missing role must NOT fall through to credential minting.
-        let (svc, _state) = make_sts_service();
+        let (svc, state) = make_sts_service();
+        register_saml_provider_in_state(&state, "arn:aws:iam::123456789012:saml-provider/idp");
         let assertion = make_saml_assertion();
         let req = sts_request(
             "AssumeRoleWithSAML",
@@ -1226,6 +1248,85 @@ mod tests {
         assert!(
             format!("{err:?}").contains("AccessDenied"),
             "expected AccessDenied, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_saml_unregistered_provider_denied() {
+        // §5.7: naming a SAML provider ARN that was never created must NOT
+        // fall through and skip assertion validation.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:saml-provider/ghost"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "saml-role", trust);
+        let assertion = make_saml_assertion();
+        let req = sts_request(
+            "AssumeRoleWithSAML",
+            vec![
+                ("RoleArn", &role_arn),
+                (
+                    "PrincipalArn",
+                    "arn:aws:iam::123456789012:saml-provider/ghost",
+                ),
+                ("SAMLAssertion", &assertion),
+            ],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected denial for an unregistered SAML provider"),
+        };
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert!(
+            format!("{err:?}").contains("not registered"),
+            "expected provider-not-registered error, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_role_with_saml_missing_audience_rejected() {
+        // §5.7: when the provider metadata declares an audience (`entityID`),
+        // an assertion with no matching audience claim must be rejected rather
+        // than skipping the binding.
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Federated":"arn:aws:iam::123456789012:saml-provider/idp"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "saml-role", trust);
+        // Provider metadata declaring an entityID -> expected audience.
+        {
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("123456789012");
+            s.saml_providers.insert(
+                "arn:aws:iam::123456789012:saml-provider/idp".to_string(),
+                crate::state::SamlProvider {
+                    arn: "arn:aws:iam::123456789012:saml-provider/idp".to_string(),
+                    name: "idp".to_string(),
+                    saml_metadata_document:
+                        r#"<EntityDescriptor entityID="https://sp.example.com/saml">"#.to_string(),
+                    created_at: Utc::now(),
+                    valid_until: Utc::now() + chrono::Duration::days(365),
+                    tags: Vec::new(),
+                },
+            );
+        }
+        // `make_saml_assertion` carries no <Audience> claim.
+        let assertion = make_saml_assertion();
+        let req = sts_request(
+            "AssumeRoleWithSAML",
+            vec![
+                ("RoleArn", &role_arn),
+                (
+                    "PrincipalArn",
+                    "arn:aws:iam::123456789012:saml-provider/idp",
+                ),
+                ("SAMLAssertion", &assertion),
+            ],
+        );
+        let err = match svc.handle(req).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected InvalidIdentityToken for missing audience"),
+        };
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            format!("{err:?}").contains("audience"),
+            "expected audience-mismatch error, got {err:?}"
         );
     }
 
@@ -1668,9 +1769,10 @@ mod tests {
         let (svc, state) = make_sts_service();
         let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithSAML"}]}"#;
         let role_arn = create_role_in_state_with_trust(&state, "saml-role", trust);
+        let provider_arn = "arn:aws:iam::123456789012:saml-provider/idp";
+        register_saml_provider_in_state(&state, provider_arn);
         let saml_xml = r#"<?xml version="1.0"?><samlp:Response><Assertion><AttributeStatement><Attribute Name="https://aws.amazon.com/SAML/Attributes/RoleSessionName"><AttributeValue>jane</AttributeValue></Attribute></AttributeStatement></Assertion></samlp:Response>"#;
         let saml_b64 = base64::engine::general_purpose::STANDARD.encode(saml_xml);
-        let provider_arn = "arn:aws:iam::123456789012:saml-provider/idp";
         let req = sts_request(
             "AssumeRoleWithSAML",
             vec![

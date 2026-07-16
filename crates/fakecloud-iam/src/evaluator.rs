@@ -882,9 +882,23 @@ fn principal_is_federated(principal: &Principal, provider: &str) -> bool {
 /// host string. False matches are avoided because unrelated role
 /// names would have to happen to contain `lambda.amazonaws.com` —
 /// unlikely in practice and never silently grant to user principals.
+/// True when `arn` denotes the given AWS service principal — i.e. it is a
+/// service-linked-role identity under the AWS-reserved `aws-service-role/
+/// <service>/` path. The reserved path segment cannot be forged as an ordinary
+/// role name, so this distinguishes a genuine service principal from a role a
+/// user merely named after a service host.
+pub(crate) fn arn_denotes_service(arn: &str, service: &str) -> bool {
+    arn.contains(&format!("aws-service-role/{service}"))
+}
+
 fn principal_is_service(principal: &Principal, service: &str) -> bool {
+    // Match the bare service host *anywhere* in the ARN would let a user create
+    // a role literally named e.g. `lambda.amazonaws.com`, assume it, and have
+    // its `assumed-role/lambda.amazonaws.com/...` ARN satisfy a
+    // `Principal: { Service: lambda.amazonaws.com }` trust — a privilege
+    // escalation. Require the reserved service-linked-role path instead.
     matches!(principal.principal_type, PrincipalType::AssumedRole)
-        && principal.arn.contains(service)
+        && arn_denotes_service(&principal.arn, service)
 }
 
 fn action_matches(action: &ActionMatch, request_action: &str) -> bool {
