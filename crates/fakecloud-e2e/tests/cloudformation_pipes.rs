@@ -126,3 +126,112 @@ async fn cfn_provisions_and_runs_pipe() {
     let gone = pipes.describe_pipe().name("cfn-pipe").send().await;
     assert!(gone.is_err(), "stack delete should remove the pipe");
 }
+
+// The pipe update handler returns only a subset of attributes (Arn, state,
+// LastModifiedTime) — not the create-time CreationTime. UpdateStack must merge
+// the update onto the create-time attribute set so a GetAtt CreationTime output
+// keeps resolving to the real timestamp instead of the literal "Pipe.CreationTime".
+const TEMPLATE_CREATIONTIME_V1: &str = r#"{
+  "Resources": {
+    "SrcQ": { "Type": "AWS::SQS::Queue", "Properties": { "QueueName": "cfn-pipe-ct-src" } },
+    "TgtQ": { "Type": "AWS::SQS::Queue", "Properties": { "QueueName": "cfn-pipe-ct-tgt" } },
+    "Pipe": {
+      "Type": "AWS::Pipes::Pipe",
+      "Properties": {
+        "Name": "cfn-pipe-ct",
+        "DesiredState": "RUNNING",
+        "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+        "Source": { "Fn::GetAtt": ["SrcQ", "Arn"] },
+        "Target": { "Fn::GetAtt": ["TgtQ", "Arn"] }
+      }
+    }
+  },
+  "Outputs": {
+    "PipeCreatedAt": { "Value": { "Fn::GetAtt": ["Pipe", "CreationTime"] } }
+  }
+}"#;
+
+const TEMPLATE_CREATIONTIME_V2: &str = r#"{
+  "Resources": {
+    "SrcQ": { "Type": "AWS::SQS::Queue", "Properties": { "QueueName": "cfn-pipe-ct-src" } },
+    "TgtQ": { "Type": "AWS::SQS::Queue", "Properties": { "QueueName": "cfn-pipe-ct-tgt" } },
+    "Pipe": {
+      "Type": "AWS::Pipes::Pipe",
+      "Properties": {
+        "Name": "cfn-pipe-ct",
+        "DesiredState": "STOPPED",
+        "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+        "Source": { "Fn::GetAtt": ["SrcQ", "Arn"] },
+        "Target": { "Fn::GetAtt": ["TgtQ", "Arn"] }
+      }
+    }
+  },
+  "Outputs": {
+    "PipeCreatedAt": { "Value": { "Fn::GetAtt": ["Pipe", "CreationTime"] } }
+  }
+}"#;
+
+fn output_value(
+    desc: &aws_sdk_cloudformation::operation::describe_stacks::DescribeStacksOutput,
+    key: &str,
+) -> String {
+    desc.stacks()[0]
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some(key))
+        .and_then(|o| o.output_value())
+        .unwrap_or_default()
+        .to_string()
+}
+
+#[tokio::test]
+async fn cfn_update_preserves_create_time_getatt_output() {
+    let s = TestServer::start().await;
+    let cfn = s.cloudformation_client().await;
+
+    cfn.create_stack()
+        .stack_name("pipe-ct-stack")
+        .template_body(TEMPLATE_CREATIONTIME_V1)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let after_create = cfn
+        .describe_stacks()
+        .stack_name("pipe-ct-stack")
+        .send()
+        .await
+        .unwrap();
+    let created_at = output_value(&after_create, "PipeCreatedAt");
+    assert!(
+        created_at.parse::<i64>().is_ok(),
+        "CreationTime output should be a timestamp on create, got {created_at:?}"
+    );
+
+    cfn.update_stack()
+        .stack_name("pipe-ct-stack")
+        .template_body(TEMPLATE_CREATIONTIME_V2)
+        .send()
+        .await
+        .expect("update_stack");
+
+    let after_update = cfn
+        .describe_stacks()
+        .stack_name("pipe-ct-stack")
+        .send()
+        .await
+        .unwrap();
+    let updated_output = output_value(&after_update, "PipeCreatedAt");
+    assert_ne!(
+        updated_output, "Pipe.CreationTime",
+        "GetAtt collapsed to the literal placeholder after update"
+    );
+    assert!(
+        updated_output.parse::<i64>().is_ok(),
+        "CreationTime output must survive the update as a timestamp, got {updated_output:?}"
+    );
+    assert_eq!(
+        updated_output, created_at,
+        "CreationTime must be stable across the update"
+    );
+}

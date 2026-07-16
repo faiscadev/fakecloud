@@ -86,6 +86,24 @@ pub async fn dispatch(
         match protocol::detect_service(&parts.headers, &query_params, &body_bytes) {
             Some(d) => d,
             None => {
+                // A request carrying X-Amz-Target is unambiguously an awsJson
+                // call whose operation we couldn't map to a known service. AWS
+                // answers these with UnknownOperationException; routing them to
+                // the apigateway catch-all below would 404 with a misleading
+                // "Stage not found" instead.
+                if let Some(target) = parts
+                    .headers
+                    .get("x-amz-target")
+                    .and_then(|v| v.to_str().ok())
+                {
+                    return build_error_response(
+                        StatusCode::BAD_REQUEST,
+                        "UnknownOperationException",
+                        &format!("The operation {target} is not recognized."),
+                        &request_id,
+                        AwsProtocol::Json,
+                    );
+                }
                 // OPTIONS requests (CORS preflight) don't carry Authorization headers.
                 // Route them to S3 since S3 is the only REST service that handles CORS.
                 // Note: API Gateway CORS preflight is not fully supported in this emulator
