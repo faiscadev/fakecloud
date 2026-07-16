@@ -1003,6 +1003,267 @@ fn list_thing_groups_for_thing_inverts_membership() {
         .contains(":thinggroup/g1"));
 }
 
+// ---------- certificate transfer resolution ----------
+
+fn cert_status(s: &IotService, cert_id: &str) -> String {
+    let desc = body_of(
+        &run(
+            s,
+            "GET",
+            &format!("/certificates/{cert_id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    desc["certificateDescription"]["status"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn accept_certificate_transfer_reactivates_cert() {
+    let s = svc();
+    let cert = body_of(&run(&s, "POST", "/keys-and-certificate", &[], Value::Null).unwrap());
+    let cert_id = cert["certificateId"].as_str().unwrap().to_string();
+    run(
+        &s,
+        "PATCH",
+        &format!("/transfer-certificate/{cert_id}?targetAwsAccount=111122223333"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    assert_eq!(cert_status(&s, &cert_id), "PENDING_TRANSFER");
+
+    run(
+        &s,
+        "PATCH",
+        &format!("/accept-certificate-transfer/{cert_id}"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    assert_eq!(cert_status(&s, &cert_id), "ACTIVE");
+}
+
+#[test]
+fn reject_certificate_transfer_deactivates_cert() {
+    let s = svc();
+    let cert = body_of(&run(&s, "POST", "/keys-and-certificate", &[], Value::Null).unwrap());
+    let cert_id = cert["certificateId"].as_str().unwrap().to_string();
+    run(
+        &s,
+        "PATCH",
+        &format!("/transfer-certificate/{cert_id}?targetAwsAccount=111122223333"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    run(
+        &s,
+        "PATCH",
+        &format!("/reject-certificate-transfer/{cert_id}"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    assert_eq!(cert_status(&s, &cert_id), "INACTIVE");
+}
+
+#[test]
+fn accept_certificate_transfer_unknown_cert_is_not_found() {
+    let s = svc();
+    // certificateId is @length(min: 64); use a 64-char hex id that was never
+    // created so the handler (not validation) produces the not-found.
+    let unknown = "a".repeat(64);
+    let err = expect_err(run(
+        &s,
+        "PATCH",
+        &format!("/accept-certificate-transfer/{unknown}"),
+        &[],
+        Value::Null,
+    ));
+    assert!(is_code(&err, "ResourceNotFoundException"));
+}
+
+// ---------- package-version SBOM ----------
+
+#[test]
+fn associate_sbom_round_trips_through_get_package_version() {
+    let s = svc();
+    run(&s, "PUT", "/packages/pkg1", &[], json!({})).unwrap();
+    run(&s, "PUT", "/packages/pkg1/versions/v1", &[], json!({})).unwrap();
+    run(
+        &s,
+        "PUT",
+        "/packages/pkg1/versions/v1/sbom",
+        &[],
+        json!({"sbom": {"s3Location": {"bucket": "b", "key": "k"}}}),
+    )
+    .unwrap();
+    let got = body_of(&run(&s, "GET", "/packages/pkg1/versions/v1", &[], Value::Null).unwrap());
+    assert_eq!(got["sbomValidationStatus"], "SUCCEEDED");
+    assert_eq!(got["sbom"]["s3Location"]["bucket"], "b");
+
+    // Disassociate clears both.
+    run(
+        &s,
+        "DELETE",
+        "/packages/pkg1/versions/v1/sbom",
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let got = body_of(&run(&s, "GET", "/packages/pkg1/versions/v1", &[], Value::Null).unwrap());
+    assert!(got.get("sbom").is_none());
+    assert!(got.get("sbomValidationStatus").is_none());
+}
+
+// ---------- per-target V2 logging level ----------
+
+#[test]
+fn set_v2_logging_level_round_trips_through_list() {
+    let s = svc();
+    run(
+        &s,
+        "POST",
+        "/v2LoggingLevel",
+        &[],
+        json!({"logTarget": {"targetType": "THING_GROUP", "targetName": "g1"}, "logLevel": "DEBUG"}),
+    )
+    .unwrap();
+    let listed = body_of(&run(&s, "GET", "/v2LoggingLevel", &[], Value::Null).unwrap());
+    let levels = listed["logTargetConfigurations"].as_array().unwrap();
+    assert_eq!(levels.len(), 1);
+    assert_eq!(levels[0]["logLevel"], "DEBUG");
+    assert_eq!(levels[0]["logTarget"]["targetName"], "g1");
+
+    run(
+        &s,
+        "DELETE",
+        "/v2LoggingLevel?targetType=THING_GROUP&targetName=g1",
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let listed = body_of(&run(&s, "GET", "/v2LoggingLevel", &[], Value::Null).unwrap());
+    assert!(listed["logTargetConfigurations"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+// ---------- job execution + task cancels ----------
+
+#[test]
+fn cancel_job_execution_shows_canceled_in_describe() {
+    let s = svc();
+    run(&s, "PUT", "/things/thing1/jobs/job1/cancel", &[], json!({})).unwrap();
+    let desc = body_of(&run(&s, "GET", "/things/thing1/jobs/job1", &[], Value::Null).unwrap());
+    assert_eq!(desc["execution"]["status"], "CANCELED");
+    assert_eq!(desc["execution"]["jobId"], "job1");
+}
+
+#[test]
+fn cancel_audit_task_transitions_status() {
+    let s = svc();
+    let out = body_of(
+        &run(
+            &s,
+            "POST",
+            "/audit/tasks",
+            &[],
+            json!({"targetCheckNames": ["LOGGING_DISABLED_CHECK"]}),
+        )
+        .unwrap(),
+    );
+    let task_id = out["taskId"].as_str().unwrap().to_string();
+    run(
+        &s,
+        "PUT",
+        &format!("/audit/tasks/{task_id}/cancel"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let desc = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/audit/tasks/{task_id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(desc["taskStatus"], "CANCELED");
+}
+
+#[test]
+fn cancel_detect_mitigation_task_transitions_task_summary() {
+    let s = svc();
+    let task_id = "detect-task-1";
+    run(
+        &s,
+        "PUT",
+        &format!("/detect/mitigationactions/tasks/{task_id}"),
+        &[],
+        json!({"actions": ["a"], "target": {}, "clientRequestToken": "tok"}),
+    )
+    .unwrap();
+    run(
+        &s,
+        "PUT",
+        &format!("/detect/mitigationactions/tasks/{task_id}/cancel"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let desc = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/detect/mitigationactions/tasks/{task_id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert_eq!(desc["taskSummary"]["taskStatus"], "CANCELED");
+}
+
+// ---------- violation verification state ----------
+
+#[test]
+fn put_verification_state_round_trips_through_list_violation_events() {
+    let s = svc();
+    run(
+        &s,
+        "POST",
+        "/violations/verification-state/viol-1",
+        &[],
+        json!({"verificationState": "FALSE_POSITIVE", "verificationStateDescription": "known good"}),
+    )
+    .unwrap();
+    // ListViolationEvents requires startTime + endTime query parameters.
+    let listed = body_of(
+        &run(
+            &s,
+            "GET",
+            "/violation-events?startTime=1700000000&endTime=1800000000",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    let events = listed["violationEvents"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["violationId"], "viol-1");
+    assert_eq!(events[0]["verificationState"], "FALSE_POSITIVE");
+}
+
 // ---------- every operation routes to a handler ----------
 
 #[test]

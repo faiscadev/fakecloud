@@ -369,6 +369,79 @@ pub(super) fn dispatch(
         // DescribeThingType reflects it (previously an accept-and-discard no-op).
         "DeprecateThingType" => Ok(Some(deprecate_thing_type(svc, ctx, meta, labels, body)?)),
 
+        // Certificate transfer resolutions. `TransferCertificate` parks the cert
+        // in PENDING_TRANSFER; these transitions unpark it (accept -> ACTIVE in
+        // the target account, reject/cancel -> INACTIVE) so DescribeCertificate
+        // reflects the outcome instead of the cert being stuck forever.
+        "AcceptCertificateTransfer" => Ok(Some(resolve_cert_transfer(
+            svc,
+            ctx,
+            meta,
+            labels,
+            CertTransfer::Accept,
+        )?)),
+        "RejectCertificateTransfer" => Ok(Some(resolve_cert_transfer(
+            svc,
+            ctx,
+            meta,
+            labels,
+            CertTransfer::Reject,
+        )?)),
+        "CancelCertificateTransfer" => Ok(Some(resolve_cert_transfer(
+            svc,
+            ctx,
+            meta,
+            labels,
+            CertTransfer::Cancel,
+        )?)),
+
+        // Package-version SBOM: persist the sbom + validation status on the
+        // stored package version so GetPackageVersion reflects it.
+        "AssociateSbomWithPackageVersion" => {
+            Ok(Some(associate_sbom(svc, ctx, meta, labels, body, true)?))
+        }
+        "DisassociateSbomFromPackageVersion" => {
+            Ok(Some(associate_sbom(svc, ctx, meta, labels, body, false)?))
+        }
+
+        // Per-target V2 logging level: persist so ListV2LoggingLevels reflects it
+        // (the account-wide singleton pair is handled by `singleton_spec`).
+        "SetV2LoggingLevel" => Ok(Some(set_v2_logging_level(svc, ctx, body))),
+        "DeleteV2LoggingLevel" => Ok(Some(delete_v2_logging_level(svc, ctx, query))),
+
+        // Per-thing job execution cancel: record a CANCELED execution so
+        // DescribeJobExecution reflects it (whole-job CancelJob is separate).
+        "CancelJobExecution" => Ok(Some(cancel_job_execution(svc, ctx, labels))),
+
+        // Long-running task cancels: transition the task record persisted by the
+        // matching Start* op so the Describe read reflects CANCELED.
+        "CancelAuditTask" => Ok(Some(cancel_task(svc, ctx, "audit/tasks", labels))),
+        "CancelAuditMitigationActionsTask" => Ok(Some(cancel_task(
+            svc,
+            ctx,
+            "audit/mitigationactions/tasks",
+            labels,
+        ))),
+        "CancelDetectMitigationActionsTask" => Ok(Some(cancel_task(
+            svc,
+            ctx,
+            "detect/mitigationactions/tasks",
+            labels,
+        ))),
+        "StopThingRegistrationTask" => Ok(Some(stop_thing_registration_task(svc, ctx, labels))),
+
+        // Violation verification state: persist so ListViolationEvents reflects
+        // it (there is no live detect plane generating violations otherwise).
+        "PutVerificationStateOnViolation" => {
+            Ok(Some(put_verification_state(svc, ctx, labels, body)))
+        }
+        "ListViolationEvents" => Ok(Some(list_violation_events(svc, ctx))),
+
+        // The CA registration code is derived deterministically per account (see
+        // `get_registration_code`), so there is no stored value to delete; accept
+        // the reset explicitly rather than letting it fall through.
+        "DeleteRegistrationCode" => Ok(Some((ok_json(Value::Object(Map::new())), false))),
+
         _ => Ok(None),
     }
 }
@@ -1967,4 +2040,279 @@ fn list_thing_groups_for_thing(
         })
         .collect();
     (ok_json(json!({ "thingGroups": objs })), false)
+}
+
+// ---------- certificate transfer resolution ----------
+
+enum CertTransfer {
+    Accept,
+    Reject,
+    Cancel,
+}
+
+/// Resolve a pending certificate transfer parked by `TransferCertificate`.
+/// Accept moves the cert to the target account and reactivates it; reject /
+/// cancel return it to an INACTIVE state and clear the pending-transfer fields.
+fn resolve_cert_transfer(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    kind: CertTransfer,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let cert_id = lbl(labels, "certificateId").unwrap_or("").to_string();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(mut record) = data.get_resource("certificates", &cert_id).cloned() else {
+        return Err(super::engine::not_found(meta, &cert_id));
+    };
+    // Only a certificate parked by TransferCertificate can be resolved; a cert
+    // that is not PENDING_TRANSFER yields the declared TransferAlreadyCompleted
+    // error rather than silently flipping status.
+    if record.get("status").and_then(Value::as_str) != Some("PENDING_TRANSFER") {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "TransferAlreadyCompletedException",
+            format!("The certificate transfer for '{cert_id}' is not pending."),
+        ));
+    }
+    if let Some(obj) = record.as_object_mut() {
+        match kind {
+            CertTransfer::Accept => {
+                let target = obj
+                    .remove("transferredTo")
+                    .and_then(|v| v.as_str().map(String::from));
+                obj.insert("status".to_string(), Value::String("ACTIVE".to_string()));
+                if let Some(target) = target {
+                    obj.insert(
+                        "certificateArn".to_string(),
+                        Value::String(format!(
+                            "arn:aws:iot:{}:{}:cert/{}",
+                            ctx.region, target, cert_id
+                        )),
+                    );
+                    obj.insert("ownedBy".to_string(), Value::String(target));
+                }
+                obj.remove("transferMessage");
+            }
+            CertTransfer::Reject | CertTransfer::Cancel => {
+                obj.insert("status".to_string(), Value::String("INACTIVE".to_string()));
+                obj.remove("transferredTo");
+                obj.remove("transferMessage");
+            }
+        }
+    }
+    data.put_resource("certificates", &cert_id, record);
+    Ok((ok_json(Value::Object(Map::new())), true))
+}
+
+// ---------- package-version SBOM ----------
+
+/// Persist (or clear) the SBOM + validation status on a stored package version
+/// so GetPackageVersion round-trips it. The package version is keyed
+/// `packageName/versionName` under the shared `packages/versions` store.
+fn associate_sbom(
+    svc: &IotService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+    associate: bool,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let pkg = lbl(labels, "packageName").unwrap_or("");
+    let ver = lbl(labels, "versionName").unwrap_or("");
+    let key = format!("{pkg}/{ver}");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(mut record) = data.get_resource("packages/versions", &key).cloned() else {
+        return Err(super::engine::not_found(meta, &key));
+    };
+    if let Some(obj) = record.as_object_mut() {
+        if associate {
+            if let Some(sbom) = body.get("sbom") {
+                obj.insert("sbom".to_string(), sbom.clone());
+            }
+            // AWS validates the SBOM asynchronously; with no scanner the emulated
+            // outcome is a successful validation.
+            obj.insert(
+                "sbomValidationStatus".to_string(),
+                Value::String("SUCCEEDED".to_string()),
+            );
+        } else {
+            obj.remove("sbom");
+            obj.remove("sbomValidationStatus");
+        }
+    }
+    let out = super::build_output(meta, &record);
+    data.put_resource("packages/versions", &key, record);
+    Ok((ok_json(out), true))
+}
+
+// ---------- per-target V2 logging levels ----------
+
+/// `SetV2LoggingLevel`: persist one `(logTarget, logLevel)` pair keyed by the
+/// target identity so the generic `ListV2LoggingLevels` projection reflects it.
+fn set_v2_logging_level(
+    svc: &IotService,
+    ctx: &Ctx,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let target = body.get("logTarget").cloned().unwrap_or(json!({}));
+    let ttype = target
+        .get("targetType")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let tname = target
+        .get("targetName")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let key = format!("{ttype}:{tname}");
+    let level = body
+        .get("logLevel")
+        .cloned()
+        .unwrap_or_else(|| Value::String("INFO".to_string()));
+    let record = json!({ "logTarget": target, "logLevel": level });
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_resource("v2LoggingLevel", &key, record);
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `DeleteV2LoggingLevel`: clear the per-target level (target identity is a
+/// query parameter pair).
+fn delete_v2_logging_level(
+    svc: &IotService,
+    ctx: &Ctx,
+    query: &[(String, String)],
+) -> (AwsResponse, bool) {
+    let ttype = query_get(query, "targetType").unwrap_or("");
+    let tname = query_get(query, "targetName").unwrap_or("");
+    let key = format!("{ttype}:{tname}");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.remove_resource("v2LoggingLevel", &key);
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+// ---------- job execution / task cancels ----------
+
+/// `CancelJobExecution`: record a CANCELED execution for `thingName/jobId` so
+/// DescribeJobExecution (which projects the `execution` struct) reflects it.
+fn cancel_job_execution(
+    svc: &IotService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let thing = lbl(labels, "thingName").unwrap_or("");
+    let job = lbl(labels, "jobId").unwrap_or("");
+    let key = format!("{thing}/{job}");
+    let execution = json!({
+        "jobId": job,
+        "thingArn": mint_arn(ctx, "things", thing),
+        "status": "CANCELED",
+        "lastUpdatedAt": super::now_epoch(),
+    });
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_resource("things/jobs", &key, json!({ "execution": execution }));
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// Transition a long-running task record (persisted by its Start* op) to a
+/// CANCELED status. `store` is the task's resource type. Updates the top-level
+/// status members and, for the detect-mitigation variant, the nested
+/// `taskSummary.taskStatus` the Describe read projects.
+fn cancel_task(
+    svc: &IotService,
+    ctx: &Ctx,
+    store: &str,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let task_id = lbl(labels, "taskId").unwrap_or("").to_string();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if let Some(mut record) = data.get_resource(store, &task_id).cloned() {
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("status".to_string(), Value::String("CANCELED".to_string()));
+            obj.insert(
+                "taskStatus".to_string(),
+                Value::String("CANCELED".to_string()),
+            );
+            match obj.get_mut("taskSummary") {
+                Some(Value::Object(summary)) => {
+                    summary.insert(
+                        "taskStatus".to_string(),
+                        Value::String("CANCELED".to_string()),
+                    );
+                }
+                _ => {
+                    obj.insert(
+                        "taskSummary".to_string(),
+                        json!({ "taskId": task_id, "taskStatus": "CANCELED" }),
+                    );
+                }
+            }
+        }
+        data.put_resource(store, &task_id, record);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `StopThingRegistrationTask`: transition the task record to Cancelled so
+/// DescribeThingRegistrationTask reflects it.
+fn stop_thing_registration_task(
+    svc: &IotService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+) -> (AwsResponse, bool) {
+    let task_id = lbl(labels, "taskId").unwrap_or("").to_string();
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if let Some(mut record) = data
+        .get_resource("thing-registration-tasks", &task_id)
+        .cloned()
+    {
+        if let Some(obj) = record.as_object_mut() {
+            obj.insert("status".to_string(), Value::String("Cancelled".to_string()));
+        }
+        data.put_resource("thing-registration-tasks", &task_id, record);
+    }
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+// ---------- violation verification state ----------
+
+/// `PutVerificationStateOnViolation`: persist the verification state keyed by
+/// violation id so `ListViolationEvents` reflects it.
+fn put_verification_state(
+    svc: &IotService,
+    ctx: &Ctx,
+    labels: &HashMap<String, String>,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let vid = lbl(labels, "violationId").unwrap_or("").to_string();
+    let mut record = Map::new();
+    record.insert("violationId".to_string(), Value::String(vid.clone()));
+    if let Some(state) = body.get("verificationState") {
+        record.insert("verificationState".to_string(), state.clone());
+    }
+    if let Some(desc) = body.get("verificationStateDescription") {
+        record.insert("verificationStateDescription".to_string(), desc.clone());
+    }
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    data.put_resource("violation-events", &vid, Value::Object(record));
+    (ok_json(Value::Object(Map::new())), true)
+}
+
+/// `ListViolationEvents`: return the stored violation records verbatim. The
+/// model gives the list element no projected members, so the generic engine
+/// would drop every field — this projects the full record instead.
+fn list_violation_events(svc: &IotService, ctx: &Ctx) -> (AwsResponse, bool) {
+    let g = svc.state.read();
+    let events = g
+        .get(&ctx.account)
+        .map(|d| d.list_resources("violation-events"))
+        .unwrap_or_default();
+    (ok_json(json!({ "violationEvents": events })), false)
 }

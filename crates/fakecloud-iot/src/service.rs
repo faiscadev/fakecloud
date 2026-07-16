@@ -188,9 +188,15 @@ impl IotService {
                 Ok((engine::list(data, meta, &query), false))
             }
             Verb::Action => {
-                // Any action not claimed by `special` is accepted as a
-                // control-plane no-op returning an empty (shape-valid) body.
-                Ok((ok_json(Value::Object(Map::new())), false))
+                // Read-only actions not claimed by `special` return an empty
+                // (shape-valid) body. An unclaimed *mutating* action must fail
+                // loud rather than silently accept-and-discard, so future model
+                // gaps surface instead of appearing to persist.
+                if is_read_only_action(meta) {
+                    Ok((ok_json(Value::Object(Map::new())), false))
+                } else {
+                    Err(AwsServiceError::action_not_implemented("iot", meta.op))
+                }
             }
         }
     }
@@ -279,6 +285,18 @@ fn match_segs(pattern: &[Seg], segs: &[String]) -> Option<(HashMap<String, Strin
 
 pub(crate) fn ok_json(v: Value) -> AwsResponse {
     AwsResponse::json_value(StatusCode::OK, v)
+}
+
+/// Whether an unclaimed `Verb::Action` operation is safe to accept as an empty
+/// no-op. Read operations (HTTP GET, or a `Get`/`List`/`Describe`/`Test`/
+/// `Validate` name — e.g. the index-analytics and authorizer-test actions) have
+/// no persisted side effect, so an empty body is shape-valid; anything else
+/// mutates and must fail loud instead of silently discarding the request.
+pub(crate) fn is_read_only_action(meta: &OpMeta) -> bool {
+    meta.method == "GET"
+        || ["Get", "List", "Describe", "Search", "Test", "Validate"]
+            .iter()
+            .any(|p| meta.op.starts_with(p))
 }
 
 pub(crate) fn parse_query(raw: &str) -> Vec<(String, String)> {
