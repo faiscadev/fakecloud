@@ -11,7 +11,7 @@ use crate::service_helpers::{
     filter_value_matches, gen_id, indexed_list, parse_filters, require, validate_max_results,
     Filter,
 };
-use crate::state::{Ec2State, SecurityGroup, SecurityGroupRule, Tag};
+use crate::state::{Ec2State, SecurityGroup, SecurityGroupRule, SecurityGroupVpcAssociation, Tag};
 
 fn rule_xml(r: &SecurityGroupRule, owner: &str, region: &str) -> String {
     let mut out = format!(
@@ -41,10 +41,16 @@ fn rule_xml(r: &SecurityGroupRule, owner: &str, region: &str) -> String {
     if let Some(p) = &r.prefix_list_id {
         out.push_str(&ec2_elem("prefixListId", p));
     }
-    if let Some(g) = &r.referenced_group_id {
+    if r.referenced_group_id.is_some() || r.referenced_user_id.is_some() {
+        let mut info = String::new();
+        if let Some(g) = &r.referenced_group_id {
+            info.push_str(&ec2_elem("groupId", g));
+        }
+        if let Some(u) = &r.referenced_user_id {
+            info.push_str(&ec2_elem("userId", u));
+        }
         out.push_str(&format!(
-            "<referencedGroupInfo>{}</referencedGroupInfo>",
-            ec2_elem("groupId", g)
+            "<referencedGroupInfo>{info}</referencedGroupInfo>"
         ));
     }
     out
@@ -76,21 +82,33 @@ fn ip_permission_xml(r: &SecurityGroupRule) -> String {
     }
     if let Some(c) = &r.cidr_ipv6 {
         ranges.push_str(&format!(
-            "<ipv6Ranges><item>{}</item></ipv6Ranges>",
-            ec2_elem("cidrIpv6", c)
+            "<ipv6Ranges><item>{}{}</item></ipv6Ranges>",
+            ec2_elem("cidrIpv6", c),
+            ec2_elem("description", &r.description)
         ));
     }
     if let Some(p) = &r.prefix_list_id {
         ranges.push_str(&format!(
-            "<prefixListIds><item>{}</item></prefixListIds>",
-            ec2_elem("prefixListId", p)
+            "<prefixListIds><item>{}{}</item></prefixListIds>",
+            ec2_elem("prefixListId", p),
+            ec2_elem("description", &r.description)
         ));
     }
-    if let Some(g) = &r.referenced_group_id {
-        ranges.push_str(&format!(
-            "<groups><item>{}</item></groups>",
-            ec2_elem("groupId", g)
-        ));
+    if r.referenced_group_id.is_some() || r.referenced_group_name.is_some() {
+        let mut item = String::new();
+        if let Some(u) = &r.referenced_user_id {
+            item.push_str(&ec2_elem("userId", u));
+        }
+        if let Some(g) = &r.referenced_group_id {
+            item.push_str(&ec2_elem("groupId", g));
+        }
+        if let Some(n) = &r.referenced_group_name {
+            item.push_str(&ec2_elem("groupName", n));
+        }
+        if !r.description.is_empty() {
+            item.push_str(&ec2_elem("description", &r.description));
+        }
+        ranges.push_str(&format!("<groups><item>{item}</item></groups>"));
     }
     inner.push_str(&ranges);
     inner
@@ -159,42 +177,78 @@ fn parse_ip_permissions(
             .get(&format!("IpPermissions.{n}.ToPort"))
             .and_then(|v| v.parse().ok())
             .unwrap_or(-1);
-        let base = |cidr4, cidr6, pl, grp, desc| SecurityGroupRule {
+        let templ = |ref_id: RuleRef| SecurityGroupRule {
             rule_id: gen_id("sgr"),
             group_id: group_id.to_string(),
             is_egress,
             ip_protocol: proto.clone(),
             from_port: from,
             to_port: to,
-            cidr_ipv4: cidr4,
-            cidr_ipv6: cidr6,
-            prefix_list_id: pl,
-            referenced_group_id: grp,
-            description: desc,
+            cidr_ipv4: ref_id.cidr4,
+            cidr_ipv6: ref_id.cidr6,
+            prefix_list_id: ref_id.prefix_list,
+            referenced_group_id: ref_id.group_id,
+            referenced_group_name: ref_id.group_name,
+            referenced_user_id: ref_id.user_id,
+            description: ref_id.description,
         };
         let mut emitted = false;
-        for cidr in indexed_sub(params, &format!("IpPermissions.{n}.IpRanges"), "CidrIp") {
-            out.push(base(Some(cidr), None, None, None, String::new()));
+        for (cidr, desc) in
+            indexed_sub_desc(params, &format!("IpPermissions.{n}.IpRanges"), "CidrIp")
+        {
+            out.push(templ(RuleRef {
+                cidr4: Some(cidr),
+                description: desc,
+                ..Default::default()
+            }));
             emitted = true;
         }
-        for cidr in indexed_sub(params, &format!("IpPermissions.{n}.Ipv6Ranges"), "CidrIpv6") {
-            out.push(base(None, Some(cidr), None, None, String::new()));
+        for (cidr, desc) in
+            indexed_sub_desc(params, &format!("IpPermissions.{n}.Ipv6Ranges"), "CidrIpv6")
+        {
+            out.push(templ(RuleRef {
+                cidr6: Some(cidr),
+                description: desc,
+                ..Default::default()
+            }));
             emitted = true;
         }
-        for pl in indexed_sub(
+        for (pl, desc) in indexed_sub_desc(
             params,
             &format!("IpPermissions.{n}.PrefixListIds"),
             "PrefixListId",
         ) {
-            out.push(base(None, None, Some(pl), None, String::new()));
+            out.push(templ(RuleRef {
+                prefix_list: Some(pl),
+                description: desc,
+                ..Default::default()
+            }));
             emitted = true;
         }
-        for grp in indexed_sub(params, &format!("IpPermissions.{n}.Groups"), "GroupId") {
-            out.push(base(None, None, None, Some(grp), String::new()));
+        // Source-group references carry GroupId and/or GroupName plus an
+        // optional UserId (cross-account) and Description. Iterate while either
+        // an id or a name is present so name-only references (default-VPC form)
+        // are not dropped.
+        let mut m = 1usize;
+        loop {
+            let gp = format!("IpPermissions.{n}.Groups.{m}");
+            let gid = sub_opt(params, &format!("{gp}.GroupId"));
+            let gname = sub_opt(params, &format!("{gp}.GroupName"));
+            if gid.is_none() && gname.is_none() {
+                break;
+            }
+            out.push(templ(RuleRef {
+                group_id: gid,
+                group_name: gname,
+                user_id: sub_opt(params, &format!("{gp}.UserId")),
+                description: sub_opt(params, &format!("{gp}.Description")).unwrap_or_default(),
+                ..Default::default()
+            }));
             emitted = true;
+            m += 1;
         }
         if !emitted {
-            out.push(base(None, None, None, None, String::new()));
+            out.push(templ(RuleRef::default()));
         }
         n += 1;
     }
@@ -221,6 +275,8 @@ fn parse_ip_permissions(
                 cidr_ipv6: None,
                 prefix_list_id: None,
                 referenced_group_id: None,
+                referenced_group_name: None,
+                referenced_user_id: None,
                 description: String::new(),
             });
         }
@@ -228,13 +284,42 @@ fn parse_ip_permissions(
     out
 }
 
-/// Collect `{prefix}.M.{field}` for M = 1.. .
-fn indexed_sub(params: &HashMap<String, String>, prefix: &str, field: &str) -> Vec<String> {
+/// The reference target of a single parsed IpPermission sub-element, used to
+/// build one `SecurityGroupRule` without a wide positional constructor.
+#[derive(Default)]
+struct RuleRef {
+    cidr4: Option<String>,
+    cidr6: Option<String>,
+    prefix_list: Option<String>,
+    group_id: Option<String>,
+    group_name: Option<String>,
+    user_id: Option<String>,
+    description: String,
+}
+
+/// Read `key`, returning `None` when absent or empty.
+fn sub_opt(params: &HashMap<String, String>, key: &str) -> Option<String> {
+    params.get(key).filter(|v| !v.is_empty()).cloned()
+}
+
+/// Collect `{prefix}.M.{field}` (paired with a sibling `Description`) for
+/// M = 1.. . Returns each value with its description (empty when absent).
+fn indexed_sub_desc(
+    params: &HashMap<String, String>,
+    prefix: &str,
+    field: &str,
+) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut m = 1usize;
     loop {
         match params.get(&format!("{prefix}.{m}.{field}")) {
-            Some(v) if !v.is_empty() => out.push(v.clone()),
+            Some(v) if !v.is_empty() => {
+                let desc = params
+                    .get(&format!("{prefix}.{m}.Description"))
+                    .cloned()
+                    .unwrap_or_default();
+                out.push((v.clone(), desc));
+            }
             _ => break,
         }
         m += 1;
@@ -263,6 +348,8 @@ pub(crate) fn create_security_group(
         cidr_ipv6: None,
         prefix_list_id: None,
         referenced_group_id: None,
+        referenced_group_name: None,
+        referenced_user_id: None,
         description: String::new(),
     };
     let sg = SecurityGroup {
@@ -632,18 +719,24 @@ pub(crate) fn modify_security_group_rules(
                     rule.cidr_ipv6 = None;
                     rule.prefix_list_id = None;
                     rule.referenced_group_id = None;
+                    rule.referenced_group_name = None;
+                    rule.referenced_user_id = None;
                 }
                 if let Some(v) = p.get(&format!("{pre}.CidrIpv6")) {
                     rule.cidr_ipv6 = Some(v.clone());
                     rule.cidr_ipv4 = None;
                     rule.prefix_list_id = None;
                     rule.referenced_group_id = None;
+                    rule.referenced_group_name = None;
+                    rule.referenced_user_id = None;
                 }
                 if let Some(v) = p.get(&format!("{pre}.PrefixListId")) {
                     rule.prefix_list_id = Some(v.clone());
                     rule.cidr_ipv4 = None;
                     rule.cidr_ipv6 = None;
                     rule.referenced_group_id = None;
+                    rule.referenced_group_name = None;
+                    rule.referenced_user_id = None;
                 }
                 if let Some(v) = p.get(&format!("{pre}.ReferencedGroupId")) {
                     rule.referenced_group_id = Some(v.clone());
@@ -760,12 +853,39 @@ pub(crate) fn update_rule_descriptions_egress(
     update_rule_descriptions(svc, req, "UpdateSecurityGroupRuleDescriptionsEgress", true)
 }
 
+fn sg_vpc_assoc_key(group_id: &str, vpc_id: &str) -> String {
+    format!("{group_id}:{vpc_id}")
+}
+
+fn sg_vpc_assoc_xml(a: &SecurityGroupVpcAssociation, owner: &str) -> String {
+    format!(
+        "{}{}{}{}{}",
+        ec2_elem("groupId", &a.group_id),
+        ec2_elem("vpcId", &a.vpc_id),
+        ec2_elem("vpcOwnerId", owner),
+        ec2_elem("state", &a.state),
+        ec2_elem("groupOwnerId", owner),
+    )
+}
+
 pub(crate) fn associate_security_group_vpc(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "GroupId")?;
-    require(&req.query_params, "VpcId")?;
+    let group_id = require(&req.query_params, "GroupId")?;
+    let vpc_id = require(&req.query_params, "VpcId")?;
+    let assoc = SecurityGroupVpcAssociation {
+        group_id: group_id.clone(),
+        vpc_id: vpc_id.clone(),
+        state: "associated".to_string(),
+    };
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .security_group_vpc_associations
+            .insert(sg_vpc_assoc_key(&group_id, &vpc_id), assoc);
+    }
     Ok(Ec2Service::respond(
         "AssociateSecurityGroupVpc",
         &req.request_id,
@@ -774,11 +894,18 @@ pub(crate) fn associate_security_group_vpc(
 }
 
 pub(crate) fn disassociate_security_group_vpc(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "GroupId")?;
-    require(&req.query_params, "VpcId")?;
+    let group_id = require(&req.query_params, "GroupId")?;
+    let vpc_id = require(&req.query_params, "VpcId")?;
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .security_group_vpc_associations
+            .remove(&sg_vpc_assoc_key(&group_id, &vpc_id));
+    }
     Ok(Ec2Service::respond(
         "DisassociateSecurityGroupVpc",
         &req.request_id,
@@ -787,14 +914,32 @@ pub(crate) fn disassociate_security_group_vpc(
 }
 
 pub(crate) fn describe_security_group_vpc_associations(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_max_results(&req.query_params, 5, 1000)?;
+    let filters = parse_filters(&req.query_params);
+    let owner = req.account_id.clone();
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let items: Vec<String> = state
+        .security_group_vpc_associations
+        .values()
+        .filter(|a| {
+            filters.iter().all(|f| match f.name.as_str() {
+                "group-id" => f.values.contains(&a.group_id),
+                "vpc-id" => f.values.contains(&a.vpc_id),
+                "state" => f.values.contains(&a.state),
+                _ => true,
+            })
+        })
+        .map(|a| sg_vpc_assoc_xml(a, &owner))
+        .collect();
     Ok(Ec2Service::respond(
         "DescribeSecurityGroupVpcAssociations",
         &req.request_id,
-        &ec2_list("securityGroupVpcAssociationSet", &[]),
+        &ec2_list("securityGroupVpcAssociationSet", &items),
     ))
 }
 
@@ -915,6 +1060,8 @@ mod modify_tests {
             cidr_ipv6: None,
             prefix_list_id: None,
             referenced_group_id: None,
+            referenced_group_name: None,
+            referenced_user_id: None,
             description: "old".into(),
         }
     }
@@ -963,6 +1110,8 @@ mod modify_tests {
             cidr_ipv6: None,
             prefix_list_id: None,
             referenced_group_id: None,
+            referenced_group_name: None,
+            referenced_user_id: None,
             description: String::new(),
         }
     }
@@ -1192,5 +1341,127 @@ mod modify_tests {
         let accounts = svc.state.read();
         let r = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules[0];
         assert_eq!(r.description, "ssh from vpc");
+    }
+
+    fn empty_group(svc: &Ec2Service) {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create("000000000000")
+            .security_groups
+            .insert(
+                "sg-1".to_string(),
+                SecurityGroup {
+                    group_id: "sg-1".into(),
+                    group_name: "g".into(),
+                    description: "d".into(),
+                    vpc_id: "vpc-1".into(),
+                    rules: Vec::new(),
+                },
+            );
+    }
+
+    #[test]
+    fn authorize_ingress_persists_iprange_description() {
+        let svc = Ec2Service::new();
+        empty_group(&svc);
+        authorize_security_group_ingress(
+            &svc,
+            &req(
+                "AuthorizeSecurityGroupIngress",
+                &[
+                    ("GroupId", "sg-1"),
+                    ("IpPermissions.1.IpProtocol", "tcp"),
+                    ("IpPermissions.1.FromPort", "443"),
+                    ("IpPermissions.1.ToPort", "443"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/8"),
+                    ("IpPermissions.1.IpRanges.1.Description", "https from vpc"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        // The stored rule carries the inline description...
+        {
+            let accounts = svc.state.read();
+            let rules = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules;
+            let r = rules.iter().find(|r| !r.is_egress).unwrap();
+            assert_eq!(r.description, "https from vpc");
+        }
+        // ...and DescribeSecurityGroups renders it in the ipRanges item.
+        let resp = describe_security_groups(&svc, &req("DescribeSecurityGroups", &[])).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            body.contains("<description>https from vpc</description>"),
+            "describe body missing inline description: {body}"
+        );
+    }
+
+    #[test]
+    fn authorize_ingress_persists_group_name_and_user_id() {
+        let svc = Ec2Service::new();
+        empty_group(&svc);
+        authorize_security_group_ingress(
+            &svc,
+            &req(
+                "AuthorizeSecurityGroupIngress",
+                &[
+                    ("GroupId", "sg-1"),
+                    ("IpPermissions.1.IpProtocol", "-1"),
+                    ("IpPermissions.1.Groups.1.GroupName", "peer-sg"),
+                    ("IpPermissions.1.Groups.1.UserId", "111122223333"),
+                    ("IpPermissions.1.Groups.1.Description", "from peer"),
+                ],
+            ),
+        )
+        .unwrap();
+        let accounts = svc.state.read();
+        let rules = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules;
+        let r = rules
+            .iter()
+            .find(|r| r.referenced_group_name.is_some())
+            .expect("group-name reference dropped");
+        assert_eq!(r.referenced_group_name.as_deref(), Some("peer-sg"));
+        assert_eq!(r.referenced_user_id.as_deref(), Some("111122223333"));
+        assert_eq!(r.description, "from peer");
+    }
+
+    #[test]
+    fn security_group_vpc_association_round_trips() {
+        let svc = Ec2Service::new();
+        associate_security_group_vpc(
+            &svc,
+            &req(
+                "AssociateSecurityGroupVpc",
+                &[("GroupId", "sg-1"), ("VpcId", "vpc-abc")],
+            ),
+        )
+        .unwrap();
+
+        let resp = describe_security_group_vpc_associations(
+            &svc,
+            &req("DescribeSecurityGroupVpcAssociations", &[]),
+        )
+        .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("<groupId>sg-1</groupId>"), "{body}");
+        assert!(body.contains("<vpcId>vpc-abc</vpcId>"), "{body}");
+        assert!(body.contains("<state>associated</state>"), "{body}");
+
+        // Disassociate removes it from the describe.
+        disassociate_security_group_vpc(
+            &svc,
+            &req(
+                "DisassociateSecurityGroupVpc",
+                &[("GroupId", "sg-1"), ("VpcId", "vpc-abc")],
+            ),
+        )
+        .unwrap();
+        let resp = describe_security_group_vpc_associations(
+            &svc,
+            &req("DescribeSecurityGroupVpcAssociations", &[]),
+        )
+        .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(!body.contains("vpc-abc"), "association not removed: {body}");
     }
 }

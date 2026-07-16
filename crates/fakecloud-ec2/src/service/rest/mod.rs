@@ -20,10 +20,11 @@ pub(crate) use crate::service_helpers::{
     validate_length, validate_max_results,
 };
 pub(crate) use crate::state::{
-    AccountVpcEncryptionControl, Ec2State, EventWindowTimeRange, FpgaImage, InstanceEventWindow,
-    ManagedPrefixList, PrefixListEntry, RouteServer, Tag, TrafficMirrorFilter,
-    TrafficMirrorFilterRule, TrafficMirrorSession, TrafficMirrorTarget, VpcBpaExclusion,
-    VpcEncryptionControl,
+    AccountVpcEncryptionControl, ByoipCidr, CapacityManagerDataExport, Ec2State,
+    EventWindowTimeRange, FpgaImage, IamInstanceProfileAssociation, InstanceEventWindow,
+    ManagedPrefixList, PrefixListEntry, PublicIpv4Pool, RouteServer, RouteServerEndpoint,
+    RouteServerPeer, Tag, TrafficMirrorFilter, TrafficMirrorFilterRule, TrafficMirrorSession,
+    TrafficMirrorTarget, VpcBpaExclusion, VpcEncryptionControl,
 };
 
 mod byoip;
@@ -104,15 +105,61 @@ pub(crate) fn associate_enclave_certificate_iam_role(
     ))
 }
 
+/// Resolve the request's `IamInstanceProfile.Arn`/`.Name` into (arn, id). AWS
+/// takes either; we synthesize the missing half so the association round-trips.
+fn iam_profile_ref(req: &AwsRequest) -> (String, String) {
+    let arn = req
+        .query_params
+        .get("IamInstanceProfile.Arn")
+        .cloned()
+        .or_else(|| {
+            req.query_params
+                .get("IamInstanceProfile.Name")
+                .map(|n| format!("arn:aws:iam::{}:instance-profile/{n}", req.account_id))
+        })
+        .unwrap_or_default();
+    let id = gen_id("AIPA");
+    (arn, id)
+}
+
+fn iam_profile_assoc_xml(a: &IamInstanceProfileAssociation) -> String {
+    format!(
+        "{}{}<iamInstanceProfile>{}{}</iamInstanceProfile><state>{}</state>",
+        ec2_elem("associationId", &a.association_id),
+        ec2_elem("instanceId", &a.instance_id),
+        ec2_elem("arn", &a.iam_instance_profile_arn),
+        ec2_elem("id", &a.iam_instance_profile_id),
+        a.state,
+    )
+}
+
 pub(crate) fn associate_iam_instance_profile(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "InstanceId")?;
+    let instance_id = require(&req.query_params, "InstanceId")?;
+    let (arn, id) = iam_profile_ref(req);
+    let assoc = IamInstanceProfileAssociation {
+        association_id: gen_id("iip-assoc"),
+        instance_id,
+        iam_instance_profile_arn: arn,
+        iam_instance_profile_id: id,
+        state: "associating".to_string(),
+    };
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .iam_instance_profile_associations
+            .insert(assoc.association_id.clone(), assoc.clone());
+    }
     Ok(Ec2Service::respond(
         "AssociateIamInstanceProfile",
         &req.request_id,
-        "",
+        &format!(
+            "<iamInstanceProfileAssociation>{}</iamInstanceProfileAssociation>",
+            iam_profile_assoc_xml(&assoc)
+        ),
     ))
 }
 
@@ -285,14 +332,99 @@ pub(crate) fn create_mac_system_integrity_protection_modification_task(
     ))
 }
 
+/// Parse `a.b.c.d/nn` into (first-address, last-address, host-count).
+fn ipv4_cidr_range(cidr: &str) -> Option<(String, String, u64)> {
+    let (addr, nm) = cidr.split_once('/')?;
+    let nm: u32 = nm.parse().ok()?;
+    if nm > 32 {
+        return None;
+    }
+    let octets: Vec<u32> = addr.split('.').filter_map(|o| o.parse().ok()).collect();
+    if octets.len() != 4 || octets.iter().any(|o| *o > 255) {
+        return None;
+    }
+    let base = (octets[0] << 24) | (octets[1] << 16) | (octets[2] << 8) | octets[3];
+    let mask = if nm == 0 { 0 } else { u32::MAX << (32 - nm) };
+    let first = base & mask;
+    let last = first | !mask;
+    let fmt = |ip: u32| {
+        format!(
+            "{}.{}.{}.{}",
+            ip >> 24,
+            (ip >> 16) & 0xff,
+            (ip >> 8) & 0xff,
+            ip & 0xff
+        )
+    };
+    // Count in u64 so a `/0` block (2^32 addresses) can't overflow.
+    let count = u64::from(last) - u64::from(first) + 1;
+    Some((fmt(first), fmt(last), count))
+}
+
+fn public_ipv4_pool_xml(p: &PublicIpv4Pool, tags: &[Tag]) -> String {
+    let mut total = 0u64;
+    let ranges: Vec<String> = p
+        .cidrs
+        .iter()
+        .filter_map(|c| ipv4_cidr_range(c))
+        .map(|(first, last, count)| {
+            total += count;
+            // `AddressCount`/`AvailableAddressCount` are modeled as Integer
+            // (i32); a wide CIDR (e.g. /1) overflows i32 and the SDK rejects
+            // the response, so clamp to i32::MAX.
+            let count = count.min(i32::MAX as u64);
+            format!(
+                "{}{}<addressCount>{count}</addressCount><availableAddressCount>{count}</availableAddressCount>",
+                ec2_elem("firstAddress", &first),
+                ec2_elem("lastAddress", &last),
+            )
+        })
+        .collect();
+    let total = total.min(i32::MAX as u64);
+    format!(
+        "{}{}{}{}<totalAddressCount>{total}</totalAddressCount><totalAvailableAddressCount>{total}</totalAvailableAddressCount>{}",
+        ec2_elem("poolId", &p.pool_id),
+        ec2_elem("description", &p.description),
+        ec2_elem("networkBorderGroup", &p.network_border_group),
+        ec2_list("poolAddressRangeSet", &ranges),
+        super::tags::tag_set_xml(tags),
+    )
+}
+
 pub(crate) fn create_public_ipv4_pool(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let id = gen_id("ipv4pool-ec2");
+    let pool = PublicIpv4Pool {
+        pool_id: id.clone(),
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
+        network_border_group: req
+            .query_params
+            .get("NetworkBorderGroup")
+            .cloned()
+            .unwrap_or_else(|| region_of(req)),
+        cidrs: Vec::new(),
+    };
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        crate::service::tags::apply_tag_specifications(
+            state,
+            &req.query_params,
+            &id,
+            "ipv4pool-ec2",
+        );
+        state.public_ipv4_pools.insert(id.clone(), pool);
+    }
     Ok(Ec2Service::respond(
         "CreatePublicIpv4Pool",
         &req.request_id,
-        "",
+        &ec2_elem("poolId", &id),
     ))
 }
 
@@ -361,14 +493,20 @@ pub(crate) fn delete_image_usage_report(
 }
 
 pub(crate) fn delete_public_ipv4_pool(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "PoolId")?;
+    let id = require(&req.query_params, "PoolId")?;
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.public_ipv4_pools.remove(&id);
+        state.tags.remove(&id);
+    }
     Ok(Ec2Service::respond(
         "DeletePublicIpv4Pool",
         &req.request_id,
-        "",
+        &ec2_elem("returnValue", "true"),
     ))
 }
 
@@ -385,15 +523,30 @@ pub(crate) fn delete_secondary_network(
 }
 
 pub(crate) fn deprovision_public_ipv4_pool_cidr(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "PoolId")?;
-    require(&req.query_params, "Cidr")?;
+    let id = require(&req.query_params, "PoolId")?;
+    let cidr = require(&req.query_params, "Cidr")?;
+    {
+        let mut accounts = svc.state.write();
+        if let Some(p) = accounts
+            .get_or_create(&req.account_id)
+            .public_ipv4_pools
+            .get_mut(&id)
+        {
+            p.cidrs.retain(|c| c != &cidr);
+        }
+    }
     Ok(Ec2Service::respond(
         "DeprovisionPublicIpv4PoolCidr",
         &req.request_id,
-        "",
+        &format!(
+            "{}{}",
+            ec2_elem("poolId", &id),
+            // DeprovisionedAddresses is a list of plain address strings.
+            ec2_list("deprovisionedAddressSet", std::slice::from_ref(&cidr))
+        ),
     ))
 }
 
@@ -540,14 +693,24 @@ pub(crate) fn describe_host_reservations(
 }
 
 pub(crate) fn describe_iam_instance_profile_associations(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_max_results(&req.query_params, 5, 1000)?;
+    let wanted = indexed_list(&req.query_params, "AssociationId");
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let items: Vec<String> = state
+        .iam_instance_profile_associations
+        .values()
+        .filter(|a| wanted.is_empty() || wanted.contains(&a.association_id))
+        .map(iam_profile_assoc_xml)
+        .collect();
     Ok(Ec2Service::respond(
         "DescribeIamInstanceProfileAssociations",
         &req.request_id,
-        "",
+        &ec2_list("iamInstanceProfileAssociationSet", &items),
     ))
 }
 
@@ -796,14 +959,24 @@ pub(crate) fn describe_principal_id_format(
 }
 
 pub(crate) fn describe_public_ipv4_pools(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_max_results(&req.query_params, 1, 10)?;
+    let wanted = indexed_list(&req.query_params, "PoolId");
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let items: Vec<String> = state
+        .public_ipv4_pools
+        .values()
+        .filter(|p| wanted.is_empty() || wanted.contains(&p.pool_id))
+        .map(|p| public_ipv4_pool_xml(p, state.tags_for(&p.pool_id)))
+        .collect();
     Ok(Ec2Service::respond(
         "DescribePublicIpv4Pools",
         &req.request_id,
-        "",
+        &ec2_list("publicIpv4PoolSet", &items),
     ))
 }
 
@@ -1002,14 +1175,35 @@ pub(crate) fn disassociate_enclave_certificate_iam_role(
 }
 
 pub(crate) fn disassociate_iam_instance_profile(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "AssociationId")?;
+    let assoc_id = require(&req.query_params, "AssociationId")?;
+    let assoc = {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .iam_instance_profile_associations
+            .remove(&assoc_id)
+    }
+    .map(|mut a| {
+        a.state = "disassociating".to_string();
+        a
+    })
+    .unwrap_or(IamInstanceProfileAssociation {
+        association_id: assoc_id.clone(),
+        instance_id: String::new(),
+        iam_instance_profile_arn: String::new(),
+        iam_instance_profile_id: String::new(),
+        state: "disassociating".to_string(),
+    });
     Ok(Ec2Service::respond(
         "DisassociateIamInstanceProfile",
         &req.request_id,
-        "",
+        &format!(
+            "<iamInstanceProfileAssociation>{}</iamInstanceProfileAssociation>",
+            iam_profile_assoc_xml(&assoc)
+        ),
     ))
 }
 
@@ -1517,16 +1711,49 @@ const ACCOUNT_VPC_ENC_EXCLUSIONS: &[(&str, &str)] = &[
 ];
 
 pub(crate) fn provision_public_ipv4_pool_cidr(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     require(&req.query_params, "IpamPoolId")?;
-    require(&req.query_params, "PoolId")?;
-    require(&req.query_params, "NetmaskLength")?;
+    let id = require(&req.query_params, "PoolId")?;
+    let netmask = require(&req.query_params, "NetmaskLength")?
+        .parse::<u32>()
+        .map_err(|_| {
+            crate::service_helpers::invalid_parameter_value("NetmaskLength must be an integer")
+        })?;
+    let cidr = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let pool = state.public_ipv4_pools.get_mut(&id);
+        match pool {
+            Some(p) => {
+                // Allocate a deterministic, non-overlapping block per provision.
+                let cidr = format!("100.{}.0.0/{netmask}", 64 + (p.cidrs.len() as u32 % 64));
+                p.cidrs.push(cidr.clone());
+                cidr
+            }
+            None => format!("100.64.0.0/{netmask}"),
+        }
+    };
+    let range = ipv4_cidr_range(&cidr)
+        .map(|(first, last, count)| {
+            // AddressCount/AvailableAddressCount are Integer (i32); clamp so a
+            // wide CIDR (e.g. /1 -> 2^31) doesn't overflow and break decoding.
+            let count = count.min(i32::MAX as u64);
+            format!(
+                "{}{}<addressCount>{count}</addressCount><availableAddressCount>{count}</availableAddressCount>",
+                ec2_elem("firstAddress", &first),
+                ec2_elem("lastAddress", &last),
+            )
+        })
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "ProvisionPublicIpv4PoolCidr",
         &req.request_id,
-        "",
+        &format!(
+            "{}<poolAddressRange>{range}</poolAddressRange>",
+            ec2_elem("poolId", &id),
+        ),
     ))
 }
 
@@ -1555,14 +1782,42 @@ pub(crate) fn purchase_scheduled_instances(
 }
 
 pub(crate) fn replace_iam_instance_profile_association(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "AssociationId")?;
+    let assoc_id = require(&req.query_params, "AssociationId")?;
+    let (arn, id) = iam_profile_ref(req);
+    let assoc = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        // AWS keeps the same association id but swaps the profile; a new id is
+        // minted (below) when the association is unknown to us.
+        if let Some(a) = state.iam_instance_profile_associations.get_mut(&assoc_id) {
+            a.iam_instance_profile_arn = arn;
+            a.iam_instance_profile_id = id;
+            a.state = "associated".to_string();
+            a.clone()
+        } else {
+            let a = IamInstanceProfileAssociation {
+                association_id: assoc_id.clone(),
+                instance_id: String::new(),
+                iam_instance_profile_arn: arn,
+                iam_instance_profile_id: id,
+                state: "associated".to_string(),
+            };
+            state
+                .iam_instance_profile_associations
+                .insert(assoc_id.clone(), a.clone());
+            a
+        }
+    };
     Ok(Ec2Service::respond(
         "ReplaceIamInstanceProfileAssociation",
         &req.request_id,
-        "",
+        &format!(
+            "<iamInstanceProfileAssociation>{}</iamInstanceProfileAssociation>",
+            iam_profile_assoc_xml(&assoc)
+        ),
     ))
 }
 
@@ -2322,5 +2577,225 @@ mod tests {
             .get("000000000000")
             .map(|s| s.managed_prefix_lists.is_empty())
             .unwrap_or(true));
+    }
+
+    #[test]
+    fn iam_instance_profile_association_round_trips() {
+        let svc = Ec2Service::new();
+        let out = body(
+            associate_iam_instance_profile(
+                &svc,
+                &req(
+                    "AssociateIamInstanceProfile",
+                    &[
+                        ("InstanceId", "i-123"),
+                        ("IamInstanceProfile.Name", "web-role"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        // The response carries a real association id + resolved profile arn.
+        let assoc_id = out
+            .split("<associationId>")
+            .nth(1)
+            .and_then(|s| s.split("</associationId>").next())
+            .unwrap()
+            .to_string();
+        assert!(assoc_id.starts_with("iip-assoc-"), "{out}");
+        assert!(out.contains(":instance-profile/web-role"), "{out}");
+
+        let described = body(
+            describe_iam_instance_profile_associations(
+                &svc,
+                &req("DescribeIamInstanceProfileAssociations", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(described.contains(&assoc_id), "{described}");
+        assert!(
+            described.contains("<instanceId>i-123</instanceId>"),
+            "{described}"
+        );
+
+        // Disassociate drops it from the describe.
+        disassociate_iam_instance_profile(
+            &svc,
+            &req(
+                "DisassociateIamInstanceProfile",
+                &[("AssociationId", &assoc_id)],
+            ),
+        )
+        .unwrap();
+        let described = body(
+            describe_iam_instance_profile_associations(
+                &svc,
+                &req("DescribeIamInstanceProfileAssociations", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(!described.contains(&assoc_id), "{described}");
+    }
+
+    #[test]
+    fn public_ipv4_pool_round_trips() {
+        let svc = Ec2Service::new();
+        let out = body(create_public_ipv4_pool(&svc, &req("CreatePublicIpv4Pool", &[])).unwrap());
+        let pool_id = out
+            .split("<poolId>")
+            .nth(1)
+            .and_then(|s| s.split("</poolId>").next())
+            .unwrap()
+            .to_string();
+        assert!(pool_id.starts_with("ipv4pool-ec2-"), "{out}");
+
+        provision_public_ipv4_pool_cidr(
+            &svc,
+            &req(
+                "ProvisionPublicIpv4PoolCidr",
+                &[
+                    ("IpamPoolId", "ipam-pool-1"),
+                    ("PoolId", &pool_id),
+                    ("NetmaskLength", "28"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let described =
+            body(describe_public_ipv4_pools(&svc, &req("DescribePublicIpv4Pools", &[])).unwrap());
+        assert!(described.contains(&pool_id), "{described}");
+        assert!(described.contains("<firstAddress>"), "{described}");
+        assert!(
+            described.contains("<addressCount>16</addressCount>"),
+            "{described}"
+        );
+    }
+
+    #[test]
+    fn byoip_cidr_round_trips() {
+        let svc = Ec2Service::new();
+        provision_byoip_cidr(
+            &svc,
+            &req(
+                "ProvisionByoipCidr",
+                &[("Cidr", "203.0.113.0/24"), ("Description", "office")],
+            ),
+        )
+        .unwrap();
+        advertise_byoip_cidr(
+            &svc,
+            &req("AdvertiseByoipCidr", &[("Cidr", "203.0.113.0/24")]),
+        )
+        .unwrap();
+        let described = body(
+            describe_byoip_cidrs(&svc, &req("DescribeByoipCidrs", &[("MaxResults", "10")]))
+                .unwrap(),
+        );
+        assert!(
+            described.contains("<cidr>203.0.113.0/24</cidr>"),
+            "{described}"
+        );
+        assert!(
+            described.contains("<state>advertised</state>"),
+            "{described}"
+        );
+        assert!(
+            described.contains("<description>office</description>"),
+            "{described}"
+        );
+    }
+
+    #[test]
+    fn capacity_manager_attributes_round_trip() {
+        let svc = Ec2Service::new();
+        enable_capacity_manager(&svc, &req("EnableCapacityManager", &[])).unwrap();
+        create_capacity_manager_data_export(
+            &svc,
+            &req(
+                "CreateCapacityManagerDataExport",
+                &[
+                    ("S3BucketName", "my-bucket"),
+                    ("Schedule", "hourly"),
+                    ("OutputFormat", "csv"),
+                ],
+            ),
+        )
+        .unwrap();
+        let attrs = body(
+            get_capacity_manager_attributes(&svc, &req("GetCapacityManagerAttributes", &[]))
+                .unwrap(),
+        );
+        assert!(
+            attrs.contains("<capacityManagerStatus>ENABLED</capacityManagerStatus>"),
+            "{attrs}"
+        );
+        assert!(
+            attrs.contains("<dataExportCount>1</dataExportCount>"),
+            "{attrs}"
+        );
+
+        let exports = body(
+            describe_capacity_manager_data_exports(
+                &svc,
+                &req("DescribeCapacityManagerDataExports", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(
+            exports.contains("<s3BucketName>my-bucket</s3BucketName>"),
+            "{exports}"
+        );
+    }
+
+    #[test]
+    fn route_server_endpoint_and_peer_round_trip() {
+        let svc = Ec2Service::new();
+        let out = body(
+            create_route_server_endpoint(
+                &svc,
+                &req(
+                    "CreateRouteServerEndpoint",
+                    &[("RouteServerId", "rs-1"), ("SubnetId", "subnet-1")],
+                ),
+            )
+            .unwrap(),
+        );
+        let ep_id = out
+            .split("<routeServerEndpointId>")
+            .nth(1)
+            .and_then(|s| s.split("</routeServerEndpointId>").next())
+            .unwrap()
+            .to_string();
+        assert!(ep_id.starts_with("rse-"), "{out}");
+
+        let described = body(
+            describe_route_server_endpoints(&svc, &req("DescribeRouteServerEndpoints", &[]))
+                .unwrap(),
+        );
+        assert!(described.contains(&ep_id), "{described}");
+
+        let peer_out = body(
+            create_route_server_peer(
+                &svc,
+                &req(
+                    "CreateRouteServerPeer",
+                    &[
+                        ("BgpOptions", "{}"),
+                        ("RouteServerEndpointId", &ep_id),
+                        ("PeerAddress", "10.0.0.5"),
+                        ("BgpOptions.PeerAsn", "65001"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(peer_out.contains("<peerAsn>65001</peerAsn>"), "{peer_out}");
+        let peers =
+            body(describe_route_server_peers(&svc, &req("DescribeRouteServerPeers", &[])).unwrap());
+        assert!(
+            peers.contains("<peerAddress>10.0.0.5</peerAddress>"),
+            "{peers}"
+        );
     }
 }

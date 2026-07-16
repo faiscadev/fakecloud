@@ -164,14 +164,68 @@ pub(crate) fn describe_managed_prefix_lists(
     ))
 }
 
+/// A deterministic AWS-managed prefix-list id for `service` in `region` (the
+/// legacy DescribePrefixLists surfaces `com.amazonaws.<region>.s3` and
+/// `.dynamodb` alongside customer-managed lists).
+fn aws_managed_pl_id(region: &str, service: &str) -> String {
+    let mut hash: u64 = 1469598103934665603;
+    for b in format!("{region}.{service}").bytes() {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(1099511628257);
+    }
+    format!("pl-{:08x}", (hash & 0xffff_ffff) as u32)
+}
+
+fn legacy_pl_xml(id: &str, name: &str, cidrs: &[String]) -> String {
+    let cidr_items: Vec<String> = cidrs.to_vec();
+    format!(
+        "{}{}{}",
+        ec2_elem("prefixListId", id),
+        ec2_elem("prefixListName", name),
+        ec2_list("cidrSet", &cidr_items),
+    )
+}
+
 pub(crate) fn describe_prefix_lists(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    let region = region_of(req);
+    let wanted = indexed_list(&req.query_params, "PrefixListId");
+    // AWS-managed service prefix lists (representative CIDR sets).
+    let mut items: Vec<String> = Vec::new();
+    let managed = [
+        (
+            "s3",
+            vec!["54.231.0.0/17".to_string(), "52.216.0.0/15".to_string()],
+        ),
+        ("dynamodb", vec!["52.94.0.0/22".to_string()]),
+    ];
+    for (svc_name, cidrs) in managed {
+        let id = aws_managed_pl_id(&region, svc_name);
+        if wanted.is_empty() || wanted.contains(&id) {
+            let name = format!("com.amazonaws.{region}.{svc_name}");
+            items.push(legacy_pl_xml(&id, &name, &cidrs));
+        }
+    }
+    // Customer-managed prefix lists also appear here, with their entry CIDRs.
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    for p in state.managed_prefix_lists.values() {
+        if wanted.is_empty() || wanted.contains(&p.prefix_list_id) {
+            let cidrs: Vec<String> = p.entries.iter().map(|e| e.cidr.clone()).collect();
+            items.push(legacy_pl_xml(
+                &p.prefix_list_id,
+                &p.prefix_list_name,
+                &cidrs,
+            ));
+        }
+    }
     Ok(Ec2Service::respond(
         "DescribePrefixLists",
         &req.request_id,
-        "",
+        &ec2_list("prefixListSet", &items),
     ))
 }
 

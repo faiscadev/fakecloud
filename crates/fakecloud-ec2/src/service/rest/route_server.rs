@@ -88,30 +88,131 @@ pub(crate) fn create_route_server(
     ))
 }
 
+fn route_server_endpoint_xml(e: &RouteServerEndpoint, tags: &[Tag]) -> String {
+    format!(
+        "{}{}{}{}{}{}{}{}",
+        ec2_elem("routeServerEndpointId", &e.id),
+        ec2_elem("routeServerId", &e.route_server_id),
+        ec2_elem("vpcId", &e.vpc_id),
+        ec2_elem("subnetId", &e.subnet_id),
+        ec2_elem("eniId", &e.eni_id),
+        ec2_elem("eniAddress", &e.eni_address),
+        ec2_elem("state", &e.state),
+        super::super::tags::tag_set_xml(tags),
+    )
+}
+
+fn route_server_peer_xml(p: &RouteServerPeer, tags: &[Tag]) -> String {
+    format!(
+        "{}{}{}{}{}{}{}{}<bgpOptions>{}</bgpOptions>{}{}",
+        ec2_elem("routeServerPeerId", &p.id),
+        ec2_elem("routeServerEndpointId", &p.route_server_endpoint_id),
+        ec2_elem("routeServerId", &p.route_server_id),
+        ec2_elem("vpcId", &p.vpc_id),
+        ec2_elem("subnetId", &p.subnet_id),
+        ec2_elem("endpointEniId", &p.endpoint_eni_id),
+        ec2_elem("endpointEniAddress", &p.endpoint_eni_address),
+        ec2_elem("peerAddress", &p.peer_address),
+        ec2_elem("peerAsn", &p.peer_asn.to_string()),
+        ec2_elem("state", &p.state),
+        super::super::tags::tag_set_xml(tags),
+    )
+}
+
 pub(crate) fn create_route_server_endpoint(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "RouteServerId")?;
-    require(&req.query_params, "SubnetId")?;
+    let route_server_id = require(&req.query_params, "RouteServerId")?;
+    let subnet_id = require(&req.query_params, "SubnetId")?;
+    let id = gen_id("rse");
+    let (endpoint, tags) = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let vpc_id = state
+            .subnets
+            .get(&subnet_id)
+            .map(|s| s.vpc_id.clone())
+            .unwrap_or_default();
+        let endpoint = RouteServerEndpoint {
+            id: id.clone(),
+            route_server_id,
+            vpc_id,
+            subnet_id,
+            eni_id: gen_id("eni"),
+            eni_address: "10.0.0.10".to_string(),
+            state: "available".to_string(),
+        };
+        crate::service::tags::apply_tag_specifications(
+            state,
+            &req.query_params,
+            &id,
+            "route-server-endpoint",
+        );
+        let tags = state.tags_for(&id).to_vec();
+        state
+            .route_server_endpoints
+            .insert(id.clone(), endpoint.clone());
+        (endpoint, tags)
+    };
     Ok(Ec2Service::respond(
         "CreateRouteServerEndpoint",
         &req.request_id,
-        "",
+        &format!(
+            "<routeServerEndpoint>{}</routeServerEndpoint>",
+            route_server_endpoint_xml(&endpoint, &tags)
+        ),
     ))
 }
 
 pub(crate) fn create_route_server_peer(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     require_struct(&req.query_params, "BgpOptions")?;
-    require(&req.query_params, "RouteServerEndpointId")?;
-    require(&req.query_params, "PeerAddress")?;
+    let endpoint_id = require(&req.query_params, "RouteServerEndpointId")?;
+    let peer_address = require(&req.query_params, "PeerAddress")?;
+    let peer_asn = req
+        .query_params
+        .get("BgpOptions.PeerAsn")
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let id = gen_id("rsp");
+    let (peer, tags) = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let endpoint = state.route_server_endpoints.get(&endpoint_id);
+        let peer = RouteServerPeer {
+            id: id.clone(),
+            route_server_endpoint_id: endpoint_id.clone(),
+            route_server_id: endpoint
+                .map(|e| e.route_server_id.clone())
+                .unwrap_or_default(),
+            vpc_id: endpoint.map(|e| e.vpc_id.clone()).unwrap_or_default(),
+            subnet_id: endpoint.map(|e| e.subnet_id.clone()).unwrap_or_default(),
+            endpoint_eni_id: endpoint.map(|e| e.eni_id.clone()).unwrap_or_default(),
+            endpoint_eni_address: endpoint.map(|e| e.eni_address.clone()).unwrap_or_default(),
+            peer_address,
+            peer_asn,
+            state: "available".to_string(),
+        };
+        crate::service::tags::apply_tag_specifications(
+            state,
+            &req.query_params,
+            &id,
+            "route-server-peer",
+        );
+        let tags = state.tags_for(&id).to_vec();
+        state.route_server_peers.insert(id.clone(), peer.clone());
+        (peer, tags)
+    };
     Ok(Ec2Service::respond(
         "CreateRouteServerPeer",
         &req.request_id,
-        "",
+        &format!(
+            "<routeServerPeer>{}</routeServerPeer>",
+            route_server_peer_xml(&peer, &tags)
+        ),
     ))
 }
 
@@ -144,50 +245,120 @@ pub(crate) fn delete_route_server(
 }
 
 pub(crate) fn delete_route_server_endpoint(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "RouteServerEndpointId")?;
+    let id = require(&req.query_params, "RouteServerEndpointId")?;
+    let (endpoint, tags) = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let mut endpoint =
+            state
+                .route_server_endpoints
+                .remove(&id)
+                .unwrap_or_else(|| RouteServerEndpoint {
+                    id: id.clone(),
+                    route_server_id: String::new(),
+                    vpc_id: String::new(),
+                    subnet_id: String::new(),
+                    eni_id: String::new(),
+                    eni_address: String::new(),
+                    state: String::new(),
+                });
+        endpoint.state = "deleting".to_string();
+        let tags = state.tags_for(&id).to_vec();
+        state.tags.remove(&id);
+        (endpoint, tags)
+    };
     Ok(Ec2Service::respond(
         "DeleteRouteServerEndpoint",
         &req.request_id,
-        "",
+        &format!(
+            "<routeServerEndpoint>{}</routeServerEndpoint>",
+            route_server_endpoint_xml(&endpoint, &tags)
+        ),
     ))
 }
 
 pub(crate) fn delete_route_server_peer(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "RouteServerPeerId")?;
+    let id = require(&req.query_params, "RouteServerPeerId")?;
+    let (peer, tags) = {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let mut peer = state
+            .route_server_peers
+            .remove(&id)
+            .unwrap_or_else(|| RouteServerPeer {
+                id: id.clone(),
+                route_server_endpoint_id: String::new(),
+                route_server_id: String::new(),
+                vpc_id: String::new(),
+                subnet_id: String::new(),
+                endpoint_eni_id: String::new(),
+                endpoint_eni_address: String::new(),
+                peer_address: String::new(),
+                peer_asn: 0,
+                state: String::new(),
+            });
+        peer.state = "deleting".to_string();
+        let tags = state.tags_for(&id).to_vec();
+        state.tags.remove(&id);
+        (peer, tags)
+    };
     Ok(Ec2Service::respond(
         "DeleteRouteServerPeer",
         &req.request_id,
-        "",
+        &format!(
+            "<routeServerPeer>{}</routeServerPeer>",
+            route_server_peer_xml(&peer, &tags)
+        ),
     ))
 }
 
 pub(crate) fn describe_route_server_endpoints(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_max_results(&req.query_params, 5, 1000)?;
+    let wanted = indexed_list(&req.query_params, "RouteServerEndpointId");
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let items: Vec<String> = state
+        .route_server_endpoints
+        .values()
+        .filter(|e| wanted.is_empty() || wanted.contains(&e.id))
+        .map(|e| route_server_endpoint_xml(e, state.tags_for(&e.id)))
+        .collect();
     Ok(Ec2Service::respond(
         "DescribeRouteServerEndpoints",
         &req.request_id,
-        "",
+        &ec2_list("routeServerEndpointSet", &items),
     ))
 }
 
 pub(crate) fn describe_route_server_peers(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_max_results(&req.query_params, 5, 1000)?;
+    let wanted = indexed_list(&req.query_params, "RouteServerPeerId");
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let items: Vec<String> = state
+        .route_server_peers
+        .values()
+        .filter(|p| wanted.is_empty() || wanted.contains(&p.id))
+        .map(|p| route_server_peer_xml(p, state.tags_for(&p.id)))
+        .collect();
     Ok(Ec2Service::respond(
         "DescribeRouteServerPeers",
         &req.request_id,
-        "",
+        &ec2_list("routeServerPeerSet", &items),
     ))
 }
 

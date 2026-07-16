@@ -659,29 +659,36 @@ pub(crate) fn create_nat_gateway(
     )?;
     validate_int_range(&req.query_params, "SecondaryPrivateIpAddressCount", 1, 31)?;
     let id = gen_id("nat");
-    let nat = NatGateway {
-        nat_gateway_id: id.clone(),
-        subnet_id: req
-            .query_params
-            .get("SubnetId")
-            .cloned()
-            .unwrap_or_default(),
-        vpc_id: String::new(),
-        state: "available".to_string(),
-        connectivity_type: req
-            .query_params
-            .get("ConnectivityType")
-            .cloned()
-            .unwrap_or_else(|| "public".to_string()),
-        allocation_id: req.query_params.get("AllocationId").cloned(),
-    };
-    let tags = {
+    let subnet_id = req
+        .query_params
+        .get("SubnetId")
+        .cloned()
+        .unwrap_or_default();
+    let (nat, tags) = {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // Derive the VPC from the subnet so DescribeNatGateways renders <vpcId>.
+        let vpc_id = state
+            .subnets
+            .get(&subnet_id)
+            .map(|s| s.vpc_id.clone())
+            .unwrap_or_default();
+        let nat = NatGateway {
+            nat_gateway_id: id.clone(),
+            subnet_id,
+            vpc_id,
+            state: "available".to_string(),
+            connectivity_type: req
+                .query_params
+                .get("ConnectivityType")
+                .cloned()
+                .unwrap_or_else(|| "public".to_string()),
+            allocation_id: req.query_params.get("AllocationId").cloned(),
+        };
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "natgateway");
         let t = state.tags_for(&id).to_vec();
         state.nat_gateways.insert(id.clone(), nat.clone());
-        t
+        (nat, t)
     };
     let body = format!(
         "<natGateway>{}</natGateway>{}",
@@ -811,4 +818,50 @@ fn simple_match_multi(
             .iter()
             .any(|v| candidates.iter().any(|c| filter_value_matches(v, c)))
     })
+}
+
+#[cfg(test)]
+mod nat_tests {
+    use super::*;
+    use crate::test_support::ec2_request;
+
+    #[test]
+    fn create_nat_gateway_derives_vpc_from_subnet() {
+        let svc = Ec2Service::new();
+        // Use a seeded default subnet and read its VPC.
+        let (subnet_id, vpc_id) = {
+            let accounts = svc.state.read();
+            let state = accounts.get("000000000000").unwrap();
+            let subnet = state.subnets.values().next().expect("default subnet");
+            (subnet.subnet_id.clone(), subnet.vpc_id.clone())
+        };
+        assert!(!vpc_id.is_empty());
+
+        let resp = create_nat_gateway(
+            &svc,
+            &ec2_request(
+                "CreateNatGateway",
+                &[("SubnetId", &subnet_id), ("ConnectivityType", "private")],
+            ),
+        )
+        .unwrap();
+        let out = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(
+            out.contains(&format!("<vpcId>{vpc_id}</vpcId>")),
+            "nat response missing vpcId: {out}"
+        );
+
+        // Describe renders the same vpcId.
+        let described = String::from_utf8_lossy(
+            describe_nat_gateways(&svc, &ec2_request("DescribeNatGateways", &[]))
+                .unwrap()
+                .body
+                .expect_bytes(),
+        )
+        .to_string();
+        assert!(
+            described.contains(&format!("<vpcId>{vpc_id}</vpcId>")),
+            "{described}"
+        );
+    }
 }
