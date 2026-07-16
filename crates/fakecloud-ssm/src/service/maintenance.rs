@@ -11,6 +11,23 @@ use crate::state::{MaintenanceWindow, MaintenanceWindowTarget, MaintenanceWindow
 
 use super::{aws_400, missing, missing_with_code, SsmService};
 
+/// Append the optional invocation/logging fields of a maintenance-window task
+/// to a response object, so Get/Describe faithfully echo what Register stored.
+fn append_task_invocation_fields(resp: &mut Value, task: &MaintenanceWindowTask) {
+    if let Some(ref tip) = task.task_invocation_parameters {
+        resp["TaskInvocationParameters"] = tip.clone();
+    }
+    if let Some(ref tp) = task.task_parameters {
+        resp["TaskParameters"] = tp.clone();
+    }
+    if let Some(ref li) = task.logging_info {
+        resp["LoggingInfo"] = li.clone();
+    }
+    if let Some(ref cb) = task.cutoff_behavior {
+        resp["CutoffBehavior"] = json!(cb);
+    }
+}
+
 /// All fields of a `CreateMaintenanceWindow` request, parsed and validated.
 struct CreateMaintenanceWindowInput {
     name: String,
@@ -520,6 +537,13 @@ impl SsmService {
         let service_role_arn = body["ServiceRoleArn"].as_str().map(|s| s.to_string());
         let name = body["Name"].as_str().map(|s| s.to_string());
         let description = body["Description"].as_str().map(|s| s.to_string());
+        let task_invocation_parameters = body
+            .get("TaskInvocationParameters")
+            .filter(|v| !v.is_null())
+            .cloned();
+        let task_parameters = body.get("TaskParameters").filter(|v| !v.is_null()).cloned();
+        let logging_info = body.get("LoggingInfo").filter(|v| !v.is_null()).cloned();
+        let cutoff_behavior = body["CutoffBehavior"].as_str().map(|s| s.to_string());
 
         let task_id = format!(
             "{}-{}",
@@ -546,6 +570,10 @@ impl SsmService {
             service_role_arn,
             name,
             description,
+            task_invocation_parameters,
+            task_parameters,
+            logging_info,
+            cutoff_behavior,
         };
         mw.tasks.push(task);
 
@@ -623,6 +651,7 @@ impl SsmService {
                 if let Some(ref desc) = t.description {
                     v["Description"] = json!(desc);
                 }
+                append_task_invocation_fields(&mut v, t);
                 v
             })
             .collect();
@@ -751,6 +780,21 @@ impl SsmService {
         if let Some(role) = body["ServiceRoleArn"].as_str() {
             task.service_role_arn = Some(role.to_string());
         }
+        if body.get("TaskInvocationParameters").is_some() {
+            task.task_invocation_parameters = body
+                .get("TaskInvocationParameters")
+                .filter(|v| !v.is_null())
+                .cloned();
+        }
+        if body.get("TaskParameters").is_some() {
+            task.task_parameters = body.get("TaskParameters").filter(|v| !v.is_null()).cloned();
+        }
+        if body.get("LoggingInfo").is_some() {
+            task.logging_info = body.get("LoggingInfo").filter(|v| !v.is_null()).cloned();
+        }
+        if let Some(cb) = body["CutoffBehavior"].as_str() {
+            task.cutoff_behavior = Some(cb.to_string());
+        }
 
         let mut resp = json!({
             "WindowId": window_id,
@@ -775,6 +819,7 @@ impl SsmService {
         if let Some(ref sra) = task.service_role_arn {
             resp["ServiceRoleArn"] = json!(sra);
         }
+        append_task_invocation_fields(&mut resp, task);
 
         Ok(AwsResponse::ok_json(resp))
     }
@@ -834,6 +879,7 @@ impl SsmService {
         if let Some(ref sra) = task.service_role_arn {
             resp["ServiceRoleArn"] = json!(sra);
         }
+        append_task_invocation_fields(&mut resp, task);
 
         Ok(AwsResponse::ok_json(resp))
     }

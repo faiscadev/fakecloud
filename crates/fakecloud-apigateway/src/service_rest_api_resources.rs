@@ -523,23 +523,82 @@ impl ApiGatewayService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let api_id = params.get("restApiId").cloned().unwrap_or_default();
         let id = params.get("resourceId").cloned().unwrap_or_default();
+        // Collect the mutations up front so we can borrow the whole resource map
+        // afterwards (renames/moves require recomputing descendant paths).
+        let mut new_path_part: Option<String> = None;
+        let mut new_parent_id: Option<String> = None;
+        apply_patch_operations(req, |op, path, value| match (op, path) {
+            ("replace", "/pathPart") => {
+                if let Some(s) = value.as_str() {
+                    new_path_part = Some(s.to_string());
+                }
+            }
+            // `move` carries the new parent in `value` (JSON pointer form),
+            // `replace` carries it directly. Accept both.
+            ("move", "/parentId") | ("replace", "/parentId") => {
+                if let Some(s) = value.as_str() {
+                    new_parent_id = Some(s.trim_start_matches('/').to_string());
+                }
+            }
+            _ => {}
+        });
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
         let resources = state
             .resources
             .get_mut(&api_id)
             .ok_or_else(|| not_found(format!("RestApi {api_id} not found")))?;
-        let resource = resources
-            .get_mut(&id)
-            .ok_or_else(|| not_found(format!("Resource {id} not found")))?;
-        apply_patch_operations(req, |op, path, value| {
-            if path == "/pathPart" && op == "replace" {
-                if let Some(s) = value.as_str() {
-                    resource.path_part = Some(s.to_string());
-                }
+        if !resources.contains_key(&id) {
+            return Err(not_found(format!("Resource {id} not found")));
+        }
+        // Validate a requested reparent target before mutating anything.
+        if let Some(pid) = &new_parent_id {
+            if !resources.contains_key(pid) {
+                return Err(not_found(format!("Resource {pid} not found")));
             }
-        });
-        ok(resource_to_json(resource, BTreeMap::new()))
+            if is_self_or_descendant(resources, &id, pid) {
+                return Err(bad_request(
+                    "Invalid parentId: cannot move a resource under itself or its descendant",
+                ));
+            }
+        }
+        // Snapshot the pre-mutation identity so a colliding change can roll back.
+        let (prev_path_part, prev_parent_id) = {
+            let r = resources.get(&id).expect("presence checked above");
+            (r.path_part.clone(), r.parent_id.clone())
+        };
+        {
+            let resource = resources.get_mut(&id).expect("presence checked above");
+            if let Some(pp) = new_path_part {
+                resource.path_part = Some(pp);
+            }
+            if let Some(pid) = new_parent_id {
+                resource.parent_id = Some(pid);
+            }
+        }
+        // Refresh stored paths for the whole tree (target + descendants).
+        recompute_resource_paths(resources);
+        // Reject a rename/reparent that collides with a sibling path (matches
+        // CreateResource, which rejects duplicates). On collision, roll back.
+        let new_path = resources[&id].path.clone();
+        if resources
+            .iter()
+            .any(|(rid, r)| rid != &id && r.path == new_path)
+        {
+            // Revert this resource's identity to the pre-mutation snapshot,
+            // then refresh paths so no partial change is persisted.
+            if let Some(r) = resources.get_mut(&id) {
+                r.path_part = prev_path_part;
+                r.parent_id = prev_parent_id;
+            }
+            recompute_resource_paths(resources);
+            return Err(conflict(format!(
+                "Another resource with the same parent already has this name: {new_path}"
+            )));
+        }
+        let resource = resources.get(&id).expect("presence checked above").clone();
+        let methods = methods_for_resource(state, &api_id, &id);
+        ok(resource_to_json(&resource, methods))
     }
 
     // ── Methods ──
@@ -773,5 +832,209 @@ impl ApiGatewayService {
             }
         });
         ok(v.clone())
+    }
+}
+
+#[cfg(test)]
+mod resource_patch_tests {
+    use super::*;
+    use fakecloud_core::service::ResponseBody;
+    use std::collections::HashMap;
+
+    fn svc() -> ApiGatewayService {
+        let state =
+            std::sync::Arc::new(
+                parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::<
+                    crate::state::ApiGatewayState,
+                >::new("123456789012", "us-east-1", "")),
+            );
+        ApiGatewayService::new(state)
+    }
+
+    fn req_body(body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "apigateway".into(),
+            action: "x".into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_json(resp: &AwsResponse) -> Value {
+        match &resp.body {
+            ResponseBody::Bytes(b) => serde_json::from_slice(b).unwrap(),
+            _ => panic!("expected bytes body"),
+        }
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn update_rest_api_applies_compression_and_endpoint_config() {
+        let s = svc();
+        let created = body_json(
+            &s.create_rest_api(&req_body(json!({
+                "name": "api",
+                "endpointConfiguration": { "types": ["EDGE"] }
+            })))
+            .unwrap(),
+        );
+        let api_id = created["id"].as_str().unwrap().to_string();
+        let p = params(&[("restApiId", &api_id)]);
+
+        let updated = body_json(
+            &s.update_rest_api(
+                &req_body(json!({ "patchOperations": [
+                    { "op": "replace", "path": "/minimumCompressionSize", "value": "1024" },
+                    { "op": "replace", "path": "/endpointConfiguration/types/0", "value": "REGIONAL" },
+                ]})),
+                &p,
+            )
+            .unwrap(),
+        );
+        assert_eq!(updated["minimumCompressionSize"], json!(1024));
+        assert_eq!(
+            updated["endpointConfiguration"]["types"][0],
+            json!("REGIONAL")
+        );
+
+        // Persisted via GetRestApi.
+        let got = body_json(&s.get_rest_api(&req_body(json!({})), &p).unwrap());
+        assert_eq!(got["minimumCompressionSize"], json!(1024));
+        assert_eq!(got["endpointConfiguration"]["types"][0], json!("REGIONAL"));
+    }
+
+    #[test]
+    fn update_resource_rename_and_reparent_recompute_paths() {
+        let s = svc();
+        let api = body_json(
+            &s.create_rest_api(&req_body(json!({ "name": "api" })))
+                .unwrap(),
+        );
+        let api_id = api["id"].as_str().unwrap().to_string();
+        let root_id = api["rootResourceId"].as_str().unwrap().to_string();
+
+        // /pets
+        let pets = body_json(
+            &s.create_resource(
+                &req_body(json!({ "pathPart": "pets" })),
+                &params(&[("restApiId", &api_id), ("parentId", &root_id)]),
+            )
+            .unwrap(),
+        );
+        let pets_id = pets["id"].as_str().unwrap().to_string();
+        assert_eq!(pets["path"], json!("/pets"));
+
+        // /pets/list
+        let list = body_json(
+            &s.create_resource(
+                &req_body(json!({ "pathPart": "list" })),
+                &params(&[("restApiId", &api_id), ("parentId", &pets_id)]),
+            )
+            .unwrap(),
+        );
+        let list_id = list["id"].as_str().unwrap().to_string();
+        assert_eq!(list["path"], json!("/pets/list"));
+
+        // Rename /pets -> /animals; descendant must follow.
+        let renamed = body_json(
+            &s.update_resource(
+                &req_body(json!({ "patchOperations": [
+                    { "op": "replace", "path": "/pathPart", "value": "animals" }
+                ]})),
+                &params(&[("restApiId", &api_id), ("resourceId", &pets_id)]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(renamed["path"], json!("/animals"));
+        let got_list = body_json(
+            &s.get_resource(
+                &req_body(json!({})),
+                &params(&[("restApiId", &api_id), ("resourceId", &list_id)]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(got_list["path"], json!("/animals/list"));
+
+        // Reparent /animals under a new /store resource.
+        let store = body_json(
+            &s.create_resource(
+                &req_body(json!({ "pathPart": "store" })),
+                &params(&[("restApiId", &api_id), ("parentId", &root_id)]),
+            )
+            .unwrap(),
+        );
+        let store_id = store["id"].as_str().unwrap().to_string();
+        let moved = body_json(
+            &s.update_resource(
+                &req_body(json!({ "patchOperations": [
+                    { "op": "replace", "path": "/parentId", "value": store_id }
+                ]})),
+                &params(&[("restApiId", &api_id), ("resourceId", &pets_id)]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(moved["path"], json!("/store/animals"));
+        let got_list = body_json(
+            &s.get_resource(
+                &req_body(json!({})),
+                &params(&[("restApiId", &api_id), ("resourceId", &list_id)]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(got_list["path"], json!("/store/animals/list"));
+
+        // Cycle guard: cannot move /store under its own descendant.
+        let err = s.update_resource(
+            &req_body(json!({ "patchOperations": [
+                { "op": "replace", "path": "/parentId", "value": list_id }
+            ]})),
+            &params(&[("restApiId", &api_id), ("resourceId", &store_id)]),
+        );
+        assert!(err.is_err());
+
+        // Collision guard: create /store/other, then renaming it to "animals"
+        // (colliding with the existing /store/animals) must fail and roll back.
+        let other = body_json(
+            &s.create_resource(
+                &req_body(json!({ "pathPart": "other" })),
+                &params(&[("restApiId", &api_id), ("parentId", &store_id)]),
+            )
+            .unwrap(),
+        );
+        let other_id = other["id"].as_str().unwrap().to_string();
+        let collision = s.update_resource(
+            &req_body(json!({ "patchOperations": [
+                { "op": "replace", "path": "/pathPart", "value": "animals" }
+            ]})),
+            &params(&[("restApiId", &api_id), ("resourceId", &other_id)]),
+        );
+        assert!(collision.is_err());
+        // Rolled back: /store/other still resolves to its original path.
+        let got_other = body_json(
+            &s.get_resource(
+                &req_body(json!({})),
+                &params(&[("restApiId", &api_id), ("resourceId", &other_id)]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(got_other["path"], json!("/store/other"));
     }
 }

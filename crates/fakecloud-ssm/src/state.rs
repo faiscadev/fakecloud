@@ -165,6 +165,10 @@ pub struct MaintenanceWindowTask {
     pub service_role_arn: Option<String>,
     pub name: Option<String>,
     pub description: Option<String>,
+    pub task_invocation_parameters: Option<serde_json::Value>,
+    pub task_parameters: Option<serde_json::Value>,
+    pub logging_info: Option<serde_json::Value>,
+    pub cutoff_behavior: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

@@ -5070,3 +5070,131 @@ fn put_parameter_duplicate_without_overwrite_reports_already_exists_first() {
     };
     assert_eq!(err.code(), "ParameterAlreadyExists");
 }
+
+#[test]
+fn maintenance_window_task_persists_invocation_params() {
+    let svc = make_service();
+    // Create window.
+    let req = make_request(
+        "CreateMaintenanceWindow",
+        json!({
+            "Name": "inv-mw",
+            "Schedule": "cron(0 2 ? * SUN *)",
+            "Duration": 3,
+            "Cutoff": 1,
+            "AllowUnassociatedTargets": true,
+        }),
+    );
+    let body: Value = serde_json::from_slice(
+        svc.create_maintenance_window(&req)
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .unwrap();
+    let window_id = body["WindowId"].as_str().unwrap().to_string();
+
+    // Register a task carrying invocation params, logging, and cutoff behavior.
+    let invocation = json!({
+        "RunCommand": {
+            "DocumentVersion": "$LATEST",
+            "Parameters": { "commands": ["echo hi"] },
+            "TimeoutSeconds": 600
+        }
+    });
+    let logging = json!({ "S3BucketName": "logs", "S3KeyPrefix": "mw/" });
+    let req = make_request(
+        "RegisterTaskWithMaintenanceWindow",
+        json!({
+            "WindowId": window_id,
+            "TaskArn": "AWS-RunShellScript",
+            "TaskType": "RUN_COMMAND",
+            "Targets": [{"Key": "InstanceIds", "Values": ["i-001"]}],
+            "TaskInvocationParameters": invocation,
+            "LoggingInfo": logging,
+            "CutoffBehavior": "CONTINUE_TASK",
+        }),
+    );
+    let body: Value = serde_json::from_slice(
+        svc.register_task_with_maintenance_window(&req)
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .unwrap();
+    let task_id = body["WindowTaskId"].as_str().unwrap().to_string();
+
+    // Get returns the stored fields.
+    let req = make_request(
+        "GetMaintenanceWindowTask",
+        json!({ "WindowId": window_id, "WindowTaskId": task_id }),
+    );
+    let body: Value = serde_json::from_slice(
+        svc.get_maintenance_window_task(&req)
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["TaskInvocationParameters"], invocation);
+    assert_eq!(body["LoggingInfo"], logging);
+    assert_eq!(body["CutoffBehavior"], "CONTINUE_TASK");
+
+    // Describe returns them too.
+    let req = make_request(
+        "DescribeMaintenanceWindowTasks",
+        json!({ "WindowId": window_id }),
+    );
+    let body: Value = serde_json::from_slice(
+        svc.describe_maintenance_window_tasks(&req)
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .unwrap();
+    let task = &body["Tasks"][0];
+    assert_eq!(task["TaskInvocationParameters"], invocation);
+    assert_eq!(task["CutoffBehavior"], "CONTINUE_TASK");
+
+    // Update can modify them.
+    let new_cutoff = "CANCEL_TASK";
+    let req = make_request(
+        "UpdateMaintenanceWindowTask",
+        json!({
+            "WindowId": window_id,
+            "WindowTaskId": task_id,
+            "CutoffBehavior": new_cutoff,
+            "TaskInvocationParameters": { "RunCommand": { "TimeoutSeconds": 120 } },
+        }),
+    );
+    let body: Value = serde_json::from_slice(
+        svc.update_maintenance_window_task(&req)
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["CutoffBehavior"], new_cutoff);
+    assert_eq!(
+        body["TaskInvocationParameters"]["RunCommand"]["TimeoutSeconds"],
+        120
+    );
+
+    // And the change persists.
+    let req = make_request(
+        "GetMaintenanceWindowTask",
+        json!({ "WindowId": window_id, "WindowTaskId": task_id }),
+    );
+    let body: Value = serde_json::from_slice(
+        svc.get_maintenance_window_task(&req)
+            .unwrap()
+            .body
+            .expect_bytes(),
+    )
+    .unwrap();
+    assert_eq!(body["CutoffBehavior"], new_cutoff);
+    assert_eq!(
+        body["TaskInvocationParameters"]["RunCommand"]["TimeoutSeconds"],
+        120
+    );
+}

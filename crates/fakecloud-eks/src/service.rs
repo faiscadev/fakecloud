@@ -569,7 +569,10 @@ impl EksService {
             tags,
             updates: Default::default(),
             connector_config: None,
-            encryption_config: None,
+            encryption_config: body
+                .get("encryptionConfig")
+                .filter(|v| v.is_array())
+                .cloned(),
             access_config: build_access_config(body.get("accessConfig")),
             upgrade_policy: build_upgrade_policy(body.get("upgradePolicy")),
             compute_config: body.get("computeConfig").cloned(),
@@ -1203,15 +1206,47 @@ impl EksService {
             params.push(("ScalingConfig".to_string(), scaling.to_string()));
         }
         if let Some(labels) = body.get("labels") {
-            if let Some(add) = labels.get("addOrUpdateLabels").and_then(|v| v.as_object()) {
-                let map = ng.labels.as_object_mut();
-                if let Some(map) = map {
+            if !ng.labels.is_object() {
+                ng.labels = json!({});
+            }
+            if let Some(map) = ng.labels.as_object_mut() {
+                if let Some(add) = labels.get("addOrUpdateLabels").and_then(|v| v.as_object()) {
                     for (k, v) in add {
                         map.insert(k.clone(), v.clone());
                     }
                 }
+                if let Some(remove) = labels.get("removeLabels").and_then(|v| v.as_array()) {
+                    for k in remove.iter().filter_map(|v| v.as_str()) {
+                        map.remove(k);
+                    }
+                }
             }
             params.push(("LabelsToAdd".to_string(), labels.to_string()));
+        }
+        if let Some(taints) = body.get("taints") {
+            if !ng.taints.is_array() {
+                ng.taints = json!([]);
+            }
+            if let Some(arr) = ng.taints.as_array_mut() {
+                // Remove first so an add+remove of the same key in one call keeps the add.
+                if let Some(remove) = taints.get("removeTaints").and_then(|v| v.as_array()) {
+                    for rt in remove {
+                        let id = taint_identity(rt);
+                        arr.retain(|t| taint_identity(t) != id);
+                    }
+                }
+                if let Some(add) = taints.get("addOrUpdateTaints").and_then(|v| v.as_array()) {
+                    for nt in add {
+                        let id = taint_identity(nt);
+                        if let Some(existing) = arr.iter_mut().find(|t| taint_identity(t) == id) {
+                            *existing = nt.clone();
+                        } else {
+                            arr.push(nt.clone());
+                        }
+                    }
+                }
+            }
+            params.push(("Taints".to_string(), taints.to_string()));
         }
         if let Some(update_config) = body.get("updateConfig") {
             ng.update_config = build_nodegroup_update_config(Some(update_config));
