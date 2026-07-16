@@ -740,6 +740,99 @@ async fn bootstrap_service_fixtures(client: &aws_sdk_ecs::Client, cluster: &str,
 }
 
 #[tokio::test]
+async fn service_connect_configuration_round_trips_on_describe() {
+    use aws_sdk_ecs::types::{
+        ServiceConnectClientAlias, ServiceConnectConfiguration, ServiceConnectService,
+    };
+    // desired_count 0 -> no task spawn -> no Docker needed; this exercises the
+    // control-plane persistence of serviceConnectConfiguration only.
+    let server = TestServer::start().await;
+    let client = server.ecs_client().await;
+    bootstrap_service_fixtures(&client, "sc-cluster", "sc-td").await;
+
+    let sc = ServiceConnectConfiguration::builder()
+        .enabled(true)
+        .namespace("sc-ns")
+        .services(
+            ServiceConnectService::builder()
+                .port_name("app")
+                .client_aliases(
+                    ServiceConnectClientAlias::builder()
+                        .port(8080)
+                        .dns_name("web.internal")
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .build();
+
+    client
+        .create_service()
+        .cluster("sc-cluster")
+        .service_name("web")
+        .task_definition("sc-td")
+        .desired_count(0)
+        .service_connect_configuration(sc)
+        .send()
+        .await
+        .expect("create_service with service connect");
+
+    let described = client
+        .describe_services()
+        .cluster("sc-cluster")
+        .services("web")
+        .send()
+        .await
+        .expect("describe_services");
+    let svc = &described.services()[0];
+    let primary = svc
+        .deployments()
+        .iter()
+        .find(|d| d.status() == Some("PRIMARY"))
+        .expect("primary deployment");
+    let got = primary
+        .service_connect_configuration()
+        .expect("serviceConnectConfiguration must round-trip");
+    assert!(got.enabled());
+    assert_eq!(got.namespace(), Some("sc-ns"));
+    assert_eq!(got.services()[0].port_name(), "app");
+
+    // Updating with an empty configuration disables Service Connect.
+    client
+        .update_service()
+        .cluster("sc-cluster")
+        .service("web")
+        .service_connect_configuration(
+            ServiceConnectConfiguration::builder()
+                .enabled(false)
+                .build(),
+        )
+        .send()
+        .await
+        .expect("update_service disables service connect");
+    let redescribed = client
+        .describe_services()
+        .cluster("sc-cluster")
+        .services("web")
+        .send()
+        .await
+        .expect("describe_services 2");
+    let primary2 = redescribed.services()[0]
+        .deployments()
+        .iter()
+        .find(|d| d.status() == Some("PRIMARY"))
+        .expect("primary deployment 2");
+    assert_eq!(
+        primary2
+            .service_connect_configuration()
+            .map(|c| c.enabled()),
+        Some(false)
+    );
+}
+
+#[tokio::test]
 async fn create_service_spawns_desired_tasks_and_describe_roundtrips() {
     if !require_docker_or_skip("create_service_spawns_desired_tasks_and_describe_roundtrips") {
         return;

@@ -304,13 +304,25 @@ impl Wafv2Service {
         let _scope = require_scope(&body)?;
         let version =
             opt_str_len(&body, "VersionName", 1, 64)?.unwrap_or_else(|| "Version_1.0".to_string());
+        // AWS rejects an unknown (vendor, name) with WAFInvalidParameterException
+        // rather than returning a fabricated rule group.
+        let def = managed_group_def(&vendor, &name).ok_or_else(|| {
+            invalid_param(format!(
+                "The managed rule group {vendor}/{name} does not exist."
+            ))
+        })?;
+        let available_labels: Vec<Value> = def
+            .rules
+            .iter()
+            .map(|r| json!({ "Name": format!("awswaf:managed:{vendor}:{name}:{r}") }))
+            .collect();
         Ok(AwsResponse::ok_json(json!({
             "VersionName": version,
             "SnsTopicArn": Arn::new("sns", "us-east-1", "", &format!("{vendor}-{name}-notifications")).to_string(),
-            "Capacity": 50,
+            "Capacity": def.capacity,
             "Rules": managed_rule_summaries(&vendor, &name),
             "LabelNamespace": format!("awswaf:managed:{vendor}:{name}:"),
-            "AvailableLabels": [],
+            "AvailableLabels": available_labels,
             "ConsumedLabels": [],
         })))
     }
@@ -386,27 +398,19 @@ impl Wafv2Service {
         let _scope = require_scope(&body)?;
         validate_opt_limit(&body)?;
         validate_opt_next_marker(&body)?;
+        let groups: Vec<Value> = managed_rule_group_catalog()
+            .iter()
+            .map(|d| {
+                json!({
+                    "VendorName": d.vendor,
+                    "Name": d.name,
+                    "VersioningSupported": true,
+                    "Description": d.description,
+                })
+            })
+            .collect();
         Ok(AwsResponse::ok_json(json!({
-            "ManagedRuleGroups": [
-                {
-                    "VendorName": "AWS",
-                    "Name": "AWSManagedRulesCommonRuleSet",
-                    "VersioningSupported": true,
-                    "Description": "OWASP Top 10 baseline rules",
-                },
-                {
-                    "VendorName": "AWS",
-                    "Name": "AWSManagedRulesKnownBadInputsRuleSet",
-                    "VersioningSupported": true,
-                    "Description": "Block request patterns associated with known exploits",
-                },
-                {
-                    "VendorName": "AWS",
-                    "Name": "AWSManagedRulesSQLiRuleSet",
-                    "VersioningSupported": true,
-                    "Description": "SQL injection patterns",
-                },
-            ],
+            "ManagedRuleGroups": groups,
         })))
     }
 

@@ -1258,10 +1258,21 @@ pub(crate) fn service_to_json(svc: &Service) -> Value {
             Value::Object(deployment_cfg),
         );
     }
-    map.insert(
-        "deployments".into(),
-        Value::Array(svc.deployments.iter().map(deployment_to_json).collect()),
-    );
+    let mut deployment_values: Vec<Value> =
+        svc.deployments.iter().map(deployment_to_json).collect();
+    // AWS carries serviceConnectConfiguration on each deployment. Echo the
+    // service's stored config onto the PRIMARY deployment so a Create/Update
+    // that supplied one round-trips on DescribeServices instead of vanishing.
+    if let Some(ref sc) = svc.service_connect_configuration {
+        for (dv, dep) in deployment_values.iter_mut().zip(svc.deployments.iter()) {
+            if dep.status == "PRIMARY" {
+                if let Some(obj) = dv.as_object_mut() {
+                    obj.insert("serviceConnectConfiguration".into(), sc.clone());
+                }
+            }
+        }
+    }
+    map.insert("deployments".into(), Value::Array(deployment_values));
     map.insert(
         "loadBalancers".into(),
         Value::Array(svc.load_balancers.clone()),

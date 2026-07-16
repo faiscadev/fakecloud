@@ -193,6 +193,59 @@ async fn sagemaker_pipeline_execution_round_trip() {
     );
 }
 
+/// Stop*/Start* lifecycle ops must advance the target resource's status so a
+/// subsequent Describe reflects the transition instead of the default state.
+#[tokio::test]
+async fn sagemaker_notebook_instance_stop_start_transitions_status() {
+    let server = TestServer::start().await;
+    let client = sagemaker_client(&server).await;
+
+    client
+        .create_notebook_instance()
+        .notebook_instance_name("nb-1")
+        .instance_type(aws_sdk_sagemaker::types::InstanceType::MlT2Medium)
+        .role_arn("arn:aws:iam::000000000000:role/SageMakerRole")
+        .send()
+        .await
+        .expect("create_notebook_instance");
+
+    client
+        .stop_notebook_instance()
+        .notebook_instance_name("nb-1")
+        .send()
+        .await
+        .expect("stop_notebook_instance");
+    let stopped = client
+        .describe_notebook_instance()
+        .notebook_instance_name("nb-1")
+        .send()
+        .await
+        .expect("describe after stop");
+    assert_eq!(
+        stopped.notebook_instance_status(),
+        Some(&aws_sdk_sagemaker::types::NotebookInstanceStatus::Stopped),
+        "StopNotebookInstance must move status to Stopped"
+    );
+
+    client
+        .start_notebook_instance()
+        .notebook_instance_name("nb-1")
+        .send()
+        .await
+        .expect("start_notebook_instance");
+    let started = client
+        .describe_notebook_instance()
+        .notebook_instance_name("nb-1")
+        .send()
+        .await
+        .expect("describe after start");
+    assert_eq!(
+        started.notebook_instance_status(),
+        Some(&aws_sdk_sagemaker::types::NotebookInstanceStatus::InService),
+        "StartNotebookInstance must move status to InService"
+    );
+}
+
 /// `AddAssociation` is the only creation path for a lineage edge; the edge must
 /// then be listed and deletable.
 #[tokio::test]

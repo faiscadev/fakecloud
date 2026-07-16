@@ -260,6 +260,23 @@ impl fakecloud_core::delivery::EcsTaskRunner for EcsTaskRunnerImpl {
     }
 }
 
+/// SageMaker pipeline starter used by EventBridge Scheduler's
+/// `sagemaker:pipeline` target: persists a PipelineExecution record so the
+/// Describe/List pipeline-execution ops resolve it.
+pub(crate) struct SageMakerPipelineDeliveryImpl {
+    pub(crate) state: fakecloud_sagemaker::SharedSageMakerState,
+}
+
+impl fakecloud_core::delivery::SageMakerPipelineDelivery for SageMakerPipelineDeliveryImpl {
+    fn start_pipeline_execution(&self, pipeline_arn: &str, parameters: &serde_json::Value) {
+        fakecloud_sagemaker::start_pipeline_execution_from_delivery(
+            &self.state,
+            pipeline_arn,
+            parameters,
+        );
+    }
+}
+
 /// SMS dispatcher used by Cognito's verification flow: append to the SNS
 /// account's `sms_messages` so test code can assert on what landed.
 pub(crate) struct SnsSmsDispatcher {

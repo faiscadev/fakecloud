@@ -1610,3 +1610,75 @@ async fn update_api_changes_route_selection_expression() {
     let got = client.get_api().api_id(&api_id).send().await.unwrap();
     assert_eq!(got.route_selection_expression(), Some("$request.body.kind"));
 }
+
+#[tokio::test]
+async fn update_route_response_merges_fields() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+
+    let api_id = client
+        .create_api()
+        .name("rr-api")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Websocket)
+        .route_selection_expression("$request.body.action")
+        .send()
+        .await
+        .unwrap()
+        .api_id()
+        .unwrap()
+        .to_string();
+
+    let route_id = client
+        .create_route()
+        .api_id(&api_id)
+        .route_key("$default")
+        .send()
+        .await
+        .unwrap()
+        .route_id()
+        .unwrap()
+        .to_string();
+
+    // Create a route response carrying two independent fields.
+    let created = client
+        .create_route_response()
+        .api_id(&api_id)
+        .route_id(&route_id)
+        .route_response_key("$default")
+        .model_selection_expression("$request.body.kind")
+        .send()
+        .await
+        .expect("create_route_response");
+    let rr_id = created.route_response_id().unwrap().to_string();
+    assert_eq!(
+        created.model_selection_expression(),
+        Some("$request.body.kind")
+    );
+
+    // Update ONLY the route response key. The previously-set
+    // modelSelectionExpression must survive the merge (before the fix, update
+    // wholesale-replaced the record and dropped it).
+    client
+        .update_route_response()
+        .api_id(&api_id)
+        .route_id(&route_id)
+        .route_response_id(&rr_id)
+        .route_response_key("$default")
+        .send()
+        .await
+        .expect("update_route_response");
+
+    let got = client
+        .get_route_response()
+        .api_id(&api_id)
+        .route_id(&route_id)
+        .route_response_id(&rr_id)
+        .send()
+        .await
+        .expect("get_route_response");
+    assert_eq!(
+        got.model_selection_expression(),
+        Some("$request.body.kind"),
+        "modelSelectionExpression must persist across a partial update"
+    );
+}

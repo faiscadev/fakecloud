@@ -191,6 +191,95 @@ async fn table_lifecycle() {
 }
 
 #[tokio::test]
+async fn table_versions_are_archived_on_create_and_update() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+
+    glue.create_database()
+        .database_input(DatabaseInput::builder().name("versdb").build().unwrap())
+        .send()
+        .await
+        .expect("create db");
+
+    glue.create_table()
+        .database_name("versdb")
+        .table_input(table_input("t"))
+        .send()
+        .await
+        .expect("create table");
+
+    // A create archives version 1.
+    let v1 = glue
+        .get_table_versions()
+        .database_name("versdb")
+        .table_name("t")
+        .send()
+        .await
+        .expect("get versions after create");
+    assert_eq!(v1.table_versions().len(), 1);
+    assert_eq!(v1.table_versions()[0].version_id(), Some("1"));
+
+    // An update archives a second version with the mutated table.
+    glue.update_table()
+        .database_name("versdb")
+        .table_input(
+            TableInput::builder()
+                .name("t")
+                .description("updated description")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("update table");
+
+    let v2 = glue
+        .get_table_versions()
+        .database_name("versdb")
+        .table_name("t")
+        .send()
+        .await
+        .expect("get versions after update");
+    assert_eq!(
+        v2.table_versions().len(),
+        2,
+        "update must archive a new version"
+    );
+
+    // GetTableVersion with no VersionId returns the latest (2), reflecting the
+    // updated description rather than a synthesized default.
+    let latest = glue
+        .get_table_version()
+        .database_name("versdb")
+        .table_name("t")
+        .send()
+        .await
+        .expect("get latest version");
+    let tv = latest.table_version().expect("table version");
+    assert_eq!(tv.version_id(), Some("2"));
+    assert_eq!(
+        tv.table().and_then(|t| t.description()),
+        Some("updated description")
+    );
+
+    // Deleting the table purges its version archive.
+    glue.delete_table()
+        .database_name("versdb")
+        .name("t")
+        .send()
+        .await
+        .expect("delete");
+    let after = glue
+        .get_table_versions()
+        .database_name("versdb")
+        .table_name("t")
+        .send()
+        .await
+        .expect("get versions after delete");
+    assert!(after.table_versions().is_empty());
+}
+
+#[tokio::test]
 async fn partition_lifecycle() {
     let server = TestServer::start().await;
     let glue = server.glue_client().await;

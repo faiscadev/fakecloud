@@ -303,6 +303,114 @@ async fn sns_subscribe_rejects_unknown_protocol() {
     assert!(subs.subscriptions().is_empty());
 }
 
+/// An SQS subscriber whose target queue is gone must route the notification to
+/// the subscription's RedrivePolicy DLQ instead of silently dropping it — the
+/// DLQ was previously honored for HTTP subscribers only.
+#[tokio::test]
+async fn sns_sqs_subscriber_failure_routes_to_dlq() {
+    let server = TestServer::start().await;
+    let sns = server.sns_client().await;
+    let sqs = server.sqs_client().await;
+
+    async fn queue_arn(sqs: &aws_sdk_sqs::Client, url: &str) -> String {
+        sqs.get_queue_attributes()
+            .queue_url(url)
+            .attribute_names(QueueAttributeName::QueueArn)
+            .send()
+            .await
+            .unwrap()
+            .attributes()
+            .unwrap()
+            .get(&QueueAttributeName::QueueArn)
+            .unwrap()
+            .to_string()
+    }
+
+    // Main queue (will be deleted) + DLQ.
+    let main_url = sqs
+        .create_queue()
+        .queue_name("dlq-main")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let main_arn = queue_arn(&sqs, &main_url).await;
+    let dlq_url = sqs
+        .create_queue()
+        .queue_name("dlq-target")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let dlq_arn = queue_arn(&sqs, &dlq_url).await;
+
+    let topic_arn = sns
+        .create_topic()
+        .name("dlq-topic")
+        .send()
+        .await
+        .unwrap()
+        .topic_arn()
+        .unwrap()
+        .to_string();
+    let sub_arn = sns
+        .subscribe()
+        .topic_arn(&topic_arn)
+        .protocol("sqs")
+        .endpoint(&main_arn)
+        .return_subscription_arn(true)
+        .send()
+        .await
+        .unwrap()
+        .subscription_arn()
+        .unwrap()
+        .to_string();
+    sns.set_subscription_attributes()
+        .subscription_arn(&sub_arn)
+        .attribute_name("RedrivePolicy")
+        .attribute_value(format!(r#"{{"deadLetterTargetArn":"{dlq_arn}"}}"#))
+        .send()
+        .await
+        .unwrap();
+
+    // Delete the subscribed queue so delivery fails.
+    sqs.delete_queue()
+        .queue_url(&main_url)
+        .send()
+        .await
+        .unwrap();
+
+    sns.publish()
+        .topic_arn(&topic_arn)
+        .message("to-dlq")
+        .send()
+        .await
+        .unwrap();
+
+    // The notification must land in the DLQ.
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&dlq_url)
+        .max_number_of_messages(10)
+        .wait_time_seconds(1)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        msgs.messages().len(),
+        1,
+        "failed delivery must route to DLQ"
+    );
+    assert!(
+        msgs.messages()[0].body().unwrap().contains("to-dlq"),
+        "DLQ envelope should wrap the original message"
+    );
+}
+
 /// Subscribing Lambda/email/sms protocols should succeed (stub delivery).
 #[tokio::test]
 async fn sns_subscribe_lambda_email_sms() {

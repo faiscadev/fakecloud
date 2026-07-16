@@ -97,7 +97,10 @@ impl ApiGatewayService {
             .get_mut(&id)
             .ok_or_else(|| not_found("UsagePlan not found"))?;
         apply_patch_operations(req, |op, path, value| {
-            if op != "replace" && op != "add" {
+            // `remove` must fall through too — the /apiStages/<id>:<stage>
+            // detach arm below is a remove op (previously dead code because
+            // this guard dropped every non-replace/add op).
+            if op != "replace" && op != "add" && op != "remove" {
                 return;
             }
             match path {

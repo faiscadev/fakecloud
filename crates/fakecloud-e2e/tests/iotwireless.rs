@@ -285,3 +285,106 @@ async fn iotwireless_stub_fixes_round_trip() {
         .expect("send_data_to_wireless_device");
     assert!(sent.message_id().is_some_and(|m| !m.is_empty()));
 }
+
+#[tokio::test]
+async fn iotwireless_gateway_thing_and_certificate_associations() {
+    // Bug-hunt 1.22: Associate*WithThing / *WithCertificate were accept-and-
+    // discard no-ops. Associations must round-trip through the reads.
+    let server = TestServer::start().await;
+    let client = iotwireless_client(&server).await;
+
+    let gw = client
+        .create_wireless_gateway()
+        .lo_ra_wan(
+            aws_sdk_iotwireless::types::LoRaWanGateway::builder()
+                .gateway_eui("0000000000000001")
+                .rf_region("US915")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create_wireless_gateway");
+    let gw_id = gw.id().expect("gateway id").to_string();
+
+    // Associate with an IoT thing.
+    let thing_arn = "arn:aws:iot:us-east-1:000000000000:thing/gw-thing";
+    client
+        .associate_wireless_gateway_with_thing()
+        .id(&gw_id)
+        .thing_arn(thing_arn)
+        .send()
+        .await
+        .expect("associate_wireless_gateway_with_thing");
+    let got = client
+        .get_wireless_gateway()
+        .identifier(&gw_id)
+        .identifier_type(aws_sdk_iotwireless::types::WirelessGatewayIdType::WirelessGatewayId)
+        .send()
+        .await
+        .expect("get_wireless_gateway");
+    assert_eq!(got.thing_arn(), Some(thing_arn));
+    assert_eq!(got.thing_name(), Some("gw-thing"));
+
+    // Associate a certificate.
+    client
+        .associate_wireless_gateway_with_certificate()
+        .id(&gw_id)
+        .iot_certificate_id("cert-abc123")
+        .send()
+        .await
+        .expect("associate_wireless_gateway_with_certificate");
+    let cert = client
+        .get_wireless_gateway_certificate()
+        .id(&gw_id)
+        .send()
+        .await
+        .expect("get_wireless_gateway_certificate");
+    assert_eq!(cert.iot_certificate_id(), Some("cert-abc123"));
+
+    // Disassociate the thing clears it.
+    client
+        .disassociate_wireless_gateway_from_thing()
+        .id(&gw_id)
+        .send()
+        .await
+        .expect("disassociate_wireless_gateway_from_thing");
+    let got = client
+        .get_wireless_gateway()
+        .identifier(&gw_id)
+        .identifier_type(aws_sdk_iotwireless::types::WirelessGatewayIdType::WirelessGatewayId)
+        .send()
+        .await
+        .expect("get after disassociate");
+    assert!(got.thing_arn().is_none() || got.thing_arn() == Some(""));
+}
+
+#[tokio::test]
+async fn iotwireless_partner_account_association() {
+    // Bug-hunt 1.22: AssociateAwsAccountWithPartnerAccount persisted nothing.
+    let server = TestServer::start().await;
+    let client = iotwireless_client(&server).await;
+
+    client
+        .associate_aws_account_with_partner_account()
+        .sidewalk(
+            aws_sdk_iotwireless::types::SidewalkAccountInfo::builder()
+                .amazon_id("amzn-partner-1")
+                .app_server_private_key("0123456789abcdef")
+                .build(),
+        )
+        .send()
+        .await
+        .expect("associate_aws_account_with_partner_account");
+
+    let list = client
+        .list_partner_accounts()
+        .send()
+        .await
+        .expect("list_partner_accounts");
+    assert!(
+        list.sidewalk()
+            .iter()
+            .any(|s| s.amazon_id() == Some("amzn-partner-1")),
+        "partner account must be listed"
+    );
+}

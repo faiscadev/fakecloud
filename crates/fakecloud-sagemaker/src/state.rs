@@ -48,6 +48,11 @@ impl SageMakerData {
         self.resources.get(family).and_then(|m| m.get(id))
     }
 
+    /// Fetch a mutable resource record by family + id.
+    pub fn get_resource_mut(&mut self, family: &str, id: &str) -> Option<&mut Value> {
+        self.resources.get_mut(family).and_then(|m| m.get_mut(id))
+    }
+
     /// Insert / replace a resource record.
     pub fn put_resource(&mut self, family: &str, id: &str, record: Value) {
         self.resources
