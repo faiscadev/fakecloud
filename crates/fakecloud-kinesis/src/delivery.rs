@@ -285,6 +285,41 @@ mod tests {
         );
     }
 
+    // bug-hunt restart-dataloss: the EventBridge Scheduler and EventBridge-Pipes
+    // delivery buses must build their Kinesis sender with `with_dirty_flag`, not
+    // `::new`. `::new` leaves `dirty: None`, so `mark_dirty()` is a no-op and a
+    // record delivered to a Kinesis stream target by a schedule/pipe lands in
+    // memory but never flips the shared flag the flusher persists on -> the
+    // record vanishes on restart. This locks in the `::new` vs `with_dirty_flag`
+    // contract those wiring sites depend on.
+    #[test]
+    fn new_does_not_mark_dirty_but_with_dirty_flag_does() {
+        let stream = make_stream("contract", 1);
+        let arn = stream.stream_arn.clone();
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"evt");
+
+        // `::new` (the buggy scheduler/pipes wiring) delivers but never signals
+        // the flusher, so the record would be lost on restart.
+        let state_new = make_state(make_stream("contract", 1));
+        let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let via_new = KinesisDeliveryImpl::new(state_new.clone());
+        via_new.put_record(&arn, &encoded, "pk");
+        assert!(
+            !flag.load(Ordering::Acquire),
+            "::new must not touch any external dirty flag"
+        );
+
+        // `with_dirty_flag` (the fixed wiring) flips the shared flag so the
+        // background flusher persists the delivery.
+        let state_dirty = make_state(stream);
+        let via_flag = KinesisDeliveryImpl::with_dirty_flag(state_dirty.clone(), flag.clone());
+        via_flag.put_record(&arn, &encoded, "pk");
+        assert!(
+            flag.load(Ordering::Acquire),
+            "with_dirty_flag must flip the shared flag so the flusher persists"
+        );
+    }
+
     // bug-audit 2026-06-26, 4.1: after a split/merge the modulo router could
     // land a fanned-in record on a CLOSED parent shard (drained, null iterator)
     // -> silent loss. Delivery must route by hash range over OPEN shards only.

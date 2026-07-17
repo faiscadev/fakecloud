@@ -4216,7 +4216,13 @@ async fn main() {
         };
     let mut autoscaling_service =
         fakecloud_autoscaling::AutoScalingService::new(autoscaling_state.clone())
-            .with_ec2(ec2_state.clone(), ec2_runtime.clone());
+            .with_ec2(ec2_state.clone(), ec2_runtime.clone())
+            // ASG capacity reconciliation launches REAL EC2 instances through a
+            // bare Ec2Service; without the EC2 snapshot hook those records live
+            // only in memory and leak their containers on restart (the EC2
+            // boot-recovery has no persisted row to re-drive). The "ec2" hook was
+            // registered above when the EC2 service was wired.
+            .with_ec2_snapshot_hook(cfn_snapshot_hooks.get("ec2").cloned());
     if let Some(store) = autoscaling_snapshot_store.clone() {
         autoscaling_service = autoscaling_service.with_snapshot_store(store);
     }
@@ -6613,8 +6619,15 @@ async fn main() {
         )
     };
     let delivery_for_scheduler = {
+        // Scheduler-driven Kinesis deliveries must flip the shared dirty flag so
+        // the background delivery flusher persists them; `::new` leaves the flag
+        // `None` and records delivered to a Kinesis stream target by a schedule
+        // would vanish on restart (bug-hunt restart-dataloss).
         let kinesis_delivery_for_scheduler =
-            fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+            fakecloud_kinesis::delivery::KinesisDeliveryImpl::with_dirty_flag(
+                kinesis_state.clone(),
+                kinesis_delivery_dirty.clone(),
+            );
         let ses_dispatcher_for_scheduler: Arc<
             dyn fakecloud_core::delivery::SesSendEmailDispatcher,
         > = Arc::new(SesSendEmailDispatcherImpl {
@@ -6725,8 +6738,15 @@ async fn main() {
                 .with_registry(sfn_registry_handle.clone()),
             )
         };
+        // Pipe-driven Kinesis deliveries must flip the shared dirty flag so the
+        // background delivery flusher persists them; `::new` leaves the flag
+        // `None` and records delivered to a Kinesis stream target by a pipe would
+        // vanish on restart (bug-hunt restart-dataloss).
         let pipes_kinesis_delivery =
-            fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis_state.clone());
+            fakecloud_kinesis::delivery::KinesisDeliveryImpl::with_dirty_flag(
+                kinesis_state.clone(),
+                kinesis_delivery_dirty.clone(),
+            );
         let mut pipes_bus = DeliveryBus::new()
             .with_sqs(sqs_delivery.clone())
             .with_sns(sns_delivery.clone())

@@ -45,6 +45,14 @@ pub struct AutoScalingService {
     /// instances (unit tests).
     ec2_state: Option<fakecloud_ec2::SharedEc2State>,
     ec2_runtime: Option<Arc<fakecloud_ec2::Ec2Runtime>>,
+    /// EC2 whole-state snapshot hook. Reconciling desired capacity launches
+    /// (and terminates) REAL EC2 instances through a bare `Ec2Service` built
+    /// without a snapshot store, so those EC2 records lived only in memory and
+    /// leaked their containers on restart (EC2 boot-recovery had no persisted
+    /// `pending`/`running` row to re-drive). Firing this hook after an EC2
+    /// mutation writes the EC2 state through, the same way a direct
+    /// `RunInstances` API call persists (bug-hunt restart-dataloss).
+    ec2_snapshot_hook: Option<SnapshotHook>,
 }
 
 impl AutoScalingService {
@@ -55,11 +63,22 @@ impl AutoScalingService {
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             ec2_state: None,
             ec2_runtime: None,
+            ec2_snapshot_hook: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    /// Attach the EC2 snapshot hook so ASG-launched EC2 instances are persisted
+    /// after capacity reconciliation. Without it, ASG-launched instances live
+    /// only in memory and their backing containers leak on restart (there is no
+    /// persisted EC2 row for boot-recovery to re-drive). `None` (memory mode /
+    /// unit tests) makes the persist a no-op.
+    pub fn with_ec2_snapshot_hook(mut self, hook: Option<SnapshotHook>) -> Self {
+        self.ec2_snapshot_hook = hook;
         self
     }
 
@@ -995,12 +1014,18 @@ impl AutoScalingService {
 
         let mut launched: Vec<AsgInstance> = Vec::new();
         let mut terminate_ids: Vec<String> = Vec::new();
+        // Whether this reconcile mutated REAL EC2 state (launched or terminated
+        // container-backed instances), so it must be persisted through the EC2
+        // snapshot hook below. No-op when there is no EC2 backend (the ids are
+        // synthesized metadata) or no hook wired.
+        let mut ec2_touched = false;
 
         if current_ids.len() < target {
             let need = target - current_ids.len();
             let mut ids = self
                 .run_ec2_instances(&image_id, &instance_type, subnet.as_deref(), need, req)
                 .await;
+            ec2_touched = self.ec2_state.is_some();
             // No EC2 backend wired (unit tests) or a partial launch: synthesize
             // the remainder so the group still reports its desired capacity.
             while ids.len() < need {
@@ -1024,34 +1049,51 @@ impl AutoScalingService {
             let remove = current_ids.len() - target;
             terminate_ids = current_ids.iter().rev().take(remove).cloned().collect();
             self.terminate_ec2_instances(&terminate_ids, req).await;
+            ec2_touched = self.ec2_state.is_some();
         }
 
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(account);
-        let descs: Vec<String> = {
-            let Some(g) = st.groups.get_mut(name) else {
-                return;
-            };
-            let lcn = g.launch_configuration_name.clone();
-            let prot = g.new_instances_protected_from_scale_in;
-            let mut descs = Vec::new();
-            for mut ni in launched {
-                ni.launch_configuration_name = lcn.clone();
-                ni.protected_from_scale_in = prot;
-                descs.push(format!("Launching a new EC2 instance: {}", ni.instance_id));
-                g.instances.push(ni);
+        // Persist the REAL EC2 records this reconcile launched/terminated BEFORE
+        // touching the ASG state below. The ASG-launched instances are driven
+        // through a bare `Ec2Service` built without a snapshot store, so without
+        // firing the EC2 snapshot hook here they live only in memory and leak
+        // their containers on restart (EC2 boot-recovery has no persisted row to
+        // re-drive). Done before the ASG write so a concurrent group delete (the
+        // early `return` below) cannot skip persisting them. No-op when there is
+        // no EC2 backend or no hook wired (bug-hunt restart-dataloss).
+        if ec2_touched {
+            if let Some(hook) = &self.ec2_snapshot_hook {
+                hook().await;
             }
-            if !terminate_ids.is_empty() {
-                g.instances
-                    .retain(|i| !terminate_ids.contains(&i.instance_id));
-                for id in &terminate_ids {
-                    descs.push(format!("Terminating EC2 instance: {id}"));
+        }
+
+        {
+            let mut accounts = self.state.write();
+            let st = accounts.get_or_create(account);
+            let descs: Vec<String> = {
+                let Some(g) = st.groups.get_mut(name) else {
+                    return;
+                };
+                let lcn = g.launch_configuration_name.clone();
+                let prot = g.new_instances_protected_from_scale_in;
+                let mut descs = Vec::new();
+                for mut ni in launched {
+                    ni.launch_configuration_name = lcn.clone();
+                    ni.protected_from_scale_in = prot;
+                    descs.push(format!("Launching a new EC2 instance: {}", ni.instance_id));
+                    g.instances.push(ni);
                 }
+                if !terminate_ids.is_empty() {
+                    g.instances
+                        .retain(|i| !terminate_ids.contains(&i.instance_id));
+                    for id in &terminate_ids {
+                        descs.push(format!("Terminating EC2 instance: {id}"));
+                    }
+                }
+                descs
+            };
+            for d in descs {
+                st.activities.insert(0, activity(name, &d));
             }
-            descs
-        };
-        for d in descs {
-            st.activities.insert(0, activity(name, &d));
         }
     }
 }

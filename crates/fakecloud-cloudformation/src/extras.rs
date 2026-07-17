@@ -1075,7 +1075,8 @@ impl CloudFormationService {
                 // custom-resource Lambda invokes (0.2).
                 {
                     let handles =
-                        crate::service::ContainerBackingHandles::from_provisioner(&provisioner);
+                        crate::service::ContainerBackingHandles::from_provisioner(&provisioner)
+                            .with_snapshot_hooks(&self.snapshot_hooks);
                     handles.spawn_container_intents(std::mem::take(
                         &mut *provisioner.pending_container_spawns.lock(),
                     ));
