@@ -1633,6 +1633,20 @@ impl ResourceProvisioner {
             "AWS::SQS::QueuePolicy" => Some(self.update_sqs_queue_policy(existing, new_def)?),
             "AWS::SNS::Topic" => Some(self.update_sns_topic(existing, new_def)?),
             "AWS::SNS::TopicPolicy" => Some(self.update_sns_topic_policy(existing, new_def)?),
+            "AWS::SNS::Subscription" => Some(self.update_sns_subscription(existing, new_def)?),
+            "AWS::SSM::Parameter" => Some(self.update_ssm_parameter(existing, new_def)?),
+            "AWS::Logs::LogGroup" => Some(self.update_log_group(existing, new_def)?),
+            "AWS::Kinesis::Stream" => Some(self.update_kinesis_stream(existing, new_def)?),
+            "AWS::Events::Rule" => Some(self.update_eventbridge_rule(existing, new_def)?),
+            "AWS::DynamoDB::Table" => Some(self.update_dynamodb_table(existing, new_def)?),
+            "AWS::SecretsManager::Secret" => {
+                Some(self.update_secrets_manager_secret(existing, new_def)?)
+            }
+            "AWS::Cognito::UserPool" => Some(self.update_cognito_user_pool(existing, new_def)?),
+            "AWS::Cognito::UserPoolClient" => {
+                Some(self.update_cognito_user_pool_client(existing, new_def)?)
+            }
+            "AWS::RDS::DBInstance" => Some(self.update_rds_db_instance(existing, new_def)?),
             "AWS::S3::Bucket" => Some(self.update_s3_bucket(existing, new_def)?),
             "AWS::S3::BucketPolicy" => Some(self.update_s3_bucket_policy(existing, new_def)?),
             "AWS::Pipes::Pipe" => Some(self.update_pipes_pipe(existing, new_def)?),
@@ -6031,5 +6045,366 @@ mod tests {
             Some("123456789012")
         );
         assert!(prov.get_att(&cfg, "Id").is_some());
+    }
+
+    // --- UpdateStack in-place fidelity for common freely-mutable types ---
+    // Each of these creates a resource, runs an UpdateStack that changes a
+    // supported property, and asserts the owning service's live state reflects
+    // the new value (regression guard for the silent `_ => None` update arm).
+
+    #[test]
+    fn update_stack_applies_ssm_parameter_value() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SSM::Parameter",
+                "P",
+                serde_json::json!({"Name": "/app/db", "Type": "String", "Value": "v1"}),
+            ))
+            .expect("param provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::SSM::Parameter",
+                "P",
+                serde_json::json!({"Name": "/app/db", "Type": "String", "Value": "v2"}),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::SSM::Parameter is updatable");
+        let ssm = prov.ssm_state.read();
+        let acct = ssm.get("123456789012").unwrap();
+        let param = acct.parameters.get("/app/db").unwrap();
+        assert_eq!(param.value, "v2", "GetParameter must return the new value");
+        assert_eq!(param.version, 2, "overwrite bumps the version");
+        assert_eq!(param.history.len(), 1, "old value rotated into history");
+    }
+
+    #[test]
+    fn update_stack_applies_log_group_retention() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Logs::LogGroup",
+                "LG",
+                serde_json::json!({"LogGroupName": "/svc/logs", "RetentionInDays": 7}),
+            ))
+            .expect("log group provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::Logs::LogGroup",
+                "LG",
+                serde_json::json!({"LogGroupName": "/svc/logs", "RetentionInDays": 30}),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::Logs::LogGroup is updatable");
+        let logs = prov.logs_state.read();
+        let acct = logs.get("123456789012").unwrap();
+        let group = acct.log_groups.get("/svc/logs").unwrap();
+        assert_eq!(group.retention_in_days, Some(30));
+    }
+
+    #[test]
+    fn update_stack_applies_kinesis_stream_retention_and_shards() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Kinesis::Stream",
+                "KS",
+                serde_json::json!({"Name": "events", "ShardCount": 1, "RetentionPeriodHours": 24}),
+            ))
+            .expect("stream provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::Kinesis::Stream",
+                "KS",
+                serde_json::json!({"Name": "events", "ShardCount": 2, "RetentionPeriodHours": 48}),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::Kinesis::Stream is updatable");
+        let kinesis = prov.kinesis_state.read();
+        let acct = kinesis.get("123456789012").unwrap();
+        let stream = acct.streams.get("events").unwrap();
+        assert_eq!(stream.retention_period_hours, 48);
+        assert_eq!(stream.open_shard_count, 2);
+        assert_eq!(stream.shard_count, 2);
+    }
+
+    #[test]
+    fn update_stack_applies_eventbridge_rule_schedule_and_state() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Events::Rule",
+                "R",
+                serde_json::json!({"Name": "r1", "ScheduleExpression": "rate(1 hour)", "State": "ENABLED"}),
+            ))
+            .expect("rule provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::Events::Rule",
+                "R",
+                serde_json::json!({
+                    "Name": "r1",
+                    "ScheduleExpression": "rate(5 minutes)",
+                    "State": "DISABLED",
+                    "Targets": [{"Id": "t1", "Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn"}]
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::Events::Rule is updatable");
+        let eb = prov.eventbridge_state.read();
+        let acct = eb.get("123456789012").unwrap();
+        let rule = acct
+            .rules
+            .get(&("default".to_string(), "r1".to_string()))
+            .unwrap();
+        assert_eq!(rule.schedule_expression.as_deref(), Some("rate(5 minutes)"));
+        assert_eq!(rule.state, "DISABLED");
+        assert_eq!(rule.targets.len(), 1, "Targets re-applied on update");
+    }
+
+    #[test]
+    fn update_stack_applies_dynamodb_table_throughput() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::DynamoDB::Table",
+                "T",
+                serde_json::json!({
+                    "TableName": "items",
+                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                    "BillingMode": "PROVISIONED",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 5, "WriteCapacityUnits": 5}
+                }),
+            ))
+            .expect("table provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::DynamoDB::Table",
+                "T",
+                serde_json::json!({
+                    "TableName": "items",
+                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
+                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                    "BillingMode": "PROVISIONED",
+                    "ProvisionedThroughput": {"ReadCapacityUnits": 25, "WriteCapacityUnits": 40}
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::DynamoDB::Table is updatable");
+        let ddb = prov.dynamodb_state.read();
+        let acct = ddb.get("123456789012").unwrap();
+        let table = acct.tables.get("items").unwrap();
+        assert_eq!(table.provisioned_throughput.read_capacity_units, 25);
+        assert_eq!(table.provisioned_throughput.write_capacity_units, 40);
+    }
+
+    #[test]
+    fn update_stack_applies_sns_subscription_attributes() {
+        let prov = make_provisioner();
+        let topic = prov
+            .create_resource(&make_resource(
+                "AWS::SNS::Topic",
+                "Topic",
+                serde_json::json!({"TopicName": "t"}),
+            ))
+            .expect("topic provisions");
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SNS::Subscription",
+                "Sub",
+                serde_json::json!({
+                    "TopicArn": topic.physical_id,
+                    "Protocol": "sqs",
+                    "Endpoint": "arn:aws:sqs:us-east-1:123456789012:q"
+                }),
+            ))
+            .expect("subscription provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::SNS::Subscription",
+                "Sub",
+                serde_json::json!({
+                    "TopicArn": topic.physical_id,
+                    "Protocol": "sqs",
+                    "Endpoint": "arn:aws:sqs:us-east-1:123456789012:q",
+                    "RawMessageDelivery": true,
+                    "FilterPolicy": {"store": ["s1"]}
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::SNS::Subscription is updatable");
+        let sns = prov.sns_state.read();
+        let acct = sns.get("123456789012").unwrap();
+        let sub = acct.subscriptions.get(&created.physical_id).unwrap();
+        assert_eq!(
+            sub.attributes.get("RawMessageDelivery").map(String::as_str),
+            Some("true")
+        );
+        assert!(sub
+            .attributes
+            .get("FilterPolicy")
+            .is_some_and(|p| p.contains("store")));
+    }
+
+    #[test]
+    fn update_stack_applies_secretsmanager_secret_string() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SecretsManager::Secret",
+                "S",
+                serde_json::json!({"Name": "db-cred", "SecretString": "old"}),
+            ))
+            .expect("secret provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::SecretsManager::Secret",
+                "S",
+                serde_json::json!({"Name": "db-cred", "SecretString": "new", "Description": "updated"}),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::SecretsManager::Secret is updatable");
+        let sm = prov.secretsmanager_state.read();
+        let acct = sm.get("123456789012").unwrap();
+        let secret = acct.secrets.get(&created.physical_id).unwrap();
+        let current = secret
+            .current_version_id
+            .as_ref()
+            .and_then(|vid| secret.versions.get(vid))
+            .unwrap();
+        assert_eq!(current.secret_string.as_deref(), Some("new"));
+        assert_eq!(secret.description.as_deref(), Some("updated"));
+        let previous_count = secret
+            .versions
+            .values()
+            .filter(|v| v.stages.iter().any(|s| s == "AWSPREVIOUS"))
+            .count();
+        assert_eq!(previous_count, 1, "exactly one AWSPREVIOUS version");
+    }
+
+    #[test]
+    fn update_stack_applies_cognito_user_pool_config() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::UserPool",
+                "UP",
+                serde_json::json!({"PoolName": "pool", "MfaConfiguration": "OFF"}),
+            ))
+            .expect("pool provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::Cognito::UserPool",
+                "UP",
+                serde_json::json!({"PoolName": "pool", "MfaConfiguration": "ON", "DeletionProtection": "ACTIVE"}),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::Cognito::UserPool is updatable");
+        let cognito = prov.cognito_state.read();
+        let acct = cognito.get("123456789012").unwrap();
+        let pool = acct.user_pools.get(&created.physical_id).unwrap();
+        assert_eq!(pool.mfa_configuration, "ON");
+        assert_eq!(pool.deletion_protection.as_deref(), Some("ACTIVE"));
+    }
+
+    #[test]
+    fn update_stack_applies_cognito_user_pool_client_config() {
+        let prov = make_provisioner();
+        let pool = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::UserPool",
+                "UP",
+                serde_json::json!({"PoolName": "pool"}),
+            ))
+            .expect("pool provisions");
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Cognito::UserPoolClient",
+                "Client",
+                serde_json::json!({
+                    "UserPoolId": pool.physical_id,
+                    "ClientName": "c1",
+                    "CallbackURLs": ["https://old.example.com/cb"]
+                }),
+            ))
+            .expect("client provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::Cognito::UserPoolClient",
+                "Client",
+                serde_json::json!({
+                    "UserPoolId": pool.physical_id,
+                    "ClientName": "c1-renamed",
+                    "CallbackURLs": ["https://new.example.com/cb"]
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::Cognito::UserPoolClient is updatable");
+        let cognito = prov.cognito_state.read();
+        let acct = cognito.get("123456789012").unwrap();
+        let client = acct.user_pool_clients.get(&created.physical_id).unwrap();
+        assert_eq!(client.client_name, "c1-renamed");
+        assert_eq!(
+            client.callback_urls,
+            vec!["https://new.example.com/cb".to_string()]
+        );
+    }
+
+    #[test]
+    fn update_stack_applies_rds_db_instance_config() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::RDS::DBInstance",
+                "DB",
+                serde_json::json!({
+                    "DBInstanceIdentifier": "app-db",
+                    "DBInstanceClass": "db.t3.micro",
+                    "Engine": "postgres",
+                    "AllocatedStorage": "20"
+                }),
+            ))
+            .expect("instance provisions");
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::RDS::DBInstance",
+                "DB",
+                serde_json::json!({
+                    "DBInstanceIdentifier": "app-db",
+                    "DBInstanceClass": "db.t3.large",
+                    "Engine": "postgres",
+                    "AllocatedStorage": "100",
+                    "BackupRetentionPeriod": 7
+                }),
+            ),
+        )
+        .expect("update succeeds")
+        .expect("AWS::RDS::DBInstance is updatable");
+        let rds = prov.rds_state.read();
+        let acct = rds.get("123456789012").unwrap();
+        let inst = acct.instances.get("app-db").unwrap();
+        assert_eq!(inst.db_instance_class, "db.t3.large");
+        assert_eq!(inst.allocated_storage, 100);
+        assert_eq!(inst.backup_retention_period, 7);
     }
 }

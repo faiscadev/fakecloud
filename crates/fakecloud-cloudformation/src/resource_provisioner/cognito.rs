@@ -140,6 +140,73 @@ impl ResourceProvisioner {
             .with("UserPoolId", pool_id))
     }
 
+    /// Apply a CFN property update to an existing Cognito user pool in place.
+    /// Mirrors the property extraction in `create_cognito_user_pool` for the
+    /// fields that update without replacement (policies, MFA, tier, deletion
+    /// protection, tags, email/SMS config, admin-create config, recovery
+    /// settings, auto-verified attributes) so a stack update reaches the pool
+    /// and `DescribeUserPool` reflects the new config instead of the stale one.
+    /// The pool id/ARN, creation date and signing keys are preserved.
+    pub(super) fn update_cognito_user_pool(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let pool_id = &existing.physical_id;
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let pool = state
+            .user_pools
+            .get_mut(pool_id)
+            .ok_or_else(|| format!("User pool {pool_id} not yet provisioned"))?;
+
+        if let Some(pool_name) = props.get("PoolName").and_then(|v| v.as_str()) {
+            pool.name = pool_name.to_string();
+        }
+        pool.policies.password_policy = parse_cognito_password_policy(props.get("Policies"));
+        pool.auto_verified_attributes =
+            parse_cognito_string_array(props.get("AutoVerifiedAttributes"));
+        if let Some(mfa) = props.get("MfaConfiguration").and_then(|v| v.as_str()) {
+            pool.mfa_configuration = mfa.to_string();
+        }
+        if let Some(tier) = props.get("UserPoolTier").and_then(|v| v.as_str()) {
+            pool.user_pool_tier = tier.to_string();
+        }
+        if let Some(dp) = props.get("DeletionProtection").and_then(|v| v.as_str()) {
+            pool.deletion_protection = Some(dp.to_string());
+        }
+        if props.get("UserPoolTags").is_some() {
+            pool.user_pool_tags = parse_cognito_tags(props.get("UserPoolTags"));
+        }
+        if props.get("EmailConfiguration").is_some() {
+            pool.email_configuration =
+                parse_cognito_email_configuration(props.get("EmailConfiguration"));
+        }
+        if props.get("SmsConfiguration").is_some() {
+            pool.sms_configuration = parse_cognito_sms_configuration(props.get("SmsConfiguration"));
+        }
+        if props.get("AdminCreateUserConfig").is_some() {
+            pool.admin_create_user_config =
+                parse_cognito_admin_create_user_config(props.get("AdminCreateUserConfig"));
+        }
+        if props.get("AccountRecoverySetting").is_some() {
+            pool.account_recovery_setting =
+                parse_cognito_account_recovery(props.get("AccountRecoverySetting"));
+        }
+        pool.last_modified_date = Utc::now();
+
+        let arn = pool.arn.clone();
+        let provider_name = format!("cognito-idp.{}.amazonaws.com/{}", self.region, pool_id);
+        let provider_url = format!("https://{provider_name}");
+        Ok(ProvisionResult::new(pool_id.clone())
+            .with("Arn", arn)
+            .with("ProviderName", provider_name)
+            .with("ProviderURL", provider_url)
+            .with("UserPoolId", pool_id.clone()))
+    }
+
     pub(super) fn delete_cognito_user_pool(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cognito_state.write();
         let state = accounts.get_or_create(&self.account_id);
@@ -276,6 +343,83 @@ impl ResourceProvisioner {
             result = result.with("ClientSecret", secret);
         }
         Ok(result)
+    }
+
+    /// Apply a CFN property update to an existing Cognito user pool client in
+    /// place. Mirrors the property extraction in `create_cognito_user_pool_client`
+    /// for the fields that update without replacement (auth flows, token
+    /// validity, callback/logout URLs, OAuth config, read/write attributes,
+    /// etc.) so a stack update reaches the client and `DescribeUserPoolClient`
+    /// reflects the new config. The client id/secret, pool id and creation date
+    /// are preserved (`GenerateSecret` is create-only).
+    pub(super) fn update_cognito_user_pool_client(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let client_id = &existing.physical_id;
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let client = state
+            .user_pool_clients
+            .get_mut(client_id)
+            .ok_or_else(|| format!("User pool client {client_id} not yet provisioned"))?;
+
+        if let Some(name) = props.get("ClientName").and_then(|v| v.as_str()) {
+            client.client_name = name.to_string();
+        }
+        client.explicit_auth_flows = parse_cognito_string_array(props.get("ExplicitAuthFlows"));
+        if let Some(v) = props.get("AccessTokenValidity").and_then(|v| v.as_i64()) {
+            client.access_token_validity = Some(v);
+        }
+        if let Some(v) = props.get("IdTokenValidity").and_then(|v| v.as_i64()) {
+            client.id_token_validity = Some(v);
+        }
+        if let Some(v) = props.get("RefreshTokenValidity").and_then(|v| v.as_i64()) {
+            client.refresh_token_validity = Some(v);
+        }
+        client.callback_urls = parse_cognito_string_array(props.get("CallbackURLs"));
+        client.logout_urls = parse_cognito_string_array(props.get("LogoutURLs"));
+        client.supported_identity_providers =
+            parse_cognito_string_array(props.get("SupportedIdentityProviders"));
+        client.allowed_o_auth_flows = parse_cognito_string_array(props.get("AllowedOAuthFlows"));
+        client.allowed_o_auth_scopes = parse_cognito_string_array(props.get("AllowedOAuthScopes"));
+        if let Some(b) = props
+            .get("AllowedOAuthFlowsUserPoolClient")
+            .and_then(|v| v.as_bool())
+        {
+            client.allowed_o_auth_flows_user_pool_client = b;
+        }
+        if let Some(s) = props
+            .get("PreventUserExistenceErrors")
+            .and_then(|v| v.as_str())
+        {
+            client.prevent_user_existence_errors = Some(s.to_string());
+        }
+        client.read_attributes = parse_cognito_string_array(props.get("ReadAttributes"));
+        client.write_attributes = parse_cognito_string_array(props.get("WriteAttributes"));
+        if let Some(b) = props.get("EnableTokenRevocation").and_then(|v| v.as_bool()) {
+            client.enable_token_revocation = b;
+        }
+        if let Some(v) = props.get("AuthSessionValidity").and_then(|v| v.as_i64()) {
+            client.auth_session_validity = Some(v);
+        }
+        if let Some(b) = props
+            .get("EnablePropagateAdditionalUserContextData")
+            .and_then(|v| v.as_bool())
+        {
+            client.enable_propagate_additional_user_context_data = b;
+        }
+        if let Some(v) = props.get("AnalyticsConfiguration") {
+            client.analytics_configuration = if v.is_null() { None } else { Some(v.clone()) };
+        }
+        client.last_modified_date = Utc::now();
+
+        Ok(ProvisionResult::new(client_id.clone())
+            .with("ClientId", client_id.clone())
+            .with("Name", client_id.clone()))
     }
 
     pub(super) fn delete_cognito_user_pool_client(&self, physical_id: &str) -> Result<(), String> {

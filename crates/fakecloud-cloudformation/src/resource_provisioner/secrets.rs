@@ -121,6 +121,83 @@ impl ResourceProvisioner {
             .with("Name", name))
     }
 
+    /// Apply a CFN property update to an existing Secrets Manager secret in
+    /// place. `Description` and `KmsKeyId` update without replacement; a changed
+    /// `SecretString` creates a new `AWSCURRENT` version (demoting the previous
+    /// one to `AWSPREVIOUS`, keeping the single-`AWSPREVIOUS` invariant) exactly
+    /// like `PutSecretValue`, so a stack update reaches the secret and
+    /// `GetSecretValue` returns the new value instead of the stale one. `Name`
+    /// is replacement-only and left untouched.
+    pub(super) fn update_secrets_manager_secret(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = &existing.physical_id;
+
+        let mut accounts = self.secretsmanager_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let secret = state
+            .secrets
+            .get_mut(arn)
+            .ok_or_else(|| format!("Secret {arn} not yet provisioned"))?;
+
+        if let Some(desc) = props.get("Description").and_then(|v| v.as_str()) {
+            secret.description = Some(desc.to_string());
+        }
+        if let Some(kms) = props.get("KmsKeyId").and_then(|v| v.as_str()) {
+            secret.kms_key_id = Some(kms.to_string());
+        }
+
+        // A changed SecretString stages a new AWSCURRENT version. GenerateSecretString
+        // is generate-once (only honoured at create), matching CloudFormation.
+        if let Some(secret_string) = props.get("SecretString").and_then(|v| v.as_str()) {
+            let current_is_same = secret
+                .current_version_id
+                .as_ref()
+                .and_then(|vid| secret.versions.get(vid))
+                .and_then(|v| v.secret_string.as_deref())
+                == Some(secret_string);
+            if !current_is_same {
+                let now = Utc::now();
+                // Demote the outgoing AWSCURRENT to AWSPREVIOUS, enforcing the
+                // single-AWSPREVIOUS invariant AWS keeps per secret.
+                if let Some(old_vid) = secret.current_version_id.clone() {
+                    for (id, v) in secret.versions.iter_mut() {
+                        if id != &old_vid {
+                            v.stages.retain(|s| s != "AWSPREVIOUS");
+                        }
+                    }
+                    if let Some(old_v) = secret.versions.get_mut(&old_vid) {
+                        old_v.stages.retain(|s| s != "AWSCURRENT");
+                        if !old_v.stages.iter().any(|s| s == "AWSPREVIOUS") {
+                            old_v.stages.push("AWSPREVIOUS".to_string());
+                        }
+                    }
+                }
+                let version_id = Uuid::new_v4().to_string();
+                secret.versions.insert(
+                    version_id.clone(),
+                    SecretVersion {
+                        version_id: version_id.clone(),
+                        secret_string: Some(secret_string.to_string()),
+                        secret_binary: None,
+                        stages: vec!["AWSCURRENT".to_string()],
+                        created_at: now,
+                    },
+                );
+                secret.current_version_id = Some(version_id);
+                secret.last_changed_at = now;
+            }
+        }
+
+        let name = secret.name.clone();
+        Ok(ProvisionResult::new(arn.clone())
+            .with("Id", arn.clone())
+            .with("Name", name))
+    }
+
     pub(super) fn delete_secrets_manager_secret(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.secretsmanager_state.write();
         let state = accounts.get_or_create(&self.account_id);

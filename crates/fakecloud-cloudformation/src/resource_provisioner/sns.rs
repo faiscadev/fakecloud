@@ -217,6 +217,60 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(sub_arn.clone()).with("Arn", sub_arn))
     }
 
+    /// Apply a CFN property update to an existing SNS subscription in place.
+    /// `Protocol`, `Endpoint` and `TopicArn` require replacement in real
+    /// CloudFormation and are left untouched; the mutable delivery/filter
+    /// attributes (`FilterPolicy`, `FilterPolicyScope`, `RawMessageDelivery`,
+    /// `RedrivePolicy`, `DeliveryPolicy`, `SubscriptionRoleArn`) are re-applied
+    /// so a stack update reaches the subscription and `GetSubscriptionAttributes`
+    /// reflects the new values instead of the stale ones.
+    pub(super) fn update_sns_subscription(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let sub_arn = &existing.physical_id;
+
+        let mut __sns_mas = self.sns_state.write();
+        let state = __sns_mas.get_or_create(&self.account_id);
+        let subscription = state
+            .subscriptions
+            .get_mut(sub_arn)
+            .ok_or_else(|| format!("SNS subscription {sub_arn} not yet provisioned"))?;
+
+        // JSON-document attributes: accept either an inline object or a string.
+        for key in ["FilterPolicy", "RedrivePolicy", "DeliveryPolicy"] {
+            if let Some(v) = props.get(key) {
+                if !v.is_null() {
+                    let doc = if let Some(s) = v.as_str() {
+                        s.to_string()
+                    } else {
+                        serde_json::to_string(v).unwrap_or_default()
+                    };
+                    subscription.attributes.insert(key.to_string(), doc);
+                }
+            }
+        }
+        for key in ["FilterPolicyScope", "SubscriptionRoleArn"] {
+            if let Some(s) = props.get(key).and_then(|v| v.as_str()) {
+                subscription
+                    .attributes
+                    .insert(key.to_string(), s.to_string());
+            }
+        }
+        if let Some(b) = props
+            .get("RawMessageDelivery")
+            .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+        {
+            subscription
+                .attributes
+                .insert("RawMessageDelivery".to_string(), b.to_string());
+        }
+
+        Ok(ProvisionResult::new(sub_arn.clone()).with("Arn", sub_arn.clone()))
+    }
+
     pub(super) fn delete_sns_subscription(&self, physical_id: &str) -> Result<(), String> {
         let mut __sns_mas = self.sns_state.write();
         let state = __sns_mas.get_or_create(&self.account_id);

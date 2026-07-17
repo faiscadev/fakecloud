@@ -68,6 +68,59 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(stream_name).with("Arn", stream_arn))
     }
 
+    /// Apply a CFN property update to an existing Kinesis stream in place.
+    /// `RetentionPeriodHours`, `ShardCount` and `StreamModeDetails.StreamMode`
+    /// are update-without-replacement in real CloudFormation, so a stack update
+    /// must reach the stream and be reflected by `DescribeStreamSummary` instead
+    /// of being silently dropped. Retention and stream mode are applied exactly;
+    /// a `ShardCount` change reshapes the stream to the target uniform partition
+    /// (the fine-grained closed-shard lineage produced by the native
+    /// `UpdateShardCount` common-refinement is not reproduced here — only the
+    /// resulting open-shard partition, which is what Describe reports).
+    pub(super) fn update_kinesis_stream(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        // The Kinesis stream's CFN physical id is the stream name (create returns
+        // `ProvisionResult::new(stream_name)`), so look it up by name.
+        let stream_name = &existing.physical_id;
+
+        let mut accounts = self.kinesis_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let stream = state
+            .streams
+            .get_mut(stream_name)
+            .ok_or_else(|| format!("Kinesis stream {stream_name} not yet provisioned"))?;
+        let stream_arn = stream.stream_arn.clone();
+
+        if let Some(hours) = props.get("RetentionPeriodHours").and_then(|v| v.as_i64()) {
+            stream.retention_period_hours = hours as i32;
+        }
+        if let Some(mode) = props
+            .get("StreamModeDetails")
+            .and_then(|v| v.get("StreamMode"))
+            .and_then(|v| v.as_str())
+        {
+            stream.stream_mode = mode.to_string();
+        }
+        if let Some(target) = props.get("ShardCount").and_then(|v| v.as_i64()) {
+            if target <= 0 {
+                return Err("ShardCount must be greater than zero".to_string());
+            }
+            let target = target as i32;
+            if target != stream.shard_count {
+                stream.shards = build_stream_shards(target);
+                stream.shard_count = target;
+                stream.open_shard_count = target;
+                stream.next_shard_index = target;
+            }
+        }
+
+        Ok(ProvisionResult::new(existing.physical_id.clone()).with("Arn", stream_arn))
+    }
+
     pub(super) fn delete_kinesis_stream(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.kinesis_state.write();
         let state = accounts.get_or_create(&self.account_id);
