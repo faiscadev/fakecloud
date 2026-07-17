@@ -32,6 +32,29 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 - `POST /_fakecloud/dynamodb/ttl-processor/tick` — expire items whose TTL attribute is in the past
 - `POST /_fakecloud/dynamodb/snapshot/save` — write the current DynamoDB state as a canonical snapshot on demand. An optional JSON body `{"dataPath": "<dir>"}` writes to `<dir>/dynamodb/snapshot.json`; with no body it writes to the configured persistent store. Returns `{"saved": true}`, `400` when neither a store nor `dataPath` is available, and `500` on write failure. Lets import/export tooling populate DynamoDB through the normal API and then have fakecloud emit the canonical snapshot format instead of reproducing snapshot internals out of tree.
 
+## Importing an AWS export at startup
+
+Seed a local table from a real DynamoDB S3 export. Two boot flags bulk-load an AWS-format export directly into the store before the server starts serving:
+
+- `--dynamodb-import-path` (`FAKECLOUD_DYNAMODB_IMPORT_PATH`) — the local `AWSDynamoDB/<export-id>/` folder that holds `manifest-summary.json` (as produced by an AWS DynamoDB S3 export).
+- `--dynamodb-import-describe-table` (`FAKECLOUD_DYNAMODB_DESCRIBE_TABLE`) — an `aws dynamodb describe-table` JSON dump supplying the table shape (key schema, attribute definitions, indexes, billing mode).
+
+```sh
+fakecloud \
+  --dynamodb-import-path ./AWSDynamoDB/01234567890123-abcdef01 \
+  --dynamodb-import-describe-table ./describe-table.json
+```
+
+Constraints:
+
+- **Both flags are required together** — passing only one aborts startup.
+- **Idempotent.** The import creates a new table. If a table of that name already exists, the import is skipped with a warning and the existing data is left untouched (no merge, no append, no overwrite). This makes restarting with the flags still set safe.
+- **Additive:** the table is materialised straight in the store. It does not go through `BatchWriteItem` and does not touch the modeled `ImportTable` API operation.
+- **Targets the default (single) account** named by `--account-id` in the configured region.
+- Only the AWS **`DYNAMODB_JSON`** export format is supported (manifests plus gzipped `data/*.json.gz` files); ION and CSV are not.
+- Every imported item must carry the key attributes declared in the describe-table `KeySchema` with the type declared in `AttributeDefinitions` (the same presence and type checks the normal write path enforces). If the manifests declare an `itemCount` that disagrees with the data actually read, the import is rejected as truncated or corrupt. Any bad or unreadable input aborts startup loudly.
+- Works in either storage mode. Under `--storage-mode=persistent` the imported table is persisted like any other state, so on a later restart it is already present and the import step is skipped (see the idempotent behavior above) rather than re-run.
+
 ## Cross-service delivery
 
 - **DynamoDB Streams -> Lambda** — Event source mapping polls and invokes

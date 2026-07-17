@@ -1,0 +1,15 @@
+{
+  "Table": {
+    "TableName": "Music",
+    "KeySchema": [
+      {"AttributeName": "Artist", "KeyType": "HASH"},
+      {"AttributeName": "SongTitle", "KeyType": "RANGE"}
+    ],
+    "AttributeDefinitions": [
+      {"AttributeName": "Artist", "AttributeType": "S"},
+      {"AttributeName": "SongTitle", "AttributeType": "S"}
+    ],
+    "BillingModeSummary": {"BillingMode": "PAY_PER_REQUEST"},
+    "TableStatus": "ACTIVE"
+  }
+}

@@ -75,6 +75,17 @@ pub(crate) struct Cli {
     #[arg(long, env = "FAKECLOUD_DATA_PATH")]
     pub data_path: Option<PathBuf>,
 
+    /// Bulk-load an AWS-format DynamoDB export at startup (additive; no API
+    /// round-trip). Points at the local `AWSDynamoDB/{export-id}/` folder that
+    /// holds `manifest-summary.json`. Requires `--dynamodb-import-describe-table`.
+    #[arg(long, env = "FAKECLOUD_DYNAMODB_IMPORT_PATH")]
+    pub dynamodb_import_path: Option<PathBuf>,
+
+    /// Path to an `aws dynamodb describe-table` JSON dump supplying the table
+    /// shape (key schema, indexes, billing mode) for `--dynamodb-import-path`.
+    #[arg(long, env = "FAKECLOUD_DYNAMODB_DESCRIBE_TABLE")]
+    pub dynamodb_import_describe_table: Option<PathBuf>,
+
     /// In-memory LRU cache for S3 object bodies in persistent mode. Plain bytes,
     /// no SI/IEC suffix parsing. Default 256 MiB.
     #[arg(long, default_value_t = DEFAULT_S3_CACHE_BYTES, env = "FAKECLOUD_S3_CACHE_SIZE")]

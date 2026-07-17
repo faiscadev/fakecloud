@@ -5358,6 +5358,7 @@ dependencies = [
  "fakecloud-core",
  "fakecloud-persistence",
  "fakecloud-s3",
+ "flate2",
  "http 1.4.0",
  "parking_lot",
  "serde",
