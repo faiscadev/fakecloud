@@ -223,8 +223,10 @@ async fn sandbox_rejects_unverified_sender() {
     let client = server.sesv2_client().await;
     set_sandbox(&server, true).await;
 
-    // No identities at all — the From-address gate must trip with the
-    // dedicated `MailFromDomainNotVerifiedException` SES uses for v2.
+    // No identities at all — the From-address gate must trip. AWS SES returns
+    // `MessageRejected` ("Email address is not verified...") for an unverified
+    // sender on both v1 and v2; `MailFromDomainNotVerifiedException` is reserved
+    // for a configured-but-unverified custom MAIL FROM domain.
     let err = client
         .send_email()
         .from_email_address("noreply@unverified.test")
@@ -253,8 +255,8 @@ async fn sandbox_rejects_unverified_sender() {
 
     let dbg = format!("{err:?}");
     assert!(
-        dbg.contains("MailFromDomainNotVerified"),
-        "expected MailFromDomainNotVerifiedException, got: {dbg}"
+        dbg.contains("MessageRejected"),
+        "expected MessageRejected, got: {dbg}"
     );
 }
 
