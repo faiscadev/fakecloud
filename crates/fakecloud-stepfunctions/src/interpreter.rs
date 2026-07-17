@@ -13,7 +13,7 @@ use crate::choice::evaluate_choice;
 use crate::error_handling::{find_catcher, should_retry};
 use crate::io_processing::{apply_input_path, apply_output_path, apply_result_path};
 use crate::service::SharedServiceRegistry;
-use crate::state::{ExecutionStatus, HistoryEvent, SharedStepFunctionsState};
+use crate::state::{ExecutionStatus, HistoryEvent, MapRun, SharedStepFunctionsState};
 
 /// Execute a state machine definition with the given input.
 /// Updates the execution record in shared state as it progresses.
@@ -764,8 +764,36 @@ async fn execute_map_state(
     let tolerated_failure_percentage = state_def["ToleratedFailurePercentage"]
         .as_f64()
         .unwrap_or(0.0);
+    let tolerated_failure_count = state_def["ToleratedFailureCount"].as_i64().unwrap_or(0);
     let total_items = batched_items.len() as f64;
     let mut failure_count = 0usize;
+
+    // A distributed Map (`ItemProcessor.ProcessorConfig.Mode == "DISTRIBUTED"`)
+    // materialises a MapRun record that `ListMapRuns` / `DescribeMapRun`
+    // surface. Inline Map states do not create one, matching AWS.
+    let is_distributed = iterator_def
+        .get("ProcessorConfig")
+        .and_then(|c| c.get("Mode"))
+        .and_then(Value::as_str)
+        == Some("DISTRIBUTED");
+    let map_run_arn = if is_distributed {
+        map_run_arn_for(execution_arn).inspect(|arn| {
+            start_map_run(
+                shared_state,
+                arn,
+                execution_arn,
+                // The configured MaxConcurrency (0 == unlimited), as AWS reports
+                // it, not the internal `effective_concurrency` (which defaults
+                // an unset value to 40).
+                max_concurrency as usize,
+                tolerated_failure_percentage,
+                tolerated_failure_count,
+                batched_items.len(),
+            );
+        })
+    } else {
+        None
+    };
 
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
 
@@ -841,10 +869,33 @@ async fn execute_map_state(
                 failure_count += 1;
                 let failure_percentage = (failure_count as f64 / total_items) * 100.0;
                 if failure_percentage > tolerated_failure_percentage {
+                    if let Some(arn) = &map_run_arn {
+                        finish_map_run(
+                            shared_state,
+                            arn,
+                            execution_arn,
+                            results.len() as i64,
+                            failure_count as i64,
+                            "FAILED",
+                        );
+                    }
                     return Err((error, cause));
                 }
             }
         }
+    }
+
+    // Every iteration is accounted for and the tolerated-failure threshold was
+    // not exceeded: the map run succeeded.
+    if let Some(arn) = &map_run_arn {
+        finish_map_run(
+            shared_state,
+            arn,
+            execution_arn,
+            results.len() as i64,
+            failure_count as i64,
+            "SUCCEEDED",
+        );
     }
 
     // Sort by index to maintain order
@@ -878,6 +929,69 @@ async fn execute_map_state(
     };
 
     Ok(output)
+}
+
+/// Build a MapRun ARN for a distributed Map running inside `execution_arn`.
+/// `arn:aws:states:R:A:execution:SM:Exec` -> `arn:aws:states:R:A:mapRun:SM/Exec:<label>`.
+fn map_run_arn_for(execution_arn: &str) -> Option<String> {
+    let (prefix, tail) = execution_arn.split_once(":execution:")?;
+    // `tail` is `StateMachineName:ExecutionName`; the MapRun ARN joins them with
+    // a slash and appends a unique label.
+    let sm_exec = tail.replacen(':', "/", 1);
+    let label = uuid::Uuid::new_v4().simple().to_string();
+    Some(format!("{prefix}:mapRun:{sm_exec}:{label}"))
+}
+
+/// Persist a fresh RUNNING MapRun record for a distributed Map.
+fn start_map_run(
+    shared_state: &SharedStepFunctionsState,
+    map_run_arn: &str,
+    execution_arn: &str,
+    max_concurrency: usize,
+    tolerated_failure_percentage: f64,
+    tolerated_failure_count: i64,
+    total: usize,
+) {
+    let account = account_id_from_arn(execution_arn).to_string();
+    let mut accounts = shared_state.write();
+    let s = accounts.get_or_create(&account);
+    s.map_runs.insert(
+        map_run_arn.to_string(),
+        MapRun {
+            map_run_arn: map_run_arn.to_string(),
+            execution_arn: execution_arn.to_string(),
+            max_concurrency: max_concurrency as i32,
+            tolerated_failure_percentage,
+            tolerated_failure_count,
+            status: "RUNNING".to_string(),
+            start_date: Utc::now(),
+            stop_date: None,
+            total_count: total as i64,
+            succeeded_count: 0,
+            failed_count: 0,
+        },
+    );
+}
+
+/// Transition a MapRun to a terminal status, recording the final iteration
+/// tallies. No-op if the record was reaped (e.g. a state reset mid-run).
+fn finish_map_run(
+    shared_state: &SharedStepFunctionsState,
+    map_run_arn: &str,
+    execution_arn: &str,
+    succeeded: i64,
+    failed: i64,
+    status: &str,
+) {
+    let account = account_id_from_arn(execution_arn).to_string();
+    let mut accounts = shared_state.write();
+    let s = accounts.get_or_create(&account);
+    if let Some(mr) = s.map_runs.get_mut(map_run_arn) {
+        mr.status = status.to_string();
+        mr.succeeded_count = succeeded;
+        mr.failed_count = failed;
+        mr.stop_date = Some(Utc::now());
+    }
 }
 
 /// Read items from S3 for distributed Map mode ItemReader.

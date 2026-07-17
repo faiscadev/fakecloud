@@ -153,6 +153,11 @@ pub(super) fn update(
     for (k, v) in body {
         record.insert(k.clone(), v.clone());
     }
+    // Reshape update-only members into the shape the matching Get projects:
+    // add/remove delta lists into their base membership lists, and top-level
+    // gateway filters into the nested `LoRaWAN` sub-object. Without this the
+    // deltas / filters are stored under keys no read consumes and vanish.
+    apply_update_shape(meta, &mut record);
     record
         .entry("Arn".to_string())
         .or_insert_with(|| Value::String(mint_arn(ctx, &rtype, &key)));
@@ -163,6 +168,88 @@ pub(super) fn update(
     let out = build_output(meta, &Value::Object(record.clone()));
     data.put_resource(&rtype, &key, Value::Object(record));
     ok_json(out)
+}
+
+/// Reshape update-only request members into the shape the family's Get reads.
+///
+/// * `UpdateNetworkAnalyzerConfiguration` carries `*ToAdd`/`*ToRemove` delta
+///   lists; `GetNetworkAnalyzerConfiguration` projects the resolved
+///   `WirelessDevices`/`WirelessGateways`/`MulticastGroups` membership lists.
+/// * `UpdateWirelessGateway` carries top-level `JoinEuiFilters`/`NetIdFilters`/
+///   `MaxEirp`; `GetWirelessGateway` surfaces them nested inside `LoRaWAN`.
+fn apply_update_shape(meta: &OpMeta, record: &mut Map<String, Value>) {
+    match meta.op {
+        "UpdateNetworkAnalyzerConfiguration" => {
+            apply_list_delta(
+                record,
+                "WirelessDevices",
+                "WirelessDevicesToAdd",
+                "WirelessDevicesToRemove",
+            );
+            apply_list_delta(
+                record,
+                "WirelessGateways",
+                "WirelessGatewaysToAdd",
+                "WirelessGatewaysToRemove",
+            );
+            apply_list_delta(
+                record,
+                "MulticastGroups",
+                "MulticastGroupsToAdd",
+                "MulticastGroupsToRemove",
+            );
+        }
+        "UpdateWirelessGateway" => {
+            nest_into_lorawan(record, &["JoinEuiFilters", "NetIdFilters", "MaxEirp"]);
+        }
+        _ => {}
+    }
+}
+
+/// Apply add/remove deltas to a base membership list, consuming the delta keys.
+/// Adds append members not already present; removes drop listed members.
+fn apply_list_delta(record: &mut Map<String, Value>, base: &str, add: &str, remove: &str) {
+    let adds = record.remove(add);
+    let removes = record.remove(remove);
+    if adds.is_none() && removes.is_none() {
+        return;
+    }
+    let mut list: Vec<Value> = record
+        .get(base)
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if let Some(Value::Array(a)) = adds {
+        for item in a {
+            if !list.contains(&item) {
+                list.push(item);
+            }
+        }
+    }
+    if let Some(Value::Array(r)) = removes {
+        list.retain(|x| !r.contains(x));
+    }
+    record.insert(base.to_string(), Value::Array(list));
+}
+
+/// Move the named top-level members into the record's `LoRaWAN` sub-object,
+/// merging with any existing nested members. Consumes the top-level keys.
+fn nest_into_lorawan(record: &mut Map<String, Value>, keys: &[&str]) {
+    let mut lorawan = record
+        .get("LoRaWAN")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let mut changed = false;
+    for k in keys {
+        if let Some(v) = record.remove(*k) {
+            lorawan.insert((*k).to_string(), v);
+            changed = true;
+        }
+    }
+    if changed {
+        record.insert("LoRaWAN".to_string(), Value::Object(lorawan));
+    }
 }
 
 pub(super) fn delete(

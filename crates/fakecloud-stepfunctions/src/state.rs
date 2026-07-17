@@ -92,6 +92,15 @@ pub struct MapRun {
     pub status: String,
     pub start_date: DateTime<Utc>,
     pub stop_date: Option<DateTime<Utc>>,
+    /// Total number of items the distributed Map iterated over.
+    #[serde(default)]
+    pub total_count: i64,
+    /// Iterations that completed successfully.
+    #[serde(default)]
+    pub succeeded_count: i64,
+    /// Iterations that failed.
+    #[serde(default)]
+    pub failed_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

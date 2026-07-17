@@ -79,7 +79,50 @@ fn build_record(
             _ => {}
         }
     }
+    apply_attribute_payload(&mut record);
     Value::Object(record)
+}
+
+/// Unwrap a Thing `attributePayload` (`{attributes, merge}`) into the top-level
+/// `attributes` map that the read path (`DescribeThing` / `ListThings`)
+/// projects. Without this the payload is stored verbatim under a key no read
+/// consumes, so attributes set at create/update time silently vanish.
+///
+/// When `merge` is true the payload attributes overlay the record's existing
+/// `attributes`; otherwise they replace it wholesale. In both modes an
+/// empty-string value removes that attribute, matching AWS IoT semantics. A
+/// record without an `attributePayload` is left untouched.
+fn apply_attribute_payload(record: &mut Map<String, Value>) {
+    let Some(payload) = record.remove("attributePayload") else {
+        return;
+    };
+    let merge = payload
+        .get("merge")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let incoming = payload
+        .get("attributes")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut attributes = if merge {
+        record
+            .get("attributes")
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default()
+    } else {
+        Map::new()
+    };
+    for (k, v) in incoming {
+        if v.as_str() == Some("") {
+            attributes.remove(&k);
+        } else {
+            attributes.insert(k, v);
+        }
+    }
+    record.insert("attributes".to_string(), Value::Object(attributes));
 }
 
 pub(super) fn create(
@@ -130,6 +173,10 @@ pub(super) fn update(
         for (k, v) in body {
             obj.insert(k.clone(), v.clone());
         }
+        // Fold any `attributePayload` (honouring its `merge` flag against the
+        // existing attributes) into the top-level `attributes` map before it is
+        // stored, so the update is visible to DescribeThing / ListThings.
+        apply_attribute_payload(obj);
         obj.insert("lastModifiedDate".to_string(), now_epoch());
     }
     let out = build_output(meta, &record);

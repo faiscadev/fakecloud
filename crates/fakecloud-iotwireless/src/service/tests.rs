@@ -1222,3 +1222,228 @@ fn required_body_omission_is_rejected_for_every_op() {
         failures.join("\n")
     );
 }
+
+// ---------- read-shape round-trips (bug-hunt) ----------
+
+fn create_device(s: &IotWirelessService, dest: &str) -> String {
+    let d = body_of(
+        &run(
+            s,
+            "POST",
+            "/wireless-devices",
+            &[],
+            json!({"Type": "Sidewalk", "DestinationName": dest}),
+        )
+        .unwrap(),
+    );
+    d["Id"].as_str().unwrap().to_string()
+}
+
+#[test]
+fn associate_device_with_multicast_group_filters_list_wireless_devices() {
+    let s = svc();
+    let group = body_of(
+        &run(
+            &s,
+            "POST",
+            "/multicast-groups",
+            &[],
+            json!({"Name": "g1", "LoRaWAN": {"RfRegion": "US915", "DlClass": "ClassC"}}),
+        )
+        .unwrap(),
+    );
+    let group_id = group["Id"].as_str().unwrap().to_string();
+    let dev_in = create_device(&s, "d");
+    let _dev_out = create_device(&s, "d");
+
+    // Associate one device with the group.
+    run(
+        &s,
+        "PUT",
+        &format!("/multicast-groups/{group_id}/wireless-device"),
+        &[],
+        json!({"WirelessDeviceId": dev_in}),
+    )
+    .unwrap();
+
+    // Filtered list returns ONLY the associated device.
+    let listed = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless-devices?multicastGroupId={group_id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    let devs = listed["WirelessDeviceList"].as_array().unwrap();
+    assert_eq!(devs.len(), 1);
+    assert_eq!(devs[0]["Id"], dev_in);
+
+    // Unfiltered list still returns both.
+    let all = body_of(&run(&s, "GET", "/wireless-devices", &[], Value::Null).unwrap());
+    assert_eq!(all["WirelessDeviceList"].as_array().unwrap().len(), 2);
+
+    // Disassociate removes membership: filtered list is now empty.
+    run(
+        &s,
+        "DELETE",
+        &format!("/multicast-groups/{group_id}/wireless-devices/{dev_in}"),
+        &[],
+        Value::Null,
+    )
+    .unwrap();
+    let after = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless-devices?multicastGroupId={group_id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    assert!(after["WirelessDeviceList"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn associate_device_with_fuota_task_filters_list_wireless_devices() {
+    let s = svc();
+    let task = body_of(
+        &run(
+            &s,
+            "POST",
+            "/fuota-tasks",
+            &[],
+            json!({
+                "Name": "t1",
+                "FirmwareUpdateImage": "img",
+                "FirmwareUpdateRole": "role"
+            }),
+        )
+        .unwrap(),
+    );
+    let task_id = task["Id"].as_str().unwrap().to_string();
+    let dev = create_device(&s, "d");
+
+    run(
+        &s,
+        "PUT",
+        &format!("/fuota-tasks/{task_id}/wireless-device"),
+        &[],
+        json!({"WirelessDeviceId": dev}),
+    )
+    .unwrap();
+
+    let listed = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless-devices?fuotaTaskId={task_id}"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    let devs = listed["WirelessDeviceList"].as_array().unwrap();
+    assert_eq!(devs.len(), 1);
+    assert_eq!(devs[0]["Id"], dev);
+}
+
+#[test]
+fn update_network_analyzer_configuration_applies_membership_deltas() {
+    let s = svc();
+    run(
+        &s,
+        "POST",
+        "/network-analyzer-configurations",
+        &[],
+        json!({"Name": "nac1", "WirelessDevices": ["d1"], "WirelessGateways": ["g1"]}),
+    )
+    .unwrap();
+
+    run(
+        &s,
+        "PATCH",
+        "/network-analyzer-configurations/nac1",
+        &[],
+        json!({
+            "WirelessDevicesToAdd": ["d2"],
+            "WirelessDevicesToRemove": ["d1"],
+            "WirelessGatewaysToAdd": ["g2"],
+            "MulticastGroupsToAdd": ["mc1"]
+        }),
+    )
+    .unwrap();
+
+    let got = body_of(
+        &run(
+            &s,
+            "GET",
+            "/network-analyzer-configurations/nac1",
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    let devices: Vec<&str> = got["WirelessDevices"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(devices, vec!["d2"]);
+    let gateways: Vec<&str> = got["WirelessGateways"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(gateways, vec!["g1", "g2"]);
+    assert_eq!(got["MulticastGroups"].as_array().unwrap().len(), 1);
+    // Delta keys must not leak into the read.
+    assert!(got.get("WirelessDevicesToAdd").is_none());
+}
+
+#[test]
+fn update_wireless_gateway_nests_filters_into_lorawan() {
+    let s = svc();
+    let gw = body_of(
+        &run(
+            &s,
+            "POST",
+            "/wireless-gateways",
+            &[],
+            json!({"LoRaWAN": {"GatewayEui": "0000000000000000", "RfRegion": "US915"}}),
+        )
+        .unwrap(),
+    );
+    let id = gw["Id"].as_str().unwrap().to_string();
+
+    run(
+        &s,
+        "PATCH",
+        &format!("/wireless-gateways/{id}"),
+        &[],
+        json!({"JoinEuiFilters": [["0000", "ffff"]], "NetIdFilters": ["000000"], "MaxEirp": 15}),
+    )
+    .unwrap();
+
+    let got = body_of(
+        &run(
+            &s,
+            "GET",
+            &format!("/wireless-gateways/{id}?identifierType=WirelessGatewayId"),
+            &[],
+            Value::Null,
+        )
+        .unwrap(),
+    );
+    // Filters surface nested inside LoRaWAN, not at the top level.
+    assert_eq!(got["LoRaWAN"]["NetIdFilters"][0], "000000");
+    assert_eq!(got["LoRaWAN"]["MaxEirp"], 15);
+    assert_eq!(got["LoRaWAN"]["GatewayEui"], "0000000000000000");
+    assert!(got.get("JoinEuiFilters").is_none());
+    assert!(got.get("MaxEirp").is_none());
+}

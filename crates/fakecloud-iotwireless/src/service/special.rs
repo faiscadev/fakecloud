@@ -14,8 +14,8 @@ use fakecloud_core::service::{AwsResponse, AwsServiceError};
 use crate::generated::OpMeta;
 
 use super::{
-    build_output, mint_arn, mint_uuid, now_epoch, ok_json, query_get, resource_type, storage_key,
-    Ctx, IotWirelessService,
+    build_element, build_output, mint_arn, mint_uuid, now_epoch, ok_json, query_get, resource_type,
+    storage_key, Ctx, IotWirelessService,
 };
 
 type Handled = Result<Option<(AwsResponse, bool)>, AwsServiceError>;
@@ -209,6 +209,12 @@ pub(super) fn dispatch(
         "ListMulticastGroupsByFuotaTask" => {
             Ok(Some(list_multicast_groups_by_fuota_task(svc, ctx, labels)))
         }
+
+        // ---- filtered wireless-device listing (finding 3) ----
+        // The generic engine list ignores the modelled query filters, so the
+        // membership Associate*WithMulticastGroup / WithFuotaTask persist is
+        // never observable. Serve the list here so the filters apply.
+        "ListWirelessDevices" => Ok(Some(list_wireless_devices(svc, meta, ctx, query))),
 
         // ---- multicast-group LoRaWAN session lifecycle ----
         // Start persists the requested LoRaWAN session under `multicast-sessions`
@@ -974,6 +980,108 @@ fn disassociate_partner_account(
             .map(|m| m.remove(id));
     }
     (ok_json(Value::Object(Map::new())), true)
+}
+
+// ---------- filtered wireless-device listing (finding 3) ----------
+
+/// A `LoRaWAN` sub-field of a wireless-device record, when present.
+fn lorawan_field<'a>(rec: &'a Value, field: &str) -> Option<&'a str> {
+    rec.get("LoRaWAN")
+        .and_then(|l| l.get(field))
+        .and_then(Value::as_str)
+}
+
+/// `ListWirelessDevices` with the modelled query filters applied. The generic
+/// engine ignores them, which hides the membership edges that
+/// `AssociateWirelessDeviceWithMulticastGroup` / `WithFuotaTask` persist and
+/// drops the `destinationName` / `deviceProfileId` / `serviceProfileId` /
+/// `wirelessDeviceType` selectors. Filtering here makes the associations (and
+/// the other filters) observable through a read.
+fn list_wireless_devices(
+    svc: &IotWirelessService,
+    meta: &OpMeta,
+    ctx: &Ctx,
+    query: &[(String, String)],
+) -> (AwsResponse, bool) {
+    let g = svc.state.read();
+    let data = g.get(&ctx.account);
+
+    // Association filters resolve through the membership relations persisted by
+    // the associate ops; an absent group/task yields an empty member set.
+    let multicast_members = query_get(query, "multicastGroupId").map(|id| {
+        data.map(|d| d.list_relation(&format!("multicast-devices:{id}")))
+            .unwrap_or_default()
+    });
+    let fuota_members = query_get(query, "fuotaTaskId").map(|id| {
+        data.map(|d| d.list_relation(&format!("fuota-devices:{id}")))
+            .unwrap_or_default()
+    });
+    let destination = query_get(query, "destinationName");
+    let device_type = query_get(query, "wirelessDeviceType");
+    let device_profile = query_get(query, "deviceProfileId");
+    let service_profile = query_get(query, "serviceProfileId");
+
+    let entries = data
+        .map(|d| d.list_resource_entries("wireless-devices"))
+        .unwrap_or_default();
+
+    let filtered: Vec<Value> = entries
+        .into_iter()
+        .filter(|(id, rec)| {
+            if let Some(members) = &multicast_members {
+                if !members.iter().any(|m| m == id) {
+                    return false;
+                }
+            }
+            if let Some(members) = &fuota_members {
+                if !members.iter().any(|m| m == id) {
+                    return false;
+                }
+            }
+            if let Some(dn) = destination {
+                if rec.get("DestinationName").and_then(Value::as_str) != Some(dn) {
+                    return false;
+                }
+            }
+            if let Some(t) = device_type {
+                if rec.get("Type").and_then(Value::as_str) != Some(t) {
+                    return false;
+                }
+            }
+            if let Some(dp) = device_profile {
+                if lorawan_field(rec, "DeviceProfileId") != Some(dp) {
+                    return false;
+                }
+            }
+            if let Some(sp) = service_profile {
+                if lorawan_field(rec, "ServiceProfileId") != Some(sp) {
+                    return false;
+                }
+            }
+            true
+        })
+        .map(|(_, rec)| build_element(meta, &rec))
+        .collect();
+
+    let page_size = query_get(query, "maxResults")
+        .or_else(|| query_get(query, "MaxResults"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or(250);
+    let start = query_get(query, "nextToken")
+        .or_else(|| query_get(query, "NextToken"))
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(0);
+    let end = (start + page_size).min(filtered.len());
+    let page = filtered.get(start..end).unwrap_or(&[]).to_vec();
+    let has_next = end < filtered.len();
+
+    let mut out = Map::new();
+    out.insert("WirelessDeviceList".to_string(), Value::Array(page));
+    if has_next {
+        out.insert("NextToken".to_string(), Value::String(end.to_string()));
+    }
+    (ok_json(Value::Object(out)), false)
 }
 
 // ---------- multicast-group LoRaWAN session ----------
