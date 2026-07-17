@@ -764,6 +764,13 @@ pub(crate) fn service_name_from_ref(input: &str) -> String {
     input.to_string()
 }
 
+/// Extract the trailing ID segment from an ARN or path-style ref, e.g. a
+/// container-instance ARN `arn:aws:ecs:...:container-instance/<cluster>/<id>`
+/// yields `<id>`. A bare ID is returned unchanged.
+pub(crate) fn id_from_ref(input: &str) -> String {
+    input.rsplit('/').next().unwrap_or(input).to_string()
+}
+
 pub(crate) fn service_not_found(name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -772,11 +779,21 @@ pub(crate) fn service_not_found(name: &str) -> AwsServiceError {
     )
 }
 
-pub(crate) fn service_already_exists(name: &str) -> AwsServiceError {
+pub(crate) fn service_already_exists() -> AwsServiceError {
+    // AWS returns InvalidParameterException (not ServiceNotActiveException)
+    // when a CreateService call collides with an existing active service.
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterException",
+        "Creation of service was not idempotent.",
+    )
+}
+
+pub(crate) fn service_not_active(name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
         "ServiceNotActiveException",
-        format!("The service {name} already exists"),
+        format!("Service {name} is not ACTIVE."),
     )
 }
 

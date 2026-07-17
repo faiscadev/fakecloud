@@ -546,6 +546,13 @@ impl EcsService {
         let family = opt_str(&body, "family");
         let status_filter = opt_str(&body, "desiredStatus").or(Some("RUNNING"));
         let started_by = opt_str(&body, "startedBy");
+        // A service's tasks carry group `service:<name>`. The serviceName
+        // filter may arrive as a bare name or a full service ARN.
+        let service_group =
+            opt_str(&body, "serviceName").map(|s| format!("service:{}", service_name_from_ref(s)));
+        // containerInstance may be a full ARN or a bare instance ID; compare on
+        // the trailing ID segment so both forms match.
+        let container_instance = opt_str(&body, "containerInstance").map(id_from_ref);
         let max_results = body
             .get("maxResults")
             .and_then(|v| v.as_i64())
@@ -564,6 +571,20 @@ impl EcsService {
                 .filter(|t| family.is_none_or(|f| t.family == f))
                 .filter(|t| status_filter.is_none_or(|s| t.desired_status == s))
                 .filter(|t| started_by.is_none_or(|s| t.started_by.as_deref() == Some(s)))
+                .filter(|t| {
+                    service_group
+                        .as_deref()
+                        .is_none_or(|g| t.group.as_deref() == Some(g))
+                })
+                .filter(|t| {
+                    container_instance.as_deref().is_none_or(|ci| {
+                        t.container_instance_arn
+                            .as_deref()
+                            .map(id_from_ref)
+                            .as_deref()
+                            == Some(ci)
+                    })
+                })
                 .map(|t| t.task_arn.clone())
                 .collect(),
             None => Vec::new(),
@@ -591,7 +612,7 @@ mod multi_container_tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    fn fresh_service() -> EcsService {
+    pub(super) fn fresh_service() -> EcsService {
         let accounts: MultiAccountState<EcsState> =
             MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
         let state = Arc::new(RwLock::new(accounts));
@@ -606,7 +627,7 @@ mod multi_container_tests {
         svc
     }
 
-    fn make_request(action: &str, body: Value) -> AwsRequest {
+    pub(super) fn make_request(action: &str, body: Value) -> AwsRequest {
         let body_bytes = Bytes::from(serde_json::to_vec(&body).unwrap());
         AwsRequest {
             service: "ecs".into(),
@@ -687,7 +708,7 @@ mod multi_container_tests {
         );
     }
 
-    fn insert_task(svc: &EcsService, id: &str, cluster: &str) {
+    pub(super) fn insert_task(svc: &EcsService, id: &str, cluster: &str) {
         let state = svc.state.clone();
         let mut accounts = state.write();
         let acct = accounts.get_or_create("000000000000");
@@ -1292,5 +1313,138 @@ mod port_mapping_tests {
         let json = task_to_json(task);
         let nb = &json["containers"][0]["networkBindings"];
         assert_eq!(nb, &serde_json::Value::Array(bindings));
+    }
+}
+
+#[cfg(test)]
+mod service_validation_tests {
+    use super::multi_container_tests::*;
+    use super::*;
+    use serde_json::{json, Value};
+
+    /// Register a task def + create an ACTIVE service named `web` with
+    /// desiredCount 0, so the update/create validation tests have a target.
+    fn service_ready(svc: &EcsService) {
+        svc.register_task_definition(&make_request(
+            "RegisterTaskDefinition",
+            json!({"family": "web", "containerDefinitions": [{"name": "app", "image": "alpine"}]}),
+        ))
+        .unwrap();
+        svc.create_service(&make_request(
+            "CreateService",
+            json!({"serviceName": "web", "taskDefinition": "web", "desiredCount": 0}),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn update_service_negative_desired_count_is_invalid_parameter() {
+        let svc = fresh_service();
+        service_ready(&svc);
+        // A negative desiredCount previously clamped to 0 and silently scaled
+        // the service down. AWS rejects it instead.
+        let err = match svc.update_service(&make_request(
+            "UpdateService",
+            json!({"service": "web", "desiredCount": -1}),
+        )) {
+            Ok(_) => panic!("expected InvalidParameterException for negative desiredCount"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "InvalidParameterException");
+    }
+
+    #[test]
+    fn update_service_on_inactive_service_is_service_not_active() {
+        let svc = fresh_service();
+        service_ready(&svc);
+        // Simulate a deleted service left at INACTIVE (still describable).
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_mut("000000000000").unwrap();
+            let key = EcsState::service_key("default", "web");
+            state.services.get_mut(&key).unwrap().status = "INACTIVE".into();
+        }
+        let err = match svc.update_service(&make_request(
+            "UpdateService",
+            json!({"service": "web", "desiredCount": 2}),
+        )) {
+            Ok(_) => panic!("expected ServiceNotActiveException for a non-ACTIVE service"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "ServiceNotActiveException");
+    }
+
+    #[test]
+    fn create_service_duplicate_name_is_invalid_parameter_not_idempotent() {
+        let svc = fresh_service();
+        service_ready(&svc);
+        let err = match svc.create_service(&make_request(
+            "CreateService",
+            json!({"serviceName": "web", "taskDefinition": "web", "desiredCount": 0}),
+        )) {
+            Ok(_) => panic!("expected InvalidParameterException for a duplicate service name"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "InvalidParameterException");
+        assert_eq!(err.message(), "Creation of service was not idempotent.");
+    }
+
+    #[test]
+    fn list_tasks_filters_by_service_name_and_container_instance() {
+        let svc = fresh_service();
+        // Two service-owned tasks (group service:web) on distinct container
+        // instances, plus one unrelated task (group service:api).
+        insert_task(&svc, "web1", "default");
+        insert_task(&svc, "web2", "default");
+        insert_task(&svc, "api1", "default");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_mut("000000000000").unwrap();
+            let ci_a = "arn:aws:ecs:us-east-1:000000000000:container-instance/default/aaaaaaaa"
+                .to_string();
+            let ci_b = "arn:aws:ecs:us-east-1:000000000000:container-instance/default/bbbbbbbb"
+                .to_string();
+            let t = state.tasks.get_mut("web1").unwrap();
+            t.group = Some("service:web".into());
+            t.container_instance_arn = Some(ci_a);
+            let t = state.tasks.get_mut("web2").unwrap();
+            t.group = Some("service:web".into());
+            t.container_instance_arn = Some(ci_b);
+            let t = state.tasks.get_mut("api1").unwrap();
+            t.group = Some("service:api".into());
+        }
+
+        // serviceName filter returns only the two web tasks.
+        let resp = svc
+            .list_tasks(&make_request("ListTasks", json!({"serviceName": "web"})))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arns = body["taskArns"].as_array().unwrap();
+        assert_eq!(arns.len(), 2);
+        assert!(arns.iter().all(|a| a.as_str().unwrap().contains("/web")));
+
+        // containerInstance filter (bare ID) narrows to the single task on it.
+        let resp = svc
+            .list_tasks(&make_request(
+                "ListTasks",
+                json!({"containerInstance": "aaaaaaaa"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arns = body["taskArns"].as_array().unwrap();
+        assert_eq!(arns.len(), 1);
+        assert!(arns[0].as_str().unwrap().ends_with("/web1"));
+
+        // containerInstance filter also accepts a full ARN.
+        let resp = svc
+            .list_tasks(&make_request(
+                "ListTasks",
+                json!({"containerInstance": "arn:aws:ecs:us-east-1:000000000000:container-instance/default/bbbbbbbb"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arns = body["taskArns"].as_array().unwrap();
+        assert_eq!(arns.len(), 1);
+        assert!(arns[0].as_str().unwrap().ends_with("/web2"));
     }
 }
