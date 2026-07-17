@@ -136,6 +136,20 @@ pub fn decode_with_context(
 
     let key_len = u64::from_be_bytes(blob[cursor..cursor + 8].try_into().ok()?) as usize;
     cursor += 8;
+    // `key_len` is fully attacker-controlled (it comes straight from the
+    // base64 `CiphertextBlob` a client hands to `Decrypt`/`ReEncrypt`).
+    // Reject any length that alone exceeds the bytes still remaining
+    // BEFORE it enters an addition: the release profile has no
+    // `overflow-checks`, so a hostile `key_len` near `usize::MAX` would
+    // otherwise wrap the `cursor + key_len + ...` sum to a tiny value,
+    // pass the guard, and panic on the slice below. Bounding it first
+    // makes every downstream index self-evidently in range.
+    let remaining = blob.len().saturating_sub(cursor);
+    if key_len > remaining {
+        return None;
+    }
+    // Trailer after the key-id: IV (12) + ct_len (4) + tag (16). This
+    // sum cannot wrap now that `key_len <= remaining <= blob.len()`.
     if cursor + key_len + 12 + 4 + 16 > blob.len() {
         return None;
     }
@@ -149,10 +163,16 @@ pub fn decode_with_context(
 
     let ct_len = u32::from_be_bytes(blob[cursor..cursor + 4].try_into().ok()?) as usize;
     cursor += 4;
-    if cursor + ct_len + 16 != blob.len() {
+    // On 64-bit `usize` this sum can't wrap (`cursor` is small and
+    // `ct_len <= u32::MAX`), but use `checked_add` so the bound is
+    // provably panic-free regardless of `usize` width, then require an
+    // exact fit: the ciphertext-plus-tag must consume the rest of the
+    // blob with nothing left over.
+    let body_end = cursor.checked_add(ct_len)?.checked_add(16)?;
+    if body_end != blob.len() {
         return None;
     }
-    let ct_with_tag = &blob[cursor..cursor + ct_len + 16];
+    let ct_with_tag = &blob[cursor..body_end];
 
     let cipher = cipher_for(master_key_bytes)?;
     let mut aad = Vec::with_capacity(key_id.len() + extra_aad.len());
@@ -266,6 +286,45 @@ mod tests {
         assert!(decode_with_context(&mk, &blob, b"{\"app\":\"staging\"}").is_none());
         // Missing EC at decrypt time — same outcome.
         assert!(decode_with_context(&mk, &blob, b"").is_none());
+    }
+
+    #[test]
+    fn decode_rejects_hostile_max_key_len_without_panicking() {
+        // Regression: a `CiphertextBlob` whose key-id length field is
+        // `u64::MAX` must be rejected as `None`, never panic. Before the
+        // fix the `cursor + key_len + ...` guard wrapped `usize` (release
+        // builds have no overflow-checks), passed, then the key-id slice
+        // panicked with "slice index starts at 12 but ends at 11".
+        let mk = fixed_master();
+        let mut hostile = Vec::new();
+        hostile.extend_from_slice(&VERSION_HEADER); // 4
+        hostile.extend_from_slice(&[0xFF; 8]); // key_len = u64::MAX
+        hostile.extend_from_slice(&[0u8; 32]); // padding to clear min-length gate
+        assert_eq!(hostile.len(), 44);
+        assert!(decode_with_context(&mk, &hostile, b"").is_none());
+    }
+
+    #[test]
+    fn decode_rejects_large_key_len_without_panicking() {
+        // A large-but-not-max `key_len` that still overruns the blob (and
+        // whose `+ 12 + 4 + 16` would overrun) must also cleanly reject.
+        let mk = fixed_master();
+        let mut hostile = Vec::new();
+        hostile.extend_from_slice(&VERSION_HEADER);
+        hostile.extend_from_slice(&0x0000_0000_1000_0000u64.to_be_bytes());
+        hostile.extend_from_slice(&[0u8; 32]);
+        assert!(decode_with_context(&mk, &hostile, b"").is_none());
+    }
+
+    #[test]
+    fn decode_with_context_round_trips_key_id_and_plaintext() {
+        // Happy path stays intact after the bounds hardening.
+        let mk = fixed_master();
+        let aad = b"ctx-bytes";
+        let blob = encode_with_context(&mk, "alias/rt-key", b"payload", aad);
+        let decoded = decode_with_context(&mk, &blob, aad).expect("well-formed blob must decode");
+        assert_eq!(decoded.key_id, "alias/rt-key");
+        assert_eq!(decoded.plaintext, b"payload");
     }
 
     #[test]
