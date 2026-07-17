@@ -384,7 +384,13 @@ async fn unauthorized_extra_form_field_is_rejected() {
         .await
         .expect("create bucket");
 
-    let policy = build_policy("post-policy-extra", "uploads/", "test", "us-east-1", 1_000_000);
+    let policy = build_policy(
+        "post-policy-extra",
+        "uploads/",
+        "test",
+        "us-east-1",
+        1_000_000,
+    );
     // `x-amz-meta-foo` is not covered by any condition in `build_policy`.
     let form = post_form(
         &policy,
@@ -402,7 +408,11 @@ async fn unauthorized_extra_form_field_is_rejected() {
         .expect("transport ok");
     let status = resp.status();
     let text = resp.text().await.unwrap_or_default();
-    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "got {status}: {text}");
+    assert_eq!(
+        status,
+        reqwest::StatusCode::FORBIDDEN,
+        "got {status}: {text}"
+    );
     assert!(
         text.contains("Extra input fields"),
         "expected extra-field AccessDenied: {text}"
@@ -437,11 +447,13 @@ async fn policy_without_expiration_is_rejected() {
             ["starts-with", "$key", "uploads/"],
         ]
     });
-    let policy_b64 =
-        base64::engine::general_purpose::STANDARD.encode(policy_json.to_string());
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy_json.to_string());
     let form = reqwest::multipart::Form::new()
         .text("key", "uploads/x.txt")
-        .text("x-amz-credential", "test/20240101/us-east-1/s3/aws4_request")
+        .text(
+            "x-amz-credential",
+            "test/20240101/us-east-1/s3/aws4_request",
+        )
         .text("policy", policy_b64)
         .text("x-amz-signature", "0".repeat(64))
         .part(
@@ -484,11 +496,13 @@ async fn success_action_redirect_returns_303() {
             {"success_action_redirect": "https://example.com/done"},
         ]
     });
-    let policy_b64 =
-        base64::engine::general_purpose::STANDARD.encode(policy_json.to_string());
+    let policy_b64 = base64::engine::general_purpose::STANDARD.encode(policy_json.to_string());
     let form = reqwest::multipart::Form::new()
         .text("key", "uploads/r.txt")
-        .text("x-amz-credential", "test/20240101/us-east-1/s3/aws4_request")
+        .text(
+            "x-amz-credential",
+            "test/20240101/us-east-1/s3/aws4_request",
+        )
         .text("policy", policy_b64)
         .text("x-amz-signature", "0".repeat(64))
         .text("success_action_redirect", "https://example.com/done")
@@ -514,8 +528,14 @@ async fn success_action_redirect_returns_303() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    assert!(location.starts_with("https://example.com/done?"), "loc={location}");
-    assert!(location.contains("bucket=post-policy-redirect"), "loc={location}");
+    assert!(
+        location.starts_with("https://example.com/done?"),
+        "loc={location}"
+    );
+    assert!(
+        location.contains("bucket=post-policy-redirect"),
+        "loc={location}"
+    );
     assert!(location.contains("key=uploads"), "loc={location}");
 
     // The object still got stored.
