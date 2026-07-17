@@ -123,3 +123,6 @@ rsa = { workspace = true }
 rand = { workspace = true }
 serde_urlencoded = "0.7"
 x509-cert = { version = "0.2", features = ["pem"] }
+hmac = { workspace = true }
+hex = "0.4"
+uuid = { workspace = true }

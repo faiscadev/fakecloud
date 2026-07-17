@@ -32,6 +32,9 @@ crc32fast = { workspace = true }
 crc64fast-nvme = { workspace = true }
 quick-xml = { workspace = true }
 toml = { workspace = true }
+multer = { workspace = true }
+futures-util = { workspace = true }
+axum = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
