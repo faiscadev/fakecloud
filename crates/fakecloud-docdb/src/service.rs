@@ -498,6 +498,35 @@ impl DocDbService {
         if let Some(v) = optional_query_param(req, "DBClusterParameterGroupName") {
             cluster.db_cluster_parameter_group = v;
         }
+        let new_vpc_sgs = collect_list(
+            req,
+            "VpcSecurityGroupIds",
+            &["VpcSecurityGroupId", "member"],
+        );
+        if !new_vpc_sgs.is_empty() {
+            cluster.vpc_security_group_ids = new_vpc_sgs;
+        }
+        // CloudwatchLogsExportConfiguration: enable/disable individual log types.
+        let enable_logs = collect_list(
+            req,
+            "CloudwatchLogsExportConfiguration.EnableLogTypes",
+            &["member", "LogType"],
+        );
+        let disable_logs = collect_list(
+            req,
+            "CloudwatchLogsExportConfiguration.DisableLogTypes",
+            &["member", "LogType"],
+        );
+        if !enable_logs.is_empty() || !disable_logs.is_empty() {
+            cluster
+                .enabled_cloudwatch_logs_exports
+                .retain(|l| !disable_logs.contains(l));
+            for log in enable_logs {
+                if !cluster.enabled_cloudwatch_logs_exports.contains(&log) {
+                    cluster.enabled_cloudwatch_logs_exports.push(log);
+                }
+            }
+        }
         // NewDBClusterIdentifier: rename.
         let renamed = optional_query_param(req, "NewDBClusterIdentifier");
         let mut cluster = cluster.clone();

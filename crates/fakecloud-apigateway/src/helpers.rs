@@ -295,6 +295,74 @@ pub(crate) fn methods_for_resource(
     out
 }
 
+/// Recompute every resource's full `path` from its parent chain. Paths are
+/// stored (not derived on read) and drive both `resource_to_json` and the
+/// data-plane router, so any `pathPart` rename or reparent must refresh them
+/// for the resource itself AND all of its descendants.
+pub(crate) fn recompute_resource_paths(resources: &mut BTreeMap<String, Resource>) {
+    let snapshot: BTreeMap<String, (Option<String>, Option<String>)> = resources
+        .iter()
+        .map(|(id, r)| (id.clone(), (r.parent_id.clone(), r.path_part.clone())))
+        .collect();
+    for (id, r) in resources.iter_mut() {
+        r.path = compute_resource_path(id, &snapshot);
+    }
+}
+
+fn compute_resource_path(
+    id: &str,
+    snapshot: &BTreeMap<String, (Option<String>, Option<String>)>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let mut cur = Some(id.to_string());
+    let max_depth = snapshot.len() + 1;
+    let mut steps = 0;
+    while let Some(cid) = cur {
+        steps += 1;
+        if steps > max_depth {
+            break; // cycle guard
+        }
+        match snapshot.get(&cid) {
+            Some((parent, part)) => {
+                if let Some(p) = part {
+                    parts.push(p.clone());
+                }
+                cur = parent.clone();
+            }
+            None => break,
+        }
+    }
+    parts.reverse();
+    if parts.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", parts.join("/"))
+    }
+}
+
+/// True if `candidate` is `target` itself or a descendant of `target`.
+/// Reparenting `target` under such a node would create a cycle.
+pub(crate) fn is_self_or_descendant(
+    resources: &BTreeMap<String, Resource>,
+    target: &str,
+    candidate: &str,
+) -> bool {
+    let mut cur = Some(candidate.to_string());
+    let max_depth = resources.len() + 1;
+    let mut steps = 0;
+    while let Some(cid) = cur {
+        if cid == target {
+            return true;
+        }
+        steps += 1;
+        if steps > max_depth {
+            break;
+        }
+        cur = resources.get(&cid).and_then(|r| r.parent_id.clone());
+    }
+    false
+}
+
 pub(crate) fn tags_from(body: &Value) -> BTreeMap<String, String> {
     body.get("tags")
         .and_then(Value::as_object)
@@ -322,10 +390,27 @@ pub(crate) fn apply_patch_operations(req: &AwsRequest, mut on: impl FnMut(&str, 
 pub(crate) fn apply_rest_api_patch(api: &mut RestApi, op: &str, path: &str, value: &Value) {
     let is_binary_media_path =
         path == "/binaryMediaTypes" || path.starts_with("/binaryMediaTypes/");
-    if op != "replace" && op != "add" && !(op == "remove" && is_binary_media_path) {
+    let is_endpoint_path =
+        path == "/endpointConfiguration" || path.starts_with("/endpointConfiguration/");
+    let remove_ok = is_binary_media_path || is_endpoint_path || path == "/minimumCompressionSize";
+    if op != "replace" && op != "add" && !(op == "remove" && remove_ok) {
+        return;
+    }
+    if is_endpoint_path {
+        apply_endpoint_config_patch(api, op, path, value);
         return;
     }
     match path {
+        "/minimumCompressionSize" => {
+            if op == "remove" {
+                api.minimum_compression_size = None;
+            } else if let Some(n) = value
+                .as_i64()
+                .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+            {
+                api.minimum_compression_size = Some(n);
+            }
+        }
         "/name" => {
             if let Some(s) = value.as_str() {
                 api.name = s.to_string();
@@ -363,6 +448,75 @@ pub(crate) fn apply_rest_api_patch(api: &mut RestApi, op: &str, path: &str, valu
                     }
                 } else if op == "remove" {
                     api.binary_media_types.retain(|m| m != &mt);
+                }
+            }
+        }
+    }
+}
+
+/// Apply a patch op to a REST API's `endpointConfiguration`. Supports the whole
+/// object (`/endpointConfiguration`) and the `types` / `vpcEndpointIds` arrays
+/// (indexed: `/endpointConfiguration/types/0`, or the whole array).
+fn apply_endpoint_config_patch(api: &mut RestApi, op: &str, path: &str, value: &Value) {
+    // Ensure the stored value is an object we can mutate.
+    if !api.endpoint_configuration.is_object() {
+        api.endpoint_configuration = json!({});
+    }
+    if path == "/endpointConfiguration" {
+        if op == "remove" {
+            api.endpoint_configuration = json!({});
+        } else if value.is_object() {
+            api.endpoint_configuration = value.clone();
+        }
+        return;
+    }
+    let Some(rest) = path.strip_prefix("/endpointConfiguration/") else {
+        return;
+    };
+    let obj = api
+        .endpoint_configuration
+        .as_object_mut()
+        .expect("endpoint_configuration coerced to object above");
+    // rest is e.g. "types", "types/0", "vpcEndpointIds", "vpcEndpointIds/1".
+    let (field, index) = match rest.split_once('/') {
+        Some((f, i)) => (f, i.parse::<usize>().ok()),
+        None => (rest, None),
+    };
+    match index {
+        None => {
+            // Whole array replace/remove.
+            if op == "remove" {
+                obj.remove(field);
+            } else {
+                obj.insert(field.to_string(), value.clone());
+            }
+        }
+        Some(idx) => {
+            let arr = obj
+                .entry(field.to_string())
+                .or_insert_with(|| Value::Array(Vec::new()));
+            if let Some(items) = arr.as_array_mut() {
+                match op {
+                    "remove" => {
+                        if idx < items.len() {
+                            items.remove(idx);
+                        }
+                    }
+                    "add" => {
+                        if idx >= items.len() {
+                            items.push(value.clone());
+                        } else {
+                            items.insert(idx, value.clone());
+                        }
+                    }
+                    _ => {
+                        // replace
+                        if idx < items.len() {
+                            items[idx] = value.clone();
+                        } else {
+                            items.push(value.clone());
+                        }
+                    }
                 }
             }
         }

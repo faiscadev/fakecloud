@@ -651,3 +651,54 @@ async fn supported_actions_cover_full_surface() {
     let svc = service();
     assert_eq!(svc.supported_actions().len(), 70);
 }
+
+#[tokio::test]
+async fn modify_cluster_applies_vpc_sgs_and_log_exports() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "mc"),
+            ("Engine", "neptune"),
+            ("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-initial"),
+            ("EnableCloudwatchLogsExports.member.1", "audit"),
+        ],
+    )
+    .await;
+
+    // Modify: swap the SGs and enable an extra log type while disabling audit.
+    let resp = call(
+        &svc,
+        "ModifyDBCluster",
+        &[
+            ("DBClusterIdentifier", "mc"),
+            ("VpcSecurityGroupIds.VpcSecurityGroupId.1", "sg-new-a"),
+            ("VpcSecurityGroupIds.VpcSecurityGroupId.2", "sg-new-b"),
+            (
+                "CloudwatchLogsExportConfiguration.EnableLogTypes.member.1",
+                "slowquery",
+            ),
+            (
+                "CloudwatchLogsExportConfiguration.DisableLogTypes.member.1",
+                "audit",
+            ),
+        ],
+    )
+    .await;
+    let xml = body(&resp);
+    assert!(xml.contains("<VpcSecurityGroupId>sg-new-a</VpcSecurityGroupId>"));
+    assert!(xml.contains("<VpcSecurityGroupId>sg-new-b</VpcSecurityGroupId>"));
+    assert!(!xml.contains("sg-initial"));
+    assert!(xml.contains("slowquery"));
+    assert!(!xml.contains("audit"));
+
+    // Persisted: Describe reflects the modified values.
+    let resp = call(&svc, "DescribeDBClusters", &[("DBClusterIdentifier", "mc")]).await;
+    let xml = body(&resp);
+    assert!(xml.contains("<VpcSecurityGroupId>sg-new-a</VpcSecurityGroupId>"));
+    assert!(xml.contains("<VpcSecurityGroupId>sg-new-b</VpcSecurityGroupId>"));
+    assert!(!xml.contains("sg-initial"));
+    assert!(xml.contains("slowquery"));
+    assert!(!xml.contains("audit"));
+}

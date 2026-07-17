@@ -600,6 +600,15 @@ pub(crate) fn build_scaling_config(req: Option<&Value>) -> Value {
     json!({ "minSize": min, "maxSize": max, "desiredSize": desired })
 }
 
+/// Identity of a Kubernetes taint for add/update/remove matching: taints are
+/// keyed by `key` + `effect` (value can change on an update-in-place).
+pub(crate) fn taint_identity(t: &Value) -> (Option<&str>, Option<&str>) {
+    (
+        t.get("key").and_then(|v| v.as_str()),
+        t.get("effect").and_then(|v| v.as_str()),
+    )
+}
+
 /// Build a `NodegroupUpdateConfig`, defaulting `maxUnavailable` to 1.
 pub(crate) fn build_nodegroup_update_config(req: Option<&Value>) -> Value {
     if let Some(pct) = req

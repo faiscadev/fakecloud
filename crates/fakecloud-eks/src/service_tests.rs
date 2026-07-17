@@ -2270,3 +2270,126 @@ async fn subscription_accepts_valid_duration() {
     assert_eq!(v["subscription"]["term"]["duration"], 36);
     assert_eq!(v["subscription"]["status"], "ACTIVE");
 }
+
+#[tokio::test]
+async fn update_nodegroup_config_applies_taints_and_removes_labels() {
+    let svc = EksService::new(make_state());
+    svc.handle(make_request(Method::POST, "/clusters", &create_body("ngc")))
+        .await
+        .unwrap();
+    svc.handle(make_request(
+        Method::POST,
+        "/clusters/ngc/node-groups",
+        &json!({
+            "nodegroupName": "ng1",
+            "nodeRole": "arn:aws:iam::111122223333:role/eks-node",
+            "subnets": ["subnet-1"],
+            "labels": { "team": "core", "tier": "gold" },
+            "taints": [ { "key": "dedicated", "value": "gpu", "effect": "NO_SCHEDULE" } ]
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    // Update: add/update a taint, remove a taint that doesn't exist yet is a
+    // no-op; also add a label and remove one.
+    svc.handle(make_request(
+        Method::POST,
+        "/clusters/ngc/node-groups/ng1/update-config",
+        &json!({
+            "labels": {
+                "addOrUpdateLabels": { "env": "prod" },
+                "removeLabels": ["tier"]
+            },
+            "taints": {
+                "addOrUpdateTaints": [
+                    { "key": "dedicated", "value": "tpu", "effect": "NO_SCHEDULE" },
+                    { "key": "spot", "value": "true", "effect": "PREFER_NO_SCHEDULE" }
+                ],
+                "removeTaints": []
+            }
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            "/clusters/ngc/node-groups/ng1",
+            "",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    // Labels: env added, tier removed, team + core unchanged.
+    assert_eq!(v["nodegroup"]["labels"]["env"], "prod");
+    assert_eq!(v["nodegroup"]["labels"]["team"], "core");
+    assert!(v["nodegroup"]["labels"].get("tier").is_none());
+    // Taints: dedicated updated in place to tpu, spot added.
+    let taints = v["nodegroup"]["taints"].as_array().unwrap();
+    assert_eq!(taints.len(), 2);
+    let dedicated = taints
+        .iter()
+        .find(|t| t["key"] == "dedicated")
+        .expect("dedicated taint");
+    assert_eq!(dedicated["value"], "tpu");
+    assert!(taints.iter().any(|t| t["key"] == "spot"));
+
+    // Now remove the dedicated taint.
+    svc.handle(make_request(
+        Method::POST,
+        "/clusters/ngc/node-groups/ng1/update-config",
+        &json!({
+            "taints": { "removeTaints": [ { "key": "dedicated", "effect": "NO_SCHEDULE" } ] }
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            "/clusters/ngc/node-groups/ng1",
+            "",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let taints = v["nodegroup"]["taints"].as_array().unwrap();
+    assert_eq!(taints.len(), 1);
+    assert_eq!(taints[0]["key"], "spot");
+}
+
+#[tokio::test]
+async fn create_cluster_stores_encryption_config() {
+    let svc = EksService::new(make_state());
+    let body = json!({
+        "name": "enc",
+        "roleArn": "arn:aws:iam::111122223333:role/eks-cluster",
+        "resourcesVpcConfig": { "subnetIds": ["subnet-1"] },
+        "encryptionConfig": [
+            {
+                "resources": ["secrets"],
+                "provider": { "keyArn": "arn:aws:kms:us-east-1:111122223333:key/abc" }
+            }
+        ]
+    })
+    .to_string();
+    svc.handle(make_request(Method::POST, "/clusters", &body))
+        .await
+        .unwrap();
+    let resp = svc
+        .handle(make_request(Method::GET, "/clusters/enc", ""))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let ec = &v["cluster"]["encryptionConfig"][0];
+    assert_eq!(ec["resources"][0], "secrets");
+    assert_eq!(
+        ec["provider"]["keyArn"],
+        "arn:aws:kms:us-east-1:111122223333:key/abc"
+    );
+}
