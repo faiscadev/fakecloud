@@ -394,15 +394,35 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        req_str(&body, "Name")?;
+        let name = req_str(&body, "Name")?.to_string();
         let run_id = req_str(&body, "RunId")?.to_string();
         let node_ids = req_present(&body, "NodeIds")?.clone();
+        let now = now_ts();
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
-        st.workflow_runs
-            .get_mut(&run_id)
+        // Resuming mints a new WorkflowRun. It must be persisted so the returned
+        // RunId is observable via GetWorkflowRun / GetWorkflowRunProperties;
+        // previously the id was returned but never inserted and 404'd on read.
+        let original = st
+            .workflow_runs
+            .get(&run_id)
             .ok_or_else(|| entity_not_found(format!("WorkflowRun {run_id} not found")))?;
+        let props = original
+            .get("WorkflowRunProperties")
+            .cloned()
+            .unwrap_or(json!({}));
         let new_run = format!("wr_{}", new_id());
+        st.workflow_runs.insert(
+            new_run.clone(),
+            json!({
+                "Name": name,
+                "WorkflowRunId": new_run,
+                "WorkflowRunProperties": props,
+                "Status": "RUNNING",
+                "StartedOn": now,
+                "PreviousRunId": run_id,
+            }),
+        );
         Ok(AwsResponse::ok_json(json!({
             "RunId": new_run,
             "NodeIds": node_ids,

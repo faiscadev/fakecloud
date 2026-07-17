@@ -58,11 +58,27 @@ impl GlueService {
     pub(crate) fn get_connection(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let name = req_str(&body, "Name")?;
+        let hide_password = body
+            .get("HidePassword")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let accounts = self.state.read();
-        let c = accounts
+        let mut c = accounts
             .get(&req.account_id)
             .and_then(|s| s.connections.get(name))
+            .cloned()
             .ok_or_else(|| entity_not_found(format!("Connection {name} not found")))?;
+        // With HidePassword=true AWS strips the PASSWORD from ConnectionProperties
+        // (and any encrypted password) rather than returning it verbatim.
+        if hide_password {
+            if let Some(props) = c
+                .get_mut("ConnectionProperties")
+                .and_then(|v| v.as_object_mut())
+            {
+                props.remove("PASSWORD");
+                props.remove("ENCRYPTED_PASSWORD");
+            }
+        }
         Ok(AwsResponse::ok_json(json!({ "Connection": c })))
     }
 

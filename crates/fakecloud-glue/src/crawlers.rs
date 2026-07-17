@@ -82,12 +82,18 @@ impl GlueService {
     }
 
     pub(crate) fn get_crawlers(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
         let accounts = self.state.read();
         let crawlers: Vec<Value> = accounts
             .get(&req.account_id)
             .map(|s| s.crawlers.values().cloned().collect())
             .unwrap_or_default();
-        Ok(AwsResponse::ok_json(json!({ "Crawlers": crawlers })))
+        let (page, token) = crate::common::paginate_body(&body, crawlers);
+        let mut resp = json!({ "Crawlers": page });
+        if let Some(t) = token {
+            resp["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(crate) fn batch_get_crawlers(

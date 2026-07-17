@@ -1199,6 +1199,7 @@ mod tests {
             table_type: Some("EXTERNAL_TABLE".to_string()),
             parameters: std::collections::BTreeMap::new(),
             partitions: std::collections::BTreeMap::new(),
+            catalog_id: "123456789012".to_string(),
         }
     }
 
