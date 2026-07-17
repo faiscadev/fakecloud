@@ -3656,17 +3656,19 @@ async fn s3_get_object_attributes() {
     );
     let json = output.stdout_json();
 
-    // ETag must round-trip with the surrounding quote chars AWS itself
-    // emits — SDK clients compare this against PutObject's ETag, which is
-    // also quoted, so unquoted values would fail integrity checks.
+    // GetObjectAttributes returns the ETag WITHOUT the surrounding quote
+    // characters — unlike GetObject/HeadObject, which quote it. This matches
+    // AWS S3, which emits the raw entity tag for this operation. Compare
+    // against PutObject's (quoted) ETag with its quotes stripped.
     let etag = json["ETag"].as_str().expect("Expected ETag in response");
+    let put_etag_unquoted = put_etag.trim_matches('"');
     assert_eq!(
-        etag, put_etag,
-        "ETag mismatch: got {etag}, expected {put_etag}"
+        etag, put_etag_unquoted,
+        "ETag mismatch: got {etag}, expected {put_etag_unquoted}"
     );
     assert!(
-        etag.starts_with('"') && etag.ends_with('"'),
-        "ETag must be quoted: {etag}"
+        !etag.starts_with('"') && !etag.ends_with('"'),
+        "GetObjectAttributes ETag must be unquoted: {etag}"
     );
 
     // ObjectSize should match data length
