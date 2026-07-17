@@ -67,12 +67,24 @@ fn arch_for(state: &Ec2State, image_id: &str) -> String {
         .unwrap_or_else(|| "x86_64".to_string())
 }
 
+/// Resolve an instance's `platformDetails` from its AMI in the seeded/owned
+/// catalogue (`Windows` for Windows images), defaulting to `Linux/UNIX` when
+/// the AMI isn't known — the same contract as [`image_xml`]'s platform fields.
+fn platform_for(state: &Ec2State, image_id: &str) -> String {
+    let raw = state
+        .images
+        .get(image_id)
+        .and_then(|img| img.platform.as_deref());
+    super::image::platform_details_label(raw)
+}
+
 fn instance_xml(
     i: &Instance,
     tags: &[Tag],
     owner: &str,
     sg_names: &HashMap<String, String>,
     architecture: &str,
+    platform_details: &str,
 ) -> String {
     let groups: Vec<String> = i
         .security_group_ids
@@ -125,6 +137,22 @@ fn instance_xml(
         i.enable_resource_name_dns_a_record,
         i.enable_resource_name_dns_aaaa_record,
     );
+    // Windows instances additionally report `<platform>windows</platform>` and
+    // a Windows usage operation, mirroring `image_xml`.
+    let platform_xml = if platform_details.eq_ignore_ascii_case("windows") {
+        format!(
+            "{}{}{}",
+            ec2_elem("platform", "windows"),
+            ec2_elem("platformDetails", platform_details),
+            ec2_elem("usageOperation", "RunInstances:0002"),
+        )
+    } else {
+        format!(
+            "{}{}",
+            ec2_elem("platformDetails", platform_details),
+            ec2_elem("usageOperation", "RunInstances"),
+        )
+    };
     let tenancy = i.placement_tenancy.as_deref().unwrap_or("default");
     let placement_group = i
         .placement_group_name
@@ -132,7 +160,7 @@ fn instance_xml(
         .map(|g| ec2_elem("groupName", g))
         .unwrap_or_default();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("instanceId", &i.instance_id),
         ec2_elem("imageId", &i.image_id),
         state_xml("instanceState", i.state_code, &i.state_name),
@@ -146,6 +174,7 @@ fn instance_xml(
         ec2_elem("launchTime", &i.launch_time),
         ec2_elem("amiLaunchIndex", &i.ami_launch_index.to_string()),
         ec2_elem("architecture", architecture),
+        platform_xml,
         ec2_elem("rootDeviceType", "ebs"),
         ec2_elem("rootDeviceName", "/dev/xvda"),
         ec2_elem("virtualizationType", "hvm"),
@@ -443,7 +472,15 @@ pub(crate) async fn run_instances(
             );
             let tags = state.tags_for(id).to_vec();
             let architecture = arch_for(state, &inst.image_id);
-            rendered.push(instance_xml(&inst, &tags, &owner, &sg_names, &architecture));
+            let platform_details = platform_for(state, &inst.image_id);
+            rendered.push(instance_xml(
+                &inst,
+                &tags,
+                &owner,
+                &sg_names,
+                &architecture,
+                &platform_details,
+            ));
             state.instances.insert(id.clone(), inst);
         }
     }
@@ -1188,6 +1225,7 @@ pub(crate) fn describe_instances(
                 &owner,
                 &sg_names,
                 &arch_for(state, &i.image_id),
+                &platform_for(state, &i.image_id),
             ));
     }
     let reservations: Vec<String> = order
@@ -2331,6 +2369,91 @@ mod modify_tests {
                 .unwrap(),
         );
         assert!(out.contains("<instanceId>i-1</instanceId>"), "got: {out}");
+    }
+
+    #[test]
+    fn describe_instances_reports_linux_platform_details() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        // "ami-1" is not in the catalogue, so platformDetails falls back to
+        // Linux/UNIX — the same default as image_xml.
+        let out = body(
+            describe_instances(&svc, &req("DescribeInstances", &[("InstanceId.1", "i-1")]))
+                .unwrap(),
+        );
+        assert!(
+            out.contains("<platformDetails>Linux/UNIX</platformDetails>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<usageOperation>RunInstances</usageOperation>"),
+            "got: {out}"
+        );
+        assert!(!out.contains("<platform>windows</platform>"), "got: {out}");
+    }
+
+    #[test]
+    fn describe_instances_reports_windows_platform() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        {
+            let mut accounts = svc.state.write();
+            let inst = accounts
+                .get_mut("000000000000")
+                .unwrap()
+                .instances
+                .get_mut("i-1")
+                .unwrap();
+            // Seeded Windows Server AMI (platform = windows).
+            inst.image_id = "ami-0a1b2c3d4e5f60006".into();
+        }
+        let out = body(
+            describe_instances(&svc, &req("DescribeInstances", &[("InstanceId.1", "i-1")]))
+                .unwrap(),
+        );
+        assert!(out.contains("<platform>windows</platform>"), "got: {out}");
+        // platformDetails is the capitalized billing label, distinct from the
+        // lowercase `<platform>` wire element.
+        assert!(
+            out.contains("<platformDetails>Windows</platformDetails>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<usageOperation>RunInstances:0002</usageOperation>"),
+            "got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_instances_reports_platform_details_on_reservation() {
+        let svc = Ec2Service::new();
+        // Seeded Windows Server AMI -> the RunInstances reservation body carries
+        // the Windows billing label + RunInstances:0002 (covers the second
+        // render path, distinct from DescribeInstances).
+        let out = body(
+            run_instances(
+                &svc,
+                &req(
+                    "RunInstances",
+                    &[
+                        ("ImageId", "ami-0a1b2c3d4e5f60006"),
+                        ("MinCount", "1"),
+                        ("MaxCount", "1"),
+                    ],
+                ),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("<platform>windows</platform>"), "got: {out}");
+        assert!(
+            out.contains("<platformDetails>Windows</platformDetails>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<usageOperation>RunInstances:0002</usageOperation>"),
+            "got: {out}"
+        );
     }
 
     #[tokio::test]
