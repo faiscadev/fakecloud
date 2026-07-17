@@ -21,13 +21,27 @@ fn validate_image_strings(req: &AwsRequest) -> Result<(), AwsServiceError> {
 
 const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
+/// Map a stored AMI `platform` value to the AWS `platformDetails` billing
+/// label. Note the two fields differ in casing on the wire: the `<platform>`
+/// element is the lowercase `windows`, while `platformDetails` is the
+/// capitalized billing string (`Windows`, `Linux/UNIX`). An unknown platform
+/// falls back to `Linux/UNIX`; any already-canonical value passes through.
+pub(crate) fn platform_details_label(raw_platform: Option<&str>) -> String {
+    match raw_platform {
+        Some(p) if p.eq_ignore_ascii_case("windows") => "Windows".to_string(),
+        Some(p) => p.to_string(),
+        None => "Linux/UNIX".to_string(),
+    }
+}
+
 fn image_xml(i: &Image, tags: &[Tag], owner: &str) -> String {
     // Effective owner: the AMI's own owner_id when set (seeded public AMIs),
     // else the requesting account (user-registered AMIs are owned by creator).
     let owner_id = i.owner_id.as_deref().unwrap_or(owner);
     let creation_date = i.creation_date.as_deref().unwrap_or(FIXED_TIME);
     let root_device_name = i.root_device_name.as_deref().unwrap_or("/dev/xvda");
-    let platform_details = i.platform.as_deref().unwrap_or("Linux/UNIX");
+    let platform_details = platform_details_label(i.platform.as_deref());
+    let platform_details = platform_details.as_str();
     let owner_alias_xml = i
         .owner_alias
         .as_deref()

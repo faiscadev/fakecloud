@@ -71,11 +71,11 @@ fn arch_for(state: &Ec2State, image_id: &str) -> String {
 /// catalogue (`Windows` for Windows images), defaulting to `Linux/UNIX` when
 /// the AMI isn't known — the same contract as [`image_xml`]'s platform fields.
 fn platform_for(state: &Ec2State, image_id: &str) -> String {
-    state
+    let raw = state
         .images
         .get(image_id)
-        .and_then(|img| img.platform.clone())
-        .unwrap_or_else(|| "Linux/UNIX".to_string())
+        .and_then(|img| img.platform.as_deref());
+    super::image::platform_details_label(raw)
 }
 
 fn instance_xml(
@@ -2412,8 +2412,42 @@ mod modify_tests {
                 .unwrap(),
         );
         assert!(out.contains("<platform>windows</platform>"), "got: {out}");
+        // platformDetails is the capitalized billing label, distinct from the
+        // lowercase `<platform>` wire element.
         assert!(
-            out.contains("<platformDetails>windows</platformDetails>"),
+            out.contains("<platformDetails>Windows</platformDetails>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<usageOperation>RunInstances:0002</usageOperation>"),
+            "got: {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_instances_reports_platform_details_on_reservation() {
+        let svc = Ec2Service::new();
+        // Seeded Windows Server AMI -> the RunInstances reservation body carries
+        // the Windows billing label + RunInstances:0002 (covers the second
+        // render path, distinct from DescribeInstances).
+        let out = body(
+            run_instances(
+                &svc,
+                &req(
+                    "RunInstances",
+                    &[
+                        ("ImageId", "ami-0a1b2c3d4e5f60006"),
+                        ("MinCount", "1"),
+                        ("MaxCount", "1"),
+                    ],
+                ),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(out.contains("<platform>windows</platform>"), "got: {out}");
+        assert!(
+            out.contains("<platformDetails>Windows</platformDetails>"),
             "got: {out}"
         );
         assert!(
