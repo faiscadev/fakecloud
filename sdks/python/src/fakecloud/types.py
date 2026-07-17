@@ -3538,6 +3538,32 @@ class EcsTaskCredentials:
 
 
 @dataclass
+class ContainerCredentials:
+    """Response shape for ``GET /_fakecloud/credentials`` — the temporary
+    credentials the AWS SDK's container-credentials provider fetches when
+    ``AWS_CONTAINER_CREDENTIALS_FULL_URI`` points at fakecloud.
+
+    Wire keys are PascalCase to match the real AWS credential endpoints.
+    """
+
+    access_key_id: str
+    secret_access_key: str
+    token: str
+    expiration: str
+    role_arn: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> ContainerCredentials:
+        return cls(
+            access_key_id=data["AccessKeyId"],
+            secret_access_key=data["SecretAccessKey"],
+            token=data["Token"],
+            expiration=data["Expiration"],
+            role_arn=data["RoleArn"],
+        )
+
+
+@dataclass
 class InjectSsmSessionRequest:
     target: str
     account_id: Optional[str] = None

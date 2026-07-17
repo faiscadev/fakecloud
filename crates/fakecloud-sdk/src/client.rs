@@ -60,6 +60,23 @@ impl FakeCloud {
         Self::parse(resp).await
     }
 
+    /// Fetch a set of temporary credentials from the general-purpose
+    /// container/instance credential endpoint (`GET /_fakecloud/credentials`).
+    ///
+    /// This is the same JSON an app's AWS SDK fetches when
+    /// `AWS_CONTAINER_CREDENTIALS_FULL_URI` points at fakecloud, letting a real
+    /// binary that expects an instance/task role resolve the default credential
+    /// chain locally with no code change. Fields use AWS's native PascalCase
+    /// (`AccessKeyId`, `SecretAccessKey`, `Token`, `Expiration`, `RoleArn`).
+    pub async fn credentials(&self) -> Result<ContainerCredentialsResponse, Error> {
+        let resp = self
+            .client
+            .get(format!("{}/_fakecloud/credentials", self.base_url))
+            .send()
+            .await?;
+        Self::parse(resp).await
+    }
+
     /// Reset a single service's state.
     pub async fn reset_service(&self, service: &str) -> Result<ResetServiceResponse, Error> {
         let resp = self

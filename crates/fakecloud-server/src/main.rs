@@ -6963,7 +6963,51 @@ async fn main() {
         .iter()
         .map(|s| s.to_string())
         .collect();
+    // Role ARN the container/instance credential endpoint vends creds for, and
+    // a per-role cache so the unauthenticated endpoint reuses one live credential
+    // per role (rotating near expiry) instead of minting one per request.
+    let credentials_role_arn = cli.credentials_role_arn(&cli.account_id);
+    let credentials_account_id = cli.account_id.clone();
+    let credentials_cache = std::sync::Arc::new(
+        fakecloud_iam::sts_service::container_creds::ContainerCredentialCache::new(),
+    );
     let app = Router::new()
+        .route(
+            // General-purpose container/instance credential endpoint. Point an
+            // app's `AWS_CONTAINER_CREDENTIALS_FULL_URI` here and the AWS SDK
+            // default credential chain resolves temporary creds locally with no
+            // code change. Creds are minted + registered in IAM state (like
+            // AssumeRole), so a request signed with them verifies even under
+            // `--verify-sigv4`.
+            "/_fakecloud/credentials",
+            axum::routing::get({
+                let iam = iam_state.clone();
+                let role_arn = credentials_role_arn.clone();
+                let account_id = credentials_account_id.clone();
+                let cache = credentials_cache.clone();
+                move || {
+                    let iam = iam.clone();
+                    let role_arn = role_arn.clone();
+                    let account_id = account_id.clone();
+                    let cache = cache.clone();
+                    async move {
+                        let creds = cache.get_or_mint(
+                            &iam,
+                            &account_id,
+                            &role_arn,
+                            fakecloud_iam::sts_service::container_creds::DEFAULT_CONTAINER_CREDENTIALS_DURATION,
+                        );
+                        axum::Json(serde_json::json!({
+                            "AccessKeyId": creds.access_key_id,
+                            "SecretAccessKey": creds.secret_access_key,
+                            "Token": creds.session_token,
+                            "Expiration": creds.expiration_iso8601(),
+                            "RoleArn": creds.role_arn,
+                        }))
+                    }
+                }
+            }),
+        )
         .route(
             "/_fakecloud/health",
             axum::routing::get({

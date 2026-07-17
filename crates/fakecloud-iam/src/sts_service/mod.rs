@@ -102,8 +102,30 @@ fn compute_expiration_at(
 }
 
 /// Format an expiration timestamp as the ISO 8601 string AWS returns.
-fn format_expiration(ts: DateTime<Utc>) -> String {
+pub(super) fn format_expiration(ts: DateTime<Utc>) -> String {
     ts.format("%Y-%m-%dT%H:%M:%SZ").to_string()
+}
+
+/// Extract the assumed-role name (the final `/`-separated segment) from a role
+/// ARN, matching how AWS names the assumed-role principal (the role path is
+/// dropped). Shared by every assumed-role mint path so the name cannot drift.
+pub(super) fn assumed_role_name(role_arn: &str) -> &str {
+    role_arn.rsplit('/').next().unwrap_or("unknown")
+}
+
+/// Format the assumed-role principal ARN
+/// (`arn:<partition>:sts::<account>:assumed-role/<role_name>/<session_name>`).
+/// Single source of truth shared by every path that mints assumed-role
+/// credentials (AssumeRole / WebIdentity / SAML in `assume.rs`, and the
+/// container-credential endpoint in `container_creds.rs`) so the shape cannot
+/// drift between them.
+pub(super) fn format_assumed_role_arn(
+    partition: &str,
+    account_id: &str,
+    role_name: &str,
+    session_name: &str,
+) -> String {
+    format!("arn:{partition}:sts::{account_id}:assumed-role/{role_name}/{session_name}")
 }
 
 /// Enforce the AWS `RoleSessionName` pattern `[\w+=,.@-]*`. Without this, a
@@ -150,6 +172,7 @@ pub struct StsService {
 
 mod assume;
 mod caller;
+pub mod container_creds;
 mod federation;
 mod session;
 

@@ -118,4 +118,5 @@ Startup time, idle memory, and binary size are tracked as constants in `scripts/
 - Lambda execution runs real code in Docker containers, supports multiple runtimes, and reuses warm containers.
 - Step Functions is fully shipped with complete ASL interpreter (all state types), error handling (Retry/Catch), and cross-service task integrations (Lambda, SQS, SNS, EventBridge, DynamoDB).
 - API Gateway v2 (HTTP APIs) is fully shipped with Lambda proxy integration v2.0, HTTP proxy, Mock integrations, route matching with path parameters and wildcards, CORS, and JWT/Lambda authorizers.
+- `GET /_fakecloud/credentials` vends AWS container-credentials-format JSON (minted + registered like AssumeRole, so it verifies under `--verify-sigv4`); point an app's `AWS_CONTAINER_CREDENTIALS_FULL_URI` at it to resolve the SDK default credential chain locally with no code change. Role ARN configurable via `--credentials-role-arn`.
 - When adding new service behavior, prefer complete, realistic implementations over placeholder API coverage.

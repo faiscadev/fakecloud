@@ -65,6 +65,7 @@ func main() {
 | `Health(ctx)` | Check server health |
 | `Reset(ctx)` | Reset all service state |
 | `ResetService(ctx, service)` | Reset a single service |
+| `Credentials(ctx)` | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
 | `CreateAdmin(ctx, accountID, userName)` | Bootstrap an admin user in a secondary account |
 
 ### SES - `fc.SES()`

@@ -73,6 +73,7 @@ FakeCloud fc = new FakeCloud("http://localhost:4566"); // explicit base URL
 | `health()`                          | Server health check                        |
 | `reset()`                           | Reset all service state                    |
 | `resetService(service)`             | Reset a single service                     |
+| `credentials()`                     | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
 | `createAdmin(accountId, userName)`  | Bootstrap an admin IAM user in an account  |
 
 ### `fc.lambda()`

@@ -50,6 +50,20 @@ func (fc *FakeCloud) ResetService(ctx context.Context, service string) (*ResetSe
 	return &out, nil
 }
 
+// Credentials fetches temporary credentials from the general-purpose
+// container/instance credential endpoint (GET /_fakecloud/credentials).
+// This is the same JSON an app's AWS SDK fetches when
+// AWS_CONTAINER_CREDENTIALS_FULL_URI points at fakecloud, letting a real
+// binary that expects an instance/task role resolve the default credential
+// chain locally with no code change.
+func (fc *FakeCloud) Credentials(ctx context.Context) (*ContainerCredentials, error) {
+	var out ContainerCredentials
+	if err := fc.doGet(ctx, "/_fakecloud/credentials", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // CreateAdmin creates an IAM admin user in a specific account.
 func (fc *FakeCloud) CreateAdmin(ctx context.Context, accountID, userName string) (*CreateAdminResponse, error) {
 	var out CreateAdminResponse

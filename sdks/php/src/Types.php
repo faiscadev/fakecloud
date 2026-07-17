@@ -4080,6 +4080,33 @@ final class EcsTaskCredentialsResponse
     }
 }
 
+/**
+ * Response for GET /_fakecloud/credentials — the temporary credentials the AWS
+ * SDK's container-credentials provider fetches when
+ * AWS_CONTAINER_CREDENTIALS_FULL_URI points at fakecloud.
+ */
+final class ContainerCredentialsResponse
+{
+    public function __construct(
+        public readonly string $accessKeyId,
+        public readonly string $secretAccessKey,
+        public readonly string $token,
+        public readonly string $expiration,
+        public readonly string $roleArn,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['AccessKeyId'] ?? ''),
+            (string) ($data['SecretAccessKey'] ?? ''),
+            (string) ($data['Token'] ?? ''),
+            (string) ($data['Expiration'] ?? ''),
+            (string) ($data['RoleArn'] ?? ''),
+        );
+    }
+}
+
 // ── SSM admin ─────────────────────────────────────────────────────
 
 final class SetSsmCommandStatusResponse

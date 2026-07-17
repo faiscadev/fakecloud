@@ -1687,6 +1687,18 @@ type EcsTaskCredentials struct {
 	RoleArn         string `json:"RoleArn"`
 }
 
+// ContainerCredentials mirrors the JSON the general-purpose container/instance
+// credential endpoint serves at GET /_fakecloud/credentials — the shape the
+// AWS SDK's container-credentials provider fetches when
+// AWS_CONTAINER_CREDENTIALS_FULL_URI points at fakecloud.
+type ContainerCredentials struct {
+	AccessKeyID     string `json:"AccessKeyId"`
+	SecretAccessKey string `json:"SecretAccessKey"`
+	Token           string `json:"Token"`
+	Expiration      string `json:"Expiration"`
+	RoleArn         string `json:"RoleArn"`
+}
+
 // ── SSM ────────────────────────────────────────────────────────────
 
 // SetSsmCommandStatusRequest is the body for

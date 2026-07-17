@@ -2335,6 +2335,25 @@ pub struct EcsTaskCredentialsResponse {
     pub role_arn: String,
 }
 
+/// Temporary credentials vended by the general-purpose container/instance
+/// credential endpoint (`GET /_fakecloud/credentials`). This is the JSON shape
+/// the AWS SDK's container-credentials provider fetches when
+/// `AWS_CONTAINER_CREDENTIALS_FULL_URI` points at fakecloud. Fields use AWS's
+/// native PascalCase.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContainerCredentialsResponse {
+    #[serde(rename = "AccessKeyId")]
+    pub access_key_id: String,
+    #[serde(rename = "SecretAccessKey")]
+    pub secret_access_key: String,
+    #[serde(rename = "Token")]
+    pub token: String,
+    #[serde(rename = "Expiration")]
+    pub expiration: String,
+    #[serde(rename = "RoleArn")]
+    pub role_arn: String,
+}
+
 // ── KMS usage (admin) ───────────────────────────────────────────────
 
 /// One recorded KMS data-plane invocation, exposed by

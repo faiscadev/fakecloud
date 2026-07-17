@@ -1428,6 +1428,19 @@ public final class Types {
             @JsonProperty("Expiration") String expiration,
             @JsonProperty("RoleArn") String roleArn) {}
 
+    /**
+     * Response for {@code GET /_fakecloud/credentials} — the temporary
+     * credentials the AWS SDK's container-credentials provider fetches when
+     * {@code AWS_CONTAINER_CREDENTIALS_FULL_URI} points at fakecloud.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record ContainerCredentialsResponse(
+            @JsonProperty("AccessKeyId") String accessKeyId,
+            @JsonProperty("SecretAccessKey") String secretAccessKey,
+            @JsonProperty("Token") String token,
+            @JsonProperty("Expiration") String expiration,
+            @JsonProperty("RoleArn") String roleArn) {}
+
     // ── SSM admin ────────────────────────────────────────────────
 
     /**

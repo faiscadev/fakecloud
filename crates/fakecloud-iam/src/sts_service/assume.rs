@@ -103,7 +103,7 @@ impl StsService {
         let account_id =
             extract_account_from_arn(role_arn).unwrap_or_else(|| req.account_id.clone());
 
-        let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
+        let role_name = super::assumed_role_name(role_arn);
         // Look up the role WITHOUT creating the target account. An
         // attacker-controlled RoleArn naming a non-existent account would
         // otherwise insert an empty account that the next mutation persists
@@ -260,10 +260,8 @@ impl StsService {
             ));
         }
 
-        let assumed_role_arn = format!(
-            "arn:{}:sts::{}:assumed-role/{}/{}",
-            partition, account_id, role_name, role_session_name
-        );
+        let assumed_role_arn =
+            super::format_assumed_role_arn(partition, &account_id, role_name, role_session_name);
         let assumed_role_id = format!("{}:{}", role_id, role_session_name);
 
         // Store credential in the target account's state so the credential
@@ -391,7 +389,7 @@ impl StsService {
         let account_id =
             extract_account_from_arn(role_arn).unwrap_or_else(|| req.account_id.clone());
 
-        let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
+        let role_name = super::assumed_role_name(role_arn);
         // Use the role's stable RoleId as the AssumedRoleId prefix (matching
         // AWS), not a fresh random AROA on every assume. Fall back to a
         // generated id only when the role isn't resolvable.
@@ -399,10 +397,8 @@ impl StsService {
             .get(&account_id)
             .and_then(|s| s.roles.get(role_name).map(|r| r.role_id.clone()))
             .unwrap_or_else(xml_responses::generate_role_id);
-        let assumed_role_arn = format!(
-            "arn:{}:sts::{}:assumed-role/{}/{}",
-            partition, account_id, role_name, role_session_name
-        );
+        let assumed_role_arn =
+            super::format_assumed_role_arn(partition, &account_id, role_name, role_session_name);
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
 
         // Decode the JWT for trust-policy enforcement and to figure out
@@ -707,17 +703,15 @@ impl StsService {
         let account_id =
             extract_account_from_arn(role_arn).unwrap_or_else(|| req.account_id.clone());
 
-        let role_name = role_arn.rsplit('/').next().unwrap_or("unknown");
+        let role_name = super::assumed_role_name(role_arn);
         // Use the role's stable RoleId as the AssumedRoleId prefix (matching
         // AWS), not a fresh random AROA on every assume.
         let role_id = accounts
             .get(&account_id)
             .and_then(|s| s.roles.get(role_name).map(|r| r.role_id.clone()))
             .unwrap_or_else(xml_responses::generate_role_id);
-        let assumed_role_arn = format!(
-            "arn:{}:sts::{}:assumed-role/{}/{}",
-            partition, account_id, role_name, role_session_name
-        );
+        let assumed_role_arn =
+            super::format_assumed_role_arn(partition, &account_id, role_name, &role_session_name);
         let assumed_role_id_str = format!("{}:{}", role_id, role_session_name);
 
         // When the named SAML provider IS registered and its metadata declares
