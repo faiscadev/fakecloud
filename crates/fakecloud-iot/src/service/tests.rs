@@ -92,14 +92,6 @@ fn routes_by_method_and_path() {
     let (m, _) = match_route(&Method::GET, "/things").unwrap();
     assert_eq!(m.op, "ListThings");
 
-    // A trailing slash must not turn a collection into a 1-item lookup: without
-    // stripping it, `/things/` split to `["things", ""]` and matched the
-    // 2-segment DescribeThing with an empty thingName (404) instead of the
-    // 1-segment ListThings. Mirrors the sibling routers (EKS/opensearch/
-    // scheduler).
-    let (m, _) = match_route(&Method::GET, "/things/").unwrap();
-    assert_eq!(m.op, "ListThings");
-
     // Fixed segment wins over label at the same position.
     let (m, _) = match_route(&Method::PUT, "/thing-groups/addThingToThingGroup").unwrap();
     assert_eq!(m.op, "AddThingToThingGroup");
@@ -145,11 +137,6 @@ fn thing_create_get_list_delete() {
     let listed = body_of(&run(&s, "GET", "/things", &[], Value::Null).unwrap());
     assert_eq!(listed["things"].as_array().unwrap().len(), 1);
     assert_eq!(listed["things"][0]["thingName"], "sensor-1");
-
-    // A trailing slash routes to ListThings, not a 404 DescribeThing.
-    let listed_slash = body_of(&run(&s, "GET", "/things/", &[], Value::Null).unwrap());
-    assert_eq!(listed_slash["things"].as_array().unwrap().len(), 1);
-    assert_eq!(listed_slash["things"][0]["thingName"], "sensor-1");
 
     run(&s, "DELETE", "/things/sensor-1", &[], Value::Null).unwrap();
     let err = expect_err(run(&s, "GET", "/things/sensor-1", &[], Value::Null));

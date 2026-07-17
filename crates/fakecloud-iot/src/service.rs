@@ -213,12 +213,7 @@ pub(crate) fn match_route(
     raw_path: &str,
 ) -> Option<(&'static OpMeta, HashMap<String, String>)> {
     let raw = raw_path.split('?').next().unwrap_or(raw_path);
-    let raw = raw.strip_prefix('/').unwrap_or(raw);
-    // Strip a single trailing slash so `/things/` routes to the 1-segment
-    // ListThings rather than the 2-segment DescribeThing with an empty
-    // thingName (which 404s). Mirrors the sibling routers (EKS/opensearch/
-    // scheduler). A bare `/` collapses to the empty path handled below.
-    let trimmed = raw.strip_suffix('/').unwrap_or(raw);
+    let trimmed = raw.strip_prefix('/').unwrap_or(raw);
     let segs: Vec<String> = if trimmed.is_empty() {
         Vec::new()
     } else {
