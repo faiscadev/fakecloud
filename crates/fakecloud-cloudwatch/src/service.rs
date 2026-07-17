@@ -532,6 +532,45 @@ pub(crate) fn parse_dimensions_query(req: &AwsRequest, prefix: &str) -> BTreeMap
     out
 }
 
+/// Parse `{prefix}.member.N.Name` / `.Value` query params into ListMetrics'
+/// `DimensionFilter` list, where `Value` is OPTIONAL (per the Smithy model).
+/// A name-only filter matches any metric carrying a dimension with that name
+/// (any value); a name+value filter is an exact match.
+///
+/// Distinct from [`parse_dimensions_query`], which drops a name-only entry —
+/// correct for the put/statistics APIs (exact dimension sets) but wrong for
+/// ListMetrics, where a name-only filter must still narrow the results
+/// instead of silently returning every metric in the namespace.
+pub(crate) fn parse_dimension_filters(
+    req: &AwsRequest,
+    prefix: &str,
+) -> Vec<(String, Option<String>)> {
+    let mut dims: BTreeMap<u32, (Option<String>, Option<String>)> = BTreeMap::new();
+    let needle = format!("{prefix}.member.");
+    for (k, v) in req.query_params.iter() {
+        let Some(rest) = k.strip_prefix(&needle) else {
+            continue;
+        };
+        let mut parts = rest.splitn(2, '.');
+        let Some(idx_str) = parts.next() else {
+            continue;
+        };
+        let Ok(idx) = idx_str.parse::<u32>() else {
+            continue;
+        };
+        let field = parts.next().unwrap_or("");
+        let entry = dims.entry(idx).or_default();
+        match field {
+            "Name" => entry.0 = Some(v.clone()),
+            "Value" => entry.1 = Some(v.clone()),
+            _ => {}
+        }
+    }
+    dims.into_values()
+        .filter_map(|(name, value)| name.map(|n| (n, value)))
+        .collect()
+}
+
 /// Validate the length of an optional string param against `[min, max]`.
 /// Returns a 4xx on violation. AWS measures length in characters; the
 /// conformance probe only sends ASCII so byte length is equivalent here.
@@ -954,7 +993,7 @@ impl CloudWatchService {
         validate_enum(req, "RecentlyActive", &["PT3H"])?;
         let namespace = optional_query_param(req, "Namespace");
         let metric_name = optional_query_param(req, "MetricName");
-        let dim_filter = parse_dimensions_query(req, "Dimensions");
+        let dim_filter = parse_dimension_filters(req, "Dimensions");
         // ListMetrics has no MaxResults param — AWS caps each page at 500 and
         // round-trips a NextToken.
         const LIST_METRICS_PAGE: usize = 500;
@@ -981,13 +1020,14 @@ impl CloudWatchService {
                             }
                         }
                         // ListMetrics filters by dimension containment (a metric
-                        // matches if it carries all the requested name/value
-                        // pairs), unlike the exact-set match used by the
-                        // statistics APIs.
+                        // matches if it carries all the requested filters),
+                        // unlike the exact-set match used by the statistics
+                        // APIs. A name-only DimensionFilter matches any value.
                         if !dim_filter.is_empty()
-                            && !dim_filter
-                                .iter()
-                                .all(|(k, v)| d.dimensions.get(k) == Some(v))
+                            && !dim_filter.iter().all(|(k, v)| match v {
+                                Some(val) => d.dimensions.get(k) == Some(val),
+                                None => d.dimensions.contains_key(k),
+                            })
                         {
                             continue;
                         }

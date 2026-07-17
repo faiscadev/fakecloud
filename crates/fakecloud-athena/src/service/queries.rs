@@ -266,7 +266,14 @@ impl AthenaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let id = require_str(&body, "QueryExecutionId")?;
+        // Smithy: MaxResults targets MaxRowsCount @range(1,1000);
+        // NextToken targets Token @length(1,1024).
         let max_results = validate_max_results(&body, 1, 1000)?;
+        validate_opt_string_len(&body, "NextToken", 1, 1024)?;
+        let next_token = body
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         let q = account
@@ -297,22 +304,58 @@ impl AthenaService {
                 })
             })
             .collect();
-        let header_row = json!({
-            "Data": q.result_columns.iter().map(|(n, _)| json!({"VarCharValue": n})).collect::<Vec<_>>(),
-        });
-        let mut rows = vec![header_row];
-        for row in q.result_rows.iter().take(max_results.saturating_sub(1)) {
+        // Pagination: the header row (column names) is emitted only on the
+        // first page (NextToken absent) and counts against MaxResults there.
+        // The NextToken is a numeric offset into the data rows; subsequent
+        // pages carry data rows only. Without this, result sets larger than
+        // MaxResults were unreachable past page 1 (bug-hunt 2026-07-16).
+        let offset: usize = match next_token.as_deref() {
+            None => 0,
+            Some(tok) => tok
+                .parse()
+                .map_err(|_| invalid_request("Invalid NextToken"))?,
+        };
+        let total = q.result_rows.len();
+        let start = offset.min(total);
+        // The column-header row is emitted only on the first invocation (no
+        // NextToken supplied). Keying this on token absence rather than
+        // `offset == 0` avoids an infinite loop when MaxResults is 1: the
+        // first page returns only the header with NextToken "0", and the
+        // resumed page must then advance past offset 0 rather than treating
+        // itself as the first page again.
+        let include_header = next_token.is_none();
+        let data_budget = if include_header {
+            max_results.saturating_sub(1)
+        } else {
+            max_results
+        };
+        let end = start.saturating_add(data_budget).min(total);
+
+        let mut rows = Vec::new();
+        if include_header {
+            rows.push(json!({
+                "Data": q.result_columns.iter().map(|(n, _)| json!({"VarCharValue": n})).collect::<Vec<_>>(),
+            }));
+        }
+        for row in &q.result_rows[start..end] {
             rows.push(json!({
                 "Data": row.iter().map(|v| json!({"VarCharValue": v})).collect::<Vec<_>>(),
             }));
         }
-        Ok(AwsResponse::ok_json(json!({
+        let mut response = json!({
             "ResultSet": {
                 "Rows": rows,
                 "ResultSetMetadata": {"ColumnInfo": column_info},
             },
             "UpdateCount": 0,
-        })))
+        });
+        if end < total {
+            response
+                .as_object_mut()
+                .unwrap()
+                .insert("NextToken".to_string(), Value::String(end.to_string()));
+        }
+        Ok(AwsResponse::ok_json(response))
     }
 
     pub(super) fn get_query_runtime_statistics(

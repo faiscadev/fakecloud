@@ -1877,9 +1877,13 @@ async fn ses_send_custom_verification_email_unverified_sender() {
         .await
         .unwrap_err();
     let dbg = format!("{err:?}");
+    // An unverified sender is rejected with MessageRejected ("Email address is
+    // not verified") — matching real SES and the v1 path.
+    // MailFromDomainNotVerifiedException is reserved for an unverified custom
+    // MAIL FROM domain, a different condition.
     assert!(
-        dbg.contains("MailFromDomainNotVerifiedException"),
-        "expected MailFromDomainNotVerifiedException, got {dbg}"
+        dbg.contains("MessageRejected"),
+        "expected MessageRejected, got {dbg}"
     );
 }
 

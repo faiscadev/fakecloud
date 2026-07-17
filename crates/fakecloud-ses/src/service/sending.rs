@@ -178,8 +178,10 @@ impl SesV2Service {
     /// Reject sends where the sender is not a verified identity. Mirrors
     /// real SES: every From address must either match a verified email
     /// identity exactly, or its domain must match a verified domain
-    /// identity. Real SES v2 surfaces this as
-    /// `MailFromDomainNotVerifiedException` (HTTP 400).
+    /// identity. Real SES surfaces an unverified sender identity as
+    /// `MessageRejected` (HTTP 400) — matching the v1 path and unlike
+    /// `MailFromDomainNotVerifiedException`, which is reserved for a custom
+    /// MAIL FROM domain that has not been verified.
     pub(super) fn reject_unverified_sender(
         &self,
         account_id: &str,
@@ -205,8 +207,10 @@ impl SesV2Service {
         } else {
             Some(Self::json_error(
                 StatusCode::BAD_REQUEST,
-                "MailFromDomainNotVerifiedException",
-                "Mail-From domain not verified.",
+                "MessageRejected",
+                &format!(
+                    "Email address is not verified. The following identities failed the check in region us-east-1: {email}"
+                ),
             ))
         }
     }

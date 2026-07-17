@@ -1025,6 +1025,82 @@ mod tests {
         }
     }
 
+    #[test]
+    fn list_resource_record_sets_uses_reversed_dns_order() {
+        // Regression: Route 53 orders record sets by reversed-label DNS name
+        // (then type), not plain forward ASCII. The apex (`example.com.`)
+        // sorts first under `com.example`, ahead of `a.example.com.`.
+        fn named(name: &str) -> crate::model::ResourceRecordSet {
+            crate::model::ResourceRecordSet {
+                name: name.to_string(),
+                record_type: "A".to_string(),
+                ttl: Some(60),
+                resource_records: Some(crate::model::ResourceRecords {
+                    resource_record: vec![crate::model::ResourceRecord {
+                        value: "1.2.3.4".to_string(),
+                    }],
+                }),
+                ..Default::default()
+            }
+        }
+        let (svc, zid) = svc_with_zone(vec![
+            named("z.example.com."),
+            named("a.example.com."),
+            named("example.com."),
+            named("b.sub.example.com."),
+        ]);
+        let route = Route {
+            action: "ListResourceRecordSets",
+            id: Some(zid.clone()),
+            second_id: None,
+        };
+        let req = AwsRequest {
+            service: "route53".to_string(),
+            action: "ListResourceRecordSets".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: DEFAULT_ACCOUNT.to_string(),
+            request_id: "rid".to_string(),
+            headers: HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![
+                "2013-04-01".into(),
+                "hostedzone".into(),
+                zid.clone(),
+                "rrset".into(),
+            ],
+            raw_path: format!("/2013-04-01/hostedzone/{zid}/rrset"),
+            raw_query: String::new(),
+            method: http::Method::GET,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let resp = svc.list_resource_record_sets(&req, &route).unwrap();
+        let body = std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string();
+        // Collect <Name> values in document order.
+        let mut names = Vec::new();
+        let mut rest = body.as_str();
+        while let Some(start) = rest.find("<Name>") {
+            rest = &rest[start + "<Name>".len()..];
+            let end = rest.find("</Name>").unwrap();
+            names.push(rest[..end].to_string());
+            rest = &rest[end + "</Name>".len()..];
+        }
+        assert_eq!(
+            names,
+            vec![
+                "example.com.".to_string(),
+                "a.example.com.".to_string(),
+                "b.sub.example.com.".to_string(),
+                "z.example.com.".to_string(),
+            ]
+        );
+    }
+
     fn empty_lookup() -> AliasLookup<'static> {
         AliasLookup {
             elbv2: None,

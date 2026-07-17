@@ -647,10 +647,10 @@ impl S3Service {
             let attr = attr.trim();
             match attr {
                 "ETag" => {
-                    body_parts.push(format!(
-                        "<ETag>&quot;{}&quot;</ETag>",
-                        xml_escape(&obj.etag)
-                    ));
+                    // GetObjectAttributes returns the ETag WITHOUT the
+                    // surrounding quotes that GetObject/HeadObject wrap it in
+                    // (single-part `md5` and multipart `md5-N` alike).
+                    body_parts.push(format!("<ETag>{}</ETag>", xml_escape(&obj.etag)));
                 }
                 "StorageClass" => {
                     body_parts.push(format!(

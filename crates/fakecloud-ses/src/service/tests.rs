@@ -740,7 +740,7 @@ async fn test_send_email_rejects_unverified_sender() {
     let svc = SesV2Service::new(state);
 
     // No identity registered for sender@example.com → v2 surfaces this
-    // as MailFromDomainNotVerifiedException.
+    // as MessageRejected (matching real SES and the v1 path).
     let req = make_request(
         Method::POST,
         "/v2/email/outbound-emails",
@@ -753,7 +753,7 @@ async fn test_send_email_rejects_unverified_sender() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["__type"], "MailFromDomainNotVerifiedException");
+    assert_eq!(body["__type"], "MessageRejected");
 }
 
 #[tokio::test]
@@ -794,7 +794,7 @@ async fn send_email_v2_rejects_unverified_from_in_sandbox() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(body["__type"], "MailFromDomainNotVerifiedException");
+    assert_eq!(body["__type"], "MessageRejected");
 }
 
 #[tokio::test]
@@ -1304,6 +1304,119 @@ async fn test_contact_lifecycle() {
     );
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn list_contacts_applies_filtered_status() {
+    // Regression: ListContacts must apply Filter.FilteredStatus rather than
+    // returning every contact. A contact's overall status is OPT_OUT when
+    // UnsubscribeAll is set, else OPT_IN.
+    let state = make_state();
+    let svc = SesV2Service::new(state);
+
+    svc.handle(make_request(
+        Method::POST,
+        "/v2/email/contact-lists",
+        r#"{"ContactListName": "flist"}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(make_request(
+        Method::POST,
+        "/v2/email/contact-lists/flist/contacts",
+        r#"{"EmailAddress": "in@example.com", "UnsubscribeAll": false}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(make_request(
+        Method::POST,
+        "/v2/email/contact-lists/flist/contacts",
+        r#"{"EmailAddress": "out@example.com", "UnsubscribeAll": true}"#,
+    ))
+    .await
+    .unwrap();
+
+    // No filter -> both contacts.
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            "/v2/email/contact-lists/flist/contacts",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Contacts"].as_array().unwrap().len(), 2);
+
+    // FilteredStatus OPT_OUT -> only the opted-out contact.
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/v2/email/contact-lists/flist/contacts/list",
+            r#"{"Filter": {"FilteredStatus": "OPT_OUT"}}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let contacts = body["Contacts"].as_array().unwrap();
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0]["EmailAddress"], "out@example.com");
+}
+
+#[tokio::test]
+async fn list_contacts_applies_topic_filter() {
+    // Regression: ListContacts must apply Filter.TopicFilter, matching only
+    // contacts with the requested subscription status for that topic.
+    let state = make_state();
+    let svc = SesV2Service::new(state);
+
+    svc.handle(make_request(
+        Method::POST,
+        "/v2/email/contact-lists",
+        r#"{
+            "ContactListName": "tlist",
+            "Topics": [{
+                "TopicName": "news",
+                "DisplayName": "News",
+                "Description": "d",
+                "DefaultSubscriptionStatus": "OPT_OUT"
+            }]
+        }"#,
+    ))
+    .await
+    .unwrap();
+    // Explicitly subscribed to "news".
+    svc.handle(make_request(
+        Method::POST,
+        "/v2/email/contact-lists/tlist/contacts",
+        r#"{
+            "EmailAddress": "sub@example.com",
+            "TopicPreferences": [{"TopicName": "news", "SubscriptionStatus": "OPT_IN"}]
+        }"#,
+    ))
+    .await
+    .unwrap();
+    // No preference for "news".
+    svc.handle(make_request(
+        Method::POST,
+        "/v2/email/contact-lists/tlist/contacts",
+        r#"{"EmailAddress": "nopref@example.com"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/v2/email/contact-lists/tlist/contacts/list",
+            r#"{"Filter": {"FilteredStatus": "OPT_IN", "TopicFilter": {"TopicName": "news"}}}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let contacts = body["Contacts"].as_array().unwrap();
+    assert_eq!(contacts.len(), 1);
+    assert_eq!(contacts[0]["EmailAddress"], "sub@example.com");
 }
 
 #[tokio::test]
@@ -2772,10 +2885,7 @@ async fn test_send_custom_verification_email_unverified_sender() {
     let resp = svc.handle(req).await.unwrap();
     assert_eq!(resp.status, StatusCode::BAD_REQUEST);
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    assert_eq!(
-        body["__type"].as_str(),
-        Some("MailFromDomainNotVerifiedException")
-    );
+    assert_eq!(body["__type"].as_str(), Some("MessageRejected"));
 }
 
 #[tokio::test]

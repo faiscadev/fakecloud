@@ -454,9 +454,8 @@ impl SesV2Service {
 
         // Verify template exists, then gate on the template's
         // FromEmailAddress matching a verified identity. Real SES v2
-        // raises `MailFromDomainNotVerifiedException` from the
-        // SendCustomVerificationEmail action when the from-address has
-        // no matching verified email/domain identity.
+        // raises `MessageRejected` when the from-address has no matching
+        // verified email/domain identity.
         let from_email = {
             let accounts = self.state.read();
             let empty = SesState::new(&req.account_id, &req.region);
