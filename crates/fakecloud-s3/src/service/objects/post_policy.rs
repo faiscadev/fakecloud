@@ -286,11 +286,15 @@ fn enforce_conditions(
 /// The whole POST-Policy security model is that the signed `conditions` list
 /// enumerates exactly which fields (and values) the browser may post; real S3
 /// rejects a request carrying a field with no matching condition with
-/// `AccessDenied` "Invalid according to Policy: Extra input fields: X". Only a
-/// small set of fields is exempt (they carry the signature material itself or
-/// are ignored by convention): `policy`, `x-amz-signature`, the `file` part,
-/// and any `x-ignore-*` field. `content-length-range` has no field name, so it
-/// authorizes nothing here (it governs the file size, checked separately).
+/// `AccessDenied` "Invalid according to Policy: Extra input fields: X". A small
+/// set of fields is exempt from needing a condition: the signature material
+/// itself (`policy`, `x-amz-signature`, `x-amz-algorithm`, `x-amz-credential`,
+/// `x-amz-date`, `x-amz-security-token`, and the SigV2 `awsaccesskeyid` /
+/// `signature`), the `file` part, and any `x-ignore-*` field. Real S3 does not
+/// require the signature-material fields to be enumerated in `conditions` (and
+/// a forged `x-amz-credential` is caught by the signature check regardless).
+/// `content-length-range` has no field name, so it authorizes nothing here (it
+/// governs the file size, checked separately).
 fn enforce_no_extra_fields(
     conditions: &[PolicyCondition],
     form: &ParsedForm,
@@ -309,10 +313,18 @@ fn enforce_no_extra_fields(
     }
     for f in &form.fields {
         let lower = f.name.to_ascii_lowercase();
-        let exempt = lower == "policy"
-            || lower == "x-amz-signature"
-            || lower == "file"
-            || lower.starts_with("x-ignore-");
+        let exempt = matches!(
+            lower.as_str(),
+            "policy"
+                | "x-amz-signature"
+                | "x-amz-algorithm"
+                | "x-amz-credential"
+                | "x-amz-date"
+                | "x-amz-security-token"
+                | "awsaccesskeyid"
+                | "signature"
+                | "file"
+        ) || lower.starts_with("x-ignore-");
         if exempt {
             continue;
         }
@@ -582,10 +594,15 @@ impl S3Service {
             .or_else(|| form.field_lower("redirect"))
             .filter(|s| !s.is_empty())
         {
-            let enc = |s: &str| {
-                percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC)
-                    .to_string()
-            };
+            // Query-component encoding: percent-encode everything unsafe but
+            // leave the RFC 3986 unreserved characters (`-._~`) intact, the way
+            // real S3 encodes the redirect query rather than over-escaping.
+            const QUERY_ENC: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+                .remove(b'-')
+                .remove(b'.')
+                .remove(b'_')
+                .remove(b'~');
+            let enc = |s: &str| percent_encoding::utf8_percent_encode(s, QUERY_ENC).to_string();
             let sep = if redirect.contains('?') { '&' } else { '?' };
             let target = format!(
                 "{redirect}{sep}bucket={}&key={}&etag={}",
