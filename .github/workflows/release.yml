@@ -198,7 +198,6 @@ jobs:
           publish fakecloud-dsql
           publish fakecloud-resource-groups  # only core/persistence/aws deps
           publish fakecloud-resource-groups-tagging  # only core/persistence/aws deps
-          publish fakecloud-elasticache
           publish fakecloud-elasticbeanstalk # only core/persistence/aws deps
           publish fakecloud-memorydb         # only core/persistence/aws deps
           publish fakecloud-kinesisanalyticsv2 # only core/persistence/aws deps
@@ -275,6 +274,7 @@ jobs:
 
           # Layer 4: depend on layer 3a/3b crates
           publish fakecloud-s3             # depends on kms
+          publish fakecloud-elasticache    # depends on s3
           publish fakecloud-route53resolver  # depends on ec2, s3 (ImportFirewallDomains)
           publish fakecloud-acmpca         # depends on s3 (audit-report delivery), acm, kms
           publish fakecloud-ecr            # depends on iam, kms
