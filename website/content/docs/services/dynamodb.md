@@ -48,11 +48,12 @@ fakecloud \
 Constraints:
 
 - **Both flags are required together** — passing only one aborts startup.
-- **Creates a new table.** If a table of that name already exists, startup fails (matching AWS `ImportTable`, which returns `ResourceInUseException`). There is no merge or append.
+- **Idempotent.** The import creates a new table. If a table of that name already exists, the import is skipped with a warning and the existing data is left untouched (no merge, no append, no overwrite). This makes restarting with the flags still set safe.
 - **Additive:** the table is materialised straight in the store. It does not go through `BatchWriteItem` and does not touch the modeled `ImportTable` API operation.
+- **Targets the default (single) account** named by `--account-id` in the configured region.
 - Only the AWS **`DYNAMODB_JSON`** export format is supported (manifests plus gzipped `data/*.json.gz` files); ION and CSV are not.
-- Every imported item must carry the key attributes declared in the describe-table `KeySchema`, and any bad or unreadable input aborts startup loudly.
-- Works in either storage mode; under `--storage-mode=persistent` the imported table is then persisted like any other state.
+- Every imported item must carry the key attributes declared in the describe-table `KeySchema` with the type declared in `AttributeDefinitions` (the same presence and type checks the normal write path enforces). If the manifests declare an `itemCount` that disagrees with the data actually read, the import is rejected as truncated or corrupt. Any bad or unreadable input aborts startup loudly.
+- Works in either storage mode. Under `--storage-mode=persistent` the imported table is persisted like any other state, so on a later restart it is already present and the import step is skipped (see the idempotent behavior above) rather than re-run.
 
 ## Cross-service delivery
 

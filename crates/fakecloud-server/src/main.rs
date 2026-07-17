@@ -2376,8 +2376,8 @@ async fn main() {
                 describe_path.display()
             ))
         });
-        let describe: serde_json::Value = serde_json::from_slice(&describe_bytes)
-            .unwrap_or_else(|e| {
+        let describe: serde_json::Value =
+            serde_json::from_slice(&describe_bytes).unwrap_or_else(|e| {
                 fatal_exit(format_args!(
                     "failed to parse describe-table JSON {}: {e}",
                     describe_path.display()
@@ -2390,10 +2390,15 @@ async fn main() {
             import_path,
             &describe,
         ) {
-            Ok((table, count)) => tracing::info!(
+            Ok(fakecloud_dynamodb::ImportOutcome::Imported { table, items }) => {
+                tracing::info!(table, items, "bulk-loaded AWS DynamoDB export at startup")
+            }
+            // Idempotent restart: the table was already present (e.g. from a
+            // persisted snapshot). The importer already logged a warning and
+            // left the existing data untouched, so booting continues normally.
+            Ok(fakecloud_dynamodb::ImportOutcome::SkippedExisting { table }) => tracing::info!(
                 table,
-                items = count,
-                "bulk-loaded AWS DynamoDB export at startup"
+                "skipped AWS DynamoDB export import: table already exists in state"
             ),
             Err(e) => fatal_exit(format_args!("dynamodb export import failed: {e}")),
         }

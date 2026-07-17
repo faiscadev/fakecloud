@@ -5,11 +5,11 @@ pub mod streams;
 pub mod streams_dataplane;
 pub mod ttl;
 
-pub use export_import::import_aws_export;
-pub use service::helpers::schemas::{parse_gsi, parse_lsi, parse_tags};
+pub use export_import::{import_aws_export, ImportOutcome};
 pub(crate) use service::helpers::schemas::{
     parse_attribute_definitions, parse_key_schema, parse_provisioned_throughput,
 };
+pub use service::helpers::schemas::{parse_gsi, parse_lsi, parse_tags};
 pub use service::{save_dynamodb_snapshot, DynamoDbService};
 pub use state::{
     AttributeDefinition, DynamoDbSnapshot, DynamoDbState, DynamoTable, GlobalSecondaryIndex,

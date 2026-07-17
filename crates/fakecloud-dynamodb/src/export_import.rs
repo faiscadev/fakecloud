@@ -17,15 +17,33 @@ use crate::state::{DynamoTable, ProvisionedThroughput, SharedDynamoDbState};
 /// A single DynamoDB item: attribute name -> typed AWS wire value.
 type Item = HashMap<String, Value>;
 
-/// Import an AWS-format DynamoDB export as a new table. Returns
-/// `(table_name, item_count)` on success.
+/// Outcome of a startup export import.
+///
+/// The import is idempotent: in persistent-storage mode the snapshot is loaded
+/// before this import runs, so on a restart with the same import flags the
+/// target table is already present. Rather than erroring (which would refuse to
+/// boot), the import is skipped and the already-loaded table is left untouched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportOutcome {
+    /// A fresh table was materialised from the export with `items` items.
+    Imported { table: String, items: usize },
+    /// A table of the same name already existed in state; import was skipped and
+    /// the existing data was left untouched.
+    SkippedExisting { table: String },
+}
+
+/// Import an AWS-format DynamoDB export as a new table.
+///
+/// Idempotent: if the target table already exists in state (for example loaded
+/// from a persisted snapshot on restart), the import is skipped and the existing
+/// data is preserved instead of erroring out.
 pub fn import_aws_export(
     state: &SharedDynamoDbState,
     account_id: &str,
     region: &str,
     export_dir: &Path,      // folder holding manifest-summary.json etc.
     describe_table: &Value, // parsed `aws dynamodb describe-table` JSON
-) -> Result<(String, usize), String> {
+) -> Result<ImportOutcome, String> {
     // Accept either the full `{"Table": {...}}` dump or a bare table object.
     let shape = describe_table.get("Table").unwrap_or(describe_table);
     let table_name = shape["TableName"]
@@ -33,22 +51,62 @@ pub fn import_aws_export(
         .ok_or("describe-table: TableName missing or not a string")?
         .to_string();
 
-    let items = read_export_items(export_dir)?;
+    // Idempotent restart guard: if the table is already present (e.g. restored
+    // from a persisted snapshot before this import runs), leave it untouched and
+    // skip rather than error and refuse to boot. Checked before reading the
+    // export so a no-op restart does no work.
+    if table_exists(state, account_id, &table_name) {
+        tracing::warn!(
+            table = %table_name,
+            "skipping DynamoDB export import: table already exists in state; existing data left untouched"
+        );
+        return Ok(ImportOutcome::SkippedExisting { table: table_name });
+    }
+
+    let (items, declared_total) = read_export_items(export_dir)?;
     let item_count = items.len();
+    // Manifest integrity: the summary's declared grand total must match what was
+    // actually read. Absent field -> skip the check (older/partial manifests).
+    if let Some(declared) = declared_total {
+        if declared != item_count {
+            return Err(format!(
+                "table {table_name}: manifest-summary declares itemCount {declared} but {item_count} items were read (truncated or corrupt export)"
+            ));
+        }
+    }
     let table = build_table(&table_name, region, account_id, shape, items)?;
 
     let mut guard = state.write();
     let account = guard.get_or_create(account_id);
+    // Re-check under the write lock to close any check-then-insert gap and to
+    // handle a genuinely conflicting table gracefully (warn + skip, never panic).
     if account.tables.contains_key(&table_name) {
-        return Err(format!("table already exists: {table_name}"));
+        tracing::warn!(
+            table = %table_name,
+            "skipping DynamoDB export import: table already exists in state; existing data left untouched"
+        );
+        return Ok(ImportOutcome::SkippedExisting { table: table_name });
     }
     account.tables.insert(table_name.clone(), table);
 
-    Ok((table_name, item_count))
+    Ok(ImportOutcome::Imported {
+        table: table_name,
+        items: item_count,
+    })
 }
 
-/// Walk the manifests (not a prefix listing) and read every item.
-fn read_export_items(export_dir: &Path) -> Result<Vec<Item>, String> {
+/// True if `account_id` already holds a table named `table_name`.
+fn table_exists(state: &SharedDynamoDbState, account_id: &str, table_name: &str) -> bool {
+    state
+        .read()
+        .get(account_id)
+        .is_some_and(|account| account.tables.contains_key(table_name))
+}
+
+/// Walk the manifests (not a prefix listing) and read every item. Returns the
+/// items plus the summary manifest's declared `itemCount` (if present) so the
+/// caller can verify the grand total.
+fn read_export_items(export_dir: &Path) -> Result<(Vec<Item>, Option<usize>), String> {
     let summary = read_json(&export_dir.join("manifest-summary.json"))?;
     let format = summary["exportFormat"].as_str().unwrap_or_default();
     if format != "DYNAMODB_JSON" {
@@ -67,12 +125,24 @@ fn read_export_items(export_dir: &Path) -> Result<Vec<Item>, String> {
         let s3_key = entry["dataFileS3Key"]
             .as_str()
             .ok_or("manifest-files: dataFileS3Key missing")?;
-        // ponytail: assume the standard `AWSDynamoDB/{export-id}/data/<file>`
-        // layout and resolve the key as `<export_dir>/data/<basename>`.
+        // The manifest key uses the standard `AWSDynamoDB/{export-id}/data/<file>`
+        // layout; resolve it against the local export as `<export_dir>/data/<basename>`.
         let basename = s3_key.rsplit('/').next().unwrap_or(s3_key);
-        items.extend(read_data_file(&export_dir.join("data").join(basename))?);
+        let file_items = read_data_file(&export_dir.join("data").join(basename))?;
+        // Per-file integrity: when the manifest entry declares an itemCount it
+        // must match the records actually read from that data file.
+        if let Some(declared) = entry["itemCount"].as_u64() {
+            if declared as usize != file_items.len() {
+                return Err(format!(
+                    "data file {basename}: manifest declares itemCount {declared} but {} records were read (truncated or corrupt export)",
+                    file_items.len()
+                ));
+            }
+        }
+        items.extend(file_items);
     }
-    Ok(items)
+    let declared_total = summary["itemCount"].as_u64().map(|n| n as usize);
+    Ok((items, declared_total))
 }
 
 /// Read one gzipped data file; each line is a `{"Item": {...}}` record.
@@ -83,8 +153,8 @@ fn read_data_file(path: &Path) -> Result<Vec<Item>, String> {
         .read_to_string(&mut contents)
         .map_err(|e| format!("gunzip {}: {e}", path.display()))?;
 
-    // ponytail: no dedup — AWS exports carry unique primary keys, so this never
-    // sees a duplicate. Colliding keys would both land.
+    // No dedup: AWS exports carry unique primary keys, so a single data file
+    // never contains a duplicate. Colliding keys would both be retained.
     nonempty_lines(&contents)
         .map(|line| {
             let record: Value =
@@ -111,23 +181,43 @@ fn build_table(
         .map_err(|e| format!("AttributeDefinitions: {e}"))?;
 
     // Guard against a wrong/hand-edited describe-table producing an
-    // ACTIVE-but-key-corrupt table: every item must carry each declared key
-    // attribute (HASH and, if present, RANGE). Presence only — value type is
-    // not checked here. Fail the whole import so no partial table lands.
+    // ACTIVE-but-key-corrupt table. For each declared key attribute (HASH and,
+    // if present, RANGE) every item must (1) carry the attribute and (2) carry
+    // it with the scalar type declared in AttributeDefinitions -- the same
+    // presence + type parity the normal write path enforces
+    // (validate_key_in_item / check_key_type). A wrong-typed key would let a
+    // correctly-typed read fail to find the row, so the data would appear to
+    // vanish. Fail the whole import so no partial table lands.
     for elem in &key_schema {
         if elem.key_type != "HASH" && elem.key_type != "RANGE" {
             continue;
         }
-        if let Some(item) = items.iter().find(|item| !item.contains_key(&elem.attribute_name)) {
-            let role = if elem.key_type == "HASH" {
-                "partition"
-            } else {
-                "sort"
+        let role = if elem.key_type == "HASH" {
+            "partition"
+        } else {
+            "sort"
+        };
+        let expected_type = attribute_definitions
+            .iter()
+            .find(|d| d.attribute_name == elem.attribute_name)
+            .map(|d| d.attribute_type.as_str());
+        for item in &items {
+            let Some(value) = item.get(&elem.attribute_name) else {
+                return Err(format!(
+                    "table {name}: item missing {role} key attribute {:?} declared in KeySchema: {item:?}",
+                    elem.attribute_name
+                ));
             };
-            return Err(format!(
-                "table {name}: item missing {role} key attribute {:?} declared in KeySchema: {item:?}",
-                elem.attribute_name
-            ));
+            if let Some(expected) = expected_type {
+                let actual = crate::state::attribute_type_and_value(value).map(|(ty, _)| ty);
+                if actual != Some(expected) {
+                    return Err(format!(
+                        "table {name}: {role} key attribute {:?} has type {} but AttributeDefinitions declares {expected}: {item:?}",
+                        elem.attribute_name,
+                        actual.unwrap_or("<none>"),
+                    ));
+                }
+            }
         }
     }
 
@@ -212,11 +302,16 @@ mod tests {
         let describe = read_json(&fixtures.join("describe-table.json")).unwrap();
         let export_dir = fixtures.join("export");
 
-        let (name, count) =
+        let outcome =
             import_aws_export(&state, "123456789012", "us-east-1", &export_dir, &describe)
                 .expect("import should succeed");
-        assert_eq!(name, "Music");
-        assert_eq!(count, 3);
+        assert_eq!(
+            outcome,
+            ImportOutcome::Imported {
+                table: "Music".to_string(),
+                items: 3,
+            }
+        );
 
         // Table lives in state with the right item count.
         let mut guard = state.write();
@@ -300,5 +395,221 @@ mod tests {
             err.contains("DoesNotExist"),
             "error should name the missing key attribute: {err}"
         );
+    }
+
+    #[test]
+    fn rejects_key_attribute_type_mismatch() {
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+
+        let export_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/export");
+
+        // The exported items carry Artist as a string (`{"S": ...}`), but this
+        // describe-table declares the partition key as numeric (`N`). The import
+        // must fail with a type mismatch, matching the normal write path's
+        // check_key_type, rather than materialise a table a correctly-typed read
+        // could never query.
+        let describe = json!({
+            "Table": {
+                "TableName": "MusicTypeMismatch",
+                "KeySchema": [
+                    { "AttributeName": "Artist", "KeyType": "HASH" },
+                    { "AttributeName": "SongTitle", "KeyType": "RANGE" }
+                ],
+                "AttributeDefinitions": [
+                    { "AttributeName": "Artist", "AttributeType": "N" },
+                    { "AttributeName": "SongTitle", "AttributeType": "S" }
+                ],
+                "BillingMode": "PAY_PER_REQUEST"
+            }
+        });
+
+        let err = import_aws_export(&state, "123456789012", "us-east-1", &export_dir, &describe)
+            .expect_err("import should fail when a key attribute has the wrong type");
+        assert!(
+            err.contains("Artist") && err.contains("type S") && err.contains("declares N"),
+            "error should describe the key type mismatch: {err}"
+        );
+        // Nothing partial landed in state.
+        let mut guard = state.write();
+        assert!(!guard
+            .get_or_create("123456789012")
+            .tables
+            .contains_key("MusicTypeMismatch"));
+    }
+
+    #[test]
+    fn import_is_idempotent_when_table_already_exists() {
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let describe = read_json(&fixtures.join("describe-table.json")).unwrap();
+        let export_dir = fixtures.join("export");
+
+        // First import materialises the table (3 items).
+        let first = import_aws_export(&state, "123456789012", "us-east-1", &export_dir, &describe)
+            .expect("first import should succeed");
+        assert_eq!(
+            first,
+            ImportOutcome::Imported {
+                table: "Music".to_string(),
+                items: 3,
+            }
+        );
+
+        // Replace the loaded data with a single sentinel row, standing in for a
+        // table restored from a persisted snapshot that has since diverged.
+        {
+            let mut guard = state.write();
+            let table = guard
+                .get_or_create("123456789012")
+                .tables
+                .get_mut("Music")
+                .expect("table in state");
+            let mut sentinel: Item = HashMap::new();
+            sentinel.insert("Artist".to_string(), json!({ "S": "SENTINEL" }));
+            sentinel.insert("SongTitle".to_string(), json!({ "S": "only" }));
+            table.items = vec![sentinel];
+            table.recalculate_stats();
+        }
+
+        // Re-running with the same flags must skip (not error, not overwrite).
+        let second = import_aws_export(&state, "123456789012", "us-east-1", &export_dir, &describe)
+            .expect("re-import should be a no-op, not an error");
+        assert_eq!(
+            second,
+            ImportOutcome::SkippedExisting {
+                table: "Music".to_string(),
+            }
+        );
+
+        // Existing data was left untouched: still the single sentinel row, not
+        // re-populated with the 3 export items.
+        let mut guard = state.write();
+        let table = guard
+            .get_or_create("123456789012")
+            .tables
+            .get("Music")
+            .expect("table still in state");
+        assert_eq!(table.items.len(), 1);
+        assert_eq!(
+            table.items[0].get("Artist"),
+            Some(&json!({ "S": "SENTINEL" }))
+        );
+    }
+
+    #[test]
+    fn rejects_manifest_item_count_mismatch() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+
+        // Build a throwaway export whose manifest-summary over-declares the item
+        // count (99) relative to the single row actually present, simulating a
+        // truncated/corrupt export.
+        let dir = std::env::temp_dir().join(format!("fc-ddb-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(
+            dir.join("manifest-summary.json"),
+            r#"{"version":"2020-06-30","exportFormat":"DYNAMODB_JSON","itemCount":99}"#,
+        )
+        .unwrap();
+        // Per-file entry carries no itemCount, so only the summary-level check
+        // can fire here.
+        std::fs::write(
+            dir.join("manifest-files.json"),
+            r#"{"dataFileS3Key":"AWSDynamoDB/01700000000000-abcd/data/0001.json.gz"}"#,
+        )
+        .unwrap();
+        let data_file = std::fs::File::create(dir.join("data/0001.json.gz")).unwrap();
+        let mut enc = GzEncoder::new(data_file, Compression::default());
+        enc.write_all(b"{\"Item\":{\"Artist\":{\"S\":\"A\"},\"SongTitle\":{\"S\":\"B\"}}}\n")
+            .unwrap();
+        enc.finish().unwrap();
+
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let describe = json!({
+            "Table": {
+                "TableName": "MusicTruncated",
+                "KeySchema": [
+                    { "AttributeName": "Artist", "KeyType": "HASH" },
+                    { "AttributeName": "SongTitle", "KeyType": "RANGE" }
+                ],
+                "AttributeDefinitions": [
+                    { "AttributeName": "Artist", "AttributeType": "S" },
+                    { "AttributeName": "SongTitle", "AttributeType": "S" }
+                ],
+                "BillingMode": "PAY_PER_REQUEST"
+            }
+        });
+
+        let err = import_aws_export(&state, "123456789012", "us-east-1", &dir, &describe)
+            .expect_err("import should fail when manifest itemCount disagrees with the data");
+        assert!(
+            err.contains("99") && err.contains("1 items"),
+            "error should report the declared vs actual counts: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_per_file_item_count_mismatch() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+
+        // manifest-summary agrees with the data (1 item), but the per-file
+        // manifest entry over-declares itemCount (5). The per-file integrity
+        // check must catch it.
+        let dir = std::env::temp_dir().join(format!("fc-ddb-import-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(
+            dir.join("manifest-summary.json"),
+            r#"{"version":"2020-06-30","exportFormat":"DYNAMODB_JSON","itemCount":1}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("manifest-files.json"),
+            r#"{"itemCount":5,"dataFileS3Key":"AWSDynamoDB/01700000000000-abcd/data/0001.json.gz"}"#,
+        )
+        .unwrap();
+        let data_file = std::fs::File::create(dir.join("data/0001.json.gz")).unwrap();
+        let mut enc = GzEncoder::new(data_file, Compression::default());
+        enc.write_all(b"{\"Item\":{\"Artist\":{\"S\":\"A\"},\"SongTitle\":{\"S\":\"B\"}}}\n")
+            .unwrap();
+        enc.finish().unwrap();
+
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let describe = json!({
+            "Table": {
+                "TableName": "MusicPerFile",
+                "KeySchema": [
+                    { "AttributeName": "Artist", "KeyType": "HASH" },
+                    { "AttributeName": "SongTitle", "KeyType": "RANGE" }
+                ],
+                "AttributeDefinitions": [
+                    { "AttributeName": "Artist", "AttributeType": "S" },
+                    { "AttributeName": "SongTitle", "AttributeType": "S" }
+                ],
+                "BillingMode": "PAY_PER_REQUEST"
+            }
+        });
+
+        let err = import_aws_export(&state, "123456789012", "us-east-1", &dir, &describe)
+            .expect_err("import should fail when a data file's itemCount is wrong");
+        assert!(
+            err.contains("0001.json.gz") && err.contains('5'),
+            "error should name the data file and declared count: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

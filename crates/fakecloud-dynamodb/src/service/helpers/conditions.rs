@@ -402,10 +402,9 @@ pub(crate) fn evaluate_size_comparison(
         ("<", rest.trim())
     } else if let Some(rest) = remainder.strip_prefix('>') {
         (">", rest.trim())
-    } else if let Some(rest) = remainder.strip_prefix('=') {
-        ("=", rest.trim())
     } else {
-        return None;
+        let rest = remainder.strip_prefix('=')?;
+        ("=", rest.trim())
     };
 
     let actual_owned = resolve_path(path, item, expr_attr_names)?;
