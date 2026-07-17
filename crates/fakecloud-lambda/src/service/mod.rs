@@ -379,6 +379,20 @@ pub(crate) fn iam_action_name_for(op: &str) -> Option<&'static str> {
     Some(action)
 }
 
+/// Strip an `arn:<partition>:lambda:` prefix for any AWS partition
+/// (`aws`, `aws-cn`, `aws-us-gov`, …), returning the remainder
+/// (`REGION:ACCOUNT:function:NAME[:QUALIFIER]`). Returns `None` when the
+/// input is not a Lambda ARN. Hardcoding `arn:aws:lambda:` previously
+/// dropped China / GovCloud ARNs on the floor.
+fn strip_lambda_arn_prefix(input: &str) -> Option<&str> {
+    let rest = input.strip_prefix("arn:")?;
+    let (partition, after) = rest.split_once(':')?;
+    if partition.is_empty() {
+        return None;
+    }
+    after.strip_prefix("lambda:")
+}
+
 pub(crate) fn normalize_function_name(input: &str) -> String {
     if input.is_empty() {
         return String::new();
@@ -393,8 +407,8 @@ pub(crate) fn normalize_function_name(input: &str) -> String {
         .into_owned();
     let input = decoded.as_str();
 
-    // Full ARN: arn:aws:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]
-    if let Some(rest) = input.strip_prefix("arn:aws:lambda:") {
+    // Full ARN: arn:<partition>:lambda:REGION:ACCOUNT:function:NAME[:QUALIFIER]
+    if let Some(rest) = strip_lambda_arn_prefix(input) {
         let parts: Vec<&str> = rest.splitn(5, ':').collect();
         // parts: [region, account, "function", name, qualifier?]
         if parts.len() >= 4 && parts[2] == "function" && !parts[3].is_empty() {
@@ -498,7 +512,7 @@ pub(crate) fn qualifier_from_function_ref(input: &str) -> Option<String> {
         .into_owned();
     let input = decoded.as_str();
 
-    if let Some(rest) = input.strip_prefix("arn:aws:lambda:") {
+    if let Some(rest) = strip_lambda_arn_prefix(input) {
         // [region, account, "function", name, qualifier?]
         let parts: Vec<&str> = rest.splitn(5, ':').collect();
         if parts.len() == 5 && parts[2] == "function" && !parts[4].is_empty() {

@@ -22,6 +22,37 @@ fn validate_required(field: &str, value: &serde_json::Value) -> Result<(), AwsSe
     }
     Ok(())
 }
+
+/// Resource ARN for an HTTP/WebSocket API — the value clients pass to the tag
+/// verbs (`arn:aws:apigateway:<region>::/apis/<api-id>`). All tags flow through
+/// the ARN-keyed `state.tags` store so create-time inline tags, TagResource,
+/// UntagResource, GetTags, and GetApi share one source of truth. Mirrors
+/// `stage_resource_arn` for the stage collection.
+fn api_resource_arn(region: &str, api_id: &str) -> String {
+    format!("arn:aws:apigateway:{region}::/apis/{api_id}")
+}
+
+/// Overlay the ARN-keyed tag store (`state.tags[arn]`) onto a serialized
+/// resource `Value`. When the store has an entry it authoritatively sets — or
+/// clears, when empty — the resource's `tags` field, so GetApi / GetStage never
+/// drift from GetTags. `None` (no store entry) leaves the struct's own
+/// serialized `tags` untouched, a fallback for resources persisted before the
+/// stores were unified.
+fn overlay_resource_tags(
+    mut v: serde_json::Value,
+    tags: Option<&BTreeMap<String, String>>,
+) -> serde_json::Value {
+    if let Some(t) = tags {
+        if t.is_empty() {
+            if let Some(o) = v.as_object_mut() {
+                o.remove("tags");
+            }
+        } else {
+            v["tags"] = json!(t);
+        }
+    }
+    v
+}
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
@@ -334,7 +365,12 @@ impl ApiGatewayV2Service {
             api.version = Some(v.to_string());
         }
 
-        Ok(AwsResponse::ok_json(json!(api)))
+        // Reflect the ARN-keyed tag store (the single source of truth for tags)
+        // so an UpdateApi response never drifts from GetTags/TagResource.
+        let api_json = json!(&*api); // last use of the `api` mutable borrow
+        let arn = api_resource_arn(&req.region, api_id);
+        let resp = overlay_resource_tags(api_json, state.tags.get(&arn));
+        Ok(AwsResponse::ok_json(resp))
     }
 }
 

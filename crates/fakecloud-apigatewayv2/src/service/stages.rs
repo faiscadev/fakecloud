@@ -111,13 +111,23 @@ impl ApiGatewayV2Service {
             ));
         }
 
+        // Unify create-time inline tags into the ARN-keyed tag store the tag
+        // verbs use, so GetTags sees create-time tags and GetStage never drifts
+        // from TagResource (same split that affected APIs).
+        let arn = self.stage_resource_arn(&req.region, api_id, &stage.stage_name);
+        if let Some(t) = stage.tags.clone() {
+            if !t.is_empty() {
+                state.tags.insert(arn.clone(), t);
+            }
+        }
         state
             .stages
             .entry(api_id.to_string())
             .or_default()
             .insert(stage_name, stage.clone());
 
-        Ok(AwsResponse::ok_json(json!(stage)))
+        let resp = overlay_resource_tags(json!(stage), state.tags.get(&arn));
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn get_stage(
@@ -165,7 +175,9 @@ impl ApiGatewayV2Service {
                 )
             })?;
 
-        Ok(AwsResponse::ok_json(json!(stage)))
+        let arn = self.stage_resource_arn(&req.region, api_id, stage_name);
+        let resp = overlay_resource_tags(json!(stage), state.tags.get(&arn));
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn get_stages(
@@ -194,10 +206,17 @@ impl ApiGatewayV2Service {
             ));
         }
 
-        let stages: Vec<&Stage> = state
+        let stages: Vec<serde_json::Value> = state
             .stages
             .get(api_id)
-            .map(|s| s.values().collect())
+            .map(|s| {
+                s.values()
+                    .map(|stage| {
+                        let arn = self.stage_resource_arn(&req.region, api_id, &stage.stage_name);
+                        overlay_resource_tags(json!(stage), state.tags.get(&arn))
+                    })
+                    .collect()
+            })
             .unwrap_or_default();
 
         Ok(AwsResponse::ok_json(json!({
@@ -315,7 +334,19 @@ impl ApiGatewayV2Service {
 
         stage.last_updated_date = Some(chrono::Utc::now());
 
-        Ok(AwsResponse::ok_json(json!(stage)))
+        // If UpdateStage carried inline tags, unify them into the ARN-keyed tag
+        // store so GetTags/GetStage stay consistent; then reflect that store on
+        // the response.
+        let update_tags = stage.tags.clone();
+        let stage_json = json!(&*stage); // last use of the `stage` mutable borrow
+        let arn = self.stage_resource_arn(&req.region, api_id, stage_name);
+        if let Some(t) = update_tags {
+            if !t.is_empty() {
+                state.tags.insert(arn.clone(), t);
+            }
+        }
+        let resp = overlay_resource_tags(stage_json, state.tags.get(&arn));
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn delete_stage(
@@ -359,6 +390,10 @@ impl ApiGatewayV2Service {
                 format!("Stage not found: {}", stage_name),
             )
         })?;
+        // Drop the ARN-keyed tags alongside the stage.
+        state
+            .tags
+            .remove(&self.stage_resource_arn(&req.region, api_id, stage_name));
 
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, vec![]))
     }
