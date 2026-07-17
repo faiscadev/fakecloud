@@ -34,6 +34,7 @@ from fakecloud.types import (
     ConfirmSubscriptionResponse,
     ConfirmUserRequest,
     ConfirmUserResponse,
+    ContainerCredentials,
     CreateAdminResponse,
     DynamoDbSnapshotSaveResponse,
     Ec2InstanceNetworksResponse,
@@ -2548,6 +2549,20 @@ class FakeCloud:
         _check(resp)
         return ResetServiceResponse.from_dict(resp.json())
 
+    async def credentials(self) -> ContainerCredentials:
+        """Fetch temporary credentials from the general-purpose
+        container/instance credential endpoint
+        (``GET /_fakecloud/credentials``).
+
+        This is the same JSON an app's AWS SDK fetches when
+        ``AWS_CONTAINER_CREDENTIALS_FULL_URI`` points at fakecloud, letting a
+        real binary that expects an instance/task role resolve the default
+        credential chain locally with no code change.
+        """
+        resp = await self._client.get(f"{self._base}/_fakecloud/credentials")
+        _check(resp)
+        return ContainerCredentials.from_dict(resp.json())
+
     async def create_admin(
         self, account_id: str, user_name: str
     ) -> CreateAdminResponse:
@@ -2742,6 +2757,14 @@ class FakeCloudSync:
         resp = self._client.post(f"{self._base}/_fakecloud/reset/{service}")
         _check(resp)
         return ResetServiceResponse.from_dict(resp.json())
+
+    def credentials(self) -> ContainerCredentials:
+        """Fetch temporary credentials from the general-purpose
+        container/instance credential endpoint
+        (``GET /_fakecloud/credentials``)."""
+        resp = self._client.get(f"{self._base}/_fakecloud/credentials")
+        _check(resp)
+        return ContainerCredentials.from_dict(resp.json())
 
     def create_admin(self, account_id: str, user_name: str) -> CreateAdminResponse:
         """Create an IAM admin user in a specific account."""

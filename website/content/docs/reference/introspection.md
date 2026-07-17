@@ -6,8 +6,7 @@ weight = 3
 
 fakecloud exposes `/_fakecloud/*` endpoints for testing behaviors that AWS runs asynchronously (TTL expiration, scheduled rotation, lifecycle, etc.) and for asserting on state from within tests. The first-party SDKs wrap these into ergonomic helpers -- see [SDK setup](/docs/getting-started/sdk-setup/) -- but the raw endpoints are documented here as the source of truth.
 
-This page lists every `/_fakecloud/*` endpoint shipped today: 85 routes across 27 service areas. Endpoints marked **NEW** were added in the last two weeks.
-This page lists every `/_fakecloud/*` endpoint shipped today: 84 routes across 27 service areas. Endpoints marked **NEW** were added in the last two weeks.
+This page lists every `/_fakecloud/*` endpoint shipped today: 86 routes across 28 service areas. Endpoints marked **NEW** were added in the last two weeks.
 
 ## Health and reset
 
@@ -16,6 +15,17 @@ This page lists every `/_fakecloud/*` endpoint shipped today: 84 routes across 2
 | `/_fakecloud/health` | GET | Returns `{"status":"ok","version":"<v>","services":[...]}`. |
 | `/_fakecloud/reset/{service}` | POST | Reset all state for a single service. |
 | `/_fakecloud/reset/{service}/{account_id}` | POST | Reset a single service for one account (multi-account setups). |
+
+## Instance / container credentials
+
+| Endpoint | Method | Description |
+| -------- | ------ | ----------- |
+| `/_fakecloud/credentials` | GET | **NEW** -- Vends short-lived AWS credentials in the ECS container-credentials JSON shape (`AccessKeyId`, `SecretAccessKey`, `Token`, `Expiration`, `RoleArn`). Point an app's `AWS_CONTAINER_CREDENTIALS_FULL_URI` here and the AWS SDK default credential chain resolves locally with no code change. Creds are minted + registered in IAM state (like AssumeRole), so they verify even under `--verify-sigv4`. See [Run an app unmodified](/docs/guides/instance-credentials/). |
+
+```sh
+export AWS_CONTAINER_CREDENTIALS_FULL_URI=http://localhost:4566/_fakecloud/credentials
+aws sts get-caller-identity --endpoint-url http://localhost:4566   # no static keys needed
+```
 
 ```sh
 curl http://localhost:4566/_fakecloud/health

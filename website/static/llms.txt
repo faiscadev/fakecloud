@@ -94,6 +94,7 @@ fakecloud exposes `/_fakecloud/*` endpoints your tests can use to assert on side
 - `GET /_fakecloud/lambda/invocations`: list Lambda invocations and their results
 - `GET /_fakecloud/cognito/confirmation-codes`: list Cognito confirmation codes (for testing signup flows)
 - `POST /_fakecloud/iam/create-admin`: bootstrap an admin user in a specific account (for multi-account tests)
+- `GET /_fakecloud/credentials`: vends AWS container-credentials-format JSON; point `AWS_CONTAINER_CREDENTIALS_FULL_URI` here to run an app that expects an instance/task role unmodified (no static keys)
 - `GET /_fakecloud/elbv2/load-balancers`: list ALB/NLB/GWLB load balancers (for testing infra setups)
 - `GET /_fakecloud/elbv2/target-groups`: list target groups
 - `GET /_fakecloud/elbv2/listeners`: list listeners

@@ -30,6 +30,7 @@ Sub-clients are accessed via methods: `fc.SES()`, `fc.SNS()`, `fc.Lambda()`, etc
 | `Health(ctx)` | Server health check |
 | `Reset(ctx)` | Reset all service state |
 | `ResetService(ctx, service)` | Reset a single service |
+| `Credentials(ctx)` | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
 | `CreateAdmin(ctx, accountID, userName)` | Bootstrap an admin user in a secondary account |
 
 ## `fc.SES()`

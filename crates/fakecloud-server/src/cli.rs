@@ -120,6 +120,15 @@ pub(crate) struct Cli {
     )]
     pub iam_mode: IamModeArg,
 
+    /// IAM role ARN that the container/instance credential endpoint
+    /// (`GET /_fakecloud/credentials`, consumed via
+    /// `AWS_CONTAINER_CREDENTIALS_FULL_URI`) vends credentials for. Lets an
+    /// app running under an instance/task role resolve the AWS SDK default
+    /// credential chain locally with no code change. Defaults to
+    /// `arn:aws:iam::<account>:role/fakecloud`.
+    #[arg(long, env = "FAKECLOUD_CREDENTIALS_ROLE_ARN")]
+    pub credentials_role_arn: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -138,6 +147,18 @@ impl Cli {
     /// Resolve the IAM mode as the cross-crate [`IamMode`] type.
     pub fn iam_mode(&self) -> IamMode {
         self.iam_mode.into()
+    }
+
+    /// Resolve the role ARN the container/instance credential endpoint vends
+    /// credentials for, defaulting to
+    /// `arn:<partition>:iam::<account>:role/fakecloud` with the partition
+    /// derived from the configured region (so aws-cn / aws-us-gov servers get a
+    /// correctly-partitioned default principal).
+    pub fn credentials_role_arn(&self, account_id: &str) -> String {
+        self.credentials_role_arn.clone().unwrap_or_else(|| {
+            let partition = fakecloud_aws::arn::partition_for(&self.region);
+            format!("arn:{partition}:iam::{account_id}:role/fakecloud")
+        })
     }
 
     pub fn persistence_config(&self) -> Result<PersistenceConfig, String> {

@@ -43,6 +43,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 - **Full Bedrock surface.** 214 ops across 4 APIs with real `InvokeModel`/`Converse` streaming, guardrails, agents, and flows. Configurable responses + fault injection for deterministic tests. See [`/bedrock-emulator/`](https://fakecloud.dev/bedrock-emulator/).
 - **First-party test SDKs** for TypeScript, Python, Go, PHP, Java, and Rust. Assert on what your code called without raw HTTP.
 - **Opt-in SigV4 verification and IAM enforcement.** Off by default so tests just work; `--verify-sigv4` for real signature checking and `--iam soft|strict` for policy evaluation across IAM/STS/SQS/SNS/S3. See [security docs](https://fakecloud.dev/docs/reference/security/).
+- **Run your app unmodified.** An app that expects an instance/task role resolves the AWS SDK default credential chain against fakecloud with no static keys and no code change: point `AWS_CONTAINER_CREDENTIALS_FULL_URI` at `/_fakecloud/credentials`. See [Run an app unmodified](https://fakecloud.dev/docs/guides/instance-credentials/).
 - **LocalStack and real-AWS URL compatibility.** Both `*.localhost.localstack.cloud` and `*.amazonaws.com` Host headers route correctly, including every S3 virtual-hosted variant. Persisted URLs and dev scripts from either system replay unchanged.
 
 ## Supported services

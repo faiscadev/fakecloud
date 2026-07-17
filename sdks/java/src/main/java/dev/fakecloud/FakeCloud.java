@@ -21,6 +21,7 @@ import dev.fakecloud.Types.BedrockResponseRule;
 import dev.fakecloud.Types.BedrockStatusResponse;
 import dev.fakecloud.Types.CloudFrontDistributionStatusRequest;
 import dev.fakecloud.Types.CloudFrontDistributionsResponse;
+import dev.fakecloud.Types.ContainerCredentialsResponse;
 import dev.fakecloud.Types.CreateAdminRequest;
 import dev.fakecloud.Types.CreateAdminResponse;
 import dev.fakecloud.Types.ConfirmSubscriptionRequest;
@@ -226,6 +227,19 @@ public final class FakeCloud {
 
     public ResetServiceResponse resetService(String service) {
         return http.postEmpty("/_fakecloud/reset/" + encodePath(service), ResetServiceResponse.class);
+    }
+
+    /**
+     * Fetch temporary credentials from the general-purpose container/instance
+     * credential endpoint ({@code GET /_fakecloud/credentials}).
+     *
+     * <p>This is the same JSON an app's AWS SDK fetches when
+     * {@code AWS_CONTAINER_CREDENTIALS_FULL_URI} points at fakecloud, letting a
+     * real binary that expects an instance/task role resolve the default
+     * credential chain locally with no code change.
+     */
+    public ContainerCredentialsResponse credentials() {
+        return http.get("/_fakecloud/credentials", ContainerCredentialsResponse.class);
     }
 
     // ── IAM ───────────────────────────────────────────────────────

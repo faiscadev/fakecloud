@@ -16,6 +16,7 @@ import type {
   Route53DnssecSignResponse,
   SnsSmsResponse,
   EcsTaskCredentials,
+  ContainerCredentials,
   BedrockFaultRule,
   BedrockFaultsResponse,
   BedrockInvocationsResponse,
@@ -1264,6 +1265,20 @@ export class FakeCloud {
       `${this.baseUrl}/_fakecloud/reset/${encodeURIComponent(service)}`,
       { method: "POST" },
     );
+    return parse(resp);
+  }
+
+  /**
+   * Fetch temporary credentials from the general-purpose container/instance
+   * credential endpoint (`GET /_fakecloud/credentials`).
+   *
+   * This is the same JSON an app's AWS SDK fetches when
+   * `AWS_CONTAINER_CREDENTIALS_FULL_URI` points at fakecloud, letting a real
+   * binary that expects an instance/task role resolve the default credential
+   * chain locally with no code change.
+   */
+  async credentials(): Promise<ContainerCredentials> {
+    const resp = await fetch(`${this.baseUrl}/_fakecloud/credentials`);
     return parse(resp);
   }
 

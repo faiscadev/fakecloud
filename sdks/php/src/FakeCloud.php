@@ -116,6 +116,22 @@ final class FakeCloud
         );
     }
 
+    /**
+     * Fetch temporary credentials from the general-purpose container/instance
+     * credential endpoint (GET /_fakecloud/credentials).
+     *
+     * This is the same JSON an app's AWS SDK fetches when
+     * AWS_CONTAINER_CREDENTIALS_FULL_URI points at fakecloud, letting a real
+     * binary that expects an instance/task role resolve the default credential
+     * chain locally with no code change.
+     */
+    public function credentials(): ContainerCredentialsResponse
+    {
+        return ContainerCredentialsResponse::fromArray(
+            $this->http->get('/_fakecloud/credentials')
+        );
+    }
+
     // ── IAM ───────────────────────────────────────────────────────
 
     public function createAdmin(string $accountId, string $userName): CreateAdminResponse

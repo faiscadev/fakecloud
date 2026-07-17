@@ -1567,6 +1567,19 @@ export interface EcsTaskCredentials {
   RoleArn: string;
 }
 
+/**
+ * Response shape for `GET /_fakecloud/credentials` — the temporary credentials
+ * the AWS SDK's container-credentials provider fetches when
+ * `AWS_CONTAINER_CREDENTIALS_FULL_URI` points at fakecloud.
+ */
+export interface ContainerCredentials {
+  AccessKeyId: string;
+  SecretAccessKey: string;
+  Token: string;
+  Expiration: string;
+  RoleArn: string;
+}
+
 // ── SSM ────────────────────────────────────────────────────────────
 
 /** Body for `POST /_fakecloud/ssm/commands/{commandId}/status`. */

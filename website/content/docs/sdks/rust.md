@@ -30,6 +30,7 @@ Every sub-client is constructed lazily via an accessor (`fc.lambda()`, `fc.sqs()
 | `reset().await`                                   | Reset all service state                  |
 | `reset_service(service).await`                    | Reset a single service                   |
 | `reset_service_for_account(service, account).await` | Reset one service in one account       |
+| `credentials().await`                             | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
 | `create_admin(req).await`                         | Create an admin user in another account  |
 
 ## `fc.acm()`
