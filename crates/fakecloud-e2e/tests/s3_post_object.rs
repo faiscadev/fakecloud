@@ -68,6 +68,10 @@ fn build_policy(
             {"bucket": bucket},
             ["starts-with", "$key", key_prefix],
             ["content-length-range", 1, max_bytes],
+            // Every field the browser posts must be authorized by a condition,
+            // just as boto3's `generate_presigned_post` emits them.
+            ["starts-with", "$Content-Type", ""],
+            {"success_action_status": "201"},
             {"x-amz-algorithm": "AWS4-HMAC-SHA256"},
             {"x-amz-credential": credential},
             {"x-amz-date": amz_date},
@@ -365,4 +369,160 @@ async fn correct_signature_from_a_real_iam_user_is_accepted() {
         .expect("uploaded object should be retrievable");
     let bytes = get.body.collect().await.unwrap().into_bytes();
     assert_eq!(bytes.as_ref(), body.as_slice());
+}
+
+/// A form field carrying no matching policy condition is rejected the way real
+/// S3 rejects it: `AccessDenied` "Extra input fields". This is the whole point
+/// of POST Policy -- the signed policy enumerates exactly what may be posted.
+#[tokio::test]
+async fn unauthorized_extra_form_field_is_rejected() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("post-policy-extra")
+        .send()
+        .await
+        .expect("create bucket");
+
+    let policy = build_policy("post-policy-extra", "uploads/", "test", "us-east-1", 1_000_000);
+    // `x-amz-meta-foo` is not covered by any condition in `build_policy`.
+    let form = post_form(
+        &policy,
+        "uploads/extra.txt",
+        "0".repeat(64).as_str(),
+        b"body".to_vec(),
+    )
+    .text("x-amz-meta-foo", "bar");
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/post-policy-extra", server.endpoint()))
+        .multipart(form)
+        .send()
+        .await
+        .expect("transport ok");
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    assert_eq!(status, reqwest::StatusCode::FORBIDDEN, "got {status}: {text}");
+    assert!(
+        text.contains("Extra input fields"),
+        "expected extra-field AccessDenied: {text}"
+    );
+
+    let err = s3
+        .get_object()
+        .bucket("post-policy-extra")
+        .key("uploads/extra.txt")
+        .send()
+        .await
+        .expect_err("object with an unauthorized field must not be stored");
+    assert!(format!("{err:?}").contains("NoSuchKey") || format!("{err:?}").contains("404"));
+}
+
+/// A policy document without an `expiration` is rejected (real S3 requires it).
+#[tokio::test]
+async fn policy_without_expiration_is_rejected() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("post-policy-noexp")
+        .send()
+        .await
+        .expect("create bucket");
+
+    // Hand-build a policy with no `expiration` field; root-bypass creds so the
+    // signature isn't checked and we exercise the policy-validation path.
+    let policy_json = serde_json::json!({
+        "conditions": [
+            {"bucket": "post-policy-noexp"},
+            ["starts-with", "$key", "uploads/"],
+        ]
+    });
+    let policy_b64 =
+        base64::engine::general_purpose::STANDARD.encode(policy_json.to_string());
+    let form = reqwest::multipart::Form::new()
+        .text("key", "uploads/x.txt")
+        .text("x-amz-credential", "test/20240101/us-east-1/s3/aws4_request")
+        .text("policy", policy_b64)
+        .text("x-amz-signature", "0".repeat(64))
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"body".to_vec()).file_name("x.txt"),
+        );
+
+    let resp = reqwest::Client::new()
+        .post(format!("{}/post-policy-noexp", server.endpoint()))
+        .multipart(form)
+        .send()
+        .await
+        .expect("transport ok");
+    assert!(
+        resp.status().is_client_error(),
+        "expected 4xx for a policy missing expiration, got {}",
+        resp.status()
+    );
+}
+
+/// `success_action_redirect` yields a 303 to the given URL with `bucket`,
+/// `key`, and `etag` appended, taking precedence over `success_action_status`.
+#[tokio::test]
+async fn success_action_redirect_returns_303() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("post-policy-redirect")
+        .send()
+        .await
+        .expect("create bucket");
+
+    let now = chrono::Utc::now();
+    let expiration = (now + chrono::Duration::minutes(15)).to_rfc3339();
+    let policy_json = serde_json::json!({
+        "expiration": expiration,
+        "conditions": [
+            {"bucket": "post-policy-redirect"},
+            ["starts-with", "$key", "uploads/"],
+            {"success_action_redirect": "https://example.com/done"},
+        ]
+    });
+    let policy_b64 =
+        base64::engine::general_purpose::STANDARD.encode(policy_json.to_string());
+    let form = reqwest::multipart::Form::new()
+        .text("key", "uploads/r.txt")
+        .text("x-amz-credential", "test/20240101/us-east-1/s3/aws4_request")
+        .text("policy", policy_b64)
+        .text("x-amz-signature", "0".repeat(64))
+        .text("success_action_redirect", "https://example.com/done")
+        .part(
+            "file",
+            reqwest::multipart::Part::bytes(b"body".to_vec()).file_name("r.txt"),
+        );
+
+    // Don't follow the redirect -- assert the 303 + Location directly.
+    let resp = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .post(format!("{}/post-policy-redirect", server.endpoint()))
+        .multipart(form)
+        .send()
+        .await
+        .expect("transport ok");
+    assert_eq!(resp.status(), reqwest::StatusCode::SEE_OTHER);
+    let location = resp
+        .headers()
+        .get("location")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert!(location.starts_with("https://example.com/done?"), "loc={location}");
+    assert!(location.contains("bucket=post-policy-redirect"), "loc={location}");
+    assert!(location.contains("key=uploads"), "loc={location}");
+
+    // The object still got stored.
+    s3.get_object()
+        .bucket("post-policy-redirect")
+        .key("uploads/r.txt")
+        .send()
+        .await
+        .expect("redirect upload should still be stored");
 }

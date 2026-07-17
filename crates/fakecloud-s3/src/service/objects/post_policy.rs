@@ -282,6 +282,65 @@ fn enforce_conditions(
     Ok(())
 }
 
+/// Reject any submitted form field that the signed policy does not authorize.
+/// The whole POST-Policy security model is that the signed `conditions` list
+/// enumerates exactly which fields (and values) the browser may post; real S3
+/// rejects a request carrying a field with no matching condition with
+/// `AccessDenied` "Invalid according to Policy: Extra input fields: X". Only a
+/// small set of fields is exempt (they carry the signature material itself or
+/// are ignored by convention): `policy`, `x-amz-signature`, the `file` part,
+/// and any `x-ignore-*` field. `content-length-range` has no field name, so it
+/// authorizes nothing here (it governs the file size, checked separately).
+fn enforce_no_extra_fields(
+    conditions: &[PolicyCondition],
+    form: &ParsedForm,
+) -> Result<(), AwsServiceError> {
+    let mut authorized: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for cond in conditions {
+        match cond {
+            PolicyCondition::Eq { field, .. } => {
+                authorized.insert(field.as_str());
+            }
+            PolicyCondition::StartsWith { field, .. } => {
+                authorized.insert(field.as_str());
+            }
+            PolicyCondition::ContentLengthRange { .. } => {}
+        }
+    }
+    for f in &form.fields {
+        let lower = f.name.to_ascii_lowercase();
+        let exempt = lower == "policy"
+            || lower == "x-amz-signature"
+            || lower == "file"
+            || lower.starts_with("x-ignore-");
+        if exempt {
+            continue;
+        }
+        if !authorized.contains(lower.as_str()) {
+            return Err(access_denied(format!(
+                "Invalid according to Policy: Extra input fields: {lower}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Absolute, path-style URL for a stored object, derived from the request's
+/// `Host` header (matching fakecloud's path-style addressing). Falls back to a
+/// root-relative path when no usable host is present. Used for the `Location`
+/// response header / `PostResponse` XML and `success_action_redirect`.
+fn object_url(req: &AwsRequest, bucket: &str, key: &str) -> String {
+    match req
+        .headers
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .filter(|h| !h.is_empty())
+    {
+        Some(host) => format!("http://{host}/{bucket}/{key}"),
+        None => format!("/{bucket}/{key}"),
+    }
+}
+
 /// `x-amz-credential` is `{access_key}/{date}/{region}/{service}/aws4_request`.
 struct ParsedCredential {
     access_key: String,
@@ -352,7 +411,7 @@ impl S3Service {
             .or_else(|| form.file_content_type.clone())
             .unwrap_or_else(|| "binary/octet-stream".to_string());
 
-        // --- Policy validation ---
+        // --- Decode the policy document ---
         let policy_b64 = form
             .field_lower("policy")
             .ok_or_else(|| invalid_argument("POST Object requires a `policy` form field"))?
@@ -363,28 +422,11 @@ impl S3Service {
         let policy: serde_json::Value = serde_json::from_slice(&policy_bytes)
             .map_err(|_| invalid_argument("`policy` is not valid JSON"))?;
 
-        if let Some(expiration) = policy.get("expiration").and_then(|v| v.as_str()) {
-            let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
-                .map_err(|_| invalid_argument("policy `expiration` is not valid RFC3339"))?
-                .with_timezone(&Utc);
-            if Utc::now() > expires_at {
-                return Err(access_denied(
-                    "Invalid according to Policy: Policy expired.",
-                ));
-            }
-        }
-
-        let conditions = parse_conditions(&policy)?;
-        enforce_conditions(
-            &conditions,
-            bucket,
-            &resolved_key,
-            &object_content_type,
-            form.file_bytes.len() as u64,
-            &form,
-        )?;
-
         // --- Signature verification ---
+        // Authenticate the policy signature *before* evaluating the policy's
+        // conditions, matching real S3's precedence: a request that both
+        // carries a bad signature and violates a condition is rejected as
+        // `SignatureDoesNotMatch`, not `AccessDenied`.
         let algorithm = form.field_lower("x-amz-algorithm").unwrap_or_default();
         if !algorithm.is_empty() && !algorithm.eq_ignore_ascii_case("AWS4-HMAC-SHA256") {
             return Err(invalid_argument(format!(
@@ -431,6 +473,36 @@ impl S3Service {
             }
         }
 
+        // --- Policy validation (expiration + conditions) ---
+        // Real S3 requires the policy to carry an `expiration`; a policy
+        // without one is rejected rather than treated as never-expiring.
+        let expiration = policy
+            .get("expiration")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                invalid_argument("Invalid Policy: policy document must contain an `expiration`")
+            })?;
+        let expires_at = chrono::DateTime::parse_from_rfc3339(expiration)
+            .map_err(|_| invalid_argument("policy `expiration` is not valid RFC3339"))?
+            .with_timezone(&Utc);
+        if Utc::now() > expires_at {
+            return Err(access_denied(
+                "Invalid according to Policy: Policy expired.",
+            ));
+        }
+
+        let conditions = parse_conditions(&policy)?;
+        enforce_conditions(
+            &conditions,
+            bucket,
+            &resolved_key,
+            &object_content_type,
+            form.file_bytes.len() as u64,
+            &form,
+        )?;
+        // Every submitted field must be authorized by a policy condition.
+        enforce_no_extra_fields(&conditions, &form)?;
+
         // --- Store the object via the existing PutObject sink ---
         let mut synth_headers = HeaderMap::new();
         synth_headers.insert(
@@ -449,6 +521,7 @@ impl S3Service {
                 || lower == "content-disposition"
                 || lower == "content-encoding"
                 || lower == "content-language"
+                || lower == "content-md5"
                 || lower == "expires"
                 || lower.starts_with("x-amz-");
             if !forwardable {
@@ -494,17 +567,48 @@ impl S3Service {
             .to_string();
 
         // --- Build the POST Object response ---
-        let success_status = form
-            .field_lower("success_action_status")
-            .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or(204);
-
         let mut headers = HeaderMap::new();
         headers.insert(
             "etag",
             etag.parse()
                 .unwrap_or_else(|_| http::HeaderValue::from_static("\"\"")),
         );
+
+        // `success_action_redirect` (legacy alias `redirect`) takes precedence
+        // over `success_action_status`: on success S3 issues a 303 to the given
+        // URL with `bucket`, `key`, and `etag` appended as query parameters.
+        if let Some(redirect) = form
+            .field_lower("success_action_redirect")
+            .or_else(|| form.field_lower("redirect"))
+            .filter(|s| !s.is_empty())
+        {
+            let enc = |s: &str| {
+                percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC)
+                    .to_string()
+            };
+            let sep = if redirect.contains('?') { '&' } else { '?' };
+            let target = format!(
+                "{redirect}{sep}bucket={}&key={}&etag={}",
+                enc(bucket),
+                enc(&resolved_key),
+                enc(etag.trim_matches('"')),
+            );
+            if let Ok(value) = target.parse() {
+                headers.insert("location", value);
+                return Ok(AwsResponse {
+                    status: StatusCode::SEE_OTHER,
+                    content_type: String::new(),
+                    body: Bytes::new().into(),
+                    headers,
+                });
+            }
+        }
+
+        let success_status = form
+            .field_lower("success_action_status")
+            .and_then(|s| s.parse::<u16>().ok())
+            .unwrap_or(204);
+        let location = object_url(req, bucket, &resolved_key);
 
         match success_status {
             200 => Ok(AwsResponse {
@@ -514,7 +618,6 @@ impl S3Service {
                 headers,
             }),
             201 => {
-                let location = format!("/{bucket}/{resolved_key}");
                 headers.insert(
                     "location",
                     location

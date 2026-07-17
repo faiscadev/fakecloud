@@ -593,7 +593,13 @@ pub fn verify_signature(
     string_to_sign: &str,
     provided_signature: &str,
 ) -> bool {
-    let expected = sign_string(secret_access_key, date_stamp, region, service, string_to_sign);
+    let expected = sign_string(
+        secret_access_key,
+        date_stamp,
+        region,
+        service,
+        string_to_sign,
+    );
     constant_time_eq(
         expected.as_bytes(),
         provided_signature.to_ascii_lowercase().as_bytes(),
