@@ -250,9 +250,10 @@ Use fakecloud as a local AWS emulator for integration tests.
 
 Early days, and the list is just getting started. If you or your team use
 fakecloud in CI, local dev, or tests, add yourself to [ADOPTERS.md](ADOPTERS.md)
-with a one-line note on how you use it: open a PR, or comment on the
+with a one-line note on how you use it. Preferred: open a PR. If that is
+inconvenient, comment on the
 ["Who's using fakecloud?"](https://github.com/faiscadev/fakecloud/issues/2324)
-issue. Self-reported and opt-in only.
+issue instead. Self-reported and opt-in only.
 
 ## Contributing
 
