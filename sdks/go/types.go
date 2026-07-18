@@ -1716,6 +1716,10 @@ type DNSResolution struct {
 	Status        string      `json:"status"`
 	Authoritative bool        `json:"authoritative"`
 	Records       []DNSRecord `json:"records"`
+	// ExternalCNAME is set for an A/AAAA query whose CNAME chain exits every
+	// local zone: the external target the --dns resolver would forward-resolve
+	// upstream (this endpoint does no upstream I/O). Empty otherwise.
+	ExternalCNAME string `json:"external_cname"`
 }
 
 // ── SSM ────────────────────────────────────────────────────────────

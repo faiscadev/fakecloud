@@ -361,7 +361,7 @@ When a stream has no encryption configured, `encryption` is `{ "status": "DISABL
 | `/_fakecloud/route53/health-checks/{id}/status` | POST | Flip a health check status (healthy / unhealthy). |
 | `/_fakecloud/route53/zones/{id}/dnssec` | GET | **NEW** -- Inspect a zone's DNSSEC configuration. |
 | `/_fakecloud/route53/zones/{id}/dnssec/sign` | POST | **NEW** -- Sign a zone's DNSSEC records. |
-| `/_fakecloud/dns/resolve?name=<n>&type=<A\|AAAA\|CNAME\|MX\|TXT\|NS\|PTR\|SPF\|CAA\|SRV\|SOA>` | GET | **NEW** -- Resolve a name against the Route 53 records exactly as the built-in `--dns` resolver would, without opening a socket. Returns `{ name, type, status (ANSWERED\|NODATA\|NXDOMAIN\|NOT_AUTHORITATIVE), authoritative, records: [{ name, type, ttl, value }] }`. `type` defaults to `A`; an unsupported type is a 400. See [Local DNS resolver](/docs/guides/dns/). |
+| `/_fakecloud/dns/resolve?name=<n>&type=<A\|AAAA\|CNAME\|MX\|TXT\|NS\|PTR\|SPF\|CAA\|SRV\|SOA>` | GET | **NEW** -- Resolve a name against the Route 53 records exactly as the built-in `--dns` resolver would, without opening a socket. Returns `{ name, type, status (ANSWERED\|NODATA\|NXDOMAIN\|NOT_AUTHORITATIVE), authoritative, records: [{ name, type, ttl, value }], external_cname }`. `external_cname` is set (target name) when an `A`/`AAAA` query's CNAME chain exits every local zone -- the socket resolver forward-resolves it upstream, but this endpoint does no upstream I/O, so it names the target instead. `type` defaults to `A`; an unsupported type is a 400. See [Local DNS resolver](/docs/guides/dns/). |
 
 ## S3
 

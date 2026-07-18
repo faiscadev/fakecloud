@@ -1463,7 +1463,13 @@ public final class Types {
             @JsonProperty("type") String type,
             @JsonProperty("status") String status,
             @JsonProperty("authoritative") boolean authoritative,
-            @JsonProperty("records") java.util.List<DnsRecord> records) {}
+            @JsonProperty("records") java.util.List<DnsRecord> records,
+            /**
+             * For an {@code A}/{@code AAAA} query whose CNAME chain exits every local
+             * zone, the external target the {@code --dns} resolver would forward-resolve
+             * upstream (this endpoint does no upstream I/O). {@code null} otherwise.
+             */
+            @JsonProperty("external_cname") String externalCname) {}
 
     // ── SSM admin ────────────────────────────────────────────────
 

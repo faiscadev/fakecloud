@@ -4140,6 +4140,10 @@ final class DnsResolution
         public readonly string $status,
         public readonly bool $authoritative,
         public readonly array $records,
+        // For an A/AAAA query whose CNAME chain exits every local zone, the
+        // external target the --dns resolver would forward-resolve upstream
+        // (this endpoint does no upstream I/O). null otherwise.
+        public readonly ?string $externalCname = null,
     ) {}
 
     public static function fromArray(array $data): self
@@ -4153,6 +4157,7 @@ final class DnsResolution
                 static fn (array $r): DnsRecord => DnsRecord::fromArray($r),
                 $data['records'] ?? [],
             ),
+            isset($data['external_cname']) ? (string) $data['external_cname'] : null,
         );
     }
 }

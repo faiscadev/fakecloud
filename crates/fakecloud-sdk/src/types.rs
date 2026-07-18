@@ -2378,6 +2378,11 @@ pub struct DnsResolution {
     pub status: String,
     pub authoritative: bool,
     pub records: Vec<DnsRecord>,
+    /// For an `A`/`AAAA` query whose CNAME chain exits every local zone, the
+    /// external target the `--dns` resolver would forward-resolve upstream (this
+    /// endpoint does no upstream I/O). `None` otherwise.
+    #[serde(default)]
+    pub external_cname: Option<String>,
 }
 
 // ── KMS usage (admin) ───────────────────────────────────────────────

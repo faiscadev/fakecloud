@@ -430,4 +430,25 @@ async fn introspection_endpoint_resolves_created_record_via_sdk() {
         .expect("dns_resolve foreign");
     assert_eq!(foreign.status, "NOT_AUTHORITATIVE");
     assert!(!foreign.authoritative);
+
+    // A CNAME chain that leaves every local zone surfaces the external target so
+    // the caller knows the answer still needs an upstream lookup (the endpoint
+    // does no upstream I/O of its own).
+    create_record(
+        &server,
+        &zone_id,
+        "www.example.com.",
+        RrType::Cname,
+        "cdn.external.net",
+    )
+    .await;
+    let external = sdk
+        .dns_resolve("www.example.com", "A")
+        .await
+        .expect("dns_resolve external cname");
+    assert_eq!(
+        external.records[0].record_type, "CNAME",
+        "the local CNAME is reported"
+    );
+    assert_eq!(external.external_cname.as_deref(), Some("cdn.external.net"));
 }

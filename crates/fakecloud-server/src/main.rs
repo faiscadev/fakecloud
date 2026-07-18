@@ -104,7 +104,12 @@ async fn cloudfront_viewer_middleware(
     }
 }
 
-/// Record types the `--dns` resolver (and this introspection endpoint) answer.
+/// Record types the `--dns` resolver (and this introspection endpoint) answer:
+/// exactly the set `fakecloud_route53::dnssec::encode_rdata` wire-encodes. This
+/// is intentionally NARROWER than `dnssec::type_code`, which also maps the
+/// DNSSEC-only `DS`/`RRSIG`/`DNSKEY` types the resolver does not serve, so the
+/// two must not be unified. Keep this in sync with `encode_rdata` if a new
+/// wire-encodable type is added there.
 const DNS_INTROSPECTION_TYPES: &[&str] = &[
     "A", "AAAA", "CNAME", "MX", "TXT", "NS", "PTR", "SPF", "CAA", "SRV", "SOA",
 ];
@@ -157,24 +162,36 @@ fn dns_resolve_introspection(
         ResolveStatus::NxDomain => "NXDOMAIN",
         ResolveStatus::NotAuthoritative => "NOT_AUTHORITATIVE",
     };
+    // Names are reported without the trailing dot so `records[].name` matches
+    // the echoed top-level `name` (which mirrors the caller's query) rather than
+    // the internally-normalized FQDN the resolver labels answers with.
     let records: Vec<serde_json::Value> = resolution
         .answers
         .iter()
         .map(|a| {
             serde_json::json!({
-                "name": a.name,
+                "name": a.name.trim_end_matches('.'),
                 "type": a.rtype,
                 "ttl": a.ttl,
                 "value": a.value,
             })
         })
         .collect();
+    // When an A/AAAA query's CNAME chain exits every local zone, the socket
+    // resolver forward-resolves this external target upstream and appends the
+    // address. This endpoint does no upstream I/O, so it surfaces the target
+    // name instead of silently reporting a dangling CNAME as a full answer.
+    let external_cname = resolution
+        .external_cname
+        .as_deref()
+        .map(|t| t.trim_end_matches('.'));
     axum::Json(serde_json::json!({
         "name": name,
         "type": qtype,
         "status": status,
         "authoritative": !matches!(resolution.status, ResolveStatus::NotAuthoritative),
         "records": records,
+        "external_cname": external_cname,
     }))
     .into_response()
 }
@@ -11895,6 +11912,58 @@ mod dns_introspection_tests {
         assert_eq!(json["authoritative"], true);
         assert_eq!(json["records"][0]["value"], "10.0.0.5");
         assert_eq!(json["records"][0]["ttl"], 60);
+        // records[].name is reported without a trailing dot, matching the echoed
+        // top-level name (the caller's query) rather than the normalized FQDN.
+        assert_eq!(json["records"][0]["name"], "app.example.com");
+        assert_eq!(json["name"], "app.example.com");
+        // No external CNAME for a plain local A answer.
+        assert!(json["external_cname"].is_null());
+    }
+
+    #[tokio::test]
+    async fn external_cname_is_surfaced() {
+        use fakecloud_route53::model::{ResourceRecord, ResourceRecordSet, ResourceRecords};
+        use fakecloud_route53::{Route53Accounts, StoredHostedZone};
+
+        let zone = StoredHostedZone {
+            id: "/hostedzone/example".to_string(),
+            name: "example.com.".to_string(),
+            caller_reference: "ref".to_string(),
+            comment: None,
+            private_zone: false,
+            features: None,
+            vpcs: Vec::new(),
+            delegation_set_id: None,
+            name_servers: Vec::new(),
+            created_time: chrono::Utc::now(),
+            resource_record_sets: vec![ResourceRecordSet {
+                name: "www.example.com.".to_string(),
+                record_type: "CNAME".to_string(),
+                ttl: Some(60),
+                resource_records: Some(ResourceRecords {
+                    resource_record: vec![ResourceRecord {
+                        value: "cdn.external.net".to_string(),
+                    }],
+                }),
+                ..Default::default()
+            }],
+        };
+        let mut accounts = Route53Accounts::new();
+        accounts
+            .entry("000000000000")
+            .hosted_zones
+            .insert(zone.id.clone(), zone);
+        let state = Arc::new(parking_lot::RwLock::new(accounts));
+
+        // An A query whose CNAME target is outside every local zone surfaces the
+        // external target (trailing dot stripped) instead of silently reporting
+        // a dangling CNAME as a complete answer.
+        let params: HashMap<String, String> =
+            [("name".to_string(), "www.example.com".to_string())].into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["records"][0]["type"], "CNAME");
+        assert_eq!(json["external_cname"], "cdn.external.net");
     }
 
     #[tokio::test]

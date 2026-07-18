@@ -3594,6 +3594,10 @@ class DnsResolution:
     status: str
     authoritative: bool
     records: List[DnsRecord]
+    #: For an ``A``/``AAAA`` query whose CNAME chain exits every local zone, the
+    #: external target the ``--dns`` resolver would forward-resolve upstream (this
+    #: endpoint does no upstream I/O). ``None`` otherwise.
+    external_cname: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> DnsResolution:
@@ -3603,6 +3607,7 @@ class DnsResolution:
             status=data["status"],
             authoritative=data["authoritative"],
             records=[DnsRecord.from_dict(r) for r in data.get("records", [])],
+            external_cname=data.get("external_cname"),
         )
 
 

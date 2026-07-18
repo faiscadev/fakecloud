@@ -1599,6 +1599,12 @@ export interface DnsResolution {
   status: string;
   authoritative: boolean;
   records: DnsRecord[];
+  /**
+   * For an `A`/`AAAA` query whose CNAME chain exits every local zone, the
+   * external target the `--dns` resolver would forward-resolve upstream (this
+   * endpoint does no upstream I/O). `null` otherwise.
+   */
+  external_cname: string | null;
 }
 
 // ── SSM ────────────────────────────────────────────────────────────
