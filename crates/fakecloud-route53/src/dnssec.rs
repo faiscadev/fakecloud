@@ -305,9 +305,45 @@ pub fn encode_rdata(rtype: &str, value: &str) -> Vec<u8> {
         }
         "TXT" | "SPF" => encode_txt(value),
         "MX" => encode_mx(value),
+        "SRV" => encode_srv(value),
+        "SOA" => encode_soa(value),
         "CAA" => encode_caa(value),
         _ => value.as_bytes().to_vec(),
     }
+}
+
+/// SRV RDATA: `priority weight port target` -> three `u16`s + the target name.
+fn encode_srv(value: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    let num = |i: usize| {
+        parts
+            .get(i)
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(0)
+    };
+    out.extend_from_slice(&num(0).to_be_bytes()); // priority
+    out.extend_from_slice(&num(1).to_be_bytes()); // weight
+    out.extend_from_slice(&num(2).to_be_bytes()); // port
+    encode_dns_name(&mut out, parts.get(3).copied().unwrap_or("."));
+    out
+}
+
+/// SOA RDATA: `mname rname serial refresh retry expire minimum` -> two names +
+/// five `u32`s.
+fn encode_soa(value: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    let parts: Vec<&str> = value.split_whitespace().collect();
+    encode_dns_name(&mut out, parts.first().copied().unwrap_or("."));
+    encode_dns_name(&mut out, parts.get(1).copied().unwrap_or("."));
+    for i in 2..7 {
+        let n = parts
+            .get(i)
+            .and_then(|p| p.parse::<u32>().ok())
+            .unwrap_or(0);
+        out.extend_from_slice(&n.to_be_bytes());
+    }
+    out
 }
 
 fn encode_a(value: &str) -> Vec<u8> {

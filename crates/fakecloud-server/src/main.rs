@@ -16,6 +16,7 @@ mod admin_elasticache_artifacts;
 mod admin_lambda_artifacts;
 mod appas_hooks;
 mod cli;
+mod dns;
 mod dynamodb_streams_lambda_poller;
 mod imds;
 mod introspection;
@@ -11697,6 +11698,17 @@ async fn main() {
         // Detached so a hung alias/bind can never delay the main server; the
         // link-local IMDS IP serves an IMDS-only surface (not the whole app).
         tokio::spawn(link_local::run(imds_ctx));
+    }
+    // Optional DNS resolver answering A/AAAA/CNAME/MX/TXT from the Route 53
+    // records created in fakecloud (names in no local zone forward upstream).
+    // Detached + best-effort so a bind failure (port 53 needs root) never blocks
+    // the main server.
+    if cli.dns {
+        let dns_cfg = dns::DnsConfig {
+            route53: route53_state.clone(),
+            upstream: cli.dns_upstream(),
+        };
+        tokio::spawn(dns::run(dns_cfg, cli.dns_addr()));
     }
     axum::serve(
         listener,

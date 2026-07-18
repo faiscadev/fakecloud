@@ -7,6 +7,7 @@
 
 pub mod dnssec;
 pub mod model;
+pub mod resolver;
 pub mod router;
 pub(crate) mod service;
 pub(crate) mod state;

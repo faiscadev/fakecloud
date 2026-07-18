@@ -87,6 +87,23 @@ aws --endpoint-url http://localhost:4566 route53 test-dns-answer \
 
 - `POST /_fakecloud/route53/health-checks/{id}/status` — flip a stored health check's reported status. `status` is one of `"Success"`, `"Failure"`, `"Timeout"`, `"DnsError"`, `"InsufficientDataPoints"`, `"Unknown"`. The `<Status>` element returned by `GetHealthCheckStatus` mirrors what real Route 53 produces: `"Success: HTTP Status Code 200"` for `Success`, `"Failure: <reason>"` (or canned descriptors `"Failure: Endpoint unreachable"`, `"Failure: Connection timed out"`, `"Failure: DNS resolution failed"` when no `reason` is supplied) for `Failure`/`Timeout`/`DnsError`, and the literal strings `"InsufficientDataPoints"` / `"Unknown"` for those flavours. The `reason` body field is recorded for failure-flavoured statuses (`Failure`, `Timeout`, `DnsError`) and surfaced by `GetHealthCheckLastFailureReason`. A `Success`/`InsufficientDataPoints`/`Unknown` flip preserves the historical reason. Returns `204 No Content` on success and `404 Not Found` for an unknown id. Available in every fakecloud SDK as `route53.setHealthCheckStatus(id, ...)` (or the language-idiomatic equivalent).
 
+## Real DNS resolver (`--dns`)
+
+By default Route 53 stores records but nothing answers a real lookup: `TestDNSAnswer` is a record-set lookup, not a DNS server. Start fakecloud with `--dns` and it also runs an actual DNS resolver (UDP + TCP) that answers `A`/`AAAA`/`CNAME`/`MX`/`TXT`/`NS`/`PTR`/`SPF`/`CAA` straight from the zones and records you created in Route 53. Point a container's resolver at fakecloud and a normal `getaddrinfo`/`dig` lookup resolves to the local target. Route 53 becomes the one source of truth for local service discovery, with no separate dnsmasq or `/etc/hosts` layer.
+
+- Longest-suffix zone match across every account's hosted zones; `CNAME`s are chased into local zones and the resolved address records appended.
+- Names in no local zone are forwarded to an upstream resolver (`--dns-upstream`), so a container can point its sole resolver at fakecloud and still reach the internet.
+- Binding the default port 53 needs root; pass `--dns-addr 127.0.0.1:15353` (or any high port) for an unprivileged run.
+
+```sh
+fakecloud --dns --dns-addr 127.0.0.1:15353 &
+# ...create a zone + A record as in the smoke test above...
+dig @127.0.0.1 -p 15353 api.example.com A     # -> the record's IP
+dig @127.0.0.1 -p 15353 registry-1.docker.io A # -> forwarded upstream
+```
+
+See the [DNS resolver guide](/docs/guides/dns/) for the docker-compose recipe.
+
 ## Caveats
 
-There is no actual DNS server: requests against the synthesized name servers don't return live responses. `TestDNSAnswer` looks up records from the in-memory state and returns them; treat it as a record-set lookup, not a real DNS resolver. fakecloud does not run real health probes: `GetHealthCheckStatus` returns synthesized observations whose status defaults to `Success` and only changes when the admin endpoint above is called. fakecloud also does not actually publish DNS query logs to CloudWatch Logs (no real DNS resolver runs) and ships a representative geo-location dataset rather than the full 200+-country ISO catalog Route 53 supports — sufficient for code paths that page through the catalog, but not exhaustive for every country lookup.
+Without `--dns` there is no actual DNS server: requests against the synthesized name servers don't return live responses, and `TestDNSAnswer` looks up records from the in-memory state and returns them; treat it as a record-set lookup, not a real DNS resolver. (With `--dns`, the same records are answered over real DNS — see above.) fakecloud does not run real health probes: `GetHealthCheckStatus` returns synthesized observations whose status defaults to `Success` and only changes when the admin endpoint above is called. fakecloud also does not actually publish DNS query logs to CloudWatch Logs (no real DNS resolver runs) and ships a representative geo-location dataset rather than the full 200+-country ISO catalog Route 53 supports — sufficient for code paths that page through the catalog, but not exhaustive for every country lookup.
