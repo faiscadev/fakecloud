@@ -167,30 +167,22 @@ fn dns_resolve_introspection(
     // without the trailing dot -- so the top-level `name` and every
     // `records[].name` agree regardless of the caller's case or FQDN form.
     let echoed_name = name.trim_end_matches('.').to_ascii_lowercase();
-    // Deduplicate answers exactly as the socket path does (dns::build_response):
-    // a merged same-name/cross-account zone or a CNAME chase can surface the same
-    // record twice, and `dig` against `--dns` would return it once. Same key
-    // (lowercased name, uppercased type, value), order preserved.
-    let mut seen = std::collections::HashSet::new();
-    let records: Vec<serde_json::Value> = resolution
-        .answers
-        .iter()
-        .filter(|a| {
-            seen.insert((
-                a.name.to_ascii_lowercase(),
-                a.rtype.to_ascii_uppercase(),
-                a.value.clone(),
-            ))
-        })
-        .map(|a| {
-            serde_json::json!({
-                "name": a.name.trim_end_matches('.'),
-                "type": a.rtype,
-                "ttl": a.ttl,
-                "value": a.value,
+    // Deduplicate answers exactly as the socket path does (both go through
+    // resolver::dedup_answers): a merged same-name/cross-account zone or a CNAME
+    // chase can surface the same record twice, and `dig` against `--dns` returns
+    // it once.
+    let records: Vec<serde_json::Value> =
+        fakecloud_route53::resolver::dedup_answers(&resolution.answers)
+            .into_iter()
+            .map(|a| {
+                serde_json::json!({
+                    "name": a.name.trim_end_matches('.'),
+                    "type": a.rtype,
+                    "ttl": a.ttl,
+                    "value": a.value,
+                })
             })
-        })
-        .collect();
+            .collect();
     // When an A/AAAA query's CNAME chain exits every local zone, the socket
     // resolver forward-resolves this external target upstream and appends the
     // address. This endpoint does no upstream I/O, so it surfaces the target

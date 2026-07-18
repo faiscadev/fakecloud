@@ -48,6 +48,25 @@ pub struct Resolution {
     pub external_cname: Option<String>,
 }
 
+/// Deduplicate answer records, preserving first-seen order. A merged same-name /
+/// cross-account zone or a CNAME chase can surface the same record twice; `dig`
+/// against the `--dns` resolver returns it once, so both the socket response
+/// builder and the HTTP introspection endpoint dedup on the same key
+/// (case-insensitive name + type, exact value). Returns references in order.
+pub fn dedup_answers(answers: &[AnswerRecord]) -> Vec<&AnswerRecord> {
+    let mut seen = std::collections::HashSet::new();
+    answers
+        .iter()
+        .filter(|a| {
+            seen.insert((
+                a.name.to_ascii_lowercase(),
+                a.rtype.to_ascii_uppercase(),
+                a.value.clone(),
+            ))
+        })
+        .collect()
+}
+
 /// Default TTL (seconds) applied when a record set omits `TTL`.
 const DEFAULT_TTL: u32 = 300;
 /// Cap on CNAME-chase hops, so a record pointing at itself (or a cycle) can't
