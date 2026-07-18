@@ -148,6 +148,27 @@ pub(crate) struct Cli {
     #[arg(long, default_value_t = false, env = "FAKECLOUD_IMDS_LINK_LOCAL")]
     pub imds_link_local: bool,
 
+    /// Run a DNS resolver that answers `A`/`AAAA`/`CNAME`/`MX`/`TXT` (and any
+    /// other stored type) from the Route 53 records created in fakecloud. Point
+    /// a container's resolver at fakecloud (compose `dns:` / `/etc/resolv.conf`)
+    /// and created records resolve to their local targets. Off by default. See
+    /// `/docs/guides/dns`.
+    #[arg(long, default_value_t = false, env = "FAKECLOUD_DNS")]
+    pub dns: bool,
+
+    /// Address the DNS resolver binds (UDP + TCP). Defaults to `0.0.0.0:53`;
+    /// binding port 53 needs root, so pass e.g. `127.0.0.1:15353` for an
+    /// unprivileged run. Only used when `--dns` is set.
+    #[arg(long, env = "FAKECLOUD_DNS_ADDR")]
+    pub dns_addr: Option<String>,
+
+    /// Upstream resolver for names in no Route 53 zone, so a container can use
+    /// fakecloud as its sole resolver and still reach the outside world.
+    /// Defaults to the first `nameserver` in `/etc/resolv.conf`, else
+    /// `8.8.8.8:53`. Only used when `--dns` is set.
+    #[arg(long, env = "FAKECLOUD_DNS_UPSTREAM")]
+    pub dns_upstream: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -180,6 +201,29 @@ impl Cli {
         })
     }
 
+    /// Address the DNS resolver binds, defaulting to `0.0.0.0:53`. A bare host
+    /// (no `:port`) gets the default DNS port 53 appended.
+    pub fn dns_addr(&self) -> std::net::SocketAddr {
+        let raw = self
+            .dns_addr
+            .clone()
+            .unwrap_or_else(|| "0.0.0.0:53".to_string());
+        parse_socket_addr(&raw, 53)
+            .unwrap_or_else(|| std::net::SocketAddr::from((std::net::Ipv4Addr::UNSPECIFIED, 53)))
+    }
+
+    /// Upstream resolver for names in no local zone, defaulting to the first
+    /// `nameserver` in `/etc/resolv.conf`, else `8.8.8.8:53`. `None` only if an
+    /// explicit value fails to parse (forwarding is then disabled).
+    pub fn dns_upstream(&self) -> Option<std::net::SocketAddr> {
+        if let Some(raw) = &self.dns_upstream {
+            return parse_socket_addr(raw, 53);
+        }
+        resolv_conf_nameserver()
+            .and_then(|ns| parse_socket_addr(&ns, 53))
+            .or_else(|| parse_socket_addr("8.8.8.8:53", 53))
+    }
+
     /// The instance ID IMDS reports, defaulting to a stable synthetic
     /// `i-<17 hex>` derived from the account ID (so it is deterministic across
     /// restarts without a flag).
@@ -208,6 +252,42 @@ impl Cli {
         config.validate()?;
         Ok(config)
     }
+}
+
+/// Parse `raw` as a numeric socket address (`IP` or `IP:port`), appending
+/// `:default_port` for a bare IP. IP-only on purpose: the DNS bind and upstream
+/// are always addresses, so this never does a blocking hostname lookup (which
+/// would stall async startup). Returns `None` for anything that isn't a numeric
+/// address.
+fn parse_socket_addr(raw: &str, default_port: u16) -> Option<std::net::SocketAddr> {
+    let raw = raw.trim();
+    if let Ok(addr) = raw.parse::<std::net::SocketAddr>() {
+        return Some(addr);
+    }
+    let ip = raw.parse::<std::net::IpAddr>().ok()?;
+    Some(std::net::SocketAddr::new(ip, default_port))
+}
+
+/// First `nameserver` address from `/etc/resolv.conf`, if readable. Skips
+/// loopback entries: on many hosts `resolv.conf` points at a local stub
+/// (127.0.0.53 / 127.0.0.11) that would just loop back into fakecloud when
+/// fakecloud is itself the resolver.
+fn resolv_conf_nameserver() -> Option<String> {
+    let contents = std::fs::read_to_string("/etc/resolv.conf").ok()?;
+    for line in contents.lines() {
+        let line = line.trim();
+        if let Some(addr) = line.strip_prefix("nameserver") {
+            let addr = addr.trim();
+            let is_loopback = addr
+                .parse::<std::net::IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false);
+            if !addr.is_empty() && !is_loopback {
+                return Some(addr.to_string());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -291,6 +371,35 @@ mod tests {
             cfg.data_path.as_deref(),
             Some(std::path::Path::new("/tmp/fc-test"))
         );
+    }
+
+    #[test]
+    fn parse_socket_addr_appends_default_port() {
+        assert_eq!(
+            parse_socket_addr("8.8.8.8", 53).unwrap().to_string(),
+            "8.8.8.8:53"
+        );
+        assert_eq!(
+            parse_socket_addr("127.0.0.1:15353", 53)
+                .unwrap()
+                .to_string(),
+            "127.0.0.1:15353"
+        );
+        assert!(parse_socket_addr("not an addr", 53).is_none());
+    }
+
+    #[test]
+    fn dns_addr_defaults_to_port_53() {
+        let cli = Cli::try_parse_from(["fakecloud"]).unwrap();
+        assert_eq!(cli.dns_addr().to_string(), "0.0.0.0:53");
+        let cli = Cli::try_parse_from(["fakecloud", "--dns-addr", "127.0.0.1:15353"]).unwrap();
+        assert_eq!(cli.dns_addr().to_string(), "127.0.0.1:15353");
+    }
+
+    #[test]
+    fn dns_upstream_explicit_bare_ip_gets_port() {
+        let cli = Cli::try_parse_from(["fakecloud", "--dns-upstream", "1.1.1.1"]).unwrap();
+        assert_eq!(cli.dns_upstream().unwrap().to_string(), "1.1.1.1:53");
     }
 
     #[test]
