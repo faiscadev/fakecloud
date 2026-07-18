@@ -163,14 +163,25 @@ fn dns_resolve_introspection(
         ResolveStatus::NxDomain => "NXDOMAIN",
         ResolveStatus::NotAuthoritative => "NOT_AUTHORITATIVE",
     };
-    // Report every name without a trailing dot -- the echoed top-level `name` and
-    // each `records[].name` -- so the two always agree even when the caller queries
-    // an FQDN form (`app.example.com.`); the resolver internally normalizes answers
-    // to the dotted FQDN, which would otherwise differ from the echoed query.
-    let echoed_name = name.trim_end_matches('.');
+    // Echo the name the way the resolver normalizes answers -- lowercased and
+    // without the trailing dot -- so the top-level `name` and every
+    // `records[].name` agree regardless of the caller's case or FQDN form.
+    let echoed_name = name.trim_end_matches('.').to_ascii_lowercase();
+    // Deduplicate answers exactly as the socket path does (dns::build_response):
+    // a merged same-name/cross-account zone or a CNAME chase can surface the same
+    // record twice, and `dig` against `--dns` would return it once. Same key
+    // (lowercased name, uppercased type, value), order preserved.
+    let mut seen = std::collections::HashSet::new();
     let records: Vec<serde_json::Value> = resolution
         .answers
         .iter()
+        .filter(|a| {
+            seen.insert((
+                a.name.to_ascii_lowercase(),
+                a.rtype.to_ascii_uppercase(),
+                a.value.clone(),
+            ))
+        })
         .map(|a| {
             serde_json::json!({
                 "name": a.name.trim_end_matches('.'),
@@ -11934,6 +11945,74 @@ mod dns_introspection_tests {
         assert_eq!(status, 200);
         assert_eq!(json["name"], "app.example.com");
         assert_eq!(json["name"], json["records"][0]["name"]);
+    }
+
+    #[tokio::test]
+    async fn mixed_case_query_name_is_lowercased_and_matches_records() {
+        let state = state_with_a_record();
+        let params: HashMap<String, String> =
+            [("name".to_string(), "App.Example.COM".to_string())].into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 200);
+        // Echoed name is lowercased so it matches the resolver-normalized record.
+        assert_eq!(json["name"], "app.example.com");
+        assert_eq!(json["name"], json["records"][0]["name"]);
+    }
+
+    #[tokio::test]
+    async fn duplicate_records_across_merged_zones_are_deduped() {
+        use fakecloud_route53::model::{ResourceRecord, ResourceRecordSet, ResourceRecords};
+        use fakecloud_route53::{Route53Accounts, StoredHostedZone};
+
+        // Same-name zone in two accounts, each carrying the identical record. The
+        // resolver merges them (two identical answers); the endpoint must dedup to
+        // one, matching what `dig` against the --dns socket resolver returns.
+        let make_zone = || StoredHostedZone {
+            id: "/hostedzone/example".to_string(),
+            name: "example.com.".to_string(),
+            caller_reference: "ref".to_string(),
+            comment: None,
+            private_zone: false,
+            features: None,
+            vpcs: Vec::new(),
+            delegation_set_id: None,
+            name_servers: Vec::new(),
+            created_time: chrono::Utc::now(),
+            resource_record_sets: vec![ResourceRecordSet {
+                name: "app.example.com.".to_string(),
+                record_type: "A".to_string(),
+                ttl: Some(60),
+                resource_records: Some(ResourceRecords {
+                    resource_record: vec![ResourceRecord {
+                        value: "10.0.0.5".to_string(),
+                    }],
+                }),
+                ..Default::default()
+            }],
+        };
+        let mut accounts = Route53Accounts::new();
+        let z1 = make_zone();
+        accounts
+            .entry("000000000000")
+            .hosted_zones
+            .insert(z1.id.clone(), z1);
+        let z2 = make_zone();
+        accounts
+            .entry("111111111111")
+            .hosted_zones
+            .insert(z2.id.clone(), z2);
+        let state = Arc::new(parking_lot::RwLock::new(accounts));
+
+        let params: HashMap<String, String> =
+            [("name".to_string(), "app.example.com".to_string())].into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 200);
+        assert_eq!(
+            json["records"].as_array().unwrap().len(),
+            1,
+            "identical merged records should be deduped to one"
+        );
+        assert_eq!(json["records"][0]["value"], "10.0.0.5");
     }
 
     #[tokio::test]
