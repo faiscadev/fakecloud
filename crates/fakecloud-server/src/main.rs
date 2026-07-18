@@ -105,11 +105,12 @@ async fn cloudfront_viewer_middleware(
 }
 
 /// Record types the `--dns` resolver (and this introspection endpoint) answer:
-/// exactly the set `fakecloud_route53::dnssec::encode_rdata` wire-encodes. This
-/// is intentionally NARROWER than `dnssec::type_code`, which also maps the
-/// DNSSEC-only `DS`/`RRSIG`/`DNSKEY` types the resolver does not serve, so the
-/// two must not be unified. Keep this in sync with `encode_rdata` if a new
-/// wire-encodable type is added there.
+/// the types `fakecloud_route53::dnssec::encode_rdata` has an explicit encoding
+/// arm for (it has a raw-bytes catch-all, but only these produce meaningful
+/// wire RDATA). Intentionally NARROWER than `dnssec::type_code`, which also maps
+/// the DNSSEC-only `DS`/`RRSIG`/`DNSKEY` types the resolver does not serve, so
+/// the two must not be unified. Hand-synced with `encode_rdata`'s explicit arms:
+/// add a new type here when one is added there.
 const DNS_INTROSPECTION_TYPES: &[&str] = &[
     "A", "AAAA", "CNAME", "MX", "TXT", "NS", "PTR", "SPF", "CAA", "SRV", "SOA",
 ];
@@ -162,9 +163,11 @@ fn dns_resolve_introspection(
         ResolveStatus::NxDomain => "NXDOMAIN",
         ResolveStatus::NotAuthoritative => "NOT_AUTHORITATIVE",
     };
-    // Names are reported without the trailing dot so `records[].name` matches
-    // the echoed top-level `name` (which mirrors the caller's query) rather than
-    // the internally-normalized FQDN the resolver labels answers with.
+    // Report every name without a trailing dot -- the echoed top-level `name` and
+    // each `records[].name` -- so the two always agree even when the caller queries
+    // an FQDN form (`app.example.com.`); the resolver internally normalizes answers
+    // to the dotted FQDN, which would otherwise differ from the echoed query.
+    let echoed_name = name.trim_end_matches('.');
     let records: Vec<serde_json::Value> = resolution
         .answers
         .iter()
@@ -186,7 +189,7 @@ fn dns_resolve_introspection(
         .as_deref()
         .map(|t| t.trim_end_matches('.'));
     axum::Json(serde_json::json!({
-        "name": name,
+        "name": echoed_name,
         "type": qtype,
         "status": status,
         "authoritative": !matches!(resolution.status, ResolveStatus::NotAuthoritative),
@@ -11918,6 +11921,19 @@ mod dns_introspection_tests {
         assert_eq!(json["name"], "app.example.com");
         // No external CNAME for a plain local A answer.
         assert!(json["external_cname"].is_null());
+    }
+
+    #[tokio::test]
+    async fn fqdn_query_name_matches_record_name() {
+        let state = state_with_a_record();
+        // Caller queries the FQDN form (trailing dot): the echoed top-level name
+        // and records[].name must still agree (both dot-less).
+        let params: HashMap<String, String> =
+            [("name".to_string(), "app.example.com.".to_string())].into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["name"], "app.example.com");
+        assert_eq!(json["name"], json["records"][0]["name"]);
     }
 
     #[tokio::test]
