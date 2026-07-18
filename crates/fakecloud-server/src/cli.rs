@@ -136,6 +136,18 @@ pub(crate) struct Cli {
     #[arg(long, env = "FAKECLOUD_IMDS_INSTANCE_ID")]
     pub imds_instance_id: Option<String>,
 
+    /// Also bind the AWS link-local metadata addresses so apps that hardcode
+    /// them (rather than honoring `AWS_EC2_METADATA_SERVICE_ENDPOINT` /
+    /// `AWS_CONTAINER_CREDENTIALS_*`) resolve credentials unmodified:
+    /// IMDS at `169.254.169.254:80` and ECS container credentials at
+    /// `169.254.170.2:80/creds`. Off by default. Requires running fakecloud as
+    /// root (to bind port 80) with those addresses already assigned to the
+    /// loopback interface: fakecloud binds them but never creates or deletes the
+    /// alias, and logs the exact manual command if binding fails (the main
+    /// server is unaffected). See `/docs/guides/instance-credentials`.
+    #[arg(long, default_value_t = false, env = "FAKECLOUD_IMDS_LINK_LOCAL")]
+    pub imds_link_local: bool,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }

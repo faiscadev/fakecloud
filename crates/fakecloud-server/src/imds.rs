@@ -85,7 +85,10 @@ impl ImdsContext {
         partition_of(&self.role_arn)
     }
 
-    fn credentials(&self) -> ContainerCredentials {
+    /// Mint (or reuse cached) credentials for the instance role. Shared by the
+    /// IMDS `security-credentials` path and the link-local ECS `/creds` surface,
+    /// so every credential surface vends the same IAM-registered creds.
+    pub(crate) fn credentials(&self) -> ContainerCredentials {
         self.cache.get_or_mint(
             &self.iam,
             &self.account_id,
@@ -99,10 +102,52 @@ impl ImdsContext {
 /// shadowing a path-style S3 bucket named `latest` (see module docs). The
 /// context is shared behind an `Arc` so axum's per-request `State` clone is a
 /// refcount bump, not a deep copy of the string fields.
-pub fn routes(ctx: ImdsContext) -> Router {
+pub fn routes(ctx: Arc<ImdsContext>) -> Router {
     Router::new()
         .route("/latest/{*rest}", any(handle))
-        .with_state(Arc::new(ctx))
+        .with_state(ctx)
+}
+
+/// Build an IMDS-only `/latest/*` router for the link-local listener
+/// (`169.254.169.254`). Unlike [`routes`], a non-IMDS path returns 404 rather
+/// than falling through to the full AWS dispatcher -- the link-local address
+/// exposes *only* the metadata surface, never the rest of the app.
+pub fn link_local_router(ctx: Arc<ImdsContext>) -> Router {
+    Router::new()
+        .route("/latest/{*rest}", any(link_local_handle))
+        .with_state(ctx)
+}
+
+/// The IMDS metadata paths, shared by the main and link-local handlers. Returns
+/// `None` for a path that is not a recognized IMDS lookup.
+fn serve_imds(ctx: &ImdsContext, req: &Request<Body>) -> Option<Response> {
+    let creds_prefix = "/latest/meta-data/iam/security-credentials/";
+    match (req.method(), req.uri().path()) {
+        (&Method::PUT, "/latest/api/token") => Some(token(req.headers())),
+        (&Method::GET, "/latest/meta-data/iam/security-credentials")
+        | (&Method::GET, "/latest/meta-data/iam/security-credentials/") => {
+            Some(text(ctx.role_name().to_string()))
+        }
+        (&Method::GET, p) if p.starts_with(creds_prefix) => {
+            Some(security_credentials(ctx, &p[creds_prefix.len()..]))
+        }
+        (&Method::GET, "/latest/meta-data/iam/info") => Some(iam_info(ctx)),
+        (&Method::GET, "/latest/dynamic/instance-identity/document") => {
+            Some(identity_document(ctx))
+        }
+        (&Method::GET, "/latest/meta-data/instance-id") => Some(text(ctx.instance_id.clone())),
+        (&Method::GET, "/latest/meta-data/placement/region") => Some(text(ctx.region.clone())),
+        (&Method::GET, "/latest/meta-data/placement/availability-zone") => {
+            Some(text(ctx.availability_zone()))
+        }
+        _ => None,
+    }
+}
+
+/// Link-local handler: serve IMDS or 404 (no dispatch fallback -- the link-local
+/// address must not expose the rest of the app).
+async fn link_local_handle(State(ctx): State<Arc<ImdsContext>>, req: Request<Body>) -> Response {
+    serve_imds(&ctx, &req).unwrap_or_else(|| (StatusCode::NOT_FOUND, "").into_response())
 }
 
 /// True if the request carries any AWS signing marker (a signed S3 request to a
@@ -133,28 +178,7 @@ async fn handle(
     // anything else (signed/presigned S3, or a non-IMDS `/latest/*` key) goes to
     // the dispatcher so a bucket named `latest` still works.
     if !is_aws_signed(req.headers(), &query) {
-        let creds_prefix = "/latest/meta-data/iam/security-credentials/";
-        let served = match (req.method(), req.uri().path()) {
-            (&Method::PUT, "/latest/api/token") => Some(token(req.headers())),
-            (&Method::GET, "/latest/meta-data/iam/security-credentials")
-            | (&Method::GET, "/latest/meta-data/iam/security-credentials/") => {
-                Some(text(ctx.role_name().to_string()))
-            }
-            (&Method::GET, p) if p.starts_with(creds_prefix) => {
-                Some(security_credentials(&ctx, &p[creds_prefix.len()..]))
-            }
-            (&Method::GET, "/latest/meta-data/iam/info") => Some(iam_info(&ctx)),
-            (&Method::GET, "/latest/dynamic/instance-identity/document") => {
-                Some(identity_document(&ctx))
-            }
-            (&Method::GET, "/latest/meta-data/instance-id") => Some(text(ctx.instance_id.clone())),
-            (&Method::GET, "/latest/meta-data/placement/region") => Some(text(ctx.region.clone())),
-            (&Method::GET, "/latest/meta-data/placement/availability-zone") => {
-                Some(text(ctx.availability_zone()))
-            }
-            _ => None,
-        };
-        if let Some(resp) = served {
+        if let Some(resp) = serve_imds(&ctx, &req) {
             return resp;
         }
     }

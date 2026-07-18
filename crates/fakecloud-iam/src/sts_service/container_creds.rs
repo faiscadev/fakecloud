@@ -75,6 +75,20 @@ impl ContainerCredentials {
     pub fn issued_at_iso8601(&self) -> String {
         format_expiration(self.issued_at)
     }
+
+    /// The credentials as the AWS container/ECS-relative JSON shape
+    /// (`AccessKeyId`, `SecretAccessKey`, `Token`, `Expiration`, `RoleArn`).
+    /// Single source shared by `/_fakecloud/credentials`, the ECS relative-URI
+    /// endpoint, and any other surface that vends this shape.
+    pub fn to_container_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "AccessKeyId": self.access_key_id,
+            "SecretAccessKey": self.secret_access_key,
+            "Token": self.session_token,
+            "Expiration": self.expiration_iso8601(),
+            "RoleArn": self.role_arn,
+        })
+    }
 }
 
 /// Derive the partition (`arn:<partition>:…`) from an ARN, defaulting to `aws`.

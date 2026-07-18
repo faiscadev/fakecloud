@@ -21,6 +21,7 @@ mod imds;
 mod introspection;
 mod kinesis_lambda_poller;
 mod lambda_delivery;
+mod link_local;
 mod pipes_runner;
 mod reaper;
 mod reset;
@@ -6975,7 +6976,7 @@ async fn main() {
     // EC2 IMDS (`/latest/*`) shares the same credential cache so the two
     // credential surfaces vend consistent, IAM-registered creds. Consumed via
     // `AWS_EC2_METADATA_SERVICE_ENDPOINT=http://<host>:<port>`.
-    let imds_router = imds::routes(imds::ImdsContext {
+    let imds_ctx = std::sync::Arc::new(imds::ImdsContext {
         iam: iam_state.clone(),
         cache: credentials_cache.clone(),
         account_id: credentials_account_id.clone(),
@@ -6983,6 +6984,7 @@ async fn main() {
         role_arn: credentials_role_arn.clone(),
         instance_id: cli.imds_instance_id(),
     });
+    let imds_router = imds::routes(imds_ctx.clone());
     let app = Router::new()
         .merge(imds_router)
         .route(
@@ -6994,30 +6996,14 @@ async fn main() {
             // `--verify-sigv4`.
             "/_fakecloud/credentials",
             axum::routing::get({
-                let iam = iam_state.clone();
-                let role_arn = credentials_role_arn.clone();
-                let account_id = credentials_account_id.clone();
-                let cache = credentials_cache.clone();
+                // Reuse the one shared IMDS context (the same `Arc` the IMDS and
+                // link-local routers hold) so this surface vends the exact same
+                // IAM-registered creds via `ImdsContext::credentials`. Cloning the
+                // Arc per request is a refcount bump, not a deep copy.
+                let ctx = imds_ctx.clone();
                 move || {
-                    let iam = iam.clone();
-                    let role_arn = role_arn.clone();
-                    let account_id = account_id.clone();
-                    let cache = cache.clone();
-                    async move {
-                        let creds = cache.get_or_mint(
-                            &iam,
-                            &account_id,
-                            &role_arn,
-                            fakecloud_iam::sts_service::container_creds::DEFAULT_CONTAINER_CREDENTIALS_DURATION,
-                        );
-                        axum::Json(serde_json::json!({
-                            "AccessKeyId": creds.access_key_id,
-                            "SecretAccessKey": creds.secret_access_key,
-                            "Token": creds.session_token,
-                            "Expiration": creds.expiration_iso8601(),
-                            "RoleArn": creds.role_arn,
-                        }))
-                    }
+                    let ctx = ctx.clone();
+                    async move { axum::Json(ctx.credentials().to_container_json()) }
                 }
             }),
         )
@@ -11703,6 +11689,15 @@ async fn main() {
             cloudfront_dataplane,
             cloudfront_viewer_middleware,
         ));
+    // Optionally bind the AWS link-local metadata addresses (169.254.169.254 for
+    // IMDS, 169.254.170.2 for ECS container credentials) so apps that hardcode
+    // them resolve credentials unmodified. Best-effort: a bind failure (needs
+    // root + a loopback alias) is logged and the main server continues.
+    if cli.imds_link_local {
+        // Detached so a hung alias/bind can never delay the main server; the
+        // link-local IMDS IP serves an IMDS-only surface (not the whole app).
+        tokio::spawn(link_local::run(imds_ctx));
+    }
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
