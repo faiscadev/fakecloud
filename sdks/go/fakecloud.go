@@ -64,6 +64,17 @@ func (fc *FakeCloud) Credentials(ctx context.Context) (*ContainerCredentials, er
 	return &out, nil
 }
 
+// InstanceIdentityDocument fetches the EC2 instance identity document from the
+// IMDS surface (GET /latest/dynamic/instance-identity/document). Returned as a
+// raw map so callers can assert on the fields they care about.
+func (fc *FakeCloud) InstanceIdentityDocument(ctx context.Context) (map[string]interface{}, error) {
+	var out map[string]interface{}
+	if err := fc.doGet(ctx, "/latest/dynamic/instance-identity/document", &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // CreateAdmin creates an IAM admin user in a specific account.
 func (fc *FakeCloud) CreateAdmin(ctx context.Context, accountID, userName string) (*CreateAdminResponse, error) {
 	var out CreateAdminResponse

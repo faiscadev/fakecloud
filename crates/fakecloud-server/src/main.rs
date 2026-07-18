@@ -17,6 +17,7 @@ mod admin_lambda_artifacts;
 mod appas_hooks;
 mod cli;
 mod dynamodb_streams_lambda_poller;
+mod imds;
 mod introspection;
 mod kinesis_lambda_poller;
 mod lambda_delivery;
@@ -6971,7 +6972,19 @@ async fn main() {
     let credentials_cache = std::sync::Arc::new(
         fakecloud_iam::sts_service::container_creds::ContainerCredentialCache::new(),
     );
+    // EC2 IMDS (`/latest/*`) shares the same credential cache so the two
+    // credential surfaces vend consistent, IAM-registered creds. Consumed via
+    // `AWS_EC2_METADATA_SERVICE_ENDPOINT=http://<host>:<port>`.
+    let imds_router = imds::routes(imds::ImdsContext {
+        iam: iam_state.clone(),
+        cache: credentials_cache.clone(),
+        account_id: credentials_account_id.clone(),
+        region: cli.region.clone(),
+        role_arn: credentials_role_arn.clone(),
+        instance_id: cli.imds_instance_id(),
+    });
     let app = Router::new()
+        .merge(imds_router)
         .route(
             // General-purpose container/instance credential endpoint. Point an
             // app's `AWS_CONTAINER_CREDENTIALS_FULL_URI` here and the AWS SDK

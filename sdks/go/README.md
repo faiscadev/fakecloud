@@ -66,6 +66,7 @@ func main() {
 | `Reset(ctx)` | Reset all service state |
 | `ResetService(ctx, service)` | Reset a single service |
 | `Credentials(ctx)` | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
+| `InstanceIdentityDocument(ctx)` | EC2 instance identity document (`/latest/dynamic/instance-identity/document`) |
 | `CreateAdmin(ctx, accountID, userName)` | Bootstrap an admin user in a secondary account |
 
 ### SES - `fc.SES()`

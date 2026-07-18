@@ -242,6 +242,17 @@ public final class FakeCloud {
         return http.get("/_fakecloud/credentials", ContainerCredentialsResponse.class);
     }
 
+    /**
+     * Fetch the EC2 instance identity document from the IMDS surface
+     * ({@code GET /latest/dynamic/instance-identity/document}). Returned as a
+     * {@code Map<String, Object>} pass-through so callers can assert on the
+     * fields they care about.
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> instanceIdentityDocument() {
+        return http.get("/latest/dynamic/instance-identity/document", Map.class);
+    }
+
     // ── IAM ───────────────────────────────────────────────────────
 
     public CreateAdminResponse createAdmin(String accountId, String userName) {

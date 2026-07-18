@@ -1282,6 +1282,18 @@ export class FakeCloud {
     return parse(resp);
   }
 
+  /**
+   * Fetch the EC2 instance identity document from the IMDS surface
+   * (`GET /latest/dynamic/instance-identity/document`). Returned as raw JSON so
+   * callers can assert on the fields they care about.
+   */
+  async instanceIdentityDocument(): Promise<Record<string, unknown>> {
+    const resp = await fetch(
+      `${this.baseUrl}/latest/dynamic/instance-identity/document`,
+    );
+    return parse(resp);
+  }
+
   // ── IAM ────────────────────────────────────────────────────────
 
   async createAdmin(

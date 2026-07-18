@@ -57,6 +57,35 @@ services:
 
 The AWS SDKs only fetch container credentials over plain HTTP from loopback hosts (`127.0.0.1`, `localhost`) or when the host resolves to a loopback/link-local address; a compose service name backed by a private-network address is treated the same way real ECS treats `169.254.170.2`.
 
+## Instance metadata (IMDS)
+
+An app that reads credentials from the EC2 instance metadata service (IMDS at `http://169.254.169.254`) rather than through the container path works too. Point the SDK's IMDS client at fakecloud:
+
+```sh
+# Note the trailing slash: the AWS CLI appends `latest/...` to this base directly.
+export AWS_EC2_METADATA_SERVICE_ENDPOINT=http://localhost:4566/
+aws sts get-caller-identity --endpoint-url http://localhost:4566   # no static keys
+```
+
+fakecloud serves the `/latest/*` metadata surface, including both IMDSv1 (plain GET) and IMDSv2 (token-first):
+
+```sh
+# IMDSv2: fetch a token, then use it.
+TOKEN=$(curl -sX PUT http://localhost:4566/latest/api/token \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://localhost:4566/latest/meta-data/iam/security-credentials/
+# -> fakecloud   (the role name)
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://localhost:4566/latest/meta-data/iam/security-credentials/fakecloud
+```
+
+The credential JSON is the IMDS shape (`Code`, `LastUpdated`, `Type`, `AccessKeyId`, `SecretAccessKey`, `Token`, `Expiration`) and comes from the same registered-credential cache as `/_fakecloud/credentials`, so it verifies under `--verify-sigv4`. fakecloud does not enforce the IMDSv2 token — it hands one out and accepts requests with or without it — so both SDK modes work.
+
+Other metadata paths served: `/latest/meta-data/instance-id`, `/latest/meta-data/placement/region`, `/latest/meta-data/placement/availability-zone`, `/latest/meta-data/iam/info`, and the instance identity document at `/latest/dynamic/instance-identity/document`. Set the reported instance ID with `--imds-instance-id` (default: a stable synthetic `i-…`).
+
+Apps that hardcode the `169.254.169.254` IP instead of honoring `AWS_EC2_METADATA_SERVICE_ENDPOINT` need that link-local address routed to fakecloud — see the follow-up on the link-local listener.
+
 ## Choosing the role
 
 By default the vended credentials map to `arn:aws:iam::<account>:role/fakecloud`. Point them at the role your app actually assumes so `GetCallerIdentity` and any role-ARN assertions line up with production:

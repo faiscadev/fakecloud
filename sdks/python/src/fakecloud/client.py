@@ -2563,6 +2563,16 @@ class FakeCloud:
         _check(resp)
         return ContainerCredentials.from_dict(resp.json())
 
+    async def instance_identity_document(self) -> Dict[str, Any]:
+        """Fetch the EC2 instance identity document from the IMDS surface
+        (``GET /latest/dynamic/instance-identity/document``). Pass-through
+        dict so callers can assert on the fields they care about."""
+        resp = await self._client.get(
+            f"{self._base}/latest/dynamic/instance-identity/document"
+        )
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
+
     async def create_admin(
         self, account_id: str, user_name: str
     ) -> CreateAdminResponse:
@@ -2765,6 +2775,15 @@ class FakeCloudSync:
         resp = self._client.get(f"{self._base}/_fakecloud/credentials")
         _check(resp)
         return ContainerCredentials.from_dict(resp.json())
+
+    def instance_identity_document(self) -> Dict[str, Any]:
+        """Fetch the EC2 instance identity document from the IMDS surface
+        (``GET /latest/dynamic/instance-identity/document``)."""
+        resp = self._client.get(
+            f"{self._base}/latest/dynamic/instance-identity/document"
+        )
+        _check(resp)
+        return cast(Dict[str, Any], resp.json())
 
     def create_admin(self, account_id: str, user_name: str) -> CreateAdminResponse:
         """Create an IAM admin user in a specific account."""
