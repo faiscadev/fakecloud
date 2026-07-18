@@ -174,6 +174,13 @@ EXCEPTIONS=(
     # vs/localstack.md aliases redirect legacy blog slugs that have "500ms" in
     # the URL itself. They're URLs we have to match verbatim, not performance claims.
     "website/content/vs/localstack.md:startup_ms:500"
+    # Comparison tables quote the COMPETITOR's performance numbers next to ours.
+    # The metric checks extract every number on the line and can't attribute it,
+    # so a competitor's figure that collides with one of our metric kinds is
+    # whitelisted here. "~150 MiB idle" is LocalStack's idle RSS in the README
+    # footprint-comparison row (ours is ~10 MiB, stated in the same row and in
+    # "Why fakecloud").
+    "README.md:idle_mem_mib:150"
     # "AWS AppConfig: 58 operations" is a DIFFERENT service from AWS Config; the
     # per-service regex matches the "Config" tail of "AppConfig". AppConfig's 58
     # op count is correct in its own context.
