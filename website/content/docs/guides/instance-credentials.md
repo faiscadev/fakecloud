@@ -84,7 +84,26 @@ The credential JSON is the IMDS shape (`Code`, `LastUpdated`, `Type`, `AccessKey
 
 Other metadata paths served: `/latest/meta-data/instance-id`, `/latest/meta-data/placement/region`, `/latest/meta-data/placement/availability-zone`, `/latest/meta-data/iam/info`, and the instance identity document at `/latest/dynamic/instance-identity/document`. Set the reported instance ID with `--imds-instance-id` (default: a stable synthetic `i-…`).
 
-Apps that hardcode the `169.254.169.254` IP instead of honoring `AWS_EC2_METADATA_SERVICE_ENDPOINT` need that link-local address routed to fakecloud — see the follow-up on the link-local listener.
+### Advanced: apps that hardcode `169.254.169.254`
+
+Some apps ignore `AWS_EC2_METADATA_SERVICE_ENDPOINT` and talk to the real IMDS IP `http://169.254.169.254` directly (and some ECS SDKs hardcode the `169.254.170.2` container-credentials base). Run fakecloud with `--imds-link-local` (or `FAKECLOUD_IMDS_LINK_LOCAL=1`) and it also binds those addresses on port 80: the full IMDS surface at `169.254.169.254`, and container credentials at `169.254.170.2/creds`. Set `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/creds` for apps that use the relative-URI base.
+
+This needs privileged host setup that fakecloud does **not** perform for you: binding port 80 needs **root**, and the link-local addresses must already be assigned to the loopback interface. Assign them first, then run fakecloud as root:
+
+```sh
+# Linux
+sudo ip addr add 169.254.169.254/32 dev lo
+sudo ip addr add 169.254.170.2/32 dev lo
+# macOS
+sudo ifconfig lo0 alias 169.254.169.254
+sudo ifconfig lo0 alias 169.254.170.2
+
+sudo fakecloud --imds-link-local
+```
+
+fakecloud never creates or deletes these aliases itself, so it leaves no host-networking state behind: the alias is yours to add and to remove (`sudo ip addr del 169.254.169.254/32 dev lo` when you're done). If the address is not aliased, the bind simply fails: fakecloud logs the exact command above and keeps running, and the main listener (plus the `AWS_EC2_METADATA_SERVICE_ENDPOINT` / `AWS_CONTAINER_CREDENTIALS_FULL_URI` paths) is unaffected.
+
+**Reaching it from a container.** A container hitting `169.254.169.254` reaches its own network namespace, not the host's loopback alias, so an app *inside* a container needs the address routed to fakecloud explicitly, e.g. a docker-compose `extra_hosts` entry or a route to the host. Prefer the `AWS_EC2_METADATA_SERVICE_ENDPOINT` / `AWS_CONTAINER_CREDENTIALS_FULL_URI` env-var approach for containerized apps; the link-local listener is aimed at apps running directly on the host.
 
 ## Choosing the role
 
