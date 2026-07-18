@@ -52,7 +52,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
-- **Full Bedrock surface.** 214 ops across 4 APIs with real `InvokeModel`/`Converse` streaming, guardrails, agents, and flows. Configurable responses + fault injection for deterministic tests. See [`/bedrock-emulator/`](https://fakecloud.dev/bedrock-emulator/).
+- **Full Bedrock surface.** 216 ops across 4 APIs with real `InvokeModel`/`Converse` streaming, guardrails, agents, and flows. Configurable responses + fault injection for deterministic tests. See [`/bedrock-emulator/`](https://fakecloud.dev/bedrock-emulator/).
 - **First-party test SDKs** for TypeScript, Python, Go, PHP, Java, and Rust. Assert on what your code called without raw HTTP.
 - **Opt-in SigV4 verification and IAM enforcement.** Off by default so tests just work; `--verify-sigv4` for real signature checking and `--iam soft|strict` for policy evaluation across IAM/STS/SQS/SNS/S3. See [security docs](https://fakecloud.dev/docs/reference/security/).
 - **Run your app unmodified.** An app that expects an instance/task role resolves the AWS SDK default credential chain against fakecloud with no static keys and no code change: point `AWS_CONTAINER_CREDENTIALS_FULL_URI` at `/_fakecloud/credentials`. See [Run an app unmodified](https://fakecloud.dev/docs/guides/instance-credentials/).
@@ -62,7 +62,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 105 services, 7,379 operations, and true 100% conformance across every implemented service.
 
-Highlights: S3, DynamoDB, SQS, SNS, EventBridge, Lambda, IAM, STS, KMS, Secrets Manager, CloudFormation, SES, Cognito, Kinesis, RDS (6 real engines), ElastiCache, ECS/ECR, EC2 (767 ops), Step Functions, API Gateway v1/v2, Bedrock (214 ops), and 80+ more.
+Highlights: S3, DynamoDB, SQS, SNS, EventBridge, Lambda, IAM, STS, KMS, Secrets Manager, CloudFormation, SES, Cognito, Kinesis, RDS (6 real engines), ElastiCache, ECS/ECR, EC2, Step Functions, API Gateway v1/v2, Bedrock, and 80+ more.
 
 Full list with per-service op counts, control-plane vs data-plane coverage, and known limitations:
 
