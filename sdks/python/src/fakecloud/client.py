@@ -36,6 +36,7 @@ from fakecloud.types import (
     ConfirmUserResponse,
     ContainerCredentials,
     CreateAdminResponse,
+    DnsResolution,
     DynamoDbSnapshotSaveResponse,
     Ec2InstanceNetworksResponse,
     Ec2InstancesResponse,
@@ -2563,6 +2564,20 @@ class FakeCloud:
         _check(resp)
         return ContainerCredentials.from_dict(resp.json())
 
+    async def dns_resolve(self, name: str, type: str = "A") -> DnsResolution:
+        """Resolve a name + record type against the Route 53 records
+        (``GET /_fakecloud/dns/resolve``), returning what the ``--dns`` resolver
+        would answer without opening a socket. ``type`` is one of ``A``,
+        ``AAAA``, ``CNAME``, ``MX``, ``TXT``, ``NS``, ``PTR``, ``SPF``, ``CAA``,
+        ``SRV``, ``SOA``.
+        """
+        resp = await self._client.get(
+            f"{self._base}/_fakecloud/dns/resolve",
+            params={"name": name, "type": type},
+        )
+        _check(resp)
+        return DnsResolution.from_dict(resp.json())
+
     async def instance_identity_document(self) -> Dict[str, Any]:
         """Fetch the EC2 instance identity document from the IMDS surface
         (``GET /latest/dynamic/instance-identity/document``). Pass-through
@@ -2775,6 +2790,16 @@ class FakeCloudSync:
         resp = self._client.get(f"{self._base}/_fakecloud/credentials")
         _check(resp)
         return ContainerCredentials.from_dict(resp.json())
+
+    def dns_resolve(self, name: str, type: str = "A") -> DnsResolution:
+        """Resolve a name + record type against the Route 53 records
+        (``GET /_fakecloud/dns/resolve``)."""
+        resp = self._client.get(
+            f"{self._base}/_fakecloud/dns/resolve",
+            params={"name": name, "type": type},
+        )
+        _check(resp)
+        return DnsResolution.from_dict(resp.json())
 
     def instance_identity_document(self) -> Dict[str, Any]:
         """Fetch the EC2 instance identity document from the IMDS surface

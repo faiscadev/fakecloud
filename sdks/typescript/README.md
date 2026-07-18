@@ -58,6 +58,7 @@ Top-level client. Defaults to `http://localhost:4566`.
 | `resetService(service)`            | Reset a single service                                                        |
 | `credentials()`                    | Fetch container/instance credentials (`GET /_fakecloud/credentials`)          |
 | `instanceIdentityDocument()`       | EC2 instance identity document (`/latest/dynamic/instance-identity/document`) |
+| `dnsResolve(name, type?)`          | Resolve a name against Route 53 records like the `--dns` resolver (`GET /_fakecloud/dns/resolve`) |
 | `createAdmin(accountId, userName)` | Bootstrap an admin IAM user for an account                                    |
 
 ### `fc.acm`

@@ -17,6 +17,7 @@ import type {
   SnsSmsResponse,
   EcsTaskCredentials,
   ContainerCredentials,
+  DnsResolution,
   BedrockFaultRule,
   BedrockFaultsResponse,
   BedrockInvocationsResponse,
@@ -1279,6 +1280,20 @@ export class FakeCloud {
    */
   async credentials(): Promise<ContainerCredentials> {
     const resp = await fetch(`${this.baseUrl}/_fakecloud/credentials`);
+    return parse(resp);
+  }
+
+  /**
+   * Resolve a name + record type against the Route 53 records
+   * (`GET /_fakecloud/dns/resolve`), returning what the `--dns` resolver would
+   * answer without opening a socket. `type` is one of `A`, `AAAA`, `CNAME`,
+   * `MX`, `TXT`, `NS`, `PTR`, `SPF`, `CAA`, `SRV`, `SOA`.
+   */
+  async dnsResolve(name: string, type: string = "A"): Promise<DnsResolution> {
+    const params = new URLSearchParams({ name, type });
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/dns/resolve?${params.toString()}`,
+    );
     return parse(resp);
   }
 

@@ -78,3 +78,22 @@ Notes:
 - Binding port 53 needs root (or `CAP_NET_BIND_SERVICE`); in a container fakecloud runs as its own process so `0.0.0.0:53` is fine. For a host run without root, use a high port and point clients at it.
 - To resolve **container names** (rather than IPs you set as record values), keep Docker's embedded DNS in the loop: put a `CNAME` in Route 53 pointing at the container name and let the container's own resolver chain handle it, or set the record's value to the container's address.
 - Wildcard record sets (`*.example.com`) are matched at a single label level (the common case). Weighted / latency / geo / failover routing policies are not evaluated: every matching record set is returned. Single-label `*.example.com` wildcards work; multi-level wildcards and `NAPTR`/`DS`/`ANY` queries are not served. Negative answers (`NXDOMAIN`/`NODATA`) do not carry the zone `SOA` in the authority section, so downstream resolvers cannot negatively-cache them. This is a local development resolver, not a full authoritative/recursive nameserver.
+
+## Assert resolution from a test (no socket)
+
+The same resolution logic is exposed over HTTP so a test can check what the resolver *would* answer without binding a UDP port (handy when `--dns` is off or port 53 is unavailable in CI):
+
+```bash
+curl 'http://localhost:4566/_fakecloud/dns/resolve?name=api.example.com&type=A'
+# { "name": "api.example.com", "type": "A", "status": "ANSWERED",
+#   "authoritative": true,
+#   "records": [ { "name": "api.example.com", "type": "A", "ttl": 300, "value": "172.28.0.10" } ] }
+```
+
+`type` defaults to `A` and accepts `A`, `AAAA`, `CNAME`, `MX`, `TXT`, `NS`, `PTR`, `SPF`, `CAA`, `SRV`, `SOA`; an unsupported type returns `400`. `status` is one of `ANSWERED`, `NODATA` (name exists, no record of that type), `NXDOMAIN` (name not in any local zone), or `NOT_AUTHORITATIVE` (name is outside every Route 53 zone, so the `--dns` resolver would forward it upstream). Every [test-assertion SDK](/docs/sdks/) wraps this as `dnsResolve` / `dns_resolve`:
+
+```python
+res = fc.dns_resolve("api.example.com", "A")
+assert res.status == "ANSWERED"
+assert res.records[0].value == "172.28.0.10"
+```

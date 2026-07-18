@@ -32,6 +32,7 @@ Every sub-client is constructed lazily via an accessor (`fc.lambda()`, `fc.sqs()
 | `reset_service_for_account(service, account).await` | Reset one service in one account       |
 | `credentials().await`                             | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
 | `instance_identity_document().await`             | EC2 instance identity document (`/latest/dynamic/instance-identity/document`) |
+| `dns_resolve(name, type).await`                  | Resolve a name against Route 53 records like the `--dns` resolver (`GET /_fakecloud/dns/resolve`) |
 | `create_admin(req).await`                         | Create an admin user in another account  |
 
 ## `fc.acm()`

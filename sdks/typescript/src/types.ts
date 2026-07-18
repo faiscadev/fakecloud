@@ -1580,6 +1580,27 @@ export interface ContainerCredentials {
   RoleArn: string;
 }
 
+/** One record from `GET /_fakecloud/dns/resolve`. */
+export interface DnsRecord {
+  name: string;
+  type: string;
+  ttl: number;
+  value: string;
+}
+
+/**
+ * Response shape for `GET /_fakecloud/dns/resolve` — what the `--dns` resolver
+ * would answer for a name + type from the Route 53 records. `status` is one of
+ * `ANSWERED`, `NODATA`, `NXDOMAIN`, `NOT_AUTHORITATIVE`.
+ */
+export interface DnsResolution {
+  name: string;
+  type: string;
+  status: string;
+  authoritative: boolean;
+  records: DnsRecord[];
+}
+
 // ── SSM ────────────────────────────────────────────────────────────
 
 /** Body for `POST /_fakecloud/ssm/commands/{commandId}/status`. */

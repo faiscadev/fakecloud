@@ -3564,6 +3564,49 @@ class ContainerCredentials:
 
 
 @dataclass
+class DnsRecord:
+    """One record from ``GET /_fakecloud/dns/resolve``."""
+
+    name: str
+    type: str
+    ttl: int
+    value: str
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DnsRecord:
+        return cls(
+            name=data["name"],
+            type=data["type"],
+            ttl=data["ttl"],
+            value=data["value"],
+        )
+
+
+@dataclass
+class DnsResolution:
+    """Response shape for ``GET /_fakecloud/dns/resolve`` -- what the ``--dns``
+    resolver would answer for a name + type from the Route 53 records. ``status``
+    is one of ``ANSWERED``, ``NODATA``, ``NXDOMAIN``, ``NOT_AUTHORITATIVE``.
+    """
+
+    name: str
+    type: str
+    status: str
+    authoritative: bool
+    records: List[DnsRecord]
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> DnsResolution:
+        return cls(
+            name=data["name"],
+            type=data["type"],
+            status=data["status"],
+            authoritative=data["authoritative"],
+            records=[DnsRecord.from_dict(r) for r in data.get("records", [])],
+        )
+
+
+@dataclass
 class InjectSsmSessionRequest:
     target: str
     account_id: Optional[str] = None

@@ -144,6 +144,23 @@ final class FakeCloud
         return $this->http->get('/latest/dynamic/instance-identity/document');
     }
 
+    /**
+     * Resolve a name against the Route 53 records fakecloud holds, exactly as
+     * the built-in DNS resolver (--dns) would answer it
+     * (GET /_fakecloud/dns/resolve?name=<n>&type=<A|AAAA|CNAME|MX|TXT|...>).
+     *
+     * Lets a test assert what a container pointed at fakecloud for DNS would
+     * see, without opening a UDP socket. Status is one of ANSWERED, NODATA,
+     * NXDOMAIN, NOT_AUTHORITATIVE.
+     */
+    public function dnsResolve(string $name, string $type = 'A'): DnsResolution
+    {
+        $query = http_build_query(['name' => $name, 'type' => $type]);
+        return DnsResolution::fromArray(
+            $this->http->get('/_fakecloud/dns/resolve?' . $query)
+        );
+    }
+
     // ── IAM ───────────────────────────────────────────────────────
 
     public function createAdmin(string $accountId, string $userName): CreateAdminResponse

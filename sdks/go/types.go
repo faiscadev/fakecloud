@@ -1699,6 +1699,25 @@ type ContainerCredentials struct {
 	RoleArn         string `json:"RoleArn"`
 }
 
+// DNSRecord is one record from GET /_fakecloud/dns/resolve.
+type DNSRecord struct {
+	Name  string `json:"name"`
+	Type  string `json:"type"`
+	TTL   int    `json:"ttl"`
+	Value string `json:"value"`
+}
+
+// DNSResolution mirrors GET /_fakecloud/dns/resolve — what the --dns resolver
+// would answer for a name + type from the Route 53 records. Status is one of
+// ANSWERED, NODATA, NXDOMAIN, NOT_AUTHORITATIVE.
+type DNSResolution struct {
+	Name          string      `json:"name"`
+	Type          string      `json:"type"`
+	Status        string      `json:"status"`
+	Authoritative bool        `json:"authoritative"`
+	Records       []DNSRecord `json:"records"`
+}
+
 // ── SSM ────────────────────────────────────────────────────────────
 
 // SetSsmCommandStatusRequest is the body for

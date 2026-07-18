@@ -77,6 +77,22 @@ impl FakeCloud {
         Self::parse(resp).await
     }
 
+    /// Resolve a name + record type against the Route 53 records
+    /// (`GET /_fakecloud/dns/resolve`), returning what the `--dns` resolver would
+    /// answer without opening a socket. Lets a test assert "the record I created
+    /// resolves" straight over HTTP. `record_type` is one of `A`, `AAAA`,
+    /// `CNAME`, `MX`, `TXT`, `NS`, `PTR`, `SPF`, `CAA`, `SRV`, `SOA`.
+    pub async fn dns_resolve(&self, name: &str, record_type: &str) -> Result<DnsResolution, Error> {
+        let url = format!(
+            "{}/_fakecloud/dns/resolve?name={}&type={}",
+            self.base_url,
+            utf8_percent_encode(name, NON_ALPHANUMERIC),
+            utf8_percent_encode(record_type, NON_ALPHANUMERIC),
+        );
+        let resp = self.client.get(url).send().await?;
+        Self::parse(resp).await
+    }
+
     /// Fetch the EC2 instance identity document from the IMDS surface
     /// (`GET /latest/dynamic/instance-identity/document`). Returned as raw JSON
     /// (`accountId`, `region`, `availabilityZone`, `instanceId`, `instanceType`,

@@ -4107,6 +4107,56 @@ final class ContainerCredentialsResponse
     }
 }
 
+// ── DNS resolver ──────────────────────────────────────────────────
+
+final class DnsRecord
+{
+    public function __construct(
+        public readonly string $name,
+        public readonly string $type,
+        public readonly int $ttl,
+        public readonly string $value,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['name'] ?? ''),
+            (string) ($data['type'] ?? ''),
+            (int) ($data['ttl'] ?? 0),
+            (string) ($data['value'] ?? ''),
+        );
+    }
+}
+
+final class DnsResolution
+{
+    /**
+     * @param DnsRecord[] $records
+     */
+    public function __construct(
+        public readonly string $name,
+        public readonly string $type,
+        public readonly string $status,
+        public readonly bool $authoritative,
+        public readonly array $records,
+    ) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self(
+            (string) ($data['name'] ?? ''),
+            (string) ($data['type'] ?? ''),
+            (string) ($data['status'] ?? ''),
+            (bool) ($data['authoritative'] ?? false),
+            array_map(
+                static fn (array $r): DnsRecord => DnsRecord::fromArray($r),
+                $data['records'] ?? [],
+            ),
+        );
+    }
+}
+
 // ── SSM admin ─────────────────────────────────────────────────────
 
 final class SetSsmCommandStatusResponse

@@ -104,6 +104,81 @@ async fn cloudfront_viewer_middleware(
     }
 }
 
+/// Record types the `--dns` resolver (and this introspection endpoint) answer.
+const DNS_INTROSPECTION_TYPES: &[&str] = &[
+    "A", "AAAA", "CNAME", "MX", "TXT", "NS", "PTR", "SPF", "CAA", "SRV", "SOA",
+];
+
+/// Handler for `GET /_fakecloud/dns/resolve?name=<n>&type=<A|...>`. Returns what
+/// the DNS resolver would answer for the name+type straight from the Route 53
+/// records, so a test can assert resolution without opening a socket.
+fn dns_resolve_introspection(
+    route53: &fakecloud_route53::SharedRoute53State,
+    params: &std::collections::HashMap<String, String>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    use fakecloud_route53::resolver::{resolve, ResolveStatus};
+
+    let name = match params.get("name").map(|n| n.trim()) {
+        Some(n) if !n.is_empty() => n,
+        _ => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": "missing required query parameter `name`"
+                })),
+            )
+                .into_response()
+        }
+    };
+    let qtype = params
+        .get("type")
+        .map(|t| t.trim().to_ascii_uppercase())
+        .filter(|t| !t.is_empty())
+        .unwrap_or_else(|| "A".to_string());
+    if !DNS_INTROSPECTION_TYPES.contains(&qtype.as_str()) {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            axum::Json(serde_json::json!({
+                "error": format!("unsupported record type `{qtype}`"),
+                "supported": DNS_INTROSPECTION_TYPES,
+            })),
+        )
+            .into_response();
+    }
+
+    let resolution = {
+        let accounts = route53.read();
+        resolve(&accounts, name, &qtype)
+    };
+    let status = match resolution.status {
+        ResolveStatus::Answered => "ANSWERED",
+        ResolveStatus::NoData => "NODATA",
+        ResolveStatus::NxDomain => "NXDOMAIN",
+        ResolveStatus::NotAuthoritative => "NOT_AUTHORITATIVE",
+    };
+    let records: Vec<serde_json::Value> = resolution
+        .answers
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "name": a.name,
+                "type": a.rtype,
+                "ttl": a.ttl,
+                "value": a.value,
+            })
+        })
+        .collect();
+    axum::Json(serde_json::json!({
+        "name": name,
+        "type": qtype,
+        "status": status,
+        "authoritative": !matches!(resolution.status, ResolveStatus::NotAuthoritative),
+        "records": records,
+    }))
+    .into_response()
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -7009,6 +7084,21 @@ async fn main() {
             }),
         )
         .route(
+            // Introspection: what the `--dns` resolver would answer for a name +
+            // type, straight from the Route 53 records (no DNS listener needed).
+            // Lets a test assert "the record I created resolves" without a socket.
+            "/_fakecloud/dns/resolve",
+            axum::routing::get({
+                let route53 = route53_state.clone();
+                move |axum::extract::Query(params): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >| {
+                    let route53 = route53.clone();
+                    async move { dns_resolve_introspection(&route53, &params) }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/health",
             axum::routing::get({
                 let services = service_names.clone();
@@ -11735,5 +11825,124 @@ async fn main() {
     }
     if let Some(rt) = ec2_runtime {
         rt.stop_all().await;
+    }
+}
+
+#[cfg(test)]
+mod dns_introspection_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn state_with_a_record() -> fakecloud_route53::SharedRoute53State {
+        use fakecloud_route53::model::{ResourceRecord, ResourceRecordSet, ResourceRecords};
+        use fakecloud_route53::{Route53Accounts, StoredHostedZone};
+
+        let zone = StoredHostedZone {
+            id: "/hostedzone/example".to_string(),
+            name: "example.com.".to_string(),
+            caller_reference: "ref".to_string(),
+            comment: None,
+            private_zone: false,
+            features: None,
+            vpcs: Vec::new(),
+            delegation_set_id: None,
+            name_servers: Vec::new(),
+            created_time: chrono::Utc::now(),
+            resource_record_sets: vec![ResourceRecordSet {
+                name: "app.example.com.".to_string(),
+                record_type: "A".to_string(),
+                ttl: Some(60),
+                resource_records: Some(ResourceRecords {
+                    resource_record: vec![ResourceRecord {
+                        value: "10.0.0.5".to_string(),
+                    }],
+                }),
+                ..Default::default()
+            }],
+        };
+        let mut accounts = Route53Accounts::new();
+        accounts
+            .entry("000000000000")
+            .hosted_zones
+            .insert(zone.id.clone(), zone);
+        Arc::new(parking_lot::RwLock::new(accounts))
+    }
+
+    async fn body_json(resp: axum::response::Response) -> (u16, serde_json::Value) {
+        let status = resp.status().as_u16();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json = if bytes.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap()
+        };
+        (status, json)
+    }
+
+    #[tokio::test]
+    async fn answered_shape_defaults_to_a() {
+        let state = state_with_a_record();
+        // No `type` param -> defaults to A.
+        let params: HashMap<String, String> =
+            [("name".to_string(), "app.example.com".to_string())].into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["status"], "ANSWERED");
+        assert_eq!(json["type"], "A");
+        assert_eq!(json["authoritative"], true);
+        assert_eq!(json["records"][0]["value"], "10.0.0.5");
+        assert_eq!(json["records"][0]["ttl"], 60);
+    }
+
+    #[tokio::test]
+    async fn unknown_type_is_400() {
+        let state = state_with_a_record();
+        let params: HashMap<String, String> = [
+            ("name".to_string(), "app.example.com".to_string()),
+            ("type".to_string(), "BOGUS".to_string()),
+        ]
+        .into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 400);
+        assert!(json["error"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported record type"));
+    }
+
+    #[tokio::test]
+    async fn missing_name_is_400() {
+        let state = state_with_a_record();
+        let params: HashMap<String, String> = HashMap::new();
+        let (status, _json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn name_outside_zone_is_not_authoritative() {
+        let state = state_with_a_record();
+        let params: HashMap<String, String> =
+            [("name".to_string(), "other.test".to_string())].into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["status"], "NOT_AUTHORITATIVE");
+        assert_eq!(json["authoritative"], false);
+    }
+
+    #[tokio::test]
+    async fn lowercase_type_is_normalized() {
+        let state = state_with_a_record();
+        let params: HashMap<String, String> = [
+            ("name".to_string(), "app.example.com".to_string()),
+            ("type".to_string(), "a".to_string()),
+        ]
+        .into();
+        let (status, json) = body_json(dns_resolve_introspection(&state, &params)).await;
+        assert_eq!(status, 200);
+        assert_eq!(json["type"], "A");
+        assert_eq!(json["status"], "ANSWERED");
     }
 }
