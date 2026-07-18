@@ -12,6 +12,14 @@
   <a href="https://fakecloud.dev"><img src="https://img.shields.io/badge/docs-fakecloud.dev-green" alt="Docs"></a>
 </p>
 
+<p align="center">
+  <a href="https://www.npmjs.com/package/fakecloud"><img src="https://img.shields.io/npm/dm/fakecloud?label=npm%20downloads" alt="npm downloads"></a>
+  <a href="https://pypi.org/project/fakecloud/"><img src="https://img.shields.io/pypi/dm/fakecloud?label=pypi%20downloads" alt="PyPI downloads"></a>
+  <a href="https://crates.io/crates/fakecloud"><img src="https://img.shields.io/crates/d/fakecloud?label=crates.io%20downloads" alt="crates.io downloads"></a>
+  <a href="https://formulae.brew.sh/formula/fakecloud"><img src="https://img.shields.io/homebrew/installs/dm/fakecloud?label=brew%20installs" alt="Homebrew installs"></a>
+  <a href="https://github.com/faiscadev/fakecloud/stargazers"><img src="https://img.shields.io/github/stars/faiscadev/fakecloud" alt="GitHub stars"></a>
+</p>
+
 ---
 
 fakecloud is a free, open-source local AWS emulator for integration testing and local development. Single binary, no account, no auth token, no paid tier. Point your AWS SDK at `http://localhost:4566` and it works.
@@ -237,6 +245,14 @@ Use fakecloud as a local AWS emulator for integration tests.
 - **[Guides](https://fakecloud.dev/docs/guides)** — in-depth how-tos (testing Bedrock, cross-service integration, CI setup)
 - **[Reference](https://fakecloud.dev/docs/reference)** — configuration, introspection endpoints, persistence, [image signature verification](https://fakecloud.dev/docs/reference/security/#image-supply-chain-cosign--trivy)
 - **[Blog](https://fakecloud.dev/blog)** — essays and hot takes on testing, AWS, and AI-assisted development
+
+## Who's using fakecloud
+
+Early days, and the list is just getting started. If you or your team use
+fakecloud in CI, local dev, or tests, add yourself to [ADOPTERS.md](ADOPTERS.md)
+with a one-line note on how you use it: open a PR, or comment on the
+["Who's using fakecloud?"](https://github.com/faiscadev/fakecloud/issues/2324)
+issue. Self-reported and opt-in only.
 
 ## Contributing
 
