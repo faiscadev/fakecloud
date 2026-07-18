@@ -77,6 +77,22 @@ impl FakeCloud {
         Self::parse(resp).await
     }
 
+    /// Fetch the EC2 instance identity document from the IMDS surface
+    /// (`GET /latest/dynamic/instance-identity/document`). Returned as raw JSON
+    /// (`accountId`, `region`, `availabilityZone`, `instanceId`, `instanceType`,
+    /// …) so callers can assert on the fields they care about.
+    pub async fn instance_identity_document(&self) -> Result<serde_json::Value, Error> {
+        let resp = self
+            .client
+            .get(format!(
+                "{}/latest/dynamic/instance-identity/document",
+                self.base_url
+            ))
+            .send()
+            .await?;
+        Self::parse(resp).await
+    }
+
     /// Reset a single service's state.
     pub async fn reset_service(&self, service: &str) -> Result<ResetServiceResponse, Error> {
         let resp = self

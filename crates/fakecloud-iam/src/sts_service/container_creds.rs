@@ -51,6 +51,9 @@ pub struct ContainerCredentials {
     pub secret_access_key: String,
     pub session_token: String,
     pub expiration: DateTime<Utc>,
+    /// When these credentials were minted. Reported by IMDS as `LastUpdated`;
+    /// stays fixed across cache reuse (unlike `now`), matching real IMDS/ECS.
+    pub issued_at: DateTime<Utc>,
     /// The IAM role ARN these credentials represent (as returned to the caller).
     pub role_arn: String,
     /// The `arn:aws:sts::…:assumed-role/…` principal ARN reported by
@@ -67,14 +70,51 @@ impl ContainerCredentials {
     pub fn expiration_iso8601(&self) -> String {
         format_expiration(self.expiration)
     }
+
+    /// Mint time formatted as the ISO-8601 string AWS reports for `LastUpdated`.
+    pub fn issued_at_iso8601(&self) -> String {
+        format_expiration(self.issued_at)
+    }
 }
 
 /// Derive the partition (`arn:<partition>:…`) from an ARN, defaulting to `aws`.
-fn partition_of(arn: &str) -> &str {
+pub fn partition_of(arn: &str) -> &str {
     arn.split(':')
         .nth(1)
         .filter(|p| !p.is_empty())
         .unwrap_or("aws")
+}
+
+/// A deterministic, fixed-length suffix derived from `input` over a
+/// power-of-two-sized `alphabet`. Stable across builds and toolchain versions
+/// (FNV-1a seed + an LCG whose high bits index the alphabet — the low bits of
+/// an LCG have a short seed-dependent period and would collide). Shared by the
+/// synthetic-ID generators (assumed-role ID, IMDS instance ID) so the algorithm
+/// lives in one place.
+///
+/// Panics in debug if `alphabet.len()` is not a power of two in `2..=256`.
+pub fn deterministic_suffix(input: &str, alphabet: &[u8], len: usize) -> String {
+    debug_assert!(
+        alphabet.len().is_power_of_two() && (2..=256).contains(&alphabet.len()),
+        "alphabet must be a power-of-two size in 2..=256"
+    );
+    let bits = alphabet.len().trailing_zeros();
+    let shift = 64 - bits;
+    let mask = alphabet.len() as u64 - 1;
+    // FNV-1a 64-bit seed.
+    let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in input.bytes() {
+        seed ^= byte as u64;
+        seed = seed.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    let mut out = String::with_capacity(len);
+    for _ in 0..len {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        out.push(alphabet[((seed >> shift) & mask) as usize] as char);
+    }
+    out
 }
 
 /// A stable `AROA`-prefixed role ID derived deterministically from the role ARN.
@@ -83,28 +123,13 @@ fn partition_of(arn: &str) -> &str {
 /// `UserId`) constant across sessions; only the session-name suffix changes.
 /// Deriving it from the ARN (rather than a fresh random ID per mint) preserves
 /// that invariant so a caller comparing `UserId` across credential refreshes
-/// sees the same role. FNV-1a (a fixed algorithm, unlike `std`'s
-/// `DefaultHasher`) keeps the id stable across builds and toolchain versions.
+/// sees the same role.
 fn deterministic_role_id(role_arn: &str) -> String {
-    // FNV-1a 64-bit.
-    let mut seed: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in role_arn.bytes() {
-        seed ^= byte as u64;
-        seed = seed.wrapping_mul(0x0000_0100_0000_01b3);
-    }
     // AWS unique-ID bodies use uppercase A-Z + 2-7.
-    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut out = String::from("AROA");
-    for _ in 0..17 {
-        // Advance an LCG (Knuth MMIX constants) and take the *high* bits: an
-        // LCG's low bits have a short period that depends only on the seed's low
-        // bits, so two seeds could otherwise yield the same character sequence.
-        seed = seed
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        out.push(ALPHABET[(seed >> 59) as usize & 31] as char);
-    }
-    out
+    format!(
+        "AROA{}",
+        deterministic_suffix(role_arn, b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567", 17)
+    )
 }
 
 /// Mint a short-lived credential set for `role_arn`, register it in IAM state
@@ -129,7 +154,8 @@ pub fn mint_container_credentials(
     duration: Duration,
 ) -> ContainerCredentials {
     let creds = StsCredentials::generate();
-    let expiration = Utc::now() + duration;
+    let issued_at = Utc::now();
+    let expiration = issued_at + duration;
     let partition = partition_of(role_arn);
     let account_id =
         extract_account_from_arn(role_arn).unwrap_or_else(|| default_account_id.to_string());
@@ -161,7 +187,7 @@ pub fn mint_container_credentials(
                 expiration,
                 session_policies: Vec::new(),
                 mfa_present: false,
-                issued_at: Utc::now(),
+                issued_at,
                 federated_provider: None,
             },
         );
@@ -172,6 +198,7 @@ pub fn mint_container_credentials(
         secret_access_key: creds.secret_access_key,
         session_token: creds.session_token,
         expiration,
+        issued_at,
         role_arn: role_arn.to_string(),
         assumed_role_arn,
         account_id,

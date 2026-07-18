@@ -132,6 +132,18 @@ final class FakeCloud
         );
     }
 
+    /**
+     * Fetch the EC2 instance identity document from the IMDS surface
+     * (GET /latest/dynamic/instance-identity/document). Returned as the raw
+     * decoded array so callers can assert on the fields they care about.
+     *
+     * @return array<string, mixed>
+     */
+    public function instanceIdentityDocument(): array
+    {
+        return $this->http->get('/latest/dynamic/instance-identity/document');
+    }
+
     // ── IAM ───────────────────────────────────────────────────────
 
     public function createAdmin(string $accountId, string $userName): CreateAdminResponse

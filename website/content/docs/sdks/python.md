@@ -53,6 +53,7 @@ emails = fc.ses.get_emails()
 | `reset()`                             | Reset all service state                                  |
 | `reset_service(service)`              | Reset a single service                                   |
 | `credentials()`                       | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
+| `instance_identity_document()`        | EC2 instance identity document (`/latest/dynamic/instance-identity/document`) |
 | `create_admin(account_id, user_name)` | Create an IAM admin user in a specific account           |
 | `aclose()` (async only)               | Close the underlying `httpx.AsyncClient` (or use `async with`) |
 

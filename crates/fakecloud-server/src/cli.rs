@@ -129,6 +129,13 @@ pub(crate) struct Cli {
     #[arg(long, env = "FAKECLOUD_CREDENTIALS_ROLE_ARN")]
     pub credentials_role_arn: Option<String>,
 
+    /// Instance ID the EC2 instance metadata service (IMDS, `/latest/*`)
+    /// reports (`meta-data/instance-id`, the instance identity document).
+    /// Defaults to a stable synthetic `i-…` ID. IMDS is consumed by pointing
+    /// an app's SDK at `AWS_EC2_METADATA_SERVICE_ENDPOINT=http://<host>:<port>`.
+    #[arg(long, env = "FAKECLOUD_IMDS_INSTANCE_ID")]
+    pub imds_instance_id: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -158,6 +165,24 @@ impl Cli {
         self.credentials_role_arn.clone().unwrap_or_else(|| {
             let partition = fakecloud_aws::arn::partition_for(&self.region);
             format!("arn:{partition}:iam::{account_id}:role/fakecloud")
+        })
+    }
+
+    /// The instance ID IMDS reports, defaulting to a stable synthetic
+    /// `i-<17 hex>` derived from the account ID (so it is deterministic across
+    /// restarts without a flag).
+    pub fn imds_instance_id(&self) -> String {
+        self.imds_instance_id.clone().unwrap_or_else(|| {
+            // Deterministic 17-hex-char suffix seeded by the account ID, via the
+            // shared generator (also used for the assumed-role ID).
+            format!(
+                "i-{}",
+                fakecloud_iam::sts_service::container_creds::deterministic_suffix(
+                    &self.account_id,
+                    b"0123456789abcdef",
+                    17,
+                )
+            )
         })
     }
 

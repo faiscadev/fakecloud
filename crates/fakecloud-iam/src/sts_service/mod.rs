@@ -109,7 +109,7 @@ pub(super) fn format_expiration(ts: DateTime<Utc>) -> String {
 /// Extract the assumed-role name (the final `/`-separated segment) from a role
 /// ARN, matching how AWS names the assumed-role principal (the role path is
 /// dropped). Shared by every assumed-role mint path so the name cannot drift.
-pub(super) fn assumed_role_name(role_arn: &str) -> &str {
+pub fn assumed_role_name(role_arn: &str) -> &str {
     role_arn.rsplit('/').next().unwrap_or("unknown")
 }
 

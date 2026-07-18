@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `reset_service(service).await`                      | Reset a single service                   |
 | `reset_service_for_account(service, account).await` | Reset one service in one account         |
 | `credentials().await`                               | Fetch container/instance credentials (`GET /_fakecloud/credentials`) |
+| `instance_identity_document().await`                | EC2 instance identity document (`/latest/dynamic/instance-identity/document`) |
 | `create_admin(req).await`                           | Create an admin user in another account  |
 
 ## Sub-clients
