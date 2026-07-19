@@ -508,9 +508,11 @@ async fn cloudwatch_composite_alarm() {
         .await
         .unwrap();
 
+    // AWS returns only metric alarms unless AlarmTypes includes CompositeAlarm.
     let described = client
         .describe_alarms()
         .alarm_names("conf-composite")
+        .alarm_types(aws_sdk_cloudwatch::types::AlarmType::CompositeAlarm)
         .send()
         .await
         .unwrap();

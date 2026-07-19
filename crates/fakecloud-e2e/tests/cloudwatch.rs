@@ -749,3 +749,140 @@ async fn describe_alarm_history_records_transitions() {
         "a StateUpdate history item must be recorded"
     );
 }
+
+// bug-cluster: DescribeAlarms honors AlarmTypes. AWS returns only metric alarms
+// by default; composite alarms appear only when AlarmTypes includes them.
+#[tokio::test]
+async fn describe_alarms_honors_alarm_types() {
+    use aws_sdk_cloudwatch::types::AlarmType;
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    cw.put_metric_alarm()
+        .alarm_name("m-alarm")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(1.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .send()
+        .await
+        .expect("put metric alarm");
+    cw.put_composite_alarm()
+        .alarm_name("c-alarm")
+        .alarm_rule("ALARM(m-alarm)")
+        .send()
+        .await
+        .expect("put composite alarm");
+
+    // Default: metric alarms only, no composite alarms.
+    let default = cw.describe_alarms().send().await.expect("default");
+    assert_eq!(default.metric_alarms().len(), 1);
+    assert!(
+        default.composite_alarms().is_empty(),
+        "default DescribeAlarms must not return composite alarms"
+    );
+
+    // AlarmTypes = CompositeAlarm: only the composite alarm.
+    let composite = cw
+        .describe_alarms()
+        .alarm_types(AlarmType::CompositeAlarm)
+        .send()
+        .await
+        .expect("composite only");
+    assert!(composite.metric_alarms().is_empty());
+    assert_eq!(composite.composite_alarms().len(), 1);
+
+    // Both types requested: both returned.
+    let both = cw
+        .describe_alarms()
+        .alarm_types(AlarmType::MetricAlarm)
+        .alarm_types(AlarmType::CompositeAlarm)
+        .send()
+        .await
+        .expect("both");
+    assert_eq!(both.metric_alarms().len(), 1);
+    assert_eq!(both.composite_alarms().len(), 1);
+}
+
+// bug-cluster: a metric-math divide-by-zero yields NaN internally; AWS emits no
+// datapoint for a NaN/infinite result, so no NaN must reach the wire.
+#[tokio::test]
+async fn get_metric_data_drops_nan_from_divide_by_zero() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+
+    // A=10 at t; B is never put (its series is empty), but even a present zero
+    // divisor must not surface NaN. Put A and a zero-valued B at the same time.
+    for (name, v) in [("A", 10.0_f64), ("B", 0.0)] {
+        cw.put_metric_data()
+            .namespace("NanNs")
+            .metric_data(
+                MetricDatum::builder()
+                    .metric_name(name)
+                    .value(v)
+                    .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                    .build(),
+            )
+            .send()
+            .await
+            .expect("put");
+    }
+
+    let mk_stat = |name: &str| {
+        MetricStat::builder()
+            .metric(
+                CwMetric::builder()
+                    .namespace("NanNs")
+                    .metric_name(name)
+                    .build(),
+            )
+            .period(60)
+            .stat("Sum")
+            .build()
+    };
+
+    let resp = cw
+        .get_metric_data()
+        .start_time(AwsDateTime::from_secs(now.timestamp() - 600))
+        .end_time(AwsDateTime::from_secs(now.timestamp() + 600))
+        .metric_data_queries(
+            MetricDataQuery::builder()
+                .id("a")
+                .metric_stat(mk_stat("A"))
+                .return_data(false)
+                .build(),
+        )
+        .metric_data_queries(
+            MetricDataQuery::builder()
+                .id("b")
+                .metric_stat(mk_stat("B"))
+                .return_data(false)
+                .build(),
+        )
+        .metric_data_queries(MetricDataQuery::builder().id("e").expression("a/b").build())
+        .send()
+        .await
+        .expect("metric data");
+
+    let results = resp.metric_data_results();
+    let e = results
+        .iter()
+        .find(|r| r.id() == Some("e"))
+        .expect("e result");
+    // The divide-by-zero datapoint is dropped entirely — no value, and nothing
+    // that is NaN or infinite.
+    assert!(
+        e.values().iter().all(|v| v.is_finite()),
+        "no NaN/infinite datapoint may reach the wire: {:?}",
+        e.values()
+    );
+    assert!(
+        e.values().is_empty(),
+        "divide-by-zero must produce no datapoint: {:?}",
+        e.values()
+    );
+}

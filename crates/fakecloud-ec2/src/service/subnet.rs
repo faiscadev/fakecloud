@@ -6,8 +6,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    filter_value_matches, gen_id, indexed_list, parse_filters, require, validate_enum,
-    validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, not_found, paginate, parse_filters, require,
+    validate_enum, validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Subnet, SubnetCidrReservation, Tag};
 
@@ -303,6 +303,14 @@ pub(crate) fn describe_subnets(
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
+    // An explicitly-requested SubnetId that does not exist is a hard error on
+    // AWS (InvalidSubnetID.NotFound), not a silently-empty result.
+    for id in &wanted {
+        if !state.subnets.contains_key(id) {
+            return Err(not_found("InvalidSubnetID.NotFound", id));
+        }
+    }
+
     let mut items: Vec<String> = state
         .subnets
         .values()
@@ -312,7 +320,20 @@ pub(crate) fn describe_subnets(
         .collect();
     items.sort();
 
-    let body = ec2_list("subnetSet", &items);
+    // DescribeSubnets is a `paginated` operation in the model; honor MaxResults
+    // + NextToken instead of always returning the full set.
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("subnetSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond(
         "DescribeSubnets",
         &req.request_id,
@@ -341,6 +362,7 @@ fn subnet_matches(s: &Subnet, tags: &[Tag], filters: &[Filter]) -> bool {
             "availability-zone" => vec![s.availability_zone.clone()],
             "state" => vec![s.state.clone()],
             "default-for-az" => vec![s.default_for_az.to_string()],
+            "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             "ipv6-cidr-block-association.association-id" => s
                 .ipv6_cidr_block
                 .as_ref()
@@ -552,4 +574,89 @@ pub(crate) fn get_subnet_cidr_reservations(
         &req.request_id,
         &body,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn body_of(resp: AwsResponse) -> String {
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    /// Create a subnet in `vpc_id` with `cidr` and return its id.
+    fn make_subnet(svc: &Ec2Service, vpc_id: &str, cidr: &str) -> String {
+        let body = body_of(
+            create_subnet(
+                svc,
+                &req("CreateSubnet", &[("VpcId", vpc_id), ("CidrBlock", cidr)]),
+            )
+            .unwrap(),
+        );
+        body.split("<subnetId>")
+            .nth(1)
+            .and_then(|s| s.split("</subnetId>").next())
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn describe_subnets_explicit_missing_id_errors() {
+        let svc = Ec2Service::new();
+        make_subnet(&svc, "vpc-test", "10.0.1.0/24");
+        let err = err_of(describe_subnets(
+            &svc,
+            &req("DescribeSubnets", &[("SubnetId.1", "subnet-missing")]),
+        ));
+        assert_eq!(err.code(), "InvalidSubnetID.NotFound");
+    }
+
+    #[test]
+    fn describe_subnets_paginates() {
+        let svc = Ec2Service::new();
+        // Seed enough subnets (plus the default subnets) to force a second page
+        // at the minimum MaxResults of 5.
+        for i in 0..6 {
+            make_subnet(&svc, "vpc-test", &format!("10.0.{i}.0/24"));
+        }
+        let body = body_of(
+            describe_subnets(&svc, &req("DescribeSubnets", &[("MaxResults", "5")])).unwrap(),
+        );
+        assert!(body.contains("<nextToken>"), "expected a NextToken: {body}");
+    }
+
+    #[test]
+    fn describe_subnets_tag_value_filter() {
+        let svc = Ec2Service::new();
+        let id = make_subnet(&svc, "vpc-test", "10.0.9.0/24");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.tags.insert(
+                id.clone(),
+                vec![Tag {
+                    key: "tier".into(),
+                    value: "public".into(),
+                }],
+            );
+        }
+        let body = body_of(
+            describe_subnets(
+                &svc,
+                &req(
+                    "DescribeSubnets",
+                    &[
+                        ("Filter.1.Name", "tag-value"),
+                        ("Filter.1.Value.1", "public"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            body.contains(&format!("<subnetId>{id}</subnetId>")),
+            "{body}"
+        );
+    }
 }

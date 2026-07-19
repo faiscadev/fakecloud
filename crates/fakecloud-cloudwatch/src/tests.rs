@@ -237,13 +237,31 @@ async fn composite_alarm_in_describe_alarms() {
         &[("AlarmName", "comp"), ("AlarmRule", "ALARM(x)")],
     )
     .await;
-    let described = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp")]).await;
+    // AWS returns only metric alarms by default; composite alarms must be
+    // requested explicitly via AlarmTypes.
+    let described = call(
+        &svc,
+        "DescribeAlarms",
+        &[
+            ("AlarmNames.member.1", "comp"),
+            ("AlarmTypes.member.1", "CompositeAlarm"),
+        ],
+    )
+    .await;
     let b = body_of(&described);
     assert!(b.contains("<AlarmRule>ALARM(x)</AlarmRule>"));
     assert!(b.contains("<CompositeAlarms>"));
 
     call(&svc, "DeleteAlarms", &[("AlarmNames.member.1", "comp")]).await;
-    let after = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp")]).await;
+    let after = call(
+        &svc,
+        "DescribeAlarms",
+        &[
+            ("AlarmNames.member.1", "comp"),
+            ("AlarmTypes.member.1", "CompositeAlarm"),
+        ],
+    )
+    .await;
     assert!(!body_of(&after).contains("ALARM(x)"));
 }
 
@@ -398,7 +416,15 @@ async fn composite_alarm_reflects_children_states() {
         ],
     )
     .await;
-    let desc = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp2")]).await;
+    let desc = call(
+        &svc,
+        "DescribeAlarms",
+        &[
+            ("AlarmNames.member.1", "comp2"),
+            ("AlarmTypes.member.1", "CompositeAlarm"),
+        ],
+    )
+    .await;
     let b = body_of(&desc);
     assert!(
         b.contains("<CompositeAlarms>") && b.contains("<StateValue>ALARM</StateValue>"),
@@ -416,7 +442,15 @@ async fn composite_alarm_reflects_children_states() {
         ],
     )
     .await;
-    let desc = call(&svc, "DescribeAlarms", &[("AlarmNames.member.1", "comp2")]).await;
+    let desc = call(
+        &svc,
+        "DescribeAlarms",
+        &[
+            ("AlarmNames.member.1", "comp2"),
+            ("AlarmTypes.member.1", "CompositeAlarm"),
+        ],
+    )
+    .await;
     assert!(body_of(&desc).contains("<StateValue>OK</StateValue>"));
 }
 

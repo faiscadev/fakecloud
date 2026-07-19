@@ -457,6 +457,23 @@ pub(crate) fn describe_security_groups(
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
+    // An explicitly-requested group id / name that does not exist is a hard
+    // error on AWS (InvalidGroup.NotFound), not a silently-empty result.
+    for id in &wanted_ids {
+        if !state.security_groups.contains_key(id) {
+            return Err(sg_not_found(id));
+        }
+    }
+    for name in &wanted_names {
+        if !state
+            .security_groups
+            .values()
+            .any(|g| &g.group_name == name)
+        {
+            return Err(sg_not_found(name));
+        }
+    }
+
     let mut items: Vec<String> = state
         .security_groups
         .values()
@@ -493,6 +510,7 @@ fn sg_matches(g: &SecurityGroup, tags: &[Tag], filters: &[Filter]) -> bool {
             "vpc-id" => vec![g.vpc_id.clone()],
             "description" => vec![g.description.clone()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
+            "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
                     tags.iter()
@@ -1463,5 +1481,54 @@ mod modify_tests {
         .unwrap();
         let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
         assert!(!body.contains("vpc-abc"), "association not removed: {body}");
+    }
+
+    #[test]
+    fn describe_security_groups_explicit_missing_id_errors() {
+        let svc = Ec2Service::new();
+        seed_group(&svc, base_rule());
+        let err = crate::test_support::err_of(describe_security_groups(
+            &svc,
+            &req("DescribeSecurityGroups", &[("GroupId.1", "sg-missing")]),
+        ));
+        assert_eq!(err.code(), "InvalidGroup.NotFound");
+    }
+
+    #[test]
+    fn describe_security_groups_explicit_missing_name_errors() {
+        let svc = Ec2Service::new();
+        seed_group(&svc, base_rule());
+        let err = crate::test_support::err_of(describe_security_groups(
+            &svc,
+            &req("DescribeSecurityGroups", &[("GroupName.1", "nope")]),
+        ));
+        assert_eq!(err.code(), "InvalidGroup.NotFound");
+    }
+
+    #[test]
+    fn describe_security_groups_tag_value_filter() {
+        let svc = Ec2Service::new();
+        seed_group(&svc, base_rule());
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.tags.insert(
+                "sg-1".to_string(),
+                vec![Tag {
+                    key: "team".into(),
+                    value: "core".into(),
+                }],
+            );
+        }
+        let resp = describe_security_groups(
+            &svc,
+            &req(
+                "DescribeSecurityGroups",
+                &[("Filter.1.Name", "tag-value"), ("Filter.1.Value.1", "core")],
+            ),
+        )
+        .unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(body.contains("<groupId>sg-1</groupId>"), "{body}");
     }
 }
