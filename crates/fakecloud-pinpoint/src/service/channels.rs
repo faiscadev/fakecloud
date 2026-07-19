@@ -11,7 +11,7 @@ use serde_json::{json, Map, Value};
 
 use fakecloud_core::service::{AwsResponse, AwsServiceError};
 
-use super::{not_found, ok, Ctx, PinpointService};
+use super::{copy_many, not_found, ok, Ctx, PinpointService};
 use crate::shared;
 
 impl PinpointService {
@@ -114,6 +114,23 @@ fn not_found_channel(channel: &str) -> AwsServiceError {
     ))
 }
 
+/// Non-secret config members shared between a `*ChannelRequest` and its
+/// `*ChannelResponse`. Secrets (ApiKey / Certificate / PrivateKey / SecretKey /
+/// ClientSecret / ServiceJson / ...) are deliberately NOT echoed — a channel
+/// response summarizes credentials via `HasCredential` / `Credential`, so
+/// blanket-copying the request would leak secrets and add members absent from
+/// the response shape.
+const CHANNEL_CONFIG: &[&str] = &[
+    "ConfigurationSet",
+    "FromAddress",
+    "Identity",
+    "RoleArn",
+    "OrchestrationSendingRoleArn",
+    "SenderId",
+    "ShortCode",
+    "DefaultAuthenticationMethod",
+];
+
 fn build_channel(app_id: &str, channel: &str, body: &Value) -> Value {
     let now = shared::now_iso();
     let enabled = body.get("Enabled").and_then(Value::as_bool).unwrap_or(true);
@@ -127,8 +144,12 @@ fn build_channel(app_id: &str, channel: &str, body: &Value) -> Value {
     out.insert("HasCredential".into(), json!(true));
     out.insert("IsArchived".into(), json!(false));
     out.insert("Version".into(), json!(1));
-    if channel == "baidu" {
-        // `Credential` is a required member of `BaiduChannelResponse`.
+    // Echo the non-secret channel config the client wrote. Previously dropped:
+    // Get*Channel returned only Enabled, losing FromAddress / SenderId / etc.
+    copy_many(&mut out, body, CHANNEL_CONFIG);
+    // `Credential` is a response member for channels whose request supplies an
+    // `ApiKey` (Baidu/GCM); it is required by `BaiduChannelResponse`.
+    if matches!(channel, "baidu" | "gcm") {
         let cred = body.get("ApiKey").and_then(Value::as_str).unwrap_or("");
         out.insert("Credential".into(), json!(cred));
     }

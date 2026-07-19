@@ -161,16 +161,14 @@ impl ApiGatewayService {
                 }
                 "/description" => s.description = value.as_str().map(String::from),
                 "/tracingEnabled" => {
-                    if let Some(b) = value.as_bool() {
+                    if let Some(b) = patch_bool(value) {
                         s.tracing_enabled = b;
                     }
                 }
                 // Previously dropped (bug-audit 2026-06-20, 1.21).
                 "/cacheClusterEnabled" => {
-                    if let Some(b) = value.as_bool() {
+                    if let Some(b) = patch_bool(value) {
                         s.cache_cluster_enabled = b;
-                    } else if let Some(v) = value.as_str() {
-                        s.cache_cluster_enabled = v == "true";
                     }
                 }
                 "/cacheClusterSize" => s.cache_cluster_size = value.as_str().map(String::from),
@@ -407,6 +405,9 @@ mod patch_tests {
                 { "op": "replace", "path": "/cacheClusterSize", "value": "0.5" },
                 { "op": "replace", "path": "/webAclArn", "value": "arn:aws:wafv2:::webacl/x" },
                 { "op": "replace", "path": "/~1pets/GET/throttling/rateLimit", "value": "10" },
+                // PatchOperation.value is a STRING; `/tracingEnabled` arrives as
+                // "true" and was previously dropped by an as_bool()-only read.
+                { "op": "replace", "path": "/tracingEnabled", "value": "true" },
             ])),
             &params,
         )
@@ -415,6 +416,7 @@ mod patch_tests {
         let accounts = state.read();
         let s = &accounts.get("123456789012").unwrap().stages["api1"]["prod"];
         assert!(s.cache_cluster_enabled);
+        assert!(s.tracing_enabled);
         assert_eq!(s.cache_cluster_size.as_deref(), Some("0.5"));
         assert_eq!(s.web_acl_arn.as_deref(), Some("arn:aws:wafv2:::webacl/x"));
         // Method settings are keyed by "{resourcePath}/{httpMethod}" with a

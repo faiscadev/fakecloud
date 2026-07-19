@@ -10,14 +10,11 @@ use serde_json::{json, Map, Value};
 use fakecloud_core::service::{AwsResponse, AwsServiceError};
 
 use super::{
-    accepted, bad_request, copy_many, created, not_found, ok, paginate, query_one, Ctx,
+    accepted, bad_request, copy_many, created, merge_body, not_found, ok, paginate, query_one, Ctx,
     PinpointService,
 };
 use crate::shared;
 use crate::state::Template;
-
-/// Members common to every `*TemplateResponse` shape.
-const TEMPLATE_SCALARS: &[&str] = &["TemplateDescription", "tags"];
 
 /// The valid `TemplateType` enum values.
 const TEMPLATE_TYPES: &[&str] = &["EMAIL", "SMS", "VOICE", "PUSH", "INAPP"];
@@ -221,17 +218,20 @@ fn select_version(tmpl: &Template, version: Option<&str>) -> Result<Value, AwsSe
     }
 }
 
-/// Build a template response record from the common `*TemplateResponse` members.
+/// Build a template response record. Persists the full `*TemplateRequest`
+/// definition (Subject / HtmlPart / TextPart / Body / voice + push + in-app
+/// content, DefaultSubstitutions, ...) so a `Get*Template` round-trips the
+/// content the client wrote, then overlays the server-authoritative members.
 fn build_template(name: &str, ttype: &str, version: &str, arn: &str, body: &Value) -> Value {
     let now = shared::now_iso();
     let mut out = Map::new();
+    merge_body(&mut out, body);
     out.insert("TemplateName".into(), json!(name));
     out.insert("TemplateType".into(), json!(ttype));
     out.insert("Arn".into(), json!(arn));
     out.insert("Version".into(), json!(version));
     out.insert("CreationDate".into(), json!(now));
     out.insert("LastModifiedDate".into(), json!(now));
-    copy_many(&mut out, body, TEMPLATE_SCALARS);
     Value::Object(out)
 }
 

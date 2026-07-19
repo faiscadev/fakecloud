@@ -153,7 +153,9 @@ impl ApiGatewayService {
                     }
                 }
                 "/timeoutInMillis" => {
-                    integration.timeout_in_millis = value.as_i64().map(|v| v as i32);
+                    // STRING-typed PatchOperation.value arrives quoted; `remove`
+                    // clears the field (Null -> None), matching prior behavior.
+                    integration.timeout_in_millis = patch_i32(value);
                 }
                 // Previously dropped (bug-audit 2026-06-20, 1.21).
                 "/credentials" => integration.credentials = value.as_str().map(String::from),
@@ -456,5 +458,80 @@ impl ApiGatewayService {
         )
         .await?;
         ok(result)
+    }
+}
+
+#[cfg(test)]
+mod patch_value_tests {
+    use super::*;
+    use crate::ApiGatewayService;
+
+    fn svc() -> ApiGatewayService {
+        let state =
+            std::sync::Arc::new(
+                parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::<
+                    crate::state::ApiGatewayState,
+                >::new("123456789012", "us-east-1", "")),
+            );
+        ApiGatewayService::new(state)
+    }
+
+    fn req(body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "apigateway".into(),
+            action: String::new(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn params() -> BTreeMap<String, String> {
+        [
+            ("restApiId".to_string(), "api1".to_string()),
+            ("resourceId".to_string(), "res1".to_string()),
+            ("httpMethod".to_string(), "GET".to_string()),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    #[test]
+    fn update_integration_timeout_via_string_value() {
+        // PatchOperation.value is a STRING, so `/timeoutInMillis` arrives quoted
+        // (e.g. "29000"). Previously read via as_i64() and silently dropped.
+        let svc = svc();
+        let p = params();
+        svc.put_integration(
+            &req(json!({ "type": "HTTP_PROXY", "uri": "https://example.com" })),
+            &p,
+        )
+        .unwrap();
+        svc.update_integration(
+            &req(json!({ "patchOperations": [
+                { "op": "replace", "path": "/timeoutInMillis", "value": "29000" }
+            ] })),
+            &p,
+        )
+        .unwrap();
+        let got: Value = serde_json::from_slice(
+            svc.get_integration(&req(json!({})), &p)
+                .unwrap()
+                .body
+                .expect_bytes(),
+        )
+        .unwrap();
+        assert_eq!(got["timeoutInMillis"], json!(29000));
     }
 }

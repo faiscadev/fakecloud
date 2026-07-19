@@ -382,6 +382,175 @@ fn resolve_action_routes_key_paths() {
     }
 }
 
+#[test]
+fn email_template_round_trips_content() {
+    // Regression: build_template previously copied only TemplateDescription/tags,
+    // dropping Subject/HtmlPart/TextPart so Get*Template returned no content.
+    let svc = service();
+    let ctx = ctx();
+    svc.create_template(
+        &ctx,
+        "welcome",
+        "EMAIL",
+        &json!({
+            "Subject": "Hi {{name}}",
+            "HtmlPart": "<h1>Hello</h1>",
+            "TextPart": "Hello",
+            "TemplateDescription": "greeting",
+            "DefaultSubstitutions": "{\"name\":\"there\"}"
+        }),
+    )
+    .unwrap();
+    let got = body_of(&svc.get_template(&ctx, "welcome", "EMAIL", &[]).unwrap());
+    assert_eq!(got["Subject"], "Hi {{name}}");
+    assert_eq!(got["HtmlPart"], "<h1>Hello</h1>");
+    assert_eq!(got["TextPart"], "Hello");
+    assert_eq!(got["TemplateDescription"], "greeting");
+    assert_eq!(got["DefaultSubstitutions"], "{\"name\":\"there\"}");
+    // Server-authoritative members still win.
+    assert_eq!(got["TemplateName"], "welcome");
+    assert_eq!(got["TemplateType"], "EMAIL");
+}
+
+#[test]
+fn segment_round_trips_dimensions_and_groups() {
+    // Regression: build_segment previously copied only Name/tags, dropping
+    // Dimensions/SegmentGroups so GetSegment returned an empty definition.
+    let svc = service();
+    let ctx = ctx();
+    let app = new_app(&svc, &ctx, "seg");
+    let dims =
+        json!({ "Attributes": { "Plan": { "Values": ["pro"], "AttributeType": "INCLUSIVE" } } });
+    let groups = json!({ "Include": "ALL", "Groups": [] });
+    let create = body_of(
+        &svc.create_segment(
+            &ctx,
+            &app,
+            &json!({ "Name": "s", "Dimensions": dims, "SegmentGroups": groups }),
+        )
+        .unwrap(),
+    );
+    let sid = create["Id"].as_str().unwrap().to_string();
+    let got = body_of(&svc.get_segment(&ctx, &app, &sid).unwrap());
+    assert_eq!(got["Dimensions"], dims);
+    assert_eq!(got["SegmentGroups"], groups);
+    assert_eq!(got["Name"], "s");
+}
+
+#[test]
+fn campaign_round_trips_message_configuration() {
+    // Regression: build_campaign previously dropped MessageConfiguration /
+    // Schedule / TemplateConfiguration.
+    let svc = service();
+    let ctx = ctx();
+    let app = new_app(&svc, &ctx, "c");
+    let msg_cfg = json!({ "EmailMessage": { "Title": "Sale", "Body": "Buy now" } });
+    let schedule = json!({ "StartTime": "2026-01-01T00:00:00Z", "Frequency": "ONCE" });
+    let tmpl_cfg = json!({ "EmailTemplate": { "Name": "welcome" } });
+    let create = body_of(
+        &svc.create_campaign(
+            &ctx,
+            &app,
+            &json!({
+                "Name": "c1",
+                "SegmentId": "seg",
+                "MessageConfiguration": msg_cfg,
+                "Schedule": schedule,
+                "TemplateConfiguration": tmpl_cfg
+            }),
+        )
+        .unwrap(),
+    );
+    let cid = create["Id"].as_str().unwrap().to_string();
+    let got = body_of(&svc.get_campaign(&ctx, &app, &cid).unwrap());
+    assert_eq!(got["MessageConfiguration"], msg_cfg);
+    assert_eq!(got["Schedule"], schedule);
+    assert_eq!(got["TemplateConfiguration"], tmpl_cfg);
+    assert_eq!(got["SegmentId"], "seg");
+}
+
+#[test]
+fn journey_round_trips_activities_and_start_condition() {
+    // Regression: build_journey previously dropped Activities/StartCondition.
+    let svc = service();
+    let ctx = ctx();
+    let app = new_app(&svc, &ctx, "j");
+    let activities = json!({ "a1": { "Wait": { "WaitTime": { "WaitFor": "P1D" } } } });
+    let start = json!({ "SegmentStartCondition": { "SegmentId": "seg" } });
+    let create = body_of(
+        &svc.create_journey(
+            &ctx,
+            &app,
+            &json!({ "Name": "j1", "Activities": activities, "StartCondition": start }),
+        )
+        .unwrap(),
+    );
+    let jid = create["Id"].as_str().unwrap().to_string();
+    let got = body_of(&svc.get_journey(&ctx, &app, &jid).unwrap());
+    assert_eq!(got["Activities"], activities);
+    assert_eq!(got["StartCondition"], start);
+    assert_eq!(got["Name"], "j1");
+}
+
+#[test]
+fn email_channel_round_trips_config_but_not_secrets() {
+    // Regression: build_channel previously returned only Enabled, dropping
+    // FromAddress/Identity/RoleArn. Secrets must NOT be echoed.
+    let svc = service();
+    let ctx = ctx();
+    let app = new_app(&svc, &ctx, "ch");
+    svc.update_channel(
+        &ctx,
+        &app,
+        "email",
+        &json!({
+            "Enabled": true,
+            "FromAddress": "no-reply@example.com",
+            "Identity": "arn:aws:ses:us-east-1:000000000000:identity/example.com",
+            "RoleArn": "arn:aws:iam::000000000000:role/pinpoint"
+        }),
+    )
+    .unwrap();
+    let got = body_of(&svc.get_channel(&ctx, &app, "email").unwrap());
+    assert_eq!(got["FromAddress"], "no-reply@example.com");
+    assert_eq!(
+        got["Identity"],
+        "arn:aws:ses:us-east-1:000000000000:identity/example.com"
+    );
+    assert_eq!(got["RoleArn"], "arn:aws:iam::000000000000:role/pinpoint");
+    assert_eq!(got["Platform"], "EMAIL");
+}
+
+#[test]
+fn apns_channel_does_not_leak_secrets() {
+    // APNSChannelRequest carries secrets (Certificate/PrivateKey/TokenKey/...)
+    // absent from APNSChannelResponse; they must never be echoed back.
+    let svc = service();
+    let ctx = ctx();
+    let app = new_app(&svc, &ctx, "ch2");
+    svc.update_channel(
+        &ctx,
+        &app,
+        "apns",
+        &json!({
+            "Enabled": true,
+            "DefaultAuthenticationMethod": "TOKEN",
+            "Certificate": "SECRET-CERT",
+            "PrivateKey": "SECRET-KEY",
+            "TokenKey": "SECRET-TOKEN",
+            "TeamId": "TEAM123"
+        }),
+    )
+    .unwrap();
+    let got = body_of(&svc.get_channel(&ctx, &app, "apns").unwrap());
+    assert_eq!(got["DefaultAuthenticationMethod"], "TOKEN");
+    assert!(got.get("Certificate").is_none(), "secret leaked");
+    assert!(got.get("PrivateKey").is_none(), "secret leaked");
+    assert!(got.get("TokenKey").is_none(), "secret leaked");
+    assert!(got.get("TeamId").is_none(), "non-response member leaked");
+    assert_eq!(got["HasCredential"], json!(true));
+}
+
 fn test_request() -> AwsRequest {
     AwsRequest {
         service: "pinpoint".to_string(),

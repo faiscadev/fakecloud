@@ -812,6 +812,22 @@ pub(crate) fn copy_many(out: &mut Map<String, Value>, src: &Value, keys: &[&str]
     }
 }
 
+/// Merge every non-null member of a request body into `out`. Used to persist the
+/// full write-request definition (e.g. a segment's `Dimensions`, a campaign's
+/// `MessageConfiguration`, an email template's `Subject`/`HtmlPart`) so nothing
+/// is silently dropped on round-trip. Callers insert server-authoritative
+/// members (`Id`, `Arn`, `Version`, timestamps, ...) AFTER this so they win over
+/// anything the client echoed for a read-only member.
+pub(crate) fn merge_body(out: &mut Map<String, Value>, src: &Value) {
+    if let Some(obj) = src.as_object() {
+        for (k, v) in obj {
+            if !v.is_null() {
+                out.insert(k.clone(), v.clone());
+            }
+        }
+    }
+}
+
 pub(crate) fn parse_query(raw: &str) -> Vec<(String, String)> {
     raw.split('&')
         .filter(|p| !p.is_empty())

@@ -6,20 +6,9 @@ use serde_json::{json, Map, Value};
 use fakecloud_core::service::{AwsResponse, AwsServiceError};
 
 use super::{
-    copy_many, created, not_found, not_found_app, ok, paginate, str_field, Ctx, PinpointService,
+    created, merge_body, not_found, not_found_app, ok, paginate, str_field, Ctx, PinpointService,
 };
 use crate::shared;
-
-/// Scalar `JourneyResponse` members safe to echo from the write request.
-const JOURNEY_SCALARS: &[&str] = &[
-    "RefreshFrequency",
-    "StartActivity",
-    "LocalTime",
-    "WaitForQuietTime",
-    "RefreshOnSegmentUpdate",
-    "SendingSchedule",
-    "tags",
-];
 
 impl PinpointService {
     pub(super) fn create_journey(
@@ -261,12 +250,15 @@ fn not_found_journey(jid: &str) -> AwsServiceError {
 fn build_journey(app_id: &str, id: &str, state: &str, body: &Value) -> Value {
     let now = shared::now_iso();
     let mut out = Map::new();
+    // Persist the full WriteJourneyRequest definition (Activities /
+    // StartCondition / StartActivity / Schedule / Limits / ...) so GetJourney
+    // round-trips it, then overlay server-authoritative members.
+    merge_body(&mut out, body);
     out.insert("Id".into(), json!(id));
     out.insert("ApplicationId".into(), json!(app_id));
     out.insert("Name".into(), json!(str_field(body, "Name")));
     out.insert("State".into(), json!(state));
     out.insert("CreationDate".into(), json!(now));
     out.insert("LastModifiedDate".into(), json!(now));
-    copy_many(&mut out, body, JOURNEY_SCALARS);
     Value::Object(out)
 }
