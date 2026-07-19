@@ -471,9 +471,13 @@ pub async fn dispatch(
         );
     }
 
-    // Merge query params with form body params for Query protocol
+    // Merge query params with form body params for the Query family (awsQuery
+    // and ec2Query share identical form-encoded request bodies).
     let mut all_params = query_params;
-    if detected.protocol == AwsProtocol::Query {
+    if matches!(
+        detected.protocol,
+        AwsProtocol::Query | AwsProtocol::Ec2Query
+    ) {
         let body_params = protocol::parse_query_body(&body_bytes);
         for (k, v) in body_params {
             all_params.entry(k).or_insert(v);
@@ -508,7 +512,10 @@ pub async fn dispatch(
         raw_path: path,
         raw_query,
         method: parts.method,
-        is_query_protocol: detected.protocol == AwsProtocol::Query,
+        is_query_protocol: matches!(
+            detected.protocol,
+            AwsProtocol::Query | AwsProtocol::Ec2Query
+        ),
         access_key_id,
         principal: caller_principal,
     };
@@ -1170,8 +1177,17 @@ fn build_error_response_with_fields(
     extra_fields: &[(String, String)],
 ) -> Response<Body> {
     let (status, content_type, body) = match protocol {
+        // awsQuery services (SQS, SNS, IAM, STS, RDS, ELBv2, CloudWatch,
+        // AutoScaling, ...) share the `<ErrorResponse>` envelope.
         AwsProtocol::Query => {
             fakecloud_aws::error::xml_error_response(status, code, message, request_id)
+        }
+        // EC2 uses the distinct ec2Query error envelope
+        // (`<Response><Errors><Error>...</Errors><RequestID>`). Only EC2 is
+        // classified `Ec2Query`, so the other Query-protocol services above are
+        // untouched.
+        AwsProtocol::Ec2Query => {
+            fakecloud_aws::ec2query::ec2_error_response(status, code, message, request_id)
         }
         AwsProtocol::Rest => fakecloud_aws::error::s3_xml_error_response_with_fields(
             status,

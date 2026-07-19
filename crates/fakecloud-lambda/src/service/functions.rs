@@ -397,32 +397,59 @@ impl LambdaService {
         let empty = LambdaState::new(account_id, "");
         let state = accounts.get(account_id).unwrap_or(&empty);
         let all_versions = function_version == Some("ALL");
-        let mut functions: Vec<Value> = state
-            .functions
-            .values()
-            .map(|f| self.function_config_json(f))
-            .collect();
+        let mut functions: Vec<Value> = if all_versions {
+            // FunctionVersion=ALL qualifies the $LATEST row's FunctionArn with
+            // `:$LATEST` (matching ListVersionsByFunction), so it is distinct
+            // from every numbered version's `:N` ARN below and from the bare
+            // ARN the default (non-ALL) listing returns.
+            state
+                .functions
+                .values()
+                .map(|f| {
+                    let mut cfg = self.function_config_json(f);
+                    cfg["FunctionArn"] = json!(format!("{}:$LATEST", f.function_arn));
+                    cfg
+                })
+                .collect()
+        } else {
+            state
+                .functions
+                .values()
+                .map(|f| self.function_config_json(f))
+                .collect()
+        };
         if all_versions {
             // FunctionVersion=ALL also lists every published numbered version,
-            // not just $LATEST.
+            // not just $LATEST. Each numbered snapshot stores the bare ARN, so
+            // qualify it with `:N` here (as PublishVersion / ListVersionsByFunction
+            // do). Without this, every version of one function shares the same
+            // bare ARN and the pagination marker — which is the last returned
+            // row's ARN — resolves back to the FIRST version each call, so a
+            // function with more versions than MaxItems never advances the
+            // marker (infinite loop) and rows are repeated + skipped.
             for snaps in state.function_version_snapshots.values() {
                 for snap in snaps.values() {
-                    functions.push(self.function_config_json(snap));
+                    let mut cfg = self.function_config_json(snap);
+                    cfg["FunctionArn"] = json!(format!("{}:{}", snap.function_arn, snap.version));
+                    cfg["MasterArn"] = json!(snap.function_arn);
+                    functions.push(cfg);
                 }
             }
-            // Order by function name, then $LATEST ahead of ascending versions.
-            functions.sort_by(|a, b| {
-                let an = a["FunctionName"].as_str().unwrap_or_default();
-                let bn = b["FunctionName"].as_str().unwrap_or_default();
-                an.cmp(bn)
-                    .then_with(|| version_sort_key(a).cmp(&version_sort_key(b)))
-            });
+            // `paginate_marker` sorts by the marker key (`farn_key`, the
+            // version-qualified ARN), which orders rows by function name and
+            // then by `$LATEST` ahead of the numbered versions (':' precedes the
+            // digits so `:$LATEST` sorts before `:N`). No separate pre-sort is
+            // needed.
         }
 
         // Honor Marker/MaxItems. AWS orders ListFunctions by FunctionName and
         // carries NextMarker as a string even on the final page (empty there).
-        // With ALL versions, key on the ARN (unique per version) so duplicate
-        // function names don't collide in the pagination marker.
+        // With ALL versions the marker must be unique per row so a function with
+        // more versions than MaxItems still advances the marker. The
+        // version-qualified ARN (set above) is unique per row and wire-safe;
+        // keying on the bare (unqualified) ARN would repeat across a function's
+        // versions and wedge pagination (infinite loop / repeated + skipped
+        // rows).
         let key: fn(&Value) -> String = if all_versions { farn_key } else { fname_key };
         let (page, next_marker) = super::paginate_marker(functions, marker, max_items, key);
         let response = json!({
@@ -438,15 +465,14 @@ fn fname_key(f: &Value) -> String {
     f["FunctionName"].as_str().unwrap_or_default().to_string()
 }
 
+/// Pagination marker key: the function's `FunctionArn`.
+///
+/// For `ListFunctions(FunctionVersion=ALL)` the caller qualifies every row's ARN
+/// (`:$LATEST` / `:N`) before this key is applied, so the ARN is UNIQUE per row.
+/// That uniqueness is load-bearing: the pagination marker is the last returned
+/// row's key, and a marker that repeats across a function's versions never
+/// advances — a function with more versions than `MaxItems` would loop forever /
+/// repeat + skip rows if the bare (unqualified) ARN were used.
 fn farn_key(f: &Value) -> String {
     f["FunctionArn"].as_str().unwrap_or_default().to_string()
-}
-
-/// Sort key for ListFunctions(ALL): `$LATEST` first (0), then numbered versions
-/// in ascending numeric order.
-fn version_sort_key(f: &Value) -> (u8, u64) {
-    match f["Version"].as_str() {
-        Some("$LATEST") | None => (0, 0),
-        Some(v) => (1, v.parse::<u64>().unwrap_or(u64::MAX)),
-    }
 }

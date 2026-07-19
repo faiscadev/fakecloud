@@ -1469,6 +1469,85 @@ async fn list_functions_paginates_by_marker_and_max_items() {
 }
 
 #[tokio::test]
+async fn list_functions_all_versions_paginates_through_every_version_once() {
+    // Regression: with FunctionVersion=ALL, $LATEST and all numbered versions
+    // of one function used to share the same bare (unqualified) ARN. The
+    // pagination marker (last returned row's ARN) then resolved back to the
+    // FIRST version each call, so a function with more versions than MaxItems
+    // never advanced the marker -> infinite loop / repeated + skipped rows.
+    use serde_json::Value;
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "pager").await;
+
+    // Publish 4 numbered versions. PublishVersion is idempotent while $LATEST
+    // is unchanged, so mutate the config before each publish to force a new
+    // numbered version. Together with $LATEST that is 5 rows, all sharing the
+    // same bare ARN before the fix.
+    for i in 0..4 {
+        let body = json!({ "Description": format!("rev-{i}") });
+        let req = make_request(
+            Method::PUT,
+            "/2015-03-31/functions/pager/configuration",
+            &body.to_string(),
+        );
+        svc.handle(req).await.unwrap();
+        let req = make_request(Method::POST, "/2015-03-31/functions/pager/versions", "{}");
+        svc.handle(req).await.unwrap();
+    }
+
+    // Walk the whole list one row at a time (MaxItems=1). Every version ARN
+    // must appear exactly once and the walk must terminate (empty NextMarker).
+    let mut seen_arns: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    // Hard cap iterations so a regression fails as a bounded assertion rather
+    // than hanging the test suite.
+    for _ in 0..50 {
+        let resp = svc
+            .list_functions("123456789012", Some("ALL"), marker.as_deref(), Some(1))
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let page = v["Functions"].as_array().unwrap();
+        assert!(page.len() <= 1, "MaxItems=1 must cap page size");
+        for f in page {
+            seen_arns.push(f["FunctionArn"].as_str().unwrap().to_string());
+        }
+        let next = v["NextMarker"].as_str().unwrap_or("");
+        if next.is_empty() {
+            marker = None;
+            break;
+        }
+        marker = Some(next.to_string());
+    }
+    assert!(
+        marker.is_none(),
+        "pagination did not terminate within the iteration cap (infinite-loop regression)"
+    );
+
+    // Exactly 5 rows ($LATEST + v1..v4), each ARN unique, none repeated/skipped.
+    let mut unique = seen_arns.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        seen_arns.len(),
+        "a version was returned more than once: {seen_arns:?}"
+    );
+    assert_eq!(
+        seen_arns.len(),
+        5,
+        "expected $LATEST + 4 numbered versions, got {seen_arns:?}"
+    );
+    let base = "arn:aws:lambda:us-east-1:123456789012:function:pager";
+    for suffix in ["$LATEST", "1", "2", "3", "4"] {
+        let want = format!("{base}:{suffix}");
+        assert!(
+            seen_arns.contains(&want),
+            "missing version-qualified ARN {want} in {seen_arns:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn function_without_environment_omits_environment_block() {
     // AWS omits the Environment block entirely for a function created without
     // environment variables. Emitting `{"Variables":{}}` made the Terraform
