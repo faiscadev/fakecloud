@@ -232,6 +232,29 @@ impl SecretsManagerService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
+        // A name that is scheduled for deletion can't be recreated while its
+        // recovery window is still open — AWS returns InvalidRequestException
+        // (not ResourceExistsException). Once the recovery window has elapsed
+        // the secret is treated as purged, so lazily remove it here and allow
+        // the create to proceed with a fresh secret.
+        if let Some((deleted, elapsed)) = state
+            .secrets
+            .get(&input.name)
+            .map(|s| (s.deleted, secret_recovery_window_elapsed(s, Utc::now())))
+        {
+            if deleted {
+                if elapsed {
+                    state.secrets.remove(&input.name);
+                } else {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidRequestException",
+                        "You can't create this secret because a secret with this name is already scheduled for deletion.",
+                    ));
+                }
+            }
+        }
+
         if let Some(existing) = state.secrets.get(&input.name) {
             if let Some(ref token) = input.client_request_token {
                 let existing_plaintext = existing.versions.get(token).and_then(|v| {
@@ -498,6 +521,10 @@ impl SecretsManagerService {
                 "You must provide either SecretString or SecretBinary.",
             ));
         }
+        // SecretString and SecretBinary are mutually exclusive.
+        if secret_string.is_some() && secret_binary.is_some() {
+            return Err(both_secret_fields_error());
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -677,6 +704,11 @@ impl SecretsManagerService {
         let secret_string = body["SecretString"].as_str().map(|s| s.to_string());
         let secret_binary = parse_secret_binary(&body)?;
 
+        // SecretString and SecretBinary are mutually exclusive.
+        if secret_string.is_some() && secret_binary.is_some() {
+            return Err(both_secret_fields_error());
+        }
+
         let version_id = if secret_string.is_some() || secret_binary.is_some() {
             let vid = body["ClientRequestToken"]
                 .as_str()
@@ -736,6 +768,10 @@ impl SecretsManagerService {
             secret.versions.insert(vid.clone(), version);
             secret.current_version_id = Some(vid.clone());
             secret.last_changed_at = now;
+            // Prune deprecated versions (no staging labels) so they don't leak,
+            // matching PutSecretValue. Demoting AWSCURRENT can strip the last
+            // label off the previously-previous version.
+            secret.versions.retain(|_, v| !v.stages.is_empty());
             Some(vid)
         } else {
             secret.last_changed_at = Utc::now();
@@ -1161,6 +1197,9 @@ impl SecretsManagerService {
         validate_optional_range_i64("maxResults", body["MaxResults"].as_i64(), 1, 100)?;
         let max_results = body["MaxResults"].as_i64().unwrap_or(100) as usize;
         let next_token = body["NextToken"].as_str();
+        // IncludeDeprecated defaults to false: a deprecated version (one with no
+        // staging labels) is hidden unless the caller explicitly asks for it.
+        let include_deprecated = body["IncludeDeprecated"].as_bool().unwrap_or(false);
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
@@ -1169,7 +1208,11 @@ impl SecretsManagerService {
 
         // Stable order so the NextToken (a version id) resumes deterministically:
         // newest first by CreatedDate, version id as a tiebreaker.
-        let mut versions: Vec<&_> = secret.versions.values().collect();
+        let mut versions: Vec<&_> = secret
+            .versions
+            .values()
+            .filter(|v| include_deprecated || !v.stages.is_empty())
+            .collect();
         versions.sort_by(|a, b| {
             b.created_at
                 .cmp(&a.created_at)
@@ -1498,6 +1541,9 @@ impl SecretsManagerService {
                         };
                         secret.versions.insert(version_id.clone(), version);
                         secret.current_version_id = Some(version_id.clone());
+                        // Prune deprecated versions (no staging labels) so they
+                        // don't leak, matching PutSecretValue / UpdateSecret.
+                        secret.versions.retain(|_, v| !v.stages.is_empty());
                         // The value has now actually rotated (synchronously), so
                         // this is the point where LastRotatedDate is stamped. The
                         // Lambda path does not claim completion here because the
@@ -2231,13 +2277,19 @@ impl CreateSecretInput {
         validate_optional_string_length("kmsKeyId", body["KmsKeyId"].as_str(), 0, 2048)?;
         validate_optional_string_length("secretString", body["SecretString"].as_str(), 1, 65536)?;
 
+        let secret_string = body["SecretString"].as_str().map(|s| s.to_string());
+        let secret_binary = parse_secret_binary(body)?;
+        if secret_string.is_some() && secret_binary.is_some() {
+            return Err(both_secret_fields_error());
+        }
+
         Ok(Self {
             name,
             client_request_token: body["ClientRequestToken"].as_str().map(|s| s.to_string()),
             description: body["Description"].as_str().map(|s| s.to_string()),
             kms_key_id: body["KmsKeyId"].as_str().map(|s| s.to_string()),
-            secret_string: body["SecretString"].as_str().map(|s| s.to_string()),
-            secret_binary: parse_secret_binary(body)?,
+            secret_string,
+            secret_binary,
             tags: parse_tags(&body["Tags"]),
             add_replica_regions: body["AddReplicaRegions"]
                 .as_array()

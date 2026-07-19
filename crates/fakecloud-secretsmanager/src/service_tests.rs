@@ -3123,3 +3123,261 @@ async fn test_scheduled_deletion_expires_on_read() {
     );
     assert!(err.to_string().contains("marked for deletion"));
 }
+
+// ── Field exclusivity: SecretString + SecretBinary are mutually exclusive ──
+
+#[tokio::test]
+async fn create_secret_rejects_both_string_and_binary() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    let err = expect_err(
+        svc.handle(make_request(
+            "CreateSecret",
+            r#"{"Name": "both", "SecretString": "s", "SecretBinary": "dGVzdA=="}"#,
+        ))
+        .await,
+    );
+    assert!(
+        err.to_string().contains("InvalidParameterException"),
+        "got {err}"
+    );
+    assert!(
+        err.to_string().contains("SecretString and SecretBinary"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn put_secret_value_rejects_both_string_and_binary() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "excl", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let err = expect_err(
+        svc.handle(make_request(
+            "PutSecretValue",
+            r#"{"SecretId": "excl", "SecretString": "s", "SecretBinary": "dGVzdA=="}"#,
+        ))
+        .await,
+    );
+    assert!(
+        err.to_string().contains("InvalidParameterException"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn update_secret_rejects_both_string_and_binary() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "excl-upd", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let err = expect_err(
+        svc.handle(make_request(
+            "UpdateSecret",
+            r#"{"SecretId": "excl-upd", "SecretString": "s", "SecretBinary": "dGVzdA=="}"#,
+        ))
+        .await,
+    );
+    assert!(
+        err.to_string().contains("InvalidParameterException"),
+        "got {err}"
+    );
+}
+
+// ── CreateSecret of a name scheduled for deletion ──
+
+#[tokio::test]
+async fn create_secret_scheduled_for_deletion_returns_invalid_request() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state);
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "sched-del", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(make_request("DeleteSecret", r#"{"SecretId": "sched-del"}"#))
+        .await
+        .unwrap();
+
+    // Recreating a still-pending-deletion name is InvalidRequestException,
+    // NOT ResourceExistsException.
+    let err = expect_err(
+        svc.handle(make_request(
+            "CreateSecret",
+            r#"{"Name": "sched-del", "SecretString": "v2"}"#,
+        ))
+        .await,
+    );
+    assert!(
+        err.to_string().contains("InvalidRequestException"),
+        "got {err}"
+    );
+    assert!(
+        err.to_string().contains("scheduled for deletion"),
+        "got {err}"
+    );
+}
+
+#[tokio::test]
+async fn create_secret_after_recovery_window_elapsed_recreates() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "elapsed", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(make_request("DeleteSecret", r#"{"SecretId": "elapsed"}"#))
+        .await
+        .unwrap();
+
+    // Force the recovery window into the past.
+    {
+        let mut accts = state.write();
+        accts
+            .default_mut()
+            .secrets
+            .get_mut("elapsed")
+            .unwrap()
+            .deletion_date = Some(Utc::now() - chrono::Duration::days(1));
+    }
+
+    // The elapsed secret is purged and a fresh secret is created.
+    let resp = svc
+        .handle(make_request(
+            "CreateSecret",
+            r#"{"Name": "elapsed", "SecretString": "v2"}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let resp = svc
+        .handle(make_request("GetSecretValue", r#"{"SecretId": "elapsed"}"#))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["SecretString"], "v2");
+}
+
+// ── Deprecated version pruning + ListSecretVersionIds IncludeDeprecated ──
+
+#[tokio::test]
+async fn update_secret_prunes_deprecated_versions() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "prune", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+    // v2: v1 -> AWSPREVIOUS, v2 -> AWSCURRENT.
+    svc.handle(make_request(
+        "UpdateSecret",
+        r#"{"SecretId": "prune", "SecretString": "v2"}"#,
+    ))
+    .await
+    .unwrap();
+    // v3: v2 -> AWSPREVIOUS, v1 loses AWSPREVIOUS (deprecated) and is pruned.
+    svc.handle(make_request(
+        "UpdateSecret",
+        r#"{"SecretId": "prune", "SecretString": "v3"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let accts = state.read();
+    let secret = accts.default_ref().secrets.get("prune").unwrap();
+    assert_eq!(
+        secret.versions.len(),
+        2,
+        "the deprecated (no-stage) version must be pruned, leaving AWSCURRENT + AWSPREVIOUS"
+    );
+    assert!(
+        secret.versions.values().all(|v| !v.stages.is_empty()),
+        "no version may be left without staging labels"
+    );
+}
+
+#[tokio::test]
+async fn list_secret_version_ids_honors_include_deprecated() {
+    let state = make_state();
+    let svc = SecretsManagerService::new(state.clone());
+
+    svc.handle(make_request(
+        "CreateSecret",
+        r#"{"Name": "listdep", "SecretString": "v1"}"#,
+    ))
+    .await
+    .unwrap();
+
+    // Inject a deprecated version (no staging labels) directly.
+    {
+        let mut accts = state.write();
+        let secret = accts.default_mut().secrets.get_mut("listdep").unwrap();
+        secret.versions.insert(
+            "deprecated-vid".to_string(),
+            SecretVersion {
+                version_id: "deprecated-vid".to_string(),
+                secret_string: Some("old".to_string()),
+                secret_binary: None,
+                stages: vec![],
+                created_at: Utc::now(),
+            },
+        );
+    }
+
+    // Default (IncludeDeprecated absent -> false): deprecated version hidden.
+    let resp = svc
+        .handle(make_request(
+            "ListSecretVersionIds",
+            r#"{"SecretId": "listdep"}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let versions = body["Versions"].as_array().unwrap();
+    assert_eq!(
+        versions.len(),
+        1,
+        "deprecated version must be hidden by default"
+    );
+    assert!(versions.iter().all(|v| v["VersionId"] != "deprecated-vid"));
+
+    // IncludeDeprecated=true: deprecated version shown.
+    let resp = svc
+        .handle(make_request(
+            "ListSecretVersionIds",
+            r#"{"SecretId": "listdep", "IncludeDeprecated": true}"#,
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let versions = body["Versions"].as_array().unwrap();
+    assert_eq!(
+        versions.len(),
+        2,
+        "deprecated version must be shown when requested"
+    );
+    assert!(versions.iter().any(|v| v["VersionId"] == "deprecated-vid"));
+}

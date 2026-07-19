@@ -374,11 +374,54 @@ fn build_param_history_value(
         "DataType": param.data_type,
     });
     if hist.param_type == "SecureString" && !with_decryption {
-        v["Value"] = json!("****");
+        // Mask consistently with the current-version representation
+        // (`param_to_json`) and GetParameterHistory (`history_entry_json`):
+        // return the `kms:<key-id>:<value>` envelope, not a bare `****`, so a
+        // client parsing the `kms:` form works whether it pulled the current
+        // version or an older one out of history. Use the same key-id fallback
+        // as `history_entry_json` so both history paths render identically.
+        let key_id = hist.key_id.as_deref().unwrap_or("alias/aws/ssm");
+        v["Value"] = json!(format!("kms:{}:{}", key_id, hist.value));
     } else {
         v["Value"] = json!(hist.value);
     }
     v
+}
+
+/// Validate a parameter value against an ``AllowedPattern`` regular
+/// expression. AWS rejects a ``PutParameter`` whose value does not satisfy the
+/// parameter's ``AllowedPattern`` (a ``ValidationException`` that
+/// ``put_parameter`` remaps to the declared ``InvalidAllowedPatternException``).
+/// The pattern is applied unanchored — AWS's own documented examples carry
+/// explicit `^...$` anchors, so the caller is responsible for anchoring; adding
+/// our own anchors would wrongly reject values against intentionally-unanchored
+/// patterns. A malformed pattern is likewise rejected.
+fn validate_value_against_allowed_pattern(
+    value: &str,
+    pattern: &str,
+) -> Result<(), AwsServiceError> {
+    if pattern.is_empty() {
+        return Ok(());
+    }
+    let re = regex::Regex::new(pattern).map_err(|_| {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!("The AllowedPattern {pattern} is not a valid regular expression."),
+        )
+    })?;
+    if re.is_match(value) {
+        Ok(())
+    } else {
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!(
+                "Parameter value {value} failed to satisfy constraint: \
+                 AllowedPattern: {pattern}"
+            ),
+        ))
+    }
 }
 
 /// All fields of a ``PutParameter`` request, already parsed and validated.
@@ -604,6 +647,12 @@ fn apply_overwrite(
     if input.key_id.is_some() {
         existing.key_id = input.key_id;
     }
+    // A new AllowedPattern supplied on overwrite replaces the stored one; the
+    // value was already validated against the effective pattern in
+    // `put_parameter`. Omitting AllowedPattern preserves the existing one.
+    if input.allowed_pattern.is_some() {
+        existing.allowed_pattern = input.allowed_pattern;
+    }
     if input.data_type_explicit {
         existing.data_type = input.data_type;
     }
@@ -727,6 +776,22 @@ impl SsmService {
                     ),
                     "InvalidAllowedPatternException",
                 ));
+            }
+        }
+
+        // Enforce AllowedPattern against the plaintext value BEFORE any KMS
+        // encryption (a SecureString value is validated in the clear). The
+        // effective pattern is the one supplied in this request, or — when the
+        // request omits it on an overwrite — the pattern already stored on the
+        // parameter, matching AWS which keeps validating against a previously
+        // set AllowedPattern.
+        {
+            let effective_pattern = input.allowed_pattern.clone().or_else(|| {
+                lookup_param(&state.parameters, &input.name).and_then(|e| e.allowed_pattern.clone())
+            });
+            if let Some(pattern) = effective_pattern {
+                validate_value_against_allowed_pattern(&input.value, &pattern)
+                    .map_err(|e| remap_validation_to(e, "InvalidAllowedPatternException"))?;
             }
         }
 
@@ -1126,6 +1191,25 @@ impl SsmService {
             if let Some(raw_name) = name_val.as_str() {
                 // Deduplicate
                 if !seen_names.insert(raw_name.to_string()) {
+                    continue;
+                }
+
+                // Handle ARN-style names directly. An ARN contains many colons
+                // that would otherwise trip parse_param_selector into
+                // ParamSelector::Invalid, landing the parameter in
+                // InvalidParameters even though GetParameter accepts the same
+                // ARN. Apply the same ARN->name normalization here.
+                if raw_name.starts_with("arn:aws:ssm:") {
+                    match resolve_param_by_name_or_arn(state, raw_name) {
+                        Ok(param) => parameters.push(self.render_param_to_json(
+                            param,
+                            true,
+                            with_decryption,
+                            &req.region,
+                            &req.account_id,
+                        )),
+                        Err(_) => invalid.push(raw_name.to_string()),
+                    }
                     continue;
                 }
 

@@ -5198,3 +5198,153 @@ fn maintenance_window_task_persists_invocation_params() {
         120
     );
 }
+
+// ── AllowedPattern enforcement (bug-hunt) ──
+
+#[test]
+fn put_parameter_allowed_pattern_accepts_matching_value() {
+    let svc = make_service();
+    let req = make_request(
+        "PutParameter",
+        json!({"Name": "/ap/ok", "Value": "12345", "Type": "String", "AllowedPattern": "^\\d+$"}),
+    );
+    let resp = svc.put_parameter(&req).unwrap();
+    assert_eq!(resp.status, http::StatusCode::OK);
+}
+
+#[test]
+fn put_parameter_allowed_pattern_rejects_non_matching_value() {
+    let svc = make_service();
+    let req = make_request(
+        "PutParameter",
+        json!({"Name": "/ap/bad", "Value": "abc", "Type": "String", "AllowedPattern": "^\\d+$"}),
+    );
+    expect_err_code(svc.put_parameter(&req), "InvalidAllowedPatternException");
+}
+
+#[test]
+fn put_parameter_allowed_pattern_enforced_on_overwrite_against_stored_pattern() {
+    let svc = make_service();
+    // Create with a numeric-only pattern.
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/ap/ow", "Value": "1", "Type": "String", "AllowedPattern": "^\\d+$"}),
+    ))
+    .unwrap();
+
+    // Overwrite omitting AllowedPattern still validates against the stored one.
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/ap/ow", "Value": "999", "Type": "String", "Overwrite": true}),
+    ))
+    .unwrap();
+
+    // A non-matching overwrite value is rejected.
+    expect_err_code(
+        svc.put_parameter(&make_request(
+            "PutParameter",
+            json!({"Name": "/ap/ow", "Value": "nope", "Type": "String", "Overwrite": true}),
+        )),
+        "InvalidAllowedPatternException",
+    );
+}
+
+#[test]
+fn put_parameter_overwrite_applies_new_allowed_pattern() {
+    let svc = make_service();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/ap/new", "Value": "1", "Type": "String", "AllowedPattern": "^\\d+$"}),
+    ))
+    .unwrap();
+
+    // Overwrite with a new alpha-only pattern and a matching value.
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/ap/new", "Value": "hello", "Type": "String", "Overwrite": true, "AllowedPattern": "^[a-z]+$"}),
+    ))
+    .unwrap();
+
+    // The new pattern is now the effective one: a numeric value is rejected.
+    expect_err_code(
+        svc.put_parameter(&make_request(
+            "PutParameter",
+            json!({"Name": "/ap/new", "Value": "123", "Type": "String", "Overwrite": true}),
+        )),
+        "InvalidAllowedPatternException",
+    );
+}
+
+// ── Historical SecureString masking is consistent with the current version ──
+
+#[test]
+fn get_parameter_history_version_masks_securestring_with_kms_form() {
+    let svc = make_service();
+    // Create then overwrite a SecureString so version 1 lands in history.
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/sec/p", "Value": "secret1", "Type": "SecureString"}),
+    ))
+    .unwrap();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/sec/p", "Value": "secret2", "Type": "SecureString", "Overwrite": true}),
+    ))
+    .unwrap();
+
+    // Current version (no decryption) uses the kms:<key>:<value> form.
+    let cur = svc
+        .get_parameter(&make_request("GetParameter", json!({"Name": "/sec/p"})))
+        .unwrap();
+    let cur: Value = serde_json::from_slice(cur.body.expect_bytes()).unwrap();
+    let cur_val = cur["Parameter"]["Value"].as_str().unwrap();
+    assert!(
+        cur_val.starts_with("kms:"),
+        "current value should be masked as kms:...; got {cur_val}"
+    );
+
+    // A historical version (fetched via :1 selector) masks the SAME way,
+    // not with a bare "****".
+    let hist = svc
+        .get_parameter(&make_request("GetParameter", json!({"Name": "/sec/p:1"})))
+        .unwrap();
+    let hist: Value = serde_json::from_slice(hist.body.expect_bytes()).unwrap();
+    let hist_val = hist["Parameter"]["Value"].as_str().unwrap();
+    assert!(
+        hist_val.starts_with("kms:"),
+        "historical value must mask consistently with the current version; got {hist_val}"
+    );
+    assert_ne!(hist_val, "****");
+}
+
+// ── GetParameters accepts a full ARN like GetParameter does ──
+
+#[test]
+fn get_parameters_resolves_full_arn() {
+    let svc = make_service();
+    svc.put_parameter(&make_request(
+        "PutParameter",
+        json!({"Name": "/arn/p", "Value": "v", "Type": "String"}),
+    ))
+    .unwrap();
+
+    // Read the ARN back from GetParameter.
+    let g = svc
+        .get_parameter(&make_request("GetParameter", json!({"Name": "/arn/p"})))
+        .unwrap();
+    let g: Value = serde_json::from_slice(g.body.expect_bytes()).unwrap();
+    let arn = g["Parameter"]["ARN"].as_str().unwrap().to_string();
+    assert!(
+        arn.starts_with("arn:aws:ssm:"),
+        "expected an ARN, got {arn}"
+    );
+
+    // GetParameters with that full ARN must resolve, not land in InvalidParameters.
+    let resp = svc
+        .get_parameters(&make_request("GetParameters", json!({"Names": [arn]})))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Parameters"].as_array().unwrap().len(), 1);
+    assert!(body["InvalidParameters"].as_array().unwrap().is_empty());
+    assert_eq!(body["Parameters"][0]["Value"], "v");
+}
