@@ -270,6 +270,24 @@ impl ResourceProvisioner {
                         .collect()
                 })
                 .unwrap_or_default(),
+            outpost_arn: props
+                .get("OutpostArn")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            preferred_instance_type: props
+                .get("PreferredInstanceType")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            dns64_enabled: props.get("Dns64Enabled").and_then(|v| v.as_bool()),
+            ipv6_internet_access_enabled: props
+                .get("Ipv6InternetAccessEnabled")
+                .and_then(|v| v.as_bool()),
+            rni_enhanced_metrics_enabled: props
+                .get("RniEnhancedMetricsEnabled")
+                .and_then(|v| v.as_bool()),
+            target_name_server_metrics_enabled: props
+                .get("TargetNameServerMetricsEnabled")
+                .and_then(|v| v.as_bool()),
         };
         let ip_count = endpoint.ip_address_count;
         let direction_att = endpoint.direction.clone();
@@ -365,6 +383,10 @@ impl ResourceProvisioner {
             share_status: "NOT_SHARED".to_string(),
             creation_time: now_rfc3339(),
             modification_time: now_rfc3339(),
+            delegation_record: props
+                .get("DelegationRecord")
+                .and_then(|v| v.as_str())
+                .map(String::from),
         };
         let tags = self.r53r_tags(props);
         {
@@ -662,6 +684,16 @@ impl ResourceProvisioner {
                 modification_time: now_rfc3339(),
                 firewall_domain_redirection_action: None,
                 qtype: r.get("Qtype").and_then(|v| v.as_str()).map(String::from),
+                dns_threat_protection: r
+                    .get("DnsThreatProtection")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                confidence_threshold: r
+                    .get("ConfidenceThreshold")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                firewall_rule_type: r.get("FirewallRuleType").filter(|v| !v.is_null()).cloned(),
+                firewall_threat_protection_id: None,
             });
         }
         let rule_count = rules.len() as i64;

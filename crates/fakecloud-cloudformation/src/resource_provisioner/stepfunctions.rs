@@ -57,6 +57,7 @@ impl ResourceProvisioner {
             logging_configuration,
             tracing_configuration,
             description: String::new(),
+            encryption_configuration: props.get("EncryptionConfiguration").cloned(),
         };
 
         let mut accounts = self.stepfunctions_state.write();

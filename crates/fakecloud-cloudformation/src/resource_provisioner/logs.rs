@@ -127,6 +127,12 @@ impl ResourceProvisioner {
             })
             .unwrap_or_default();
 
+        let query_language = props
+            .get("QueryLanguage")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| Some("CWLI".to_string()));
+
         let id = Uuid::new_v4().to_string();
         let qd = QueryDefinition {
             query_definition_id: id.clone(),
@@ -134,6 +140,7 @@ impl ResourceProvisioner {
             query_string,
             log_group_names,
             last_modified: Utc::now().timestamp_millis(),
+            query_language,
         };
 
         let mut logs_accounts = self.logs_state.write();

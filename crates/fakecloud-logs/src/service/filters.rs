@@ -282,6 +282,11 @@ impl LogsService {
                 metric_value: t["metricValue"].as_str().unwrap_or("").to_string(),
                 default_value: t["defaultValue"].as_f64(),
                 unit: t["unit"].as_str().map(str::to_string),
+                dimensions: t["dimensions"].as_object().map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect()
+                }),
             })
             .collect();
 
@@ -375,6 +380,9 @@ impl LogsService {
                         });
                         if let Some(dv) = t.default_value {
                             obj["defaultValue"] = json!(dv);
+                        }
+                        if let Some(ref dims) = t.dimensions {
+                            obj["dimensions"] = json!(dims);
                         }
                         obj
                     })
@@ -671,6 +679,36 @@ mod tests {
         let resp = svc.describe_metric_filters(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["metricFilters"].as_array().unwrap().is_empty());
+    }
+
+    // PutMetricFilter persists metricTransformation.dimensions; describe echoes
+    // them (bug-hunt 2026-07-19).
+    #[test]
+    fn metric_filter_persists_dimensions() {
+        let svc = make_service();
+        create_group(&svc, "mf-dim");
+        let req = make_request(
+            "PutMetricFilter",
+            json!({
+                "logGroupName": "mf-dim",
+                "filterName": "dim-filter",
+                "filterPattern": "[ip, id, user]",
+                "metricTransformations": [{
+                    "metricName": "Requests",
+                    "metricNamespace": "MyApp",
+                    "metricValue": "1",
+                    "dimensions": { "User": "$user", "IP": "$ip" }
+                }],
+            }),
+        );
+        svc.put_metric_filter(&req).unwrap();
+
+        let req = make_request("DescribeMetricFilters", json!({ "logGroupName": "mf-dim" }));
+        let resp = svc.describe_metric_filters(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let dims = &body["metricFilters"][0]["metricTransformations"][0]["dimensions"];
+        assert_eq!(dims["User"], "$user");
+        assert_eq!(dims["IP"], "$ip");
     }
 
     #[test]

@@ -8,6 +8,30 @@ use super::{dd_config_json, infer_delivery_destination_type};
 use super::{require_str, LogsService};
 use crate::state::{Delivery, DeliveryDestination, DeliverySource};
 
+/// Render a stored `Delivery` to the wire `delivery` shape, echoing every
+/// persisted optional member (`recordFields` / `fieldDelimiter` /
+/// `s3DeliveryConfiguration`) so `GetDelivery` and `DescribeDeliveries` agree.
+fn delivery_to_json(d: &Delivery) -> Value {
+    let mut delivery_json = json!({
+        "id": d.id,
+        "deliverySourceName": d.delivery_source_name,
+        "deliveryDestinationArn": d.delivery_destination_arn,
+        "deliveryDestinationType": d.delivery_destination_type,
+        "arn": d.arn,
+        "tags": d.tags,
+    });
+    if !d.record_fields.is_empty() {
+        delivery_json["recordFields"] = json!(d.record_fields);
+    }
+    if let Some(ref delim) = d.field_delimiter {
+        delivery_json["fieldDelimiter"] = json!(delim);
+    }
+    if let Some(ref s3) = d.s3_delivery_configuration {
+        delivery_json["s3DeliveryConfiguration"] = s3.clone();
+    }
+    delivery_json
+}
+
 impl LogsService {
     // ---- Delivery Destinations ----
 
@@ -742,36 +766,19 @@ impl LogsService {
             delivery_destination_arn: delivery_destination_arn.clone(),
             delivery_destination_type: dest_type.to_string(),
             arn: arn.clone(),
-            tags: tags.clone(),
-            field_delimiter: field_delimiter.clone(),
-            record_fields: record_fields.clone(),
+            tags,
+            field_delimiter,
+            record_fields,
             s3_delivery_configuration: if s3_delivery_config.is_null() {
                 None
             } else {
-                Some(s3_delivery_config.clone())
+                Some(s3_delivery_config)
             },
             created_at: chrono::Utc::now().timestamp_millis(),
         };
 
+        let delivery_json = delivery_to_json(&delivery);
         state.deliveries.insert(delivery_id.clone(), delivery);
-
-        let mut delivery_json = json!({
-            "id": delivery_id,
-            "deliverySourceName": delivery_source_name,
-            "deliveryDestinationArn": delivery_destination_arn,
-            "deliveryDestinationType": dest_type,
-            "arn": arn,
-            "tags": tags,
-        });
-        if !record_fields.is_empty() {
-            delivery_json["recordFields"] = json!(record_fields);
-        }
-        if let Some(ref delim) = field_delimiter {
-            delivery_json["fieldDelimiter"] = json!(delim);
-        }
-        if !s3_delivery_config.is_null() {
-            delivery_json["s3DeliveryConfiguration"] = s3_delivery_config;
-        }
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -805,23 +812,7 @@ impl LogsService {
             )
         })?;
 
-        let mut delivery_json = json!({
-            "id": d.id,
-            "deliverySourceName": d.delivery_source_name,
-            "deliveryDestinationArn": d.delivery_destination_arn,
-            "deliveryDestinationType": d.delivery_destination_type,
-            "arn": d.arn,
-            "tags": d.tags,
-        });
-        if !d.record_fields.is_empty() {
-            delivery_json["recordFields"] = json!(d.record_fields);
-        }
-        if let Some(ref delim) = d.field_delimiter {
-            delivery_json["fieldDelimiter"] = json!(delim);
-        }
-        if let Some(ref s3) = d.s3_delivery_configuration {
-            delivery_json["s3DeliveryConfiguration"] = s3.clone();
-        }
+        let delivery_json = delivery_to_json(d);
         Ok(AwsResponse::json(
             StatusCode::OK,
             serde_json::to_string(&json!({ "delivery": delivery_json })).unwrap(),
@@ -839,20 +830,7 @@ impl LogsService {
         let accounts = self.state.read();
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let deliveries: Vec<Value> = state
-            .deliveries
-            .values()
-            .map(|d| {
-                json!({
-                    "id": d.id,
-                    "deliverySourceName": d.delivery_source_name,
-                    "deliveryDestinationArn": d.delivery_destination_arn,
-                    "deliveryDestinationType": d.delivery_destination_type,
-                    "arn": d.arn,
-                    "tags": d.tags,
-                })
-            })
-            .collect();
+        let deliveries: Vec<Value> = state.deliveries.values().map(delivery_to_json).collect();
 
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -1315,6 +1293,68 @@ mod tests {
         let resp = svc.describe_deliveries(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["deliveries"].as_array().unwrap().is_empty());
+    }
+
+    // DescribeDeliveries must echo the same recordFields / fieldDelimiter /
+    // s3DeliveryConfiguration that GetDelivery returns (bug-hunt 2026-07-19).
+    #[test]
+    fn describe_deliveries_echoes_record_fields_and_delimiter() {
+        let svc = make_service();
+        create_group(&svc, "dd-grp");
+        let req = make_request(
+            "DescribeLogGroups",
+            json!({ "logGroupNamePrefix": "dd-grp" }),
+        );
+        let resp = svc.describe_log_groups(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let group_arn = body["logGroups"][0]["arn"].as_str().unwrap().to_string();
+
+        svc.put_delivery_source(&make_request(
+            "PutDeliverySource",
+            json!({ "name": "dd-src", "resourceArn": group_arn, "logType": "APPLICATION_LOGS" }),
+        ))
+        .unwrap();
+        svc.put_delivery_destination(&make_request(
+            "PutDeliveryDestination",
+            json!({
+                "name": "dd-dest",
+                "deliveryDestinationConfiguration": { "destinationResourceArn": "arn:aws:s3:::dd-bucket" }
+            }),
+        ))
+        .unwrap();
+        let resp = svc
+            .get_delivery_destination(&make_request(
+                "GetDeliveryDestination",
+                json!({ "name": "dd-dest" }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let dest_arn = body["deliveryDestination"]["arn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        svc.create_delivery(&make_request(
+            "CreateDelivery",
+            json!({
+                "deliverySourceName": "dd-src",
+                "deliveryDestinationArn": dest_arn,
+                "recordFields": ["timestamp", "message"],
+                "fieldDelimiter": "|",
+                "s3DeliveryConfiguration": { "suffixPath": "logs/" }
+            }),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .describe_deliveries(&make_request("DescribeDeliveries", json!({})))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let d = &body["deliveries"][0];
+        assert_eq!(d["recordFields"][0], "timestamp");
+        assert_eq!(d["recordFields"][1], "message");
+        assert_eq!(d["fieldDelimiter"], "|");
+        assert_eq!(d["s3DeliveryConfiguration"]["suffixPath"], "logs/");
     }
 
     #[test]

@@ -261,6 +261,8 @@ impl LogsService {
             table_body: table_body.to_string(),
             creation_time: now,
             last_modified_time: now,
+            description: body["description"].as_str().map(str::to_string),
+            kms_key_id: body["kmsKeyId"].as_str().map(str::to_string),
         };
 
         let mut accounts = self.state.write();
@@ -284,17 +286,25 @@ impl LogsService {
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         match state.lookup_tables.get(lookup_table_arn) {
-            Some(t) => Ok(AwsResponse::json(
-                StatusCode::OK,
-                serde_json::to_string(&json!({
+            Some(t) => {
+                let mut out = json!({
                     "lookupTableName": t.lookup_table_name,
                     "lookupTableArn": t.arn,
                     "tableBody": t.table_body,
                     "creationTime": t.creation_time,
                     "lastModifiedTime": t.last_modified_time,
-                }))
-                .unwrap(),
-            )),
+                });
+                if let Some(ref d) = t.description {
+                    out["description"] = json!(d);
+                }
+                if let Some(ref k) = t.kms_key_id {
+                    out["kmsKeyId"] = json!(k);
+                }
+                Ok(AwsResponse::json(
+                    StatusCode::OK,
+                    serde_json::to_string(&out).unwrap(),
+                ))
+            }
             None => Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
@@ -362,6 +372,12 @@ impl LogsService {
         match state.lookup_tables.get_mut(lookup_table_arn) {
             Some(t) => {
                 t.table_body = table_body.to_string();
+                if let Some(d) = body["description"].as_str() {
+                    t.description = Some(d.to_string());
+                }
+                if let Some(k) = body["kmsKeyId"].as_str() {
+                    t.kms_key_id = Some(k.to_string());
+                }
                 t.last_modified_time = Utc::now().timestamp_millis();
                 Ok(AwsResponse::json(StatusCode::OK, "{}"))
             }
@@ -418,6 +434,10 @@ impl LogsService {
         .to_string();
         let now = Utc::now().timestamp_millis();
 
+        // `state` is the caller's desired ENABLED/DISABLED setting; live AWS
+        // defaults it to ENABLED when omitted.
+        let desired_state = body["state"].as_str().unwrap_or("ENABLED").to_string();
+
         let sq = ScheduledQuery {
             name: name.to_string(),
             arn: arn.clone(),
@@ -428,6 +448,11 @@ impl LogsService {
             status: "ACTIVE".to_string(),
             creation_time: now,
             last_modified_time: now,
+            description: body["description"].as_str().map(str::to_string),
+            timezone: body["timezone"].as_str().map(str::to_string),
+            schedule_start_time: body["scheduleStartTime"].as_i64(),
+            schedule_end_time: body["scheduleEndTime"].as_i64(),
+            state: Some(desired_state.clone()),
         };
 
         let mut accounts = self.state.write();
@@ -436,7 +461,8 @@ impl LogsService {
 
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({ "scheduledQueryArn": arn })).unwrap(),
+            serde_json::to_string(&json!({ "scheduledQueryArn": arn, "state": desired_state }))
+                .unwrap(),
         ))
     }
 
@@ -451,18 +477,37 @@ impl LogsService {
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         match state.scheduled_queries.get(identifier) {
-            Some(sq) => Ok(AwsResponse::json(
-                StatusCode::OK,
-                serde_json::to_string(&json!({
+            Some(sq) => {
+                let mut out = json!({
                     "scheduledQueryArn": sq.arn,
                     "name": sq.name,
                     "queryString": sq.query_string,
                     "queryLanguage": sq.query_language,
                     "scheduleExpression": sq.schedule_expression,
                     "executionRoleArn": sq.execution_role_arn,
-                }))
-                .unwrap(),
-            )),
+                    "creationTime": sq.creation_time,
+                    "lastUpdatedTime": sq.last_modified_time,
+                });
+                if let Some(ref d) = sq.description {
+                    out["description"] = json!(d);
+                }
+                if let Some(ref tz) = sq.timezone {
+                    out["timezone"] = json!(tz);
+                }
+                if let Some(t) = sq.schedule_start_time {
+                    out["scheduleStartTime"] = json!(t);
+                }
+                if let Some(t) = sq.schedule_end_time {
+                    out["scheduleEndTime"] = json!(t);
+                }
+                if let Some(ref s) = sq.state {
+                    out["state"] = json!(s);
+                }
+                Ok(AwsResponse::json(
+                    StatusCode::OK,
+                    serde_json::to_string(&out).unwrap(),
+                ))
+            }
             None => Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "ResourceNotFoundException",
@@ -550,6 +595,21 @@ impl LogsService {
                 sq.query_language = query_language.to_string();
                 sq.schedule_expression = schedule_expression.to_string();
                 sq.execution_role_arn = execution_role_arn.to_string();
+                if let Some(d) = body["description"].as_str() {
+                    sq.description = Some(d.to_string());
+                }
+                if let Some(tz) = body["timezone"].as_str() {
+                    sq.timezone = Some(tz.to_string());
+                }
+                if let Some(t) = body["scheduleStartTime"].as_i64() {
+                    sq.schedule_start_time = Some(t);
+                }
+                if let Some(t) = body["scheduleEndTime"].as_i64() {
+                    sq.schedule_end_time = Some(t);
+                }
+                if let Some(st) = body["state"].as_str() {
+                    sq.state = Some(st.to_string());
+                }
                 sq.last_modified_time = Utc::now().timestamp_millis();
                 Ok(AwsResponse::json(StatusCode::OK, "{}"))
             }
@@ -1252,6 +1312,118 @@ mod tests {
         let resp = svc.list_scheduled_queries(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["scheduledQueries"].as_array().unwrap().is_empty());
+    }
+
+    // CreateLookupTable persists description + kmsKeyId; GetLookupTable echoes
+    // them (bug-hunt 2026-07-19).
+    #[test]
+    fn lookup_table_persists_description_and_kms_key() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateLookupTable",
+            json!({
+                "lookupTableName": "t",
+                "tableBody": "key,value\na,b",
+                "description": "my table",
+                "kmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/abc"
+            }),
+        );
+        let resp = svc.create_lookup_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["lookupTableArn"].as_str().unwrap().to_string();
+
+        let req = make_request("GetLookupTable", json!({ "lookupTableArn": arn.clone() }));
+        let resp = svc.get_lookup_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["description"].as_str().unwrap(), "my table");
+        assert_eq!(
+            body["kmsKeyId"].as_str().unwrap(),
+            "arn:aws:kms:us-east-1:123456789012:key/abc"
+        );
+
+        // UpdateLookupTable merges a new description.
+        let req = make_request(
+            "UpdateLookupTable",
+            json!({ "lookupTableArn": arn.clone(), "tableBody": "key,value\nc,d", "description": "updated" }),
+        );
+        svc.update_lookup_table(&req).unwrap();
+        let req = make_request("GetLookupTable", json!({ "lookupTableArn": arn }));
+        let resp = svc.get_lookup_table(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["description"].as_str().unwrap(), "updated");
+    }
+
+    // CreateScheduledQuery persists description/timezone/schedule times/state;
+    // GetScheduledQuery echoes them and an update can disable it (bug-hunt
+    // 2026-07-19).
+    #[test]
+    fn scheduled_query_persists_optional_fields_and_state() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateScheduledQuery",
+            json!({
+                "name": "sq",
+                "queryString": "fields @timestamp",
+                "queryLanguage": "CWLI",
+                "scheduleExpression": "rate(1 hour)",
+                "executionRoleArn": "arn:aws:iam::123456789012:role/exec",
+                "description": "nightly",
+                "timezone": "UTC",
+                "scheduleStartTime": 1000_i64,
+                "scheduleEndTime": 2000_i64,
+                "state": "ENABLED"
+            }),
+        );
+        let resp = svc.create_scheduled_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["state"].as_str().unwrap(), "ENABLED");
+        let arn = body["scheduledQueryArn"].as_str().unwrap().to_string();
+
+        let req = make_request("GetScheduledQuery", json!({ "identifier": arn.clone() }));
+        let resp = svc.get_scheduled_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["description"].as_str().unwrap(), "nightly");
+        assert_eq!(body["timezone"].as_str().unwrap(), "UTC");
+        assert_eq!(body["scheduleStartTime"].as_i64().unwrap(), 1000);
+        assert_eq!(body["scheduleEndTime"].as_i64().unwrap(), 2000);
+        assert_eq!(body["state"].as_str().unwrap(), "ENABLED");
+
+        // An update can disable the query.
+        let req = make_request(
+            "UpdateScheduledQuery",
+            json!({
+                "identifier": arn.clone(),
+                "queryString": "fields @message",
+                "queryLanguage": "CWLI",
+                "scheduleExpression": "rate(2 hours)",
+                "executionRoleArn": "arn:aws:iam::123456789012:role/exec",
+                "state": "DISABLED"
+            }),
+        );
+        svc.update_scheduled_query(&req).unwrap();
+        let req = make_request("GetScheduledQuery", json!({ "identifier": arn }));
+        let resp = svc.get_scheduled_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["state"].as_str().unwrap(), "DISABLED");
+    }
+
+    // A scheduled query created without an explicit state defaults to ENABLED.
+    #[test]
+    fn scheduled_query_defaults_state_enabled() {
+        let svc = make_service();
+        let req = make_request(
+            "CreateScheduledQuery",
+            json!({
+                "name": "sq2",
+                "queryString": "fields @timestamp",
+                "queryLanguage": "CWLI",
+                "scheduleExpression": "rate(1 hour)",
+                "executionRoleArn": "arn:aws:iam::123456789012:role/exec"
+            }),
+        );
+        let resp = svc.create_scheduled_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["state"].as_str().unwrap(), "ENABLED");
     }
 
     // -- Misc stubs --

@@ -252,6 +252,10 @@ pub struct MetricTransformation {
     /// Terraform `aws_cloudwatch_log_metric_filter` resource asserts on it.
     #[serde(default)]
     pub unit: Option<String>,
+    /// Dimensions to publish with the metric (name -> value template). Echoed
+    /// on DescribeMetricFilters; the Terraform resource round-trips it.
+    #[serde(default)]
+    pub dimensions: Option<std::collections::BTreeMap<String, String>>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -358,6 +362,10 @@ pub struct QueryDefinition {
     pub query_string: String,
     pub log_group_names: Vec<String>,
     pub last_modified: i64,
+    /// Query language (CWLI / SQL / PPL). Echoed on DescribeQueryDefinitions;
+    /// defaults to CWLI when the caller omits it.
+    #[serde(default)]
+    pub query_language: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -432,6 +440,10 @@ pub struct LookupTable {
     pub table_body: String,
     pub creation_time: i64,
     pub last_modified_time: i64,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub kms_key_id: Option<String>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -445,6 +457,18 @@ pub struct ScheduledQuery {
     pub status: String,
     pub creation_time: i64,
     pub last_modified_time: i64,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub timezone: Option<String>,
+    #[serde(default)]
+    pub schedule_start_time: Option<i64>,
+    #[serde(default)]
+    pub schedule_end_time: Option<i64>,
+    /// The desired ENABLED/DISABLED state (defaults to ENABLED). Distinct from
+    /// `status` (the server-derived lifecycle status).
+    #[serde(default)]
+    pub state: Option<String>,
 }
 
 /// On-disk snapshot envelope for CloudWatch Logs state. Versioned so

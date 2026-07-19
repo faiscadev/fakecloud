@@ -658,3 +658,74 @@ fn register_devices_visible_to_read_siblings() {
     ));
     assert_eq!(err.code(), "ResourceNotFound");
 }
+
+// Enable/Disable persist the Service Catalog portfolio status; Get reads it back
+// (default Disabled before any Enable) (bug-hunt 2026-07-19).
+#[test]
+fn servicecatalog_portfolio_status_round_trips() {
+    let s = svc();
+    // Default before any Enable/Disable is Disabled.
+    let got = resp_json(&run(&s, "GetSagemakerServicecatalogPortfolioStatus", json!({})).unwrap());
+    assert_eq!(got["Status"], "Disabled");
+
+    run(&s, "EnableSagemakerServicecatalogPortfolio", json!({})).unwrap();
+    let got = resp_json(&run(&s, "GetSagemakerServicecatalogPortfolioStatus", json!({})).unwrap());
+    assert_eq!(got["Status"], "Enabled");
+
+    run(&s, "DisableSagemakerServicecatalogPortfolio", json!({})).unwrap();
+    let got = resp_json(&run(&s, "GetSagemakerServicecatalogPortfolioStatus", json!({})).unwrap());
+    assert_eq!(got["Status"], "Disabled");
+}
+
+// RetryPipelineExecution transitions a stopped execution's status back to
+// Executing, visible via DescribePipelineExecution (bug-hunt 2026-07-19).
+#[test]
+fn retry_pipeline_execution_transitions_status() {
+    let s = svc();
+    let started = resp_json(
+        &run(
+            &s,
+            "StartPipelineExecution",
+            json!({"PipelineName": "p1", "ClientRequestToken": "a".repeat(32)}),
+        )
+        .unwrap(),
+    );
+    let arn = started["PipelineExecutionArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Stop it so it leaves the Executing state.
+    run(
+        &s,
+        "StopPipelineExecution",
+        json!({"PipelineExecutionArn": arn, "ClientRequestToken": "b".repeat(32)}),
+    )
+    .unwrap();
+    let described = resp_json(
+        &run(
+            &s,
+            "DescribePipelineExecution",
+            json!({"PipelineExecutionArn": arn}),
+        )
+        .unwrap(),
+    );
+    assert_ne!(described["PipelineExecutionStatus"], "Executing");
+
+    // Retry brings it back to Executing.
+    run(
+        &s,
+        "RetryPipelineExecution",
+        json!({"PipelineExecutionArn": arn, "ClientRequestToken": "c".repeat(32)}),
+    )
+    .unwrap();
+    let described = resp_json(
+        &run(
+            &s,
+            "DescribePipelineExecution",
+            json!({"PipelineExecutionArn": arn}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(described["PipelineExecutionStatus"], "Executing");
+}
