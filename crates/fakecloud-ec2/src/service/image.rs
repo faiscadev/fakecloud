@@ -258,6 +258,18 @@ pub(crate) fn describe_images(
             &empty
         }
     };
+    // An explicitly-requested ImageId that does not exist (e.g. one that was
+    // deregistered) is a hard error on AWS (InvalidAMIID.NotFound), not a
+    // silently-empty result. A `disabled` image is still present and returns
+    // normally; only genuinely-absent (or recycle-binned) ids error.
+    for id in &wanted {
+        if !state.images.get(id).is_some_and(|i| !i.in_recycle_bin) {
+            return Err(crate::service_helpers::not_found(
+                "InvalidAMIID.NotFound",
+                id,
+            ));
+        }
+    }
     let mut items: Vec<String> = state
         .images
         .values()
@@ -346,6 +358,7 @@ fn img_match(i: &Image, tags: &[Tag], filters: &[Filter]) -> bool {
                 .map(|_| vec!["windows".to_string()])
                 .unwrap_or_default(),
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
+            "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
                     tags.iter()
@@ -1241,6 +1254,51 @@ mod tests {
             &req("DisableImage", &[("ImageId", "ami-nope")]),
         ));
         assert_eq!(err.code(), "InvalidAMIID.NotFound");
+    }
+
+    #[test]
+    fn describe_images_explicit_missing_id_errors() {
+        use crate::test_support::{ec2_request as req, err_of};
+        let svc = crate::service::Ec2Service::new();
+        seed_image(&svc, "ami-x");
+        let err = err_of(super::describe_images(
+            &svc,
+            &req("DescribeImages", &[("ImageId.1", "ami-missing")]),
+        ));
+        assert_eq!(err.code(), "InvalidAMIID.NotFound");
+    }
+
+    #[test]
+    fn describe_images_tag_value_filter() {
+        use crate::test_support::ec2_request as req;
+        let svc = crate::service::Ec2Service::new();
+        seed_image(&svc, "ami-x");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.tags.insert(
+                "ami-x".to_string(),
+                vec![crate::state::Tag {
+                    key: "role".into(),
+                    value: "base".into(),
+                }],
+            );
+        }
+        let body = String::from_utf8(
+            super::describe_images(
+                &svc,
+                &req(
+                    "DescribeImages",
+                    &[("Filter.1.Name", "tag-value"), ("Filter.1.Value.1", "base")],
+                ),
+            )
+            .unwrap()
+            .body
+            .expect_bytes()
+            .to_vec(),
+        )
+        .unwrap();
+        assert!(body.contains("<imageId>ami-x</imageId>"), "{body}");
     }
 
     #[test]

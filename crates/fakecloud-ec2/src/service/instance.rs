@@ -1382,6 +1382,7 @@ fn inst_match(i: &Instance, tags: &[Tag], filters: &[Filter], architecture: &str
             "key-name" => i.key_name.clone().into_iter().collect(),
             "architecture" => vec![architecture.to_string()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
+            "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
                     tags.iter()

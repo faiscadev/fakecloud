@@ -1284,6 +1284,12 @@ impl CloudWatchService {
             let mut timestamps: Vec<String> = Vec::new();
             let mut values: Vec<f64> = Vec::new();
             for (ts, v) in series.iter() {
+                // AWS emits no datapoint for a NaN/infinite result (e.g. a
+                // metric-math divide-by-zero); dropping it here keeps NaN/Inf
+                // off both the XML and JSON wire.
+                if !v.is_finite() {
+                    continue;
+                }
                 timestamps.push(ts.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
                 values.push(*v);
             }
@@ -1500,6 +1506,19 @@ impl CloudWatchService {
                 filter_names.push(v.clone());
             }
         }
+        // AWS defaults DescribeAlarms to MetricAlarm only; when AlarmTypes is
+        // supplied it returns exactly the requested types (MetricAlarm and/or
+        // CompositeAlarm). Absent -> metric alarms only.
+        let alarm_types = collect_member_values(req, "AlarmTypes");
+        for t in &alarm_types {
+            if t != "MetricAlarm" && t != "CompositeAlarm" {
+                return Err(invalid_param(format!(
+                    "AlarmTypes has an invalid value '{t}'"
+                )));
+            }
+        }
+        let want_metric = alarm_types.is_empty() || alarm_types.iter().any(|t| t == "MetricAlarm");
+        let want_composite = alarm_types.iter().any(|t| t == "CompositeAlarm");
         validate_len(req, "AlarmNamePrefix", 1, 255)?;
         validate_len(req, "ActionPrefix", 1, 1024)?;
         validate_len(req, "ChildrenOfAlarmName", 1, 255)?;
@@ -1555,34 +1574,40 @@ impl CloudWatchService {
         }
         let mut combined: Vec<(bool, String)> = Vec::new();
         if let Some(acct) = state.get(&req.account_id) {
-            if let Some(alarms) = acct.alarms_in(&req.region) {
-                for alarm in alarms.values() {
-                    if matches(
-                        &alarm.alarm_name,
-                        alarm.state_value.as_str(),
-                        [
-                            &alarm.alarm_actions,
-                            &alarm.ok_actions,
-                            &alarm.insufficient_data_actions,
-                        ],
-                    ) {
-                        combined.push((false, render_alarm(alarm)));
+            if want_metric {
+                if let Some(alarms) = acct.alarms_in(&req.region) {
+                    for alarm in alarms.values() {
+                        if matches(
+                            &alarm.alarm_name,
+                            alarm.state_value.as_str(),
+                            [
+                                &alarm.alarm_actions,
+                                &alarm.ok_actions,
+                                &alarm.insufficient_data_actions,
+                            ],
+                        ) {
+                            combined.push((false, render_alarm(alarm)));
+                        }
                     }
                 }
             }
-            if let Some(composites) = acct.composite_alarms_in(&req.region) {
-                for alarm in composites.values() {
-                    if matches(
-                        &alarm.alarm_name,
-                        alarm.state_value.as_str(),
-                        [
-                            &alarm.alarm_actions,
-                            &alarm.ok_actions,
-                            &alarm.insufficient_data_actions,
-                        ],
-                    ) {
-                        combined
-                            .push((true, crate::composite_alarms::render_composite_alarm(alarm)));
+            if want_composite {
+                if let Some(composites) = acct.composite_alarms_in(&req.region) {
+                    for alarm in composites.values() {
+                        if matches(
+                            &alarm.alarm_name,
+                            alarm.state_value.as_str(),
+                            [
+                                &alarm.alarm_actions,
+                                &alarm.ok_actions,
+                                &alarm.insufficient_data_actions,
+                            ],
+                        ) {
+                            combined.push((
+                                true,
+                                crate::composite_alarms::render_composite_alarm(alarm),
+                            ));
+                        }
                     }
                 }
             }

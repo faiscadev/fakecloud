@@ -165,6 +165,13 @@ pub(crate) fn describe_volumes(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    // An explicitly-requested VolumeId that does not exist (or is in the
+    // recycle bin) is a hard error on AWS, not a silently-empty result.
+    for id in &wanted {
+        if !state.volumes.get(id).is_some_and(|v| !v.in_recycle_bin) {
+            return Err(not_found("InvalidVolume.NotFound", id));
+        }
+    }
     let mut items: Vec<String> = state
         .volumes
         .values()
@@ -204,6 +211,7 @@ fn vol_match(v: &Volume, tags: &[Tag], filters: &[Filter]) -> bool {
             "encrypted" => vec![v.encrypted.to_string()],
             "size" => vec![v.size.to_string()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
+            "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
                     tags.iter()
@@ -834,6 +842,65 @@ mod tests {
             &req("DescribeVolumes", &[("MaxResults", "1001")]),
         ));
         assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn describe_volumes_explicit_missing_id_errors() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "available", false);
+        let err = err_of(describe_volumes(
+            &svc,
+            &req("DescribeVolumes", &[("VolumeId.1", "vol-missing")]),
+        ));
+        assert_eq!(err.code(), "InvalidVolume.NotFound");
+    }
+
+    #[test]
+    fn describe_volumes_no_id_empty_ok() {
+        // No explicit id + no match => empty result, never an error.
+        let svc = Ec2Service::new();
+        let body = body_of(describe_volumes(&svc, &req("DescribeVolumes", &[])).unwrap());
+        assert!(body.contains("<volumeSet"), "{body}");
+    }
+
+    #[test]
+    fn describe_volumes_tag_value_filter() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "available", false);
+        {
+            let mut accounts = svc.state.write();
+            let st = accounts.get_or_create("000000000000");
+            st.tags.insert(
+                "vol-1".to_string(),
+                vec![Tag {
+                    key: "env".into(),
+                    value: "prod".into(),
+                }],
+            );
+        }
+        let body = body_of(
+            describe_volumes(
+                &svc,
+                &req(
+                    "DescribeVolumes",
+                    &[("Filter.1.Name", "tag-value"), ("Filter.1.Value.1", "prod")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(body.contains("<volumeId>vol-1</volumeId>"), "{body}");
+        // A non-matching tag-value excludes it.
+        let empty = body_of(
+            describe_volumes(
+                &svc,
+                &req(
+                    "DescribeVolumes",
+                    &[("Filter.1.Name", "tag-value"), ("Filter.1.Value.1", "dev")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(!empty.contains("<volumeId>vol-1</volumeId>"), "{empty}");
     }
 
     #[test]

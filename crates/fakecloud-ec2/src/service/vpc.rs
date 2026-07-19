@@ -6,8 +6,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    filter_value_matches, gen_id, indexed_list, parse_filters, require, validate_enum,
-    validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, not_found, paginate, parse_filters, require,
+    validate_enum, validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Tag, Vpc, VpcCidrAssoc};
 
@@ -99,6 +99,7 @@ fn vpc_matches(vpc: &Vpc, tags: &[Tag], filters: &[Filter]) -> bool {
                 vpc.ipv6_cidr_block.clone().into_iter().collect()
             }
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
+            "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
                     tags.iter()
@@ -244,6 +245,14 @@ pub(crate) fn describe_vpcs(
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
 
+    // An explicitly-requested VpcId that does not exist is a hard error on AWS
+    // (InvalidVpcID.NotFound), not a silently-empty result.
+    for id in &wanted {
+        if !state.vpcs.contains_key(id) {
+            return Err(not_found("InvalidVpcID.NotFound", id));
+        }
+    }
+
     let mut items: Vec<String> = state
         .vpcs
         .values()
@@ -253,7 +262,20 @@ pub(crate) fn describe_vpcs(
         .collect();
     items.sort();
 
-    let body = ec2_list("vpcSet", &items);
+    // DescribeVpcs is a `paginated` operation in the model; honor MaxResults +
+    // NextToken instead of always returning the full set.
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("vpcSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond("DescribeVpcs", &req.request_id, &body))
 }
 
@@ -469,4 +491,79 @@ pub(crate) fn disassociate_vpc_cidr_block(
 
 fn bool_attr(params: &std::collections::HashMap<String, String>, key: &str) -> Option<bool> {
     params.get(key).map(|v| v == "true")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn body_of(resp: AwsResponse) -> String {
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    /// Create a VPC and return its id.
+    fn make_vpc(svc: &Ec2Service, cidr: &str) -> String {
+        let body = body_of(create_vpc(svc, &req("CreateVpc", &[("CidrBlock", cidr)])).unwrap());
+        body.split("<vpcId>")
+            .nth(1)
+            .and_then(|s| s.split("</vpcId>").next())
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn describe_vpcs_explicit_missing_id_errors() {
+        let svc = Ec2Service::new();
+        make_vpc(&svc, "10.9.0.0/16");
+        let err = err_of(describe_vpcs(
+            &svc,
+            &req("DescribeVpcs", &[("VpcId.1", "vpc-missing")]),
+        ));
+        assert_eq!(err.code(), "InvalidVpcID.NotFound");
+    }
+
+    #[test]
+    fn describe_vpcs_paginates() {
+        let svc = Ec2Service::new();
+        // Seed enough VPCs (plus the default VPC) to force a second page at the
+        // minimum MaxResults of 5.
+        for i in 0..6 {
+            make_vpc(&svc, &format!("10.{i}.0.0/16"));
+        }
+        let body =
+            body_of(describe_vpcs(&svc, &req("DescribeVpcs", &[("MaxResults", "5")])).unwrap());
+        assert!(body.contains("<nextToken>"), "expected a NextToken: {body}");
+    }
+
+    #[test]
+    fn describe_vpcs_tag_value_filter() {
+        let svc = Ec2Service::new();
+        let id = make_vpc(&svc, "10.8.0.0/16");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.tags.insert(
+                id.clone(),
+                vec![Tag {
+                    key: "env".into(),
+                    value: "staging".into(),
+                }],
+            );
+        }
+        let body = body_of(
+            describe_vpcs(
+                &svc,
+                &req(
+                    "DescribeVpcs",
+                    &[
+                        ("Filter.1.Name", "tag-value"),
+                        ("Filter.1.Value.1", "staging"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(body.contains(&format!("<vpcId>{id}</vpcId>")), "{body}");
+    }
 }

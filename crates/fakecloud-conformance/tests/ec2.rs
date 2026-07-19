@@ -3627,12 +3627,17 @@ async fn ec2_deregister_image() {
     let c = s.ec2_client().await;
     let id = make_ami(&c).await;
     c.deregister_image().image_id(&id).send().await.unwrap();
-    // The deregistered AMI is gone. (A no-filter DescribeImages is NOT empty —
-    // every account sees the seeded public AMI catalogue, as in real AWS — so
-    // assert on the specific id rather than the whole image set.)
-    assert!(c
+    // The deregistered AMI is gone. Requesting it explicitly by id is a hard
+    // error on real AWS (InvalidAMIID.NotFound), not a silently-empty result.
+    let err = c.describe_images().image_ids(&id).send().await.unwrap_err();
+    assert!(
+        format!("{:?}", err).contains("InvalidAMIID.NotFound"),
+        "expected InvalidAMIID.NotFound, got: {err:?}"
+    );
+    // A no-filter DescribeImages is NOT empty — every account still sees the
+    // seeded public AMI catalogue, as in real AWS.
+    assert!(!c
         .describe_images()
-        .image_ids(&id)
         .send()
         .await
         .unwrap()
