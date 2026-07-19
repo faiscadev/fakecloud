@@ -441,6 +441,10 @@ fn state_machine_to_json(sm: &StateMachine) -> Value {
         });
     }
 
+    if let Some(ref enc) = sm.encryption_configuration {
+        resp["encryptionConfiguration"] = enc.clone();
+    }
+
     resp
 }
 
@@ -1143,6 +1147,110 @@ mod tests {
         let svc = StepFunctionsService::new(make_state());
         let arn = create_sm(&svc, "test-sm");
         assert!(arn.contains("test-sm"));
+    }
+
+    // bug-hunt 2026-07-19: CreateStateMachine with publish=true creates a real
+    // version that ListStateMachineVersions returns; without publish, no version
+    // ARN is returned and no version exists.
+    #[test]
+    fn create_state_machine_publish_creates_listable_version() {
+        let svc = StepFunctionsService::new(make_state());
+        let body = json!({
+            "name": "pub-sm",
+            "definition": VALID_DEF,
+            "roleArn": "arn:aws:iam::123456789012:role/r",
+            "publish": true,
+            "versionDescription": "first",
+        });
+        let req = make_request("CreateStateMachine", &body.to_string());
+        let resp = svc.create_state_machine(&req).unwrap();
+        let b = body_json(&resp);
+        let arn = b["stateMachineArn"].as_str().unwrap().to_string();
+        let version_arn = b["stateMachineVersionArn"].as_str().unwrap().to_string();
+        assert_eq!(version_arn, format!("{arn}:1"));
+
+        let list_req = make_request(
+            "ListStateMachineVersions",
+            &json!({ "stateMachineArn": arn }).to_string(),
+        );
+        let list = body_json(&svc.list_state_machine_versions(&list_req).unwrap());
+        let versions = list["stateMachineVersions"].as_array().unwrap();
+        assert_eq!(versions.len(), 1);
+        assert_eq!(versions[0]["stateMachineVersionArn"], version_arn);
+    }
+
+    #[test]
+    fn create_state_machine_no_publish_has_no_version() {
+        let svc = StepFunctionsService::new(make_state());
+        let arn = create_sm(&svc, "nopub-sm");
+        // No version ARN is returned when publish is absent.
+        let body = json!({
+            "name": "nopub-sm2",
+            "definition": VALID_DEF,
+            "roleArn": "arn:aws:iam::123456789012:role/r",
+        });
+        let req = make_request("CreateStateMachine", &body.to_string());
+        let b = body_json(&svc.create_state_machine(&req).unwrap());
+        assert!(b.get("stateMachineVersionArn").is_none());
+
+        let list_req = make_request(
+            "ListStateMachineVersions",
+            &json!({ "stateMachineArn": arn }).to_string(),
+        );
+        let list = body_json(&svc.list_state_machine_versions(&list_req).unwrap());
+        assert!(list["stateMachineVersions"].as_array().unwrap().is_empty());
+    }
+
+    // bug-hunt 2026-07-19: UpdateStateMachine with publish=true publishes the
+    // next version, and encryptionConfiguration persists + round-trips on
+    // Describe.
+    #[test]
+    fn update_state_machine_publish_and_encryption_round_trip() {
+        let svc = StepFunctionsService::new(make_state());
+        let create = json!({
+            "name": "enc-sm",
+            "definition": VALID_DEF,
+            "roleArn": "arn:aws:iam::123456789012:role/r",
+            "encryptionConfiguration": { "type": "CUSTOMER_MANAGED_KMS_KEY", "kmsKeyId": "key-123" },
+        });
+        let req = make_request("CreateStateMachine", &create.to_string());
+        let arn = body_json(&svc.create_state_machine(&req).unwrap())["stateMachineArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // encryptionConfiguration round-trips on Describe.
+        let desc_req = make_request(
+            "DescribeStateMachine",
+            &json!({ "stateMachineArn": arn }).to_string(),
+        );
+        let desc = body_json(&svc.describe_state_machine(&desc_req).unwrap());
+        assert_eq!(
+            desc["encryptionConfiguration"]["type"],
+            "CUSTOMER_MANAGED_KMS_KEY"
+        );
+        assert_eq!(desc["encryptionConfiguration"]["kmsKeyId"], "key-123");
+
+        // Update with publish creates version 1.
+        let upd = json!({
+            "stateMachineArn": arn,
+            "definition": VALID_DEF,
+            "publish": true,
+            "versionDescription": "v via update",
+        });
+        let upd_req = make_request("UpdateStateMachine", &upd.to_string());
+        let upd_body = body_json(&svc.update_state_machine(&upd_req).unwrap());
+        assert_eq!(
+            upd_body["stateMachineVersionArn"].as_str().unwrap(),
+            format!("{arn}:1")
+        );
+
+        let list_req = make_request(
+            "ListStateMachineVersions",
+            &json!({ "stateMachineArn": arn }).to_string(),
+        );
+        let list = body_json(&svc.list_state_machine_versions(&list_req).unwrap());
+        assert_eq!(list["stateMachineVersions"].as_array().unwrap().len(), 1);
     }
 
     #[test]

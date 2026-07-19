@@ -220,12 +220,18 @@ impl ResourceProvisioner {
                     .get("Unit")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
+                let dimensions = t.get("Dimensions").and_then(|v| v.as_object()).map(|m| {
+                    m.iter()
+                        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+                        .collect()
+                });
                 transformations.push(MetricTransformation {
                     metric_name,
                     metric_namespace,
                     metric_value,
                     default_value,
                     unit,
+                    dimensions,
                 });
             }
         }

@@ -150,6 +150,8 @@ pub struct StateMachine {
     pub logging_configuration: Option<Value>,
     pub tracing_configuration: Option<Value>,
     pub description: String,
+    #[serde(default)]
+    pub encryption_configuration: Option<Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -373,6 +375,7 @@ mod tests {
                 logging_configuration: None,
                 tracing_configuration: None,
                 description: String::new(),
+                encryption_configuration: None,
             },
         );
         state.reset();

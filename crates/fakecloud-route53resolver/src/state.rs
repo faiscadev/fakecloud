@@ -107,6 +107,18 @@ pub struct ResolverEndpoint {
     pub resolver_endpoint_type: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub protocols: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outpost_arn: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preferred_instance_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns64_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ipv6_internet_access_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rni_enhanced_metrics_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_name_server_metrics_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -145,6 +157,8 @@ pub struct ResolverRule {
     pub share_status: String,
     pub creation_time: String,
     pub modification_time: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delegation_record: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -247,6 +261,17 @@ pub struct FirewallRule {
     pub firewall_domain_redirection_action: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub qtype: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dns_threat_protection: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confidence_threshold: Option<String>,
+    /// The (structured) rule-type configuration echoed back verbatim. Stored as
+    /// a JSON value because the `FirewallRuleType` union carries several
+    /// alternative nested configs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firewall_rule_type: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub firewall_threat_protection_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

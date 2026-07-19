@@ -594,6 +594,24 @@ impl Route53ResolverService {
                 .unwrap_or("IPV4")
                 .to_string(),
             protocols: string_list(body.get("Protocols")),
+            outpost_arn: body
+                .get("OutpostArn")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            preferred_instance_type: body
+                .get("PreferredInstanceType")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            dns64_enabled: body.get("Dns64Enabled").and_then(Value::as_bool),
+            ipv6_internet_access_enabled: body
+                .get("Ipv6InternetAccessEnabled")
+                .and_then(Value::as_bool),
+            rni_enhanced_metrics_enabled: body
+                .get("RniEnhancedMetricsEnabled")
+                .and_then(Value::as_bool),
+            target_name_server_metrics_enabled: body
+                .get("TargetNameServerMetricsEnabled")
+                .and_then(Value::as_bool),
         };
         let arn_str = endpoint.arn.clone();
         let tags = parse_tags(body.get("Tags"))?;
@@ -652,6 +670,27 @@ impl Route53ResolverService {
             let protocols = string_list(body.get("Protocols"));
             if !protocols.is_empty() {
                 rec.endpoint.protocols = protocols;
+            }
+            if let Some(v) = body.get("Dns64Enabled").and_then(Value::as_bool) {
+                rec.endpoint.dns64_enabled = Some(v);
+            }
+            if let Some(v) = body
+                .get("Ipv6InternetAccessEnabled")
+                .and_then(Value::as_bool)
+            {
+                rec.endpoint.ipv6_internet_access_enabled = Some(v);
+            }
+            if let Some(v) = body
+                .get("RniEnhancedMetricsEnabled")
+                .and_then(Value::as_bool)
+            {
+                rec.endpoint.rni_enhanced_metrics_enabled = Some(v);
+            }
+            if let Some(v) = body
+                .get("TargetNameServerMetricsEnabled")
+                .and_then(Value::as_bool)
+            {
+                rec.endpoint.target_name_server_metrics_enabled = Some(v);
             }
             rec.endpoint.status = "UPDATING".to_string();
             rec.endpoint.modification_time = now_rfc3339();
@@ -891,6 +930,10 @@ impl Route53ResolverService {
             share_status: "NOT_SHARED".to_string(),
             creation_time: now_rfc3339(),
             modification_time: now_rfc3339(),
+            delegation_record: body
+                .get("DelegationRecord")
+                .and_then(Value::as_str)
+                .map(str::to_string),
         };
         let arn_str = rule.arn.clone();
         let tags = parse_tags(body.get("Tags"))?;
@@ -1996,6 +2039,29 @@ impl Route53ResolverService {
                 .get("Qtype")
                 .and_then(Value::as_str)
                 .map(str::to_string),
+            dns_threat_protection: entry
+                .get("DnsThreatProtection")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            confidence_threshold: entry
+                .get("ConfidenceThreshold")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            firewall_rule_type: entry
+                .get("FirewallRuleType")
+                .filter(|v| !v.is_null())
+                .cloned(),
+            // AWS mints a threat-protection id for rules that carry a
+            // DnsThreatProtection detector or a structured FirewallRuleType.
+            firewall_threat_protection_id: if entry
+                .get("DnsThreatProtection")
+                .is_some_and(|v| !v.is_null())
+                || entry.get("FirewallRuleType").is_some_and(|v| !v.is_null())
+            {
+                Some(format!("rslvr-ftp-{}", hex17()))
+            } else {
+                None
+            },
         })
     }
 
@@ -2094,6 +2160,15 @@ impl Route53ResolverService {
             .and_then(Value::as_str)
         {
             rule.firewall_domain_redirection_action = Some(a.to_string());
+        }
+        if let Some(d) = body.get("DnsThreatProtection").and_then(Value::as_str) {
+            rule.dns_threat_protection = Some(d.to_string());
+        }
+        if let Some(c) = body.get("ConfidenceThreshold").and_then(Value::as_str) {
+            rule.confidence_threshold = Some(c.to_string());
+        }
+        if let Some(frt) = body.get("FirewallRuleType").filter(|v| !v.is_null()) {
+            rule.firewall_rule_type = Some(frt.clone());
         }
         rule.modification_time = now_rfc3339();
         let out = rule.clone();
@@ -3496,6 +3571,137 @@ mod tests {
             rule["FirewallDomainRedirectionAction"],
             "TRUST_REDIRECTION_DOMAIN"
         );
+    }
+
+    // bug-hunt 2026-07-19: CreateResolverEndpoint persists OutpostArn,
+    // PreferredInstanceType and the Dns64/Ipv6/metrics booleans; Get/List echo
+    // them, and UpdateResolverEndpoint round-trips the mutable booleans.
+    #[tokio::test]
+    async fn resolver_endpoint_optional_fields_round_trip() {
+        let svc = Route53ResolverService::default();
+        let (status, body) = call(
+            &svc,
+            "CreateResolverEndpoint",
+            json!({
+                "CreatorRequestId": "c1",
+                "Direction": "INBOUND",
+                "SecurityGroupIds": ["sg-1"],
+                "IpAddresses": [ { "SubnetId": "subnet-a" }, { "SubnetId": "subnet-b" } ],
+                "OutpostArn": "arn:aws:outposts:us-east-1:123456789012:outpost/op-abc",
+                "PreferredInstanceType": "m5.large",
+                "Dns64Enabled": true,
+                "Ipv6InternetAccessEnabled": false,
+                "RniEnhancedMetricsEnabled": true,
+                "TargetNameServerMetricsEnabled": true,
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let ep = &body["ResolverEndpoint"];
+        assert_eq!(
+            ep["OutpostArn"],
+            "arn:aws:outposts:us-east-1:123456789012:outpost/op-abc"
+        );
+        assert_eq!(ep["PreferredInstanceType"], "m5.large");
+        assert_eq!(ep["Dns64Enabled"], true);
+        assert_eq!(ep["Ipv6InternetAccessEnabled"], false);
+        assert_eq!(ep["RniEnhancedMetricsEnabled"], true);
+        assert_eq!(ep["TargetNameServerMetricsEnabled"], true);
+        let id = ep["Id"].as_str().unwrap().to_string();
+
+        let (_, got) = call(
+            &svc,
+            "GetResolverEndpoint",
+            json!({ "ResolverEndpointId": id }),
+        )
+        .await;
+        assert_eq!(got["ResolverEndpoint"]["OutpostArn"], ep["OutpostArn"]);
+        assert_eq!(got["ResolverEndpoint"]["Dns64Enabled"], true);
+
+        // Update flips Dns64Enabled.
+        let (s, upd) = call(
+            &svc,
+            "UpdateResolverEndpoint",
+            json!({ "ResolverEndpointId": id, "Dns64Enabled": false }),
+        )
+        .await;
+        assert_eq!(s, 200, "{upd}");
+        assert_eq!(upd["ResolverEndpoint"]["Dns64Enabled"], false);
+    }
+
+    // bug-hunt 2026-07-19: CreateResolverRule persists DelegationRecord and it
+    // round-trips on Get/List.
+    #[tokio::test]
+    async fn resolver_rule_delegation_record_round_trips() {
+        let svc = Route53ResolverService::default();
+        let (s, body) = call(
+            &svc,
+            "CreateResolverRule",
+            json!({
+                "CreatorRequestId": "c",
+                "RuleType": "RECURSIVE",
+                "DomainName": "example.com",
+                "DelegationRecord": "ns-1.example.com",
+            }),
+        )
+        .await;
+        assert_eq!(s, 200, "{body}");
+        assert_eq!(body["ResolverRule"]["DelegationRecord"], "ns-1.example.com");
+        let id = body["ResolverRule"]["Id"].as_str().unwrap().to_string();
+        let (_, got) = call(&svc, "GetResolverRule", json!({ "ResolverRuleId": id })).await;
+        assert_eq!(got["ResolverRule"]["DelegationRecord"], "ns-1.example.com");
+    }
+
+    // bug-hunt 2026-07-19: CreateFirewallRule persists DnsThreatProtection,
+    // ConfidenceThreshold and the structured FirewallRuleType; they round-trip
+    // on List and mint a FirewallThreatProtectionId.
+    #[tokio::test]
+    async fn firewall_rule_threat_protection_fields_round_trip() {
+        let svc = Route53ResolverService::default();
+        let (_, g) = call(
+            &svc,
+            "CreateFirewallRuleGroup",
+            json!({ "CreatorRequestId": "c", "Name": "g" }),
+        )
+        .await;
+        let group_id = g["FirewallRuleGroup"]["Id"].as_str().unwrap().to_string();
+        let (s, created) = call(
+            &svc,
+            "CreateFirewallRule",
+            json!({
+                "FirewallRuleGroupId": group_id,
+                "Name": "threat-rule",
+                "Priority": 5,
+                "Action": "BLOCK",
+                "BlockResponse": "NODATA",
+                "DnsThreatProtection": "DGA",
+                "ConfidenceThreshold": "HIGH",
+                "FirewallRuleType": { "DnsThreatProtection": { "Detector": "DGA" } },
+            }),
+        )
+        .await;
+        assert_eq!(s, 200, "{created}");
+        let rule = &created["FirewallRule"];
+        assert_eq!(rule["DnsThreatProtection"], "DGA");
+        assert_eq!(rule["ConfidenceThreshold"], "HIGH");
+        assert_eq!(
+            rule["FirewallRuleType"]["DnsThreatProtection"]["Detector"],
+            "DGA"
+        );
+        assert!(rule["FirewallThreatProtectionId"]
+            .as_str()
+            .unwrap()
+            .starts_with("rslvr-ftp-"));
+
+        let (_, listed) = call(
+            &svc,
+            "ListFirewallRules",
+            json!({ "FirewallRuleGroupId": group_id }),
+        )
+        .await;
+        let listed_rule = &listed["FirewallRules"][0];
+        assert_eq!(listed_rule["DnsThreatProtection"], "DGA");
+        assert_eq!(listed_rule["ConfidenceThreshold"], "HIGH");
     }
 
     // Finding 5: a NextToken that this service never minted is rejected with

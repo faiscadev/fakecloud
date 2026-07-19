@@ -354,6 +354,9 @@ impl LogsService {
             &["CWLI", "SQL", "PPL"],
         )?;
 
+        // AWS defaults omitted queryLanguage to CWLI (Logs Insights QL).
+        let query_language = body["queryLanguage"].as_str().unwrap_or("CWLI").to_string();
+
         let now = Utc::now().timestamp_millis();
 
         let mut accounts = self.state.write();
@@ -366,6 +369,7 @@ impl LogsService {
                 query_string,
                 log_group_names,
                 last_modified: now,
+                query_language: Some(query_language),
             },
         );
 
@@ -406,13 +410,17 @@ impl LogsService {
             .values()
             .filter(|qd| name_prefix.is_empty() || qd.name.starts_with(name_prefix))
             .map(|qd| {
-                json!({
+                let mut obj = json!({
                     "queryDefinitionId": qd.query_definition_id,
                     "name": qd.name,
                     "queryString": qd.query_string,
                     "logGroupNames": qd.log_group_names,
                     "lastModified": qd.last_modified,
-                })
+                });
+                if let Some(ref ql) = qd.query_language {
+                    obj["queryLanguage"] = json!(ql);
+                }
+                obj
             })
             .collect();
 
@@ -616,6 +624,39 @@ mod tests {
         let resp = svc.describe_query_definitions(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["queryDefinitions"].as_array().unwrap().is_empty());
+    }
+
+    // PutQueryDefinition persists queryLanguage; describe echoes it, defaulting
+    // to CWLI when omitted (bug-hunt 2026-07-19).
+    #[test]
+    fn query_definition_persists_query_language() {
+        let svc = make_service();
+        // Explicit SQL.
+        svc.put_query_definition(&make_request(
+            "PutQueryDefinition",
+            json!({
+                "name": "sql-q",
+                "queryString": "SELECT * FROM logs",
+                "queryLanguage": "SQL",
+            }),
+        ))
+        .unwrap();
+        // Omitted -> defaults to CWLI.
+        svc.put_query_definition(&make_request(
+            "PutQueryDefinition",
+            json!({ "name": "default-q", "queryString": "fields @timestamp" }),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .describe_query_definitions(&make_request("DescribeQueryDefinitions", json!({})))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let defs = body["queryDefinitions"].as_array().unwrap();
+        let sql = defs.iter().find(|d| d["name"] == "sql-q").unwrap();
+        assert_eq!(sql["queryLanguage"], "SQL");
+        let default = defs.iter().find(|d| d["name"] == "default-q").unwrap();
+        assert_eq!(default["queryLanguage"], "CWLI");
     }
 
     #[test]

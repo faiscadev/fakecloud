@@ -48,6 +48,16 @@ pub(super) fn dispatch(
         "RegisterDevices" => Ok(Some(register_devices(svc, ctx, meta, body))),
         "DeregisterDevices" => Ok(Some(deregister_devices(svc, ctx, meta, body))),
         "UpdateDevices" => Ok(Some(update_devices(svc, ctx, meta, body))),
+        "EnableSagemakerServicecatalogPortfolio" => {
+            Ok(Some(set_portfolio_status(svc, ctx, meta, body, "Enabled")))
+        }
+        "DisableSagemakerServicecatalogPortfolio" => {
+            Ok(Some(set_portfolio_status(svc, ctx, meta, body, "Disabled")))
+        }
+        "GetSagemakerServicecatalogPortfolioStatus" => {
+            Ok(Some(get_portfolio_status(svc, ctx, body)))
+        }
+        "RetryPipelineExecution" => Ok(Some(retry_pipeline_execution(svc, ctx, meta, body))),
         op if is_lifecycle_transition(op) => Ok(lifecycle_transition(svc, ctx, meta, body)),
         _ => Ok(None),
     }
@@ -115,6 +125,53 @@ fn delete_mpg_policy(
         data.singletons.remove(&mpg_policy_singleton(&name));
     }
     (engine::action(ctx, meta, body), true)
+}
+
+// ── Service Catalog portfolio status ─────────────────────────────────────
+//
+// `EnableSagemakerServicecatalogPortfolio` / `DisableSagemakerServicecatalogPortfolio`
+// / `GetSagemakerServicecatalogPortfolioStatus` are all Action verbs. The
+// generic Action arm discarded the Enable/Disable and returned an empty Get
+// (no `Status`), so the portfolio status never round-tripped and Terraform saw a
+// perpetual diff. Persist the account-scoped status singleton on Enable/Disable
+// and read it back in Get, defaulting to `Disabled` (the live-AWS default before
+// any Enable) (bug-hunt 2026-07-19).
+
+const PORTFOLIO_STATUS_SINGLETON: &str = "SagemakerServicecatalogPortfolioStatus";
+
+fn set_portfolio_status(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+    status: &str,
+) -> (AwsResponse, bool) {
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        data.singletons.insert(
+            PORTFOLIO_STATUS_SINGLETON.to_string(),
+            Value::String(status.to_string()),
+        );
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+fn get_portfolio_status(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    _body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let g = svc.state.read();
+    let status = g
+        .get(&ctx.account)
+        .and_then(|data| data.singletons.get(PORTFOLIO_STATUS_SINGLETON))
+        .and_then(Value::as_str)
+        .unwrap_or("Disabled")
+        .to_string();
+    let mut out = Map::new();
+    out.insert("Status".to_string(), Value::String(status));
+    (ok_json(Value::Object(out)), false)
 }
 
 // ── Edge devices ─────────────────────────────────────────────────────────
@@ -330,6 +387,35 @@ fn start_pipeline_execution(
         .or_insert_with(|| Value::String("Executing".to_string()));
     seed.insert("StartTime".to_string(), now_epoch());
     (engine::action_create(data, ctx, meta, &arn, &seed), true)
+}
+
+/// `RetryPipelineExecution` — re-run a stopped/failed pipeline execution by
+/// transitioning its stored `PipelineExecutionStatus` back to `Executing`, so a
+/// subsequent DescribePipelineExecution reflects the retry instead of the stale
+/// terminal status. The execution is keyed by its `PipelineExecutionArn` (as
+/// minted by `StartPipelineExecution`). If no such record exists the response
+/// still echoes the ARN (idempotent, matching the generic Action arm).
+fn retry_pipeline_execution(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let arn = str_member(body, "PipelineExecutionArn");
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    if let Some(key) = data.resolve_key("PipelineExecution", &arn) {
+        if let Some(rec) = data.get_resource_mut("PipelineExecution", &key) {
+            if let Some(obj) = rec.as_object_mut() {
+                obj.insert(
+                    "PipelineExecutionStatus".to_string(),
+                    Value::String("Executing".to_string()),
+                );
+                obj.insert("LastModifiedTime".to_string(), now_epoch());
+            }
+        }
+    }
+    (engine::action(ctx, meta, body), true)
 }
 
 /// `ImportHubContent` — persist a hub-content record so DescribeHubContent /

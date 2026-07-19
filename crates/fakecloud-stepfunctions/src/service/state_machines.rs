@@ -83,15 +83,25 @@ impl StepFunctionsService {
             logging_configuration: body.get("loggingConfiguration").cloned(),
             tracing_configuration: body.get("tracingConfiguration").cloned(),
             description: body["description"].as_str().unwrap_or("").to_string(),
+            encryption_configuration: body.get("encryptionConfiguration").cloned(),
         };
 
         state.state_machines.insert(arn.clone(), sm);
 
-        Ok(AwsResponse::ok_json(json!({
+        let mut resp = json!({
             "stateMachineArn": arn,
             "creationDate": now.timestamp() as f64,
-            "stateMachineVersionArn": arn,
-        })))
+        });
+        // `publish: true` creates version 1 and returns its version-qualified ARN
+        // (which ListStateMachineVersions resolves). Without publish, no version
+        // exists and no `stateMachineVersionArn` is returned.
+        if body["publish"].as_bool() == Some(true) {
+            let version_description = body["versionDescription"].as_str().unwrap_or("");
+            let (version_arn, _) = publish_version(state, &arn, version_description);
+            resp["stateMachineVersionArn"] = json!(version_arn);
+        }
+
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn describe_state_machine(
@@ -222,6 +232,10 @@ impl StepFunctionsService {
             sm.description = description.to_string();
         }
 
+        if let Some(enc) = body.get("encryptionConfiguration") {
+            sm.encryption_configuration = Some(enc.clone());
+        }
+
         let now = Utc::now();
         sm.update_date = now;
         sm.revision_id = uuid::Uuid::new_v4().to_string();
@@ -229,11 +243,20 @@ impl StepFunctionsService {
         let revision_id = sm.revision_id.clone();
         let sm_arn = sm.arn.clone();
 
-        Ok(AwsResponse::ok_json(json!({
+        let mut resp = json!({
             "updateDate": now.timestamp() as f64,
             "revisionId": revision_id,
-            "stateMachineVersionArn": sm_arn,
-        })))
+        });
+        // `publish: true` publishes a new version reflecting this update and
+        // returns its version-qualified ARN. Without publish, no version ARN is
+        // returned (a bare update does not create a version).
+        if body["publish"].as_bool() == Some(true) {
+            let version_description = body["versionDescription"].as_str().unwrap_or("");
+            let (version_arn, _) = publish_version(state, &sm_arn, version_description);
+            resp["stateMachineVersionArn"] = json!(version_arn);
+        }
+
+        Ok(AwsResponse::ok_json(resp))
     }
 
     pub(super) fn describe_state_machine_for_execution(
@@ -273,34 +296,16 @@ impl StepFunctionsService {
             .as_str()
             .ok_or_else(|| missing("stateMachineArn"))?
             .to_string();
-        let description = body["description"].as_str().unwrap_or("").to_string();
+        let description = body["description"].as_str().unwrap_or("");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         if !state.state_machines.contains_key(&arn) {
             return Err(state_machine_not_found(&arn));
         }
-        let version = state
-            .state_machine_versions
-            .values()
-            .filter(|v| v.state_machine_arn == arn)
-            .map(|v| v.version)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let version_arn = format!("{arn}:{version}");
-        let v = crate::state::StateMachineVersion {
-            state_machine_arn: arn,
-            version,
-            revision_id: format!("rev-{version}"),
-            description,
-            creation_date: chrono::Utc::now(),
-        };
-        state
-            .state_machine_versions
-            .insert(version_arn.clone(), v.clone());
+        let (version_arn, creation_date) = publish_version(state, &arn, description);
         Ok(AwsResponse::ok_json(json!({
             "stateMachineVersionArn": version_arn,
-            "creationDate": v.creation_date.timestamp(),
+            "creationDate": creation_date.timestamp(),
         })))
     }
 
@@ -595,4 +600,34 @@ impl StepFunctionsService {
             }))),
         }
     }
+}
+
+/// Publish a new state-machine version and return its version-qualified ARN
+/// plus its creation timestamp. The version number is the current max for the
+/// state machine plus one (starting at 1). Callers must hold the state write
+/// lock and have verified the state machine exists.
+fn publish_version(
+    state: &mut crate::state::StepFunctionsState,
+    arn: &str,
+    description: &str,
+) -> (String, chrono::DateTime<chrono::Utc>) {
+    let version = state
+        .state_machine_versions
+        .values()
+        .filter(|v| v.state_machine_arn == arn)
+        .map(|v| v.version)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    let version_arn = format!("{arn}:{version}");
+    let v = crate::state::StateMachineVersion {
+        state_machine_arn: arn.to_string(),
+        version,
+        revision_id: format!("rev-{version}"),
+        description: description.to_string(),
+        creation_date: chrono::Utc::now(),
+    };
+    let creation_date = v.creation_date;
+    state.state_machine_versions.insert(version_arn.clone(), v);
+    (version_arn, creation_date)
 }
