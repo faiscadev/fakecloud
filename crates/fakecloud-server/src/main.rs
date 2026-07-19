@@ -1774,7 +1774,7 @@ async fn main() {
     if let Some(ref rt) = container_runtime {
         eb_service = eb_service.with_runtime(rt.clone());
     }
-    if let Some(store) = eb_snapshot_store {
+    if let Some(store) = eb_snapshot_store.clone() {
         eb_service = eb_service.with_snapshot_store(store);
     }
     if let Some(h) = eb_service.snapshot_hook() {
@@ -1793,6 +1793,11 @@ async fn main() {
             .with_logs(logs_state.clone());
     if let Some(ref rt) = container_runtime {
         scheduler = scheduler.with_runtime(rt.clone());
+    }
+    // Persist last_fired advances so a rate(...) rule doesn't double-fire after
+    // a restart (on-disk last_fired would otherwise stay at its creation value).
+    if let Some(store) = eb_snapshot_store {
+        scheduler = scheduler.with_snapshot_store(store);
     }
     tokio::spawn(scheduler.run());
     let iam_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
@@ -2465,6 +2470,14 @@ async fn main() {
             Arc::new(fakecloud_persistence::s3::MemoryS3Store::new())
         }
     };
+    // The CloudWatch-Logs -> Firehose -> S3 delivery hook was built before the
+    // S3 store existed; wire the store now so records it delivers are written
+    // through to disk (they would otherwise be lost on restart).
+    firehose_delivery_for_logs.set_s3_store(s3_store.clone());
+    // Same for the shared S3 delivery impl (CloudWatch Logs export/deliveries +
+    // RDS S3 exports go through this Arc): route its writes through the durable
+    // store so delivered objects survive a restart.
+    s3_delivery_for_logs.set_s3_store(s3_store.clone());
     let s3_store_for_inbound = s3_store.clone();
     if let Some(ref cache) = shared_body_cache {
         // Share the cache between the S3Store and S3State so read_body honors
@@ -2568,7 +2581,24 @@ async fn main() {
             &describe,
         ) {
             Ok(fakecloud_dynamodb::ImportOutcome::Imported { table, items }) => {
-                tracing::info!(table, items, "bulk-loaded AWS DynamoDB export at startup")
+                tracing::info!(table, items, "bulk-loaded AWS DynamoDB export at startup");
+                // Persist the imported table immediately. A DynamoDB snapshot is
+                // otherwise only written by a mutating API call, so a read-only
+                // workload against the imported data would lose it on restart.
+                if let Some(store) = dynamodb_snapshot_store.clone() {
+                    let lock = tokio::sync::Mutex::new(());
+                    if let Err(e) = fakecloud_dynamodb::save_dynamodb_snapshot(
+                        &dynamodb_state_for_register,
+                        Some(store),
+                        &lock,
+                    )
+                    .await
+                    {
+                        fatal_exit(format_args!(
+                            "failed to persist bulk-loaded dynamodb import: {e}"
+                        ));
+                    }
+                }
             }
             // Idempotent restart: the table was already present (e.g. from a
             // persisted snapshot). The importer already logged a warning and
@@ -3337,6 +3367,9 @@ async fn main() {
     let s3_delivery_for_elbv2 = Arc::new(fakecloud_s3::delivery::S3DeliveryImpl::new(
         s3_state.clone(),
     ));
+    // Route ELB access-log deliveries through the durable S3 store so they
+    // survive a restart (S3 is rebuilt from the store on boot).
+    s3_delivery_for_elbv2.set_s3_store(s3_store.clone());
     let elbv2_delivery_bus = Arc::new(DeliveryBus::new().with_s3(s3_delivery_for_elbv2));
     let elbv2_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
@@ -3814,8 +3847,9 @@ async fn main() {
         } else {
             None
         };
-    let mut firehose_service =
-        fakecloud_firehose::FirehoseService::new(firehose_state.clone()).with_s3(s3_state.clone());
+    let mut firehose_service = fakecloud_firehose::FirehoseService::new(firehose_state.clone())
+        .with_s3(s3_state.clone())
+        .with_s3_store(s3_store.clone());
     if let Some(store) = firehose_snapshot_store.clone() {
         firehose_service = firehose_service.with_snapshot_store(store);
     }
@@ -6834,7 +6868,7 @@ async fn main() {
     if let Some(ref ld) = lambda_delivery {
         sqs_lambda_poller = sqs_lambda_poller.with_lambda_delivery(ld.clone());
     }
-    if let Some(h) = sqs_poller_snapshot_hook {
+    if let Some(h) = sqs_poller_snapshot_hook.clone() {
         sqs_lambda_poller = sqs_lambda_poller.with_snapshot_hook(h);
     }
     tokio::spawn(sqs_lambda_poller.run());
@@ -6920,6 +6954,12 @@ async fn main() {
         .with_kms_hook(kms_hook_for_services.clone());
         if let Some(hook) = pipes_persist_hook.clone() {
             runner = runner.with_persist_hook(hook);
+        }
+        // Persist SQS state after an SQS-source pipe acks messages, so the
+        // consumed backlog doesn't revert on restart and re-deliver (the SQS
+        // snapshot hook is the same one the SQS->Lambda poller uses).
+        if let Some(hook) = sqs_poller_snapshot_hook.clone() {
+            runner = runner.with_sqs_snapshot_hook(hook);
         }
         tokio::spawn(runner.run());
     }

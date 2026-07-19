@@ -13,7 +13,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
-use fakecloud_persistence::SnapshotStore;
+use fakecloud_persistence::{BodySource, S3Store, SnapshotStore};
 use fakecloud_s3::{memory_body, S3Object, SharedS3State};
 
 use crate::state::{
@@ -52,6 +52,13 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 pub struct FirehoseService {
     state: SharedFirehoseState,
     s3: Option<SharedS3State>,
+    /// Durable S3 backing store. S3 durability is write-through to this store
+    /// (there is no `s3_state` snapshot; on boot S3 is rebuilt from the store),
+    /// so records delivered to an S3 destination must be routed through it or
+    /// they are lost on restart. Behind a lock so the CloudWatch-Logs delivery
+    /// hook (built before the S3 store exists) can be wired up after the fact
+    /// via `set_s3_store`.
+    s3_store: RwLock<Option<Arc<dyn S3Store>>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
@@ -61,6 +68,7 @@ impl FirehoseService {
         Self {
             state,
             s3: None,
+            s3_store: RwLock::new(None),
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
@@ -69,6 +77,20 @@ impl FirehoseService {
     pub fn with_s3(mut self, s3: SharedS3State) -> Self {
         self.s3 = Some(s3);
         self
+    }
+
+    /// Builder form of [`Self::set_s3_store`], for the public service which is
+    /// constructed after the S3 store already exists.
+    pub fn with_s3_store(self, store: Arc<dyn S3Store>) -> Self {
+        self.set_s3_store(store);
+        self
+    }
+
+    /// Wire the durable S3 store after construction. Used by
+    /// `FirehoseDeliveryImpl`, whose delivery hook is built before the S3 store
+    /// is available during server startup.
+    pub fn set_s3_store(&self, store: Arc<dyn S3Store>) {
+        *self.s3_store.write() = Some(store);
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
@@ -972,6 +994,16 @@ impl FirehoseService {
             return Ok(());
         };
         let Some(bucket_name) = bucket_name_from_arn(&dest.bucket_arn) else {
+            // AWS accepts PutRecord/PutRecordBatch into the delivery buffer and
+            // reports delivery failures asynchronously (CloudWatch metrics /
+            // S3 error-output), never as an API error, so the caller still gets
+            // a 200 + RecordId. We can't deliver a malformed destination ARN, so
+            // warn for observability instead of dropping it silently.
+            tracing::warn!(
+                stream = %stream_name,
+                bucket_arn = %dest.bucket_arn,
+                "firehose S3 destination has a malformed bucket ARN; records not delivered",
+            );
             return Ok(());
         };
         let mut payload = Vec::new();
@@ -994,44 +1026,87 @@ impl FirehoseService {
         );
         let size = payload.len() as u64;
         let etag = format!("\"{}\"", Uuid::new_v4().simple());
-        let body = memory_body(Bytes::from(payload));
+        let bytes = Bytes::from(payload);
+        let body = memory_body(bytes.clone());
         let _ = region;
+        // Snapshot the durable store handle before taking the S3 state lock so we
+        // never hold two locks at once.
+        let store = self.s3_store.read().clone();
         let mut s3_state = s3.write();
         let s3 = s3_state.get_or_create(account_id);
-        if let Some(bucket) = s3.buckets.get_mut(bucket_name) {
-            let object = S3Object {
-                key: key.clone(),
-                body,
-                content_type: "application/octet-stream".to_string(),
-                etag,
-                size,
-                last_modified: now,
-                metadata: BTreeMap::new(),
-                storage_class: "STANDARD".to_string(),
-                tags: BTreeMap::new(),
-                acl_grants: Vec::new(),
-                acl_owner_id: None,
-                parts_count: None,
-                part_sizes: None,
-                sse_algorithm: None,
-                sse_kms_key_id: None,
-                bucket_key_enabled: None,
-                version_id: None,
-                is_delete_marker: false,
-                content_encoding: None,
-                cache_control: None,
-                content_disposition: None,
-                content_language: None,
-                expires: None,
-                website_redirect_location: None,
-                restore_ongoing: None,
-                restore_expiry: None,
-                checksum_algorithm: None,
-                checksum_value: None,
-                lock_mode: None,
-                lock_retain_until: None,
-                lock_legal_hold: None,
-            };
+        let Some(bucket) = s3.buckets.get_mut(bucket_name) else {
+            // As above: AWS acknowledges the records (async delivery) even when
+            // the destination bucket is absent. Warn for observability rather
+            // than dropping silently, but don't fail the API call.
+            tracing::warn!(
+                stream = %stream_name,
+                bucket = %bucket_name,
+                "firehose S3 destination bucket does not exist; records not delivered",
+            );
+            return Ok(());
+        };
+        let object = S3Object {
+            key: key.clone(),
+            body,
+            content_type: "application/octet-stream".to_string(),
+            etag,
+            size,
+            last_modified: now,
+            metadata: BTreeMap::new(),
+            storage_class: "STANDARD".to_string(),
+            tags: BTreeMap::new(),
+            acl_grants: Vec::new(),
+            acl_owner_id: None,
+            parts_count: None,
+            part_sizes: None,
+            sse_algorithm: None,
+            sse_kms_key_id: None,
+            bucket_key_enabled: None,
+            version_id: None,
+            is_delete_marker: false,
+            content_encoding: None,
+            cache_control: None,
+            content_disposition: None,
+            content_language: None,
+            expires: None,
+            website_redirect_location: None,
+            restore_ongoing: None,
+            restore_expiry: None,
+            checksum_algorithm: None,
+            checksum_value: None,
+            lock_mode: None,
+            lock_retain_until: None,
+            lock_legal_hold: None,
+        };
+        // Write through to the durable S3 store so delivered records survive a
+        // restart. S3 has no state snapshot: on boot it is rebuilt from this
+        // store, so an object that only lives in `s3_state` is lost. Mirror the
+        // S3 replication path (service/notifications.rs): persist via the store,
+        // then swap the in-memory body for the canonical (possibly disk-backed)
+        // ref the store returns.
+        if let Some(store) = &store {
+            let meta = fakecloud_s3::persistence::object_meta_snapshot(&object);
+            match store.put_object(bucket_name, &key, None, BodySource::Bytes(bytes), &meta) {
+                Ok(returned) => {
+                    let mut object = object;
+                    object.body = returned;
+                    bucket.objects.insert(key, object);
+                }
+                Err(err) => {
+                    // Store write (disk) failed. Don't fail the API (AWS wouldn't
+                    // for a backend hiccup); degrade to keeping the object in
+                    // memory for this session and warn that it isn't durable.
+                    tracing::error!(
+                        stream = %stream_name,
+                        bucket = %bucket_name,
+                        %err,
+                        "failed to persist firehose delivery to S3 store; keeping in memory only",
+                    );
+                    bucket.objects.insert(key, object);
+                }
+            }
+        } else {
+            // Memory mode: no durable store, keep the in-memory object only.
             bucket.objects.insert(key, object);
         }
         Ok(())
@@ -1456,5 +1531,156 @@ mod tests {
         assert_eq!(tags.len(), 1);
         assert_eq!(tags[0]["Key"], "c");
         assert_eq!(body["HasMoreTags"], false);
+    }
+
+    const S3_ACCOUNT: &str = "123456789012";
+
+    /// Build an S3 state seeded with `bucket`, plus a matching on-disk
+    /// [`DiskS3Store`] (with the bucket's meta so `load()` surfaces it), and a
+    /// FirehoseService wired to both.
+    fn firehose_with_disk_s3(
+        bucket: &str,
+    ) -> (
+        FirehoseService,
+        std::sync::Arc<fakecloud_persistence::s3::DiskS3Store>,
+        tempfile::TempDir,
+    ) {
+        use fakecloud_core::multi_account::MultiAccountState;
+        use fakecloud_persistence::{cache::BodyCache, s3::DiskS3Store, BucketMeta, S3Store};
+        use fakecloud_s3::{S3Bucket, S3State};
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cache = std::sync::Arc::new(BodyCache::new(1024 * 1024));
+        let disk = std::sync::Arc::new(DiskS3Store::new(tmp.path().join("s3"), cache));
+        disk.put_bucket_meta(
+            bucket,
+            &BucketMeta {
+                name: bucket.to_string(),
+                region: "us-east-1".to_string(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let mut mas: MultiAccountState<S3State> =
+            MultiAccountState::new(S3_ACCOUNT, "us-east-1", "http://localhost");
+        mas.get_or_create(S3_ACCOUNT).buckets.insert(
+            bucket.to_string(),
+            S3Bucket::new(bucket, "us-east-1", "owner-id"),
+        );
+        let s3_state = std::sync::Arc::new(RwLock::new(mas));
+
+        let svc = FirehoseService::new(Arc::new(RwLock::new(FirehoseAccounts::new())))
+            .with_s3(s3_state)
+            .with_s3_store(disk.clone() as std::sync::Arc<dyn S3Store>);
+        (svc, disk, tmp)
+    }
+
+    fn create_s3_stream(svc: &FirehoseService, name: &str, bucket: &str) {
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": name,
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "BucketARN": format!("arn:aws:s3:::{bucket}"),
+                }
+            }),
+        ))
+        .unwrap();
+    }
+
+    #[test]
+    fn put_record_writes_through_to_durable_s3_store() {
+        use fakecloud_persistence::{BodyRef, S3Store};
+
+        let (svc, disk, _tmp) = firehose_with_disk_s3("fh-bucket");
+        create_s3_stream(&svc, "logs-to-s3", "fh-bucket");
+
+        let payload = b"event-line".to_vec();
+        let resp = svc
+            .put_record(&request(
+                "PutRecord",
+                json!({
+                    "DeliveryStreamName": "logs-to-s3",
+                    "Record": {
+                        "Data": base64::engine::general_purpose::STANDARD.encode(&payload)
+                    }
+                }),
+            ))
+            .expect("PutRecord should succeed when the destination bucket exists");
+        assert!(resp
+            .body
+            .expect_bytes()
+            .windows(8)
+            .any(|w| w == b"RecordId"));
+
+        // The delivered object's in-memory body must be the store's canonical
+        // disk-backed ref (proof the write went through the store, not just RAM),
+        // and the backing file must exist on disk.
+        let s3 = svc.s3.as_ref().unwrap().read();
+        let acct = s3.get(S3_ACCOUNT).unwrap();
+        let bucket = acct.buckets.get("fh-bucket").unwrap();
+        assert_eq!(bucket.objects.len(), 1, "exactly one delivered object");
+        let obj = bucket.objects.values().next().unwrap();
+        match &obj.body {
+            BodyRef::Disk { path, .. } => {
+                assert!(path.exists(), "delivered object bytes must be on disk");
+            }
+            BodyRef::Memory(_) => panic!("delivery was not written through to the durable store"),
+        }
+        drop(s3);
+
+        // Reloading the store from disk (as boot does) must surface the object.
+        let reloaded = disk.load().unwrap();
+        let rbucket = reloaded
+            .buckets
+            .get("fh-bucket")
+            .expect("bucket survives reload");
+        assert_eq!(
+            rbucket.objects.len(),
+            1,
+            "delivered object survives a store reload"
+        );
+    }
+
+    #[test]
+    fn put_record_to_missing_bucket_is_accepted_but_delivers_nothing() {
+        // AWS accepts PutRecord into the delivery buffer and reports delivery
+        // failures asynchronously (never as an API error), so a stream whose
+        // destination bucket is absent still returns 200 + RecordId. The record
+        // simply lands nowhere (a warn is logged for observability). This is the
+        // behavior the conformance baseline asserts; the emulator must match it
+        // rather than fabricate a synchronous error.
+        let (svc, _disk, _tmp) = firehose_with_disk_s3("real-bucket");
+        create_s3_stream(&svc, "broken-stream", "ghost-bucket");
+
+        let resp = svc
+            .put_record(&request(
+                "PutRecord",
+                json!({
+                    "DeliveryStreamName": "broken-stream",
+                    "Record": {
+                        "Data": base64::engine::general_purpose::STANDARD.encode(b"x")
+                    }
+                }),
+            ))
+            .expect("PutRecord to a missing destination bucket must still be accepted (AWS async delivery)");
+        assert!(resp
+            .body
+            .expect_bytes()
+            .windows(8)
+            .any(|w| w == b"RecordId"));
+
+        // The record could not be delivered, so the existing (different) bucket
+        // stays empty — nothing was written anywhere.
+        let s3 = svc.s3.as_ref().unwrap().read();
+        let real = s3
+            .get(S3_ACCOUNT)
+            .unwrap()
+            .buckets
+            .get("real-bucket")
+            .unwrap();
+        assert!(real.objects.is_empty(), "no object should be written");
     }
 }

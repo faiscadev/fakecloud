@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use fakecloud_core::delivery::FirehoseDelivery;
+use fakecloud_persistence::S3Store;
 use fakecloud_s3::SharedS3State;
 
 use crate::service::FirehoseService;
@@ -19,6 +20,14 @@ impl FirehoseDeliveryImpl {
         Self {
             inner: Arc::new(svc),
         }
+    }
+
+    /// Wire the durable S3 store after construction. The delivery hook is built
+    /// during startup before the S3 store exists, so the store is set later so
+    /// records delivered via the CloudWatch-Logs subscription path are written
+    /// through to disk and survive a restart.
+    pub fn set_s3_store(&self, store: Arc<dyn S3Store>) {
+        self.inner.set_s3_store(store);
     }
 }
 

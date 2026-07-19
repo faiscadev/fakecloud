@@ -94,6 +94,17 @@ pub struct PipesRunner {
     /// the pipes snapshot hook, so a restart re-replays the retained backlog
     /// (bug-hunt 2026-07-01 M1). `None` in memory-only mode.
     persist_hook: Option<SnapshotHook>,
+    /// Persists SQS state after an SQS-source pipe hides (picks) or deletes
+    /// (acks) messages. Consuming a message mutates the shared SQS state in
+    /// memory only; without this the ack never reaches disk until an unrelated
+    /// SQS API write triggers its snapshot, so a restart resurrects the whole
+    /// consumed backlog and the pipe re-delivers it (guaranteed duplicate
+    /// delivery). Mirrors the SQS->Lambda poller's snapshot hook. `None` in
+    /// memory-only mode.
+    sqs_snapshot_hook: Option<SnapshotHook>,
+    /// Set by `pick_messages` / `delete_messages`; drained once per poll to
+    /// flush at most one SQS snapshot per cycle rather than one per message.
+    sqs_dirty: Arc<AtomicBool>,
     /// Set by `set_checkpoint`; drained once per poll to flush at most one
     /// snapshot per cycle rather than one per delivered record.
     checkpoints_dirty: Arc<AtomicBool>,
@@ -118,6 +129,8 @@ impl PipesRunner {
             delivery,
             kms_hook: None,
             persist_hook: None,
+            sqs_snapshot_hook: None,
+            sqs_dirty: Arc::new(AtomicBool::new(false)),
             checkpoints_dirty: Arc::new(AtomicBool::new(false)),
             retry_counts: Mutex::new(HashMap::new()),
         }
@@ -126,6 +139,13 @@ impl PipesRunner {
     /// Wire the pipes snapshot hook so checkpoint advances are flushed to disk.
     pub fn with_persist_hook(mut self, hook: SnapshotHook) -> Self {
         self.persist_hook = Some(hook);
+        self
+    }
+
+    /// Wire the SQS snapshot hook so SQS-source acks (picked/deleted messages)
+    /// are flushed to disk and don't re-deliver on restart.
+    pub fn with_sqs_snapshot_hook(mut self, hook: SnapshotHook) -> Self {
+        self.sqs_snapshot_hook = Some(hook);
         self
     }
 
@@ -198,6 +218,17 @@ impl PipesRunner {
         // instead of re-replaying the retained backlog (M1).
         if self.checkpoints_dirty.swap(false, Ordering::Relaxed) {
             if let Some(hook) = &self.persist_hook {
+                hook().await;
+            }
+        }
+
+        // Flush SQS state once per cycle when an SQS-source pipe consumed
+        // messages this tick, so acked (deleted) and in-flight (hidden) messages
+        // survive a restart instead of the queue reverting and the pipe
+        // re-delivering the backlog. Done after the write guards are released so
+        // the blocking snapshot IO never runs under the SQS lock.
+        if self.sqs_dirty.swap(false, Ordering::Relaxed) {
+            if let Some(hook) = &self.sqs_snapshot_hook {
                 hook().await;
             }
         }
@@ -402,6 +433,12 @@ impl PipesRunner {
                 sqs_source_event(msg, &body, source_arn, &region),
             ));
         }
+        // Hiding messages for the visibility window is a durable mutation of SQS
+        // state; mark it so the poll flushes it and a restart doesn't re-pull an
+        // in-flight batch.
+        if !out.is_empty() {
+            self.sqs_dirty.store(true, Ordering::Relaxed);
+        }
         out
     }
 
@@ -435,7 +472,13 @@ impl PipesRunner {
             .to_string();
         let sqs = sqs_mas.get_or_create(&acct);
         if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == source_arn) {
+            let before = queue.messages.len();
             queue.messages.retain(|m| !ids.contains(&m.message_id));
+            // Deleting acked messages is the durable mutation that must survive a
+            // restart, else the pipe re-delivers them (duplicate delivery).
+            if queue.messages.len() != before {
+                self.sqs_dirty.store(true, Ordering::Relaxed);
+            }
         }
     }
 
@@ -1342,6 +1385,123 @@ mod tests {
         assert_eq!(
             after[kinesis_window_start(&after, "00002")].sequence_number,
             "00003"
+        );
+    }
+
+    /// Regression (bug-hunt Tier 0 side-channel-persistence): an SQS-source
+    /// pipe consumes (acks/deletes) source messages by mutating shared SQS
+    /// state in memory. Without the SQS snapshot hook that ack never reaches
+    /// disk, so a restart resurrects the whole consumed backlog and the pipe
+    /// re-delivers it. A poll that consumes messages must flush SQS state
+    /// through the hook, and the acked message must be gone.
+    #[tokio::test]
+    async fn sqs_source_pipe_persists_consumed_messages() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        use fakecloud_sqs::{SqsMessage, SqsQueue, SqsState};
+        use parking_lot::RwLock;
+        use std::collections::{BTreeMap, VecDeque};
+        use std::sync::atomic::AtomicUsize;
+
+        const ACCOUNT: &str = "123456789012";
+        const REGION: &str = "us-east-1";
+        let queue_arn = format!("arn:aws:sqs:{REGION}:{ACCOUNT}:pipe-src");
+        let queue_url = format!("http://localhost:4566/{ACCOUNT}/pipe-src");
+
+        let mut attrs = BTreeMap::new();
+        attrs.insert("VisibilityTimeout".to_string(), "30".to_string());
+        let queue = SqsQueue {
+            queue_name: "pipe-src".to_string(),
+            queue_url: queue_url.clone(),
+            arn: queue_arn.clone(),
+            created_at: Utc::now(),
+            messages: VecDeque::from(vec![SqsMessage {
+                message_id: "msg-1".to_string(),
+                receipt_handle: None,
+                md5_of_body: "d41d8cd98f00b204e9800998ecf8427e".to_string(),
+                body: "hello".to_string(),
+                sent_timestamp: 0,
+                attributes: BTreeMap::new(),
+                message_attributes: BTreeMap::new(),
+                visible_at: None,
+                receive_count: 0,
+                first_received_at: None,
+                message_group_id: None,
+                message_dedup_id: None,
+                created_at: Utc::now(),
+                sequence_number: None,
+            }]),
+            inflight: Vec::new(),
+            attributes: attrs,
+            is_fifo: false,
+            dedup_cache: BTreeMap::new(),
+            redrive_policy: None,
+            tags: BTreeMap::new(),
+            next_sequence_number: 0,
+            permission_labels: Vec::new(),
+            receipt_handle_map: BTreeMap::new(),
+            receive_attempt_cache: BTreeMap::new(),
+        };
+        let mut sqs: MultiAccountState<SqsState> =
+            MultiAccountState::new(ACCOUNT, REGION, "http://localhost:4566");
+        sqs.default_mut()
+            .queues
+            .insert(queue.queue_url.clone(), queue);
+        let sqs_state = Arc::new(RwLock::new(sqs));
+
+        // One RUNNING pipe with an SQS source and a FilterCriteria that matches
+        // nothing, so the message is acked via Pipes' "filter drop-as-ack" path
+        // (delete) without needing a live target — exactly the durable mutation
+        // that must be persisted.
+        let mut pipes = fakecloud_pipes::PipesAccounts::new();
+        pipes.accounts.insert(ACCOUNT.to_string(), {
+            let mut state = fakecloud_pipes::PipesState::default();
+            state.pipes.insert(
+                "p1".to_string(),
+                json!({
+                    "Arn": format!("arn:aws:pipes:{REGION}:{ACCOUNT}:pipe/p1"),
+                    "CurrentState": "RUNNING",
+                    "Source": queue_arn,
+                    "Target": format!("arn:aws:lambda:{REGION}:{ACCOUNT}:function:noop"),
+                    "SourceParameters": {
+                        "FilterCriteria": {
+                            "Filters": [{ "Pattern": "{\"body\":[\"__never_matches__\"]}" }]
+                        }
+                    }
+                }),
+            );
+            state
+        });
+        let pipes_state = Arc::new(RwLock::new(pipes));
+
+        let snapshot_calls = Arc::new(AtomicUsize::new(0));
+        let counter = snapshot_calls.clone();
+        let hook: SnapshotHook = Arc::new(move || {
+            let counter = counter.clone();
+            Box::pin(async move {
+                counter.fetch_add(1, Ordering::SeqCst);
+            })
+        });
+
+        let runner = Arc::new(
+            PipesRunner::new(pipes_state, sqs_state.clone(), Arc::new(DeliveryBus::new()))
+                .with_sqs_snapshot_hook(hook),
+        );
+        runner.poll().await;
+
+        // The consumed message was acked (deleted) from the source queue...
+        {
+            let sqs = sqs_state.read();
+            let queue = sqs.get(ACCOUNT).unwrap().queues.values().next().unwrap();
+            assert!(
+                queue.messages.is_empty(),
+                "filtered-out source message must be acked (deleted)"
+            );
+        }
+        // ...and that ack was flushed through the SQS snapshot hook so it
+        // survives a restart instead of re-delivering.
+        assert!(
+            snapshot_calls.load(Ordering::SeqCst) >= 1,
+            "consuming SQS messages must persist SQS state through the hook"
         );
     }
 }
