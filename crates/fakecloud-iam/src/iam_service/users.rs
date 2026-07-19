@@ -11,7 +11,8 @@ use crate::xml_responses;
 use super::{
     empty_response, extract_access_key, generate_id, generate_long_id, parse_tag_keys, parse_tags,
     partition_for_region, required_param_with_code, resolve_calling_user, tags_xml, url_encode,
-    validate_optional_string_length_with_code, validate_string_length_with_code, IamService,
+    validate_optional_string_length_with_code, validate_string_length_with_code, validate_tags,
+    validate_untag_keys, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -68,6 +69,50 @@ fn ensure_user_can_be_deleted(state: &IamState, user_name: &str) -> Result<(), A
             StatusCode::CONFLICT,
             "DeleteConflict",
             "Cannot delete entity, must delete policies first.".to_string(),
+        ));
+    }
+
+    if state.login_profiles.contains_key(user_name) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "DeleteConflict",
+            "Cannot delete entity, must delete login profile first.".to_string(),
+        ));
+    }
+
+    if state
+        .signing_certificates
+        .get(user_name)
+        .is_some_and(|c| !c.is_empty())
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "DeleteConflict",
+            "Cannot delete entity, must delete signing certificates first.".to_string(),
+        ));
+    }
+
+    if state
+        .ssh_public_keys
+        .get(user_name)
+        .is_some_and(|k| !k.is_empty())
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "DeleteConflict",
+            "Cannot delete entity, must delete SSH public keys first.".to_string(),
+        ));
+    }
+
+    if state
+        .virtual_mfa_devices
+        .values()
+        .any(|d| d.user.as_deref() == Some(user_name))
+    {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::CONFLICT,
+            "DeleteConflict",
+            "Cannot delete entity, must deactivate MFA device first.".to_string(),
         ));
     }
 
@@ -163,6 +208,7 @@ impl IamService {
             .cloned()
             .unwrap_or_else(|| "/".to_string());
         let tags = parse_tags(&req.query_params);
+        validate_tags(&tags, 0)?;
         let permissions_boundary = req.query_params.get("PermissionsBoundary").cloned();
 
         let partition = partition_for_region(&req.region);
@@ -287,6 +333,7 @@ impl IamService {
         state.user_inline_policies.remove(&user_name);
         state.login_profiles.remove(&user_name);
         state.signing_certificates.remove(&user_name);
+        state.ssh_public_keys.remove(&user_name);
 
         let xml = empty_response("DeleteUser", &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -443,6 +490,16 @@ impl IamService {
             )
         })?;
 
+        // Count existing tags that won't be overwritten by the new tags, so the
+        // 50-tag ceiling is enforced against the post-merge total (mirrors
+        // TagRole/TagPolicy).
+        let existing_count = user
+            .tags
+            .iter()
+            .filter(|t| !new_tags.iter().any(|nt| nt.key == t.key))
+            .count();
+        validate_tags(&new_tags, existing_count)?;
+
         for new_tag in new_tags {
             if let Some(existing) = user.tags.iter_mut().find(|t| t.key == new_tag.key) {
                 existing.value = new_tag.value;
@@ -461,6 +518,7 @@ impl IamService {
         let user_name = required_param_with_code(&req.query_params, "UserName", "NoSuchEntity")?;
         validate_string_length_with_code("userName", &user_name, 1, 64, "NoSuchEntity")?;
         let tag_keys = parse_tag_keys(&req.query_params);
+        validate_untag_keys(&tag_keys)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
@@ -1562,8 +1620,16 @@ impl IamService {
             ));
         }
 
-        // Check policy exists (allow AWS managed policies)
-        if !policy_arn.contains(":aws:policy/") && !state.policies.contains_key(&policy_arn) {
+        // Check the policy exists. An AWS-managed ARN must resolve in the
+        // managed-policy catalog (a bogus `arn:aws:iam::aws:policy/DoesNotExist`
+        // is NoSuchEntity, not silently accepted); a customer-managed ARN must
+        // exist in state.
+        let policy_exists = if policy_arn.contains(":aws:policy/") {
+            crate::managed_policies::lookup(&policy_arn).is_some()
+        } else {
+            state.policies.contains_key(&policy_arn)
+        };
+        if !policy_exists {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",

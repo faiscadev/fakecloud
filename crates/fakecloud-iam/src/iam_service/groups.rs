@@ -644,9 +644,16 @@ impl IamService {
             ));
         }
 
-        // Check policy exists (allow AWS managed policies). Mirrors the
-        // existence check in attach_role_policy / attach_user_policy.
-        if !policy_arn.contains(":aws:policy/") && !state.policies.contains_key(&policy_arn) {
+        // Check the policy exists. Mirrors attach_role_policy / attach_user_policy:
+        // an AWS-managed ARN must resolve in the managed-policy catalog (a bogus
+        // `arn:aws:iam::aws:policy/DoesNotExist` is NoSuchEntity, not silently
+        // accepted); a customer-managed ARN must exist in state.
+        let policy_exists = if policy_arn.contains(":aws:policy/") {
+            crate::managed_policies::lookup(&policy_arn).is_some()
+        } else {
+            state.policies.contains_key(&policy_arn)
+        };
+        if !policy_exists {
             return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
                 "NoSuchEntity",

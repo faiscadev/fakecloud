@@ -224,6 +224,22 @@ impl Route53Service {
             .map(|a| a.hosted_zones.values().cloned().collect())
             .unwrap_or_default();
         drop(state);
+        // Apply the server-side filters AWS supports: `delegationsetid` keeps
+        // only zones assigned to that reusable delegation set, and
+        // `hostedzonetype=PrivateHostedZone` keeps only private zones. Without
+        // these, private/public zones leaked across a filtered query and the
+        // page counts were wrong.
+        if let Some(ds_id) = req
+            .query_params
+            .get("delegationsetid")
+            .filter(|s| !s.is_empty())
+        {
+            let ds_id = strip_zone_prefix(ds_id);
+            zones.retain(|z| z.delegation_set_id.as_deref() == Some(ds_id.as_str()));
+        }
+        if req.query_params.get("hostedzonetype").map(|s| s.as_str()) == Some("PrivateHostedZone") {
+            zones.retain(|z| z.private_zone);
+        }
         zones.sort_by(|a, b| a.id.cmp(&b.id));
 
         // Paginate on marker (the next zone id) + maxitems.

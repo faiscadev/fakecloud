@@ -60,6 +60,12 @@ pub(crate) fn default_zone_records(name: &str, name_servers: &[String]) -> Vec<R
 
 pub(crate) fn normalize_rrset(r: &ResourceRecordSet) -> ResourceRecordSet {
     let mut out = r.clone();
+    // Route 53 lowercases record names on store and matches them
+    // case-insensitively. Normalizing to lowercase here keeps stored records
+    // canonical (so `ListResourceRecordSets` doesn't echo mixed case back and
+    // cause a Terraform perpetual diff) and makes CREATE duplicate-detection
+    // and DELETE/UPSERT matching case-insensitive.
+    out.name = out.name.to_ascii_lowercase();
     if !out.name.ends_with('.') {
         out.name.push('.');
     }
@@ -67,7 +73,12 @@ pub(crate) fn normalize_rrset(r: &ResourceRecordSet) -> ResourceRecordSet {
 }
 
 pub(crate) fn rrset_matches(a: &ResourceRecordSet, b: &ResourceRecordSet) -> bool {
-    a.name == b.name && a.record_type == b.record_type && a.set_identifier == b.set_identifier
+    // Compare names case-insensitively — AWS treats DNS names as
+    // case-insensitive, and older stored records (e.g. default SOA/NS seeded
+    // from a mixed-case zone name) may not be lowercased.
+    a.name.eq_ignore_ascii_case(&b.name)
+        && a.record_type == b.record_type
+        && a.set_identifier == b.set_identifier
 }
 
 /// Sorted multiset of a record set's values (resource records + an alias
@@ -131,6 +142,21 @@ pub(crate) fn validate_rrset_in_zone(
     if !has_values && r.alias_target.is_none() {
         return Err(invalid_change_batch(format!(
             "Invalid resource record set [name='{}', type='{}']: must specify either ResourceRecords or AliasTarget",
+            r.name, r.record_type
+        )));
+    }
+    // AliasTarget is mutually exclusive with both ResourceRecords and TTL: an
+    // alias record's target is resolved dynamically, so AWS rejects a record
+    // that also carries literal values or a TTL with InvalidChangeBatch.
+    if r.alias_target.is_some() && has_values {
+        return Err(invalid_change_batch(format!(
+            "Invalid resource record set [name='{}', type='{}']: may not specify both AliasTarget and ResourceRecords",
+            r.name, r.record_type
+        )));
+    }
+    if r.alias_target.is_some() && r.ttl.is_some() {
+        return Err(invalid_change_batch(format!(
+            "Invalid resource record set [name='{}', type='{}']: may not specify a TTL for an alias record",
             r.name, r.record_type
         )));
     }
