@@ -388,6 +388,130 @@ async fn sts_assume_role_with_web_identity() {
 }
 
 #[tokio::test]
+async fn sts_assume_role_with_web_identity_echoes_token_fields() {
+    use base64::Engine;
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    server
+        .iam_client()
+        .await
+        .create_role()
+        .role_name("web-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithWebIdentity"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // A JWT with `sub`/`aud` and an AWS source_identity claim but no `iss`,
+    // so it doesn't require a registered OIDC provider. `Provider` is then
+    // sourced from the ProviderId parameter (OAuth 2.0 behaviour).
+    let b64u = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let header = b64u.encode(br#"{"alg":"none","typ":"JWT"}"#);
+    let payload = b64u.encode(
+        br#"{"sub":"user-abc-123","aud":"my-client-id","https://aws.amazon.com/source_identity":"alice"}"#,
+    );
+    let token = format!("{header}.{payload}.sig");
+
+    let resp = client
+        .assume_role_with_web_identity()
+        .role_arn("arn:aws:iam::123456789012:role/web-role")
+        .role_session_name("web-session")
+        .web_identity_token(token)
+        .provider_id("my-idp.example.com")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.subject_from_web_identity_token(), Some("user-abc-123"));
+    assert_eq!(resp.audience(), Some("my-client-id"));
+    assert_eq!(resp.provider(), Some("my-idp.example.com"));
+    assert_eq!(resp.source_identity(), Some("alice"));
+}
+
+#[tokio::test]
+async fn sts_assume_role_with_saml_echoes_assertion_fields() {
+    use base64::Engine;
+    let server = TestServer::start().await;
+    let client = server.sts_client().await;
+    server
+        .iam_client()
+        .await
+        .create_role()
+        .role_name("saml-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRoleWithSAML"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let assertion_xml = r#"<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol" xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+  <saml:Issuer>https://idp.example.com/shibboleth</saml:Issuer>
+  <saml:Assertion>
+    <saml:Subject>
+      <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:transient">SamlExampleUser</saml:NameID>
+    </saml:Subject>
+    <saml:Conditions>
+      <saml:AudienceRestriction>
+        <saml:Audience>https://signin.aws.amazon.com/saml</saml:Audience>
+      </saml:AudienceRestriction>
+    </saml:Conditions>
+    <saml:AttributeStatement>
+      <saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/SourceIdentity">
+        <saml:AttributeValue>bob</saml:AttributeValue>
+      </saml:Attribute>
+    </saml:AttributeStatement>
+  </saml:Assertion>
+</samlp:Response>"#;
+    let assertion = base64::engine::general_purpose::STANDARD.encode(assertion_xml);
+
+    let resp = client
+        .assume_role_with_saml()
+        .role_arn("arn:aws:iam::123456789012:role/saml-role")
+        .principal_arn("arn:aws:iam::123456789012:saml-provider/MyIdP")
+        .saml_assertion(assertion)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.subject(), Some("SamlExampleUser"));
+    assert_eq!(resp.subject_type(), Some("transient"));
+    assert_eq!(resp.issuer(), Some("https://idp.example.com/shibboleth"));
+    assert_eq!(resp.audience(), Some("https://signin.aws.amazon.com/saml"));
+    assert_eq!(resp.source_identity(), Some("bob"));
+    // NameQualifier is a non-empty hash derived from issuer + account + provider.
+    assert!(resp.name_qualifier().is_some_and(|q| !q.is_empty()));
+}
+
+#[tokio::test]
+async fn sts_assume_role_echoes_source_identity() {
+    let server = TestServer::start().await;
+    let sts = server.sts_client().await;
+    let iam = server.iam_client().await;
+
+    let trust_policy = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":["sts:AssumeRole","sts:SetSourceIdentity"]}]}"#;
+    iam.create_role()
+        .role_name("src-role")
+        .assume_role_policy_document(trust_policy)
+        .send()
+        .await
+        .unwrap();
+
+    let resp = sts
+        .assume_role()
+        .role_arn("arn:aws:iam::123456789012:role/src-role")
+        .role_session_name("src-session")
+        .source_identity("carol")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(resp.source_identity(), Some("carol"));
+}
+
+#[tokio::test]
 async fn sts_assume_role_returns_correct_arn() {
     let server = TestServer::start().await;
     let sts = server.sts_client().await;

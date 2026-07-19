@@ -605,15 +605,38 @@ impl StsCredentials {
 }
 
 /// Inputs shared by all assume-role variants used to build an STS XML response.
+///
+/// The optional fields carry values decoded from the request (a JWT for
+/// WebIdentity, a SAML assertion for SAML, or the `SourceIdentity` parameter
+/// for AssumeRole). AWS echoes these back in the response, and the value must
+/// survive so callers can read `SubjectFromWebIdentityToken`, `Provider`,
+/// `Subject`, etc., and so `SourceIdentity` persists across role chaining.
+/// Each field is only rendered by the builder(s) whose response shape declares
+/// it in the STS model.
+#[derive(Default)]
 pub struct AssumedRoleInfo<'a> {
     pub role_arn: &'a str,
     pub role_session_name: &'a str,
     pub assumed_role_id: &'a str,
     pub account_id: &'a str,
     pub partition: &'a str,
-    pub creds: &'a StsCredentials,
+    pub creds: Option<&'a StsCredentials>,
     pub expiration: &'a str,
     pub request_id: &'a str,
+    /// Echoed by AssumeRole / AssumeRoleWithWebIdentity / AssumeRoleWithSAML.
+    pub source_identity: Option<&'a str>,
+    // --- AssumeRoleWithWebIdentity ---
+    /// The token's `sub` claim.
+    pub subject_from_web_identity_token: Option<&'a str>,
+    /// The token's `iss` claim (or the `ProviderId` parameter for OAuth 2.0).
+    pub provider: Option<&'a str>,
+    // --- AssumeRoleWithWebIdentity + AssumeRoleWithSAML share `Audience` ---
+    pub audience: Option<&'a str>,
+    // --- AssumeRoleWithSAML ---
+    pub subject: Option<&'a str>,
+    pub subject_type: Option<&'a str>,
+    pub issuer: Option<&'a str>,
+    pub name_qualifier: Option<&'a str>,
 }
 
 impl AssumedRoleInfo<'_> {
@@ -624,10 +647,24 @@ impl AssumedRoleInfo<'_> {
             self.partition, self.account_id, role_name, self.role_session_name
         )
     }
+
+    fn creds(&self) -> &StsCredentials {
+        self.creds.expect("AssumedRoleInfo.creds must be set")
+    }
+
+    /// Render one optional `<Tag>value</Tag>` line, XML-escaped, or nothing.
+    fn opt_element(tag: &str, value: Option<&str>) -> String {
+        match value {
+            Some(v) => format!("\n    <{tag}>{}</{tag}>", xml_escape(v)),
+            None => String::new(),
+        }
+    }
 }
 
 pub fn assume_role_response(info: &AssumedRoleInfo<'_>) -> String {
     let assumed_role_arn = info.assumed_role_arn();
+    let creds = info.creds();
+    let source_identity = AssumedRoleInfo::opt_element("SourceIdentity", info.source_identity);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <AssumeRoleResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -641,15 +678,15 @@ pub fn assume_role_response(info: &AssumedRoleInfo<'_>) -> String {
     <AssumedRoleUser>
       <AssumedRoleId>{role_id}:{session}</AssumedRoleId>
       <Arn>{assumed_role_arn}</Arn>
-    </AssumedRoleUser>
+    </AssumedRoleUser>{source_identity}
   </AssumeRoleResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </AssumeRoleResponse>"#,
-        access_key_id = info.creds.access_key_id,
-        secret_access_key = info.creds.secret_access_key,
-        session_token = info.creds.session_token,
+        access_key_id = creds.access_key_id,
+        secret_access_key = creds.secret_access_key,
+        session_token = creds.session_token,
         role_id = info.assumed_role_id,
         assumed_role_arn = assumed_role_arn,
         session = info.role_session_name,
@@ -660,6 +697,15 @@ pub fn assume_role_response(info: &AssumedRoleInfo<'_>) -> String {
 
 pub fn assume_role_with_web_identity_response(info: &AssumedRoleInfo<'_>) -> String {
     let assumed_role_arn = info.assumed_role_arn();
+    let creds = info.creds();
+    // Fields decoded from the web identity token; AWS echoes each back.
+    let subject = AssumedRoleInfo::opt_element(
+        "SubjectFromWebIdentityToken",
+        info.subject_from_web_identity_token,
+    );
+    let audience = AssumedRoleInfo::opt_element("Audience", info.audience);
+    let provider = AssumedRoleInfo::opt_element("Provider", info.provider);
+    let source_identity = AssumedRoleInfo::opt_element("SourceIdentity", info.source_identity);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <AssumeRoleWithWebIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -673,15 +719,15 @@ pub fn assume_role_with_web_identity_response(info: &AssumedRoleInfo<'_>) -> Str
     <AssumedRoleUser>
       <AssumedRoleId>{assumed_role_id}:{session}</AssumedRoleId>
       <Arn>{assumed_role_arn}</Arn>
-    </AssumedRoleUser>
+    </AssumedRoleUser>{subject}{audience}{provider}{source_identity}
   </AssumeRoleWithWebIdentityResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </AssumeRoleWithWebIdentityResponse>"#,
-        access_key_id = info.creds.access_key_id,
-        secret_access_key = info.creds.secret_access_key,
-        session_token = info.creds.session_token,
+        access_key_id = creds.access_key_id,
+        secret_access_key = creds.secret_access_key,
+        session_token = creds.session_token,
         assumed_role_id = info.assumed_role_id,
         assumed_role_arn = assumed_role_arn,
         session = info.role_session_name,
@@ -692,6 +738,14 @@ pub fn assume_role_with_web_identity_response(info: &AssumedRoleInfo<'_>) -> Str
 
 pub fn assume_role_with_saml_response(info: &AssumedRoleInfo<'_>) -> String {
     let assumed_role_arn = info.assumed_role_arn();
+    let creds = info.creds();
+    // Fields decoded from the SAML assertion; AWS echoes each back.
+    let subject = AssumedRoleInfo::opt_element("Subject", info.subject);
+    let subject_type = AssumedRoleInfo::opt_element("SubjectType", info.subject_type);
+    let issuer = AssumedRoleInfo::opt_element("Issuer", info.issuer);
+    let audience = AssumedRoleInfo::opt_element("Audience", info.audience);
+    let name_qualifier = AssumedRoleInfo::opt_element("NameQualifier", info.name_qualifier);
+    let source_identity = AssumedRoleInfo::opt_element("SourceIdentity", info.source_identity);
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
 <AssumeRoleWithSAMLResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
@@ -705,15 +759,15 @@ pub fn assume_role_with_saml_response(info: &AssumedRoleInfo<'_>) -> String {
     <AssumedRoleUser>
       <AssumedRoleId>{assumed_role_id}:{session}</AssumedRoleId>
       <Arn>{assumed_role_arn}</Arn>
-    </AssumedRoleUser>
+    </AssumedRoleUser>{subject}{subject_type}{issuer}{audience}{name_qualifier}{source_identity}
   </AssumeRoleWithSAMLResult>
   <ResponseMetadata>
     <RequestId>{request_id}</RequestId>
   </ResponseMetadata>
 </AssumeRoleWithSAMLResponse>"#,
-        access_key_id = info.creds.access_key_id,
-        secret_access_key = info.creds.secret_access_key,
-        session_token = info.creds.session_token,
+        access_key_id = creds.access_key_id,
+        secret_access_key = creds.secret_access_key,
+        session_token = creds.session_token,
         assumed_role_id = info.assumed_role_id,
         assumed_role_arn = assumed_role_arn,
         session = info.role_session_name,

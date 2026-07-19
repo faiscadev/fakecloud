@@ -75,6 +75,21 @@ pub(crate) fn is_valid_number(s: &str) -> bool {
     normalize_decimal(s).is_some()
 }
 
+/// Canonical decimal form of a DynamoDB Number, so numerically-equal literals
+/// (`"1"`, `"1.0"`, `"1e0"`) collapse to one key. Used to detect duplicate
+/// members in a Number Set (`NS`), which AWS compares by numeric value rather
+/// than string. Returns `None` for a malformed number.
+pub(crate) fn canonical_number(s: &str) -> Option<String> {
+    let (neg, (int_part, frac_part)) = normalize_decimal(s)?;
+    let sign = if neg { "-" } else { "" };
+    let int_str = if int_part.is_empty() { "0" } else { &int_part };
+    if frac_part.is_empty() {
+        Some(format!("{sign}{int_str}"))
+    } else {
+        Some(format!("{sign}{int_str}.{frac_part}"))
+    }
+}
+
 /// Decompose a decimal string into `(is_negative, (int_digits, frac_digits))`
 /// with insignificant zeros stripped so the magnitude compare is purely
 /// lexical. Returns `None` for non-numeric input; negative zero normalizes

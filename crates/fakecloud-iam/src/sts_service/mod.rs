@@ -455,11 +455,20 @@ fn extract_account_from_arn(arn: &str) -> Option<String> {
 struct SamlClaims {
     issuer: Option<String>,
     audience: Option<String>,
+    /// The `<NameID>` text — STS returns this as `Subject`.
+    subject: Option<String>,
+    /// The `<NameID Format="...">` value with the standard
+    /// `urn:oasis:names:tc:SAML:*:nameid-format:` prefix stripped — STS
+    /// returns this as `SubjectType` (e.g. `transient`, `persistent`).
+    subject_type: Option<String>,
+    /// The `https://aws.amazon.com/SAML/Attributes/SourceIdentity` attribute
+    /// value, if the IdP included it — STS echoes it as `SourceIdentity`.
+    source_identity: Option<String>,
 }
 
-/// Pull `Issuer` and `Audience` out of a base64-encoded SAML assertion.
-/// Returns whatever fields could be extracted (both fields are optional);
-/// callers decide what to do when one is missing.
+/// Pull the response-relevant claims out of a base64-encoded SAML assertion.
+/// Returns whatever fields could be extracted (all optional); callers decide
+/// what to do when one is missing.
 fn extract_saml_claims(saml_b64: &str) -> SamlClaims {
     use base64::Engine;
     let mut claims = SamlClaims::default();
@@ -473,7 +482,105 @@ fn extract_saml_claims(saml_b64: &str) -> SamlClaims {
     };
     claims.issuer = extract_xml_text_after(&xml_str, "Issuer");
     claims.audience = extract_xml_text_after(&xml_str, "Audience");
+    claims.subject = extract_xml_text_after(&xml_str, "NameID");
+    claims.subject_type = extract_nameid_format(&xml_str);
+    claims.source_identity = extract_saml_attribute(
+        &xml_str,
+        "https://aws.amazon.com/SAML/Attributes/SourceIdentity",
+    );
     claims
+}
+
+/// Compute the STS `NameQualifier` for an `AssumeRoleWithSAML` response.
+/// AWS defines it as `BASE64(SHA1(Issuer + AccountId + "/" + ProviderName))`
+/// where `ProviderName` is the friendly name (last ARN component) of the SAML
+/// provider. Uniquely identifies a user together with `Subject`.
+pub(super) fn compute_saml_name_qualifier(
+    issuer: &str,
+    account_id: &str,
+    provider_name: &str,
+) -> String {
+    use base64::Engine;
+    use sha1::{Digest, Sha1};
+    let mut hasher = Sha1::new();
+    hasher.update(issuer.as_bytes());
+    hasher.update(account_id.as_bytes());
+    hasher.update(b"/");
+    hasher.update(provider_name.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(hasher.finalize())
+}
+
+/// Extract the `Format` attribute of the first `<NameID>` element and strip the
+/// standard SAML name-id-format URI prefix, matching how STS surfaces
+/// `SubjectType` (`urn:oasis:names:tc:SAML:2.0:nameid-format:transient`
+/// becomes `transient`). Defaults to `transient` when a NameID is present with
+/// no Format, per AWS.
+fn extract_nameid_format(xml: &str) -> Option<String> {
+    let mut search_from = 0;
+    while let Some(idx) = xml[search_from..].find('<') {
+        let abs = search_from + idx;
+        let after_lt = &xml[abs + 1..];
+        let tag_start = after_lt
+            .split_once(':')
+            .map(|(_pfx, rest)| rest)
+            .unwrap_or(after_lt);
+        if let Some(after_name) = tag_start.strip_prefix("NameID") {
+            let terminator = after_name.chars().next();
+            if matches!(terminator, Some(' ' | '\t' | '\n' | '>' | '/')) {
+                // The NameID opening tag runs up to the next '>'.
+                let gt = after_lt.find('>')?;
+                let open_tag = &after_lt[..gt];
+                let format = extract_attr_value(open_tag, "Format")
+                    .map(|f| strip_nameid_format_prefix(&f))
+                    .unwrap_or_else(|| "transient".to_string());
+                return Some(format);
+            }
+        }
+        search_from = abs + 1;
+    }
+    None
+}
+
+/// Strip the `urn:oasis:names:tc:SAML:<ver>:nameid-format:` prefix from a
+/// NameID Format URI, returning the trailing token (e.g. `transient`).
+fn strip_nameid_format_prefix(format: &str) -> String {
+    match format.rsplit_once("nameid-format:") {
+        Some((_, tail)) if !tail.is_empty() => tail.to_string(),
+        _ => format.to_string(),
+    }
+}
+
+/// Read the value of `attr="..."` (or `attr='...'`) from an opening-tag body.
+fn extract_attr_value(open_tag: &str, attr: &str) -> Option<String> {
+    let key = open_tag.find(attr)?;
+    let rest = &open_tag[key + attr.len()..];
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix('=')?.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    let body = &rest[1..];
+    let end = body.find(quote)?;
+    Some(body[..end].to_string())
+}
+
+/// Extract a SAML `<Attribute Name="...">` element's first `<AttributeValue>`
+/// text. Used to surface AWS-namespaced attributes like `SourceIdentity`.
+fn extract_saml_attribute(xml: &str, attribute_name: &str) -> Option<String> {
+    let pos = xml.find(attribute_name)?;
+    let after = &xml[pos..];
+    let av_start = after.find("AttributeValue")?;
+    let after_av = &after[av_start..];
+    let gt_pos = after_av.find('>')?;
+    let value_start = &after_av[gt_pos + 1..];
+    let lt_pos = value_start.find('<')?;
+    let value = value_start[..lt_pos].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
 }
 
 /// Find the first occurrence of an opening tag with `local_name` (with or
@@ -754,6 +861,62 @@ mod tests {
             Some("111111111111".to_string())
         );
         assert_eq!(extract_account_from_arn("invalid"), None);
+    }
+
+    #[test]
+    fn saml_claims_extracts_subject_and_source_identity() {
+        use base64::Engine;
+        let xml = r#"<Response xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
+          <saml:Issuer>https://idp.test/shibboleth</saml:Issuer>
+          <saml:NameID Format="urn:oasis:names:tc:SAML:2.0:nameid-format:persistent">jdoe</saml:NameID>
+          <saml:Audience>https://signin.aws.amazon.com/saml</saml:Audience>
+          <saml:Attribute Name="https://aws.amazon.com/SAML/Attributes/SourceIdentity">
+            <saml:AttributeValue>jdoe-src</saml:AttributeValue>
+          </saml:Attribute>
+        </Response>"#;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(xml);
+        let claims = extract_saml_claims(&b64);
+        assert_eq!(
+            claims.issuer.as_deref(),
+            Some("https://idp.test/shibboleth")
+        );
+        assert_eq!(
+            claims.audience.as_deref(),
+            Some("https://signin.aws.amazon.com/saml")
+        );
+        assert_eq!(claims.subject.as_deref(), Some("jdoe"));
+        assert_eq!(claims.subject_type.as_deref(), Some("persistent"));
+        assert_eq!(claims.source_identity.as_deref(), Some("jdoe-src"));
+    }
+
+    #[test]
+    fn nameid_format_defaults_to_transient_when_absent() {
+        assert_eq!(
+            extract_nameid_format("<NameID>bob</NameID>").as_deref(),
+            Some("transient")
+        );
+        assert_eq!(
+            extract_nameid_format(
+                r#"<saml:NameID Format="urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress">a@b</saml:NameID>"#
+            )
+            .as_deref(),
+            Some("emailAddress")
+        );
+    }
+
+    #[test]
+    fn name_qualifier_is_deterministic_base64_sha1() {
+        // BASE64(SHA1("https://example.com/saml" + "123456789012" + "/MySAMLIdP")).
+        let q =
+            compute_saml_name_qualifier("https://example.com/saml", "123456789012", "MySAMLIdP");
+        // SHA1 -> 20 bytes -> 28-char base64 with one '=' pad.
+        assert_eq!(q.len(), 28);
+        assert!(q.ends_with('='));
+        // Deterministic.
+        assert_eq!(
+            q,
+            compute_saml_name_qualifier("https://example.com/saml", "123456789012", "MySAMLIdP")
+        );
     }
 
     #[test]

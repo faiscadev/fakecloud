@@ -302,9 +302,13 @@ impl StsService {
             assumed_role_id: &role_id,
             account_id: &account_id,
             partition,
-            creds: &creds,
+            creds: Some(&creds),
             expiration: &expiration,
             request_id: &req.request_id,
+            // SourceIdentity is echoed back so it survives across role
+            // chaining (AWS returns it whenever the caller supplied one).
+            source_identity: req.query_params.get("SourceIdentity").map(|s| s.as_str()),
+            ..Default::default()
         });
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
@@ -605,6 +609,22 @@ impl StsService {
             },
         );
 
+        // Echo the token-derived fields AWS returns. `Provider` is the token's
+        // `iss` for OIDC ID tokens, or the `ProviderId` parameter for OAuth 2.0
+        // access tokens. `Audience` is the token's client-id claim; AWS returns
+        // a single value, so surface the first. `SourceIdentity` comes from the
+        // AWS-namespaced JWT claim when the IdP set one.
+        let subject_from_web_identity_token = jwt.as_ref().and_then(|c| c.sub.as_deref());
+        let provider = jwt
+            .as_ref()
+            .and_then(|c| c.iss.as_deref())
+            .or(provider_id_param.as_deref());
+        let audience = jwt.as_ref().and_then(|c| c.aud.first().map(|s| s.as_str()));
+        let source_identity = jwt
+            .as_ref()
+            .and_then(|c| c.raw.get("https://aws.amazon.com/source_identity"))
+            .and_then(|v| v.as_str());
+
         let xml = xml_responses::assume_role_with_web_identity_response(
             &xml_responses::AssumedRoleInfo {
                 role_arn,
@@ -612,9 +632,14 @@ impl StsService {
                 assumed_role_id: &role_id,
                 account_id: &account_id,
                 partition,
-                creds: &creds,
+                creds: Some(&creds),
                 expiration: &expiration,
                 request_id: &req.request_id,
+                subject_from_web_identity_token,
+                provider,
+                audience,
+                source_identity,
+                ..Default::default()
             },
         );
         Ok(AwsResponse::xml(StatusCode::OK, xml))
@@ -827,15 +852,35 @@ impl StsService {
             },
         );
 
+        // NameQualifier is a hash over the issuer, account, and SAML provider
+        // friendly name (AWS pseudocode:
+        // `BASE64(SHA1(Issuer + AccountId + "/" + ProviderName))`). It requires
+        // an Issuer claim, so it stays absent when the assertion carries none.
+        let saml_provider_name = principal_arn
+            .rsplit("saml-provider/")
+            .next()
+            .unwrap_or(principal_arn);
+        let name_qualifier = saml_claims
+            .issuer
+            .as_deref()
+            .map(|iss| super::compute_saml_name_qualifier(iss, &account_id, saml_provider_name));
+
         let xml = xml_responses::assume_role_with_saml_response(&xml_responses::AssumedRoleInfo {
             role_arn,
             role_session_name: &role_session_name,
             assumed_role_id: &role_id,
             account_id: &account_id,
             partition,
-            creds: &creds,
+            creds: Some(&creds),
             expiration: &expiration,
             request_id: &req.request_id,
+            subject: saml_claims.subject.as_deref(),
+            subject_type: saml_claims.subject_type.as_deref(),
+            issuer: saml_claims.issuer.as_deref(),
+            audience: saml_claims.audience.as_deref(),
+            name_qualifier: name_qualifier.as_deref(),
+            source_identity: saml_claims.source_identity.as_deref(),
+            ..Default::default()
         });
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
