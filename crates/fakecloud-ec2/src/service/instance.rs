@@ -290,6 +290,31 @@ pub(crate) async fn run_instances(
     let mut sg_ids = indexed_list(&req.query_params, "SecurityGroupId");
     let user_data = req.query_params.get("UserData").cloned();
     let owner = req.account_id.clone();
+    // Honor launch-time `Monitoring.Enabled`, `EbsOptimized`, and
+    // `MetadataOptions.*` so DescribeInstances reflects them, matching CFN's
+    // `AWS::EC2::Instance` provisioner (which shares the same instance model).
+    let monitoring = req
+        .query_params
+        .get("Monitoring.Enabled")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let ebs_optimized = req
+        .query_params
+        .get("EbsOptimized")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+    let metadata_options = parse_metadata_options(&req.query_params);
+    // `IamInstanceProfile.Arn` / `.Name` (either half is accepted; synthesize
+    // the ARN from the name when only the name is given).
+    let iam_profile_arn = req
+        .query_params
+        .get("IamInstanceProfile.Arn")
+        .cloned()
+        .or_else(|| {
+            req.query_params
+                .get("IamInstanceProfile.Name")
+                .map(|n| format!("arn:aws:iam::{}:instance-profile/{n}", req.account_id))
+        });
     let az = format!(
         "{}a",
         if req.region.is_empty() {
@@ -439,21 +464,21 @@ pub(crate) async fn run_instances(
                 security_group_ids: sg_ids.clone(),
                 reservation_id: reservation_id.clone(),
                 ami_launch_index: idx as i64,
-                monitoring: false,
+                monitoring,
                 az: az.clone(),
                 launch_time: LAUNCH_TIME.to_string(),
                 container_id: None,
                 disable_api_termination: false,
                 disable_api_stop: false,
                 source_dest_check: true,
-                ebs_optimized: false,
+                ebs_optimized,
                 instance_initiated_shutdown_behavior: req
                     .query_params
                     .get("InstanceInitiatedShutdownBehavior")
                     .cloned()
                     .unwrap_or_else(|| "stop".to_string()),
                 user_data: user_data.clone().filter(|s| !s.is_empty()),
-                metadata_options: crate::state::MetadataOptions::default(),
+                metadata_options: metadata_options.clone(),
                 cpu_options: None,
                 bandwidth_weighting: None,
                 maintenance_options: crate::state::MaintenanceOptions::default(),
@@ -482,6 +507,23 @@ pub(crate) async fn run_instances(
                 &platform_details,
             ));
             state.instances.insert(id.clone(), inst);
+
+            // Record an IAM instance-profile association when the request
+            // supplies `IamInstanceProfile`, matching a direct
+            // AssociateIamInstanceProfile so
+            // DescribeIamInstanceProfileAssociations reflects it.
+            if let Some(profile_arn) = iam_profile_arn.clone() {
+                let assoc = crate::state::IamInstanceProfileAssociation {
+                    association_id: gen_id("iip-assoc"),
+                    instance_id: id.clone(),
+                    iam_instance_profile_arn: profile_arn,
+                    iam_instance_profile_id: gen_id("AIPA"),
+                    state: "associated".to_string(),
+                };
+                state
+                    .iam_instance_profile_associations
+                    .insert(assoc.association_id.clone(), assoc);
+            }
         }
     }
 
@@ -569,6 +611,38 @@ fn reconcile_started(
     }
 }
 
+/// Build a [`MetadataOptions`](crate::state::MetadataOptions) from launch-time
+/// `MetadataOptions.*` request params, defaulting each unset field to the AWS
+/// default. Shared by RunInstances (the CFN provisioner parses its own JSON
+/// property shape).
+fn parse_metadata_options(
+    params: &std::collections::HashMap<String, String>,
+) -> crate::state::MetadataOptions {
+    let default = crate::state::MetadataOptions::default();
+    crate::state::MetadataOptions {
+        http_tokens: params
+            .get("MetadataOptions.HttpTokens")
+            .cloned()
+            .unwrap_or(default.http_tokens),
+        http_endpoint: params
+            .get("MetadataOptions.HttpEndpoint")
+            .cloned()
+            .unwrap_or(default.http_endpoint),
+        http_put_response_hop_limit: params
+            .get("MetadataOptions.HttpPutResponseHopLimit")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(default.http_put_response_hop_limit),
+        http_protocol_ipv6: params
+            .get("MetadataOptions.HttpProtocolIpv6")
+            .cloned()
+            .unwrap_or(default.http_protocol_ipv6),
+        instance_metadata_tags: params
+            .get("MetadataOptions.InstanceMetadataTags")
+            .cloned()
+            .unwrap_or(default.instance_metadata_tags),
+    }
+}
+
 /// Inputs for a CloudFormation-driven `AWS::EC2::Instance` launch.
 #[derive(Debug, Clone, Default)]
 pub struct CfnInstanceSpec {
@@ -580,6 +654,20 @@ pub struct CfnInstanceSpec {
     pub key_name: Option<String>,
     pub user_data: Option<String>,
     pub private_ip: Option<String>,
+    /// Instance metadata service options (`MetadataOptions`). When present the
+    /// created instance reports these in DescribeInstances, matching a direct
+    /// RunInstances launch with the same options.
+    pub metadata_options: Option<crate::state::MetadataOptions>,
+    /// `EbsOptimized` — reflected in DescribeInstances `<ebsOptimized>`.
+    pub ebs_optimized: bool,
+    /// `Monitoring` — reflected in DescribeInstances `<monitoring><state>`.
+    pub monitoring: bool,
+    /// `IamInstanceProfile` (arn, name). When present, an
+    /// `IamInstanceProfileAssociation` is recorded so
+    /// DescribeIamInstanceProfileAssociations reflects it, mirroring a direct
+    /// AssociateIamInstanceProfile after launch.
+    pub iam_instance_profile_arn: Option<String>,
+    pub iam_instance_profile_name: Option<String>,
 }
 
 /// The Ref / GetAtt-resolvable attributes of a CFN-launched instance.
@@ -709,17 +797,17 @@ pub(crate) fn cfn_create_instance(
             security_group_ids: sg_ids,
             reservation_id: gen_id("r"),
             ami_launch_index: 0,
-            monitoring: false,
+            monitoring: spec.monitoring,
             az: az.clone(),
             launch_time: LAUNCH_TIME.to_string(),
             container_id: None,
             disable_api_termination: false,
             disable_api_stop: false,
             source_dest_check: true,
-            ebs_optimized: false,
+            ebs_optimized: spec.ebs_optimized,
             instance_initiated_shutdown_behavior: "stop".to_string(),
             user_data: spec.user_data.clone().filter(|s| !s.is_empty()),
-            metadata_options: crate::state::MetadataOptions::default(),
+            metadata_options: spec.metadata_options.clone().unwrap_or_default(),
             cpu_options: None,
             bandwidth_weighting: None,
             maintenance_options: crate::state::MaintenanceOptions::default(),
@@ -731,6 +819,27 @@ pub(crate) fn cfn_create_instance(
             enable_resource_name_dns_aaaa_record: false,
         };
         state.instances.insert(id.clone(), inst);
+
+        // Record an IAM instance-profile association when the template supplies
+        // `IamInstanceProfile`, mirroring a direct AssociateIamInstanceProfile
+        // so DescribeIamInstanceProfileAssociations reflects it. AWS accepts
+        // either Arn or Name; synthesize the missing half so it round-trips.
+        if spec.iam_instance_profile_arn.is_some() || spec.iam_instance_profile_name.is_some() {
+            let arn = spec.iam_instance_profile_arn.clone().unwrap_or_else(|| {
+                let name = spec.iam_instance_profile_name.clone().unwrap_or_default();
+                format!("arn:aws:iam::{account_id}:instance-profile/{name}")
+            });
+            let assoc = crate::state::IamInstanceProfileAssociation {
+                association_id: gen_id("iip-assoc"),
+                instance_id: id.clone(),
+                iam_instance_profile_arn: arn,
+                iam_instance_profile_id: gen_id("AIPA"),
+                state: "associated".to_string(),
+            };
+            state
+                .iam_instance_profile_associations
+                .insert(assoc.association_id.clone(), assoc);
+        }
     }
 
     CfnInstanceAttrs {
@@ -2210,6 +2319,44 @@ mod modify_tests {
             enable_resource_name_dns_aaaa_record: false,
         };
         state.instances.insert(id.to_string(), inst);
+    }
+
+    #[test]
+    fn cfn_instance_honors_metadata_monitoring_ebs_and_iam_profile() {
+        // Fix #4: the CFN AWS::EC2::Instance provisioner must carry through
+        // MetadataOptions, Monitoring, EbsOptimized, and IamInstanceProfile so
+        // DescribeInstances (and the IAM-profile association list) reflect them,
+        // matching a direct RunInstances launch.
+        let svc = Ec2Service::new();
+        let spec = CfnInstanceSpec {
+            image_id: Some("ami-123".into()),
+            instance_type: Some("t3.small".into()),
+            metadata_options: Some(crate::state::MetadataOptions {
+                http_tokens: "required".into(),
+                http_put_response_hop_limit: 3,
+                ..Default::default()
+            }),
+            ebs_optimized: true,
+            monitoring: true,
+            iam_instance_profile_name: Some("my-profile".into()),
+            ..Default::default()
+        };
+        let attrs = cfn_create_instance(&svc, "000000000000", "us-east-1", &spec);
+
+        let accounts = svc.state.read();
+        let state = accounts.get("000000000000").unwrap();
+        let inst = state.instances.get(&attrs.instance_id).unwrap();
+        assert_eq!(inst.metadata_options.http_tokens, "required");
+        assert_eq!(inst.metadata_options.http_put_response_hop_limit, 3);
+        assert!(inst.ebs_optimized);
+        assert!(inst.monitoring);
+        // An IAM instance-profile association was recorded for the instance.
+        let assoc = state
+            .iam_instance_profile_associations
+            .values()
+            .find(|a| a.instance_id == attrs.instance_id)
+            .expect("iam instance profile association should be recorded");
+        assert!(assoc.iam_instance_profile_arn.contains("my-profile"));
     }
 
     #[test]

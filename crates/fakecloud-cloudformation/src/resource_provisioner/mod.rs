@@ -914,6 +914,9 @@ pub struct ResourceProvisioner {
     pub mq_state: fakecloud_mq::SharedMqState,
     pub kafka_state: fakecloud_kafka::SharedKafkaState,
     pub ka2_state: fakecloud_kinesisanalyticsv2::SharedKa2State,
+    pub redshift_state: fakecloud_redshift::SharedRedshiftState,
+    pub docdb_state: fakecloud_docdb::SharedDocDbState,
+    pub neptune_state: fakecloud_neptune::SharedNeptuneState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1107,6 +1110,7 @@ mod mq;
 mod organizations;
 mod pipes;
 mod rds;
+mod redshiftlike;
 mod route;
 mod route53resolver;
 mod s3;
@@ -1224,6 +1228,9 @@ impl ResourceProvisioner {
             "AWS::RDS::DBProxy" => self.create_rds_db_proxy(resource),
             "AWS::RDS::DBInstance" => self.create_rds_db_instance(resource),
             "AWS::RDS::DBCluster" => self.create_rds_db_cluster(resource),
+            "AWS::Redshift::Cluster" => self.create_redshift_cluster(resource),
+            "AWS::DocDB::DBCluster" => self.create_docdb_cluster(resource),
+            "AWS::Neptune::DBCluster" => self.create_neptune_cluster(resource),
             "AWS::AutoScaling::LaunchConfiguration" => {
                 self.create_autoscaling_launch_configuration(resource)
             }
@@ -1782,6 +1789,13 @@ impl ResourceProvisioner {
                 self.get_att_ecs_capacity_provider(&resource.physical_id, attribute)
             }
             "AWS::ECR::Repository" => self.get_att_ecr_repository(&resource.physical_id, attribute),
+            "AWS::Redshift::Cluster" => {
+                self.get_att_redshift_cluster(&resource.physical_id, attribute)
+            }
+            "AWS::DocDB::DBCluster" => self.get_att_docdb_cluster(&resource.physical_id, attribute),
+            "AWS::Neptune::DBCluster" => {
+                self.get_att_neptune_cluster(&resource.physical_id, attribute)
+            }
             "AWS::ElasticLoadBalancingV2::LoadBalancer" => {
                 self.get_att_elbv2_load_balancer(&resource.physical_id, attribute)
             }
@@ -2064,6 +2078,9 @@ impl ResourceProvisioner {
             "AWS::RDS::DBProxy" => self.delete_rds_db_proxy(&resource.physical_id),
             "AWS::RDS::DBInstance" => self.delete_rds_db_instance(&resource.physical_id),
             "AWS::RDS::DBCluster" => self.delete_rds_db_cluster(&resource.physical_id),
+            "AWS::Redshift::Cluster" => self.delete_redshift_cluster(&resource.physical_id),
+            "AWS::DocDB::DBCluster" => self.delete_docdb_cluster(&resource.physical_id),
+            "AWS::Neptune::DBCluster" => self.delete_neptune_cluster(&resource.physical_id),
             "AWS::EC2::Instance" => {
                 // Queue terminating the REAL instance + reaping its backing
                 // container so the stack delete drain doesn't leak an EC2
@@ -3638,6 +3655,15 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             ka2_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            redshift_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_redshift::RedshiftAccounts::new(),
+            )),
+            docdb_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            neptune_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),

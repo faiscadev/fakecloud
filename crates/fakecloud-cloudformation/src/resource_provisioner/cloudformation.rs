@@ -119,6 +119,9 @@ impl ResourceProvisioner {
             mq_state: self.mq_state.clone(),
             kafka_state: self.kafka_state.clone(),
             ka2_state: self.ka2_state.clone(),
+            redshift_state: self.redshift_state.clone(),
+            docdb_state: self.docdb_state.clone(),
+            neptune_state: self.neptune_state.clone(),
             cloudformation_state: self.cloudformation_state.clone(),
             delivery: self.delivery.clone(),
             lambda_runtime: self.lambda_runtime.clone(),
@@ -174,6 +177,7 @@ impl ResourceProvisioner {
                     export_name: o.export_name.clone(),
                 })
                 .collect(),
+            enable_termination_protection: false,
         };
 
         {
