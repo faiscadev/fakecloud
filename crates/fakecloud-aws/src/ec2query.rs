@@ -19,7 +19,56 @@
 //! tests below round-trip the rendered XML through a minimal parser to lock the
 //! structure in. See [`crate::xml::xml_escape`] for content escaping.
 
+use bytes::Bytes;
+use http::StatusCode;
+
 use crate::xml::xml_escape;
+
+/// Build an `ec2Query` error response.
+///
+/// EC2's error envelope differs from awsQuery's `<ErrorResponse>` shape in
+/// three load-bearing ways the AWS SDKs deserialize strictly against:
+///
+/// ```xml
+/// <?xml version="1.0" encoding="UTF-8"?>
+/// <Response>
+///   <Errors>
+///     <Error>
+///       <Code>InvalidInstanceID.NotFound</Code>
+///       <Message>The instance ID 'i-123' does not exist</Message>
+///     </Error>
+///   </Errors>
+///   <RequestID>{request_id}</RequestID>
+/// </Response>
+/// ```
+///
+/// 1. The root element is `<Response>` (not `<ErrorResponse>`).
+/// 2. Errors nest inside an `<Errors>` wrapper, and each `<Error>` carries only
+///    `<Code>` + `<Message>` — there is NO `<Type>` element (awsQuery emits one).
+/// 3. The request id element is `<RequestID>` (capital I-D), not `<RequestId>`.
+///
+/// aws-sdk-go-v2 (Terraform), aws-sdk-js v3, aws-sdk-rust, and aws-sdk-java v2
+/// read the error code via `Response > Errors > Error > Code` and the id via
+/// `RequestID`; the awsQuery `<ErrorResponse>` shape leaves both empty for them,
+/// breaking `InvalidInstanceID.NotFound` / `DependencyViolation` branching and
+/// request-id-based retries. Only botocore/CLI are lenient enough to recover the
+/// code from the wrong shape.
+pub fn ec2_error_response(
+    status: StatusCode,
+    code: &str,
+    message: &str,
+    request_id: &str,
+) -> (StatusCode, String, Bytes) {
+    let body = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <Response><Errors><Error><Code>{code}</Code><Message>{message}</Message></Error></Errors>\
+         <RequestID>{rid}</RequestID></Response>",
+        code = xml_escape(code),
+        message = xml_escape(message),
+        rid = xml_escape(request_id),
+    );
+    (status, "text/xml".to_string(), Bytes::from(body))
+}
 
 /// The EC2 response namespace. Note the trailing slash — EC2 emits it on the
 /// wire even though the Smithy model's `xmlNamespace` uri omits it.
@@ -199,6 +248,50 @@ mod tests {
             ec2_bool("ebsOptimized", false),
             "<ebsOptimized>false</ebsOptimized>"
         );
+    }
+
+    #[test]
+    fn error_response_uses_ec2query_envelope_not_awsquery() {
+        let (status, content_type, body) = ec2_error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidInstanceID.NotFound",
+            "The instance ID 'i-123' does not exist",
+            "req-42",
+        );
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(content_type, "text/xml");
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+        // Root <Response>, NOT awsQuery's <ErrorResponse>.
+        assert!(xml.contains("<Response>"), "{xml}");
+        assert!(!xml.contains("<ErrorResponse>"), "{xml}");
+        // <Errors> wrapper around each <Error>.
+        assert!(xml.contains("<Errors><Error>"), "{xml}");
+        // Code + Message, but NO <Type> element (awsQuery emits Sender/Receiver).
+        assert!(
+            xml.contains("<Code>InvalidInstanceID.NotFound</Code>"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<Message>The instance ID &apos;i-123&apos; does not exist</Message>")
+                || xml.contains("<Message>The instance ID 'i-123' does not exist</Message>"),
+            "{xml}"
+        );
+        assert!(!xml.contains("<Type>"), "{xml}");
+        // Capital-ID <RequestID>, not <RequestId>.
+        assert!(xml.contains("<RequestID>req-42</RequestID>"), "{xml}");
+        assert!(!xml.contains("<RequestId>"), "{xml}");
+    }
+
+    #[test]
+    fn error_response_escapes_special_chars_in_message() {
+        let (_, _, body) = ec2_error_response(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterValue",
+            "a<b>&c",
+            "r-1",
+        );
+        let xml = String::from_utf8(body.to_vec()).unwrap();
+        assert!(xml.contains("<Message>a&lt;b&gt;&amp;c</Message>"), "{xml}");
     }
 
     #[test]

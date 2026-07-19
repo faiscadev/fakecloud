@@ -12593,6 +12593,62 @@ async fn ec2_raw(server: &TestServer, body: &str) -> reqwest::Response {
     resp
 }
 
+/// EC2 error responses must use the `ec2Query` error envelope, NOT the
+/// `awsQuery` `<ErrorResponse>` shape the other Query-protocol services use.
+/// aws-sdk-go-v2 (Terraform), aws-sdk-js v3, aws-sdk-rust and aws-sdk-java v2
+/// parse the error code via `Response > Errors > Error > Code` and the id via
+/// `RequestID`; the wrong envelope leaves both empty, breaking
+/// `InvalidInstanceID.NotFound` branching and request-id retries.
+#[tokio::test]
+async fn ec2_error_uses_ec2query_envelope() {
+    let server = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header("Authorization", EC2_RAW_AUTH)
+        .body("Action=DescribeInstances&Version=2016-11-15&InstanceId.1=i-0123456789abcdef0")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_client_error(),
+        "DescribeInstances on a bogus id must return a client error, got {}",
+        resp.status()
+    );
+    let body = resp.text().await.unwrap();
+
+    // ec2Query envelope: root <Response>, <Errors> wrapper, <Code>/<Message>,
+    // capital-ID <RequestID>. NONE of the awsQuery markers may appear.
+    assert!(
+        body.contains("<Response>"),
+        "missing <Response> root: {body}"
+    );
+    assert!(
+        body.contains("<Errors><Error>"),
+        "missing <Errors><Error> wrapper: {body}"
+    );
+    assert!(
+        body.contains("<Code>InvalidInstanceID.NotFound</Code>"),
+        "missing/incorrect error code: {body}"
+    );
+    assert!(
+        body.contains("<RequestID>"),
+        "missing capital-ID <RequestID>: {body}"
+    );
+    assert!(
+        !body.contains("<ErrorResponse>"),
+        "leaked awsQuery <ErrorResponse> root: {body}"
+    );
+    assert!(
+        !body.contains("<Type>"),
+        "leaked awsQuery <Type> element: {body}"
+    );
+    assert!(
+        !body.contains("<RequestId>"),
+        "leaked awsQuery lower-d <RequestId>: {body}"
+    );
+}
+
 #[test_action(
     "ec2",
     "CreateCapacityReservationCancellationQuote",

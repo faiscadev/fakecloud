@@ -8,6 +8,16 @@ pub enum AwsProtocol {
     /// Query protocol: form-encoded body, Action param, XML response.
     /// Used by: SQS, SNS, IAM, STS.
     Query,
+    /// EC2 Query protocol: a variant of Query. Requests are wire-identical to
+    /// `Query` (form-encoded body, `Action` param), but responses — including
+    /// errors — use EC2's distinct XML envelope. Where `Query`/awsQuery emits
+    /// `<ErrorResponse><Error><Type/><Code/><Message/></Error><RequestId/>`,
+    /// ec2Query emits `<Response><Errors><Error><Code/><Message/></Error></Errors><RequestID/></Response>`
+    /// (root `<Response>`, an `<Errors>` wrapper, no `<Type>`, and capital-ID
+    /// `<RequestID>`). The AWS SDKs (aws-sdk-go-v2/Terraform, aws-sdk-js v3,
+    /// aws-sdk-rust, aws-sdk-java v2) parse EC2 error codes strictly against
+    /// this shape. Used by: EC2.
+    Ec2Query,
     /// JSON protocol: JSON body, X-Amz-Target header, JSON response.
     /// Used by: SSM, EventBridge, DynamoDB, SecretsManager, KMS, CloudWatch Logs.
     Json,
@@ -17,6 +27,17 @@ pub enum AwsProtocol {
     /// REST-JSON protocol: HTTP method + path-based routing, JSON responses.
     /// Used by: Lambda, SES v2.
     RestJson,
+}
+
+/// Pick the Query-family protocol for a resolved service. EC2 speaks the
+/// `ec2Query` variant (distinct error/response envelope); every other
+/// Action-param service uses plain `awsQuery`.
+fn query_protocol_for(service: &str) -> AwsProtocol {
+    if service == "ec2" {
+        AwsProtocol::Ec2Query
+    } else {
+        AwsProtocol::Query
+    }
 }
 
 /// Services that use REST protocol with XML responses (detected from SigV4 credential scope).
@@ -156,10 +177,11 @@ pub fn detect_service_headers_only(
             .or_else(|| infer_service_from_action(action))
             .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
         if let Some(service) = service {
+            let protocol = query_protocol_for(&service);
             return Some(DetectedRequest {
                 service,
                 action: action.clone(),
-                protocol: AwsProtocol::Query,
+                protocol,
             });
         }
     }
@@ -224,10 +246,11 @@ pub fn detect_service(
             .or_else(|| infer_service_from_action(action))
             .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
         if let Some(service) = service {
+            let protocol = query_protocol_for(&service);
             return Some(DetectedRequest {
                 service,
                 action: action.clone(),
-                protocol: AwsProtocol::Query,
+                protocol,
             });
         }
     }
@@ -241,10 +264,11 @@ pub fn detect_service(
                 .or_else(|| infer_service_from_action(action))
                 .or_else(|| parse_routing_host_from_headers(headers).map(|h| h.service));
             if let Some(service) = service {
+                let protocol = query_protocol_for(&service);
                 return Some(DetectedRequest {
                     service,
                     action: action.clone(),
-                    protocol: AwsProtocol::Query,
+                    protocol,
                 });
             }
         }
