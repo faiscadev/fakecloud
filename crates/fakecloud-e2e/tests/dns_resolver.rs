@@ -389,3 +389,66 @@ async fn external_cname_target_is_chased_via_upstream() {
         .expect("expected an address chased from the external CNAME target");
     assert_eq!(a.rdata, vec![9, 9, 9, 9]);
 }
+
+// The introspection endpoint (Batch 2) returns the same resolution over HTTP so
+// a test can assert it without binding a socket. Exercised here via the Rust SDK
+// wrapper `dns_resolve`; the server is started WITHOUT `--dns` to prove the
+// endpoint is independent of the UDP/TCP listener.
+#[tokio::test]
+async fn introspection_endpoint_resolves_created_record_via_sdk() {
+    let server = TestServer::start_full(&[], &[]).await;
+    let zone_id = create_zone(&server, "example.com.").await;
+    create_record(&server, &zone_id, "app.example.com.", RrType::A, "10.0.0.5").await;
+
+    let sdk = fakecloud_sdk::FakeCloud::new(server.endpoint());
+
+    // Answered: the created A record comes back with its value + ttl.
+    let res = sdk
+        .dns_resolve("app.example.com", "A")
+        .await
+        .expect("dns_resolve");
+    assert_eq!(res.status, "ANSWERED");
+    assert!(res.authoritative);
+    assert_eq!(res.records.len(), 1);
+    assert_eq!(res.records[0].value, "10.0.0.5");
+    assert_eq!(res.records[0].ttl, 60);
+    assert_eq!(res.records[0].record_type, "A");
+
+    // Name in the zone but no AAAA record -> NODATA (still authoritative).
+    let nodata = sdk
+        .dns_resolve("app.example.com", "AAAA")
+        .await
+        .expect("dns_resolve aaaa");
+    assert_eq!(nodata.status, "NODATA");
+    assert!(nodata.authoritative);
+    assert!(nodata.records.is_empty());
+
+    // Name outside every local zone -> NOT_AUTHORITATIVE (the resolver forwards).
+    let foreign = sdk
+        .dns_resolve("registry-1.docker.io", "A")
+        .await
+        .expect("dns_resolve foreign");
+    assert_eq!(foreign.status, "NOT_AUTHORITATIVE");
+    assert!(!foreign.authoritative);
+
+    // A CNAME chain that leaves every local zone surfaces the external target so
+    // the caller knows the answer still needs an upstream lookup (the endpoint
+    // does no upstream I/O of its own).
+    create_record(
+        &server,
+        &zone_id,
+        "www.example.com.",
+        RrType::Cname,
+        "cdn.external.net",
+    )
+    .await;
+    let external = sdk
+        .dns_resolve("www.example.com", "A")
+        .await
+        .expect("dns_resolve external cname");
+    assert_eq!(
+        external.records[0].record_type, "CNAME",
+        "the local CNAME is reported"
+    );
+    assert_eq!(external.external_cname.as_deref(), Some("cdn.external.net"));
+}

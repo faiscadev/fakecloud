@@ -621,21 +621,14 @@ fn build_response(
     udp_limit: Option<usize>,
     edns: Option<u16>,
 ) -> Vec<u8> {
-    // Only records we can wire-encode correctly go into the answer section,
-    // deduplicated (a merged cross-account zone or a CNAME chase can surface the
-    // same record twice), preserving order.
-    let mut seen = std::collections::HashSet::new();
-    let encodable: Vec<(&resolver::AnswerRecord, u16)> = answers
-        .iter()
+    // Deduplicate (a merged cross-account zone or a CNAME chase can surface the
+    // same record twice), preserving order, then keep only records we can
+    // wire-encode correctly. The HTTP introspection endpoint shares the same
+    // resolver::dedup_answers so both report the same record set.
+    let encodable: Vec<(&resolver::AnswerRecord, u16)> = resolver::dedup_answers(answers)
+        .into_iter()
         .filter(|a| wire_encodable(&a.rtype))
         .filter_map(|a| type_code(&a.rtype).map(|tc| (a, tc)))
-        .filter(|(a, _)| {
-            seen.insert((
-                a.name.to_ascii_lowercase(),
-                a.rtype.to_ascii_uppercase(),
-                a.value.clone(),
-            ))
-        })
         .collect();
 
     let mut flags = FLAG_QR | rcode;

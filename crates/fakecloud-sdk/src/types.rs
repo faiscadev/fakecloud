@@ -2354,6 +2354,37 @@ pub struct ContainerCredentialsResponse {
     pub role_arn: String,
 }
 
+// ── DNS resolver introspection ──────────────────────────────────────
+
+/// One record from `GET /_fakecloud/dns/resolve` (an answer the `--dns`
+/// resolver would return).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsRecord {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub ttl: u32,
+    pub value: String,
+}
+
+/// Response shape for `GET /_fakecloud/dns/resolve`: what the DNS resolver would
+/// answer for a name + type from the Route 53 records. `status` is one of
+/// `ANSWERED`, `NODATA`, `NXDOMAIN`, `NOT_AUTHORITATIVE`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DnsResolution {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub record_type: String,
+    pub status: String,
+    pub authoritative: bool,
+    pub records: Vec<DnsRecord>,
+    /// For an `A`/`AAAA` query whose CNAME chain exits every local zone, the
+    /// external target the `--dns` resolver would forward-resolve upstream (this
+    /// endpoint does no upstream I/O). `None` otherwise.
+    #[serde(default)]
+    pub external_cname: Option<String>,
+}
+
 // ── KMS usage (admin) ───────────────────────────────────────────────
 
 /// One recorded KMS data-plane invocation, exposed by

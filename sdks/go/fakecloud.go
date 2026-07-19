@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -59,6 +60,21 @@ func (fc *FakeCloud) ResetService(ctx context.Context, service string) (*ResetSe
 func (fc *FakeCloud) Credentials(ctx context.Context) (*ContainerCredentials, error) {
 	var out ContainerCredentials
 	if err := fc.doGet(ctx, "/_fakecloud/credentials", &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
+// DNSResolve resolves a name + record type against the Route 53 records
+// (GET /_fakecloud/dns/resolve), returning what the --dns resolver would answer
+// without opening a socket. recordType is one of A, AAAA, CNAME, MX, TXT, NS,
+// PTR, SPF, CAA, SRV, SOA.
+func (fc *FakeCloud) DNSResolve(ctx context.Context, name, recordType string) (*DNSResolution, error) {
+	q := url.Values{}
+	q.Set("name", name)
+	q.Set("type", recordType)
+	var out DNSResolution
+	if err := fc.doGet(ctx, "/_fakecloud/dns/resolve?"+q.Encode(), &out); err != nil {
 		return nil, err
 	}
 	return &out, nil

@@ -1441,6 +1441,36 @@ public final class Types {
             @JsonProperty("Expiration") String expiration,
             @JsonProperty("RoleArn") String roleArn) {}
 
+    // ── DNS resolver ─────────────────────────────────────────────
+
+    /** One record from {@code GET /_fakecloud/dns/resolve}. */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record DnsRecord(
+            @JsonProperty("name") String name,
+            @JsonProperty("type") String type,
+            @JsonProperty("ttl") long ttl,
+            @JsonProperty("value") String value) {}
+
+    /**
+     * Response for {@code GET /_fakecloud/dns/resolve} — what the built-in DNS
+     * resolver ({@code --dns}) would answer for a name + type from the Route 53
+     * records. {@code status} is one of {@code ANSWERED}, {@code NODATA},
+     * {@code NXDOMAIN}, {@code NOT_AUTHORITATIVE}.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record DnsResolution(
+            @JsonProperty("name") String name,
+            @JsonProperty("type") String type,
+            @JsonProperty("status") String status,
+            @JsonProperty("authoritative") boolean authoritative,
+            @JsonProperty("records") java.util.List<DnsRecord> records,
+            /**
+             * For an {@code A}/{@code AAAA} query whose CNAME chain exits every local
+             * zone, the external target the {@code --dns} resolver would forward-resolve
+             * upstream (this endpoint does no upstream I/O). {@code null} otherwise.
+             */
+            @JsonProperty("external_cname") String externalCname) {}
+
     // ── SSM admin ────────────────────────────────────────────────
 
     /**

@@ -23,6 +23,7 @@ import dev.fakecloud.Types.CloudFrontDistributionStatusRequest;
 import dev.fakecloud.Types.CloudFrontDistributionsResponse;
 import dev.fakecloud.Types.ContainerCredentialsResponse;
 import dev.fakecloud.Types.CreateAdminRequest;
+import dev.fakecloud.Types.DnsResolution;
 import dev.fakecloud.Types.CreateAdminResponse;
 import dev.fakecloud.Types.ConfirmSubscriptionRequest;
 import dev.fakecloud.Types.ConfirmSubscriptionResponse;
@@ -251,6 +252,26 @@ public final class FakeCloud {
     @SuppressWarnings("unchecked")
     public Map<String, Object> instanceIdentityDocument() {
         return http.get("/latest/dynamic/instance-identity/document", Map.class);
+    }
+
+    /**
+     * Resolve a name against the Route 53 records fakecloud holds, exactly as
+     * the built-in DNS resolver ({@code --dns}) would answer it
+     * ({@code GET /_fakecloud/dns/resolve?name=<n>&type=<A|AAAA|CNAME|MX|TXT|...>}).
+     *
+     * <p>Lets a test assert what a container pointed at fakecloud for DNS would
+     * see, without opening a UDP socket. Status is one of {@code ANSWERED},
+     * {@code NODATA}, {@code NXDOMAIN}, {@code NOT_AUTHORITATIVE}.
+     */
+    public DnsResolution dnsResolve(String name, String type) {
+        return http.get(
+                "/_fakecloud/dns/resolve?name=" + encodePath(name) + "&type=" + encodePath(type),
+                DnsResolution.class);
+    }
+
+    /** {@link #dnsResolve(String, String)} defaulting the record type to {@code A}. */
+    public DnsResolution dnsResolve(String name) {
+        return dnsResolve(name, "A");
     }
 
     // ── IAM ───────────────────────────────────────────────────────
