@@ -110,7 +110,34 @@ pub(crate) fn validate_item_attribute_values(
     Ok(())
 }
 
-fn validate_attribute_value(v: &Value) -> Result<(), AwsServiceError> {
+/// Reject an empty DynamoDB set (`SS`/`NS`/`BS`). AWS returns a
+/// `ValidationException` — storing an empty set corrupts later
+/// `ADD`/`DELETE`/`size()` semantics.
+fn validate_set_not_empty(kind: &str, is_empty: bool) -> Result<(), AwsServiceError> {
+    if is_empty {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            format!("One or more parameter values were invalid: An {kind} set may not be empty"),
+        ));
+    }
+    Ok(())
+}
+
+/// Build the `ValidationException` AWS returns when a set contains duplicate
+/// members. The collection is echoed back the way AWS renders it.
+fn duplicate_set(members: &[&str]) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ValidationException",
+        format!(
+            "One or more parameter values were invalid: Input collection [{}] contains duplicates",
+            members.join(", ")
+        ),
+    )
+}
+
+pub(crate) fn validate_attribute_value(v: &Value) -> Result<(), AwsServiceError> {
     let Some((tag, val)) = v.as_object().and_then(|o| o.iter().next()) else {
         return Ok(());
     };
@@ -128,11 +155,62 @@ fn validate_attribute_value(v: &Value) -> Result<(), AwsServiceError> {
                 return Err(bad_number(s));
             }
         }
+        "SS" => {
+            let members: Vec<&str> = val
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|el| el.as_str().unwrap_or_default())
+                .collect();
+            validate_set_not_empty("string", members.is_empty())?;
+            let mut seen = std::collections::HashSet::new();
+            for m in &members {
+                if !seen.insert(*m) {
+                    return Err(duplicate_set(&members));
+                }
+            }
+        }
         "NS" => {
-            for el in val.as_array().into_iter().flatten() {
-                let s = el.as_str().unwrap_or_default();
+            let members: Vec<&str> = val
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|el| el.as_str().unwrap_or_default())
+                .collect();
+            validate_set_not_empty("number", members.is_empty())?;
+            let mut seen = std::collections::HashSet::new();
+            for s in &members {
                 if !is_valid_number(s) {
                     return Err(bad_number(s));
+                }
+                // Number-set members are deduped by numeric value, so `"1"` and
+                // `"1.0"` collide. `canonical_number` never returns `None` here
+                // because `is_valid_number` already passed.
+                let canon = canonical_number(s).unwrap_or_else(|| (*s).to_string());
+                if !seen.insert(canon) {
+                    return Err(duplicate_set(&members));
+                }
+            }
+        }
+        "BS" => {
+            use base64::Engine;
+            let members: Vec<&str> = val
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|el| el.as_str().unwrap_or_default())
+                .collect();
+            validate_set_not_empty("binary", members.is_empty())?;
+            // Dedup by decoded bytes so distinct base64 encodings of the same
+            // value still collide; fall back to the raw string when a member
+            // is not valid base64 (left for the codec layer to reject).
+            let mut seen = std::collections::HashSet::new();
+            for m in &members {
+                let key = base64::engine::general_purpose::STANDARD
+                    .decode(m)
+                    .unwrap_or_else(|_| m.as_bytes().to_vec());
+                if !seen.insert(key) {
+                    return Err(duplicate_set(&members));
                 }
             }
         }
@@ -286,6 +364,74 @@ mod attr_value_validation_tests {
             ("n".to_string(), json!({"N": "3.14"})),
             ("s".to_string(), json!({"S": "hi"})),
             ("ns".to_string(), json!({"NS": ["1", "2.5"]})),
+        ]);
+        assert!(validate_item_attribute_values(&item).is_ok());
+    }
+
+    fn err_of(v: serde_json::Value) -> AwsServiceError {
+        let item: HashMap<String, AttributeValue> = HashMap::from([("a".to_string(), v)]);
+        validate_item_attribute_values(&item).unwrap_err()
+    }
+
+    #[test]
+    fn rejects_empty_sets() {
+        for (v, kind) in [
+            (json!({"SS": []}), "string"),
+            (json!({"NS": []}), "number"),
+            (json!({"BS": []}), "binary"),
+        ] {
+            let err = err_of(v);
+            assert_eq!(err.code(), "ValidationException");
+            assert!(
+                err.message()
+                    .contains(&format!("An {kind} set may not be empty")),
+                "unexpected message for {kind}: {}",
+                err.message()
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_duplicate_string_set() {
+        let err = err_of(json!({"SS": ["a", "a"]}));
+        assert_eq!(err.code(), "ValidationException");
+        assert!(
+            err.message().contains("contains duplicates"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn rejects_numeric_value_duplicate_number_set() {
+        // "1" and "1.0" are the same numeric value -> duplicate.
+        let err = err_of(json!({"NS": ["1", "1.0"]}));
+        assert_eq!(err.code(), "ValidationException");
+        assert!(
+            err.message().contains("contains duplicates"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn rejects_duplicate_binary_set() {
+        // Both decode to the same bytes.
+        let err = err_of(json!({"BS": ["aGVsbG8=", "aGVsbG8="]}));
+        assert_eq!(err.code(), "ValidationException");
+        assert!(
+            err.message().contains("contains duplicates"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn accepts_valid_sets() {
+        let item: HashMap<String, AttributeValue> = HashMap::from([
+            ("ss".to_string(), json!({"SS": ["a", "b", "c"]})),
+            ("ns".to_string(), json!({"NS": ["1", "2", "3.5"]})),
+            ("bs".to_string(), json!({"BS": ["aGVsbG8=", "d29ybGQ="]})),
         ]);
         assert!(validate_item_attribute_values(&item).is_ok());
     }

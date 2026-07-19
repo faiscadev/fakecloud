@@ -11,8 +11,8 @@ use super::{
     evaluate_condition_with_return, extract_key, get_table, get_table_mut,
     parse_expression_attribute_names, parse_expression_attribute_values, project_item,
     require_object, require_str, resolve_write_condition, return_consumed_mode, return_icm_mode,
-    validate_item_attribute_values, validate_key_attributes_in_key, validate_key_in_item,
-    AttributeValue, DynamoDbService,
+    validate_attribute_value, validate_item_attribute_values, validate_key_attributes_in_key,
+    validate_key_in_item, AttributeValue, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -364,6 +364,20 @@ impl DynamoDbService {
         let condition =
             resolve_write_condition(&body, &mut expr_attr_names, &mut expr_attr_values)?;
         let update_expression = body["UpdateExpression"].as_str();
+
+        // Validate the attribute values an UpdateExpression / AttributeUpdates
+        // will write (empty or duplicate SS/BS/NS, malformed numbers) before
+        // they corrupt the item — matches PutItem's item validation.
+        for v in expr_attr_values.values() {
+            validate_attribute_value(v)?;
+        }
+        if let Some(updates) = body["AttributeUpdates"].as_object() {
+            for upd in updates.values() {
+                if let Some(v) = upd.get("Value") {
+                    validate_attribute_value(v)?;
+                }
+            }
+        }
 
         let existing_idx = table.find_item_index(&key);
 

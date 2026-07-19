@@ -834,7 +834,13 @@ pub(crate) fn data_key_size_from_body(body: &Value) -> Result<usize, AwsServiceE
             format!("1 validation error detected: Value '{spec}' at 'keySpec' failed to satisfy constraint: Member must satisfy enum value set: [AES_256, AES_128]"),
         )),
         (None, Some(n)) => {
-            if n > 1024 {
+            if n < 1 {
+                Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationException",
+                    format!("1 validation error detected: Value '{n}' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1"),
+                ))
+            } else if n > 1024 {
                 Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "ValidationException",
@@ -1018,5 +1024,48 @@ mod key_spec_usage_tests {
         assert!(validate_key_spec_usage("SYMMETRIC_DEFAULT", "SIGN_VERIFY").is_err());
         // secp256k1 supports signing only.
         assert!(validate_key_spec_usage("ECC_SECG_P256K1", "KEY_AGREEMENT").is_err());
+    }
+}
+
+#[cfg(test)]
+mod data_key_size_tests {
+    use super::data_key_size_from_body;
+    use serde_json::json;
+
+    #[test]
+    fn number_of_bytes_zero_rejected() {
+        // AWS models NumberOfBytes as @range(min:1,max:1024); 0 is a
+        // ValidationException, not a 200 with an empty data key.
+        let err = data_key_size_from_body(&json!({"NumberOfBytes": 0})).unwrap_err();
+        assert_eq!(err.code(), "ValidationException");
+        assert!(
+            err.message().contains("greater than or equal to 1"),
+            "unexpected message: {}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn number_of_bytes_valid_accepted() {
+        assert_eq!(
+            data_key_size_from_body(&json!({"NumberOfBytes": 32})).unwrap(),
+            32
+        );
+        // Boundaries.
+        assert_eq!(
+            data_key_size_from_body(&json!({"NumberOfBytes": 1})).unwrap(),
+            1
+        );
+        assert_eq!(
+            data_key_size_from_body(&json!({"NumberOfBytes": 1024})).unwrap(),
+            1024
+        );
+    }
+
+    #[test]
+    fn number_of_bytes_over_max_rejected() {
+        let err = data_key_size_from_body(&json!({"NumberOfBytes": 1025})).unwrap_err();
+        assert_eq!(err.code(), "ValidationException");
+        assert!(err.message().contains("less than or equal to 1024"));
     }
 }
