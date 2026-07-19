@@ -113,6 +113,10 @@ pub async fn check_and_rotate(
                     };
                     secret.versions.insert(version_id.clone(), version);
                     secret.current_version_id = Some(version_id.clone());
+                    // Prune deprecated versions (no staging labels) so they
+                    // don't leak, matching PutSecretValue / UpdateSecret /
+                    // RotateSecret.
+                    secret.versions.retain(|_, v| !v.stages.is_empty());
                 }
                 version_created = true;
             }

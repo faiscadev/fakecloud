@@ -55,6 +55,19 @@ pub(crate) fn demote_current_to_previous(
     }
 }
 
+/// The error AWS returns when a request supplies both `SecretString` and
+/// `SecretBinary`. The two are mutually exclusive on CreateSecret,
+/// PutSecretValue and UpdateSecret — a value can be a string or binary, never
+/// both — so a request carrying both is rejected rather than storing (and
+/// later returning) both.
+pub(crate) fn both_secret_fields_error() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterException",
+        "You can't specify both the SecretString and SecretBinary in the same request.",
+    )
+}
+
 /// Decode the optional `SecretBinary` field. Returns an error when the field is
 /// present but not valid base64, matching AWS which rejects an undecodable
 /// `SecretBinary` rather than silently dropping it (which would let a caller

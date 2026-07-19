@@ -6797,6 +6797,7 @@ dependencies = [
  "http 1.4.0",
  "md5",
  "parking_lot",
+ "regex",
  "serde",
  "serde_json",
  "serde_yaml",
