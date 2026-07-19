@@ -609,7 +609,27 @@ impl KinesisService {
         {
             start_index += 1;
         }
-        let end_index = shard.records.len().min(start_index.saturating_add(limit));
+        // AWS caps a single GetRecords response at min(Limit records, 10 MiB of
+        // data), whichever comes first, and lets NextShardIterator resume after
+        // the truncation point. Slicing purely by record COUNT (the old
+        // behaviour) could return a batch far larger than 10 MiB. Accumulate
+        // record byte sizes and stop before the batch would exceed the cap —
+        // but always include at least the first record so a full shard never
+        // yields an empty batch with a live iterator (which stalls consumers).
+        const MAX_GET_RECORDS_BYTES: usize = 10 * 1024 * 1024;
+        let mut end_index = start_index;
+        let mut accumulated_bytes: usize = 0;
+        while end_index < shard.records.len() && end_index - start_index < limit {
+            let record = &shard.records[end_index];
+            let record_bytes = record.data.len() + record.partition_key.len();
+            if end_index > start_index
+                && accumulated_bytes.saturating_add(record_bytes) > MAX_GET_RECORDS_BYTES
+            {
+                break;
+            }
+            accumulated_bytes = accumulated_bytes.saturating_add(record_bytes);
+            end_index += 1;
+        }
         let records: Vec<Value> = shard.records[start_index..end_index]
             .iter()
             .map(|record| {
