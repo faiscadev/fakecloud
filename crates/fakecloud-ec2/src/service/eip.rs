@@ -14,12 +14,10 @@ use crate::state::{Ec2State, ElasticIp, KeyPair, PlacementGroup, Tag};
 
 fn address_xml(a: &ElasticIp, tags: &[Tag]) -> String {
     let mut out = format!(
-        "{}{}{}{}{}",
+        "{}{}{}",
         ec2_elem("publicIp", &a.public_ip),
         ec2_elem("allocationId", &a.allocation_id),
         ec2_elem("domain", &a.domain),
-        ec2_elem("publicIpv4Pool", &a.public_ipv4_pool),
-        ec2_elem("networkBorderGroup", &a.network_border_group),
     );
     if let Some(v) = &a.association_id {
         out.push_str(&ec2_elem("associationId", v));
@@ -34,6 +32,10 @@ fn address_xml(a: &ElasticIp, tags: &[Tag]) -> String {
         out.push_str(&ec2_elem("privateIpAddress", v));
     }
     out.push_str(&super::tags::tag_set_xml(tags));
+    // publicIpv4Pool and networkBorderGroup trail tagSet, matching the
+    // member order AWS emits for the Address type.
+    out.push_str(&ec2_elem("publicIpv4Pool", &a.public_ipv4_pool));
+    out.push_str(&ec2_elem("networkBorderGroup", &a.network_border_group));
     out
 }
 
@@ -43,24 +45,36 @@ pub(crate) fn allocate_address(
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_enum(&req.query_params, "Domain", &["vpc", "standard"])?;
     let alloc_id = gen_id("eipalloc");
+    // Derive the public IP from three hex bytes of the allocation id so
+    // distinct allocations get distinct addresses. The previous form keyed
+    // only on `alloc_id.len()` (a constant 26) and a single hex nibble,
+    // collapsing every EIP onto ~16 IPs and letting ReleaseAddress-by-PublicIp
+    // target the wrong address.
+    let hex = &alloc_id["eipalloc-".len()..];
+    let octet = |s: &str| u16::from_str_radix(s, 16).unwrap_or(0) % 256;
     let public_ip = format!(
-        "52.0.{}.{}",
-        alloc_id.len() % 250,
-        alloc_id.as_bytes()[9] as u16 % 250
+        "52.{}.{}.{}",
+        octet(&hex[0..2]),
+        octet(&hex[2..4]),
+        octet(&hex[4..6]),
     );
     let domain = req
         .query_params
         .get("Domain")
         .cloned()
         .unwrap_or_else(|| "vpc".to_string());
+    // Treat an empty query-param value as absent so `PublicIpv4Pool=` still
+    // falls back to the default rather than persisting an empty string.
     let public_ipv4_pool = req
         .query_params
         .get("PublicIpv4Pool")
+        .filter(|v| !v.is_empty())
         .cloned()
         .unwrap_or_else(|| "amazon".to_string());
     let network_border_group = req
         .query_params
         .get("NetworkBorderGroup")
+        .filter(|v| !v.is_empty())
         .cloned()
         .unwrap_or_else(|| {
             if req.region.is_empty() {
@@ -83,6 +97,16 @@ pub(crate) fn allocate_address(
     {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // The AWS-managed "amazon" pool is always valid; any BYOIP pool id must
+        // have been provisioned first, else AWS returns
+        // InvalidPublicIpv4PoolID.NotFound.
+        if public_ipv4_pool != "amazon" && !state.public_ipv4_pools.contains_key(&public_ipv4_pool)
+        {
+            return Err(not_found(
+                "InvalidPublicIpv4PoolID.NotFound",
+                &public_ipv4_pool,
+            ));
+        }
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -96,8 +120,8 @@ pub(crate) fn allocate_address(
         ec2_elem("allocationId", &alloc_id),
         ec2_elem("publicIp", &public_ip),
         ec2_elem("domain", &domain),
-        ec2_elem("networkBorderGroup", &network_border_group),
         ec2_elem("publicIpv4Pool", &public_ipv4_pool),
+        ec2_elem("networkBorderGroup", &network_border_group),
     );
     Ok(Ec2Service::respond(
         "AllocateAddress",
@@ -174,6 +198,7 @@ fn addr_match(e: &ElasticIp, tags: &[Tag], filters: &[Filter]) -> bool {
             "allocation-id" => vec![e.allocation_id.clone()],
             "public-ip" => vec![e.public_ip.clone()],
             "domain" => vec![e.domain.clone()],
+            "network-border-group" => vec![e.network_border_group.clone()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -752,6 +777,19 @@ mod eip_tests {
     #[test]
     fn allocate_address_honors_pool_and_border_group_params() {
         let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.public_ipv4_pools.insert(
+                "ipv4pool-ec2-0abc".to_string(),
+                crate::state::PublicIpv4Pool {
+                    pool_id: "ipv4pool-ec2-0abc".to_string(),
+                    description: String::new(),
+                    network_border_group: String::new(),
+                    cidrs: Vec::new(),
+                },
+            );
+        }
         let out = body(
             allocate_address(
                 &svc,
@@ -783,6 +821,132 @@ mod eip_tests {
             out.contains("<publicIpv4Pool>ipv4pool-ec2-0abc</publicIpv4Pool>"),
             "got: {out}"
         );
+    }
+
+    #[test]
+    fn describe_addresses_filters_by_network_border_group() {
+        let svc = Ec2Service::new();
+        allocate_address(&svc, &req("AllocateAddress", &[("Domain", "vpc")])).unwrap();
+        allocate_address(
+            &svc,
+            &req(
+                "AllocateAddress",
+                &[("Domain", "vpc"), ("NetworkBorderGroup", "us-east-1-atl-1")],
+            ),
+        )
+        .unwrap();
+        let out = body(
+            describe_addresses(
+                &svc,
+                &req(
+                    "DescribeAddresses",
+                    &[
+                        ("Filter.1.Name", "network-border-group"),
+                        ("Filter.1.Value.1", "us-east-1-atl-1"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            out.contains("<networkBorderGroup>us-east-1-atl-1</networkBorderGroup>"),
+            "got: {out}"
+        );
+        assert!(
+            !out.contains("<networkBorderGroup>us-east-1</networkBorderGroup>"),
+            "default border group should be filtered out, got: {out}"
+        );
+    }
+
+    #[test]
+    fn allocate_address_rejects_unprovisioned_pool() {
+        let svc = Ec2Service::new();
+        let res = allocate_address(
+            &svc,
+            &req(
+                "AllocateAddress",
+                &[
+                    ("Domain", "vpc"),
+                    ("PublicIpv4Pool", "ipv4pool-ec2-missing"),
+                ],
+            ),
+        );
+        let err = match res {
+            Ok(_) => panic!("expected InvalidPublicIpv4PoolID.NotFound"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "InvalidPublicIpv4PoolID.NotFound");
+    }
+
+    #[test]
+    fn allocate_address_accepts_provisioned_pool() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.public_ipv4_pools.insert(
+                "ipv4pool-ec2-0abc".to_string(),
+                crate::state::PublicIpv4Pool {
+                    pool_id: "ipv4pool-ec2-0abc".to_string(),
+                    description: String::new(),
+                    network_border_group: String::new(),
+                    cidrs: Vec::new(),
+                },
+            );
+        }
+        let out = body(
+            allocate_address(
+                &svc,
+                &req(
+                    "AllocateAddress",
+                    &[("Domain", "vpc"), ("PublicIpv4Pool", "ipv4pool-ec2-0abc")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            out.contains("<publicIpv4Pool>ipv4pool-ec2-0abc</publicIpv4Pool>"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn allocate_address_empty_pool_param_falls_back_to_default() {
+        let svc = Ec2Service::new();
+        let out = body(
+            allocate_address(
+                &svc,
+                &req(
+                    "AllocateAddress",
+                    &[
+                        ("Domain", "vpc"),
+                        ("PublicIpv4Pool", ""),
+                        ("NetworkBorderGroup", ""),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            out.contains("<publicIpv4Pool>amazon</publicIpv4Pool>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<networkBorderGroup>us-east-1</networkBorderGroup>"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn allocate_address_assigns_distinct_public_ips() {
+        let svc = Ec2Service::new();
+        allocate_address(&svc, &req("AllocateAddress", &[("Domain", "vpc")])).unwrap();
+        allocate_address(&svc, &req("AllocateAddress", &[("Domain", "vpc")])).unwrap();
+        let accounts = svc.state.read();
+        let state = accounts.get("000000000000").unwrap();
+        let ips: std::collections::HashSet<_> =
+            state.elastic_ips.values().map(|e| &e.public_ip).collect();
+        assert_eq!(ips.len(), 2, "each allocation should get a distinct IP");
     }
 
     #[test]
