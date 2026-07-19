@@ -4231,3 +4231,161 @@ async fn iam_create_instance_profile_govcloud_partition() {
         "expected aws-us-gov partition ARN, got: {arn}"
     );
 }
+
+// ─── Regression tests: bug-hunt correctness cluster (2026-07-19) ─────
+
+/// CreateUser / TagUser enforce the same tag validation the role/policy paths
+/// do: >50 tags and case-insensitive duplicate keys are rejected with
+/// InvalidInput.
+#[tokio::test]
+async fn iam_user_tag_validation_rejects_bad_input() {
+    use aws_sdk_iam::types::Tag;
+
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    // 51 tags on CreateUser -> InvalidInput.
+    let mut create = client.create_user().user_name("tagval-user");
+    for i in 0..51 {
+        create = create.tags(
+            Tag::builder()
+                .key(format!("k{i}"))
+                .value("v")
+                .build()
+                .unwrap(),
+        );
+    }
+    let err = create.send().await.unwrap_err();
+    assert!(
+        format!("{err:?}").contains("InvalidInput"),
+        "51 tags on CreateUser must be InvalidInput: {err:?}"
+    );
+
+    // A valid user, then a TagUser with case-insensitive duplicate keys.
+    client
+        .create_user()
+        .user_name("tagval-user2")
+        .send()
+        .await
+        .unwrap();
+    let err = client
+        .tag_user()
+        .user_name("tagval-user2")
+        .tags(Tag::builder().key("Env").value("a").build().unwrap())
+        .tags(Tag::builder().key("env").value("b").build().unwrap())
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("InvalidInput"),
+        "duplicate tag keys on TagUser must be InvalidInput: {err:?}"
+    );
+}
+
+/// CreateInstanceProfile enforces tag validation too.
+#[tokio::test]
+async fn iam_instance_profile_tag_validation_rejects_bad_input() {
+    use aws_sdk_iam::types::Tag;
+
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    let mut create = client
+        .create_instance_profile()
+        .instance_profile_name("tagval-ip");
+    for i in 0..51 {
+        create = create.tags(
+            Tag::builder()
+                .key(format!("k{i}"))
+                .value("v")
+                .build()
+                .unwrap(),
+        );
+    }
+    let err = create.send().await.unwrap_err();
+    assert!(
+        format!("{err:?}").contains("InvalidInput"),
+        "51 tags on CreateInstanceProfile must be InvalidInput: {err:?}"
+    );
+}
+
+/// DeleteUser returns DeleteConflict when the user still has a login profile.
+#[tokio::test]
+async fn iam_delete_user_conflicts_on_login_profile() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("del-conflict-user")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_login_profile()
+        .user_name("del-conflict-user")
+        .password("S3cureP@ss!")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .delete_user()
+        .user_name("del-conflict-user")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("DeleteConflict"),
+        "DeleteUser with a login profile must be DeleteConflict: {err:?}"
+    );
+
+    // Deleting the login profile first unblocks the user delete.
+    client
+        .delete_login_profile()
+        .user_name("del-conflict-user")
+        .send()
+        .await
+        .unwrap();
+    client
+        .delete_user()
+        .user_name("del-conflict-user")
+        .send()
+        .await
+        .expect("delete after removing login profile");
+}
+
+/// AttachUserPolicy rejects a bogus AWS-managed ARN that isn't in the catalog.
+#[tokio::test]
+async fn iam_attach_user_policy_rejects_bogus_managed_arn() {
+    let server = TestServer::start().await;
+    let client = server.iam_client().await;
+
+    client
+        .create_user()
+        .user_name("attach-bogus-user")
+        .send()
+        .await
+        .unwrap();
+
+    let err = client
+        .attach_user_policy()
+        .user_name("attach-bogus-user")
+        .policy_arn("arn:aws:iam::aws:policy/DoesNotExist")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("NoSuchEntity"),
+        "attaching a bogus managed policy must be NoSuchEntity: {err:?}"
+    );
+
+    // A real managed policy still attaches.
+    client
+        .attach_user_policy()
+        .user_name("attach-bogus-user")
+        .policy_arn("arn:aws:iam::aws:policy/AdministratorAccess")
+        .send()
+        .await
+        .expect("real managed policy attaches");
+}

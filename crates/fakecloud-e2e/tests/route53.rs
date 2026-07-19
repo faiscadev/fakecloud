@@ -852,3 +852,306 @@ async fn test_dns_answer_alias_target_resolves_against_s3_bucket_state() {
         .parse::<std::net::Ipv4Addr>()
         .is_ok());
 }
+
+// ─── Regression tests: bug-hunt correctness cluster (2026-07-19) ─────
+
+/// Record names are lowercased on store and matched case-insensitively, so a
+/// mixed-case CREATE surfaces lowercased in ListResourceRecordSets (no
+/// Terraform perpetual diff) and a differently-cased DELETE still matches.
+#[tokio::test]
+async fn record_names_are_case_insensitive() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    let create = r53
+        .create_hosted_zone()
+        .name("ci.example.com")
+        .caller_reference("e2e-ci-names")
+        .send()
+        .await
+        .expect("create");
+    let zone_id = create.hosted_zone().unwrap().id().to_string();
+
+    // CREATE with a mixed-case name.
+    let mixed = ResourceRecordSet::builder()
+        .name("API.ci.example.com.")
+        .r#type(RrType::A)
+        .ttl(60)
+        .resource_records(
+            ResourceRecord::builder()
+                .value("203.0.113.5")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    r53.change_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .change_batch(
+            ChangeBatch::builder()
+                .changes(
+                    Change::builder()
+                        .action(ChangeAction::Create)
+                        .resource_record_set(mixed.clone())
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("create mixed-case record");
+
+    // The stored + listed name is lowercased.
+    let list = r53
+        .list_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .send()
+        .await
+        .expect("list");
+    let names: Vec<&str> = list
+        .resource_record_sets()
+        .iter()
+        .map(|r| r.name())
+        .collect();
+    assert!(
+        names.contains(&"api.ci.example.com."),
+        "expected lowercased name, got {names:?}"
+    );
+    assert!(!names.contains(&"API.ci.example.com."));
+
+    // A duplicate CREATE with different casing must be rejected as already-existing.
+    let dup = r53
+        .change_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .change_batch(
+            ChangeBatch::builder()
+                .changes(
+                    Change::builder()
+                        .action(ChangeAction::Create)
+                        .resource_record_set(
+                            ResourceRecordSet::builder()
+                                .name("api.CI.example.com.")
+                                .r#type(RrType::A)
+                                .ttl(60)
+                                .resource_records(
+                                    ResourceRecord::builder()
+                                        .value("203.0.113.6")
+                                        .build()
+                                        .unwrap(),
+                                )
+                                .build()
+                                .unwrap(),
+                        )
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await;
+    assert!(
+        dup.is_err(),
+        "case-variant duplicate CREATE must be rejected"
+    );
+
+    // DELETE with yet another casing (and matching value/TTL) succeeds.
+    let del = ResourceRecordSet::builder()
+        .name("Api.Ci.Example.Com.")
+        .r#type(RrType::A)
+        .ttl(60)
+        .resource_records(
+            ResourceRecord::builder()
+                .value("203.0.113.5")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    r53.change_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .change_batch(
+            ChangeBatch::builder()
+                .changes(
+                    Change::builder()
+                        .action(ChangeAction::Delete)
+                        .resource_record_set(del)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("case-insensitive delete must match");
+
+    let list = r53
+        .list_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .send()
+        .await
+        .expect("list after delete");
+    let names: Vec<&str> = list
+        .resource_record_sets()
+        .iter()
+        .map(|r| r.name())
+        .collect();
+    assert!(!names.contains(&"api.ci.example.com."));
+}
+
+/// ListHostedZones honors the `hostedzonetype` and `delegationsetid` filters.
+#[tokio::test]
+async fn list_hosted_zones_filters_by_type_and_delegation_set() {
+    use aws_sdk_route53::types::HostedZoneType;
+
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    // A reusable delegation set to tie one zone to.
+    let ds = r53
+        .create_reusable_delegation_set()
+        .caller_reference("e2e-filter-ds")
+        .send()
+        .await
+        .expect("create delegation set");
+    let ds_id = ds.delegation_set().unwrap().id().unwrap().to_string();
+
+    // Public zone bound to the delegation set.
+    let pub_zone = r53
+        .create_hosted_zone()
+        .name("public-filter.example.com")
+        .caller_reference("e2e-filter-public")
+        .delegation_set_id(&ds_id)
+        .send()
+        .await
+        .expect("create public zone");
+    let pub_id = pub_zone.hosted_zone().unwrap().id().to_string();
+
+    // Private zone (marked private via the config flag), no delegation set.
+    let priv_zone = r53
+        .create_hosted_zone()
+        .name("private-filter.example.com")
+        .caller_reference("e2e-filter-private")
+        .hosted_zone_config(HostedZoneConfig::builder().private_zone(true).build())
+        .send()
+        .await
+        .expect("create private zone");
+    let priv_id = priv_zone.hosted_zone().unwrap().id().to_string();
+
+    // Filter to private zones only.
+    let privates = r53
+        .list_hosted_zones()
+        .hosted_zone_type(HostedZoneType::PrivateHostedZone)
+        .send()
+        .await
+        .expect("list private");
+    let ids: Vec<&str> = privates.hosted_zones().iter().map(|z| z.id()).collect();
+    assert!(ids.iter().any(|id| *id == priv_id));
+    assert!(!ids.iter().any(|id| *id == pub_id));
+
+    // Filter by delegation set id -> only the public zone bound to it.
+    let by_ds = r53
+        .list_hosted_zones()
+        .delegation_set_id(&ds_id)
+        .send()
+        .await
+        .expect("list by delegation set");
+    let ids: Vec<&str> = by_ds.hosted_zones().iter().map(|z| z.id()).collect();
+    assert!(ids.iter().any(|id| *id == pub_id));
+    assert!(!ids.iter().any(|id| *id == priv_id));
+}
+
+/// AliasTarget is mutually exclusive with ResourceRecords and with TTL.
+#[tokio::test]
+async fn alias_target_mutually_exclusive_with_records_and_ttl() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    let create = r53
+        .create_hosted_zone()
+        .name("alias-excl.example.com")
+        .caller_reference("e2e-alias-excl")
+        .send()
+        .await
+        .expect("create");
+    let zone_id = create.hosted_zone().unwrap().id().to_string();
+
+    // AliasTarget + ResourceRecords together -> rejected.
+    let both = ResourceRecordSet::builder()
+        .name("a.alias-excl.example.com.")
+        .r#type(RrType::A)
+        .alias_target(
+            AliasTarget::builder()
+                .hosted_zone_id("Z2FDTNDATAQYW2")
+                .dns_name("example.cloudfront.net")
+                .evaluate_target_health(false)
+                .build()
+                .unwrap(),
+        )
+        .resource_records(
+            ResourceRecord::builder()
+                .value("203.0.113.9")
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let res = r53
+        .change_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .change_batch(
+            ChangeBatch::builder()
+                .changes(
+                    Change::builder()
+                        .action(ChangeAction::Create)
+                        .resource_record_set(both)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await;
+    assert!(
+        res.is_err(),
+        "AliasTarget + ResourceRecords must be rejected"
+    );
+
+    // AliasTarget + TTL together -> rejected.
+    let with_ttl = ResourceRecordSet::builder()
+        .name("b.alias-excl.example.com.")
+        .r#type(RrType::A)
+        .ttl(300)
+        .alias_target(
+            AliasTarget::builder()
+                .hosted_zone_id("Z2FDTNDATAQYW2")
+                .dns_name("example.cloudfront.net")
+                .evaluate_target_health(false)
+                .build()
+                .unwrap(),
+        )
+        .build()
+        .unwrap();
+    let res = r53
+        .change_resource_record_sets()
+        .hosted_zone_id(&zone_id)
+        .change_batch(
+            ChangeBatch::builder()
+                .changes(
+                    Change::builder()
+                        .action(ChangeAction::Create)
+                        .resource_record_set(with_ttl)
+                        .build()
+                        .unwrap(),
+                )
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await;
+    assert!(res.is_err(), "AliasTarget + TTL must be rejected");
+}

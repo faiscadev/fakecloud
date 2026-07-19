@@ -8,7 +8,7 @@ use crate::state::IamInstanceProfile;
 
 use super::{
     empty_response, generate_id, paginated_tags_response, parse_tag_keys, parse_tags,
-    partition_for_region, tags_xml, url_encode, IamService,
+    partition_for_region, tags_xml, url_encode, validate_tags, validate_untag_keys, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -25,6 +25,7 @@ impl IamService {
             .cloned()
             .unwrap_or_else(|| "/".to_string());
         let tags = parse_tags(&req.query_params);
+        validate_tags(&tags, 0)?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -309,6 +310,15 @@ impl IamService {
             )
         })?;
 
+        // Enforce the 50-tag ceiling against the post-merge total (mirrors
+        // TagRole/TagPolicy).
+        let existing_count = ip
+            .tags
+            .iter()
+            .filter(|t| !new_tags.iter().any(|nt| nt.key == t.key))
+            .count();
+        validate_tags(&new_tags, existing_count)?;
+
         for new_tag in new_tags {
             if let Some(existing) = ip.tags.iter_mut().find(|t| t.key == new_tag.key) {
                 existing.value = new_tag.value;
@@ -327,6 +337,7 @@ impl IamService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_param(&req.query_params, "InstanceProfileName")?;
         let tag_keys = parse_tag_keys(&req.query_params);
+        validate_untag_keys(&tag_keys)?;
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
