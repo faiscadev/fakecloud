@@ -12,7 +12,7 @@ use std::str::FromStr;
 
 use cedar_policy::{
     Authorizer, Context, Decision, Entities, EntityId, EntityTypeName, EntityUid, Policy, PolicyId,
-    PolicySet, Request, SlotId, Template,
+    PolicySet, Request, Schema, SlotId, Template,
 };
 use serde_json::{json, Map, Value};
 
@@ -41,16 +41,32 @@ pub fn evaluate(
     context: Option<&Value>,
     entities: Option<&Value>,
 ) -> Result<AuthzResult, String> {
+    // Load the policy store's Cedar schema (if any) so schema-typed evaluation
+    // works: action groups, `memberOf` entity hierarchies and typed attributes
+    // all require the schema to be threaded through entity parsing, context
+    // parsing and request validation. Without it, policies that rely on the
+    // schema produce spurious DENYs.
+    let (schema, schema_err) = build_schema(store);
+
     let principal_uid = entity_uid(principal)?;
     let action_uid = action_uid(action)?;
     let resource_uid = entity_uid(resource)?;
     let ctx = build_context(context)?;
-    let ents = build_entities(entities)?;
+    let ents = build_entities(entities, schema.as_ref())?;
 
     let (policy_set, mut errors) = build_policy_set(store);
+    if let Some(e) = schema_err {
+        errors.push(e);
+    }
 
-    let request = Request::new(principal_uid, action_uid, resource_uid, ctx, None)
-        .map_err(|e| format!("invalid authorization request: {e}"))?;
+    let request = Request::new(
+        principal_uid,
+        action_uid,
+        resource_uid,
+        ctx,
+        schema.as_ref(),
+    )
+    .map_err(|e| format!("invalid authorization request: {e}"))?;
     let response = Authorizer::new().is_authorized(&request, &policy_set, &ents);
 
     let decision = match response.decision() {
@@ -72,6 +88,24 @@ pub fn evaluate(
         determining_policies,
         errors,
     })
+}
+
+/// Parse the policy store's stored Cedar schema (the `cedarJson` blob from
+/// `PutSchema`) into a [`Schema`]. Returns `(None, None)` when no schema is
+/// attached, `(Some(schema), None)` on success, and `(None, Some(error))` when
+/// a stored schema fails to parse — in which case evaluation proceeds without
+/// it and the error is surfaced in the response `errors`.
+fn build_schema(store: &StoredPolicyStore) -> (Option<Schema>, Option<String>) {
+    let Some(stored) = &store.schema else {
+        return (None, None);
+    };
+    match Schema::from_json_str(&stored.cedar_json) {
+        Ok(schema) => (Some(schema), None),
+        Err(e) => (
+            None,
+            Some(format!("policy store schema failed to parse: {e}")),
+        ),
+    }
 }
 
 /// Build the Cedar `PolicySet` for a store, returning any policies that failed
@@ -191,20 +225,35 @@ fn build_context(cd: Option<&Value>) -> Result<Context, String> {
     Ok(Context::empty())
 }
 
-fn build_entities(ed: Option<&Value>) -> Result<Entities, String> {
-    let Some(ed) = ed else {
-        return Ok(Entities::empty());
+fn build_entities(ed: Option<&Value>, schema: Option<&Schema>) -> Result<Entities, String> {
+    // Resolve the caller-supplied entities to a Cedar entities-JSON array.
+    // When none are provided we still parse an empty array *through the schema*
+    // so that schema-defined `Action` entities (and their action-group
+    // ancestors) are injected — otherwise `action in Action::"group"` scopes
+    // never match. See `Entities::from_json_value`: the schema is a source of
+    // Action entities added to the parsed set.
+    let json = match ed {
+        Some(ed) => {
+            if let Some(list) = ed.get("entityList").and_then(Value::as_array) {
+                Value::Array(list.iter().map(entity_item_to_cedar).collect())
+            } else if let Some(cedar_json) = ed.get("cedarJson").and_then(Value::as_str) {
+                serde_json::from_str(cedar_json)
+                    .map_err(|e| format!("invalid entities cedarJson: {e}"))?
+            } else {
+                Value::Array(Vec::new())
+            }
+        }
+        None => Value::Array(Vec::new()),
     };
-    if let Some(list) = ed.get("entityList").and_then(Value::as_array) {
-        let json = Value::Array(list.iter().map(entity_item_to_cedar).collect());
-        return Entities::from_json_value(json, None).map_err(|e| format!("invalid entities: {e}"));
+    // Without a schema and with no entities, keep the cheap empty path.
+    if schema.is_none() {
+        if let Value::Array(a) = &json {
+            if a.is_empty() {
+                return Ok(Entities::empty());
+            }
+        }
     }
-    if let Some(cedar_json) = ed.get("cedarJson").and_then(Value::as_str) {
-        let json: Value = serde_json::from_str(cedar_json)
-            .map_err(|e| format!("invalid entities cedarJson: {e}"))?;
-        return Entities::from_json_value(json, None).map_err(|e| format!("invalid entities: {e}"));
-    }
-    Ok(Entities::empty())
+    Entities::from_json_value(json, schema).map_err(|e| format!("invalid entities: {e}"))
 }
 
 /// Convert a Verified Permissions `EntityItem` into the Cedar entity JSON form
@@ -296,7 +345,7 @@ fn attribute_to_cedar(v: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{StoredPolicy, StoredPolicyStore};
+    use crate::state::{StoredPolicy, StoredPolicyStore, StoredSchema};
     use chrono::Utc;
     use std::collections::BTreeMap;
 
@@ -423,5 +472,111 @@ mod tests {
         )
         .unwrap();
         assert_eq!(without.decision, "DENY");
+    }
+
+    #[test]
+    fn schema_action_group_membership_enables_allow() {
+        // The policy permits any action that is a member of the `readOnly`
+        // action group. That membership is defined only in the schema, so
+        // authorization of `Action::"view"` depends on the schema being loaded.
+        let schema = r#"{
+            "": {
+                "entityTypes": { "User": {}, "Photo": {} },
+                "actions": {
+                    "readOnly": {},
+                    "view": {
+                        "memberOf": [{ "id": "readOnly" }],
+                        "appliesTo": {
+                            "principalTypes": ["User"],
+                            "resourceTypes": ["Photo"]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let mut store = store_with_policies(vec![(
+            "grp",
+            r#"permit(principal, action in Action::"readOnly", resource);"#,
+        )]);
+
+        let principal = json!({ "entityType": "User", "entityId": "alice" });
+        let action = json!({ "actionType": "Action", "actionId": "view" });
+        let resource = json!({ "entityType": "Photo", "entityId": "vacation" });
+
+        // Without the schema, the action-group membership is unknown, so the
+        // `action in Action::"readOnly"` scope never matches -> spurious DENY.
+        let denied = evaluate(&store, &principal, &action, &resource, None, None).unwrap();
+        assert_eq!(denied.decision, "DENY");
+
+        // With the schema loaded, `view memberOf readOnly` is populated and the
+        // policy matches.
+        store.schema = Some(StoredSchema {
+            cedar_json: schema.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+        let allowed = evaluate(&store, &principal, &action, &resource, None, None).unwrap();
+        assert_eq!(allowed.decision, "ALLOW");
+        assert_eq!(allowed.determining_policies, vec!["grp".to_string()]);
+        assert!(
+            allowed.errors.is_empty(),
+            "unexpected errors: {:?}",
+            allowed.errors
+        );
+    }
+
+    #[test]
+    fn schema_entity_hierarchy_memberof_enables_allow() {
+        // A policy scoped to a Group principal must ALLOW a User that is a
+        // member of that group. The parent relationship is supplied on the
+        // entity, but the schema declares the `memberOfTypes` relation so the
+        // typed hierarchy is validated when entities are parsed with the schema.
+        let schema = r#"{
+            "": {
+                "entityTypes": {
+                    "User": { "memberOfTypes": ["Group"] },
+                    "Group": {},
+                    "Photo": {}
+                },
+                "actions": {
+                    "view": {
+                        "appliesTo": {
+                            "principalTypes": ["User"],
+                            "resourceTypes": ["Photo"]
+                        }
+                    }
+                }
+            }
+        }"#;
+        let mut store = store_with_policies(vec![(
+            "grp",
+            r#"permit(principal in Group::"admins", action == Action::"view", resource);"#,
+        )]);
+        store.schema = Some(StoredSchema {
+            cedar_json: schema.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        });
+
+        let entities = json!({
+            "entityList": [
+                {
+                    "identifier": { "entityType": "User", "entityId": "alice" },
+                    "attributes": {},
+                    "parents": [ { "entityType": "Group", "entityId": "admins" } ]
+                }
+            ]
+        });
+        let r = evaluate(
+            &store,
+            &json!({ "entityType": "User", "entityId": "alice" }),
+            &json!({ "actionType": "Action", "actionId": "view" }),
+            &json!({ "entityType": "Photo", "entityId": "vacation" }),
+            None,
+            Some(&entities),
+        )
+        .unwrap();
+        assert_eq!(r.decision, "ALLOW", "errors: {:?}", r.errors);
+        assert_eq!(r.determining_policies, vec!["grp".to_string()]);
     }
 }

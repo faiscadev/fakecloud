@@ -71,6 +71,134 @@ pub(super) fn cluster_engine(entry: &Value) -> &str {
     entry["Engine"].as_str().unwrap_or("aurora-postgresql")
 }
 
+/// Persist the create-time cluster input fields that `CreateDBCluster`
+/// otherwise dropped. Mirrors the set `ModifyDBCluster` stores (and
+/// `db_cluster_member_xml` renders) plus the create-only fields (`KmsKeyId`,
+/// `DatabaseName`, `EngineMode`, `DBSubnetGroupName`), so that safety-relevant
+/// flags such as `DeletionProtection` / `StorageEncrypted` survive a create
+/// without needing a follow-up modify.
+///
+/// Values are coerced to the same JSON shapes the renderer expects: `int_keys`
+/// become numbers, `bool_keys` become booleans, everything else stays a string.
+pub(super) fn apply_create_cluster_params(
+    obj: &mut serde_json::Map<String, Value>,
+    req: &AwsRequest,
+) {
+    // (input param name, persisted JSON key). Distinct where AWS renames the
+    // field in its response shape (e.g. EnableIAMDatabaseAuthentication ->
+    // IAMDatabaseAuthenticationEnabled).
+    let scalar_inputs: &[(&str, &str)] = &[
+        ("DatabaseName", "DatabaseName"),
+        ("KmsKeyId", "KmsKeyId"),
+        ("StorageEncrypted", "StorageEncrypted"),
+        ("DeletionProtection", "DeletionProtection"),
+        ("BackupRetentionPeriod", "BackupRetentionPeriod"),
+        ("PreferredBackupWindow", "PreferredBackupWindow"),
+        ("PreferredMaintenanceWindow", "PreferredMaintenanceWindow"),
+        ("DBSubnetGroupName", "DBSubnetGroup"),
+        ("DBClusterParameterGroupName", "DBClusterParameterGroupName"),
+        ("StorageType", "StorageType"),
+        ("AllocatedStorage", "AllocatedStorage"),
+        ("Iops", "Iops"),
+        ("DBClusterInstanceClass", "DBClusterInstanceClass"),
+        ("EngineMode", "EngineMode"),
+        ("NetworkType", "NetworkType"),
+        ("CopyTagsToSnapshot", "CopyTagsToSnapshot"),
+        (
+            "EnableIAMDatabaseAuthentication",
+            "IAMDatabaseAuthenticationEnabled",
+        ),
+        ("AutoMinorVersionUpgrade", "AutoMinorVersionUpgrade"),
+        ("BacktrackWindow", "BacktrackWindow"),
+        ("EnableHttpEndpoint", "HttpEndpointEnabled"),
+        ("Domain", "Domain"),
+        ("DomainIAMRoleName", "DomainIAMRoleName"),
+        ("MonitoringInterval", "MonitoringInterval"),
+        ("MonitoringRoleArn", "MonitoringRoleArn"),
+        ("PerformanceInsightsKMSKeyId", "PerformanceInsightsKMSKeyId"),
+        (
+            "PerformanceInsightsRetentionPeriod",
+            "PerformanceInsightsRetentionPeriod",
+        ),
+        ("EnablePerformanceInsights", "PerformanceInsightsEnabled"),
+        ("ManageMasterUserPassword", "ManageMasterUserPassword"),
+        ("MasterUserSecretKmsKeyId", "MasterUserSecretKmsKeyId"),
+        ("CACertificateIdentifier", "CACertificateIdentifier"),
+        (
+            "ServerlessV2ScalingConfiguration.MinCapacity",
+            "ServerlessV2ScalingConfiguration.MinCapacity",
+        ),
+        (
+            "ServerlessV2ScalingConfiguration.MaxCapacity",
+            "ServerlessV2ScalingConfiguration.MaxCapacity",
+        ),
+    ];
+    let int_keys: &[&str] = &[
+        "BackupRetentionPeriod",
+        "AllocatedStorage",
+        "Iops",
+        "BacktrackWindow",
+        "MonitoringInterval",
+        "PerformanceInsightsRetentionPeriod",
+    ];
+    let bool_keys: &[&str] = &[
+        "StorageEncrypted",
+        "DeletionProtection",
+        "CopyTagsToSnapshot",
+        "IAMDatabaseAuthenticationEnabled",
+        "AutoMinorVersionUpgrade",
+        "HttpEndpointEnabled",
+        "PerformanceInsightsEnabled",
+        "ManageMasterUserPassword",
+    ];
+
+    for (param_name, json_key) in scalar_inputs {
+        if let Some(v) = get_param(req, param_name) {
+            let value = if int_keys.contains(json_key) {
+                v.parse::<i64>().map(|n| json!(n)).unwrap_or(json!(v))
+            } else if bool_keys.contains(json_key) {
+                match v.as_str() {
+                    "true" => json!(true),
+                    "false" => json!(false),
+                    _ => json!(v),
+                }
+            } else {
+                json!(v)
+            };
+            obj.insert((*json_key).to_string(), value);
+        }
+    }
+
+    // VpcSecurityGroupIds.VpcSecurityGroupId.N (list)
+    let mut sg_ids = Vec::new();
+    for index in 1.. {
+        let key = format!("VpcSecurityGroupIds.VpcSecurityGroupId.{index}");
+        match get_param(req, &key) {
+            Some(v) => sg_ids.push(Value::String(v)),
+            None => break,
+        }
+    }
+    if !sg_ids.is_empty() {
+        obj.insert("VpcSecurityGroupIds".to_string(), Value::Array(sg_ids));
+    }
+
+    // EnableCloudwatchLogsExports.member.N (list)
+    let mut logs = Vec::new();
+    for index in 1.. {
+        let key = format!("EnableCloudwatchLogsExports.member.{index}");
+        match get_param(req, &key) {
+            Some(v) => logs.push(Value::String(v)),
+            None => break,
+        }
+    }
+    if !logs.is_empty() {
+        obj.insert(
+            "EnabledCloudwatchLogsExports".to_string(),
+            Value::Array(logs),
+        );
+    }
+}
+
 /// `ModifyDBCluster`: accept the full set of mutable cluster fields and
 /// persist them on the stored cluster entry. Mirrors the M1
 /// `ModifyDBInstance` scope — every settable cluster field on the AWS

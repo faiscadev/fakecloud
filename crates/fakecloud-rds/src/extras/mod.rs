@@ -138,7 +138,7 @@ impl RdsService {
                 let port = get_param(req, "Port")
                     .and_then(|p| p.parse::<i64>().ok())
                     .unwrap_or(if engine.contains("mysql") { 3306 } else { 5432 });
-                let entry = json!({
+                let mut entry = json!({
                     "DBClusterIdentifier": id, "DBClusterArn": arn,
                     "DbClusterResourceId": new_cluster_resource_id(),
                     "Status": "available", "Engine": engine,
@@ -147,6 +147,13 @@ impl RdsService {
                     "ReaderEndpoint": format!("{id}.cluster-ro-xxx.{region}.rds.amazonaws.com"),
                     "Port": port, "MasterUsername": get_param(req, "MasterUsername").unwrap_or_else(|| "postgres".to_string()),
                 });
+                // Persist the remaining create-time input fields (safety flags
+                // like DeletionProtection / StorageEncrypted, KmsKeyId,
+                // BackupRetentionPeriod, DatabaseName, ...) that were otherwise
+                // dropped until a follow-up ModifyDBCluster.
+                if let Some(obj) = entry.as_object_mut() {
+                    apply_create_cluster_params(obj, req);
+                }
                 {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);

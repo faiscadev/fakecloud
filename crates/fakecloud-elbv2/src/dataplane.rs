@@ -23,7 +23,7 @@ use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_wafv2::evaluator::{
     evaluate_detailed as waf_evaluate_detailed, WafAction, WafRequest,
 };
-use fakecloud_wafv2::{IpSet, RegexPatternSet, SharedWafv2State, WebAcl};
+use fakecloud_wafv2::{IpSet, RegexPatternSet, RuleGroup, SharedWafv2State, WebAcl};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
@@ -794,7 +794,13 @@ pub(crate) fn evaluate_waf_outcome(
         country: None,
         body_size_bytes: body.len() as u64,
     };
-    let detailed = waf_evaluate_detailed(&req, &snap.web_acl, &snap.ipsets, &snap.regex_sets);
+    let detailed = waf_evaluate_detailed(
+        &req,
+        &snap.web_acl,
+        &snap.ipsets,
+        &snap.regex_sets,
+        &snap.rule_groups,
+    );
     if !detailed.count_rules.is_empty() {
         if let Some(metrics) = count_metrics {
             let mut m = metrics.lock();
@@ -867,6 +873,7 @@ struct WafSnapshot {
     web_acl: WebAcl,
     ipsets: std::collections::HashMap<String, IpSet>,
     regex_sets: std::collections::HashMap<String, RegexPatternSet>,
+    rule_groups: std::collections::HashMap<String, RuleGroup>,
 }
 
 fn waf_snapshot_for_lb(waf_state: &SharedWafv2State, lb_arn: &str) -> Option<WafSnapshot> {
@@ -888,10 +895,16 @@ fn waf_snapshot_for_lb(waf_state: &SharedWafv2State, lb_arn: &str) -> Option<Waf
             .values()
             .map(|s| (s.arn.clone(), s.clone()))
             .collect();
+        let rule_groups: std::collections::HashMap<String, RuleGroup> = account
+            .rule_groups
+            .values()
+            .map(|g| (g.arn.clone(), g.clone()))
+            .collect();
         return Some(WafSnapshot {
             web_acl: web_acl.clone(),
             ipsets,
             regex_sets,
+            rule_groups,
         });
     }
     None

@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::evaluator::{
     evaluate_web_acl, RateLimiter, WafAction, WafRequest, WafVerdict, FAKECLOUD_GEO_COUNTRY_HEADER,
 };
-use crate::state::{IpSet, RegexPatternSet, SharedWafv2State, WebAcl};
+use crate::state::{IpSet, RegexPatternSet, RuleGroup, SharedWafv2State, WebAcl};
 
 /// Default cap on the request-body bytes inspected by
 /// [`evaluate_request`]. Matches AWS WAF's free-tier inspection limit
@@ -188,6 +188,7 @@ struct ResourceSnapshot {
     web_acl: WebAcl,
     ipsets: HashMap<String, IpSet>,
     regex_sets: HashMap<String, RegexPatternSet>,
+    rule_groups: HashMap<String, RuleGroup>,
 }
 
 fn snapshot_for_resource(state: &SharedWafv2State, resource_arn: &str) -> Option<ResourceSnapshot> {
@@ -209,10 +210,16 @@ fn snapshot_for_resource(state: &SharedWafv2State, resource_arn: &str) -> Option
             .values()
             .map(|s| (s.arn.clone(), s.clone()))
             .collect();
+        let rule_groups: HashMap<String, RuleGroup> = account
+            .rule_groups
+            .values()
+            .map(|g| (g.arn.clone(), g.clone()))
+            .collect();
         return Some(ResourceSnapshot {
             web_acl: web_acl.clone(),
             ipsets,
             regex_sets,
+            rule_groups,
         });
     }
     None
@@ -267,6 +274,7 @@ pub fn evaluate_request(
         &req,
         &snapshot.ipsets,
         &snapshot.regex_sets,
+        &snapshot.rule_groups,
         rate_limiter,
         now_epoch_secs,
     );
