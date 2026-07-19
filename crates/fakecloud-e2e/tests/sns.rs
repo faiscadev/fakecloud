@@ -875,6 +875,93 @@ async fn sns_publish_batch() {
     assert!(resp.failed().is_empty());
 }
 
+/// A PublishBatch with one valid entry and one invalid entry (malformed
+/// `MessageStructure=json`) must report the invalid entry in `Failed` while the
+/// valid one succeeds — the invalid entry fails only itself instead of aborting
+/// the whole batch with a 400/500 (the old behaviour propagated the parse error
+/// out of the handler). Regression for the always-empty `Failed` list.
+#[tokio::test]
+async fn sns_publish_batch_reports_per_entry_failures() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("batch-fail-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    use aws_sdk_sns::types::PublishBatchRequestEntry;
+    let entries = vec![
+        PublishBatchRequestEntry::builder()
+            .id("ok")
+            .message("valid message")
+            .build()
+            .unwrap(),
+        PublishBatchRequestEntry::builder()
+            .id("bad")
+            .message("this is not json")
+            .message_structure("json")
+            .build()
+            .unwrap(),
+    ];
+
+    let resp = client
+        .publish_batch()
+        .topic_arn(&topic_arn)
+        .set_publish_batch_request_entries(Some(entries))
+        .send()
+        .await
+        .expect("batch must not fail wholesale when a single entry is invalid");
+
+    assert_eq!(resp.successful().len(), 1);
+    assert_eq!(resp.successful()[0].id(), Some("ok"));
+
+    assert_eq!(resp.failed().len(), 1);
+    let failed = &resp.failed()[0];
+    assert_eq!(failed.id(), "bad");
+    assert_eq!(failed.code(), "InvalidParameter");
+    assert!(failed.sender_fault());
+}
+
+/// Request-level validation: a duplicate batch entry Id fails the whole request
+/// with BatchEntryIdsNotDistinct, and a malformed Id with InvalidBatchEntryId.
+#[tokio::test]
+async fn sns_publish_batch_rejects_invalid_entry_ids() {
+    let server = TestServer::start().await;
+    let client = server.sns_client().await;
+
+    let topic = client
+        .create_topic()
+        .name("batch-id-topic")
+        .send()
+        .await
+        .unwrap();
+    let topic_arn = topic.topic_arn().unwrap().to_string();
+
+    use aws_sdk_sns::types::PublishBatchRequestEntry;
+
+    // Malformed Id (contains a space) -> InvalidBatchEntryId.
+    let bad_id_entries = vec![PublishBatchRequestEntry::builder()
+        .id("has space")
+        .message("m")
+        .build()
+        .unwrap()];
+    let err = client
+        .publish_batch()
+        .topic_arn(&topic_arn)
+        .set_publish_batch_request_entries(Some(bad_id_entries))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidBatchEntryId")
+    );
+}
+
 #[tokio::test]
 async fn sns_platform_application_lifecycle() {
     let server = TestServer::start().await;

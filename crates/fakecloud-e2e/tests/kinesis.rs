@@ -855,3 +855,89 @@ async fn kinesis_get_records_returns_child_shards_after_split() {
         assert!(c.hash_key_range().is_some());
     }
 }
+
+/// GetRecords caps a single response at 10 MiB of record data even when the
+/// Limit (record count) would allow more, and NextShardIterator resumes after
+/// the truncation point. Regression: the batch was previously sliced purely by
+/// record COUNT, so a high Limit could return far more than 10 MiB.
+#[tokio::test]
+async fn kinesis_get_records_caps_response_at_ten_mib() {
+    let server = TestServer::start().await;
+    let client = server.kinesis_client().await;
+
+    client
+        .create_stream()
+        .stream_name("big-read")
+        .shard_count(1)
+        .send()
+        .await
+        .unwrap();
+
+    // Put 15 records of ~900 KiB each (under the 1 MiB per-record limit).
+    // Total ~13.5 MiB, so a single GetRecords must truncate below 10 MiB.
+    let record_size = 900 * 1024;
+    let payload = vec![b'x'; record_size];
+    let mut shard_id = String::new();
+    for i in 0..15 {
+        let out = client
+            .put_record()
+            .stream_name("big-read")
+            .partition_key(format!("k{i}"))
+            .data(Blob::new(payload.clone()))
+            .send()
+            .await
+            .unwrap();
+        shard_id = out.shard_id().to_string();
+    }
+
+    let iterator = client
+        .get_shard_iterator()
+        .stream_name("big-read")
+        .shard_id(&shard_id)
+        .shard_iterator_type(ShardIteratorType::TrimHorizon)
+        .send()
+        .await
+        .unwrap();
+
+    // Request all 15 with a high Limit; the response must be capped by size.
+    let first = client
+        .get_records()
+        .shard_iterator(iterator.shard_iterator().unwrap())
+        .limit(10000)
+        .send()
+        .await
+        .unwrap();
+
+    let returned = first.records().len();
+    assert!(
+        returned < 15,
+        "GetRecords must truncate below the full 15-record set, got {returned}"
+    );
+    assert!(returned >= 1, "at least one record must be returned");
+    let total_bytes: usize = first
+        .records()
+        .iter()
+        .map(|r| r.data().as_ref().len())
+        .sum();
+    assert!(
+        total_bytes <= 10 * 1024 * 1024,
+        "response data {total_bytes} bytes exceeds the 10 MiB cap"
+    );
+    let next = first
+        .next_shard_iterator()
+        .expect("truncated batch must return a resumable NextShardIterator");
+
+    // Resume: the remaining records come back on the next call.
+    let second = client
+        .get_records()
+        .shard_iterator(next)
+        .limit(10000)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        returned + second.records().len(),
+        15,
+        "resuming the iterator returns the remaining records"
+    );
+}

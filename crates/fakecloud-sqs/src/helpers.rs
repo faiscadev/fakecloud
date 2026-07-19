@@ -599,6 +599,28 @@ pub(crate) fn parse_body(req: &AwsRequest) -> Value {
         if !attr_names.is_empty() {
             map.insert("AttributeNames".to_string(), Value::Array(attr_names));
         }
+        // Handle MessageAttributeName.N patterns (used by ReceiveMessage in
+        // query protocol to select which message attributes to return, e.g.
+        // MessageAttributeName.1=All). Query-protocol SendMessage attributes
+        // are parsed elsewhere but the receive-side selector list was dropped,
+        // so AWS Java SDK v1 / legacy botocore clients requesting `All` got
+        // ZERO message attributes back. Same contiguous enumeration as above.
+        let mut msg_attr_names = Vec::new();
+        let mut i = 1;
+        loop {
+            let key = format!("MessageAttributeName.{i}");
+            match req.query_params.get(&key) {
+                Some(val) => msg_attr_names.push(Value::String(val.clone())),
+                None => break,
+            }
+            i += 1;
+        }
+        if !msg_attr_names.is_empty() {
+            map.insert(
+                "MessageAttributeNames".to_string(),
+                Value::Array(msg_attr_names),
+            );
+        }
         // Handle batch entry patterns: *Entry.N.Field or *.N.Field
         // e.g. SendMessageBatchRequestEntry.1.Id=foo&SendMessageBatchRequestEntry.1.MessageBody=bar
         // Also: DeleteMessageBatchRequestEntry.1.Id=...&DeleteMessageBatchRequestEntry.1.ReceiptHandle=...

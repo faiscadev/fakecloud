@@ -2036,3 +2036,86 @@ async fn sqs_set_visibility_timeout_out_of_range_rejected() {
     assert_eq!(recv.messages().len(), 1);
     assert_eq!(recv.messages()[0].body().unwrap(), "still-alive");
 }
+
+/// Query-protocol (form-encoded) ReceiveMessage must return the message
+/// attributes a client selects via `MessageAttributeName.N=All`. The modern
+/// AWS SDK uses the JSON protocol, so this drives the query protocol directly
+/// with a form-encoded body — the shape AWS Java SDK v1 / legacy botocore emit.
+/// Regression: parse_body previously dropped `MessageAttributeName.N`, so
+/// query-protocol clients got zero attributes back.
+#[tokio::test]
+async fn sqs_query_protocol_receive_returns_message_attributes() {
+    let server = TestServer::start().await;
+    let client = server.sqs_client().await;
+
+    let created = client
+        .create_queue()
+        .queue_name("qp-attr-queue")
+        .send()
+        .await
+        .unwrap();
+    let queue_url = created.queue_url().unwrap().to_string();
+
+    // Send a message carrying a message attribute (via the SDK / JSON protocol).
+    client
+        .send_message()
+        .queue_url(&queue_url)
+        .message_body("hello")
+        .message_attributes(
+            "trace-id",
+            MessageAttributeValue::builder()
+                .data_type("String")
+                .string_value("abc-123")
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Receive via the raw query protocol, selecting all message attributes. The
+    // Authorization header's credential scope (`.../sqs/...`) is how the request
+    // is routed to SQS; auth is not enforced by default.
+    let body = format!(
+        "Action=ReceiveMessage&Version=2012-11-05&QueueUrl={}&MaxNumberOfMessages=1&MessageAttributeName.1=All",
+        urlencoding_encode(&queue_url)
+    );
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("content-type", "application/x-www-form-urlencoded")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/us-east-1/sqs/aws4_request, SignedHeaders=host, Signature=deadbeef",
+        )
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "status {}", resp.status());
+    let xml = resp.text().await.unwrap();
+
+    // The attribute the SendMessage set must be echoed back in the XML.
+    assert!(
+        xml.contains("<Name>trace-id</Name>"),
+        "message attribute name missing from query-protocol response: {xml}"
+    );
+    assert!(
+        xml.contains("<StringValue>abc-123</StringValue>"),
+        "message attribute value missing from query-protocol response: {xml}"
+    );
+}
+
+/// Minimal percent-encoding for the queue URL used in the form body above
+/// (encodes the reserved characters that appear in an SQS queue URL).
+fn urlencoding_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}

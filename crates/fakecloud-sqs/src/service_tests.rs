@@ -3384,6 +3384,45 @@ fn set_queue_attributes_reads_more_than_twenty_individual_pairs() {
 }
 
 #[test]
+fn receive_message_parses_query_protocol_message_attribute_names() {
+    // Query-protocol ReceiveMessage selects which message attributes to return
+    // via MessageAttributeName.N (e.g. MessageAttributeName.1=All). parse_body
+    // must surface these into the `MessageAttributeNames` list so the receive
+    // handler returns them — otherwise AWS Java SDK v1 / legacy botocore clients
+    // get ZERO message attributes back.
+    let req = make_query_request(
+        "ReceiveMessage",
+        &[
+            ("QueueUrl", "http://localhost/123456789012/q"),
+            ("MessageAttributeName.1", "All"),
+        ],
+    );
+    let parsed = parse_body(&req);
+    let names = parsed["MessageAttributeNames"].as_array().unwrap();
+    assert_eq!(names.len(), 1);
+    assert_eq!(names[0], "All");
+}
+
+#[test]
+fn receive_message_message_attribute_names_enumeration_is_contiguous() {
+    // Multiple named selectors enumerate contiguously and stop at the first gap,
+    // matching how SDKs serialize the list.
+    let req = make_query_request(
+        "ReceiveMessage",
+        &[
+            ("QueueUrl", "http://localhost/123456789012/q"),
+            ("MessageAttributeName.1", "alpha"),
+            ("MessageAttributeName.2", "beta"),
+            ("MessageAttributeName.4", "delta"),
+        ],
+    );
+    let parsed = parse_body(&req);
+    let names = parsed["MessageAttributeNames"].as_array().unwrap();
+    assert_eq!(names.len(), 2);
+    assert_eq!(names[1], "beta");
+}
+
+#[test]
 fn attribute_name_enumeration_stops_at_first_gap() {
     // Contiguous enumeration: a hole at index 3 stops the scan (matches how
     // AWS SDKs serialize the list — always 1..N contiguous).

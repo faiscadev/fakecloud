@@ -10,6 +10,7 @@ use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
+use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -378,6 +379,56 @@ impl SnsService {
             ));
         }
 
+        // Validate: every entry Id must be a non-empty string of at most 80
+        // alphanumeric / hyphen / underscore characters. AWS rejects the whole
+        // batch with InvalidBatchEntryId (request-level, not per-entry) when any
+        // Id is malformed.
+        if let Some(bad) = entries.iter().map(|e| e.0.as_str()).find(|id| {
+            id.is_empty()
+                || id.len() > 80
+                || !id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBatchEntryId",
+                format!(
+                    "A batch entry id can only contain alphanumeric characters, hyphens and underscores. It can be at most 80 letters long. Batch entry id '{bad}' is invalid."
+                ),
+            ));
+        }
+
+        // Validate: the combined size of all message bodies plus their message
+        // attributes must not exceed 256 KiB. AWS rejects the whole batch with
+        // BatchRequestTooLong (request-level) rather than truncating.
+        let total_batch_size: usize = entries
+            .iter()
+            .enumerate()
+            .map(|(idx, e)| {
+                let attrs = parse_batch_message_attributes(req, idx + 1);
+                let attr_size: usize = attrs
+                    .iter()
+                    .map(|(name, attr)| {
+                        name.len()
+                            + attr.data_type.len()
+                            + attr.string_value.as_ref().map_or(0, |s| s.len())
+                            + attr.binary_value.as_ref().map_or(0, |b| b.len())
+                    })
+                    .sum();
+                e.1.len() + attr_size
+            })
+            .sum();
+        if total_batch_size > 262_144 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BatchRequestTooLong",
+                format!(
+                    "The length of all the messages put together is more than the limit. Batch request size is {total_batch_size} bytes; the limit is 262144 bytes."
+                ),
+            ));
+        }
+
         // FIFO: all entries must have MessageGroupId — this is a top-level error
         if is_fifo && entries.iter().any(|e| e.3.is_none()) {
             return Err(AwsServiceError::aws_error(
@@ -398,7 +449,7 @@ impl SnsService {
         }
 
         let mut successful = Vec::new();
-        let failed: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
 
         for (idx, (id, message, subject, group_id, dedup_id, structure)) in
             entries.iter().enumerate()
@@ -406,9 +457,30 @@ impl SnsService {
             // Parse per-entry message attributes
             let batch_attrs = parse_batch_message_attributes(req, idx + 1);
 
-            // Validate MessageStructure=json
+            // Per-entry validation: an invalid entry fails only ITSELF (populating
+            // the Failed list), it does not abort the whole batch. AWS reports
+            // each failure as a BatchResultErrorEntry with Id/Code/Message and
+            // SenderFault=true for client-side errors.
+
+            // Empty / missing Message.
+            if message.is_empty() {
+                failed.push(batch_error_member(
+                    id,
+                    "InvalidParameter",
+                    "Invalid parameter: Empty message",
+                    true,
+                ));
+                continue;
+            }
+
+            // Malformed MessageStructure=json: fail this entry only rather than
+            // aborting the whole batch with a 400/500 (the old `?` propagated the
+            // error out of publish_batch entirely).
             if structure.as_deref() == Some("json") {
-                validate_message_structure_json(message)?;
+                if let Err(e) = validate_message_structure_json(message) {
+                    failed.push(batch_error_member(id, e.code(), &e.message(), true));
+                    continue;
+                }
             }
 
             // FIFO dedup + sequence minting, mirroring single Publish. A
@@ -534,9 +606,10 @@ impl SnsService {
                 .unwrap_or_default();
             successful.push(format!(
                 r#"    <member>
-      <Id>{id}</Id>
+      <Id>{}</Id>
       <MessageId>{msg_id}</MessageId>{sequence_xml}
-    </member>"#
+    </member>"#,
+                xml_escape(id)
             ));
         }
 
@@ -1121,6 +1194,24 @@ pub(crate) fn build_dlq_envelope(
         "SubscriptionArn": subscription_arn,
     }))
     .unwrap_or_else(|_| original_body.to_string())
+}
+
+/// Render one `<member>` of a `PublishBatch` `Failed` list
+/// (a `BatchResultErrorEntry`). `sender_fault` is true for client-caused
+/// errors (invalid parameters) and false for server-side failures.
+fn batch_error_member(id: &str, code: &str, message: &str, sender_fault: bool) -> String {
+    format!(
+        r#"    <member>
+      <Id>{}</Id>
+      <Code>{}</Code>
+      <Message>{}</Message>
+      <SenderFault>{}</SenderFault>
+    </member>"#,
+        xml_escape(id),
+        xml_escape(code),
+        xml_escape(message),
+        sender_fault
+    )
 }
 
 #[cfg(test)]
