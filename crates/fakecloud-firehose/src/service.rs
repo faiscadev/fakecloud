@@ -994,15 +994,17 @@ impl FirehoseService {
             return Ok(());
         };
         let Some(bucket_name) = bucket_name_from_arn(&dest.bucket_arn) else {
+            // AWS accepts PutRecord/PutRecordBatch into the delivery buffer and
+            // reports delivery failures asynchronously (CloudWatch metrics /
+            // S3 error-output), never as an API error, so the caller still gets
+            // a 200 + RecordId. We can't deliver a malformed destination ARN, so
+            // warn for observability instead of dropping it silently.
             tracing::warn!(
                 stream = %stream_name,
                 bucket_arn = %dest.bucket_arn,
-                "firehose S3 destination has a malformed bucket ARN; dropping records",
+                "firehose S3 destination has a malformed bucket ARN; records not delivered",
             );
-            return Err(delivery_failed(
-                stream_name,
-                "malformed destination bucket ARN",
-            ));
+            return Ok(());
         };
         let mut payload = Vec::new();
         for d in datas {
@@ -1033,15 +1035,15 @@ impl FirehoseService {
         let mut s3_state = s3.write();
         let s3 = s3_state.get_or_create(account_id);
         let Some(bucket) = s3.buckets.get_mut(bucket_name) else {
+            // As above: AWS acknowledges the records (async delivery) even when
+            // the destination bucket is absent. Warn for observability rather
+            // than dropping silently, but don't fail the API call.
             tracing::warn!(
                 stream = %stream_name,
                 bucket = %bucket_name,
-                "firehose S3 destination bucket does not exist; dropping records",
+                "firehose S3 destination bucket does not exist; records not delivered",
             );
-            return Err(delivery_failed(
-                stream_name,
-                format!("destination bucket {bucket_name} does not exist"),
-            ));
+            return Ok(());
         };
         let object = S3Object {
             key: key.clone(),
@@ -1091,16 +1093,16 @@ impl FirehoseService {
                     bucket.objects.insert(key, object);
                 }
                 Err(err) => {
+                    // Store write (disk) failed. Don't fail the API (AWS wouldn't
+                    // for a backend hiccup); degrade to keeping the object in
+                    // memory for this session and warn that it isn't durable.
                     tracing::error!(
                         stream = %stream_name,
                         bucket = %bucket_name,
                         %err,
-                        "failed to persist firehose delivery to S3 store",
+                        "failed to persist firehose delivery to S3 store; keeping in memory only",
                     );
-                    return Err(delivery_failed(
-                        stream_name,
-                        format!("failed to persist delivery to bucket {bucket_name}: {err}"),
-                    ));
+                    bucket.objects.insert(key, object);
                 }
             }
         } else {
@@ -1109,18 +1111,6 @@ impl FirehoseService {
         }
         Ok(())
     }
-}
-
-/// A record could not be delivered to its configured S3 destination. Firehose
-/// surfaces this as `ServiceUnavailableException`; since this emulator delivers
-/// synchronously with no retry buffer, undeliverable data is reported honestly
-/// rather than acknowledged with a fabricated RecordId.
-fn delivery_failed(stream_name: &str, reason: impl std::fmt::Display) -> AwsServiceError {
-    AwsServiceError::aws_error(
-        StatusCode::SERVICE_UNAVAILABLE,
-        "ServiceUnavailableException",
-        format!("could not deliver records for stream {stream_name}: {reason}"),
-    )
 }
 
 fn not_found(name: &str) -> AwsServiceError {
@@ -1655,24 +1645,42 @@ mod tests {
     }
 
     #[test]
-    fn put_record_to_missing_bucket_reports_failure_not_fake_success() {
-        // Fix: a delivery to a non-existent destination bucket must not be
-        // acknowledged with a fabricated RecordId; it is surfaced honestly.
+    fn put_record_to_missing_bucket_is_accepted_but_delivers_nothing() {
+        // AWS accepts PutRecord into the delivery buffer and reports delivery
+        // failures asynchronously (never as an API error), so a stream whose
+        // destination bucket is absent still returns 200 + RecordId. The record
+        // simply lands nowhere (a warn is logged for observability). This is the
+        // behavior the conformance baseline asserts; the emulator must match it
+        // rather than fabricate a synchronous error.
         let (svc, _disk, _tmp) = firehose_with_disk_s3("real-bucket");
         create_s3_stream(&svc, "broken-stream", "ghost-bucket");
 
-        let result = svc.put_record(&request(
-            "PutRecord",
-            json!({
-                "DeliveryStreamName": "broken-stream",
-                "Record": {
-                    "Data": base64::engine::general_purpose::STANDARD.encode(b"x")
-                }
-            }),
-        ));
-        match result {
-            Ok(_) => panic!("delivery to a missing bucket must fail, not fake success"),
-            Err(err) => assert_eq!(err.code(), "ServiceUnavailableException"),
-        }
+        let resp = svc
+            .put_record(&request(
+                "PutRecord",
+                json!({
+                    "DeliveryStreamName": "broken-stream",
+                    "Record": {
+                        "Data": base64::engine::general_purpose::STANDARD.encode(b"x")
+                    }
+                }),
+            ))
+            .expect("PutRecord to a missing destination bucket must still be accepted (AWS async delivery)");
+        assert!(resp
+            .body
+            .expect_bytes()
+            .windows(8)
+            .any(|w| w == b"RecordId"));
+
+        // The record could not be delivered, so the existing (different) bucket
+        // stays empty — nothing was written anywhere.
+        let s3 = svc.s3.as_ref().unwrap().read();
+        let real = s3
+            .get(S3_ACCOUNT)
+            .unwrap()
+            .buckets
+            .get("real-bucket")
+            .unwrap();
+        assert!(real.objects.is_empty(), "no object should be written");
     }
 }
