@@ -52,6 +52,13 @@ pub struct Stack {
     pub notification_arns: Vec<String>,
     #[serde(default)]
     pub outputs: Vec<StackOutput>,
+    /// Whether `TerminationProtection` is enabled for this stack. Set from the
+    /// `EnableTerminationProtection` parameter on `CreateStack` and toggled by
+    /// `UpdateTerminationProtection`. `DeleteStack` refuses a protected stack,
+    /// and `DescribeStacks` reports the flag. The single source of truth (the
+    /// previous write-only `termination_protection` map is gone).
+    #[serde(default)]
+    pub enable_termination_protection: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,8 +77,6 @@ pub struct CloudFormationState {
     pub events: BTreeMap<String, Vec<serde_json::Value>>,
     #[serde(default)]
     pub stack_policies: BTreeMap<String, String>,
-    #[serde(default)]
-    pub termination_protection: BTreeMap<String, bool>,
     #[serde(default)]
     pub orgs_access_enabled: bool,
     /// Account-wide exports keyed by `Export.Name`. Populated whenever a
@@ -94,7 +99,6 @@ impl CloudFormationState {
             extras: BTreeMap::new(),
             events: BTreeMap::new(),
             stack_policies: BTreeMap::new(),
-            termination_protection: BTreeMap::new(),
             orgs_access_enabled: false,
             exports: BTreeMap::new(),
             imports: BTreeMap::new(),
@@ -106,7 +110,6 @@ impl CloudFormationState {
         self.extras.clear();
         self.events.clear();
         self.stack_policies.clear();
-        self.termination_protection.clear();
         self.orgs_access_enabled = false;
         self.exports.clear();
         self.imports.clear();
@@ -163,6 +166,7 @@ mod tests {
                 description: None,
                 notification_arns: vec![],
                 outputs: vec![],
+                enable_termination_protection: false,
             },
         );
         state.reset();

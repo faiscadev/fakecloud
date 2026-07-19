@@ -226,6 +226,16 @@ impl RedshiftService {
         !(action.starts_with("Describe") || action.starts_with("Get") || action.starts_with("List"))
     }
 
+    /// Synchronous entry point for the CloudFormation provisioner. Routes a
+    /// single action through the real [`dispatch`](Self::dispatch) handler (the
+    /// same code path `handle` runs) so a CFN-provisioned `AWS::Redshift::Cluster`
+    /// is created with identical state and validation to the direct API. The CFN
+    /// layer fires the registered snapshot hook afterwards for persistence, so
+    /// this deliberately skips the async `save_snapshot`.
+    pub fn provision_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.dispatch(req)
+    }
+
     fn dispatch(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         crate::validation::validate_request(&req.action, req)?;
         match req.action.as_str() {

@@ -533,6 +533,7 @@ impl CloudFormationService {
                                     description: None,
                                     notification_arns: Vec::new(),
                                     outputs: Vec::new(),
+                                    enable_termination_protection: false,
                                 },
                             );
                             // Real CloudFormation emits a stack event when a
@@ -2353,12 +2354,19 @@ impl CloudFormationService {
                 let stack_id = {
                     let mut accounts = self.state.write();
                     let state = accounts.get_or_create(&aid);
-                    state.termination_protection.insert(stack.clone(), enabled);
-                    state
-                        .stacks
-                        .get(&stack)
-                        .map(|s| s.stack_id.clone())
-                        .unwrap_or_else(|| stack.clone())
+                    // Toggle the flag on the stack itself (the single source of
+                    // truth). Look up by name or stack id, skipping deleted
+                    // stacks, so DeleteStack/DescribeStacks observe it.
+                    let target = state.stacks.values_mut().find(|s| {
+                        (s.name == stack || s.stack_id == stack) && s.status != "DELETE_COMPLETE"
+                    });
+                    match target {
+                        Some(s) => {
+                            s.enable_termination_protection = enabled;
+                            s.stack_id.clone()
+                        }
+                        None => stack.clone(),
+                    }
                 };
                 Ok(xml_response(
                     "UpdateTerminationProtection",
@@ -2746,6 +2754,9 @@ mod tests {
             mq: shared::<fakecloud_mq::MqData>(),
             kafka: shared::<fakecloud_kafka::KafkaData>(),
             kinesisanalyticsv2: shared::<fakecloud_kinesisanalyticsv2::Ka2State>(),
+            redshift: Arc::new(RwLock::new(fakecloud_redshift::RedshiftAccounts::new())),
+            docdb: shared::<fakecloud_docdb::DocDbState>(),
+            neptune: shared::<fakecloud_neptune::NeptuneState>(),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,

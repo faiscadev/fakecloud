@@ -60,6 +60,9 @@ fakecloud-elasticbeanstalk = { workspace = true }
 fakecloud-mq = { workspace = true }
 fakecloud-kafka = { workspace = true }
 fakecloud-kinesisanalyticsv2 = { workspace = true }
+fakecloud-redshift = { workspace = true }
+fakecloud-docdb = { workspace = true }
+fakecloud-neptune = { workspace = true }
 rcgen = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }

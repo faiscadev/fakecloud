@@ -42,7 +42,11 @@ Full control plane: `CreateStackSet`, `UpdateStackSet`, `DeleteStackSet`, `Descr
 
 ## Nested stacks
 
-`AWS::CloudFormation::Stack` is a real provisioner: the parent fetches `TemplateURL` from the S3 reference (or accepts an inline body), creates a child stack with its own ID/events/exports, and links `Outputs` so the parent's `Fn::GetAtt NestedStack.Outputs.X` resolves to the child's output value. Deleting the parent cascades to children.
+`AWS::CloudFormation::Stack` is a real provisioner: the parent fetches `TemplateURL` from the S3 reference (or accepts an inline body), creates a child stack with its own ID/events/exports, and links `Outputs` so the parent's `Fn::GetAtt NestedStack.Outputs.X` resolves to the child's output value. Deleting the parent cascades to children. A snapshot-backed resource inside a nested stack (e.g. an SQS queue synthesized by CDK into a nested stack) is persisted through its owning service's snapshot hook — the persist pass recurses into nested-stack children — so it survives a restart on both create and delete, not just the top-level stack metadata.
+
+## Termination protection
+
+`EnableTerminationProtection` is honored end to end: set it on `CreateStack` (or toggle it with `UpdateTerminationProtection`) and `DescribeStacks` reports it. `DeleteStack` refuses a protected stack with `Stack [name] cannot be deleted while TerminationProtection is enabled` until protection is disabled, matching real CloudFormation.
 
 ## Custom resources
 
@@ -75,7 +79,9 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 - **CloudWatch** — `Alarm`, `Dashboard`
 - **Cognito** — `UserPool`, `UserPoolClient`, `UserPoolDomain`, `IdentityPool`, `IdentityPoolRoleAttachment`
 - **DynamoDB** — `Table`
-- **EC2** — `VPC`, `Subnet`, `SecurityGroup` (including inline `SecurityGroupIngress` / `SecurityGroupEgress` rules), `InternetGateway`, `RouteTable`. VPC `EnableDnsSupport` / `EnableDnsHostnames` and subnet `MapPublicIpOnLaunch` are applied; `Fn::GetAtt` on a subnet resolves `VpcId` / `CidrBlock`
+- **EC2** — `VPC`, `Subnet`, `SecurityGroup` (including inline `SecurityGroupIngress` / `SecurityGroupEgress` rules), `InternetGateway`, `RouteTable`, `Instance`. VPC `EnableDnsSupport` / `EnableDnsHostnames` and subnet `MapPublicIpOnLaunch` are applied; `Fn::GetAtt` on a subnet resolves `VpcId` / `CidrBlock`. An `Instance` is launched through the same real `RunInstances` path the direct API uses and carries `MetadataOptions`, `IamInstanceProfile`, `EbsOptimized`, and `Monitoring` through to `DescribeInstances`
+- **DocDB** — `DBCluster` (routed through the real `CreateDBCluster`; `Fn::GetAtt` resolves `Endpoint`, `ReadEndpoint`, `Port`, `ClusterResourceId`)
+- **Neptune** — `DBCluster` (routed through the real `CreateDBCluster`; `Fn::GetAtt` resolves `Endpoint`, `ReadEndpoint`, `Port`, `ClusterResourceId`)
 - **ECR** — `Repository`, `RepositoryPolicy`, `LifecyclePolicy`, `PullThroughCacheRule`, `RegistryPolicy`, `RegistryScanningConfiguration`, `ReplicationConfiguration`
 - **ECS** — `Cluster`, `Service` (launches real running tasks to reach `DesiredCount`), `TaskDefinition`, `CapacityProvider`
 - **EKS** — `Cluster`, `Nodegroup`, `FargateProfile`, `Addon`, `AccessEntry`, `IdentityProviderConfig`, `PodIdentityAssociation`
@@ -93,6 +99,7 @@ For **container-backed** services, a CloudFormation-provisioned resource is back
 - **CloudWatch Logs** — `LogGroup`, `LogStream`, `MetricFilter`, `SubscriptionFilter`, `Destination`, `ResourcePolicy`, `QueryDefinition`, `Delivery`, `DeliverySource`, `DeliveryDestination`
 - **Organizations** — `Organization`, `OrganizationalUnit`, `Account`, `Policy`, `ResourcePolicy`
 - **RDS** — `DBInstance`, `DBCluster`, `DBParameterGroup`, `DBClusterParameterGroup`, `DBSubnetGroup`, `DBSecurityGroup`, `OptionGroup`, `DBProxy`, `EventSubscription`
+- **Redshift** — `Cluster` (routed through the real `CreateCluster`; `Fn::GetAtt` resolves `Endpoint.Address`, `Endpoint.Port`, `Id`)
 - **Route 53** — `HostedZone`, `RecordSet`, `HealthCheck`, `DNSSEC`, `KeySigningKey`
 - **S3** — `Bucket`, `BucketPolicy`
 - **Secrets Manager** — `Secret`, `ResourcePolicy`, `RotationSchedule`, `SecretTargetAttachment`
@@ -153,7 +160,7 @@ aws --endpoint-url http://localhost:4566 cloudformation list-exports
 
 ## Gotchas
 
-- **Not every resource type provisions something.** Types in the provisioner list above create real backing state. Anything else (the remaining `AWS::EC2::*` types such as `Instance` / `NatGateway` / `Route`, etc.) is recorded but has no underlying resource, so a follow-up call against that service will 404.
+- **Not every resource type provisions something.** Types in the provisioner list above create real backing state. Anything else (the remaining `AWS::EC2::*` types such as `NatGateway` / `Route`, etc.) is recorded but has no underlying resource, so a follow-up call against that service will 404.
 - **Drift always reports IN_SYNC.** fakecloud is the source of truth for backing state, so real drift never occurs. The drift API still round-trips IDs and statuses for tooling that polls them.
 - **SAM expansion runs at create time.** A re-uploaded template still requires `Capabilities=[CAPABILITY_AUTO_EXPAND]` on operations that touch transforms.
 

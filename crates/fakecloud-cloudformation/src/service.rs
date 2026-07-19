@@ -219,6 +219,14 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "KinesisAnalyticsV2" => "kinesisanalyticsv2",
         "EKS" => "eks",
         "ServiceDiscovery" => "servicediscovery",
+        // RDS-shaped cluster services wired into the provisioner (this batch):
+        // their CFN-created clusters mutate snapshot-backed state directly, so
+        // without these mappings a CFN-created (or deleted) cluster would vanish
+        // (or reappear) on restart. Each has a registered snapshot hook keyed by
+        // these names in the server.
+        "Redshift" => "redshift",
+        "DocDB" => "docdb",
+        "Neptune" => "neptune",
         _ => return None,
     })
 }
@@ -249,6 +257,43 @@ async fn persist_touched_services<I>(
     for key in keys {
         if let Some(hook) = hooks.get(key) {
             hook().await;
+        }
+    }
+}
+
+/// Maximum nested-stack recursion depth when collecting touched resource types.
+/// Real CloudFormation caps nesting well below this; the guard only exists to
+/// keep a pathological (or cyclic) child-stack graph from recursing forever.
+const MAX_NESTED_STACK_DEPTH: usize = 50;
+
+/// Collect the resource types a stack op touched, recursing into nested
+/// `AWS::CloudFormation::Stack` children so every owning service's snapshot
+/// hook fires — not just the parent's top-level types.
+///
+/// A nested stack's child resources (e.g. an SQS queue inside an
+/// `AWS::CloudFormation::Stack`) are provisioned by mutating the same shared
+/// service state as top-level resources, but at the parent level the whole
+/// subtree is represented by a single `AWS::CloudFormation::Stack` resource,
+/// which `service_key_for_type` maps to `None`. Without this recursion the
+/// child service's snapshot hook never fires, so a snapshot-backed child
+/// vanishes (create) or reappears (delete) on restart — the #1766 pattern one
+/// (or more) levels deep. The child stacks live in the same
+/// `CloudFormationState`, keyed by their `stack_id` (the nested-stack
+/// resource's `physical_id`), so we look each one up and recurse.
+fn collect_nested_touched_types(
+    state: &CloudFormationState,
+    resource_type: &str,
+    physical_id: &str,
+    out: &mut Vec<String>,
+    depth: usize,
+) {
+    out.push(resource_type.to_string());
+    if depth >= MAX_NESTED_STACK_DEPTH || resource_type != "AWS::CloudFormation::Stack" {
+        return;
+    }
+    if let Some(child) = state.stacks.values().find(|s| s.stack_id == physical_id) {
+        for r in &child.resources {
+            collect_nested_touched_types(state, &r.resource_type, &r.physical_id, out, depth + 1);
         }
     }
 }
@@ -454,6 +499,9 @@ pub struct CloudFormationDeps {
     pub mq: fakecloud_mq::SharedMqState,
     pub kafka: fakecloud_kafka::SharedKafkaState,
     pub kinesisanalyticsv2: fakecloud_kinesisanalyticsv2::SharedKa2State,
+    pub redshift: fakecloud_redshift::SharedRedshiftState,
+    pub docdb: fakecloud_docdb::SharedDocDbState,
+    pub neptune: fakecloud_neptune::SharedNeptuneState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -1001,6 +1049,9 @@ impl CloudFormationService {
             mq_state: self.deps.mq.clone(),
             kafka_state: self.deps.kafka.clone(),
             ka2_state: self.deps.kinesisanalyticsv2.clone(),
+            redshift_state: self.deps.redshift.clone(),
+            docdb_state: self.deps.docdb.clone(),
+            neptune_state: self.deps.neptune.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -1517,6 +1568,13 @@ impl CloudFormationService {
         let mut parameters = Self::extract_parameters(&params);
         Self::merge_parameter_defaults(&mut parameters, template_body);
         let notification_arns = Self::extract_notification_arns(&params);
+        // Honor the `EnableTerminationProtection` parameter (default false),
+        // matching real CreateStack so a protected stack can't later be deleted
+        // without disabling protection first.
+        let enable_termination_protection = params
+            .get("EnableTerminationProtection")
+            .map(|v| v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
 
         // Seed AWS::* pseudo-parameters with stack-context values so
         // resolve_refs can substitute them into resource properties.
@@ -1600,6 +1658,7 @@ impl CloudFormationService {
                     description: parsed.description.clone(),
                     notification_arns: notification_arns.clone(),
                     outputs: Vec::new(),
+                    enable_termination_protection,
                 },
             );
             record_stack_status_event(
@@ -1817,16 +1876,37 @@ impl CloudFormationService {
             "CREATE_COMPLETE",
         );
 
+        // Expand the top-level resource types into the full set the op touched,
+        // recursing into nested `AWS::CloudFormation::Stack` children so a
+        // snapshot-backed nested-stack resource (e.g. an SQS queue synthesized
+        // by CDK inside a nested stack) is persisted too. The child stacks were
+        // inserted into `state` during provisioning, so they are visible here.
+        let touched_types: Vec<String> = {
+            let accounts = state.read();
+            let cfn_state = accounts.get(&account_id);
+            let mut types = Vec::new();
+            if let Some(cfn_state) = cfn_state {
+                for r in &resources {
+                    collect_nested_touched_types(
+                        cfn_state,
+                        &r.resource_type,
+                        &r.physical_id,
+                        &mut types,
+                        0,
+                    );
+                }
+            } else {
+                types.extend(resources.iter().map(|r| r.resource_type.clone()));
+            }
+            types
+        };
+
         save_snapshot_static(state, snapshot_store, snapshot_lock).await;
         // Persist every snapshot-backed service the stack provisioned, so a
         // CFN-created resource (e.g. a Lambda function or Secret whose service
         // is not otherwise re-mutated) is written to disk and survives a
         // restart -- not just the CloudFormation stack metadata above.
-        persist_touched_services(
-            &snapshot_hooks,
-            resources.iter().map(|r| r.resource_type.clone()),
-        )
-        .await;
+        persist_touched_services(&snapshot_hooks, touched_types).await;
     }
 
     /// Roll a stack into CREATE_FAILED, record the lifecycle event, and
@@ -1894,6 +1974,40 @@ impl CloudFormationService {
                 let stack_name_for_notif = stack.name.clone();
                 let notification_arns = stack.notification_arns.clone();
                 let resources: Vec<_> = stack.resources.clone();
+                let termination_protected = stack.enable_termination_protection;
+
+                // Refuse to delete a stack with TerminationProtection enabled,
+                // matching real CloudFormation (the caller must disable
+                // protection via UpdateTerminationProtection first). The guard
+                // lock drops as this early return unwinds the block, before any
+                // `.await`. DeleteStack declares only `TokenAlreadyExistsException`
+                // in Smithy; the `AnyError` conformance expectation accepts any
+                // AWS-shaped 4xx, and real AWS uses this exact message.
+                if termination_protected {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationError",
+                        format!(
+                            "Stack [{stack_name_for_notif}] cannot be deleted while TerminationProtection is enabled"
+                        ),
+                    ));
+                }
+
+                // Capture the touched types now, recursing into nested-stack
+                // children, BEFORE the child stacks are removed from state
+                // below. Otherwise the nested-stack subtree would be gone by the
+                // time we build the persist set and a snapshot-backed child
+                // resource would reappear on restart (#1766 pattern one level
+                // deep, delete side).
+                for r in &resources {
+                    collect_nested_touched_types(
+                        state,
+                        &r.resource_type,
+                        &r.physical_id,
+                        &mut deleted_types,
+                        0,
+                    );
+                }
 
                 // Block delete if any of this stack's exports are still
                 // imported by another live stack. Mirrors real CFN.
@@ -1984,8 +2098,6 @@ impl CloudFormationService {
                     &stack_id,
                     "DELETE_COMPLETE",
                 );
-
-                deleted_types = resources.iter().map(|r| r.resource_type.clone()).collect();
             }
         }
 
@@ -2327,9 +2439,19 @@ impl CloudFormationService {
                 Ok(changes) => {
                     // Capture every service touched by the update (created,
                     // updated, or deleted resources) so we can persist them once
-                    // the stack reaches UPDATE_COMPLETE.
-                    let touched_types: Vec<String> =
-                        changes.iter().map(|c| c.resource_type.clone()).collect();
+                    // the stack reaches UPDATE_COMPLETE. Recurse into nested
+                    // `AWS::CloudFormation::Stack` children so a snapshot-backed
+                    // resource inside a nested stack is persisted too.
+                    let mut touched_types: Vec<String> = Vec::new();
+                    for c in &changes {
+                        collect_nested_touched_types(
+                            state,
+                            &c.resource_type,
+                            &c.physical_id,
+                            &mut touched_types,
+                            0,
+                        );
+                    }
                     record_stack_events(state, &stack_id, &stack_name_owned, &changes);
                     record_stack_status_event(
                         state,
@@ -3314,6 +3436,23 @@ mod tests {
                     "",
                 ),
             )),
+            redshift: Arc::new(parking_lot::RwLock::new(
+                fakecloud_redshift::RedshiftAccounts::new(),
+            )),
+            docdb: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
+            neptune: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            )),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,
@@ -4081,6 +4220,214 @@ mod tests {
         assert!(
             !loaded.buckets.contains_key("cfn-bucket"),
             "CFN-deleted bucket should be removed from the S3 store"
+        );
+    }
+
+    /// Build a parent template whose only resource is an
+    /// `AWS::CloudFormation::Stack` whose child template contains one SQS queue.
+    fn nested_stack_create_req(stack: &str, queue_name: &str) -> AwsRequest {
+        let child_template = format!(
+            r#"{{"Resources":{{"ChildQ":{{"Type":"AWS::SQS::Queue","Properties":{{"QueueName":"{queue_name}"}}}}}}}}"#
+        );
+        let parent = serde_json::json!({
+            "Resources": {
+                "Child": {
+                    "Type": "AWS::CloudFormation::Stack",
+                    "Properties": { "TemplateBody": child_template }
+                }
+            }
+        })
+        .to_string();
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), stack.to_string());
+        p.insert("TemplateBody".to_string(), parent);
+        make_request("CreateStack", p)
+    }
+
+    fn sqs_queue_count(svc: &CloudFormationService) -> usize {
+        let accounts = svc.deps.sqs.read();
+        accounts
+            .get("123456789012")
+            .map(|s| s.queues.len())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn nested_stack_child_fires_child_service_snapshot_hook() {
+        // Regression for the #1766-class nested-stack bug: a snapshot-backed
+        // resource inside an AWS::CloudFormation::Stack child must fire its
+        // owning service's snapshot hook, or it vanishes on restart. The parent
+        // op only sees the "AWS::CloudFormation::Stack" type; the recursion into
+        // child resources is what surfaces the child's "sqs" type.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("sqs", counting_hook(counter.clone()));
+        let svc = make_service().with_snapshot_hooks(hooks);
+
+        svc.create_stack(&nested_stack_create_req("parent", "nested-q"))
+            .await
+            .unwrap();
+
+        // The child SQS queue was really provisioned...
+        assert_eq!(sqs_queue_count(&svc), 1, "nested child queue should exist");
+        // ...and the sqs snapshot hook fired so it is persisted (would be 0
+        // before the fix, since only AWS::CloudFormation::Stack surfaced).
+        assert!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "child SQS snapshot hook must fire for a nested-stack resource"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_stack_delete_fires_child_service_snapshot_hook() {
+        // Delete side of the nested-stack fix: deleting the parent must persist
+        // the child's owning service so the removed nested resource does not
+        // reappear on restart.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("sqs", counting_hook(counter.clone()));
+        let svc = make_service().with_snapshot_hooks(hooks);
+
+        svc.create_stack(&nested_stack_create_req("parent", "nested-q"))
+            .await
+            .unwrap();
+        let after_create = counter.load(Ordering::SeqCst);
+        assert!(after_create >= 1, "create fired the child sqs hook");
+
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "parent".to_string());
+        svc.delete_stack(&make_request("DeleteStack", p))
+            .await
+            .unwrap();
+
+        // The child queue is gone and the sqs hook fired again on delete.
+        assert_eq!(sqs_queue_count(&svc), 0, "nested child queue removed");
+        assert!(
+            counter.load(Ordering::SeqCst) > after_create,
+            "delete must re-fire the child sqs snapshot hook"
+        );
+    }
+
+    #[tokio::test]
+    async fn termination_protection_blocks_delete_and_is_reported() {
+        let svc = make_service();
+
+        // Create a protected stack.
+        let mut create = HashMap::new();
+        create.insert("StackName".to_string(), "protected".to_string());
+        create.insert(
+            "TemplateBody".to_string(),
+            r#"{"Resources":{"Q":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"tp-q"}}}}"#
+                .to_string(),
+        );
+        create.insert(
+            "EnableTerminationProtection".to_string(),
+            "true".to_string(),
+        );
+        svc.create_stack(&make_request("CreateStack", create))
+            .await
+            .unwrap();
+
+        // DescribeStacks reports the flag as true.
+        let desc = svc
+            .describe_stacks(&make_request("DescribeStacks", {
+                let mut p = HashMap::new();
+                p.insert("StackName".to_string(), "protected".to_string());
+                p
+            }))
+            .unwrap();
+        let body = String::from_utf8_lossy(desc.body.expect_bytes()).to_string();
+        assert!(
+            body.contains("<EnableTerminationProtection>true</EnableTerminationProtection>"),
+            "DescribeStacks must report termination protection: {body}"
+        );
+
+        // DeleteStack is refused while protection is on.
+        let mut del = HashMap::new();
+        del.insert("StackName".to_string(), "protected".to_string());
+        let err = match svc.delete_stack(&make_request("DeleteStack", del)).await {
+            Err(e) => e,
+            Ok(_) => panic!("delete of a protected stack must be refused"),
+        };
+        assert!(
+            err.message().contains("TerminationProtection is enabled"),
+            "unexpected error: {}",
+            err.message()
+        );
+
+        // Disable protection, then delete succeeds.
+        let mut upd = HashMap::new();
+        upd.insert("StackName".to_string(), "protected".to_string());
+        upd.insert(
+            "EnableTerminationProtection".to_string(),
+            "false".to_string(),
+        );
+        svc.handle_extra_action(&make_request("UpdateTerminationProtection", upd))
+            .unwrap();
+
+        let mut del = HashMap::new();
+        del.insert("StackName".to_string(), "protected".to_string());
+        svc.delete_stack(&make_request("DeleteStack", del))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn redshift_cluster_provisions_through_real_handler_with_ref_and_getatt() {
+        // Fix #3: AWS::Redshift::Cluster now routes through the real
+        // CreateCluster handler instead of the no-op catch-all, so it has real
+        // backing state, Ref resolves to the cluster id, and GetAtt returns the
+        // real endpoint. Also proves the redshift snapshot hook fires.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let mut hooks: BTreeMap<&'static str, fakecloud_persistence::SnapshotHook> =
+            BTreeMap::new();
+        hooks.insert("redshift", counting_hook(counter.clone()));
+        let svc = make_service().with_snapshot_hooks(hooks);
+
+        let template = r#"{"Resources":{"Cluster":{"Type":"AWS::Redshift::Cluster","Properties":{
+            "ClusterIdentifier":"my-redshift","NodeType":"ra3.xlplus",
+            "MasterUsername":"admin","ClusterType":"single-node","DBName":"analytics"}}}}"#;
+        let mut p = HashMap::new();
+        p.insert("StackName".to_string(), "rs".to_string());
+        p.insert("TemplateBody".to_string(), template.to_string());
+        svc.create_stack(&make_request("CreateStack", p))
+            .await
+            .unwrap();
+
+        // Real backing state exists in the redshift service.
+        {
+            let mut guard = svc.deps.redshift.write();
+            let acct = guard.account("123456789012");
+            let cluster = acct
+                .clusters
+                .get("my-redshift")
+                .expect("redshift cluster should be provisioned in the real service state");
+            assert_eq!(cluster.node_type, "ra3.xlplus");
+            assert!(!cluster.endpoint_address.is_empty());
+        }
+        // Ref (physical id) is the cluster identifier; GetAtt Endpoint.Address
+        // is a real endpoint, not the logical id.
+        {
+            let accounts = svc.state.read();
+            let stack = accounts
+                .get("123456789012")
+                .unwrap()
+                .stacks
+                .get("rs")
+                .unwrap();
+            let res = &stack.resources[0];
+            assert_eq!(res.physical_id, "my-redshift");
+            let addr = res
+                .attributes
+                .get("Endpoint.Address")
+                .expect("Endpoint.Address");
+            assert!(addr.contains("my-redshift"), "GetAtt endpoint: {addr}");
+        }
+        assert!(
+            counter.load(Ordering::SeqCst) >= 1,
+            "redshift snapshot hook must fire"
         );
     }
 

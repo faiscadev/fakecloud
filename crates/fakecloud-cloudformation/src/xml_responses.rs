@@ -155,12 +155,14 @@ fn stack_member_xml(stack: &Stack) -> String {
         <StackName>{name}</StackName>
         <StackId>{id}</StackId>
         <StackStatus>{status}</StackStatus>
-        <CreationTime>{created}</CreationTime>{description_xml}{tags_xml}{params_xml}{notification_arns_xml}{outputs_xml}
+        <CreationTime>{created}</CreationTime>
+        <EnableTerminationProtection>{termination_protection}</EnableTerminationProtection>{description_xml}{tags_xml}{params_xml}{notification_arns_xml}{outputs_xml}
       </member>"#,
         name = xml_escape(&stack.name),
         id = xml_escape(&stack.stack_id),
         status = xml_escape(&stack.status),
         created = stack.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
+        termination_protection = stack.enable_termination_protection,
     )
 }
 
@@ -319,6 +321,7 @@ mod tests {
             description: None,
             notification_arns: vec![],
             outputs: vec![],
+            enable_termination_protection: false,
         }
     }
 

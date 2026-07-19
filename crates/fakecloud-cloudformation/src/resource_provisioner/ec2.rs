@@ -323,6 +323,55 @@ impl ResourceProvisioner {
                     .collect()
             })
             .unwrap_or_default();
+        // MetadataOptions: only build one when the template supplies the block,
+        // so an instance without it keeps the AWS defaults. Each field falls
+        // back to the DescribeInstances-default when omitted.
+        let metadata_options = props
+            .get("MetadataOptions")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                let default = fakecloud_ec2::state::MetadataOptions::default();
+                let get_str = |key: &str, dflt: &str| {
+                    m.get(key)
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_else(|| dflt.to_string())
+                };
+                fakecloud_ec2::state::MetadataOptions {
+                    http_tokens: get_str("HttpTokens", &default.http_tokens),
+                    http_endpoint: get_str("HttpEndpoint", &default.http_endpoint),
+                    http_put_response_hop_limit: m
+                        .get("HttpPutResponseHopLimit")
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(default.http_put_response_hop_limit),
+                    http_protocol_ipv6: get_str("HttpProtocolIpv6", &default.http_protocol_ipv6),
+                    instance_metadata_tags: get_str(
+                        "InstanceMetadataTags",
+                        &default.instance_metadata_tags,
+                    ),
+                }
+            });
+
+        // IamInstanceProfile can be a string (profile name / ARN) or an object
+        // with `Arn` / `Name` (the CFN property shape).
+        let iam_profile = props.get("IamInstanceProfile");
+        let (iam_instance_profile_arn, iam_instance_profile_name) = match iam_profile {
+            Some(serde_json::Value::String(s)) => {
+                // A bare string is the profile name (or an ARN); classify by
+                // prefix so both round-trip.
+                if s.starts_with("arn:") {
+                    (Some(s.clone()), None)
+                } else {
+                    (None, Some(s.clone()))
+                }
+            }
+            Some(serde_json::Value::Object(o)) => (
+                o.get("Arn").and_then(|v| v.as_str()).map(String::from),
+                o.get("Name").and_then(|v| v.as_str()).map(String::from),
+            ),
+            _ => (None, None),
+        };
+
         let spec = fakecloud_ec2::cfn_provision::CfnInstanceSpec {
             image_id: prop_str(props, "ImageId").map(String::from),
             instance_type: prop_str(props, "InstanceType").map(String::from),
@@ -342,6 +391,13 @@ impl ResourceProvisioner {
             key_name: prop_str(props, "KeyName").map(String::from),
             user_data: prop_str(props, "UserData").map(String::from),
             private_ip: prop_str(props, "PrivateIpAddress").map(String::from),
+            metadata_options,
+            // CFN `EbsOptimized` / `Monitoring` are booleans; templates may pass
+            // them as JSON bool or the stringified form after Ref resolution.
+            ebs_optimized: prop_bool(props, "EbsOptimized").unwrap_or(false),
+            monitoring: prop_bool(props, "Monitoring").unwrap_or(false),
+            iam_instance_profile_arn,
+            iam_instance_profile_name,
         };
 
         let attrs = fakecloud_ec2::cfn_provision::cfn_create(

@@ -104,6 +104,25 @@ impl DocDbService {
         self
     }
 
+    /// Synchronous entry point for the CloudFormation provisioner. Routes the
+    /// cluster create/delete/describe actions through the real handlers (the
+    /// same code path `handle` runs, including prevalidation) so a
+    /// CFN-provisioned `AWS::DocDB::DBCluster` has identical state to the direct
+    /// API. Persistence is driven by the CFN layer's registered snapshot hook.
+    pub fn provision_sync(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        crate::validation::prevalidate(req.action.as_str(), req)?;
+        match req.action.as_str() {
+            "CreateDBCluster" => self.create_db_cluster(req),
+            "DeleteDBCluster" => self.delete_db_cluster(req),
+            "DescribeDBClusters" => self.describe_db_clusters(req),
+            other => Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidAction",
+                format!("DocDB CFN provisioning does not support action {other}"),
+            )),
+        }
+    }
+
     /// A persistence hook usable by the CloudFormation provisioner / restart
     /// path. `None` in memory mode.
     pub fn snapshot_hook(&self) -> Option<fakecloud_persistence::SnapshotHook> {
