@@ -317,9 +317,14 @@ pub(crate) fn wafv2_evaluate_admin(
                 .values()
                 .map(|s| (s.arn.clone(), s.clone()))
                 .collect();
-        (acl, ip_sets, regex_sets)
+        let rule_groups: std::collections::HashMap<String, fakecloud_wafv2::RuleGroup> = account
+            .rule_groups
+            .values()
+            .map(|g| (g.arn.clone(), g.clone()))
+            .collect();
+        (acl, ip_sets, regex_sets, rule_groups)
     };
-    let (acl, ip_sets, regex_sets) = snapshot;
+    let (acl, ip_sets, regex_sets, rule_groups) = snapshot;
     let Some(acl) = acl else {
         return bad("WebACL not found");
     };
@@ -338,6 +343,7 @@ pub(crate) fn wafv2_evaluate_admin(
         &request,
         &ip_sets,
         &regex_sets,
+        &rule_groups,
         rate_limiter,
         now_epoch_secs,
     );

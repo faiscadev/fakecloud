@@ -2266,3 +2266,76 @@ fn start_activity_stream_accepts_alias() {
     let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
     assert!(body.contains("<KmsKeyId>arn:aws:kms:us-east-1:000000000000:alias/aws/rds</KmsKeyId>"));
 }
+
+#[test]
+fn create_db_cluster_persists_safety_fields() {
+    // Regression: CreateDBCluster dropped DeletionProtection / StorageEncrypted
+    // / KmsKeyId / BackupRetentionPeriod / DatabaseName until a follow-up
+    // ModifyDBCluster. They must be persisted at create time and echoed by both
+    // CreateDBCluster and DescribeDBClusters.
+    let svc = svc();
+    let resp = svc
+        .handle_extra_action(&req(
+            "CreateDBCluster",
+            &[
+                ("DBClusterIdentifier", "secure"),
+                ("Engine", "aurora-postgresql"),
+                ("DeletionProtection", "true"),
+                ("StorageEncrypted", "true"),
+                (
+                    "KmsKeyId",
+                    "arn:aws:kms:us-east-1:000000000000:key/abcd-1234",
+                ),
+                ("BackupRetentionPeriod", "14"),
+                ("DatabaseName", "appdb"),
+            ],
+        ))
+        .expect("CreateDBCluster");
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        body.contains("<DeletionProtection>true</DeletionProtection>"),
+        "create body missing DeletionProtection: {body}"
+    );
+    assert!(
+        body.contains("<StorageEncrypted>true</StorageEncrypted>"),
+        "create body missing StorageEncrypted: {body}"
+    );
+    assert!(
+        body.contains("<KmsKeyId>arn:aws:kms:us-east-1:000000000000:key/abcd-1234</KmsKeyId>"),
+        "create body missing KmsKeyId: {body}"
+    );
+    assert!(
+        body.contains("<BackupRetentionPeriod>14</BackupRetentionPeriod>"),
+        "create body missing BackupRetentionPeriod: {body}"
+    );
+    assert!(
+        body.contains("<DatabaseName>appdb</DatabaseName>"),
+        "create body missing DatabaseName: {body}"
+    );
+
+    // The same values must survive into DescribeDBClusters.
+    let dr = svc
+        .handle_extra_action(&req("DescribeDBClusters", &[]))
+        .unwrap();
+    let dbody = String::from_utf8(dr.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        dbody.contains("<DeletionProtection>true</DeletionProtection>"),
+        "describe missing DeletionProtection: {dbody}"
+    );
+    assert!(
+        dbody.contains("<StorageEncrypted>true</StorageEncrypted>"),
+        "describe missing StorageEncrypted: {dbody}"
+    );
+    assert!(
+        dbody.contains("<KmsKeyId>arn:aws:kms:us-east-1:000000000000:key/abcd-1234</KmsKeyId>"),
+        "describe missing KmsKeyId: {dbody}"
+    );
+    assert!(
+        dbody.contains("<BackupRetentionPeriod>14</BackupRetentionPeriod>"),
+        "describe missing BackupRetentionPeriod: {dbody}"
+    );
+    assert!(
+        dbody.contains("<DatabaseName>appdb</DatabaseName>"),
+        "describe missing DatabaseName: {dbody}"
+    );
+}

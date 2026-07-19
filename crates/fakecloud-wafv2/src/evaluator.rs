@@ -33,7 +33,7 @@ use percent_encoding::percent_decode_str;
 use regex::Regex;
 use serde_json::Value;
 
-use crate::state::{IpSet, RegexPatternSet, WebAcl};
+use crate::state::{IpSet, RegexPatternSet, RuleGroup, WebAcl};
 
 /// HTTP header name (lowercased) the test admin endpoint uses to inject a
 /// synthetic geo country code into the request. Real GeoIP lookup is out of
@@ -188,8 +188,9 @@ pub fn evaluate(
     web_acl: &WebAcl,
     ipsets: &HashMap<String, IpSet>,
     regex_sets: &HashMap<String, RegexPatternSet>,
+    rule_groups: &HashMap<String, RuleGroup>,
 ) -> WafAction {
-    evaluate_detailed(req, web_acl, ipsets, regex_sets).action
+    evaluate_detailed(req, web_acl, ipsets, regex_sets, rule_groups).action
 }
 
 /// Like [`evaluate`] but also reports the names of rules whose
@@ -200,8 +201,17 @@ pub fn evaluate_detailed(
     web_acl: &WebAcl,
     ipsets: &HashMap<String, IpSet>,
     regex_sets: &HashMap<String, RegexPatternSet>,
+    rule_groups: &HashMap<String, RuleGroup>,
 ) -> WafEvaluation {
-    let verdict = evaluate_inner(req, web_acl, ipsets, regex_sets, None, current_epoch_secs());
+    let verdict = evaluate_inner(
+        req,
+        web_acl,
+        ipsets,
+        regex_sets,
+        rule_groups,
+        None,
+        current_epoch_secs(),
+    );
     WafEvaluation {
         action: verdict.action,
         count_rules: verdict.count_rules,
@@ -214,11 +224,13 @@ pub fn evaluate_detailed(
 ///
 /// `now_epoch_secs` is taken as a parameter so tests can drive the
 /// rate-based clock deterministically.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_web_acl(
     web_acl: &WebAcl,
     request: &WafRequest,
     ipsets: &HashMap<String, IpSet>,
     regex_sets: &HashMap<String, RegexPatternSet>,
+    rule_groups: &HashMap<String, RuleGroup>,
     rate_limiter: &RateLimiter,
     now_epoch_secs: i64,
 ) -> WafVerdict {
@@ -227,6 +239,7 @@ pub fn evaluate_web_acl(
         web_acl,
         ipsets,
         regex_sets,
+        rule_groups,
         Some(rate_limiter),
         now_epoch_secs,
     )
@@ -239,8 +252,9 @@ impl WebAcl {
         req: &WafRequest,
         ipsets: &HashMap<String, IpSet>,
         regex_sets: &HashMap<String, RegexPatternSet>,
+        rule_groups: &HashMap<String, RuleGroup>,
     ) -> WafAction {
-        evaluate(req, self, ipsets, regex_sets)
+        evaluate(req, self, ipsets, regex_sets, rule_groups)
     }
 
     /// Convenience wrapper around [`evaluate_detailed`] for callers
@@ -250,8 +264,9 @@ impl WebAcl {
         req: &WafRequest,
         ipsets: &HashMap<String, IpSet>,
         regex_sets: &HashMap<String, RegexPatternSet>,
+        rule_groups: &HashMap<String, RuleGroup>,
     ) -> WafEvaluation {
-        evaluate_detailed(req, self, ipsets, regex_sets)
+        evaluate_detailed(req, self, ipsets, regex_sets, rule_groups)
     }
 }
 
@@ -263,11 +278,13 @@ fn current_epoch_secs() -> i64 {
         .unwrap_or(0)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn evaluate_inner(
     req: &WafRequest,
     web_acl: &WebAcl,
     ipsets: &HashMap<String, IpSet>,
     regex_sets: &HashMap<String, RegexPatternSet>,
+    rule_groups: &HashMap<String, RuleGroup>,
     rate_limiter: Option<&RateLimiter>,
     now_epoch_secs: i64,
 ) -> WafVerdict {
@@ -282,6 +299,42 @@ fn evaluate_inner(
         let Some(stmt) = rule.get("Statement") else {
             continue;
         };
+        // Customer RuleGroupReferenceStatement rules delegate their terminal
+        // decision to the referenced rule group's own rules (they carry an
+        // `OverrideAction`, not an `Action`). Handle them before the generic
+        // statement dispatch so a matching Block rule inside the group blocks.
+        if let Some(rg_ref) = stmt.get("RuleGroupReferenceStatement") {
+            if let Some(term) = eval_rule_group_reference(
+                rule,
+                rg_ref,
+                req,
+                ipsets,
+                regex_sets,
+                rule_groups,
+                rate_limiter,
+                now_epoch_secs,
+                &mut labels,
+                &mut emitted_labels,
+                &mut count_rules,
+            ) {
+                add_rule_labels(rule, &mut labels, &mut emitted_labels);
+                return WafVerdict {
+                    action: term.action,
+                    terminating_rule_id: Some(term.rule_id),
+                    labels: emitted_labels,
+                    blocked: matches!(
+                        term.action,
+                        WafAction::Block | WafAction::Captcha | WafAction::Challenge
+                    ),
+                    count_rules,
+                    custom_response_body_key: term.body_key,
+                    custom_response_status: term.status,
+                };
+            }
+            // No terminal action produced by the group — it is non-terminal
+            // for the WebACL, continue to the next rule.
+            continue;
+        }
         let ctx = StmtCtx {
             req,
             ipsets,
@@ -299,15 +352,7 @@ fn evaluate_inner(
             continue;
         }
         // Add labels produced by this rule so subsequent rules can match.
-        if let Some(arr) = rule.get("RuleLabels").and_then(Value::as_array) {
-            for label in arr {
-                if let Some(name) = label.get("Name").and_then(Value::as_str) {
-                    if labels.insert(name.to_owned()) {
-                        emitted_labels.push(name.to_owned());
-                    }
-                }
-            }
-        }
+        add_rule_labels(rule, &mut labels, &mut emitted_labels);
         if let Some(action) = rule.get("Action").and_then(rule_action) {
             // Count is non-terminal: keep evaluating subsequent rules but
             // record the rule for metrics.
@@ -332,8 +377,10 @@ fn evaluate_inner(
                 custom_response_status: status,
             };
         }
-        // Rule with OverrideAction (rule group reference) doesn't terminate
-        // here either since we don't expand rule groups in this batch.
+        // A rule that matched but carries only an OverrideAction (e.g. a
+        // managed rule group reference without an explicit terminal Action)
+        // does not terminate here; customer rule group references are expanded
+        // and terminated above.
     }
 
     let default = default_action(web_acl);
@@ -346,6 +393,151 @@ fn evaluate_inner(
         custom_response_body_key: None,
         custom_response_status: None,
     }
+}
+
+/// Insert every `RuleLabels[].Name` produced by `rule` into the shared label
+/// set, tracking newly-added labels in `emitted_labels` (in insertion order).
+fn add_rule_labels(rule: &Value, labels: &mut HashSet<String>, emitted_labels: &mut Vec<String>) {
+    if let Some(arr) = rule.get("RuleLabels").and_then(Value::as_array) {
+        for label in arr {
+            if let Some(name) = label.get("Name").and_then(Value::as_str) {
+                if labels.insert(name.to_owned()) {
+                    emitted_labels.push(name.to_owned());
+                }
+            }
+        }
+    }
+}
+
+/// Terminal outcome produced by evaluating a referenced customer rule group.
+struct GroupTerminal {
+    action: WafAction,
+    rule_id: String,
+    body_key: Option<String>,
+    status: Option<u16>,
+}
+
+/// Evaluate a customer `RuleGroupReferenceStatement`.
+///
+/// Looks up the referenced [`RuleGroup`] by ARN and evaluates its rules in
+/// `Priority` order against the request, reusing the same statement machinery
+/// as inline WebACL rules. Honors:
+///
+/// - the reference's `OverrideAction`: `Count` converts every inner rule's
+///   action to `Count` (test/monitor mode); `None` lets inner actions apply.
+/// - `RuleActionOverrides`: per-rule action replacement by rule name.
+/// - `ExcludedRules` (legacy): named inner rules are forced to `Count`.
+///
+/// Returns `Some(GroupTerminal)` when an inner rule matches with a terminal
+/// (non-`Count`) action, or `None` when nothing terminal fired (including a
+/// missing rule group — AWS validates the reference at association time, so at
+/// evaluation a missing group is a no-op rather than a match).
+#[allow(clippy::too_many_arguments)]
+fn eval_rule_group_reference(
+    outer_rule: &Value,
+    rg_ref: &Value,
+    req: &WafRequest,
+    ipsets: &HashMap<String, IpSet>,
+    regex_sets: &HashMap<String, RegexPatternSet>,
+    rule_groups: &HashMap<String, RuleGroup>,
+    rate_limiter: Option<&RateLimiter>,
+    now_epoch_secs: i64,
+    labels: &mut HashSet<String>,
+    emitted_labels: &mut Vec<String>,
+    count_rules: &mut Vec<String>,
+) -> Option<GroupTerminal> {
+    let arn = rg_ref.get("ARN").and_then(Value::as_str)?;
+    let group = rule_groups.get(arn)?;
+
+    // OverrideAction {Count:{}} on the reference forces every inner rule to
+    // Count (nothing terminates). {None:{}} is the pass-through default.
+    let force_count = outer_rule
+        .get("OverrideAction")
+        .and_then(Value::as_object)
+        .map(|o| o.contains_key("Count"))
+        .unwrap_or(false);
+
+    let overrides = rg_ref.get("RuleActionOverrides").and_then(Value::as_array);
+    let excluded: HashSet<&str> = rg_ref
+        .get("ExcludedRules")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| e.get("Name").and_then(Value::as_str))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut inner_rules: Vec<&Value> = group.rules.iter().collect();
+    inner_rules.sort_by_key(|r| r.get("Priority").and_then(Value::as_i64).unwrap_or(0));
+
+    for inner in inner_rules {
+        let Some(stmt) = inner.get("Statement") else {
+            continue;
+        };
+        let name = inner
+            .get("Name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_owned();
+
+        let matched = {
+            let ctx = StmtCtx {
+                req,
+                ipsets,
+                regex_sets,
+                labels: &*labels,
+                rule_id: name.clone(),
+                rate_limiter,
+                now_epoch_secs,
+            };
+            eval_statement(stmt, &ctx)
+        };
+        if !matched {
+            continue;
+        }
+
+        add_rule_labels(inner, labels, emitted_labels);
+
+        // Resolve the effective action for this inner rule.
+        let mut action = if excluded.contains(name.as_str()) {
+            WafAction::Count
+        } else if let Some(ov) = override_action_for(overrides, &name) {
+            ov
+        } else {
+            inner
+                .get("Action")
+                .and_then(rule_action)
+                .unwrap_or(WafAction::Count)
+        };
+        if force_count {
+            action = WafAction::Count;
+        }
+
+        if action == WafAction::Count {
+            count_rules.push(name);
+            continue;
+        }
+
+        let (body_key, status) = block_custom_response(inner);
+        return Some(GroupTerminal {
+            action,
+            rule_id: name,
+            body_key,
+            status,
+        });
+    }
+    None
+}
+
+/// Resolve a `RuleActionOverrides` entry for the inner rule named `name`.
+fn override_action_for(overrides: Option<&Vec<Value>>, name: &str) -> Option<WafAction> {
+    let overrides = overrides?;
+    overrides
+        .iter()
+        .find(|o| o.get("Name").and_then(Value::as_str) == Some(name))
+        .and_then(|o| o.get("ActionToUse"))
+        .and_then(rule_action)
 }
 
 fn block_custom_response(rule: &Value) -> (Option<String>, Option<u16>) {
@@ -456,8 +648,10 @@ fn eval_statement(stmt: &Value, ctx: &StmtCtx) -> bool {
         return eval_managed_rule_group(s, ctx.req);
     }
 
-    // RuleGroupReferenceStatement is intentionally unimplemented in W1 —
-    // the customer-defined rule group expansion is a follow-up.
+    // RuleGroupReferenceStatement is expanded at the top level of the WebACL
+    // loop (see `eval_rule_group_reference`), not here — AWS does not allow a
+    // rule group reference nested inside a logical statement, so reaching this
+    // arm means the reference is malformed; treat it as a non-match.
     false
 }
 
@@ -1132,7 +1326,13 @@ mod tests {
             json!({"Allow": {}}),
             vec![byte_match_uri_contains("/admin", json!({"Block": {}}))],
         );
-        let action = evaluate(&req("/admin/users"), &acl, &HashMap::new(), &HashMap::new());
+        let action = evaluate(
+            &req("/admin/users"),
+            &acl,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(action, WafAction::Block);
     }
 
@@ -1142,7 +1342,13 @@ mod tests {
             json!({"Allow": {}}),
             vec![byte_match_uri_contains("/admin", json!({"Block": {}}))],
         );
-        let action = evaluate(&req("/public"), &acl, &HashMap::new(), &HashMap::new());
+        let action = evaluate(
+            &req("/public"),
+            &acl,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(action, WafAction::Allow);
     }
 
@@ -1169,12 +1375,18 @@ mod tests {
         let mut r = req("/admin");
         r.method = "POST";
         assert_eq!(
-            evaluate(&r, &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(&r, &acl, &HashMap::new(), &HashMap::new(), &HashMap::new()),
             WafAction::Block,
             "POST /admin EXACTLY should block"
         );
         assert_eq!(
-            evaluate(&req("/admin/users"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/admin/users"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Allow,
             "/admin/users is not EXACTLY /admin"
         );
@@ -1210,7 +1422,10 @@ mod tests {
         );
         let mut r = req("/");
         r.source_ip = IpAddr::V4(Ipv4Addr::new(10, 1, 2, 3));
-        assert_eq!(evaluate(&r, &acl, &sets, &HashMap::new()), WafAction::Block);
+        assert_eq!(
+            evaluate(&r, &acl, &sets, &HashMap::new(), &HashMap::new()),
+            WafAction::Block
+        );
     }
 
     #[test]
@@ -1228,20 +1443,26 @@ mod tests {
         let mut r = req("/");
         r.country = Some("DE");
         assert_eq!(
-            evaluate(&r, &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(&r, &acl, &HashMap::new(), &HashMap::new(), &HashMap::new()),
             WafAction::Block,
             "country=DE matches"
         );
         let mut r2 = req("/");
         r2.country = Some("US");
         assert_eq!(
-            evaluate(&r2, &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(&r2, &acl, &HashMap::new(), &HashMap::new(), &HashMap::new()),
             WafAction::Allow,
             "country=US does not match"
         );
         // No country -> no match
         assert_eq!(
-            evaluate(&req("/"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Allow,
             "missing country header -> no match"
         );
@@ -1268,6 +1489,7 @@ mod tests {
                 &req("/api/v2/admin"),
                 &acl,
                 &HashMap::new(),
+                &HashMap::new(),
                 &HashMap::new()
             ),
             WafAction::Block
@@ -1276,6 +1498,7 @@ mod tests {
             evaluate(
                 &req("/api/v2/admin/x"),
                 &acl,
+                &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new()
             ),
@@ -1305,7 +1528,13 @@ mod tests {
             })],
         );
         assert_eq!(
-            evaluate(&req("/admin"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/admin"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Allow
         );
     }
@@ -1331,7 +1560,13 @@ mod tests {
             })],
         );
         assert_eq!(
-            evaluate(&req("/admin/x"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/admin/x"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
     }
@@ -1357,7 +1592,13 @@ mod tests {
         );
         // Inner ByteMatch fails, NOT inverts to true -> Block.
         assert_eq!(
-            evaluate(&req("/public"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/public"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
     }
@@ -1398,7 +1639,13 @@ mod tests {
             })],
         );
         assert_eq!(
-            evaluate(&req("/internal/x"), &acl, &HashMap::new(), &sets),
+            evaluate(
+                &req("/internal/x"),
+                &acl,
+                &HashMap::new(),
+                &sets,
+                &HashMap::new()
+            ),
             WafAction::Block
         );
     }
@@ -1407,7 +1654,13 @@ mod tests {
     fn default_action_block_when_no_rules_match_and_default_block() {
         let acl = make_acl(json!({"Block": {}}), vec![]);
         assert_eq!(
-            evaluate(&req("/anything"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/anything"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
     }
@@ -1424,7 +1677,13 @@ mod tests {
             }],
         );
         assert_eq!(
-            evaluate(&req("/admin/x"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/admin/x"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
     }
@@ -1460,7 +1719,13 @@ mod tests {
             ],
         );
         assert_eq!(
-            evaluate(&req("/admin/x"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/admin/x"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
     }
@@ -1487,13 +1752,19 @@ mod tests {
         let mut r = req("/upload");
         r.body_size_bytes = 2048;
         assert_eq!(
-            evaluate(&r, &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(&r, &acl, &HashMap::new(), &HashMap::new(), &HashMap::new()),
             WafAction::Block
         );
         let mut r_small = req("/upload");
         r_small.body_size_bytes = 512;
         assert_eq!(
-            evaluate(&r_small, &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &r_small,
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Allow
         );
     }
@@ -1517,11 +1788,23 @@ mod tests {
         );
         // /api is 4 bytes -> blocks
         assert_eq!(
-            evaluate(&req("/api"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/api"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
         assert_eq!(
-            evaluate(&req("/admin"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/admin"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Allow
         );
     }
@@ -1548,12 +1831,28 @@ mod tests {
         r.source_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1));
         // First 1000 requests should be allowed.
         for _ in 0..1000 {
-            let v = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now);
+            let v = evaluate_web_acl(
+                &acl,
+                &r,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                now,
+            );
             assert_eq!(v.action, WafAction::Allow);
             assert!(!v.blocked);
         }
         // 1001st must trigger the block.
-        let v = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now);
+        let v = evaluate_web_acl(
+            &acl,
+            &r,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            now,
+        );
         assert_eq!(v.action, WafAction::Block);
         assert_eq!(v.terminating_rule_id.as_deref(), Some("rate"));
         assert!(v.blocked);
@@ -1578,13 +1877,45 @@ mod tests {
         let limiter = RateLimiter::new();
         let r = req("/api");
         let t0 = 1_700_000_000;
-        evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, t0);
-        evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, t0);
-        let v3 = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, t0);
+        evaluate_web_acl(
+            &acl,
+            &r,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            t0,
+        );
+        evaluate_web_acl(
+            &acl,
+            &r,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            t0,
+        );
+        let v3 = evaluate_web_acl(
+            &acl,
+            &r,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            t0,
+        );
         assert_eq!(v3.action, WafAction::Block, "3rd in window blocks");
         // Roll the clock past the window — counters expire, request is allowed again.
         let later = t0 + 301;
-        let v4 = evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, later);
+        let v4 = evaluate_web_acl(
+            &acl,
+            &r,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            later,
+        );
         assert_eq!(v4.action, WafAction::Allow, "after window rolls, allowed");
     }
 
@@ -1612,23 +1943,59 @@ mod tests {
         b.source_ip = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2));
         // 1st request from each IP allowed.
         assert_eq!(
-            evaluate_web_acl(&acl, &a, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            evaluate_web_acl(
+                &acl,
+                &a,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                now
+            )
+            .action,
             WafAction::Allow
         );
         assert_eq!(
-            evaluate_web_acl(&acl, &b, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            evaluate_web_acl(
+                &acl,
+                &b,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                now
+            )
+            .action,
             WafAction::Allow
         );
         // 2nd from a blocks, but b's counter is independent.
         assert_eq!(
-            evaluate_web_acl(&acl, &a, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            evaluate_web_acl(
+                &acl,
+                &a,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                now
+            )
+            .action,
             WafAction::Block
         );
         // b's second still goes over its own limit too (Limit=1, so 2nd
         // blocks). The check is that it isn't *prematurely* blocked by a's
         // bucket — we already proved the first b succeeded above.
         assert_eq!(
-            evaluate_web_acl(&acl, &b, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            evaluate_web_acl(
+                &acl,
+                &b,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                now
+            )
+            .action,
             WafAction::Block
         );
     }
@@ -1657,6 +2024,7 @@ mod tests {
         let v = evaluate_web_acl(
             &acl,
             &req("/"),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &limiter,
@@ -1693,6 +2061,7 @@ mod tests {
         let v = evaluate_web_acl(
             &acl,
             &req("/"),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &limiter,
@@ -1745,7 +2114,16 @@ mod tests {
         };
         let acl_no = mk_acl("NO_MATCH");
         assert_eq!(
-            evaluate_web_acl(&acl_no, &r, &HashMap::new(), &HashMap::new(), &limiter, 0).action,
+            evaluate_web_acl(
+                &acl_no,
+                &r,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                0
+            )
+            .action,
             WafAction::Allow,
             "malformed XFF + NO_MATCH falls through"
         );
@@ -1754,6 +2132,7 @@ mod tests {
             evaluate_web_acl(
                 &acl_match,
                 &r,
+                &HashMap::new(),
                 &HashMap::new(),
                 &HashMap::new(),
                 &limiter,
@@ -1796,11 +2175,29 @@ mod tests {
             body_size_bytes: 0,
         };
         assert_eq!(
-            evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            evaluate_web_acl(
+                &acl,
+                &r,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                now
+            )
+            .action,
             WafAction::Allow
         );
         assert_eq!(
-            evaluate_web_acl(&acl, &r, &HashMap::new(), &HashMap::new(), &limiter, now).action,
+            evaluate_web_acl(
+                &acl,
+                &r,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new(),
+                &limiter,
+                now
+            )
+            .action,
             WafAction::Block
         );
     }
@@ -1822,15 +2219,33 @@ mod tests {
             })],
         );
         assert_eq!(
-            evaluate(&req("/admin/users"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/admin/users"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
         assert_eq!(
-            evaluate(&req("/wp-admin"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/wp-admin"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Block
         );
         assert_eq!(
-            evaluate(&req("/index.html"), &acl, &HashMap::new(), &HashMap::new()),
+            evaluate(
+                &req("/index.html"),
+                &acl,
+                &HashMap::new(),
+                &HashMap::new(),
+                &HashMap::new()
+            ),
             WafAction::Allow
         );
     }
@@ -1845,6 +2260,7 @@ mod tests {
         let v = evaluate_web_acl(
             &acl,
             &req("/admin/x"),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &limiter,
@@ -1864,6 +2280,7 @@ mod tests {
         let v = evaluate_web_acl(
             &acl,
             &req("/admin/x"),
+            &HashMap::new(),
             &HashMap::new(),
             &HashMap::new(),
             &limiter,
@@ -1909,6 +2326,7 @@ mod tests {
             &req("/admin/x"),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &limiter,
             0,
         );
@@ -1944,11 +2362,204 @@ mod tests {
             &req("/admin"),
             &HashMap::new(),
             &HashMap::new(),
+            &HashMap::new(),
             &limiter,
             0,
         );
         assert_eq!(v.action, WafAction::Block);
         assert_eq!(v.custom_response_status, Some(429));
         assert_eq!(v.custom_response_body_key.as_deref(), Some("rate-limited"));
+    }
+
+    // --- Customer RuleGroupReferenceStatement expansion ---------------------
+
+    const RG_ARN: &str = "arn:aws:wafv2:us-east-1:000000000000:regional/rulegroup/rg/rgid";
+
+    fn make_rule_group(rules: Vec<Value>) -> RuleGroup {
+        RuleGroup {
+            id: "rgid".into(),
+            name: "rg".into(),
+            arn: RG_ARN.into(),
+            scope: "REGIONAL".into(),
+            capacity: 10,
+            description: None,
+            rules,
+            visibility_config: json!({}),
+            lock_token: "lt".into(),
+            label_namespace: "awswaf:000000000000:rulegroup:rg:".into(),
+            custom_response_bodies: BTreeMap::new(),
+            available_labels: Vec::new(),
+            consumed_labels: Vec::new(),
+            created_time: Utc::now(),
+        }
+    }
+
+    fn rule_group_ref_rule(overrides: Value) -> Value {
+        let mut stmt = json!({ "ARN": RG_ARN });
+        if let Value::Object(extra) = overrides {
+            for (k, v) in extra {
+                stmt[k] = v;
+            }
+        }
+        json!({
+            "Name": "rg-ref",
+            "Priority": 0,
+            "OverrideAction": {"None": {}},
+            "VisibilityConfig": {},
+            "Statement": {"RuleGroupReferenceStatement": stmt},
+        })
+    }
+
+    fn groups_map(g: RuleGroup) -> HashMap<String, RuleGroup> {
+        let mut m = HashMap::new();
+        m.insert(g.arn.clone(), g);
+        m
+    }
+
+    #[test]
+    fn customer_rule_group_reference_blocks_matching_request() {
+        // The referenced group's only rule blocks /admin; the WebACL delegates
+        // entirely to the group. A matching request must be blocked.
+        let group = make_rule_group(vec![byte_match_uri_contains(
+            "/admin",
+            json!({"Block": {}}),
+        )]);
+        let acl = make_acl(json!({"Allow": {}}), vec![rule_group_ref_rule(json!({}))]);
+        let groups = groups_map(group);
+        let limiter = RateLimiter::new();
+
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/users"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &groups,
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Block, "group Block rule must block");
+        assert!(v.blocked);
+        assert_eq!(v.terminating_rule_id.as_deref(), Some("r"));
+
+        // A non-matching request falls through to the WebACL default (Allow).
+        let v2 = evaluate_web_acl(
+            &acl,
+            &req("/public"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &groups,
+            &limiter,
+            0,
+        );
+        assert_eq!(v2.action, WafAction::Allow);
+    }
+
+    #[test]
+    fn customer_rule_group_override_to_count_does_not_block() {
+        // OverrideAction {Count:{}} converts every inner action to Count.
+        let group = make_rule_group(vec![byte_match_uri_contains(
+            "/admin",
+            json!({"Block": {}}),
+        )]);
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![rule_group_ref_rule(json!({}))
+                .as_object()
+                .cloned()
+                .map(|mut o| {
+                    o.insert("OverrideAction".into(), json!({"Count": {}}));
+                    Value::Object(o)
+                })
+                .unwrap()],
+        );
+        let groups = groups_map(group);
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/users"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &groups,
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Allow, "Count override must not block");
+        assert!(v.count_rules.contains(&"r".to_string()));
+    }
+
+    #[test]
+    fn customer_rule_group_action_override_flips_block_to_count() {
+        // RuleActionOverrides on the reference replaces the inner rule's Block
+        // action with Count for the rule named "r".
+        let group = make_rule_group(vec![byte_match_uri_contains(
+            "/admin",
+            json!({"Block": {}}),
+        )]);
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![rule_group_ref_rule(json!({
+                "RuleActionOverrides": [
+                    {"Name": "r", "ActionToUse": {"Count": {}}}
+                ]
+            }))],
+        );
+        let groups = groups_map(group);
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/users"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &groups,
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Allow);
+        assert!(v.count_rules.contains(&"r".to_string()));
+    }
+
+    #[test]
+    fn customer_rule_group_excluded_rule_is_forced_to_count() {
+        let group = make_rule_group(vec![byte_match_uri_contains(
+            "/admin",
+            json!({"Block": {}}),
+        )]);
+        let acl = make_acl(
+            json!({"Allow": {}}),
+            vec![rule_group_ref_rule(json!({
+                "ExcludedRules": [{"Name": "r"}]
+            }))],
+        );
+        let groups = groups_map(group);
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/users"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &groups,
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Allow);
+        assert!(v.count_rules.contains(&"r".to_string()));
+    }
+
+    #[test]
+    fn customer_rule_group_missing_reference_is_no_match() {
+        // AWS validates the reference at association time; at eval a missing
+        // group is a no-op, falling through to the WebACL default action.
+        let acl = make_acl(json!({"Allow": {}}), vec![rule_group_ref_rule(json!({}))]);
+        let limiter = RateLimiter::new();
+        let v = evaluate_web_acl(
+            &acl,
+            &req("/admin/users"),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &limiter,
+            0,
+        );
+        assert_eq!(v.action, WafAction::Allow);
     }
 }
