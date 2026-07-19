@@ -14,10 +14,12 @@ use crate::state::{Ec2State, ElasticIp, KeyPair, PlacementGroup, Tag};
 
 fn address_xml(a: &ElasticIp, tags: &[Tag]) -> String {
     let mut out = format!(
-        "{}{}{}",
+        "{}{}{}{}{}",
         ec2_elem("publicIp", &a.public_ip),
         ec2_elem("allocationId", &a.allocation_id),
         ec2_elem("domain", &a.domain),
+        ec2_elem("publicIpv4Pool", &a.public_ipv4_pool),
+        ec2_elem("networkBorderGroup", &a.network_border_group),
     );
     if let Some(v) = &a.association_id {
         out.push_str(&ec2_elem("associationId", v));
@@ -51,6 +53,22 @@ pub(crate) fn allocate_address(
         .get("Domain")
         .cloned()
         .unwrap_or_else(|| "vpc".to_string());
+    let public_ipv4_pool = req
+        .query_params
+        .get("PublicIpv4Pool")
+        .cloned()
+        .unwrap_or_else(|| "amazon".to_string());
+    let network_border_group = req
+        .query_params
+        .get("NetworkBorderGroup")
+        .cloned()
+        .unwrap_or_else(|| {
+            if req.region.is_empty() {
+                "us-east-1".to_string()
+            } else {
+                req.region.clone()
+            }
+        });
     let eip = ElasticIp {
         allocation_id: alloc_id.clone(),
         public_ip: public_ip.clone(),
@@ -59,6 +77,8 @@ pub(crate) fn allocate_address(
         instance_id: None,
         network_interface_id: None,
         private_ip_address: None,
+        public_ipv4_pool: public_ipv4_pool.clone(),
+        network_border_group: network_border_group.clone(),
     };
     {
         let mut accounts = svc.state.write();
@@ -76,15 +96,8 @@ pub(crate) fn allocate_address(
         ec2_elem("allocationId", &alloc_id),
         ec2_elem("publicIp", &public_ip),
         ec2_elem("domain", &domain),
-        ec2_elem(
-            "networkBorderGroup",
-            if req.region.is_empty() {
-                "us-east-1"
-            } else {
-                &req.region
-            }
-        ),
-        ec2_elem("publicIpv4Pool", "amazon"),
+        ec2_elem("networkBorderGroup", &network_border_group),
+        ec2_elem("publicIpv4Pool", &public_ipv4_pool),
     );
     Ok(Ec2Service::respond(
         "AllocateAddress",
@@ -709,6 +722,78 @@ pub(crate) fn get_groups_for_capacity_reservation(
         &req.request_id,
         &ec2_list("capacityReservationGroupSet", &[]),
     ))
+}
+
+#[cfg(test)]
+mod eip_tests {
+    use super::*;
+    use crate::test_support::ec2_request as req;
+    use fakecloud_core::service::AwsResponse;
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn describe_addresses_reports_pool_and_border_group() {
+        let svc = Ec2Service::new();
+        allocate_address(&svc, &req("AllocateAddress", &[("Domain", "vpc")])).unwrap();
+        let out = body(describe_addresses(&svc, &req("DescribeAddresses", &[])).unwrap());
+        assert!(
+            out.contains("<publicIpv4Pool>amazon</publicIpv4Pool>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<networkBorderGroup>us-east-1</networkBorderGroup>"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn allocate_address_honors_pool_and_border_group_params() {
+        let svc = Ec2Service::new();
+        let out = body(
+            allocate_address(
+                &svc,
+                &req(
+                    "AllocateAddress",
+                    &[
+                        ("Domain", "vpc"),
+                        ("NetworkBorderGroup", "us-east-1-atl-1"),
+                        ("PublicIpv4Pool", "ipv4pool-ec2-0abc"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            out.contains("<networkBorderGroup>us-east-1-atl-1</networkBorderGroup>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<publicIpv4Pool>ipv4pool-ec2-0abc</publicIpv4Pool>"),
+            "got: {out}"
+        );
+        let out = body(describe_addresses(&svc, &req("DescribeAddresses", &[])).unwrap());
+        assert!(
+            out.contains("<networkBorderGroup>us-east-1-atl-1</networkBorderGroup>"),
+            "got: {out}"
+        );
+        assert!(
+            out.contains("<publicIpv4Pool>ipv4pool-ec2-0abc</publicIpv4Pool>"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn elastic_ip_deserializes_legacy_state_without_pool_fields() {
+        let json = r#"{"allocation_id":"eipalloc-1","public_ip":"52.0.0.1",
+            "domain":"vpc","association_id":null,"instance_id":null,
+            "network_interface_id":null,"private_ip_address":null}"#;
+        let eip: ElasticIp = serde_json::from_str(json).unwrap();
+        assert_eq!(eip.public_ipv4_pool, "amazon");
+        assert_eq!(eip.network_border_group, "us-east-1");
+    }
 }
 
 #[cfg(test)]

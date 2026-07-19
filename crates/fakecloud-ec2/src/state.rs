@@ -243,6 +243,18 @@ pub struct ElasticIp {
     pub instance_id: Option<String>,
     pub network_interface_id: Option<String>,
     pub private_ip_address: Option<String>,
+    #[serde(default = "default_eip_public_ipv4_pool")]
+    pub public_ipv4_pool: String,
+    #[serde(default = "default_eip_network_border_group")]
+    pub network_border_group: String,
+}
+
+fn default_eip_public_ipv4_pool() -> String {
+    "amazon".to_string()
+}
+
+fn default_eip_network_border_group() -> String {
+    "us-east-1".to_string()
 }
 
 /// An EC2 key pair (public-key metadata only).
