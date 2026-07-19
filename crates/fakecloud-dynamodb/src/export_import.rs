@@ -368,6 +368,64 @@ mod tests {
         assert!(bs.contains(&json!("Yg==")));
     }
 
+    #[tokio::test]
+    async fn imported_table_persists_through_snapshot_save() {
+        // Regression: a startup bulk-import mutates state directly, so unless it
+        // is written through the DynamoDB snapshot store it is durable only if a
+        // later mutating API call happens to trigger a save. A read-only workload
+        // would lose the imported table on restart. Exercise import -> save ->
+        // reload (the exact path the server now wires) and assert the table
+        // survives.
+        use crate::save_dynamodb_snapshot;
+        use crate::state::DynamoDbSnapshot;
+        use fakecloud_persistence::{DiskSnapshotStore, SnapshotStore};
+        use std::sync::Arc;
+
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+
+        let fixtures = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let describe = read_json(&fixtures.join("describe-table.json")).unwrap();
+        let export_dir = fixtures.join("export");
+        let outcome =
+            import_aws_export(&state, "123456789012", "us-east-1", &export_dir, &describe)
+                .expect("import should succeed");
+        assert!(matches!(outcome, ImportOutcome::Imported { .. }));
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let store: Arc<dyn SnapshotStore> = Arc::new(DiskSnapshotStore::new(
+            tmp.path().join("dynamodb").join("snapshot.json"),
+        ));
+        let lock = tokio::sync::Mutex::new(());
+        let wrote = save_dynamodb_snapshot(&state, Some(store.clone()), &lock)
+            .await
+            .expect("snapshot save should succeed");
+        assert!(
+            wrote,
+            "a snapshot store is configured, so a save must occur"
+        );
+
+        // Reload exactly as boot does: read the bytes back and deserialize.
+        let bytes = store
+            .load()
+            .expect("load ok")
+            .expect("snapshot bytes on disk");
+        let snapshot: DynamoDbSnapshot =
+            serde_json::from_slice(&bytes).expect("snapshot deserializes");
+        let accounts = snapshot
+            .accounts
+            .expect("v2 multi-account snapshot written");
+        let account = accounts
+            .get("123456789012")
+            .expect("account present after reload");
+        let table = account
+            .tables
+            .get("Music")
+            .expect("imported table survives snapshot round-trip");
+        assert_eq!(table.items.len(), 3, "all imported items are durable");
+    }
+
     #[test]
     fn rejects_items_missing_declared_key_attribute() {
         let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(

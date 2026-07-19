@@ -4,11 +4,13 @@ use std::time::Duration;
 
 use chrono::{Datelike, Timelike, Utc};
 use serde_json::json;
+use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_lambda::runtime::ContainerRuntime;
 use fakecloud_lambda::SharedLambdaState;
 use fakecloud_logs::SharedLogsState;
+use fakecloud_persistence::SnapshotStore;
 
 use crate::state::SharedEventBridgeState;
 
@@ -311,6 +313,14 @@ pub struct Scheduler {
     lambda_state: Option<SharedLambdaState>,
     logs_state: Option<SharedLogsState>,
     container_runtime: Option<Arc<ContainerRuntime>>,
+    /// Persist hook. Firing a rule advances its `last_fired` directly, outside
+    /// the service's action-dispatch path that is otherwise the only thing that
+    /// snapshots -- so without writing through here the on-disk `last_fired`
+    /// stays at its creation value, and a `rate(...)` rule double-fires on the
+    /// next restart (`last_fired == None` => fire immediately). `None` in
+    /// memory-only mode.
+    snapshot_store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
 }
 
 impl Scheduler {
@@ -321,7 +331,16 @@ impl Scheduler {
             lambda_state: None,
             logs_state: None,
             container_runtime: None,
+            snapshot_store: None,
+            snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
+    }
+
+    /// Wire the snapshot store so each tick that advances a rule's `last_fired`
+    /// is written through to disk (see the `snapshot_store` field).
+    pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
+        self.snapshot_store = Some(store);
+        self
     }
 
     pub fn with_lambda(mut self, lambda_state: SharedLambdaState) -> Self {
@@ -347,11 +366,31 @@ impl Scheduler {
 
         loop {
             interval.tick().await;
-            self.tick(&mut cron_last_minute);
+            self.tick_and_persist(&mut cron_last_minute).await;
         }
     }
 
-    fn tick(&self, cron_last_minute: &mut HashMap<crate::state::RuleKey, (u32, u32)>) {
+    /// Run one tick and, when it advanced any rule's `last_fired`, write the
+    /// EventBridge snapshot through so the advance survives a restart. Only
+    /// persists on a mutating tick, to avoid a snapshot every idle second.
+    async fn tick_and_persist(
+        &self,
+        cron_last_minute: &mut HashMap<crate::state::RuleKey, (u32, u32)>,
+    ) {
+        if self.tick(cron_last_minute) {
+            crate::service::save_eventbridge_snapshot(
+                &self.state,
+                self.snapshot_store.clone(),
+                &self.snapshot_lock,
+            )
+            .await;
+        }
+    }
+
+    /// Run one firing pass. Returns `true` if it advanced any rule's
+    /// `last_fired` (persisted state), so the caller knows to write the
+    /// snapshot through.
+    fn tick(&self, cron_last_minute: &mut HashMap<crate::state::RuleKey, (u32, u32)>) -> bool {
         let now = Utc::now();
 
         // Collect rules that need to fire (to avoid holding lock during delivery)
@@ -436,6 +475,11 @@ impl Scheduler {
         }
         // Lock is dropped here
 
+        // A non-empty fire set means at least one rule's `last_fired` was
+        // advanced under the write lock above; that persisted change must be
+        // written through by the caller.
+        let mutated = !to_fire.is_empty();
+
         // Deliver events. Reuse the shared single-target dispatch so scheduled
         // rules honour the same target shape as PutEvents-driven rules —
         // Input / InputPath / InputTransformer resolution plus the Kinesis,
@@ -477,6 +521,8 @@ impl Scheduler {
                 );
             }
         }
+
+        mutated
     }
 }
 
@@ -1017,6 +1063,117 @@ mod tests {
                 .get(&("default".to_string(), "r".to_string()))
                 .unwrap();
             assert!(rule.last_fired.is_some());
+        }
+
+        /// Records every `save` and keeps the last payload so the test can
+        /// assert the snapshot actually carries the advanced `last_fired`.
+        #[derive(Default)]
+        struct RecordingStore {
+            saves: std::sync::atomic::AtomicUsize,
+            last: Mutex<Option<Vec<u8>>>,
+        }
+
+        impl fakecloud_persistence::SnapshotStore for RecordingStore {
+            fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+                Ok(None)
+            }
+            fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+                self.saves.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *self.last.lock().unwrap() = Some(bytes.to_vec());
+                Ok(())
+            }
+        }
+
+        /// Regression (bug-hunt Tier 0 side-channel-persistence): firing a rule
+        /// advances `last_fired` under the scheduler's own write lock, outside
+        /// the service's snapshot path. Without writing through, on-disk
+        /// `last_fired` stays `None` and a `rate(...)` rule double-fires on
+        /// restart. A mutating tick must persist, and the snapshot must carry
+        /// the advanced `last_fired`.
+        #[tokio::test]
+        async fn tick_persists_last_fired_through_snapshot_store() {
+            use std::sync::atomic::Ordering::SeqCst;
+
+            let (shared, _) = make_state();
+            {
+                let mut s_accounts = shared.write();
+                let s = s_accounts.default_mut();
+                let rule = make_rule(
+                    "r",
+                    "rate(1 second)",
+                    "arn:aws:sqs:us-east-1:123456789012:q",
+                );
+                s.rules
+                    .insert(("default".to_string(), "r".to_string()), rule);
+            }
+            let recorder = Arc::new(Recorder::default());
+            let store = Arc::new(RecordingStore::default());
+            let bus = Arc::new(DeliveryBus::new().with_sqs(recorder.clone()));
+            let scheduler = Scheduler::new(shared.clone(), bus).with_snapshot_store(store.clone());
+            let mut last = HashMap::<RuleKey, (u32, u32)>::new();
+            scheduler.tick_and_persist(&mut last).await;
+
+            // last_fired advanced in memory...
+            {
+                let mas = shared.read();
+                assert!(mas
+                    .default_ref()
+                    .rules
+                    .get(&("default".to_string(), "r".to_string()))
+                    .unwrap()
+                    .last_fired
+                    .is_some());
+            }
+            // ...and that advance was written through the snapshot store, with
+            // the persisted rule carrying the new last_fired (so it survives a
+            // restart instead of double-firing).
+            assert!(
+                store.saves.load(SeqCst) >= 1,
+                "a mutating tick must persist the last_fired advance"
+            );
+            let bytes = store
+                .last
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("snapshot written");
+            let snap: crate::state::EventBridgeSnapshot =
+                serde_json::from_slice(&bytes).expect("snapshot deserializes");
+            let accounts = snap.accounts.expect("v2 multi-account snapshot");
+            let persisted_rule = accounts
+                .get("123456789012")
+                .expect("account persisted")
+                .rules
+                .get(&("default".to_string(), "r".to_string()))
+                .expect("rule persisted");
+            assert!(
+                persisted_rule.last_fired.is_some(),
+                "the on-disk rule must carry the advanced last_fired"
+            );
+        }
+
+        /// An idle tick (nothing fires) must NOT write a snapshot every second.
+        #[tokio::test]
+        async fn idle_tick_does_not_persist() {
+            let (shared, _) = make_state();
+            {
+                let mut s_accounts = shared.write();
+                let s = s_accounts.default_mut();
+                let mut rule = make_rule("r", "rate(1 second)", "arn:aws:sqs:us-east-1:123:q");
+                rule.state = "DISABLED".to_string();
+                s.rules
+                    .insert(("default".to_string(), "r".to_string()), rule);
+            }
+            let store = Arc::new(RecordingStore::default());
+            let bus = Arc::new(DeliveryBus::new());
+            let scheduler = Scheduler::new(shared.clone(), bus).with_snapshot_store(store.clone());
+            let mut last = HashMap::<RuleKey, (u32, u32)>::new();
+            scheduler.tick_and_persist(&mut last).await;
+            assert_eq!(
+                store.saves.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "an idle tick must not snapshot"
+            );
         }
     }
 }
