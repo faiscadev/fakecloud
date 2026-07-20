@@ -135,6 +135,13 @@ impl ResourceProvisioner {
             .get("TemplateArn")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // AWS::ACMPCA::Certificate carries the same ApiPassthrough (Subject +
+        // Extensions) as the API, so stamp it into the issued certificate here
+        // too rather than dropping it.
+        let api_passthrough = props
+            .get("ApiPassthrough")
+            .filter(|v| v.is_object())
+            .cloned();
         let (validity_value, validity_type) = props
             .get("Validity")
             .map(|v| {
@@ -184,9 +191,16 @@ impl ResourceProvisioner {
                 .map_err(|e| format!("failed to build issuer: {e}"))?;
             (issuer, Some(ca_cert_pem))
         };
-        let (cert_pem, serial) =
-            fakecloud_acmpca::issue_certificate(&issuer, &ca_key, &csr_pem, now, not_after, is_ca)
-                .map_err(|e| format!("ACM PCA certificate issuance failed: {e}"))?;
+        let (cert_pem, serial) = fakecloud_acmpca::issue_certificate(
+            &issuer,
+            &ca_key,
+            &csr_pem,
+            now,
+            not_after,
+            is_ca,
+            api_passthrough.as_ref(),
+        )
+        .map_err(|e| format!("ACM PCA certificate issuance failed: {e}"))?;
 
         let cert_arn = format!("{ca_arn}/certificate/{serial}");
         let chain = chain_base.map(|mut c| {

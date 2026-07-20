@@ -1,11 +1,12 @@
 //! Input validation + real X.509 crypto for ACM Private CA.
 
+use base64::Engine;
 use chrono::{DateTime, Datelike, TimeZone, Utc};
 use rcgen::{
     BasicConstraints, Certificate, CertificateParams, CertificateSigningRequestParams,
-    DistinguishedName, DnType, IsCa, KeyPair, KeyUsagePurpose, SignatureAlgorithm,
-    PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384, PKCS_RSA_SHA256, PKCS_RSA_SHA384,
-    PKCS_RSA_SHA512,
+    CustomExtension, DistinguishedName, DnType, ExtendedKeyUsagePurpose, Ia5String, IsCa, KeyPair,
+    KeyUsagePurpose, SanType, SignatureAlgorithm, PKCS_ECDSA_P256_SHA256, PKCS_ECDSA_P384_SHA384,
+    PKCS_RSA_SHA256, PKCS_RSA_SHA384, PKCS_RSA_SHA512,
 };
 use rsa::pkcs8::{EncodePrivateKey, LineEnding};
 use serde_json::Value;
@@ -172,6 +173,12 @@ pub fn self_issuer(subject: &Value, ca_key: &KeyPair) -> Result<Certificate, Str
 
 /// Sign an end-entity (or subordinate-CA) certificate from a client CSR using
 /// the given issuer + CA key. Returns `(certificate_pem, serial_hex)`.
+///
+/// `api_passthrough` carries the caller's `IssueCertificate` `ApiPassthrough`
+/// (Subject override + Extensions). ACM PCA stamps those values into the signed
+/// certificate, so — unlike a naive re-sign of the CSR — the SANs, subject,
+/// key-usage, extended-key-usage and custom extensions the caller asked for
+/// actually appear in the certificate returned by `GetCertificate`.
 pub fn issue_certificate(
     issuer_cert: &Certificate,
     ca_key: &KeyPair,
@@ -179,6 +186,7 @@ pub fn issue_certificate(
     not_before: DateTime<Utc>,
     not_after: DateTime<Utc>,
     is_ca: bool,
+    api_passthrough: Option<&Value>,
 ) -> Result<(String, String), String> {
     let mut csr = CertificateSigningRequestParams::from_pem(csr_pem)
         .map_err(|_| "the certificate signing request (CSR) is invalid".to_string())?;
@@ -192,10 +200,209 @@ pub fn issue_certificate(
     } else {
         csr.params.is_ca = IsCa::NoCa;
     }
+    if let Some(passthrough) = api_passthrough {
+        apply_api_passthrough(&mut csr.params, passthrough, is_ca)?;
+    }
     let cert = csr
         .signed_by(issuer_cert, ca_key)
         .map_err(|e| format!("certificate issuance failed: {e}"))?;
     Ok((cert.pem(), hex::encode(serial)))
+}
+
+/// Stamp an `ApiPassthrough` (Subject + Extensions) onto the certificate params
+/// before signing, so the issued certificate really carries what the caller
+/// requested. A `Subject` overrides the CSR's distinguished name; `Extensions`
+/// (SANs, KeyUsage, ExtendedKeyUsage, CustomExtensions) override the
+/// corresponding CSR extensions.
+///
+/// `CertificatePolicies` is the one `Extensions` sub-field left unapplied: it
+/// requires hand-encoding the RFC 5280 certificatePolicies extension (policy
+/// OIDs plus qualifier `IA5String`/`UserNotice` structures), for which rcgen
+/// 0.13 exposes no first-class API. Rather than silently accept-and-drop it,
+/// an explicit `CertificatePolicies` is rejected below so the caller is never
+/// misled into thinking a policy was embedded.
+fn apply_api_passthrough(
+    params: &mut CertificateParams,
+    passthrough: &Value,
+    is_ca: bool,
+) -> Result<(), String> {
+    if let Some(subject) = passthrough.get("Subject").filter(|v| v.is_object()) {
+        params.distinguished_name = build_dn(subject);
+    }
+    let Some(ext) = passthrough.get("Extensions").filter(|v| v.is_object()) else {
+        return Ok(());
+    };
+
+    if let Some(sans) = ext.get("SubjectAlternativeNames").and_then(Value::as_array) {
+        let mut mapped = Vec::with_capacity(sans.len());
+        for san in sans {
+            mapped.push(general_name_to_san(san)?);
+        }
+        params.subject_alt_names = mapped;
+    }
+
+    // KeyUsage passthrough applies to end-entity certificates. For a CA
+    // certificate the KeyCertSign/CrlSign usages set above are mandatory, so a
+    // passthrough KeyUsage is not allowed to weaken them.
+    if !is_ca {
+        if let Some(ku) = ext.get("KeyUsage").filter(|v| v.is_object()) {
+            params.key_usages = key_usage_to_purposes(ku);
+        }
+    }
+
+    if let Some(ekus) = ext.get("ExtendedKeyUsage").and_then(Value::as_array) {
+        let mut mapped = Vec::with_capacity(ekus.len());
+        for eku in ekus {
+            mapped.push(extended_key_usage_to_purpose(eku)?);
+        }
+        params.extended_key_usages = mapped;
+    }
+
+    if let Some(customs) = ext.get("CustomExtensions").and_then(Value::as_array) {
+        for custom in customs {
+            params.custom_extensions.push(custom_extension(custom)?);
+        }
+    }
+
+    if ext
+        .get("CertificatePolicies")
+        .and_then(Value::as_array)
+        .is_some_and(|p| !p.is_empty())
+    {
+        return Err("ApiPassthrough Extensions.CertificatePolicies is not supported".to_string());
+    }
+    Ok(())
+}
+
+/// Map an ACM PCA `GeneralName` to an rcgen `SanType`. The four IA5String-based
+/// name forms (DNS, RFC822/email, URI, IP) cover the SANs clients actually put
+/// in a certificate; the ASN.1-structured forms (`DirectoryName`, `OtherName`,
+/// `EdiPartyName`, `RegisteredId`) are rejected rather than dropped.
+fn general_name_to_san(name: &Value) -> Result<SanType, String> {
+    let ia5 = |field: &str| -> Result<Ia5String, String> {
+        let s = name.get(field).and_then(Value::as_str).unwrap_or_default();
+        Ia5String::try_from(s.to_string())
+            .map_err(|_| format!("invalid IA5String in GeneralName.{field}: {s}"))
+    };
+    if name.get("DnsName").is_some() {
+        Ok(SanType::DnsName(ia5("DnsName")?))
+    } else if name.get("Rfc822Name").is_some() {
+        Ok(SanType::Rfc822Name(ia5("Rfc822Name")?))
+    } else if name.get("UniformResourceIdentifier").is_some() {
+        Ok(SanType::URI(ia5("UniformResourceIdentifier")?))
+    } else if let Some(ip) = name.get("IpAddress").and_then(Value::as_str) {
+        let addr = ip
+            .parse::<std::net::IpAddr>()
+            .map_err(|_| format!("invalid IpAddress in SubjectAlternativeNames: {ip}"))?;
+        Ok(SanType::IpAddress(addr))
+    } else {
+        Err("unsupported SubjectAlternativeNames GeneralName type".to_string())
+    }
+}
+
+/// Map an ACM PCA `KeyUsage` (a struct of booleans) to rcgen key-usage purposes.
+fn key_usage_to_purposes(ku: &Value) -> Vec<KeyUsagePurpose> {
+    let on = |field: &str| ku.get(field).and_then(Value::as_bool).unwrap_or(false);
+    let mut out = Vec::new();
+    if on("DigitalSignature") {
+        out.push(KeyUsagePurpose::DigitalSignature);
+    }
+    if on("NonRepudiation") {
+        out.push(KeyUsagePurpose::ContentCommitment);
+    }
+    if on("KeyEncipherment") {
+        out.push(KeyUsagePurpose::KeyEncipherment);
+    }
+    if on("DataEncipherment") {
+        out.push(KeyUsagePurpose::DataEncipherment);
+    }
+    if on("KeyAgreement") {
+        out.push(KeyUsagePurpose::KeyAgreement);
+    }
+    if on("KeyCertSign") {
+        out.push(KeyUsagePurpose::KeyCertSign);
+    }
+    if on("CRLSign") {
+        out.push(KeyUsagePurpose::CrlSign);
+    }
+    if on("EncipherOnly") {
+        out.push(KeyUsagePurpose::EncipherOnly);
+    }
+    if on("DecipherOnly") {
+        out.push(KeyUsagePurpose::DecipherOnly);
+    }
+    out
+}
+
+/// Map an ACM PCA `ExtendedKeyUsage` entry to an rcgen extended-key-usage
+/// purpose. Either a named `ExtendedKeyUsageType` or an arbitrary dotted
+/// `ExtendedKeyUsageObjectIdentifier` is accepted.
+fn extended_key_usage_to_purpose(eku: &Value) -> Result<ExtendedKeyUsagePurpose, String> {
+    if let Some(ty) = eku.get("ExtendedKeyUsageType").and_then(Value::as_str) {
+        return match ty {
+            "SERVER_AUTH" => Ok(ExtendedKeyUsagePurpose::ServerAuth),
+            "CLIENT_AUTH" => Ok(ExtendedKeyUsagePurpose::ClientAuth),
+            "CODE_SIGNING" => Ok(ExtendedKeyUsagePurpose::CodeSigning),
+            "EMAIL_PROTECTION" => Ok(ExtendedKeyUsagePurpose::EmailProtection),
+            "TIME_STAMPING" => Ok(ExtendedKeyUsagePurpose::TimeStamping),
+            "OCSP_SIGNING" => Ok(ExtendedKeyUsagePurpose::OcspSigning),
+            // Named ACM PCA purposes without a first-class rcgen variant map to
+            // their well-known OIDs (RFC 5280 / Microsoft) via `Other`.
+            "SMART_CARD_LOGIN" => Ok(ExtendedKeyUsagePurpose::Other(vec![
+                1, 3, 6, 1, 4, 1, 311, 20, 2, 2,
+            ])),
+            "DOCUMENT_SIGNING" => Ok(ExtendedKeyUsagePurpose::Other(vec![
+                1, 3, 6, 1, 4, 1, 311, 10, 3, 12,
+            ])),
+            "CERTIFICATE_TRANSPARENCY" => Ok(ExtendedKeyUsagePurpose::Other(vec![
+                1, 3, 6, 1, 4, 1, 11129, 2, 4, 4,
+            ])),
+            other => Err(format!("Invalid ExtendedKeyUsageType: {other}")),
+        };
+    }
+    if let Some(oid) = eku
+        .get("ExtendedKeyUsageObjectIdentifier")
+        .and_then(Value::as_str)
+    {
+        return Ok(ExtendedKeyUsagePurpose::Other(parse_oid(oid)?));
+    }
+    Err(
+        "ExtendedKeyUsage requires ExtendedKeyUsageType or ExtendedKeyUsageObjectIdentifier"
+            .to_string(),
+    )
+}
+
+/// Build an rcgen `CustomExtension` from an ACM PCA `CustomExtension`
+/// (dotted OID + base64 DER value + optional Critical flag).
+fn custom_extension(custom: &Value) -> Result<CustomExtension, String> {
+    let oid = custom
+        .get("ObjectIdentifier")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "CustomExtension.ObjectIdentifier is required".to_string())?;
+    let value_b64 = custom
+        .get("Value")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "CustomExtension.Value is required".to_string())?;
+    let content = base64::engine::general_purpose::STANDARD
+        .decode(value_b64)
+        .map_err(|_| "CustomExtension.Value must be base64".to_string())?;
+    let mut ext = CustomExtension::from_oid_content(&parse_oid(oid)?, content);
+    if custom
+        .get("Critical")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        ext.set_criticality(true);
+    }
+    Ok(ext)
+}
+
+/// Parse a dotted OID string (`1.3.6.1.5.5.7.3.1`) into its arc components.
+fn parse_oid(oid: &str) -> Result<Vec<u64>, String> {
+    oid.split('.')
+        .map(|arc| arc.parse::<u64>())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| format!("invalid object identifier: {oid}"))
 }
 
 /// Outcome of verifying an imported CA certificate against the CA key pair.
