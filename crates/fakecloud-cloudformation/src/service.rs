@@ -114,6 +114,40 @@ fn well_known_attributes_for(resource_type: &str) -> &'static [&'static str] {
         "AWS::Config::ConformancePack" => &["Arn"],
         "AWS::Config::AggregationAuthorization" => &["AggregationAuthorizationArn"],
         "AWS::Config::OrganizationConfigRule" => &["Arn"],
+        "AWS::CodePipeline::Pipeline" => &["Version", "Id"],
+        "AWS::CodeBuild::Project" => &["Arn"],
+        "AWS::CodeDeploy::DeploymentGroup" => &["Id", "Name"],
+        "AWS::OpenSearchService::Domain" | "AWS::Elasticsearch::Domain" => &[
+            "Arn",
+            "DomainArn",
+            "Id",
+            "DomainEndpoint",
+            "DomainEndpointV2",
+        ],
+        "AWS::EMR::Cluster" => &["MasterPublicDNS"],
+        "AWS::SageMaker::Model" => &["ModelArn", "Id"],
+        "AWS::SageMaker::EndpointConfig" => &["EndpointConfigArn", "Id"],
+        "AWS::SageMaker::Endpoint" => &["EndpointArn", "EndpointName", "Id"],
+        "AWS::SageMaker::NotebookInstance" => &["NotebookInstanceArn", "Id"],
+        "AWS::Backup::BackupVault" => &["BackupVaultArn", "BackupVaultName"],
+        "AWS::Backup::BackupPlan" => &["BackupPlanArn", "BackupPlanId", "VersionId"],
+        "AWS::AppSync::GraphQLApi" => &[
+            "ApiId",
+            "Arn",
+            "GraphQLUrl",
+            "GraphQLDns",
+            "RealtimeUrl",
+            "RealtimeDns",
+        ],
+        "AWS::AppSync::DataSource" => &["DataSourceArn", "Name"],
+        "AWS::AppSync::Resolver" => &["ResolverArn", "TypeName", "FieldName"],
+        "AWS::Timestream::Database" => &["Arn", "DatabaseName"],
+        "AWS::Timestream::Table" => &["Arn", "Name"],
+        "AWS::MWAA::Environment" => &["Arn", "WebserverUrl", "CeleryExecutorQueue"],
+        "AWS::Amplify::App" => &["AppId", "AppName", "Arn", "DefaultDomain"],
+        "AWS::AppConfig::Application" => &["ApplicationId"],
+        "AWS::AppConfig::Environment" => &["EnvironmentId"],
+        "AWS::AppConfig::ConfigurationProfile" => &["ConfigurationProfileId"],
         _ => &[],
     }
 }
@@ -227,6 +261,25 @@ fn service_key_for_type(resource_type: &str) -> Option<&'static str> {
         "Redshift" => "redshift",
         "DocDB" => "docdb",
         "Neptune" => "neptune",
+        // Orchestration/persistence sweep (#1766 family): these services'
+        // CFN provisioners mutate snapshot-backed state directly, so without
+        // these mappings a CFN-created (or CFN-deleted) resource would vanish
+        // (or reappear) on restart while its direct-API equivalent persisted.
+        // Each has a registered snapshot hook keyed by these names in the
+        // server. `OpenSearchService`/`Elasticsearch` both back the `es`
+        // service.
+        "CodePipeline" => "codepipeline",
+        "CodeBuild" => "codebuild",
+        "CodeDeploy" => "codedeploy",
+        "OpenSearchService" | "Elasticsearch" => "es",
+        "EMR" => "emr",
+        "SageMaker" => "sagemaker",
+        "Backup" => "backup",
+        "AppSync" => "appsync",
+        "Timestream" => "timestream",
+        "MWAA" => "mwaa",
+        "Amplify" => "amplify",
+        "AppConfig" => "appconfig",
         _ => return None,
     })
 }
@@ -502,6 +555,18 @@ pub struct CloudFormationDeps {
     pub redshift: fakecloud_redshift::SharedRedshiftState,
     pub docdb: fakecloud_docdb::SharedDocDbState,
     pub neptune: fakecloud_neptune::SharedNeptuneState,
+    pub codepipeline: fakecloud_codepipeline::SharedCodePipelineState,
+    pub codebuild: fakecloud_codebuild::SharedCodeBuildState,
+    pub codedeploy: fakecloud_codedeploy::SharedCodeDeployState,
+    pub opensearch: fakecloud_opensearch::SharedOpenSearchState,
+    pub emr: fakecloud_emr::SharedEmrState,
+    pub sagemaker: fakecloud_sagemaker::SharedSageMakerState,
+    pub backup: fakecloud_backup::SharedBackupState,
+    pub appsync: fakecloud_appsync::SharedAppSyncState,
+    pub timestream: fakecloud_timestream::SharedTimestreamState,
+    pub mwaa: fakecloud_mwaa::SharedMwaaState,
+    pub amplify: fakecloud_amplify::SharedAmplifyState,
+    pub appconfig: fakecloud_appconfig::SharedAppConfigState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime, when Docker/Podman is available. Used to
     /// pre-pull the runtime image of a CFN-provisioned `AWS::Lambda::Function`
@@ -1052,6 +1117,18 @@ impl CloudFormationService {
             redshift_state: self.deps.redshift.clone(),
             docdb_state: self.deps.docdb.clone(),
             neptune_state: self.deps.neptune.clone(),
+            codepipeline_state: self.deps.codepipeline.clone(),
+            codebuild_state: self.deps.codebuild.clone(),
+            codedeploy_state: self.deps.codedeploy.clone(),
+            opensearch_state: self.deps.opensearch.clone(),
+            emr_state: self.deps.emr.clone(),
+            sagemaker_state: self.deps.sagemaker.clone(),
+            backup_state: self.deps.backup.clone(),
+            appsync_state: self.deps.appsync.clone(),
+            timestream_state: self.deps.timestream.clone(),
+            mwaa_state: self.deps.mwaa.clone(),
+            amplify_state: self.deps.amplify.clone(),
+            appconfig_state: self.deps.appconfig.clone(),
             cloudformation_state: self.state.clone(),
             delivery: self.deps.delivery.clone(),
             lambda_runtime: self.deps.lambda_runtime.clone(),
@@ -3188,6 +3265,18 @@ mod tests {
     }
 
     fn make_service() -> CloudFormationService {
+        // Fresh empty per-account state for the services added by the
+        // orchestration/persistence sweep (all MultiAccountState-backed).
+        fn mas<T: fakecloud_core::multi_account::AccountState>(
+        ) -> Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<T>>> {
+            Arc::new(RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new(
+                    "123456789012",
+                    "us-east-1",
+                    "",
+                ),
+            ))
+        }
         let cf_state = Arc::new(RwLock::new(
             fakecloud_core::multi_account::MultiAccountState::new(
                 "123456789012",
@@ -3453,6 +3542,18 @@ mod tests {
                     "",
                 ),
             )),
+            codepipeline: mas(),
+            codebuild: mas(),
+            codedeploy: mas(),
+            opensearch: mas(),
+            emr: mas(),
+            sagemaker: mas(),
+            backup: mas(),
+            appsync: mas(),
+            timestream: mas(),
+            mwaa: mas(),
+            amplify: mas(),
+            appconfig: mas(),
             delivery: Arc::new(DeliveryBus::new()),
             lambda_runtime: None,
             rds_runtime: None,

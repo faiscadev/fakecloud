@@ -12,7 +12,7 @@
 
 pub mod persistence;
 pub(crate) mod service;
-pub(crate) mod state;
+pub mod state;
 mod validation_gen;
 
 pub use service::{OpenSearchService, ES_ACTIONS, OPENSEARCH_ACTIONS};
