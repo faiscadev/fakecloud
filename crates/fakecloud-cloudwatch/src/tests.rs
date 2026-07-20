@@ -344,6 +344,81 @@ async fn metric_alarm_evaluates_to_ok_below_threshold() {
     );
 }
 
+// DescribeAlarmsForMetric returns freshly-evaluated state (not a stale stored
+// value) and filters by Dimensions.
+#[tokio::test]
+async fn describe_alarms_for_metric_returns_fresh_state_filtered_by_dimensions() {
+    let svc = service();
+    call(
+        &svc,
+        "PutMetricAlarm",
+        &[
+            ("AlarmName", "dfm-alarm"),
+            ("Namespace", "Test/DFM"),
+            ("MetricName", "CPU"),
+            ("Dimensions.member.1.Name", "Host"),
+            ("Dimensions.member.1.Value", "a"),
+            ("ComparisonOperator", "GreaterThanThreshold"),
+            ("Threshold", "50"),
+            ("EvaluationPeriods", "1"),
+            ("Period", "60"),
+            ("Statistic", "Average"),
+        ],
+    )
+    .await;
+    // Publish a breaching datapoint AFTER creating the alarm; the handler must
+    // re-evaluate rather than return the initial INSUFFICIENT_DATA.
+    call(
+        &svc,
+        "PutMetricData",
+        &[
+            ("Namespace", "Test/DFM"),
+            ("MetricData.member.1.MetricName", "CPU"),
+            ("MetricData.member.1.Value", "100"),
+            ("MetricData.member.1.Dimensions.member.1.Name", "Host"),
+            ("MetricData.member.1.Dimensions.member.1.Value", "a"),
+        ],
+    )
+    .await;
+
+    // Matching dimensions -> the alarm is returned with its fresh ALARM state.
+    let matched = call(
+        &svc,
+        "DescribeAlarmsForMetric",
+        &[
+            ("Namespace", "Test/DFM"),
+            ("MetricName", "CPU"),
+            ("Dimensions.member.1.Name", "Host"),
+            ("Dimensions.member.1.Value", "a"),
+        ],
+    )
+    .await;
+    let body = body_of(&matched);
+    assert!(body.contains("dfm-alarm"), "alarm should match: {body}");
+    assert!(
+        body.contains("<StateValue>ALARM</StateValue>"),
+        "fresh state should be ALARM: {body}"
+    );
+
+    // Non-matching dimensions -> filtered out.
+    let unmatched = call(
+        &svc,
+        "DescribeAlarmsForMetric",
+        &[
+            ("Namespace", "Test/DFM"),
+            ("MetricName", "CPU"),
+            ("Dimensions.member.1.Name", "Host"),
+            ("Dimensions.member.1.Value", "b"),
+        ],
+    )
+    .await;
+    assert!(
+        !body_of(&unmatched).contains("dfm-alarm"),
+        "different dimensions must not match: {}",
+        body_of(&unmatched)
+    );
+}
+
 // A manually-set state must survive DescribeAlarms re-evaluation when the
 // watched metric has no datapoints (default treat-missing-data).
 #[tokio::test]

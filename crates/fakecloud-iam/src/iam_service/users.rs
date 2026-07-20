@@ -616,8 +616,10 @@ impl IamService {
         }
 
         let key = IamAccessKey {
-            access_key_id: format!("FKIA{}", generate_id()),
-            secret_access_key: format!("fake{}{}fake", generate_id(), generate_id()),
+            // Access key IDs are 20 chars total (4-char prefix + 16), unlike the
+            // 21-char principal unique IDs generate_id() now mints.
+            access_key_id: format!("FKIA{}", &generate_id()[..16]),
+            secret_access_key: format!("fake{}{}fake", &generate_id()[..16], &generate_id()[..16]),
             user_name: user_name.clone(),
             status: "Active".to_string(),
             created_at: Utc::now(),
@@ -1292,7 +1294,8 @@ impl IamService {
             ));
         }
 
-        let key_id = format!("APKA{}", generate_id());
+        // SSH public-key IDs are 20 chars total (APKA + 16), like access keys.
+        let key_id = format!("APKA{}", &generate_id()[..16]);
         // Generate a simple fingerprint from the body
         let fingerprint = format!(
             "{}:{}:{}:{}:{}",

@@ -100,16 +100,20 @@ pub(crate) fn resource_arn(account: &str, region: &str, kind: &str, name: &str) 
 /// absent the full remaining list (from any incoming offset) is returned in a
 /// single page with no continuation token — matching how AWS returns an
 /// unbounded page when the caller omits a page size.
-pub(crate) fn paginate_body(body: &Value, items: Vec<Value>) -> (Vec<Value>, Option<String>) {
+pub(crate) fn paginate_body(
+    body: &Value,
+    items: Vec<Value>,
+) -> Result<(Vec<Value>, Option<String>), AwsServiceError> {
     let token = body.get("NextToken").and_then(|v| v.as_str());
     let max = body
         .get("MaxResults")
         .and_then(|v| v.as_u64())
-        .map(|n| n as usize);
-    match max {
-        Some(m) => fakecloud_core::pagination::paginate(&items, token, m),
-        None => fakecloud_core::pagination::paginate(&items, token, usize::MAX),
-    }
+        .map(|n| n as usize)
+        .unwrap_or(usize::MAX);
+    // A malformed NextToken is rejected with InvalidInputException rather than
+    // silently restarting at page 0 (which can loop a client forever).
+    fakecloud_core::pagination::paginate_checked(&items, token, max)
+        .map_err(|_| invalid_input("Invalid value for NextToken."))
 }
 
 /// A small UUID-ish identifier (32 hex chars). Glue uses these for run ids,

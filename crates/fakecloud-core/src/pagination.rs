@@ -3,6 +3,12 @@
 /// Parses `next_token` as a numeric offset (defaulting to 0 if `None` or unparseable),
 /// slices `items` starting at that offset, and returns at most `max_results` items
 /// along with an optional next token for the following page.
+///
+/// Prefer [`paginate_checked`] for client-facing list ops: this variant treats a
+/// malformed `next_token` as offset 0, which can drive an infinite client
+/// pagination loop. It remains for callers whose service model declares no
+/// invalid-token error (returning one would be an undeclared error).
+#[must_use]
 pub fn paginate<T: Clone>(
     items: &[T],
     next_token: Option<&str>,

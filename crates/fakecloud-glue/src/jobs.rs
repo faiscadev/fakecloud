@@ -171,7 +171,7 @@ impl GlueService {
             .get(&req.account_id)
             .map(|s| s.jobs.values().map(job_to_json).collect())
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, jobs);
+        let (page, token) = crate::common::paginate_body(&body, jobs)?;
         let mut resp = json!({ "Jobs": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
@@ -186,7 +186,7 @@ impl GlueService {
             .get(&req.account_id)
             .map(|s| s.jobs.keys().map(|k| json!(k)).collect())
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, names);
+        let (page, token) = crate::common::paginate_body(&body, names)?;
         let mut resp = json!({ "JobNames": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);

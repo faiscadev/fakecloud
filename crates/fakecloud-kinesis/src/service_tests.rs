@@ -2320,6 +2320,48 @@ fn at_sequence_number_below_trim_horizon_resolves_to_earliest() {
     assert_eq!(records.len(), 1, "resolves to the surviving record");
 }
 
+// A sequence number minted by a *different* shard (its packed discriminator
+// doesn't match) must raise InvalidArgumentException even when it sorts below
+// this shard's earliest record, instead of silently resolving to trim horizon.
+#[test]
+fn at_sequence_number_from_another_shard_is_invalid() {
+    let (svc, state) = make_service();
+    svc.create_stream(&request(
+        "CreateStream",
+        json!({"StreamName": "xshard", "ShardCount": 2}),
+    ))
+    .unwrap();
+
+    // Seed shard 1 (discriminator 1) with a record directly.
+    {
+        let mut g = state.write();
+        let stream = g.default_mut().streams.get_mut("xshard").unwrap();
+        stream.shards[1].records.push(KinesisRecord {
+            sequence_number: format!("{:05}{:051}", 1, 10),
+            partition_key: "p".to_string(),
+            data: b"one".to_vec(),
+            approximate_arrival_timestamp: chrono::Utc::now(),
+        });
+    }
+
+    // A token with shard-0's discriminator sorts below shard 1's record but was
+    // never minted by shard 1.
+    let foreign_seq = format!("{:05}{:051}", 0, 5);
+    let err = match svc.get_shard_iterator(&request(
+        "GetShardIterator",
+        json!({
+            "StreamName": "xshard",
+            "ShardId": "shardId-000000000001",
+            "ShardIteratorType": "AT_SEQUENCE_NUMBER",
+            "StartingSequenceNumber": foreign_seq,
+        }),
+    )) {
+        Ok(_) => panic!("expected InvalidArgumentException"),
+        Err(e) => e,
+    };
+    assert_eq!(err.code(), "InvalidArgumentException");
+}
+
 // ── L2: shard-iterator tokens are unique per insert ──
 
 #[test]

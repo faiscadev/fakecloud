@@ -146,7 +146,8 @@ impl Wafv2Service {
             })
             .unwrap_or_default();
         all.sort_by(|a, b| a.name.cmp(&b.name));
-        let (page, next) = paginate(&all, next_marker.as_deref(), limit);
+        let (page, next) = paginate_checked(&all, next_marker.as_deref(), limit)
+            .map_err(|_| invalid_param("The specified NextMarker is not valid."))?;
         let summaries: Vec<Value> = page
             .iter()
             .map(|a| {

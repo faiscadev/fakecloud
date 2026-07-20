@@ -13,7 +13,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use fakecloud_aws::arn::Arn;
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 

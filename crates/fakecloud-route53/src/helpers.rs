@@ -102,9 +102,14 @@ fn rrset_value_key(r: &ResourceRecordSet) -> Vec<String> {
 /// True when two record sets carry identical TTL and value data, in
 /// addition to name/type/set-identifier. Used to gate `DELETE`.
 pub(crate) fn rrset_values_match(current: &ResourceRecordSet, want: &ResourceRecordSet) -> bool {
-    // AliasTarget-backed records have no TTL; only compare TTL when the
-    // caller supplied one (real Route 53 ignores TTL for alias deletes).
-    let ttl_ok = want.ttl.is_none() || current.ttl == want.ttl;
+    // Alias records carry no TTL, so Route 53 ignores TTL when matching an
+    // alias delete. For a standard record a DELETE must specify the TTL and it
+    // must match exactly — omitting it is a mismatch, not a wildcard.
+    let ttl_ok = if current.alias_target.is_some() {
+        true
+    } else {
+        current.ttl == want.ttl
+    };
     ttl_ok && rrset_value_key(current) == rrset_value_key(want)
 }
 
@@ -167,14 +172,20 @@ pub(crate) fn is_default_record(r: &ResourceRecordSet, zone_name: &str) -> bool 
     r.name == zone_name && (r.record_type == "SOA" || r.record_type == "NS")
 }
 
-/// Reversed-label sort key for a DNS name (`www.example.com.` ->
-/// `com.example.www`). Route 53's `ListHostedZonesByName` orders zones by
-/// this key rather than plain lexicographic name order.
+/// Reversed-label sort key for a DNS name. Route 53 orders record sets and
+/// zones by RFC 4034 canonical name ordering: compare labels right-to-left, and
+/// within a label octet-by-octet where the end of a label sorts before any
+/// octet.
+///
+/// The labels are reversed and joined with NUL (`0x00`) rather than `.` so that
+/// a label boundary sorts before every label octet. Joining with `.` (`0x2E`)
+/// mis-ranks any label containing an octet below `.` — e.g. `-` (`0x2D`) — so
+/// `a-.example.com.` would wrongly sort after `x.a.example.com.`.
 pub(crate) fn reverse_dns_key(name: &str) -> String {
-    let trimmed = name.trim_end_matches('.');
+    let trimmed = name.trim_end_matches('.').to_ascii_lowercase();
     let mut labels: Vec<&str> = trimmed.split('.').collect();
     labels.reverse();
-    labels.join(".").to_ascii_lowercase()
+    labels.join("\0")
 }
 
 /// Materialize a traffic-policy document into the record set AWS creates for
@@ -2280,10 +2291,22 @@ mod hardening_tests {
 
     #[test]
     fn reverse_dns_key_reverses_labels() {
-        assert_eq!(reverse_dns_key("www.example.com."), "com.example.www");
-        assert_eq!(reverse_dns_key("example.com"), "com.example");
+        // Labels are reversed and joined with NUL.
+        assert_eq!(reverse_dns_key("www.example.com."), "com\0example\0www");
+        assert_eq!(reverse_dns_key("example.com"), "com\0example");
+        assert_eq!(reverse_dns_key("WWW.Example.COM"), "com\0example\0www");
         // Zone apex sorts before its subdomains under the reversed key.
         assert!(reverse_dns_key("example.com.") < reverse_dns_key("a.example.com."));
+    }
+
+    // RFC 4034: end-of-label sorts before any octet, so a label that is a proper
+    // prefix of a sibling sorts first even when the sibling's next octet is
+    // below '.' (0x2E). `a` < `a-` -> `a.example.com.` < `a-.example.com.`.
+    #[test]
+    fn reverse_dns_key_orders_end_of_label_before_low_octet() {
+        assert!(reverse_dns_key("a.example.com.") < reverse_dns_key("a-.example.com."));
+        // And a deeper name under `a` still sorts before the `a-` sibling.
+        assert!(reverse_dns_key("z.a.example.com.") < reverse_dns_key("a-.example.com."));
     }
 
     #[test]
@@ -2310,6 +2333,34 @@ mod hardening_tests {
         assert!(rrset_values_match(&cur, &same));
         assert!(!rrset_values_match(&cur, &diff_val));
         assert!(!rrset_values_match(&cur, &diff_ttl));
+
+        // A DELETE that omits TTL for a standard record does NOT match — Route
+        // 53 requires the TTL on a non-alias delete.
+        let no_ttl = ResourceRecordSet {
+            ttl: None,
+            resource_records: rr(&["1.2.3.4"]),
+            ..cur.clone()
+        };
+        assert!(!rrset_values_match(&cur, &no_ttl));
+
+        // Alias records have no TTL; TTL is ignored when matching an alias.
+        let alias_cur = ResourceRecordSet {
+            name: "alias.example.com.".into(),
+            record_type: "A".into(),
+            ttl: None,
+            resource_records: None,
+            alias_target: Some(crate::model::AliasTarget {
+                hosted_zone_id: "Z1".into(),
+                dns_name: "target.example.com.".into(),
+                evaluate_target_health: false,
+            }),
+            ..Default::default()
+        };
+        let alias_want = ResourceRecordSet {
+            ttl: None,
+            ..alias_cur.clone()
+        };
+        assert!(rrset_values_match(&alias_cur, &alias_want));
     }
 
     #[test]
