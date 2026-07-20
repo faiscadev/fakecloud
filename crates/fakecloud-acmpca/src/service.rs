@@ -809,6 +809,15 @@ impl AcmPcaService {
             .get("TemplateArn")
             .and_then(Value::as_str)
             .map(str::to_string);
+        // ApiPassthrough (Subject + Extensions) is stamped into the issued
+        // certificate so a caller that requests SANs / a subject / key-usage
+        // actually gets them back from GetCertificate. Rejected outright if it
+        // is present but not an object.
+        let api_passthrough = match body.get("ApiPassthrough") {
+            Some(v) if v.is_object() => Some(v.clone()),
+            Some(Value::Null) | None => None,
+            Some(_) => return Err(invalid_args("ApiPassthrough must be an object")),
+        };
         let idempotency_token = body
             .get("IdempotencyToken")
             .and_then(Value::as_str)
@@ -910,6 +919,7 @@ impl AcmPcaService {
             not_before,
             not_after,
             is_ca_template,
+            api_passthrough.as_ref(),
         )
         .map_err(malformed_csr)?;
 
@@ -2283,6 +2293,133 @@ mod tests {
             }),
         )));
         assert_eq!(err.code(), "InvalidArgsException");
+    }
+
+    /// Bug-hunt regression: `IssueCertificate` `ApiPassthrough` (Subject +
+    /// Extensions) is stamped into the issued certificate, so a caller that asks
+    /// for subject-alternative-names, a subject override, key-usage and
+    /// extended-key-usage actually gets them back from `GetCertificate` — rather
+    /// than the field being silently accepted and dropped.
+    #[tokio::test]
+    async fn issue_certificate_applies_api_passthrough() {
+        use x509_parser::extensions::GeneralName;
+
+        let svc = AcmPcaService::default();
+        let arn = create_active_root(&svc, "EC_prime256v1", "SHA256WITHECDSA").await;
+
+        let issued = svc
+            .issue_certificate(&req(
+                "IssueCertificate",
+                json!({
+                    "CertificateAuthorityArn": arn,
+                    "Csr": leaf_csr(),
+                    "SigningAlgorithm": "SHA256WITHECDSA",
+                    "Validity": { "Value": 365, "Type": "DAYS" },
+                    "ApiPassthrough": {
+                        "Subject": { "CommonName": "passthrough.example.com" },
+                        "Extensions": {
+                            "SubjectAlternativeNames": [
+                                { "DnsName": "alt.example.com" },
+                                { "IpAddress": "10.0.0.1" }
+                            ],
+                            "KeyUsage": { "DigitalSignature": true, "KeyEncipherment": true },
+                            "ExtendedKeyUsage": [
+                                { "ExtendedKeyUsageType": "SERVER_AUTH" }
+                            ]
+                        }
+                    }
+                }),
+            ))
+            .unwrap();
+        let cert_arn = body_json(&issued)["CertificateArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let leaf_pem = body_json(
+            &svc.get_certificate(&req(
+                "GetCertificate",
+                json!({ "CertificateAuthorityArn": arn, "CertificateArn": cert_arn }),
+            ))
+            .unwrap(),
+        )["Certificate"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let (_, pem) = x509_parser::pem::parse_x509_pem(leaf_pem.as_bytes()).unwrap();
+        let cert = pem.parse_x509().unwrap();
+
+        // Subject override applied.
+        assert!(
+            cert.subject()
+                .to_string()
+                .contains("passthrough.example.com"),
+            "ApiPassthrough Subject must override the certificate subject, got: {}",
+            cert.subject()
+        );
+
+        // Both SANs present.
+        let san = cert
+            .subject_alternative_name()
+            .unwrap()
+            .expect("issued cert must carry a SubjectAlternativeName extension");
+        let has_dns = san
+            .value
+            .general_names
+            .iter()
+            .any(|g| matches!(g, GeneralName::DNSName("alt.example.com")));
+        let has_ip = san
+            .value
+            .general_names
+            .iter()
+            .any(|g| matches!(g, GeneralName::IPAddress(&[10, 0, 0, 1])));
+        assert!(
+            has_dns,
+            "ApiPassthrough DnsName SAN must appear in the cert"
+        );
+        assert!(
+            has_ip,
+            "ApiPassthrough IpAddress SAN must appear in the cert"
+        );
+
+        // KeyUsage applied.
+        let ku = cert
+            .key_usage()
+            .unwrap()
+            .expect("issued cert must carry a KeyUsage extension");
+        assert!(ku.value.digital_signature());
+        assert!(ku.value.key_encipherment());
+
+        // ExtendedKeyUsage applied.
+        let eku = cert
+            .extended_key_usage()
+            .unwrap()
+            .expect("issued cert must carry an ExtendedKeyUsage extension");
+        assert!(eku.value.server_auth, "SERVER_AUTH EKU must be present");
+    }
+
+    /// Bug-hunt regression: an unsupported `ApiPassthrough` extension
+    /// (`CertificatePolicies`, which cannot be faithfully encoded) is rejected
+    /// with an error rather than silently accepted and dropped.
+    #[tokio::test]
+    async fn issue_certificate_rejects_unsupported_passthrough() {
+        let svc = AcmPcaService::default();
+        let arn = create_active_root(&svc, "EC_prime256v1", "SHA256WITHECDSA").await;
+        let err = expect_err(svc.issue_certificate(&req(
+            "IssueCertificate",
+            json!({
+                "CertificateAuthorityArn": arn,
+                "Csr": leaf_csr(),
+                "SigningAlgorithm": "SHA256WITHECDSA",
+                "Validity": { "Value": 365, "Type": "DAYS" },
+                "ApiPassthrough": {
+                    "Extensions": {
+                        "CertificatePolicies": [ { "CertPolicyId": "1.2.3.4" } ]
+                    }
+                }
+            }),
+        )));
+        assert_eq!(err.code(), "MalformedCSRException");
     }
 
     /// UpdateCertificateAuthority(Status): a PENDING_CERTIFICATE CA can be moved
