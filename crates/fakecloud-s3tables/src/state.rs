@@ -60,6 +60,10 @@ pub struct TableRecord {
     pub version_token: String,
     /// Opaque S3 URI pointing at the table's Iceberg metadata document.
     pub metadata_location: Option<String>,
+    /// The create-time `metadata` union (Iceberg schema) supplied to
+    /// CreateTable, retained verbatim so the initial schema is not lost.
+    #[serde(default)]
+    pub iceberg_metadata: Option<Value>,
     pub warehouse_location: String,
     pub managed_by_service: Option<String>,
     pub namespace_id: String,

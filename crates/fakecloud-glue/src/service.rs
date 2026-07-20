@@ -907,6 +907,12 @@ fn database_json(db: &Database) -> Value {
     if let Some(ref l) = db.location_uri {
         o["LocationUri"] = json!(l);
     }
+    if let Some(ref t) = db.target_database {
+        o["TargetDatabase"] = t.clone();
+    }
+    if let Some(ref f) = db.federated_database {
+        o["FederatedDatabase"] = f.clone();
+    }
     o
 }
 
@@ -1028,6 +1034,14 @@ impl GlueService {
                 parameters: parse_string_map(&input["Parameters"]),
                 created_at: Utc::now(),
                 catalog_id: req.account_id.clone(),
+                target_database: input
+                    .get("TargetDatabase")
+                    .filter(|v| !v.is_null())
+                    .cloned(),
+                federated_database: input
+                    .get("FederatedDatabase")
+                    .filter(|v| !v.is_null())
+                    .cloned(),
                 tables: BTreeMap::new(),
             },
         );
@@ -1087,6 +1101,16 @@ impl GlueService {
         if input["Parameters"].is_object() {
             db.parameters = parse_string_map(&input["Parameters"]);
         }
+        // UpdateDatabase replaces the DatabaseInput, so the link fields follow
+        // the input verbatim (present -> set, absent -> cleared).
+        db.target_database = input
+            .get("TargetDatabase")
+            .filter(|v| !v.is_null())
+            .cloned();
+        db.federated_database = input
+            .get("FederatedDatabase")
+            .filter(|v| !v.is_null())
+            .cloned();
         Ok(AwsResponse::ok_json(json!({})))
     }
 

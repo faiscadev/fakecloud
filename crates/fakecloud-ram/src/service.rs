@@ -1357,32 +1357,50 @@ impl RamService {
         let from = req_str(body, "fromPermissionArn")?;
         let to = req_str(body, "toPermissionArn")?;
         let now = Utc::now();
+        let from_version = u32_field(body, "fromPermissionVersion").unwrap_or(1);
+        let id = gen_id();
+
+        // Validate, swap the association, and settle the work under a single
+        // write guard (a read-then-write split would race a concurrent op).
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
         // The source permission must exist (managed or customer-managed).
-        let known = find_managed(&from).is_some()
-            || self
-                .state
-                .read()
-                .get(&req.account_id)
-                .is_some_and(|st| st.permissions.contains_key(&from));
+        let known = find_managed(&from).is_some() || st.permissions.contains_key(&from);
         if !known {
             return Err(unknown_resource(format!(
                 "Permission {from} could not be found."
             )));
         }
-        let from_version = u32_field(body, "fromPermissionVersion").unwrap_or(1);
-        let id = gen_id();
+        // Actually replace the permission on every resource share that used the
+        // source permission, so ListPermissionAssociations reflects the swap.
+        // Without this the work would settle but the association never changed.
+        for share in st.resource_shares.values_mut() {
+            if share.permission_arns.iter().any(|p| p == &from) {
+                // Swap `from` -> `to`, dropping any duplicate if `to` was already
+                // associated (a share carries each permission at most once).
+                share.permission_arns.retain(|p| p != &to);
+                for p in share.permission_arns.iter_mut() {
+                    if p == &from {
+                        *p = to.clone();
+                    }
+                }
+                share.last_updated_time = now;
+            }
+        }
+        // RAM's ReplacePermissionAssociationsWork has no async backing here, so
+        // the swap completes synchronously and the work settles to COMPLETED
+        // (the model has only status/creationTime/lastUpdatedTime -- no
+        // statusCode/endTime -- so settling is status + lastUpdatedTime).
         let work = json!({
             "id": id,
             "fromPermissionArn": from,
             "fromPermissionVersion": from_version.to_string(),
             "toPermissionArn": to,
             "toPermissionVersion": "1",
-            "status": "IN_PROGRESS",
+            "status": "COMPLETED",
             "creationTime": ts(now),
             "lastUpdatedTime": ts(now),
         });
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(&req.account_id);
         st.replace_works.insert(id, work.clone());
         Ok(ok(json!({
             "replacePermissionAssociationsWork": work,
@@ -1630,5 +1648,109 @@ impl RamService {
             )));
         }
         Ok(ok(json!({})))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+    use std::collections::HashMap;
+
+    fn svc() -> RamService {
+        RamService::new(Arc::new(RwLock::new(MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "",
+        ))))
+    }
+
+    fn req(body: &Value) -> AwsRequest {
+        AwsRequest {
+            service: "ram".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn json_of(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[test]
+    fn replace_permission_associations_swaps_and_settles_completed() {
+        let s = svc();
+        let from = "arn:aws:ram::aws:permission/AWSRAMDefaultPermissionSubnet";
+        let to = "arn:aws:ram::aws:permission/AWSRAMDefaultPermissionTransitGateway";
+
+        // A share carrying the source permission.
+        let create_body = json!({
+            "name": "share-1",
+            "permissionArns": [from],
+        });
+        s.create_resource_share(&req(&create_body), &create_body)
+            .unwrap();
+
+        // Replace the permission.
+        let replace_body = json!({
+            "fromPermissionArn": from,
+            "toPermissionArn": to,
+        });
+        let out = json_of(
+            s.replace_permission_associations(&req(&replace_body), &replace_body)
+                .unwrap(),
+        );
+        // The work settles synchronously to COMPLETED, not stuck IN_PROGRESS.
+        assert_eq!(
+            out["replacePermissionAssociationsWork"]["status"], "COMPLETED",
+            "work must settle: {out}"
+        );
+        assert_eq!(
+            out["replacePermissionAssociationsWork"]["toPermissionArn"],
+            to
+        );
+
+        // ListReplacePermissionAssociationsWork reflects the settled work.
+        let works_body = json!({});
+        let works = json_of(s.list_replace_work(&req(&works_body), &works_body).unwrap());
+        assert_eq!(
+            works["replacePermissionAssociationsWorks"][0]["status"],
+            "COMPLETED"
+        );
+
+        // The association was actually swapped: `to` now appears, `from` is gone.
+        let assoc_body = json!({});
+        let assocs = json_of(
+            s.list_permission_associations(&req(&assoc_body), &assoc_body)
+                .unwrap(),
+        );
+        let arns: Vec<&str> = assocs["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["arn"].as_str().unwrap())
+            .collect();
+        assert!(
+            arns.contains(&to),
+            "swapped-in permission present: {assocs}"
+        );
+        assert!(
+            !arns.contains(&from),
+            "swapped-out permission gone: {assocs}"
+        );
     }
 }

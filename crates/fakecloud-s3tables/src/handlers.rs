@@ -503,6 +503,12 @@ impl S3TablesService {
             .cloned()
             .unwrap_or_else(|| json!({ "storageClass": "STANDARD" }));
         let tags = parse_tags(&body, "tags");
+        // The create-time Iceberg `metadata` union carries the initial schema.
+        // AWS writes an initial metadata document from it, so when it is
+        // supplied we retain it AND seed a metadataLocation pointer -- otherwise
+        // the schema was silently dropped and GetTableMetadataLocation returned
+        // nothing for a freshly created table (bug-hunt).
+        let iceberg_metadata = body.get("metadata").filter(|v| !v.is_null()).cloned();
         let now = Utc::now();
 
         let mut accounts = self.state.write();
@@ -543,9 +549,13 @@ impl S3TablesService {
             modified_by: String::new(),
             owner_account_id: req.account_id.clone(),
             version_token: token.clone(),
-            // No Iceberg metadata pointer until the client writes one (via
-            // CreateTable `metadata` or UpdateTableMetadataLocation).
-            metadata_location: None,
+            // Seed the metadata pointer from the create-time schema when given;
+            // otherwise none until the client writes one (via
+            // UpdateTableMetadataLocation).
+            metadata_location: iceberg_metadata
+                .as_ref()
+                .map(|_| format!("{warehouse}/metadata/00000-{}.metadata.json", gen_id())),
+            iceberg_metadata,
             warehouse_location: warehouse,
             managed_by_service: None,
             namespace_id,
@@ -1279,4 +1289,161 @@ fn table_to_get_value(t: &TableRecord, table_bucket_id: &str) -> Value {
     m.insert("format".into(), json!(t.format));
     m.insert("tableBucketId".into(), json!(table_bucket_id));
     Value::Object(m)
+}
+
+#[cfg(test)]
+mod create_table_metadata_tests {
+    use super::*;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+
+    fn svc() -> S3TablesService {
+        S3TablesService::new(Arc::new(RwLock::new(MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "",
+        ))))
+    }
+
+    fn enc(s: &str) -> String {
+        percent_encoding::utf8_percent_encode(s, percent_encoding::NON_ALPHANUMERIC).to_string()
+    }
+
+    fn request(method: Method, path: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "s3tables".to_string(),
+            action: String::new(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "test".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: path.to_string(),
+            raw_query: String::new(),
+            method,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    async fn body_of(s: &S3TablesService, method: Method, path: &str, body: Value) -> Value {
+        let resp = s.handle(request(method, path, body)).await.unwrap();
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[tokio::test]
+    async fn create_table_persists_iceberg_metadata_and_seeds_location() {
+        let s = svc();
+        // bucket -> namespace -> table
+        let created =
+            body_of(&s, Method::PUT, "/buckets", json!({ "name": "bkt" })).await;
+        let arn = created["arn"].as_str().unwrap().to_string();
+        let earn = enc(&arn);
+        body_of(
+            &s,
+            Method::PUT,
+            &format!("/namespaces/{earn}"),
+            json!({ "namespace": ["ns"] }),
+        )
+        .await;
+
+        // CreateTable WITH an Iceberg schema in `metadata`.
+        let metadata = json!({
+            "iceberg": {
+                "schema": {
+                    "fields": [
+                        {"name": "id", "type": "long", "required": true},
+                        {"name": "data", "type": "string"}
+                    ]
+                }
+            }
+        });
+        body_of(
+            &s,
+            Method::PUT,
+            &format!("/tables/{earn}/ns"),
+            json!({ "name": "t", "format": "ICEBERG", "metadata": metadata }),
+        )
+        .await;
+
+        // GetTableMetadataLocation now returns a seeded, non-empty pointer
+        // (previously empty because CreateTable dropped the metadata).
+        let loc = body_of(
+            &s,
+            Method::GET,
+            &format!("/tables/{earn}/ns/t/metadata-location"),
+            json!({}),
+        )
+        .await;
+        let ml = loc["metadataLocation"].as_str().unwrap_or_default();
+        assert!(
+            ml.ends_with(".metadata.json"),
+            "metadataLocation seeded from create-time schema: {loc}"
+        );
+
+        // GetTable also reflects the metadataLocation.
+        let got = body_of(
+            &s,
+            Method::GET,
+            &format!("/tables/{earn}/ns/t"),
+            json!({}),
+        )
+        .await;
+        assert_eq!(got["metadataLocation"], loc["metadataLocation"]);
+
+        // And the raw create-time schema is retained on the record.
+        let stored = s
+            .state
+            .read()
+            .get("123456789012")
+            .unwrap()
+            .table_buckets
+            .get(&arn)
+            .unwrap()
+            .tables
+            .values()
+            .next()
+            .unwrap()
+            .iceberg_metadata
+            .clone();
+        assert_eq!(stored, Some(metadata));
+    }
+
+    #[tokio::test]
+    async fn create_table_without_metadata_has_no_location() {
+        let s = svc();
+        let created =
+            body_of(&s, Method::PUT, "/buckets", json!({ "name": "bkt2" })).await;
+        let earn = enc(created["arn"].as_str().unwrap());
+        body_of(
+            &s,
+            Method::PUT,
+            &format!("/namespaces/{earn}"),
+            json!({ "namespace": ["ns"] }),
+        )
+        .await;
+        body_of(
+            &s,
+            Method::PUT,
+            &format!("/tables/{earn}/ns"),
+            json!({ "name": "t", "format": "ICEBERG" }),
+        )
+        .await;
+        let loc = body_of(
+            &s,
+            Method::GET,
+            &format!("/tables/{earn}/ns/t/metadata-location"),
+            json!({}),
+        )
+        .await;
+        assert!(
+            loc["metadataLocation"].as_str().unwrap_or_default().is_empty()
+                || loc.get("metadataLocation").is_none(),
+            "no metadata supplied -> no seeded location: {loc}"
+        );
+    }
 }

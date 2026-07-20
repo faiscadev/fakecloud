@@ -496,6 +496,17 @@ impl FirehoseService {
         };
         let extra_destinations = extract_extra_destinations(&body, "Configuration");
 
+        // Create-time Tags must be returned by ListTagsForDeliveryStream without
+        // a follow-up TagDeliveryStream call (bug-hunt).
+        let mut create_tags = BTreeMap::new();
+        if let Some(arr) = body["Tags"].as_array() {
+            for t in arr {
+                if let (Some(k), Some(v)) = (t["Key"].as_str(), t["Value"].as_str()) {
+                    create_tags.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+
         let now = Utc::now();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
@@ -517,7 +528,7 @@ impl FirehoseService {
             last_update: now,
             version_id: "1".to_string(),
             destination: s3_dest,
-            tags: BTreeMap::new(),
+            tags: create_tags,
             encryption: None,
             extra_destinations,
         };
@@ -1157,6 +1168,40 @@ mod tests {
             json!({ "DeliveryStreamName": name }),
         ))
         .unwrap();
+    }
+
+    #[test]
+    fn create_delivery_stream_persists_tags() {
+        // Create-time Tags must surface via ListTagsForDeliveryStream without a
+        // follow-up TagDeliveryStream (bug-hunt).
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "tagged-at-create",
+                "Tags": [
+                    {"Key": "team", "Value": "data"},
+                    {"Key": "env", "Value": "prod"}
+                ]
+            }),
+        ))
+        .unwrap();
+
+        let resp = svc
+            .list_tags_for_delivery_stream(&request(
+                "ListTagsForDeliveryStream",
+                json!({ "DeliveryStreamName": "tagged-at-create" }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let tags = body["Tags"].as_array().unwrap();
+        assert_eq!(tags.len(), 2);
+        let mut pairs: Vec<(&str, &str)> = tags
+            .iter()
+            .map(|t| (t["Key"].as_str().unwrap(), t["Value"].as_str().unwrap()))
+            .collect();
+        pairs.sort();
+        assert_eq!(pairs, vec![("env", "prod"), ("team", "data")]);
     }
 
     fn describe_encryption(svc: &FirehoseService, name: &str) -> Value {

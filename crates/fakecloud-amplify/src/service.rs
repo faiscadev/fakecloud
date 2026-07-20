@@ -325,6 +325,28 @@ fn ok(v: Value) -> Result<AwsResponse, AwsServiceError> {
     Ok(AwsResponse::json_value(StatusCode::OK, v))
 }
 
+/// Build the `certificate` object for a DomainAssociation from a request's
+/// `certificateSettings` input. Shared by create + update so both persist the
+/// requested cert type / customCertificateArn identically. Returns `None` when
+/// the request carries no `certificateSettings`.
+fn build_certificate(body: &Value, domain: &str) -> Option<Value> {
+    let cs = body.get("certificateSettings").and_then(Value::as_object)?;
+    let ctype = cs
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("AMPLIFY_MANAGED");
+    let mut cert = Map::new();
+    cert.insert("type".into(), json!(ctype));
+    if let Some(arn) = cs.get("customCertificateArn") {
+        cert.insert("customCertificateArn".into(), arn.clone());
+    }
+    cert.insert(
+        "certificateVerificationDNSRecord".into(),
+        json!(shared::certificate_verification_dns_record(domain)),
+    );
+    Some(Value::Object(cert))
+}
+
 fn parse_body(req: &AwsRequest) -> Result<Value, AwsServiceError> {
     if req.body.is_empty() {
         return Ok(json!({}));
@@ -890,21 +912,8 @@ impl AmplifyService {
             .collect();
         d.insert("subDomains".into(), json!(subdomains));
         // Certificate mirrors the requested certificate settings.
-        if let Some(cs) = body.get("certificateSettings").and_then(Value::as_object) {
-            let ctype = cs
-                .get("type")
-                .and_then(Value::as_str)
-                .unwrap_or("AMPLIFY_MANAGED");
-            let mut cert = Map::new();
-            cert.insert("type".into(), json!(ctype));
-            if let Some(arn) = cs.get("customCertificateArn") {
-                cert.insert("customCertificateArn".into(), arn.clone());
-            }
-            cert.insert(
-                "certificateVerificationDNSRecord".into(),
-                json!(shared::certificate_verification_dns_record(domain)),
-            );
-            d.insert("certificate".into(), Value::Object(cert));
+        if let Some(cert) = build_certificate(body, domain) {
+            d.insert("certificate".into(), cert);
         }
         echo(
             &mut d,
@@ -1001,6 +1010,11 @@ impl AmplifyService {
                 })
                 .collect();
             a.insert("subDomains".into(), json!(subs));
+        }
+        // Persist updated certificateSettings so GetDomainAssociation echoes the
+        // new certificate (previously dropped, leaving a stale create-time cert).
+        if let Some(cert) = build_certificate(body, domain) {
+            a.insert("certificate".into(), cert);
         }
         // Re-enter verification so the update settles on the next read.
         a.insert("domainStatus".into(), json!("UPDATING"));
@@ -1846,6 +1860,42 @@ mod tests {
             .unwrap();
         let body = body_json(&created);
         body["app"]["appId"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn update_domain_persists_certificate_settings() {
+        // UpdateDomainAssociation dropped certificateSettings; the new cert must
+        // be echoed by GetDomainAssociation (bug-hunt).
+        let s = svc();
+        let c = ctx();
+        let app_id = make_app(&s, &c);
+        s.create_domain(
+            &c,
+            &app_id,
+            &json!({
+                "domainName": "example.com",
+                "subDomainSettings": [{ "prefix": "www", "branchName": "main" }],
+                "certificateSettings": { "type": "AMPLIFY_MANAGED" }
+            }),
+        )
+        .unwrap();
+
+        // Switch to a CUSTOM certificate.
+        let arn = "arn:aws:acm:us-east-1:000000000000:certificate/abc";
+        s.update_domain(
+            &c,
+            &app_id,
+            "example.com",
+            &json!({
+                "certificateSettings": { "type": "CUSTOM", "customCertificateArn": arn }
+            }),
+        )
+        .unwrap();
+
+        let dom = body_json(&s.get_domain(&c, &app_id, "example.com").unwrap());
+        let cert = &dom["domainAssociation"]["certificate"];
+        assert_eq!(cert["type"], "CUSTOM");
+        assert_eq!(cert["customCertificateArn"], arn);
     }
 
     #[test]

@@ -52,6 +52,14 @@ impl ResourceProvisioner {
                 parameters,
                 created_at: Utc::now(),
                 catalog_id: self.account_id.clone(),
+                target_database: input
+                    .get("TargetDatabase")
+                    .filter(|v| !v.is_null())
+                    .cloned(),
+                federated_database: input
+                    .get("FederatedDatabase")
+                    .filter(|v| !v.is_null())
+                    .cloned(),
                 tables: BTreeMap::new(),
             },
         );

@@ -503,3 +503,67 @@ async fn resource_config_history_honors_order_and_time_window() {
     .await;
     assert_eq!(none["configurationItems"].as_array().unwrap().len(), 0);
 }
+
+#[tokio::test]
+async fn put_config_rule_persists_create_time_tags() {
+    // Create-time Tags on Put* ops were dropped; ListTagsForResource must
+    // return them without a follow-up TagResource (bug-hunt).
+    let svc = service();
+    let acct = "111111111111";
+    let mut body = managed_rule_body("tagged-rule", "S3_BUCKET_VERSIONING_ENABLED");
+    body["Tags"] = json!([{"Key": "team", "Value": "sec"}, {"Key": "env", "Value": "prod"}]);
+    call(&svc, "PutConfigRule", acct, body).await;
+
+    // Resolve the rule ARN via DescribeConfigRules.
+    let desc = call(&svc, "DescribeConfigRules", acct, json!({})).await;
+    let arn = desc["ConfigRules"][0]["ConfigRuleArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let tags = call(
+        &svc,
+        "ListTagsForResource",
+        acct,
+        json!({ "ResourceArn": arn }),
+    )
+    .await;
+    let list = tags["Tags"].as_array().unwrap();
+    assert_eq!(list.len(), 2, "both create-time tags listed: {tags}");
+    assert!(list
+        .iter()
+        .any(|t| t["Key"] == "team" && t["Value"] == "sec"));
+    assert!(list
+        .iter()
+        .any(|t| t["Key"] == "env" && t["Value"] == "prod"));
+}
+
+#[tokio::test]
+async fn put_configuration_aggregator_persists_create_time_tags() {
+    let svc = service();
+    let acct = "111111111111";
+    let out = call(
+        &svc,
+        "PutConfigurationAggregator",
+        acct,
+        json!({
+            "ConfigurationAggregatorName": "agg",
+            "AccountAggregationSources": [{"AccountIds": ["111111111111"], "AllAwsRegions": true}],
+            "Tags": [{"Key": "owner", "Value": "data"}]
+        }),
+    )
+    .await;
+    let arn = out["ConfigurationAggregator"]["ConfigurationAggregatorArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let tags = call(
+        &svc,
+        "ListTagsForResource",
+        acct,
+        json!({ "ResourceArn": arn }),
+    )
+    .await;
+    assert_eq!(tags["Tags"][0]["Key"], "owner");
+    assert_eq!(tags["Tags"][0]["Value"], "data");
+}

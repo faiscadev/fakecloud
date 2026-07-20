@@ -1536,7 +1536,15 @@ impl ConfigService {
             last_successful_invocation_time: existing
                 .and_then(|r| r.last_successful_invocation_time),
         };
-        acc.rules.insert(name, cfg_rule);
+        acc.rules.insert(name.clone(), cfg_rule);
+        let arn_for_tags = acc.rules[&name].arn.clone();
+        let tags = parse_create_tags(body);
+        if !tags.is_empty() {
+            let entry = acc.tags.entry(arn_for_tags).or_default();
+            for (k, v) in tags {
+                entry.insert(k, v);
+            }
+        }
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -2677,6 +2685,13 @@ impl ConfigService {
         };
         let out_arn = pack.arn.clone();
         acc.conformance_packs.insert(name, pack);
+        let tags = parse_create_tags(body);
+        if !tags.is_empty() {
+            let entry = acc.tags.entry(out_arn.clone()).or_default();
+            for (k, v) in tags {
+                entry.insert(k, v);
+            }
+        }
         Ok(AwsResponse::ok_json(
             json!({ "ConformancePackArn": out_arn }),
         ))
@@ -2992,6 +3007,13 @@ impl ConfigService {
                 last_update_time: Utc::now(),
             },
         );
+        let tags = parse_create_tags(body);
+        if !tags.is_empty() {
+            let entry = acc.tags.entry(out_arn.clone()).or_default();
+            for (k, v) in tags {
+                entry.insert(k, v);
+            }
+        }
         Ok(AwsResponse::ok_json(
             json!({ "OrganizationConfigRuleArn": out_arn }),
         ))
@@ -3160,6 +3182,13 @@ impl ConfigService {
                 last_update_time: Utc::now(),
             },
         );
+        let tags = parse_create_tags(body);
+        if !tags.is_empty() {
+            let entry = acc.tags.entry(out_arn.clone()).or_default();
+            for (k, v) in tags {
+                entry.insert(k, v);
+            }
+        }
         Ok(AwsResponse::ok_json(
             json!({ "OrganizationConformancePackArn": out_arn }),
         ))
@@ -3292,7 +3321,15 @@ impl ConfigService {
             created_by: None,
         };
         let out = Self::aggregator_json(&agg);
+        let arn_for_tags = agg.arn.clone();
         acc.aggregators.insert(name, agg);
+        let tags = parse_create_tags(body);
+        if !tags.is_empty() {
+            let entry = acc.tags.entry(arn_for_tags).or_default();
+            for (k, v) in tags {
+                entry.insert(k, v);
+            }
+        }
         Ok(AwsResponse::ok_json(
             json!({ "ConfigurationAggregator": out }),
         ))
@@ -3427,9 +3464,15 @@ impl ConfigService {
         };
         let out = Self::auth_json(&auth);
         let mut st = self.state.write();
-        st.account_mut(account)
-            .aggregation_authorizations
-            .insert(key, auth);
+        let acc = st.account_mut(account);
+        acc.aggregation_authorizations.insert(key, auth);
+        let tags = parse_create_tags(body);
+        if !tags.is_empty() {
+            let entry = acc.tags.entry(arn.clone()).or_default();
+            for (k, v) in tags {
+                entry.insert(k, v);
+            }
+        }
         let _ = out;
         Ok(AwsResponse::ok_json(
             json!({ "AggregationAuthorization": Self::auth_json_by_arn(&arn) }),
@@ -3896,6 +3939,13 @@ impl ConfigService {
             },
         );
         let _ = id;
+        let tags = parse_create_tags(body);
+        if !tags.is_empty() {
+            let entry = acc.tags.entry(arn.clone()).or_default();
+            for (k, v) in tags {
+                entry.insert(k, v);
+            }
+        }
         Ok(AwsResponse::ok_json(json!({ "QueryArn": arn })))
     }
 
@@ -4174,6 +4224,26 @@ impl ConfigService {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/// Parse a Put* request's create-time `Tags` (a `TagsList` of `{Key, Value}`)
+/// into `(key, value)` pairs. Config Put ops accept Tags at create time but
+/// historically dropped them, so ListTagsForResource returned nothing until a
+/// follow-up TagResource (bug-hunt).
+fn parse_create_tags(body: &Value) -> Vec<(String, String)> {
+    body.get("Tags")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|t| {
+                    Some((
+                        t.get("Key").and_then(Value::as_str)?.to_string(),
+                        t.get("Value").and_then(Value::as_str)?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
 
 fn account_id(req: &AwsRequest) -> String {
     if req.account_id.is_empty() {

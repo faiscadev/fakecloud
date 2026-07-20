@@ -1312,6 +1312,48 @@ async fn create_account_starts_in_progress_then_describes_succeeded() {
 }
 
 #[tokio::test]
+async fn create_account_applies_create_time_tags() {
+    // Create-time Tags were dropped; they must be visible via
+    // ListTagsForResource on the new account id without a follow-up
+    // TagResource (bug-hunt). Tags are set at reserve-time, queryable
+    // immediately even before the async enrollment completes.
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "CreateAccount",
+            json!({
+                "Email": "tagged@example.com",
+                "AccountName": "Tagged",
+                "Tags": [{"Key": "team", "Value": "platform"}]
+            }),
+        ))
+        .await
+        .unwrap();
+    let acct_id = body_value(resp)["CreateAccountStatus"]["AccountId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let listed = svc
+        .handle(req_with(
+            "111111111111",
+            "ListTagsForResource",
+            json!({"ResourceId": acct_id}),
+        ))
+        .await
+        .unwrap();
+    let v = body_value(listed);
+    let tags = v["Tags"].as_array().unwrap();
+    assert!(
+        tags.iter()
+            .any(|t| t["Key"] == "team" && t["Value"] == "platform"),
+        "create-time tag must be listed: {v}"
+    );
+}
+
+#[tokio::test]
 async fn create_account_only_management_account_can_call() {
     let (svc, _state) = OrganizationsService::shared();
     create_org_with_root(&svc).await;

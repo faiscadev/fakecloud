@@ -365,12 +365,30 @@ impl GlueService {
             .to_string();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        if !state.classifiers.contains_key(&name) {
-            return Err(entity_not_found(format!("Classifier {name} not found")));
-        }
+        // Preserve the original CreationTime and bump Version from the stored
+        // classifier -- the client `def` carries neither (both are output-only),
+        // so a naive wholesale replace previously dropped CreationTime and left
+        // Version un-bumped (bug-hunt). The stored kind may differ from the
+        // update kind, so read prior values from whichever sub-shape is stored.
+        let (prev_creation, prev_version) = state
+            .classifiers
+            .get(&name)
+            .and_then(Value::as_object)
+            .and_then(|wrapper| wrapper.values().next())
+            .map(|prev| {
+                (
+                    prev.get("CreationTime").cloned(),
+                    prev.get("Version").and_then(Value::as_i64).unwrap_or(1),
+                )
+            })
+            .ok_or_else(|| entity_not_found(format!("Classifier {name} not found")))?;
         let mut stored = def.clone();
         if let Some(obj) = stored.as_object_mut() {
+            if let Some(ct) = prev_creation {
+                obj.insert("CreationTime".into(), ct);
+            }
             obj.insert("LastUpdated".into(), json!(now_ts()));
+            obj.insert("Version".into(), json!(prev_version + 1));
         }
         state.classifiers.insert(name, json!({ kind: stored }));
         Ok(AwsResponse::ok_json(json!({})))

@@ -1506,30 +1506,76 @@ impl CodeArtifactService {
         let domain = req_q(req, "domain")?;
         let format = req_q(req, "format")?;
         validate_format(&format)?;
-        let _package = req_q(req, "package")?;
+        let package = req_q(req, "package")?;
+        let namespace = q(req, "namespace").unwrap_or_default();
         let region = req.region.clone();
         let owner = req.account_id.clone();
-        let mut guard = self.state.write();
-        let acct = guard.get_or_create(&req.account_id);
-        if !acct.domains.contains_key(&domain) {
+        let guard = self.state.read();
+        let acct = guard
+            .get(&req.account_id)
+            .filter(|a| a.domains.contains_key(&domain));
+        let Some(acct) = acct else {
             return Err(not_found(format!("Domain {domain} does not exist")));
-        }
-        // Absent a more specific match, the root package group `/*` is the
-        // strong association every package inherits.
-        let root = package_group_desc(&region, &owner, &domain, "/*", None, None);
-        ok(json!({ "packageGroup": root, "associationType": "STRONG" }))
+        };
+        // Resolve the MOST-SPECIFIC stored group whose pattern matches this
+        // package's coordinate path; every package inherits the root `/*` group
+        // when no explicit group is a better match.
+        let path = package_path(&format, &namespace, &package);
+        let patterns = domain_group_patterns(acct, &domain);
+        let pattern = best_group_pattern(&patterns, &path);
+        // Echo the stored group when it exists (preserving its contactInfo /
+        // description / origin config), else synthesize the implicit root group.
+        let gkey = format!("{domain}{SEP}{pattern}");
+        let group = acct
+            .package_groups
+            .get(&gkey)
+            .cloned()
+            .unwrap_or_else(|| package_group_desc(&region, &owner, &domain, &pattern, None, None));
+        ok(json!({ "packageGroup": group, "associationType": "STRONG" }))
     }
 
     fn list_associated_packages(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let domain = req_q(req, "domain")?;
-        let _pattern = req_q(req, "package-group")?;
-        let mut guard = self.state.write();
-        let acct = guard.get_or_create(&req.account_id);
-        if !acct.domains.contains_key(&domain) {
+        let pattern = req_q(req, "package-group")?;
+        let guard = self.state.read();
+        let acct = guard
+            .get(&req.account_id)
+            .filter(|a| a.domains.contains_key(&domain));
+        let Some(acct) = acct else {
             return Err(not_found(format!("Domain {domain} does not exist")));
+        };
+        // A package is associated with the requested group iff that group is its
+        // most-specific matching pattern. Enumerate the domain's packages and
+        // select the ones whose best match is `pattern`.
+        let patterns = domain_group_patterns(acct, &domain);
+        let dom_prefix = format!("{domain}{SEP}");
+        let mut packages = Vec::new();
+        for key in &acct.package_order {
+            if !key.starts_with(&dom_prefix) {
+                continue;
+            }
+            let Some(pkg) = acct.packages.get(key) else {
+                continue;
+            };
+            let format = pkg.get("format").and_then(Value::as_str).unwrap_or("");
+            let namespace = pkg.get("namespace").and_then(Value::as_str).unwrap_or("");
+            let name = pkg.get("package").and_then(Value::as_str).unwrap_or("");
+            let path = package_path(format, namespace, name);
+            if best_group_pattern(&patterns, &path) != pattern {
+                continue;
+            }
+            let mut item = Map::new();
+            item.insert("format".into(), json!(format));
+            item.insert(
+                "namespace".into(),
+                pkg.get("namespace").cloned().unwrap_or(Value::Null),
+            );
+            item.insert("package".into(), json!(name));
+            item.insert("associationType".into(), json!("STRONG"));
+            packages.push(Value::Object(item));
         }
         let mut out = Map::new();
-        out.insert("packages".into(), Value::Array(Vec::new()));
+        out.insert("packages".into(), Value::Array(packages));
         ok(Value::Object(out))
     }
 
@@ -1896,6 +1942,64 @@ fn validate_origin_restrictions(restrictions: &Value) -> Result<(), AwsServiceEr
         }
     }
     Ok(())
+}
+
+/// The CodeArtifact package-group path for a package's coordinates, e.g.
+/// `/npm/@types~/node` (scoped npm), `/npm/lodash`, `/maven/com.google~/guava`.
+/// Package groups match packages by this path.
+fn package_path(format: &str, namespace: &str, package: &str) -> String {
+    let mut p = format!("/{format}");
+    if !namespace.is_empty() {
+        // npm scopes are written `@scope~`; other formats use the namespace
+        // directly followed by `~` per CodeArtifact's path grammar.
+        if format == "npm" {
+            p.push_str(&format!("/@{namespace}~"));
+        } else {
+            p.push_str(&format!("/{namespace}~"));
+        }
+    }
+    p.push('/');
+    p.push_str(package);
+    p
+}
+
+/// Whether a package-group `pattern` matches a package `path`. Supports the
+/// prefix form (`/npm/*`, root `/*`), the exact form (`/npm/lodash$`), and a
+/// bare path prefix.
+fn pattern_matches(pattern: &str, path: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix("/*") {
+        // Root `/*` -> empty prefix -> matches everything.
+        return prefix.is_empty() || path == prefix || path.starts_with(&format!("{prefix}/"));
+    }
+    if let Some(exact) = pattern.strip_suffix('$') {
+        return path == exact;
+    }
+    path == pattern || path.starts_with(&format!("{pattern}/"))
+}
+
+/// Every stored package-group pattern for a domain, plus the implicit root.
+fn domain_group_patterns(acct: &crate::state::CodeArtifactState, domain: &str) -> Vec<String> {
+    let prefix = format!("{domain}{SEP}");
+    let mut patterns: Vec<String> = acct
+        .package_groups
+        .keys()
+        .filter_map(|k| k.strip_prefix(&prefix).map(str::to_string))
+        .collect();
+    if !patterns.iter().any(|p| p == "/*") {
+        patterns.push("/*".to_string());
+    }
+    patterns
+}
+
+/// The most-specific (longest) pattern that matches `path`, defaulting to the
+/// root `/*` group.
+fn best_group_pattern(patterns: &[String], path: &str) -> String {
+    patterns
+        .iter()
+        .filter(|p| pattern_matches(p, path))
+        .max_by_key(|p| p.len())
+        .cloned()
+        .unwrap_or_else(|| "/*".to_string())
 }
 
 /// Build a fresh `PackageGroupDescription` with default origin configuration.
@@ -2387,5 +2491,88 @@ mod handler_tests {
             .unwrap()
             .len();
         assert_eq!(conns, 1);
+    }
+
+    #[test]
+    fn associated_package_group_resolves_from_stored_groups() {
+        // GetAssociatedPackageGroup / ListAssociatedPackages returned a constant
+        // root group / empty list; they must derive real associations from the
+        // stored package groups and packages (bug-hunt).
+        let s = svc();
+        setup(&s, "d1", "r1");
+        publish(&s, "d1", "r1", "lodash", "1.0.0", "a1.tgz", b"one").unwrap();
+        publish(&s, "d1", "r1", "react", "1.0.0", "a2.tgz", b"two").unwrap();
+
+        // Create a format-wide group and an exact-package group.
+        for pattern in ["/npm/*", "/npm/lodash$"] {
+            s.create_package_group(&mkreq(
+                "CreatePackageGroup",
+                "domain=d1",
+                jbody(json!({ "packageGroup": pattern })),
+                HeaderMap::new(),
+            ))
+            .unwrap();
+        }
+
+        // lodash's most-specific group is the exact `/npm/lodash$`.
+        let g = body_json(
+            &s.get_associated_package_group(&mkreq(
+                "GetAssociatedPackageGroup",
+                "domain=d1&format=npm&package=lodash",
+                jbody(json!({})),
+                HeaderMap::new(),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(g["packageGroup"]["pattern"], "/npm/lodash$");
+        assert_eq!(g["associationType"], "STRONG");
+
+        // react falls under the format-wide `/npm/*`.
+        let g2 = body_json(
+            &s.get_associated_package_group(&mkreq(
+                "GetAssociatedPackageGroup",
+                "domain=d1&format=npm&package=react",
+                jbody(json!({})),
+                HeaderMap::new(),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(g2["packageGroup"]["pattern"], "/npm/*");
+
+        // ListAssociatedPackages for `/npm/*` returns react (lodash belongs to
+        // the more specific group), and `/npm/lodash$` returns lodash.
+        let list_wide = body_json(
+            &s.list_associated_packages(&mkreq(
+                "ListAssociatedPackages",
+                "domain=d1&package-group=%2Fnpm%2F*",
+                jbody(json!({})),
+                HeaderMap::new(),
+            ))
+            .unwrap(),
+        );
+        let wide_names: Vec<&str> = list_wide["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["package"].as_str().unwrap())
+            .collect();
+        assert_eq!(wide_names, vec!["react"], "wide group excludes lodash");
+
+        let list_exact = body_json(
+            &s.list_associated_packages(&mkreq(
+                "ListAssociatedPackages",
+                "domain=d1&package-group=%2Fnpm%2Flodash%24",
+                jbody(json!({})),
+                HeaderMap::new(),
+            ))
+            .unwrap(),
+        );
+        let exact_names: Vec<&str> = list_exact["packages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["package"].as_str().unwrap())
+            .collect();
+        assert_eq!(exact_names, vec!["lodash"]);
     }
 }
