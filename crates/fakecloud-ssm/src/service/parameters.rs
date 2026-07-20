@@ -518,6 +518,21 @@ impl PutParameterInput {
         let tier_explicit = body["Tier"].as_str().is_some();
         let tier = body["Tier"].as_str().unwrap_or("Standard").to_string();
 
+        // Tier must be one of the AWS-documented values. An unrecognised tier
+        // (e.g. "advanced" lower-case, or a typo) is rejected up front rather
+        // than being silently stored — AWS returns a ValidationException.
+        if !["Standard", "Advanced", "Intelligent-Tiering"].contains(&tier.as_str()) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationException",
+                format!(
+                    "1 validation error detected: Value '{tier}' at 'tier' failed to \
+                     satisfy constraint: Member must satisfy enum value set: \
+                     [Standard, Advanced, Intelligent-Tiering]"
+                ),
+            ));
+        }
+
         // Parse + validate the Policies JSON up front so PutParameter
         // can return InvalidPolicyAttributeException without touching
         // state. Empty/absent Policies -> empty list -> no-op.
@@ -760,6 +775,30 @@ impl SsmService {
                 Some(e) if !input.tier_explicit => e.tier.clone(),
                 _ => input.tier.clone(),
             };
+            // Enforce the per-tier value-size limit: Standard caps at 4KB,
+            // Advanced at 8KB. Intelligent-Tiering auto-upgrades to Advanced
+            // once the value exceeds 4KB, so its effective ceiling is also 8KB.
+            // The check runs against the plaintext value (SecureString values
+            // are encrypted only later), matching AWS which rejects an
+            // oversized value before storing it.
+            let value_limit = match effective_tier.as_str() {
+                "Advanced" | "Intelligent-Tiering" => 8192,
+                _ => 4096,
+            };
+            if input.value.len() > value_limit {
+                return Err(remap_validation_to(
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationException",
+                        format!(
+                            "1 validation error detected: Value at 'value' failed to \
+                             satisfy constraint: Member must have length less than or \
+                             equal to {value_limit}"
+                        ),
+                    ),
+                    "InvalidAllowedPatternException",
+                ));
+            }
             let policies_present = match input.policies.as_deref() {
                 Some(s) => !s.trim().is_empty(),
                 None => existing
@@ -1320,21 +1359,37 @@ impl SsmService {
         let recursive = body["Recursive"].as_bool().unwrap_or(false);
         let with_decryption = body["WithDecryption"].as_bool().unwrap_or(false);
         let filters = body["ParameterFilters"].as_array().cloned();
-        let max_results = body["MaxResults"].as_i64().unwrap_or(10) as usize;
 
-        // Validate MaxResults
-        if max_results > 10 {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidFilterValue",
-                format!(
-                    "1 validation error detected: \
-                     Value {} at 'maxResults' failed to satisfy constraint: \
-                     Member must have value less than or equal to 10",
-                    max_results
-                ),
-            ));
-        }
+        // Validate MaxResults. AWS constrains it to 1..=10 for
+        // GetParametersByPath: a value of 0 (or negative) is rejected with the
+        // greater-than-or-equal-to-1 constraint, and anything above 10 with the
+        // less-than-or-equal-to-10 constraint. Absent -> default 10.
+        let max_results = match body["MaxResults"].as_i64() {
+            Some(n) if n < 1 => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidFilterValue",
+                    format!(
+                        "1 validation error detected: \
+                         Value {n} at 'maxResults' failed to satisfy constraint: \
+                         Member must have value greater than or equal to 1"
+                    ),
+                ));
+            }
+            Some(n) if n > 10 => {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidFilterValue",
+                    format!(
+                        "1 validation error detected: \
+                         Value {n} at 'maxResults' failed to satisfy constraint: \
+                         Member must have value less than or equal to 10"
+                    ),
+                ));
+            }
+            Some(n) => n as usize,
+            None => 10,
+        };
 
         // Validate path
         if !is_valid_param_path(path) {
@@ -2249,8 +2304,11 @@ pub(super) fn validate_parameter_filters(filters: &[Value]) -> Result<(), AwsSer
         }
 
         if key == "Name" {
+            // AWS only accepts BeginsWith / Equals for the Name key on
+            // DescribeParameters. Contains is valid for GetParametersByPath's
+            // path traversal but NOT here, so reject it.
             if let Some(opt) = option {
-                if !["BeginsWith", "Equals", "Contains"].contains(&opt) {
+                if !["BeginsWith", "Equals"].contains(&opt) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
                         "ValidationException",

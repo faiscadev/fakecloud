@@ -720,13 +720,34 @@ impl EventBridgeService {
         };
 
         let key = (event_bus_name.clone(), name.clone());
-        let targets = state
+        // Preserve the mutable bookkeeping that PutRule must NOT clobber when it
+        // updates an existing rule: attached targets, tags, and the internal
+        // managed_by/created_by markers. Real AWS PutRule updates the rule's
+        // definition fields (pattern/schedule/state/etc.) but leaves targets
+        // attached and leaves tags untouched unless the request carries Tags
+        // (tags are otherwise managed via TagResource/UntagResource).
+        let (targets, existing_tags, existing_managed_by, existing_created_by) = state
             .rules
             .get(&key)
-            .map(|r| r.targets.clone())
+            .map(|r| {
+                (
+                    r.targets.clone(),
+                    r.tags.clone(),
+                    r.managed_by.clone(),
+                    r.created_by.clone(),
+                )
+            })
             .unwrap_or_default();
 
-        let tags = parse_tags(&body);
+        // Only replace tags when the request explicitly supplies a Tags array.
+        // A PutRule that omits Tags preserves whatever was already attached;
+        // previously this always overwrote tags with an empty map, silently
+        // dropping tags on every update.
+        let tags = if body.get("Tags").map(|t| t.is_array()).unwrap_or(false) {
+            parse_tags(&body)
+        } else {
+            existing_tags
+        };
 
         let rule = EventRule {
             name: name.clone(),
@@ -737,8 +758,8 @@ impl EventBridgeService {
             state: rule_state,
             description,
             role_arn,
-            managed_by: None,
-            created_by: None,
+            managed_by: existing_managed_by,
+            created_by: existing_created_by,
             targets,
             tags,
             last_fired: None,
@@ -1032,6 +1053,28 @@ impl EventBridgeService {
                     "ErrorCode": "ValidationException",
                     "ErrorMessage": format!(
                         "Parameter {target_arn} is not valid. Reason: Provided Arn is not in correct format."
+                    ),
+                }));
+                continue;
+            }
+
+            // Input, InputPath, and InputTransformer are mutually exclusive on a
+            // single target. AWS surfaces a violation as a per-entry
+            // FailedEntry (not a top-level ValidationException), which
+            // increments FailedEntryCount. Previously all three were accepted
+            // silently, letting a malformed target through and under-reporting
+            // the failed count.
+            let input_fields = ["Input", "InputPath", "InputTransformer"]
+                .iter()
+                .filter(|k| !target[**k].is_null())
+                .count();
+            if input_fields > 1 {
+                failed_entries.push(json!({
+                    "TargetId": target_id,
+                    "ErrorCode": "ValidationException",
+                    "ErrorMessage": format!(
+                        "Only one of Input, InputPath, or InputTransformer can be \
+                         specified for target: {target_id}."
                     ),
                 }));
                 continue;

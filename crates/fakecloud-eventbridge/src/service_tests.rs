@@ -2028,6 +2028,156 @@ fn put_rule_persists_event_pattern_and_state() {
 }
 
 #[test]
+fn put_rule_without_tags_preserves_existing_tags() {
+    let svc = make_service();
+    // Create the rule WITH tags.
+    let create = make_request(
+        "PutRule",
+        json!({
+            "Name": "tagged",
+            "EventPattern": r#"{"source":["a"]}"#,
+            "Tags": [{"Key": "team", "Value": "platform"}]
+        }),
+    );
+    svc.put_rule(&create).unwrap();
+
+    let rule_arn = {
+        let _mas = svc.state.read();
+        let state = _mas.default_ref();
+        state
+            .rules
+            .get(&("default".to_string(), "tagged".to_string()))
+            .unwrap()
+            .arn
+            .clone()
+    };
+
+    // Update the rule WITHOUT Tags — must not wipe the existing tag.
+    let update = make_request(
+        "PutRule",
+        json!({
+            "Name": "tagged",
+            "EventPattern": r#"{"source":["b"]}"#,
+            "State": "DISABLED"
+        }),
+    );
+    svc.put_rule(&update).unwrap();
+
+    let resp = svc
+        .list_tags_for_resource(&make_request(
+            "ListTagsForResource",
+            json!({ "ResourceARN": rule_arn }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let tags = body["Tags"].as_array().unwrap();
+    assert_eq!(
+        tags.len(),
+        1,
+        "existing tag must survive a PutRule without Tags"
+    );
+    assert_eq!(tags[0]["Key"], json!("team"));
+    assert_eq!(tags[0]["Value"], json!("platform"));
+
+    // And the definition update still took effect.
+    let _mas = svc.state.read();
+    let state = _mas.default_ref();
+    let rule = state
+        .rules
+        .get(&("default".to_string(), "tagged".to_string()))
+        .unwrap();
+    assert_eq!(rule.state, "DISABLED");
+    assert_eq!(rule.event_pattern.as_deref(), Some(r#"{"source":["b"]}"#));
+}
+
+#[test]
+fn put_rule_with_tags_replaces_tags() {
+    let svc = make_service();
+    let create = make_request(
+        "PutRule",
+        json!({
+            "Name": "tagged2",
+            "EventPattern": r#"{"source":["a"]}"#,
+            "Tags": [{"Key": "team", "Value": "platform"}]
+        }),
+    );
+    svc.put_rule(&create).unwrap();
+    let update = make_request(
+        "PutRule",
+        json!({
+            "Name": "tagged2",
+            "EventPattern": r#"{"source":["a"]}"#,
+            "Tags": [{"Key": "env", "Value": "prod"}]
+        }),
+    );
+    svc.put_rule(&update).unwrap();
+
+    let _mas = svc.state.read();
+    let state = _mas.default_ref();
+    let rule = state
+        .rules
+        .get(&("default".to_string(), "tagged2".to_string()))
+        .unwrap();
+    assert_eq!(rule.tags.get("env").map(String::as_str), Some("prod"));
+    assert_eq!(rule.tags.get("team"), None);
+}
+
+#[test]
+fn put_targets_rejects_input_and_input_path_together() {
+    let svc = make_service();
+    put_rule_simple(&svc, "r_excl");
+    let req = make_request(
+        "PutTargets",
+        json!({
+            "Rule": "r_excl",
+            "Targets": [{
+                "Id": "t1",
+                "Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn",
+                "Input": "{}",
+                "InputPath": "$.detail"
+            }]
+        }),
+    );
+    let resp = svc.put_targets(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], json!(1));
+    assert_eq!(body["FailedEntries"][0]["TargetId"], json!("t1"));
+    assert_eq!(
+        body["FailedEntries"][0]["ErrorCode"],
+        json!("ValidationException")
+    );
+
+    // The malformed target must NOT have been attached to the rule.
+    let _mas = svc.state.read();
+    let state = _mas.default_ref();
+    let rule = state
+        .rules
+        .get(&("default".to_string(), "r_excl".to_string()))
+        .unwrap();
+    assert!(rule.targets.is_empty());
+}
+
+#[test]
+fn put_targets_accepts_single_input_field() {
+    let svc = make_service();
+    put_rule_simple(&svc, "r_ok");
+    let req = make_request(
+        "PutTargets",
+        json!({
+            "Rule": "r_ok",
+            "Targets": [{
+                "Id": "t1",
+                "Arn": "arn:aws:lambda:us-east-1:123456789012:function:fn",
+                "InputPath": "$.detail"
+            }]
+        }),
+    );
+    let resp = svc.put_targets(&req).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["FailedEntryCount"], json!(0));
+}
+
+#[test]
 fn put_rule_accepts_schedule_on_non_default_bus() {
     // PutRule's Smithy model does not declare ValidationException; we accept
     // a ScheduleExpression on a non-default bus rather than rejecting it

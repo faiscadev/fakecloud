@@ -1225,6 +1225,8 @@ impl Ec2Service {
         {
             let runtime = runtime.clone();
             let state = self.state.clone();
+            let store = self.snapshot_store.clone();
+            let lock = self.snapshot_lock.clone();
             tokio::spawn(async move {
                 for h in handles {
                     let _ = h.await;
@@ -1232,6 +1234,14 @@ impl Ec2Service {
                 if runtime.network_isolation_enforced() {
                     firewall_model::reconcile(&state, &runtime).await;
                 }
+                // Persist the recovered fleet: each instance now carries a
+                // fresh container_id and a settled running/stopped state that
+                // the recovery loop wrote back in memory. Without this flush the
+                // snapshot still held the pre-restart container_ids (nulled at
+                // the top of this fn), so every restart re-drove recovery from
+                // stale data instead of reusing the freshly booted containers —
+                // unlike the RDS/ElastiCache siblings, which save after recover.
+                save_ec2_snapshot(&state, store, &lock).await;
             });
         }
     }
@@ -2836,5 +2846,118 @@ mod recover_guard_tests {
         let reap = apply_boot_failure(&mut row);
         assert!(!reap);
         assert_eq!(row.state_code, 80, "failed boot marks stopped");
+    }
+}
+
+#[cfg(test)]
+mod recover_persist_tests {
+    use super::*;
+    use crate::state::Instance;
+
+    /// Captures the last serialized snapshot (into a shared buffer the test also
+    /// holds) so a recovery flush is observable.
+    struct RecordingStore(Arc<std::sync::Mutex<Option<Vec<u8>>>>);
+    impl SnapshotStore for RecordingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.0.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    fn pending_instance(id: &str) -> Instance {
+        Instance {
+            instance_id: id.into(),
+            image_id: "ami-1".into(),
+            instance_type: "t3.micro".into(),
+            // state_code 0 == pending: a persisted mid-boot instance.
+            state_code: 0,
+            state_name: "pending".into(),
+            private_ip: "10.0.0.5".into(),
+            public_ip: None,
+            subnet_id: None,
+            vpc_id: Some("vpc-1".into()),
+            key_name: None,
+            security_group_ids: vec![],
+            reservation_id: "r-1".into(),
+            ami_launch_index: 0,
+            monitoring: false,
+            az: "us-east-1a".into(),
+            launch_time: "2024-01-01T00:00:00.000Z".into(),
+            container_id: None,
+            disable_api_termination: false,
+            disable_api_stop: false,
+            source_dest_check: true,
+            ebs_optimized: false,
+            instance_initiated_shutdown_behavior: "stop".into(),
+            user_data: None,
+            metadata_options: Default::default(),
+            cpu_options: None,
+            bandwidth_weighting: None,
+            maintenance_options: Default::default(),
+            placement_tenancy: None,
+            placement_affinity: None,
+            placement_group_name: None,
+            private_dns_hostname_type: None,
+            enable_resource_name_dns_a_record: false,
+            enable_resource_name_dns_aaaa_record: false,
+        }
+    }
+
+    /// Restart recovery must persist the recovered fleet, not just fix it in
+    /// memory. Exercised via the metadata-only recovery path (reachable without
+    /// a container runtime): a persisted `pending` instance is flipped to
+    /// `running` AND the snapshot is flushed so a subsequent restart doesn't
+    /// re-drive recovery from stale data. Same persist-after-recover guarantee
+    /// the runtime-backed path now honours.
+    #[tokio::test]
+    async fn recovery_persists_recovered_state() {
+        let recorded = Arc::new(std::sync::Mutex::new(None));
+        let svc = Ec2Service::new().with_snapshot_store(Arc::new(RecordingStore(recorded.clone())));
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state
+                .instances
+                .insert("i-1".into(), pending_instance("i-1"));
+        }
+
+        // No runtime wired -> metadata-only recovery, which flips pending
+        // instances to running and persists.
+        svc.recover_persisted_containers().await;
+
+        // In-memory state recovered to running.
+        {
+            let accounts = svc.state.read();
+            let inst = accounts
+                .get("000000000000")
+                .unwrap()
+                .instances
+                .get("i-1")
+                .unwrap();
+            assert_eq!(inst.state_code, 16);
+            assert_eq!(inst.state_name, "running");
+        }
+
+        // ...and that recovered state was flushed to the snapshot store.
+        let bytes = recorded
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("recovery should have flushed a snapshot");
+        let snap: crate::Ec2Snapshot = serde_json::from_slice(&bytes).unwrap();
+        let persisted = snap.accounts.expect("accounts present");
+        let inst = persisted
+            .get("000000000000")
+            .unwrap()
+            .instances
+            .get("i-1")
+            .unwrap();
+        assert_eq!(
+            inst.state_code, 16,
+            "persisted snapshot must reflect the recovered running state"
+        );
     }
 }

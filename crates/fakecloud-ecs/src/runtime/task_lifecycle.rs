@@ -23,6 +23,9 @@ impl EcsRuntime {
                     "STOPPED",
                     Some(("TaskFailedToStart", err.to_string())),
                 );
+                // Persist the STOPPED/failed transition so a restart sees the
+                // terminal status instead of a stale PENDING/RUNNING row.
+                rt.persist_snapshot().await;
             }
         });
     }
@@ -394,12 +397,16 @@ impl EcsRuntime {
                 "STOPPED",
                 Some(("UserInitiated", "Task stopped during launch".into())),
             );
+            self.persist_snapshot().await;
             return Ok(());
         }
 
         mark_running_multi(state, account_id, task_id, &started);
         self.register_lb_targets(state, account_id, task_id);
         self.emit_state_change(state, account_id, task_id, "RUNNING", None);
+        // Persist the PENDING->RUNNING transition so DescribeTasks reports
+        // RUNNING after a restart without waiting on restart reconciliation.
+        self.persist_snapshot().await;
 
         // Wait for the first essential container (or, if none are
         // essential, any container) to exit. ECS task lifetime is
@@ -540,6 +547,9 @@ impl EcsRuntime {
             "STOPPED",
             Some((wait_outcome.stop_code, format!("Exit code {}", exit_code))),
         );
+        // Persist the terminal STOPPED transition + captured exit codes so a
+        // restart reflects the completed task instead of a stale RUNNING row.
+        self.persist_snapshot().await;
         Ok(())
     }
 
