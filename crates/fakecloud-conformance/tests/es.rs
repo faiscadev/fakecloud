@@ -17,7 +17,7 @@ use helpers::TestServer;
     "CancelElasticsearchServiceSoftwareUpdate",
     checksum = "dfdf94e7"
 )]
-#[test_action("es", "CreateElasticsearchDomain", checksum = "f80b7cbe")]
+#[test_action("es", "CreateElasticsearchDomain", checksum = "ed95acfa")]
 #[test_action(
     "es",
     "CreateOutboundCrossClusterSearchConnection",
@@ -25,7 +25,7 @@ use helpers::TestServer;
 )]
 #[test_action("es", "CreatePackage", checksum = "c2dcccf9")]
 #[test_action("es", "CreateVpcEndpoint", checksum = "c76d4594")]
-#[test_action("es", "DeleteElasticsearchDomain", checksum = "179f8127")]
+#[test_action("es", "DeleteElasticsearchDomain", checksum = "edd9fdf0")]
 #[test_action("es", "DeleteElasticsearchServiceRole", checksum = "99948922")]
 #[test_action(
     "es",
@@ -41,9 +41,9 @@ use helpers::TestServer;
 #[test_action("es", "DeleteVpcEndpoint", checksum = "1b75a90b")]
 #[test_action("es", "DescribeDomainAutoTunes", checksum = "77b62a64")]
 #[test_action("es", "DescribeDomainChangeProgress", checksum = "ae8b706e")]
-#[test_action("es", "DescribeElasticsearchDomain", checksum = "30d0143b")]
-#[test_action("es", "DescribeElasticsearchDomainConfig", checksum = "aaefd354")]
-#[test_action("es", "DescribeElasticsearchDomains", checksum = "f1a2ae0f")]
+#[test_action("es", "DescribeElasticsearchDomain", checksum = "8fe6b74c")]
+#[test_action("es", "DescribeElasticsearchDomainConfig", checksum = "ad07741a")]
+#[test_action("es", "DescribeElasticsearchDomains", checksum = "06270a3b")]
 #[test_action("es", "DescribeElasticsearchInstanceTypeLimits", checksum = "ce31afef")]
 #[test_action(
     "es",
@@ -90,7 +90,7 @@ use helpers::TestServer;
 #[test_action("es", "RemoveTags", checksum = "278646a2")]
 #[test_action("es", "RevokeVpcEndpointAccess", checksum = "f3d0c08f")]
 #[test_action("es", "StartElasticsearchServiceSoftwareUpdate", checksum = "8ffd378b")]
-#[test_action("es", "UpdateElasticsearchDomainConfig", checksum = "77a35f7f")]
+#[test_action("es", "UpdateElasticsearchDomainConfig", checksum = "4aec0653")]
 #[test_action("es", "UpdatePackage", checksum = "8495978e")]
 #[test_action("es", "UpdateVpcEndpoint", checksum = "5a8721bd")]
 #[test_action("es", "UpgradeElasticsearchDomain", checksum = "97d0de6d")]

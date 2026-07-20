@@ -25,7 +25,7 @@ use helpers::TestServer;
     "AddApplicationVpcConfiguration",
     checksum = "5383c120"
 )]
-#[test_action("kinesisanalyticsv2", "CreateApplication", checksum = "1da727c6")]
+#[test_action("kinesisanalyticsv2", "CreateApplication", checksum = "27593794")]
 #[test_action(
     "kinesisanalyticsv2",
     "CreateApplicationPresignedUrl",
@@ -63,7 +63,7 @@ use helpers::TestServer;
     "DeleteApplicationVpcConfiguration",
     checksum = "ebfa1178"
 )]
-#[test_action("kinesisanalyticsv2", "DescribeApplication", checksum = "59c4d633")]
+#[test_action("kinesisanalyticsv2", "DescribeApplication", checksum = "ec4343f8")]
 #[test_action(
     "kinesisanalyticsv2",
     "DescribeApplicationOperation",
@@ -72,12 +72,12 @@ use helpers::TestServer;
 #[test_action(
     "kinesisanalyticsv2",
     "DescribeApplicationSnapshot",
-    checksum = "9bb66a4d"
+    checksum = "2ea1f4ba"
 )]
 #[test_action(
     "kinesisanalyticsv2",
     "DescribeApplicationVersion",
-    checksum = "3aae3275"
+    checksum = "4018befc"
 )]
 #[test_action("kinesisanalyticsv2", "DiscoverInputSchema", checksum = "922726a2")]
 #[test_action(
@@ -88,17 +88,17 @@ use helpers::TestServer;
 #[test_action(
     "kinesisanalyticsv2",
     "ListApplicationSnapshots",
-    checksum = "35801c2c"
+    checksum = "2c023709"
 )]
 #[test_action("kinesisanalyticsv2", "ListApplicationVersions", checksum = "cce8b35d")]
-#[test_action("kinesisanalyticsv2", "ListApplications", checksum = "5dfb6311")]
+#[test_action("kinesisanalyticsv2", "ListApplications", checksum = "26a11265")]
 #[test_action("kinesisanalyticsv2", "ListTagsForResource", checksum = "ed66bc05")]
-#[test_action("kinesisanalyticsv2", "RollbackApplication", checksum = "f408ca0a")]
+#[test_action("kinesisanalyticsv2", "RollbackApplication", checksum = "ae8a6eab")]
 #[test_action("kinesisanalyticsv2", "StartApplication", checksum = "78d183cc")]
 #[test_action("kinesisanalyticsv2", "StopApplication", checksum = "406c71cf")]
 #[test_action("kinesisanalyticsv2", "TagResource", checksum = "06086e5e")]
 #[test_action("kinesisanalyticsv2", "UntagResource", checksum = "9e3481bb")]
-#[test_action("kinesisanalyticsv2", "UpdateApplication", checksum = "35a4776a")]
+#[test_action("kinesisanalyticsv2", "UpdateApplication", checksum = "09ddcf4c")]
 #[test_action(
     "kinesisanalyticsv2",
     "UpdateApplicationMaintenanceConfiguration",
