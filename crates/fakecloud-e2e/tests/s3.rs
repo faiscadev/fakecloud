@@ -1159,6 +1159,94 @@ async fn s3_multipart_upload_basic() {
     assert_eq!(body.as_ref(), expected.as_slice());
 }
 
+/// Regression for the non-blocking multipart assembly change (bug-hunt
+/// 2026-07-19): CompleteMultipartUpload with several parts still assembles the
+/// object in order, returns a well-formed multipart ETag (`<md5>-<N>`), and the
+/// downloaded bytes match the concatenation of the uploaded parts.
+#[tokio::test]
+async fn s3_multipart_upload_three_parts_etag_and_order() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("mp3-bucket")
+        .send()
+        .await
+        .unwrap();
+
+    let create = client
+        .create_multipart_upload()
+        .bucket("mp3-bucket")
+        .key("three.bin")
+        .send()
+        .await
+        .unwrap();
+    let upload_id = create.upload_id().unwrap().to_string();
+
+    use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
+    // Three parts; non-last parts must be >= 5 MiB. Distinct fill bytes so an
+    // out-of-order assembly would be detectable in the downloaded object.
+    let part_bytes: [Vec<u8>; 3] = [
+        vec![b'x'; 5 * 1024 * 1024],
+        vec![b'y'; 5 * 1024 * 1024],
+        b"tail-part-three".to_vec(),
+    ];
+    let mut completed = CompletedMultipartUpload::builder();
+    for (i, data) in part_bytes.iter().enumerate() {
+        let pn = (i + 1) as i32;
+        let up = client
+            .upload_part()
+            .bucket("mp3-bucket")
+            .key("three.bin")
+            .upload_id(&upload_id)
+            .part_number(pn)
+            .body(ByteStream::from(data.clone()))
+            .send()
+            .await
+            .unwrap();
+        completed = completed.parts(
+            CompletedPart::builder()
+                .part_number(pn)
+                .e_tag(up.e_tag().unwrap())
+                .build(),
+        );
+    }
+
+    let complete = client
+        .complete_multipart_upload()
+        .bucket("mp3-bucket")
+        .key("three.bin")
+        .upload_id(&upload_id)
+        .multipart_upload(completed.build())
+        .send()
+        .await
+        .unwrap();
+
+    // Multipart ETag carries the "-<part count>" suffix.
+    let etag = complete.e_tag().unwrap().trim_matches('"').to_string();
+    assert!(
+        etag.ends_with("-3"),
+        "multipart ETag should end with -3, got {etag}"
+    );
+
+    let get = client
+        .get_object()
+        .bucket("mp3-bucket")
+        .key("three.bin")
+        .send()
+        .await
+        .unwrap();
+    // GetObject echoes the same multipart ETag.
+    assert_eq!(get.e_tag().unwrap().trim_matches('"'), etag);
+    let body = get.body.collect().await.unwrap().into_bytes();
+    let mut expected = Vec::new();
+    for data in &part_bytes {
+        expected.extend_from_slice(data);
+    }
+    assert_eq!(body.as_ref(), expected.as_slice());
+}
+
 #[tokio::test]
 async fn s3_multipart_abort() {
     let server = TestServer::start().await;

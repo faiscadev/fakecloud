@@ -195,9 +195,18 @@ async fn handle_query(cfg: &DnsConfig, raw: &[u8], udp: bool) -> Option<Vec<u8>>
     let ra = cfg.upstream.is_some();
 
     let qtype_str = qtype_to_str(query.qtype);
-    let resolution = {
+    let (resolution, soa) = {
         let accounts = cfg.route53.read();
-        resolver::resolve(&accounts, &query.qname, qtype_str)
+        let resolution = resolver::resolve(&accounts, &query.qname, qtype_str);
+        // Fetch the zone SOA for the negative-response authority section while
+        // we still hold the read guard (RFC 2308 negative caching).
+        let soa = match resolution.status {
+            ResolveStatus::NxDomain | ResolveStatus::NoData => {
+                resolver::zone_soa(&accounts, &query.qname)
+            }
+            _ => None,
+        };
+        (resolution, soa)
     };
 
     match resolution.status {
@@ -213,6 +222,7 @@ async fn handle_query(cfg: &DnsConfig, raw: &[u8], udp: bool) -> Option<Vec<u8>>
                 ra,
                 udp_limit,
                 edns,
+                None,
             )),
         },
         ResolveStatus::NxDomain => Some(build_response(
@@ -223,8 +233,18 @@ async fn handle_query(cfg: &DnsConfig, raw: &[u8], udp: bool) -> Option<Vec<u8>>
             ra,
             udp_limit,
             edns,
+            soa.as_ref(),
         )),
-        ResolveStatus::NoData => Some(build_response(&query, &[], 0, true, ra, udp_limit, edns)),
+        ResolveStatus::NoData => Some(build_response(
+            &query,
+            &[],
+            0,
+            true,
+            ra,
+            udp_limit,
+            edns,
+            soa.as_ref(),
+        )),
         ResolveStatus::Answered => {
             let mut answers = resolution.answers;
             // The CNAME chain left all local zones: forward-resolve the external
@@ -249,6 +269,7 @@ async fn handle_query(cfg: &DnsConfig, raw: &[u8], udp: bool) -> Option<Vec<u8>>
                 ra,
                 udp_limit,
                 edns,
+                None,
             ))
         }
     }
@@ -612,6 +633,9 @@ fn wire_encodable(rtype: &str) -> bool {
 /// client retries over TCP (which passes `None`, never truncating). `edns` is the
 /// client's advertised UDP size when its query carried EDNS0, so a truncated (or
 /// any) reply can echo an OPT record.
+// Orthogonal wire-encoding inputs (flags, size limits, sections); bundling them
+// into a struct would obscure more than it clarifies for a single hot builder.
+#[allow(clippy::too_many_arguments)]
 fn build_response(
     query: &Query,
     answers: &[resolver::AnswerRecord],
@@ -620,6 +644,7 @@ fn build_response(
     ra: bool,
     udp_limit: Option<usize>,
     edns: Option<u16>,
+    authority: Option<&resolver::AnswerRecord>,
 ) -> Vec<u8> {
     // Deduplicate (a merged cross-account zone or a CNAME chase can surface the
     // same record twice), preserving order, then keep only records we can
@@ -655,39 +680,60 @@ fn build_response(
     });
     let opt_len = opt.map_or(0, |o| o.len());
 
+    let write_rr = |out: &mut Vec<u8>, rr: &resolver::AnswerRecord, tc: u16| {
+        write_name(out, &rr.name);
+        out.extend_from_slice(&tc.to_be_bytes());
+        out.extend_from_slice(&CLASS_IN.to_be_bytes());
+        out.extend_from_slice(&rr.ttl.to_be_bytes());
+        let rdata = encode_rdata(&rr.rtype, &rr.value);
+        out.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+        out.extend_from_slice(&rdata);
+    };
+
     let header_and_question = 12 + query.question.len();
     let mut body = Vec::with_capacity(encodable.len() * 32);
     for (ans, tc) in &encodable {
-        write_name(&mut body, &ans.name);
-        body.extend_from_slice(&tc.to_be_bytes());
-        body.extend_from_slice(&CLASS_IN.to_be_bytes());
-        body.extend_from_slice(&ans.ttl.to_be_bytes());
-        let rdata = encode_rdata(&ans.rtype, &ans.value);
-        body.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
-        body.extend_from_slice(&rdata);
+        write_rr(&mut body, ans, *tc);
     }
 
-    // UDP over the client's advertised size: truncate (TC set, no answers) so it
-    // retries over TCP rather than getting a datagram its buffer would drop. The
-    // OPT record (if any) is retained so an EDNS client still sees a valid reply.
-    let (ancount, body) = match udp_limit {
-        Some(limit) if header_and_question + body.len() + opt_len > limit => {
-            flags |= FLAG_TC;
-            (0u16, Vec::new())
+    // Authority section: the zone SOA for a negative (NXDOMAIN/NODATA) response,
+    // so clients can cache the negative answer (RFC 2308). Only wire-encodable
+    // (it always is for SOA) records are placed here.
+    let mut auth_body = Vec::new();
+    let mut nscount: u16 = 0;
+    if let Some(soa) = authority {
+        if wire_encodable(&soa.rtype) {
+            if let Some(tc) = type_code(&soa.rtype) {
+                write_rr(&mut auth_body, soa, tc);
+                nscount = 1;
+            }
         }
-        _ => (encodable.len() as u16, body),
+    }
+
+    // UDP over the client's advertised size: truncate (TC set, no answer or
+    // authority records) so it retries over TCP rather than getting a datagram
+    // its buffer would drop. The OPT record (if any) is retained so an EDNS
+    // client still sees a valid reply.
+    let (ancount, nscount, body, auth_body) = match udp_limit {
+        Some(limit) if header_and_question + body.len() + auth_body.len() + opt_len > limit => {
+            flags |= FLAG_TC;
+            (0u16, 0u16, Vec::new(), Vec::new())
+        }
+        _ => (encodable.len() as u16, nscount, body, auth_body),
     };
     let arcount: u16 = if opt.is_some() { 1 } else { 0 };
 
-    let mut out = Vec::with_capacity(header_and_question + body.len() + opt_len);
+    let mut out = Vec::with_capacity(header_and_question + body.len() + auth_body.len() + opt_len);
     out.extend_from_slice(&query.id.to_be_bytes());
     out.extend_from_slice(&flags.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
     out.extend_from_slice(&ancount.to_be_bytes()); // ANCOUNT
-    out.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
+    out.extend_from_slice(&nscount.to_be_bytes()); // NSCOUNT
     out.extend_from_slice(&arcount.to_be_bytes()); // ARCOUNT
     out.extend_from_slice(&query.question);
     out.extend_from_slice(&body);
+    // Authority section follows the answer section, before the additional (OPT).
+    out.extend_from_slice(&auth_body);
     if let Some(opt) = opt {
         out.extend_from_slice(&opt);
     }
@@ -727,6 +773,7 @@ fn qtype_to_str(qtype: u16) -> &'static str {
         28 => "AAAA",
         33 => "SRV",
         99 => "SPF",
+        255 => "ANY",
         257 => "CAA",
         _ => "",
     }
@@ -779,7 +826,7 @@ mod tests {
             ttl: 60,
             value: "10.0.0.5".to_string(),
         }];
-        let resp = build_response(&query, &answers, 0, true, true, None, None);
+        let resp = build_response(&query, &answers, 0, true, true, None, None, None);
         // Header: same id, QR+AA+RA set, ANCOUNT = 1.
         assert_eq!(u16::from_be_bytes([resp[0], resp[1]]), 0xABCD);
         let flags = u16::from_be_bytes([resp[2], resp[3]]);
@@ -793,7 +840,7 @@ mod tests {
     #[test]
     fn nxdomain_sets_rcode_and_no_answers() {
         let query = parse_query(&a_query(1, "nope.example.com")).unwrap();
-        let resp = build_response(&query, &[], RCODE_NXDOMAIN, true, true, None, None);
+        let resp = build_response(&query, &[], RCODE_NXDOMAIN, true, true, None, None, None);
         assert_eq!(
             u16::from_be_bytes([resp[2], resp[3]]) & 0x000f,
             RCODE_NXDOMAIN
@@ -802,10 +849,41 @@ mod tests {
     }
 
     #[test]
+    fn negative_response_carries_authority_soa() {
+        // An NXDOMAIN with a zone SOA passed as authority must set NSCOUNT=1 and
+        // append the SOA record after the (empty) answer section (RFC 2308).
+        let query = parse_query(&a_query(7, "nope.example.com")).unwrap();
+        let soa = AnswerRecord {
+            name: "example.com.".to_string(),
+            rtype: "SOA".to_string(),
+            ttl: 900,
+            value: "ns.example.com. hostmaster.example.com. 1 7200 900 1209600 86400".to_string(),
+        };
+        let resp = build_response(
+            &query,
+            &[],
+            RCODE_NXDOMAIN,
+            true,
+            false,
+            None,
+            None,
+            Some(&soa),
+        );
+        assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 0); // ANCOUNT
+        assert_eq!(u16::from_be_bytes([resp[8], resp[9]]), 1); // NSCOUNT
+                                                               // Authority SOA present: the owner "example.com" appears in the body.
+        assert!(
+            resp.windows(7).any(|w| w == b"example"),
+            "authority SOA owner must be encoded"
+        );
+    }
+
+    #[test]
     fn qtype_mapping() {
         assert_eq!(qtype_to_str(1), "A");
         assert_eq!(qtype_to_str(28), "AAAA");
         assert_eq!(qtype_to_str(15), "MX");
+        assert_eq!(qtype_to_str(255), "ANY");
         assert_eq!(qtype_to_str(9999), "");
     }
 
@@ -821,7 +899,7 @@ mod tests {
                 value: format!("\"chunk number {i} with some padding text\""),
             })
             .collect();
-        let resp = build_response(&query, &answers, 0, true, true, Some(512), None);
+        let resp = build_response(&query, &answers, 0, true, true, Some(512), None, None);
         let flags = u16::from_be_bytes([resp[2], resp[3]]);
         assert_eq!(flags & FLAG_TC, FLAG_TC, "TC must be set when truncated");
         assert_eq!(
@@ -831,7 +909,7 @@ mod tests {
         );
         assert!(resp.len() <= 512);
         // Over TCP (no limit) the same answer is emitted in full.
-        let tcp = build_response(&query, &answers, 0, true, true, None, None);
+        let tcp = build_response(&query, &answers, 0, true, true, None, None, None);
         assert_eq!(u16::from_be_bytes([tcp[2], tcp[3]]) & FLAG_TC, 0);
         assert_eq!(u16::from_be_bytes([tcp[6], tcp[7]]), 50);
     }
@@ -863,7 +941,16 @@ mod tests {
             value: "10.0.0.5".to_string(),
         }];
         // Client advertised EDNS (Some size), plenty of room -> full answer + OPT.
-        let resp = build_response(&query, &answers, 0, true, true, Some(4096), Some(1232));
+        let resp = build_response(
+            &query,
+            &answers,
+            0,
+            true,
+            true,
+            Some(4096),
+            Some(1232),
+            None,
+        );
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1); // ANCOUNT
         assert_eq!(u16::from_be_bytes([resp[10], resp[11]]), 1); // ARCOUNT (OPT)
                                                                  // The OPT is the trailing 11 bytes: root name (0), TYPE=41, then class/ttl/rdlen.

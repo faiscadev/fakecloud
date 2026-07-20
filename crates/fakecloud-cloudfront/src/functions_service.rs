@@ -114,7 +114,12 @@ impl CloudFrontService {
         drop(state);
         let view = stage_view(&f, &stage);
         let mut headers = HeaderMap::new();
-        headers.insert(ETAG, view.etag.parse().unwrap());
+        headers.insert(
+            ETAG,
+            view.etag
+                .parse()
+                .unwrap_or_else(|_| http::HeaderValue::from_static("")),
+        );
         let bytes = base64::engine::general_purpose::STANDARD
             .decode(view.function_code.as_bytes())
             .unwrap_or_default();

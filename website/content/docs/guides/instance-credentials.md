@@ -52,7 +52,7 @@ services:
       AWS_CONTAINER_CREDENTIALS_FULL_URI: http://fakecloud:4566/_fakecloud/credentials
       AWS_ENDPOINT_URL: http://fakecloud:4566
   fakecloud:
-    image: fakecloud/fakecloud
+    image: ghcr.io/faiscadev/fakecloud
 ```
 
 The AWS SDKs only fetch container credentials over plain HTTP from loopback hosts (`127.0.0.1`, `localhost`) or when the host resolves to a loopback/link-local address; a compose service name backed by a private-network address is treated the same way real ECS treats `169.254.170.2`.

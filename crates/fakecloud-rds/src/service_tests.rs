@@ -2374,6 +2374,44 @@ async fn reboot_db_instance_missing_id_errors() {
     assert_code(svc.reboot_db_instance(&req).await, "MissingParameter");
 }
 
+#[tokio::test]
+async fn reboot_db_instance_restart_failure_resets_status() {
+    // Regression (bug-hunt 2026-07-19): a failed container restart must not
+    // leave the instance stuck reporting "rebooting" forever. The stub runtime
+    // has no registered container, so `restart_container` returns Err
+    // immediately; the background task must flip the status back to "available".
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "db1");
+
+    let req = request("RebootDBInstance", &[("DBInstanceIdentifier", "db1")]);
+    // The synchronous response reports "rebooting".
+    svc.reboot_db_instance(&req).await.expect("reboot accepted");
+
+    // The background restart fails, then resets the status. Poll until it clears
+    // (the reset is a fast Err path, but the task is spawned asynchronously).
+    let mut status = String::new();
+    for _ in 0..200 {
+        {
+            let accounts = svc.state.read();
+            status = accounts
+                .default_ref()
+                .instances
+                .get("db1")
+                .expect("instance present")
+                .db_instance_status
+                .clone();
+        }
+        if status != "rebooting" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        status, "available",
+        "failed reboot must reset status to available, not stay stuck at rebooting"
+    );
+}
+
 // ── create_db_instance validation ──
 
 #[tokio::test]

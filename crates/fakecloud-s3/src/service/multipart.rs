@@ -627,56 +627,75 @@ impl S3Service {
         // Assemble the object from its parts OFF-LOCK. Bodies are read via the
         // state-free `read_body_uncached`, so no S3 lock is held during the
         // (potentially large) concatenation, hashing, and disk persist below.
-        let mut combined_data = Vec::new();
-        let mut md5_digests = Vec::new();
-        let mut part_sizes = Vec::new();
-        // Per-part raw additional-checksum digests, collected in
-        // part-number order so we can build the COMPOSITE checksum
-        // (hash-of-part-hashes) AWS returns for multipart objects.
-        let mut part_checksum_digests: Vec<Vec<u8>> = Vec::new();
+        //
+        // The read+concat+hash of every part is synchronous, blocking disk IO
+        // (`std::fs::read`) that can process multi-GB objects, so run it inside
+        // `run_blocking_io`: on the multi-threaded runtime this hands the tokio
+        // worker's other tasks to a sibling thread for the duration instead of
+        // stalling them (and risking the client timeout) — the same helper
+        // GetObject uses (bug-hunt 2026-07-19). Behavior/response are
+        // unchanged; only where the CPU/IO runs differs.
+        let checksum_algorithm = upload.checksum_algorithm.clone();
+        let (combined_data, md5_digests, part_sizes, part_checksum_digests) =
+            super::objects::run_blocking_io(|| {
+                let mut combined_data = Vec::new();
+                let mut md5_digests = Vec::new();
+                let mut part_sizes = Vec::new();
+                // Per-part raw additional-checksum digests, collected in
+                // part-number order so we can build the COMPOSITE checksum
+                // (hash-of-part-hashes) AWS returns for multipart objects.
+                let mut part_checksum_digests: Vec<Vec<u8>> = Vec::new();
 
-        for (part_num, submitted_etag) in &sorted_parts {
-            let part = upload.parts.get(part_num).ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidPart",
-                    "One or more of the specified parts could not be found.",
-                )
+                for (part_num, submitted_etag) in &sorted_parts {
+                    let part = upload.parts.get(part_num).ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidPart",
+                            "One or more of the specified parts could not be found.",
+                        )
+                    })?;
+                    if submitted_etag != &part.etag {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidPart",
+                            "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's entity tag.",
+                        ));
+                    }
+                    let part_bytes = crate::state::S3State::read_body_uncached(&part.body)
+                        .map_err(super::io_to_aws)?;
+                    let part_md5 = Md5::digest(&part_bytes);
+                    // Fail closed if the bytes just read no longer hash to the
+                    // part's recorded etag. We snapshot (clone) the upload —
+                    // including each part's fixed disk path and etag — then read
+                    // bodies off-lock. In disk mode a concurrent UploadPart of
+                    // the same part number rewrites part-NNNNN.bin after the
+                    // snapshot, so without this check Complete would assemble the
+                    // *new* bytes while validating them against the *old* cloned
+                    // etag, producing an object whose content doesn't match the
+                    // parts the client committed (bug-hunt 2026-06-13, finding
+                    // 4.1). Memory-mode parts are immutable, so this never trips
+                    // for them.
+                    if format!("{:x}", part_md5) != part.etag {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidPart",
+                            "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's etag.",
+                        ));
+                    }
+                    if let Some(algo) = checksum_algorithm.as_deref() {
+                        part_checksum_digests.push(super::compute_checksum_raw(algo, &part_bytes));
+                    }
+                    combined_data.extend_from_slice(&part_bytes);
+                    md5_digests.extend_from_slice(&part_md5);
+                    part_sizes.push((*part_num, part_bytes.len() as u64));
+                }
+                Ok::<_, AwsServiceError>((
+                    combined_data,
+                    md5_digests,
+                    part_sizes,
+                    part_checksum_digests,
+                ))
             })?;
-            if submitted_etag != &part.etag {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidPart",
-                    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's entity tag.",
-                ));
-            }
-            let part_bytes =
-                crate::state::S3State::read_body_uncached(&part.body).map_err(super::io_to_aws)?;
-            let part_md5 = Md5::digest(&part_bytes);
-            // Fail closed if the bytes just read no longer hash to the part's
-            // recorded etag. We snapshot (clone) the upload — including each
-            // part's fixed disk path and etag — then read bodies off-lock. In
-            // disk mode a concurrent UploadPart of the same part number
-            // rewrites part-NNNNN.bin after the snapshot, so without this
-            // check Complete would assemble the *new* bytes while validating
-            // them against the *old* cloned etag, producing an object whose
-            // content doesn't match the parts the client committed (bug-hunt
-            // 2026-06-13, finding 4.1). Memory-mode parts are immutable, so
-            // this never trips for them.
-            if format!("{:x}", part_md5) != part.etag {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidPart",
-                    "One or more of the specified parts could not be found. The part may not have been uploaded, or the specified entity tag may not have matched the part's etag.",
-                ));
-            }
-            if let Some(algo) = upload.checksum_algorithm.as_deref() {
-                part_checksum_digests.push(super::compute_checksum_raw(algo, &part_bytes));
-            }
-            combined_data.extend_from_slice(&part_bytes);
-            md5_digests.extend_from_slice(&part_md5);
-            part_sizes.push((*part_num, part_bytes.len() as u64));
-        }
 
         // Multipart ETag: MD5(concat(part_md5_digests))-N
         let combined_md5 = Md5::digest(&md5_digests);
@@ -771,10 +790,16 @@ impl S3Service {
             // completes (bug-hunt 2026-06-24, 4.1). In memory mode
             // `mpu_complete` returns an empty placeholder, so the in-memory
             // body set at construction is kept.
-            let assembled_body = self
-                .store
-                .mpu_complete(bucket, upload_id, key, meta.version_id.as_deref(), &meta)
-                .map_err(super::persistence_error)?;
+            // `mpu_complete` streams every part into the object file in disk
+            // mode — more blocking disk IO — so run it under `run_blocking_io`
+            // too. `block_in_place` keeps running on this thread (holding the
+            // write lock), it just lets the runtime spin up a replacement worker
+            // for other tasks; no await happens here, so the lock is safe.
+            let assembled_body = super::objects::run_blocking_io(|| {
+                self.store
+                    .mpu_complete(bucket, upload_id, key, meta.version_id.as_deref(), &meta)
+            })
+            .map_err(super::persistence_error)?;
             if !matches!(assembled_body, BodyRef::Memory(_)) {
                 obj.body = assembled_body;
             }
