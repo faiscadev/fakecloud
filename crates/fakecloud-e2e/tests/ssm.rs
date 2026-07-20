@@ -1088,7 +1088,10 @@ async fn ssm_get_calendar_state() {
         .send()
         .await
         .unwrap();
-    assert_eq!(resp.state(), Some(&aws_sdk_ssm::types::CalendarState::Closed));
+    assert_eq!(
+        resp.state(),
+        Some(&aws_sdk_ssm::types::CalendarState::Closed)
+    );
 }
 
 #[tokio::test]

@@ -1825,10 +1825,7 @@ async fn ec2_modify_address_attribute() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        r.address().and_then(|a| a.ptr_record()),
-        Some("x.com")
-    );
+    assert_eq!(r.address().and_then(|a| a.ptr_record()), Some("x.com"));
 }
 
 #[test_action("ec2", "ResetAddressAttribute", checksum = "6d8e2e96")]
