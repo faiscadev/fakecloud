@@ -135,7 +135,9 @@ impl ApiGatewayService {
                 }
                 "/description" => k.description = value.as_str().map(String::from),
                 "/enabled" => {
-                    if let Some(b) = value.as_bool() {
+                    // PatchOperation.value is a STRING, so clients send
+                    // `"false"` to disable a key; accept both forms.
+                    if let Some(b) = patch_bool(value) {
                         k.enabled = b;
                     }
                 }
@@ -157,5 +159,70 @@ impl ApiGatewayService {
         });
         k.last_updated_date = chrono::Utc::now();
         ok(api_key_to_json(k, false))
+    }
+}
+
+#[cfg(test)]
+mod patch_value_tests {
+    use super::*;
+    use crate::ApiGatewayService;
+
+    fn svc() -> ApiGatewayService {
+        let state =
+            std::sync::Arc::new(
+                parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::<
+                    crate::state::ApiGatewayState,
+                >::new("123456789012", "us-east-1", "")),
+            );
+        ApiGatewayService::new(state)
+    }
+
+    fn req(body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "apigateway".into(),
+            action: String::new(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_of(resp: &AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[test]
+    fn update_api_key_disable_via_string_value() {
+        // PatchOperation.value is a STRING, so the CLI/SDK/Terraform send
+        // `"false"` to disable a key. Previously read via as_bool() and dropped,
+        // leaving the key enabled and still usable.
+        let svc = svc();
+        let created = body_of(
+            &svc.create_api_key(&req(json!({ "name": "k", "enabled": true })))
+                .unwrap(),
+        );
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(created["enabled"], json!(true));
+        let params: BTreeMap<String, String> = [("apiKeyId".to_string(), id)].into_iter().collect();
+        svc.update_api_key(
+            &req(json!({ "patchOperations": [
+                { "op": "replace", "path": "/enabled", "value": "false" }
+            ] })),
+            &params,
+        )
+        .unwrap();
+        let got = body_of(&svc.get_api_key(&req(json!({})), &params).unwrap());
+        assert_eq!(got["enabled"], json!(false));
     }
 }

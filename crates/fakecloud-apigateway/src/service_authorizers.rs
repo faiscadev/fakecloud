@@ -154,7 +154,9 @@ impl ApiGatewayService {
                 "/authorizerUri" => a.authorizer_uri = value.as_str().map(String::from),
                 "/identitySource" => a.identity_source = value.as_str().map(String::from),
                 "/authorizerResultTtlInSeconds" => {
-                    a.authorizer_result_ttl_in_seconds = value.as_i64().map(|v| v as i32);
+                    // STRING-typed PatchOperation.value arrives quoted; `remove`
+                    // clears the field (Null -> None), matching prior behavior.
+                    a.authorizer_result_ttl_in_seconds = patch_i32(value);
                 }
                 // Previously dropped: rotating Cognito provider ARNs or updating
                 // the authorizer's IAM credentials / identity validation

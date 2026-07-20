@@ -12,6 +12,27 @@ pub(crate) fn conflict(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::CONFLICT, "ConflictException", msg.into())
 }
 
+/// PatchOperation.value is modeled as a STRING in the API Gateway API, so
+/// clients (CLI/SDK/Terraform) send booleans as `"true"`/`"false"`. Accept both
+/// the native JSON boolean and its string form so e.g. disabling an API key
+/// (`{"op":"replace","path":"/enabled","value":"false"}`) is not silently
+/// dropped.
+pub(crate) fn patch_bool(value: &Value) -> Option<bool> {
+    value
+        .as_bool()
+        .or_else(|| value.as_str().map(|s| s == "true"))
+}
+
+/// Like [`patch_bool`] but for integer-valued patch fields (e.g.
+/// `/timeoutInMillis`, `/authorizerResultTtlInSeconds`) that arrive as a quoted
+/// string per the STRING-typed PatchOperation.value model.
+pub(crate) fn patch_i32(value: &Value) -> Option<i32> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
+        .map(|v| v as i32)
+}
+
 pub(crate) fn ok(value: Value) -> Result<AwsResponse, AwsServiceError> {
     Ok(AwsResponse::ok_json(strip_nulls_deep(value)))
 }
@@ -420,7 +441,7 @@ pub(crate) fn apply_rest_api_patch(api: &mut RestApi, op: &str, path: &str, valu
         "/version" => api.version = value.as_str().map(String::from),
         "/policy" => api.policy = value.as_str().map(String::from),
         "/disableExecuteApiEndpoint" => {
-            if let Some(b) = value.as_bool() {
+            if let Some(b) = patch_bool(value) {
                 api.disable_execute_api_endpoint = b;
             }
         }
@@ -535,7 +556,7 @@ pub(crate) fn apply_method_patch(m: &mut ApiMethod, op: &str, path: &str, value:
         }
         "/authorizerId" => m.authorizer_id = value.as_str().map(String::from),
         "/apiKeyRequired" => {
-            if let Some(b) = value.as_bool() {
+            if let Some(b) = patch_bool(value) {
                 m.api_key_required = b;
             }
         }

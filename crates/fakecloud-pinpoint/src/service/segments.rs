@@ -5,7 +5,7 @@ use serde_json::{json, Map, Value};
 
 use fakecloud_core::service::{AwsResponse, AwsServiceError};
 
-use super::{copy_many, created, not_found, not_found_app, ok, paginate, Ctx, PinpointService};
+use super::{created, merge_body, not_found, not_found_app, ok, paginate, Ctx, PinpointService};
 use crate::shared;
 use crate::state::Versioned;
 
@@ -209,6 +209,10 @@ fn build_segment(ctx: &Ctx, app_id: &str, id: &str, version: i64, body: &Value) 
         "DIMENSIONAL"
     };
     let mut out = Map::new();
+    // Persist the full write-request definition (Dimensions / SegmentGroups /
+    // Name / tags / ImportDefinition, ...) so GetSegment round-trips it, then
+    // overlay server-authoritative members.
+    merge_body(&mut out, body);
     out.insert("Id".into(), json!(id));
     out.insert("ApplicationId".into(), json!(app_id));
     out.insert(
@@ -225,6 +229,5 @@ fn build_segment(ctx: &Ctx, app_id: &str, id: &str, version: i64, body: &Value) 
     out.insert("LastModifiedDate".into(), json!(now));
     out.insert("SegmentType".into(), json!(segment_type));
     out.insert("Version".into(), json!(version));
-    copy_many(&mut out, body, &["Name", "tags"]);
     Value::Object(out)
 }

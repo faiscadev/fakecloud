@@ -5,22 +5,9 @@ use serde_json::{json, Map, Value};
 
 use fakecloud_core::service::{AwsResponse, AwsServiceError};
 
-use super::{copy_many, created, not_found, ok, paginate, Ctx, PinpointService};
+use super::{created, merge_body, not_found, ok, paginate, Ctx, PinpointService};
 use crate::shared;
 use crate::state::Versioned;
-
-/// Scalar `CampaignResponse` members that are safe to echo from the write
-/// request (no nested structures, so response shape validation can't trip).
-const CAMPAIGN_SCALARS: &[&str] = &[
-    "Name",
-    "Description",
-    "HoldoutPercent",
-    "IsPaused",
-    "TreatmentName",
-    "TreatmentDescription",
-    "Priority",
-    "tags",
-];
 
 impl PinpointService {
     pub(super) fn create_campaign(
@@ -216,6 +203,10 @@ fn campaigns_page(
 fn build_campaign(ctx: &Ctx, app_id: &str, id: &str, version: i64, body: &Value) -> Value {
     let now = shared::now_iso();
     let mut out = Map::new();
+    // Persist the full WriteCampaignRequest definition (MessageConfiguration /
+    // Schedule / TemplateConfiguration / AdditionalTreatments / Limits / Hook /
+    // ...) so GetCampaign round-trips it, then overlay server members.
+    merge_body(&mut out, body);
     out.insert("Id".into(), json!(id));
     out.insert("ApplicationId".into(), json!(app_id));
     out.insert(
@@ -242,6 +233,5 @@ fn build_campaign(ctx: &Ctx, app_id: &str, id: &str, version: i64, body: &Value)
             .unwrap_or(0)),
     );
     out.insert("Version".into(), json!(version));
-    copy_many(&mut out, body, CAMPAIGN_SCALARS);
     Value::Object(out)
 }
