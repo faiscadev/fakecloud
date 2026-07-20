@@ -77,6 +77,17 @@ pub struct EcsRuntime {
     /// each task to a Pod instead of `docker run`. `None` is the default
     /// Docker/Podman backend, and the fields above drive it.
     k8s: Option<k8s::K8sTaskBackend>,
+    /// Persist hook wired after the owning `EcsService` is built (the store is
+    /// only known then). Runtime state transitions — PENDING->RUNNING via
+    /// `mark_running_multi`, and the stop/exit finalizers — mutate the shared
+    /// state in the background but did not previously flush to disk, so the
+    /// snapshot lagged live task status until the next control-plane write.
+    /// `reconcile_persisted_tasks` compensated on restart, but a task that ran
+    /// and stopped between restarts could still be mis-reported. Set via
+    /// [`EcsRuntime::set_snapshot_hook`] and invoked by
+    /// [`EcsRuntime::persist_snapshot`]. A `OnceLock` so the `Arc<EcsRuntime>`
+    /// can receive the hook through a shared reference after construction.
+    snapshot_hook: std::sync::OnceLock<fakecloud_persistence::SnapshotHook>,
 }
 
 mod config;
@@ -106,6 +117,7 @@ impl EcsRuntime {
             secretsmanager_state: None,
             ssm_state: None,
             k8s: None,
+            snapshot_hook: std::sync::OnceLock::new(),
         })
     }
 
@@ -132,6 +144,7 @@ impl EcsRuntime {
             secretsmanager_state: None,
             ssm_state: None,
             k8s: Some(backend),
+            snapshot_hook: std::sync::OnceLock::new(),
         })
     }
 
@@ -164,6 +177,25 @@ impl EcsRuntime {
     pub fn with_logs(mut self, logs: SharedLogsState) -> Self {
         self.logs_state = Some(logs);
         self
+    }
+
+    /// Wire the persistence hook that flushes the ECS snapshot to disk. Called
+    /// once, after the owning `EcsService` (which owns the snapshot store) is
+    /// constructed — hence a `&self` setter over a `OnceLock` rather than a
+    /// consuming builder, since the runtime is already behind an `Arc` by then.
+    /// A no-op in memory mode (the service hands back `None`, so this is never
+    /// called). Subsequent calls are ignored.
+    pub fn set_snapshot_hook(&self, hook: fakecloud_persistence::SnapshotHook) {
+        let _ = self.snapshot_hook.set(hook);
+    }
+
+    /// Persist the current ECS state through the wired snapshot hook, if any.
+    /// Invoked after each background task state transition so a restart sees
+    /// the latest task status without relying solely on restart reconciliation.
+    pub(crate) async fn persist_snapshot(&self) {
+        if let Some(hook) = self.snapshot_hook.get() {
+            hook().await;
+        }
     }
 }
 
@@ -1952,6 +1984,90 @@ mod tests {
             task.captured_logs.starts_with("[task failed to start]:"),
             "captured_logs missing prefix: {:?}",
             task.captured_logs
+        );
+    }
+
+    /// Records the last serialized snapshot so tests can assert what a runtime
+    /// state transition flushed to disk.
+    struct RecordingStore(Arc<std::sync::Mutex<Option<Vec<u8>>>>);
+    impl fakecloud_persistence::SnapshotStore for RecordingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.0.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    fn bare_runtime() -> EcsRuntime {
+        EcsRuntime {
+            cli: String::new(),
+            net: fakecloud_core::container_net::HostNetworking {
+                host_alias: String::new(),
+                add_host_arg: None,
+                sibling_host: String::new(),
+            },
+            server_port: 0,
+            docker_config: None,
+            containers: RwLock::new(std::collections::HashMap::new()),
+            delivery_bus: None,
+            logs_state: None,
+            secretsmanager_state: None,
+            ssm_state: None,
+            k8s: None,
+            snapshot_hook: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The PENDING->RUNNING transition (`mark_running_multi`) must be flushed
+    /// through the runtime's persistence hook so a restart sees RUNNING without
+    /// relying solely on restart reconciliation. Regression for the Tier-4
+    /// bug-hunt finding that runtime transitions never called the snapshot.
+    #[tokio::test]
+    async fn running_transition_persists_snapshot() {
+        let mut accounts: MultiAccountState<EcsState> =
+            MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
+        let acct = accounts.get_or_create("000000000000");
+        acct.tasks.insert("t1".into(), make_task("t1"));
+        let state: SharedEcsState = Arc::new(RwLock::new(accounts));
+
+        // Build the production persistence hook backed by a recording store.
+        let recorded = Arc::new(std::sync::Mutex::new(None));
+        let store: Arc<dyn fakecloud_persistence::SnapshotStore> =
+            Arc::new(RecordingStore(recorded.clone()));
+        let hook = crate::service::EcsService::new(state.clone())
+            .with_snapshot_store(store)
+            .snapshot_hook()
+            .expect("hook present when a store is wired");
+
+        let rt = bare_runtime();
+        rt.set_snapshot_hook(hook);
+
+        // Nothing persisted before the transition.
+        assert!(recorded.lock().unwrap().is_none());
+
+        // Drive the PENDING->RUNNING transition + persist, exactly as
+        // run_task_inner does after launching containers.
+        mark_running_multi(&state, "000000000000", "t1", &[]);
+        rt.persist_snapshot().await;
+
+        let bytes = recorded
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("running transition should have flushed a snapshot");
+        let snap: crate::EcsSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let persisted = snap.accounts.expect("accounts present");
+        let task = persisted
+            .get("000000000000")
+            .unwrap()
+            .tasks
+            .get("t1")
+            .unwrap();
+        assert_eq!(
+            task.last_status, "RUNNING",
+            "persisted snapshot must reflect the RUNNING transition"
         );
     }
 

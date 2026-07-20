@@ -3344,6 +3344,14 @@ async fn main() {
     // scheduler ticker brings services back to desiredCount. Same
     // restart-bug class as RDS #1338.
     ecs_service.reconcile_persisted_tasks().await;
+    // Wire the persistence hook into the task runtime so background task state
+    // transitions (PENDING->RUNNING, exit/stop finalizers) flush the snapshot
+    // to disk. The store is only known here (after the service is built), and
+    // the runtime is already behind an Arc, so we hand it the hook by shared
+    // reference. No-op in memory mode (snapshot_hook() returns None).
+    if let (Some(rt), Some(hook)) = (ecs_runtime.as_ref(), ecs_service.snapshot_hook()) {
+        rt.set_snapshot_hook(hook);
+    }
     let ecs_service = Arc::new(ecs_service);
     let ecs_service_for_scheduler = ecs_service.clone();
     // ECS desiredCount scheduler ticker. reconcile_persisted_tasks STOPs all

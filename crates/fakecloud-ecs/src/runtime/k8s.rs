@@ -252,6 +252,7 @@ impl EcsRuntime {
                     if !marked_running {
                         mark_running_multi(state, account_id, task_id, &started);
                         self.emit_state_change(state, account_id, task_id, "RUNNING", None);
+                        self.persist_snapshot().await;
                     }
                     return self
                         .k8s_finalize(
@@ -279,6 +280,7 @@ impl EcsRuntime {
                 mark_running_multi(state, account_id, task_id, &started);
                 self.register_lb_targets(state, account_id, task_id);
                 self.emit_state_change(state, account_id, task_id, "RUNNING", None);
+                self.persist_snapshot().await;
                 marked_running = true;
             }
 
@@ -389,6 +391,9 @@ impl EcsRuntime {
             "STOPPED",
             Some((final_stop_code, reason_msg)),
         );
+        // Persist the terminal STOPPED transition so a restart reflects the
+        // completed task instead of a stale RUNNING row.
+        self.persist_snapshot().await;
         Ok(())
     }
 }

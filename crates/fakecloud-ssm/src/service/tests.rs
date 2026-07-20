@@ -2493,6 +2493,132 @@ fn put_parameter_overwrite_bumps_version() {
 }
 
 #[test]
+fn put_parameter_rejects_invalid_tier() {
+    let svc = make_service();
+    let req = make_request(
+        "PutParameter",
+        json!({ "Name": "/a", "Value": "v", "Type": "String", "Tier": "Premium" }),
+    );
+    let err = svc.put_parameter(&req).err().expect("expected error");
+    // PutParameter remaps ValidationException to the declared shape.
+    assert_eq!(err.code(), "InvalidAllowedPatternException");
+    assert!(err
+        .message()
+        .contains("Standard, Advanced, Intelligent-Tiering"));
+}
+
+#[test]
+fn put_parameter_accepts_valid_tiers() {
+    let svc = make_service();
+    for (i, tier) in ["Standard", "Advanced", "Intelligent-Tiering"]
+        .iter()
+        .enumerate()
+    {
+        let req = make_request(
+            "PutParameter",
+            json!({ "Name": format!("/tier/{i}"), "Value": "v", "Type": "String", "Tier": tier }),
+        );
+        svc.put_parameter(&req)
+            .unwrap_or_else(|e| panic!("tier {tier}: {e:?}"));
+    }
+}
+
+#[test]
+fn put_parameter_rejects_standard_value_over_4kb() {
+    let svc = make_service();
+    let big = "x".repeat(4097);
+    let req = make_request(
+        "PutParameter",
+        json!({ "Name": "/big", "Value": big, "Type": "String" }),
+    );
+    let err = svc.put_parameter(&req).err().expect("expected error");
+    assert_eq!(err.code(), "InvalidAllowedPatternException");
+    assert!(err.message().contains("4096"));
+}
+
+#[test]
+fn put_parameter_advanced_allows_up_to_8kb() {
+    let svc = make_service();
+    // 6KB value: too big for Standard (4KB) but fine for Advanced (8KB).
+    let mid = "x".repeat(6000);
+    let req = make_request(
+        "PutParameter",
+        json!({ "Name": "/adv", "Value": mid, "Type": "String", "Tier": "Advanced" }),
+    );
+    svc.put_parameter(&req)
+        .expect("advanced 6KB value should be accepted");
+
+    // ...but 9KB exceeds even the Advanced ceiling.
+    let too_big = "x".repeat(8193);
+    let req = make_request(
+        "PutParameter",
+        json!({ "Name": "/adv2", "Value": too_big, "Type": "String", "Tier": "Advanced" }),
+    );
+    let err = svc.put_parameter(&req).err().expect("expected error");
+    assert_eq!(err.code(), "InvalidAllowedPatternException");
+    assert!(err.message().contains("8192"));
+}
+
+#[test]
+fn describe_parameters_rejects_contains_on_name() {
+    let svc = make_service();
+    let req = make_request(
+        "DescribeParameters",
+        json!({
+            "ParameterFilters": [
+                { "Key": "Name", "Option": "Contains", "Values": ["db"] }
+            ]
+        }),
+    );
+    let err = svc.describe_parameters(&req).err().expect("expected error");
+    assert_eq!(err.code(), "InvalidFilterKey");
+    assert!(err.message().contains("BeginsWith, Equals"));
+}
+
+#[test]
+fn describe_parameters_accepts_beginswith_and_equals_on_name() {
+    let svc = make_service();
+    for opt in ["BeginsWith", "Equals"] {
+        let req = make_request(
+            "DescribeParameters",
+            json!({
+                "ParameterFilters": [
+                    { "Key": "Name", "Option": opt, "Values": ["/a"] }
+                ]
+            }),
+        );
+        svc.describe_parameters(&req)
+            .unwrap_or_else(|e| panic!("option {opt}: {e:?}"));
+    }
+}
+
+#[test]
+fn get_parameters_by_path_rejects_max_results_zero() {
+    let svc = make_service();
+    let req = make_request(
+        "GetParametersByPath",
+        json!({ "Path": "/app", "MaxResults": 0 }),
+    );
+    let err = svc
+        .get_parameters_by_path(&req)
+        .err()
+        .expect("expected error");
+    assert_eq!(err.code(), "InvalidFilterValue");
+    assert!(err.message().contains("greater than or equal to 1"));
+}
+
+#[test]
+fn get_parameters_by_path_accepts_max_results_in_range() {
+    let svc = make_service();
+    let req = make_request(
+        "GetParametersByPath",
+        json!({ "Path": "/app", "MaxResults": 10 }),
+    );
+    svc.get_parameters_by_path(&req)
+        .expect("MaxResults=10 is valid");
+}
+
+#[test]
 fn get_parameter_returns_latest_version() {
     let svc = make_service();
     put_simple_string(&svc, "/a", "v1");
@@ -4016,7 +4142,11 @@ fn describe_parameters_name_begins_with_filter() {
 }
 
 #[test]
-fn describe_parameters_name_contains_filter() {
+fn describe_parameters_name_contains_filter_rejected() {
+    // AWS rejects the Contains option for the Name key on DescribeParameters:
+    // only BeginsWith / Equals are valid there (Contains is a
+    // GetParametersByPath concept). This previously accepted Contains and
+    // silently substring-matched, which no real AWS caller can rely on.
     let svc = make_service();
     for name in &["/app/db", "/system/app", "/misc/x"] {
         svc.put_parameter(&make_request(
@@ -4033,10 +4163,8 @@ fn describe_parameters_name_contains_filter() {
             ]
         }),
     );
-    let resp = svc.describe_parameters(&req).unwrap();
-    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
-    let params = body["Parameters"].as_array().unwrap();
-    assert_eq!(params.len(), 2);
+    let err = svc.describe_parameters(&req).err().expect("expected error");
+    assert_eq!(err.code(), "InvalidFilterKey");
 }
 
 #[test]
