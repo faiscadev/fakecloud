@@ -1488,3 +1488,161 @@ async fn update_direct_query_data_source_persists_type() {
     let v = json_of(&resp);
     assert_eq!(v["DataSourceType"], new_type);
 }
+
+async fn create_app(svc: &OpenSearchService, name: &str) -> (String, String) {
+    let created = json_of(
+        &call(
+            svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/application"),
+                json!({"name": name}),
+            ),
+        )
+        .await,
+    );
+    (
+        created["id"].as_str().unwrap().to_string(),
+        created["arn"].as_str().unwrap().to_string(),
+    )
+}
+
+#[tokio::test]
+async fn register_capability_roundtrips_config() {
+    let svc = service();
+    let (id, _) = create_app(&svc, "cap-app").await;
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/application/{id}/capability/register"),
+            json!({"capabilityName": "SQL", "capabilityConfig": {"enabled": "true"}}),
+        ),
+    )
+    .await;
+    let got = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/application/{id}/capability/SQL"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(got["capabilityName"], "SQL");
+    assert_eq!(got["capabilityConfig"]["enabled"], "true");
+}
+
+#[tokio::test]
+async fn attach_data_source_roundtrips_on_application() {
+    let svc = service();
+    let (id, _) = create_app(&svc, "attach-app").await;
+    let attached = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/application/{id}/attachDataSource"),
+                json!({"dataSourceArn": "arn:aws:s3:::my-data-source-bucket-name-example"}),
+            ),
+        )
+        .await,
+    );
+    let attachment_id = attached["attachmentId"].as_str().unwrap().to_string();
+
+    let listed = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/application/{id}/listDataSourceAttachments"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(listed["attachments"].as_array().unwrap().len(), 1);
+
+    let described = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/application/{id}/describeDataSourceAttachment"),
+                json!({"attachmentId": attachment_id, "dataSourceArn": "arn:aws:s3:::my-data-source-bucket-name-example"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        described["dataSourceArn"],
+        "arn:aws:s3:::my-data-source-bucket-name-example"
+    );
+}
+
+#[tokio::test]
+async fn default_application_setting_roundtrips() {
+    let svc = service();
+    let (_, arn) = create_app(&svc, "default-app").await;
+    call(
+        &svc,
+        req(
+            Method::PUT,
+            &format!("{OS}/opensearch/defaultApplicationSetting"),
+            json!({"applicationArn": arn, "setAsDefault": true}),
+        ),
+    )
+    .await;
+    let got = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/defaultApplicationSetting"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(got["applicationArn"], arn);
+}
+
+#[tokio::test]
+async fn create_index_persists_schema() {
+    let svc = service();
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "ixdomain"}),
+        ),
+    )
+    .await;
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain/ixdomain/index"),
+            json!({"IndexName": "logs", "IndexSchema": {"mappings": {"properties": {"ts": {"type": "date"}}}}}),
+        ),
+    )
+    .await;
+    let got = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/ixdomain/index/logs"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        got["IndexSchema"]["mappings"]["properties"]["ts"]["type"],
+        "date"
+    );
+}

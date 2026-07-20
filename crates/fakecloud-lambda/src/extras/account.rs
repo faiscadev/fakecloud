@@ -89,9 +89,8 @@ impl LambdaService {
             "ListFunctionsByCodeSigningConfig" => self.list_functions_by_code_signing(res, aid),
 
             // Event invoke
-            "PutFunctionEventInvokeConfig" | "UpdateFunctionEventInvokeConfig" => {
-                self.put_function_event_invoke(res, req)
-            }
+            "PutFunctionEventInvokeConfig" => self.put_function_event_invoke(res, req),
+            "UpdateFunctionEventInvokeConfig" => self.update_function_event_invoke(res, req),
             "GetFunctionEventInvokeConfig" => self.get_function_event_invoke(res, req),
             "DeleteFunctionEventInvokeConfig" => self.delete_function_event_invoke(res, req),
             "ListFunctionEventInvokeConfigs" => self.list_function_event_invoke(res, aid),

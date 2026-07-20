@@ -416,7 +416,12 @@ impl ElastiCacheService {
             if let Some(a) = access_string {
                 user.access_string = a;
             }
-            user.status = "modifying".to_string();
+            // The change is applied synchronously, so the user settles straight
+            // back to `active`. Leaving it `modifying` (as before) would hang the
+            // provider's update waiter (Pending: modifying, Target: active)
+            // forever, since fakecloud has no async tick to flip it. Mirrors
+            // `modify_user_group`.
+            user.status = "active".to_string();
             let rg_ids: Vec<String> = state
                 .replication_groups
                 .values()

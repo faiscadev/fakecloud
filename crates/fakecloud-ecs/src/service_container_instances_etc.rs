@@ -317,6 +317,29 @@ impl EcsService {
                 value: value.clone(),
             };
             state.attributes.insert(key, attr);
+            // Container-instance attributes must also surface in
+            // DescribeContainerInstances, which reads ContainerInstance.attributes.
+            if target_type == "container-instance" {
+                let ci_key = format!(
+                    "{}/{}",
+                    cluster_name,
+                    container_instance_id_from_ref(&target_id)
+                );
+                if let Some(ci) = state.container_instances.get_mut(&ci_key) {
+                    if let Some(existing) = ci.attributes.iter_mut().find(|r| r.name == name) {
+                        existing.value = value.clone();
+                        existing.target_type = Some(target_type.clone());
+                        existing.target_id = Some(target_id.clone());
+                    } else {
+                        ci.attributes.push(AttributeRef {
+                            name: name.to_string(),
+                            value: value.clone(),
+                            target_type: Some(target_type.clone()),
+                            target_id: Some(target_id.clone()),
+                        });
+                    }
+                }
+            }
             stored.push(json!({
                 "name": name,
                 "value": value,
@@ -345,6 +368,16 @@ impl EcsService {
             let target_id = a.get("targetId").and_then(|v| v.as_str()).unwrap_or("");
             let key = format!("{}/{}/{}", cluster_name, target_id, name);
             if let Some(attr) = state.attributes.remove(&key) {
+                if attr.target_type == "container-instance" {
+                    let ci_key = format!(
+                        "{}/{}",
+                        cluster_name,
+                        container_instance_id_from_ref(target_id)
+                    );
+                    if let Some(ci) = state.container_instances.get_mut(&ci_key) {
+                        ci.attributes.retain(|r| r.name != name);
+                    }
+                }
                 deleted.push(json!({
                     "name": attr.name,
                     "value": attr.value,

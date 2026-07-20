@@ -472,15 +472,86 @@ fn get_connection_status_returns_connected() {
 }
 
 #[test]
-fn get_calendar_state_returns_open() {
+fn get_calendar_state_unknown_calendar_errors() {
     let svc = make_service();
     let req = make_request(
         "GetCalendarState",
-        json!({ "CalendarNames": ["arn:aws:ssm:us-east-1:123456789012:document/cal"] }),
+        json!({ "CalendarNames": ["arn:aws:ssm:us-east-1:123456789012:document/nope"] }),
     );
-    let resp = svc.get_calendar_state(&req).unwrap();
+    let err = svc.get_calendar_state(&req).err().expect("expected error");
+    assert_eq!(err.code(), "InvalidDocument");
+}
+
+#[test]
+fn get_calendar_state_evaluates_closed_window() {
+    let svc = make_service();
+    // A DEFAULT_OPEN change calendar with a single CLOSED window on 2022-11-30
+    // from 23:00Z to 2022-12-01 01:00Z.
+    let ical = "BEGIN:VCALENDAR\r\n\
+        PRODID:-//AWS//Change Calendar 1.0//EN\r\n\
+        VERSION:2.0\r\n\
+        X-CALENDAR-TYPE:DEFAULT_OPEN\r\n\
+        BEGIN:VEVENT\r\n\
+        DTSTART:20221130T230000Z\r\n\
+        DTEND:20221201T010000Z\r\n\
+        UID:evt-1\r\n\
+        SUMMARY:freeze\r\n\
+        END:VEVENT\r\n\
+        END:VCALENDAR\r\n";
+    svc.create_document(&make_request(
+        "CreateDocument",
+        json!({
+            "Name": "prod-cal",
+            "Content": ical,
+            "DocumentType": "ChangeCalendar",
+            "DocumentFormat": "TEXT",
+        }),
+    ))
+    .unwrap();
+
+    // Inside the CLOSED window -> CLOSED, with the window end as next transition.
+    let resp = svc
+        .get_calendar_state(&make_request(
+            "GetCalendarState",
+            json!({ "CalendarNames": ["prod-cal"], "AtTime": "2022-11-30T23:30:00Z" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["State"].as_str().unwrap(), "CLOSED");
+    assert_eq!(body["AtTime"].as_str().unwrap(), "2022-11-30T23:30:00Z");
+    assert_eq!(
+        body["NextTransitionTime"].as_str().unwrap(),
+        "2022-12-01T01:00:00Z"
+    );
+
+    // Before the window -> OPEN (default), next transition is the window start.
+    let resp = svc
+        .get_calendar_state(&make_request(
+            "GetCalendarState",
+            json!({ "CalendarNames": ["prod-cal"], "AtTime": "2022-11-30T12:00:00Z" }),
+        ))
+        .unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(body["State"].as_str().unwrap(), "OPEN");
+    assert_eq!(
+        body["NextTransitionTime"].as_str().unwrap(),
+        "2022-11-30T23:00:00Z"
+    );
+
+    // A non-calendar document is rejected.
+    svc.create_document(&make_request(
+        "CreateDocument",
+        json!({ "Name": "plain", "Content": "{\"schemaVersion\":\"2.2\"}", "DocumentType": "Command" }),
+    ))
+    .unwrap();
+    let err = svc
+        .get_calendar_state(&make_request(
+            "GetCalendarState",
+            json!({ "CalendarNames": ["plain"] }),
+        ))
+        .err()
+        .expect("expected error");
+    assert_eq!(err.code(), "InvalidDocumentType");
 }
 
 #[test]

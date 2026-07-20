@@ -3920,6 +3920,38 @@ async fn reboot_cache_cluster_marks_rebooting_when_no_runtime() {
 }
 
 #[tokio::test]
+async fn modify_user_settles_active() {
+    let svc = fresh_service();
+    svc.create_user(&request(
+        "CreateUser",
+        &[
+            ("UserId", "u1"),
+            ("UserName", "u1"),
+            ("Engine", "redis"),
+            ("AccessString", "on ~* +@all"),
+        ],
+    ))
+    .unwrap();
+
+    let resp = svc
+        .modify_user(&request(
+            "ModifyUser",
+            &[("UserId", "u1"), ("AccessString", "on ~app:* +@read")],
+        ))
+        .await
+        .unwrap();
+    let body_str = body(resp);
+    // Response reports the settled status, not a stuck "modifying".
+    assert!(body_str.contains("<Status>active</Status>"), "{body_str}");
+
+    // And a subsequent read confirms persistence of both status and change.
+    let state = svc.state.read();
+    let user = state.get("123456789012").unwrap().users.get("u1").unwrap();
+    assert_eq!(user.status, "active");
+    assert_eq!(user.access_string, "on ~app:* +@read");
+}
+
+#[tokio::test]
 async fn modify_unknown_user_errors() {
     let svc = fresh_service();
     let req = request("ModifyUser", &[("UserId", "ghost")]);

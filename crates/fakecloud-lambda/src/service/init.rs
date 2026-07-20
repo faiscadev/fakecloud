@@ -103,9 +103,10 @@ impl LambdaService {
             && segs.get(3).map(|s| s.as_str()) == Some("event-invoke-config")
         {
             let res = segs.get(2).map(|s| s.to_string());
+            // Per the Lambda API: PUT = Put (full replace), POST = Update (merge).
             return match req.method {
-                Method::POST => Some(("PutFunctionEventInvokeConfig", res)),
-                Method::PUT => Some(("UpdateFunctionEventInvokeConfig", res)),
+                Method::PUT => Some(("PutFunctionEventInvokeConfig", res)),
+                Method::POST => Some(("UpdateFunctionEventInvokeConfig", res)),
                 Method::GET => Some(("GetFunctionEventInvokeConfig", res)),
                 Method::DELETE => Some(("DeleteFunctionEventInvokeConfig", res)),
                 _ => None,

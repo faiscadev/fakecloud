@@ -588,8 +588,10 @@ impl AcmService {
         // sends a confirmation email; tests drive the approval via
         // `POST /_fakecloud/acm/certificates/{arn}/approve`.
         // ImportCertificate stays ISSUED-on-arrival (its own code path
-        // never enters this branch).
-        if validation_method == "DNS" {
+        // never enters this branch). HTTP-validated certs also auto-issue
+        // (real ACM completes them once the redirect resolves); only EMAIL
+        // waits for explicit approval.
+        if validation_method == "DNS" || validation_method == "HTTP" {
             self.spawn_auto_issue_tick(req.account_id.clone(), arn.clone());
         }
 
@@ -1603,8 +1605,8 @@ fn effective_sans(domain: &str, extras: &[String]) -> Vec<String> {
 fn synth_domain_validation(domain: &str, sans: &[String], method: &str) -> Vec<DomainValidation> {
     effective_sans(domain, sans)
         .iter()
-        .map(|d| {
-            if method == "DNS" {
+        .map(|d| match method {
+            "DNS" => {
                 let token = synth_dns_token(d);
                 DomainValidation {
                     domain_name: d.clone(),
@@ -1613,17 +1615,39 @@ fn synth_domain_validation(domain: &str, sans: &[String], method: &str) -> Vec<D
                     resource_record_name: Some(format!("_{token}.{d}.")),
                     resource_record_type: Some("CNAME".to_string()),
                     resource_record_value: Some(format!("_{token}.acm-validations.aws.")),
+                    http_redirect_from: None,
+                    http_redirect_to: None,
                 }
-            } else {
+            }
+            "HTTP" => {
+                // For HTTP validation ACM publishes a well-known token path that
+                // must redirect to an acm-validations.aws target.
+                let token = synth_dns_token(d);
                 DomainValidation {
                     domain_name: d.clone(),
                     validation_status: "PENDING_VALIDATION".to_string(),
-                    validation_method: "EMAIL".to_string(),
+                    validation_method: "HTTP".to_string(),
                     resource_record_name: None,
                     resource_record_type: None,
                     resource_record_value: None,
+                    http_redirect_from: Some(format!(
+                        "http://{d}/.well-known/pki-validation/{token}.txt"
+                    )),
+                    http_redirect_to: Some(format!(
+                        "https://{token}.acm-validations.aws/.well-known/pki-validation/{token}.txt"
+                    )),
                 }
             }
+            _ => DomainValidation {
+                domain_name: d.clone(),
+                validation_status: "PENDING_VALIDATION".to_string(),
+                validation_method: "EMAIL".to_string(),
+                resource_record_name: None,
+                resource_record_type: None,
+                resource_record_value: None,
+                http_redirect_from: None,
+                http_redirect_to: None,
+            },
         })
         .collect()
 }
@@ -1898,6 +1922,15 @@ fn domain_validation_json(v: &DomainValidation) -> Value {
                 "Name": name,
                 "Type": rtype,
                 "Value": value,
+            }),
+        );
+    }
+    if let (Some(from), Some(to)) = (&v.http_redirect_from, &v.http_redirect_to) {
+        out.as_object_mut().unwrap().insert(
+            "HttpRedirect".to_string(),
+            json!({
+                "RedirectFrom": from,
+                "RedirectTo": to,
             }),
         );
     }
@@ -2286,6 +2319,80 @@ mod tests {
         let rs = &last["Certificate"]["RenewalSummary"];
         assert_eq!(rs["RenewalStatus"], "PENDING_AUTO_RENEWAL");
         assert!(rs["UpdatedAt"].as_f64().unwrap() > 0.0);
+    }
+
+    #[tokio::test]
+    async fn http_validation_labeled_http_with_redirect_and_issues() {
+        let svc = AcmService::default()
+            .with_pending_validation_delay(std::time::Duration::from_millis(50));
+        let resp = svc
+            .handle(make_req(
+                "RequestCertificate",
+                json!({"DomainName": "http.example.com", "ValidationMethod": "HTTP"}),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let arn = body["CertificateArn"].as_str().unwrap().to_string();
+
+        // DescribeCertificate reports HTTP (not the old mislabeled EMAIL) with
+        // an HttpRedirect (not a DNS ResourceRecord).
+        let desc = svc
+            .handle(make_req(
+                "DescribeCertificate",
+                json!({"CertificateArn": arn}),
+            ))
+            .await
+            .unwrap();
+        let desc: Value = serde_json::from_slice(desc.body.expect_bytes()).unwrap();
+        let dvo = &desc["Certificate"]["DomainValidationOptions"][0];
+        assert_eq!(dvo["ValidationMethod"], "HTTP");
+        assert!(dvo.get("ResourceRecord").is_none());
+        assert!(dvo["HttpRedirect"]["RedirectFrom"]
+            .as_str()
+            .unwrap()
+            .contains("/.well-known/pki-validation/"));
+        assert!(dvo["HttpRedirect"]["RedirectTo"]
+            .as_str()
+            .unwrap()
+            .contains("acm-validations.aws"));
+
+        // SearchCertificates agrees with Describe on the method (previously
+        // Describe said EMAIL while Search said HTTP).
+        let search = svc
+            .handle(make_req("SearchCertificates", json!({"Filters": {}})))
+            .await
+            .unwrap();
+        let search: Value = serde_json::from_slice(search.body.expect_bytes()).unwrap();
+        let summary = search["Results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["CertificateArn"] == json!(arn))
+            .expect("cert in search results");
+        assert_eq!(
+            summary["CertificateMetadata"]["AcmCertificateMetadata"]["ValidationMethod"],
+            "HTTP"
+        );
+
+        // HTTP-validated certs auto-issue (only EMAIL waits for approval).
+        let mut issued = false;
+        for _ in 0..40 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let resp = svc
+                .handle(make_req(
+                    "DescribeCertificate",
+                    json!({"CertificateArn": arn}),
+                ))
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            if body["Certificate"]["Status"] == "ISSUED" {
+                issued = true;
+                break;
+            }
+        }
+        assert!(issued, "HTTP-validated cert should auto-issue");
     }
 
     #[tokio::test]

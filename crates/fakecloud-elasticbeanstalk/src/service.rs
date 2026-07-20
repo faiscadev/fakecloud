@@ -15,9 +15,9 @@ use fakecloud_persistence::{SnapshotHook, SnapshotStore};
 
 use crate::state::{
     environment_status as est, AccountState, Application, ApplicationVersion,
-    ConfigurationTemplate, ElasticBeanstalkSnapshot, Environment, Event, MaxAgeRule, MaxCountRule,
-    OptionSetting, ResourceLifecycleConfig, ResourceTag, SharedEbState, SourceBuildInformation,
-    ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
+    ConfigurationTemplate, CustomPlatform, ElasticBeanstalkSnapshot, Environment, Event,
+    MaxAgeRule, MaxCountRule, OptionSetting, ResourceLifecycleConfig, ResourceTag, SharedEbState,
+    SourceBuildInformation, ELASTICBEANSTALK_SNAPSHOT_SCHEMA_VERSION,
 };
 
 const NS: &str = "http://elasticbeanstalk.amazonaws.com/docs/2010-12-01/";
@@ -1887,10 +1887,18 @@ impl ElasticBeanstalkService {
     fn list_platform_versions(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         // Each member is already fully wrapped (`<member>...</member>`), so
         // paginate the raw fragments and join without re-wrapping.
-        let all: Vec<String> = SOLUTION_STACKS
+        let mut all: Vec<String> = SOLUTION_STACKS
             .iter()
             .map(|s| render_platform_summary(s, &req.region))
             .collect();
+        // Include the account's custom platforms alongside the managed stacks.
+        {
+            let mut guard = self.state.write();
+            let acct = guard.get_or_create(&req.account_id);
+            for p in acct.platforms.values() {
+                all.push(render_custom_platform_summary(p));
+            }
+        }
         let (page, next_token) = paginate_members(all, "MaxRecords", req);
         let inner = format!(
             "<PlatformSummaryList>{}</PlatformSummaryList>{}",
@@ -1921,15 +1929,43 @@ impl ElasticBeanstalkService {
 
     fn describe_platform_version(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_query_param(req, "PlatformArn")?;
-        let inner = format!(
-            "<PlatformDescription>{}{}{}{}{}</PlatformDescription>",
-            el("PlatformArn", &arn),
-            el("PlatformOwner", "AWSElasticBeanstalk"),
-            el("PlatformStatus", "Ready"),
-            el("PlatformCategory", "generic"),
-            el("PlatformLifecycleState", "Supported"),
-        );
-        Ok(self.ok("DescribePlatformVersion", inner, req))
+        // A custom platform created in this account is described from the store.
+        {
+            let mut guard = self.state.write();
+            let acct = guard.get_or_create(&req.account_id);
+            if let Some(p) = acct.platforms.get(&arn) {
+                let inner = format!(
+                    "<PlatformDescription>{}{}{}{}{}{}{}{}</PlatformDescription>",
+                    el("PlatformArn", &p.arn),
+                    el("PlatformOwner", &p.owner),
+                    el("PlatformName", &p.name),
+                    el("PlatformVersion", &p.version),
+                    el("PlatformStatus", &p.status),
+                    el("PlatformCategory", &p.category),
+                    el("PlatformLifecycleState", "Supported"),
+                    el("DateCreated", &iso(p.date_created)),
+                );
+                return Ok(self.ok("DescribePlatformVersion", inner, req));
+            }
+        }
+        // Otherwise it must be one of the AWS-managed solution stacks; anything
+        // else is genuinely unknown (real ACM returns the service exception).
+        if is_managed_platform_arn(&arn) {
+            let inner = format!(
+                "<PlatformDescription>{}{}{}{}{}</PlatformDescription>",
+                el("PlatformArn", &arn),
+                el("PlatformOwner", "AWSElasticBeanstalk"),
+                el("PlatformStatus", "Ready"),
+                el("PlatformCategory", "generic"),
+                el("PlatformLifecycleState", "Supported"),
+            );
+            return Ok(self.ok("DescribePlatformVersion", inner, req));
+        }
+        Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ElasticBeanstalkServiceException",
+            format!("No Platform named '{arn}' found."),
+        ))
     }
 
     fn create_platform_version(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1942,11 +1978,29 @@ impl ElasticBeanstalkService {
             "arn:aws:elasticbeanstalk:{}:{}:platform/{name}/{version}",
             req.region, req.account_id
         );
+        let now = Utc::now();
+        let platform = CustomPlatform {
+            arn: arn.clone(),
+            name,
+            version,
+            owner: req.account_id.clone(),
+            status: "Ready".to_string(),
+            category: "custom".to_string(),
+            date_created: now,
+            date_updated: now,
+        };
+        {
+            let mut guard = self.state.write();
+            let acct = guard.get_or_create(&req.account_id);
+            acct.platforms.insert(arn.clone(), platform.clone());
+        }
         let inner = format!(
-            "<PlatformSummary>{}{}{}</PlatformSummary>{}",
-            el("PlatformArn", &arn),
-            el("PlatformOwner", &req.account_id),
-            el("PlatformStatus", "Creating"),
+            "<PlatformSummary>{}{}{}{}{}</PlatformSummary>{}",
+            el("PlatformArn", &platform.arn),
+            el("PlatformOwner", &platform.owner),
+            el("PlatformStatus", &platform.status),
+            el("PlatformCategory", &platform.category),
+            el("PlatformVersion", &platform.version),
             "<Builder/>",
         );
         Ok(self.ok("CreatePlatformVersion", inner, req))
@@ -1954,10 +2008,20 @@ impl ElasticBeanstalkService {
 
     fn delete_platform_version(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let arn = required_query_param(req, "PlatformArn")?;
+        let removed = {
+            let mut guard = self.state.write();
+            let acct = guard.get_or_create(&req.account_id);
+            acct.platforms.remove(&arn)
+        };
+        let status = if removed.is_some() {
+            "Deleting"
+        } else {
+            "Deleted"
+        };
         let inner = format!(
             "<PlatformSummary>{}{}</PlatformSummary>",
             el("PlatformArn", &arn),
-            el("PlatformStatus", "Deleting"),
+            el("PlatformStatus", status),
         );
         Ok(self.ok("DeletePlatformVersion", inner, req))
     }
@@ -2358,6 +2422,24 @@ fn render_platform_summary(stack: &str, region: &str) -> String {
     )
 }
 
+fn render_custom_platform_summary(p: &CustomPlatform) -> String {
+    format!(
+        "<member>{}{}{}{}{}</member>",
+        el("PlatformArn", &p.arn),
+        el("PlatformOwner", &p.owner),
+        el("PlatformStatus", &p.status),
+        el("PlatformCategory", &p.category),
+        el("PlatformVersion", &p.version),
+    )
+}
+
+/// An AWS-managed solution-stack platform ARN carries an empty account segment
+/// (`...:elasticbeanstalk:<region>::platform/...`); custom platforms carry the
+/// owning account id.
+fn is_managed_platform_arn(arn: &str) -> bool {
+    arn.contains(":elasticbeanstalk:") && arn.contains("::platform/")
+}
+
 fn platform_family(stack: &str) -> &'static str {
     let lower = stack.to_ascii_lowercase();
     if lower.contains("node.js") {
@@ -2589,6 +2671,8 @@ impl AwsService for ElasticBeanstalkService {
                 | "AssociateEnvironmentOperationsRole"
                 | "DisassociateEnvironmentOperationsRole"
                 | "SwapEnvironmentCNAMEs"
+                | "CreatePlatformVersion"
+                | "DeletePlatformVersion"
         );
         let result = match req.action.as_str() {
             // Applications

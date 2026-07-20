@@ -92,6 +92,27 @@ fn build_record(
 /// `attributes`; otherwise they replace it wholesale. In both modes an
 /// empty-string value removes that attribute, matching AWS IoT semantics. A
 /// record without an `attributePayload` is left untouched.
+/// Honour the request-only boolean removal toggles carried by several
+/// `Update*` operations. Each toggle, when true, clears its associated stored
+/// field; the toggle itself is never part of the persisted resource, so it is
+/// always stripped from the record.
+fn apply_removal_toggles(record: &mut Map<String, Value>) {
+    for (toggle, field) in [
+        ("removeThingType", "thingTypeName"),           // UpdateThing
+        ("deleteBehaviors", "behaviors"),               // UpdateSecurityProfile
+        ("deleteAlertTargets", "alertTargets"),         // UpdateSecurityProfile
+        ("removeAuthorizerConfig", "authorizerConfig"), // UpdateDomainConfiguration
+    ] {
+        let set = record
+            .remove(toggle)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if set {
+            record.remove(field);
+        }
+    }
+}
+
 fn apply_attribute_payload(record: &mut Map<String, Value>) {
     let Some(payload) = record.remove("attributePayload") else {
         return;
@@ -173,6 +194,10 @@ pub(super) fn update(
         for (k, v) in body {
             obj.insert(k.clone(), v.clone());
         }
+        // Honour the request-only removal toggles that the blind overlay would
+        // otherwise store as spurious fields while leaving the associated data in
+        // place (e.g. UpdateThing removeThingType).
+        apply_removal_toggles(obj);
         // Fold any `attributePayload` (honouring its `merge` flag against the
         // existing attributes) into the top-level `attributes` map before it is
         // stored, so the update is visible to DescribeThing / ListThings.

@@ -445,6 +445,139 @@ mod scheduler_reconcile {
     }
 
     #[tokio::test]
+    async fn start_task_places_on_specified_container_instance() {
+        let svc = EcsService::new(empty_state());
+        svc.create_cluster(&ecs_request("CreateCluster", json!({"clusterName": "c1"})))
+            .unwrap();
+        svc.register_task_definition(&ecs_request(
+            "RegisterTaskDefinition",
+            json!({
+                "family": "web",
+                "containerDefinitions": [{"name": "app", "image": "nginx", "essential": true}]
+            }),
+        ))
+        .unwrap();
+        // Register two container instances.
+        let mut ci_ids = Vec::new();
+        for _ in 0..2 {
+            let resp = svc
+                .register_container_instance(&ecs_request(
+                    "RegisterContainerInstance",
+                    json!({"cluster": "c1"}),
+                ))
+                .unwrap();
+            let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            ci_ids.push(
+                v["containerInstance"]["containerInstanceArn"]
+                    .as_str()
+                    .unwrap()
+                    .to_string(),
+            );
+        }
+
+        // StartTask on the SECOND instance -> the task lands there, not on a
+        // synthetic i-fakecloud-1.
+        let resp = svc
+            .start_task(&ecs_request(
+                "StartTask",
+                json!({
+                    "cluster": "c1",
+                    "taskDefinition": "web",
+                    "containerInstances": [ci_ids[1].clone()]
+                }),
+            ))
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(v["tasks"].as_array().unwrap().len(), 1);
+        assert_eq!(v["tasks"][0]["containerInstanceArn"], json!(ci_ids[1]));
+        assert!(
+            !v["tasks"][0]["containerInstanceArn"]
+                .as_str()
+                .unwrap()
+                .contains("i-fakecloud-1"),
+            "must not use the synthetic placeholder instance"
+        );
+
+        // StartTask with no containerInstances is rejected.
+        assert!(svc
+            .start_task(&ecs_request(
+                "StartTask",
+                json!({"cluster": "c1", "taskDefinition": "web"}),
+            ))
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn put_attributes_reflected_in_describe_container_instances() {
+        let svc = EcsService::new(empty_state());
+        svc.create_cluster(&ecs_request("CreateCluster", json!({"clusterName": "c1"})))
+            .unwrap();
+        let resp = svc
+            .register_container_instance(&ecs_request(
+                "RegisterContainerInstance",
+                json!({"cluster": "c1"}),
+            ))
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let ci_arn = v["containerInstance"]["containerInstanceArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        svc.put_attributes(&ecs_request(
+            "PutAttributes",
+            json!({
+                "cluster": "c1",
+                "attributes": [{
+                    "name": "stack",
+                    "value": "prod",
+                    "targetType": "container-instance",
+                    "targetId": ci_arn.clone()
+                }]
+            }),
+        ))
+        .unwrap();
+
+        // DescribeContainerInstances must now include the attribute set via PutAttributes.
+        let resp = svc
+            .describe_container_instances(&ecs_request(
+                "DescribeContainerInstances",
+                json!({"cluster": "c1", "containerInstances": [ci_arn.clone()]}),
+            ))
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let attrs = v["containerInstances"][0]["attributes"].as_array().unwrap();
+        let found = attrs
+            .iter()
+            .find(|a| a["name"] == json!("stack"))
+            .expect("PutAttributes attribute must appear in DescribeContainerInstances");
+        assert_eq!(found["value"], json!("prod"));
+
+        // DeleteAttributes removes it from the Describe view too.
+        svc.delete_attributes(&ecs_request(
+            "DeleteAttributes",
+            json!({
+                "cluster": "c1",
+                "attributes": [{
+                    "name": "stack",
+                    "targetType": "container-instance",
+                    "targetId": ci_arn.clone()
+                }]
+            }),
+        ))
+        .unwrap();
+        let resp = svc
+            .describe_container_instances(&ecs_request(
+                "DescribeContainerInstances",
+                json!({"cluster": "c1", "containerInstances": [ci_arn]}),
+            ))
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let attrs = v["containerInstances"][0]["attributes"].as_array().unwrap();
+        assert!(attrs.iter().all(|a| a["name"] != json!("stack")));
+    }
+
+    #[tokio::test]
     async fn update_service_applies_extended_fields() {
         // UpdateService previously read only desiredCount/taskDefinition/
         // lifecycleHooks and dropped everything else (bug-audit 2026-06-20, 1.15).

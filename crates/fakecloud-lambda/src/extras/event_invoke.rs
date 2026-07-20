@@ -63,6 +63,60 @@ impl LambdaService {
         ok(event_invoke_json(&cfg))
     }
 
+    /// `UpdateFunctionEventInvokeConfig` merges: only the fields present in the
+    /// request are overwritten; anything omitted (notably `DestinationConfig`)
+    /// keeps its stored value. This is the difference from Put, which replaces
+    /// the whole config. Updating a non-existent config is a not-found error.
+    pub(super) fn update_function_event_invoke(
+        &self,
+        function_name: &str,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = body(req);
+        let qualifier = parse_qualifier(req);
+        let key = Self::ev_key(function_name, &qualifier);
+
+        // Validate provided ranges before touching state.
+        if let Some(event_age) = body.get("MaximumEventAgeInSeconds").and_then(Value::as_i64) {
+            if !(60..=21600).contains(&event_age) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("MaximumEventAgeInSeconds must be 60..21600 (got {event_age})"),
+                ));
+            }
+        }
+        if let Some(retries) = body.get("MaximumRetryAttempts").and_then(Value::as_i64) {
+            if !(0..=2).contains(&retries) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    format!("MaximumRetryAttempts must be 0..2 (got {retries})"),
+                ));
+            }
+        }
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let cfg = state
+            .event_invoke_configs
+            .get_mut(&key)
+            .ok_or_else(|| not_found("EventInvokeConfig", function_name))?;
+
+        if let Some(event_age) = body.get("MaximumEventAgeInSeconds").and_then(Value::as_i64) {
+            cfg.maximum_event_age = event_age;
+        }
+        if let Some(retries) = body.get("MaximumRetryAttempts").and_then(Value::as_i64) {
+            cfg.maximum_retry_attempts = retries;
+        }
+        if body.get("DestinationConfig").is_some() {
+            cfg.destination_config = body.get("DestinationConfig").cloned();
+        }
+        cfg.last_modified = Utc::now();
+        let snapshot = cfg.clone();
+        ok(event_invoke_json(&snapshot))
+    }
+
     pub(super) fn get_function_event_invoke(
         &self,
         function_name: &str,

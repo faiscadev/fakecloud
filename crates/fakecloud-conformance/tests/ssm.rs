@@ -1118,12 +1118,28 @@ async fn ssm_get_connection_status() {
 async fn ssm_get_calendar_state() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
+    // GetCalendarState evaluates a real Change Calendar document, so create one
+    // first (as on real AWS — querying a nonexistent calendar is InvalidDocument).
     client
+        .create_document()
+        .name("cal")
+        .document_type(aws_sdk_ssm::types::DocumentType::ChangeCalendar)
+        .document_format(aws_sdk_ssm::types::DocumentFormat::Text)
+        .content(
+            "BEGIN:VCALENDAR\r\nPRODID:-//AWS//Change Calendar 1.0//EN\r\nVERSION:2.0\r\n\
+             X-CALENDAR-TYPE:DEFAULT_OPEN\r\nEND:VCALENDAR\r\n",
+        )
+        .send()
+        .await
+        .unwrap();
+    let out = client
         .get_calendar_state()
         .calendar_names("arn:aws:ssm:us-east-1:123456789012:document/cal")
         .send()
         .await
         .unwrap();
+    // An empty DEFAULT_OPEN calendar is OPEN.
+    assert_eq!(out.state(), Some(&aws_sdk_ssm::types::CalendarState::Open));
 }
 
 #[test_action("ssm", "DescribePatchGroupState", checksum = "6ff4c75a")]

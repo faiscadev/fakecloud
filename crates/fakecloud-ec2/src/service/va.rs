@@ -5,10 +5,10 @@ use fakecloud_aws::ec2query::{ec2_elem, ec2_list};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
-use crate::service_helpers::{gen_id, require, validate_enum, validate_max_results};
+use crate::service_helpers::{gen_id, indexed_list, require, validate_enum, validate_max_results};
 use crate::state::{
     Ec2State, Tag, VerifiedAccessEndpoint, VerifiedAccessGroup, VerifiedAccessInstance,
-    VerifiedAccessTrustProvider,
+    VerifiedAccessLoggingConfig, VerifiedAccessTrustProvider,
 };
 
 const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
@@ -582,13 +582,19 @@ pub(crate) fn modify_verified_access_group_policy(
 // ---- endpoints ----
 
 fn endpoint_xml(e: &VerifiedAccessEndpoint, tags: &[Tag]) -> String {
+    let description = if e.description.is_empty() {
+        String::new()
+    } else {
+        ec2_elem("description", &e.description)
+    };
     format!(
-        "{}{}{}<endpointType>{}</endpointType><attachmentType>{}</attachmentType><status><code>active</code></status><creationTime>{}</creationTime>{}",
+        "{}{}{}<endpointType>{}</endpointType><attachmentType>{}</attachmentType>{}<status><code>active</code></status><creationTime>{}</creationTime>{}",
         ec2_elem("verifiedAccessEndpointId", &e.id),
         ec2_elem("verifiedAccessGroupId", &e.group_id),
         ec2_elem("verifiedAccessInstanceId", &e.instance_id),
         e.endpoint_type,
         e.attachment_type,
+        description,
         FIXED_TIME,
         super::tags::tag_set_xml(tags),
     )
@@ -621,6 +627,11 @@ pub(crate) fn create_verified_access_endpoint(
         instance_id,
         endpoint_type: et,
         attachment_type: at,
+        description: req
+            .query_params
+            .get("Description")
+            .cloned()
+            .unwrap_or_default(),
     };
     let tags = {
         let mut accounts = svc.state.write();
@@ -664,6 +675,7 @@ pub(crate) fn delete_verified_access_endpoint(
             instance_id: "vai-0".to_string(),
             endpoint_type: "load-balancer".to_string(),
             attachment_type: "vpc".to_string(),
+            description: String::new(),
         });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -704,30 +716,30 @@ pub(crate) fn modify_verified_access_endpoint(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VerifiedAccessEndpointId")?;
-    let (e, tags) = {
-        let accounts = svc.state.read();
-        let e = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.va_endpoints.get(&id).cloned())
-            .unwrap_or(VerifiedAccessEndpoint {
-                id: id.clone(),
-                group_id: "vagr-0".to_string(),
-                instance_id: "vai-0".to_string(),
-                endpoint_type: "load-balancer".to_string(),
-                attachment_type: "vpc".to_string(),
-            });
-        let tags = accounts
-            .get(&req.account_id)
-            .map(|s| s.tags_for(&id).to_vec())
-            .unwrap_or_default();
-        (e, tags)
-    };
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let e = state.va_endpoints.get_mut(&id).ok_or_else(|| {
+        AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidVerifiedAccessEndpointId.NotFound",
+            format!("The VerifiedAccessEndpointId '{id}' does not exist"),
+        )
+    })?;
+    if let Some(desc) = req.query_params.get("Description") {
+        e.description = desc.clone();
+    }
+    // An endpoint can be reassigned to a different group.
+    if let Some(group) = req.query_params.get("VerifiedAccessGroupId") {
+        e.group_id = group.clone();
+    }
+    let snapshot = e.clone();
+    let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
         "ModifyVerifiedAccessEndpoint",
         &req.request_id,
         &format!(
             "<verifiedAccessEndpoint>{}</verifiedAccessEndpoint>",
-            endpoint_xml(&e, &tags)
+            endpoint_xml(&snapshot, &tags)
         ),
     ))
 }
@@ -788,26 +800,90 @@ pub(crate) fn get_verified_access_endpoint_targets(
 
 // ---- logging + export ----
 
+fn logging_configuration_xml(inst: &str, cfg: &VerifiedAccessLoggingConfig) -> String {
+    let opt = |tag: &str, v: &Option<String>| match v {
+        Some(s) => ec2_elem(tag, s),
+        None => String::new(),
+    };
+    let log_version = cfg.log_version.as_deref().unwrap_or("ocsf-1.0.0-rc.2");
+    format!(
+        "{}<accessLogs>\
+         <cloudWatchLogs><enabled>{}</enabled>{}</cloudWatchLogs>\
+         <kinesisDataFirehose><enabled>{}</enabled>{}</kinesisDataFirehose>\
+         <s3><enabled>{}</enabled>{}{}{}</s3>\
+         <logVersion>{}</logVersion><includeTrustContext>{}</includeTrustContext>\
+         </accessLogs>",
+        ec2_elem("verifiedAccessInstanceId", inst),
+        cfg.cloudwatch_logs_enabled,
+        opt("logGroup", &cfg.cloudwatch_logs_group),
+        cfg.kinesis_firehose_enabled,
+        opt("deliveryStream", &cfg.kinesis_firehose_stream),
+        cfg.s3_enabled,
+        opt("bucketName", &cfg.s3_bucket_name),
+        opt("prefix", &cfg.s3_prefix),
+        opt("bucketOwner", &cfg.s3_bucket_owner),
+        log_version,
+        cfg.include_trust_context,
+    )
+}
+
 pub(crate) fn describe_verified_access_instance_logging_configurations(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_max_results(&req.query_params, 1, 10)?;
+    let wanted = indexed_list(&req.query_params, "VerifiedAccessInstanceId");
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let mut items: Vec<String> = state
+        .va_logging
+        .iter()
+        .filter(|(inst, _)| wanted.is_empty() || wanted.contains(inst))
+        .map(|(inst, cfg)| {
+            format!(
+                "<loggingConfiguration>{}</loggingConfiguration>",
+                logging_configuration_xml(inst, cfg)
+            )
+        })
+        .collect();
+    items.sort();
     Ok(Ec2Service::respond(
         "DescribeVerifiedAccessInstanceLoggingConfigurations",
         &req.request_id,
-        &ec2_list("loggingConfigurationSet", &[]),
+        &ec2_list("loggingConfigurationSet", &items),
     ))
 }
 
 pub(crate) fn modify_verified_access_instance_logging_configuration(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let inst = require(&req.query_params, "VerifiedAccessInstanceId")?;
+    let qp = &req.query_params;
+    let bool_qp = |k: &str| qp.get(k).map(|v| v == "true").unwrap_or(false);
+    let cfg = VerifiedAccessLoggingConfig {
+        log_version: qp.get("AccessLogs.LogVersion").cloned(),
+        include_trust_context: bool_qp("AccessLogs.IncludeTrustContext"),
+        cloudwatch_logs_enabled: bool_qp("AccessLogs.CloudWatchLogs.Enabled"),
+        cloudwatch_logs_group: qp.get("AccessLogs.CloudWatchLogs.LogGroup").cloned(),
+        kinesis_firehose_enabled: bool_qp("AccessLogs.KinesisDataFirehose.Enabled"),
+        kinesis_firehose_stream: qp
+            .get("AccessLogs.KinesisDataFirehose.DeliveryStream")
+            .cloned(),
+        s3_enabled: bool_qp("AccessLogs.S3.Enabled"),
+        s3_bucket_name: qp.get("AccessLogs.S3.BucketName").cloned(),
+        s3_prefix: qp.get("AccessLogs.S3.Prefix").cloned(),
+        s3_bucket_owner: qp.get("AccessLogs.S3.BucketOwner").cloned(),
+    };
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        state.va_logging.insert(inst.clone(), cfg.clone());
+    }
     let body = format!(
-        "<loggingConfiguration>{}<accessLogs><logVersion>ocsf-1.0.0-rc.2</logVersion></accessLogs></loggingConfiguration>",
-        ec2_elem("verifiedAccessInstanceId", &inst),
+        "<loggingConfiguration>{}</loggingConfiguration>",
+        logging_configuration_xml(&inst, &cfg)
     );
     Ok(Ec2Service::respond(
         "ModifyVerifiedAccessInstanceLoggingConfiguration",
@@ -831,4 +907,104 @@ pub(crate) fn export_verified_access_instance_client_configuration(
         &req.request_id,
         &body,
     ))
+}
+
+#[cfg(test)]
+mod va_tests {
+    use super::*;
+    use crate::test_support::ec2_request as req;
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn modify_endpoint_persists_description_and_group() {
+        let svc = Ec2Service::new();
+        let created = body(
+            create_verified_access_endpoint(
+                &svc,
+                &req(
+                    "CreateVerifiedAccessEndpoint",
+                    &[
+                        ("VerifiedAccessGroupId", "vagr-1"),
+                        ("EndpointType", "load-balancer"),
+                        ("AttachmentType", "vpc"),
+                        ("Description", "orig"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let id = created
+            .split("<verifiedAccessEndpointId>")
+            .nth(1)
+            .and_then(|s| s.split("</verifiedAccessEndpointId>").next())
+            .unwrap()
+            .to_string();
+        assert!(created.contains("<description>orig</description>"));
+
+        modify_verified_access_endpoint(
+            &svc,
+            &req(
+                "ModifyVerifiedAccessEndpoint",
+                &[
+                    ("VerifiedAccessEndpointId", &id),
+                    ("Description", "updated"),
+                    ("VerifiedAccessGroupId", "vagr-2"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let desc = body(
+            describe_verified_access_endpoints(&svc, &req("DescribeVerifiedAccessEndpoints", &[]))
+                .unwrap(),
+        );
+        assert!(
+            desc.contains("<description>updated</description>"),
+            "{desc}"
+        );
+        assert!(
+            desc.contains("<verifiedAccessGroupId>vagr-2</verifiedAccessGroupId>"),
+            "{desc}"
+        );
+    }
+
+    #[test]
+    fn logging_configuration_persists_and_describes() {
+        let svc = Ec2Service::new();
+        modify_verified_access_instance_logging_configuration(
+            &svc,
+            &req(
+                "ModifyVerifiedAccessInstanceLoggingConfiguration",
+                &[
+                    ("VerifiedAccessInstanceId", "vai-1"),
+                    ("AccessLogs.CloudWatchLogs.Enabled", "true"),
+                    ("AccessLogs.CloudWatchLogs.LogGroup", "/aws/va/logs"),
+                    ("AccessLogs.IncludeTrustContext", "true"),
+                    ("AccessLogs.LogVersion", "ocsf-1.0.0-rc.2"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let desc = body(
+            describe_verified_access_instance_logging_configurations(
+                &svc,
+                &req("DescribeVerifiedAccessInstanceLoggingConfigurations", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(
+            desc.contains("<verifiedAccessInstanceId>vai-1</verifiedAccessInstanceId>"),
+            "{desc}"
+        );
+        assert!(desc.contains("<logGroup>/aws/va/logs</logGroup>"), "{desc}");
+        assert!(desc.contains("<enabled>true</enabled>"), "{desc}");
+        assert!(
+            desc.contains("<includeTrustContext>true</includeTrustContext>"),
+            "{desc}"
+        );
+    }
 }

@@ -1815,14 +1815,20 @@ async fn ec2_describe_addresses_attribute() {
 async fn ec2_modify_address_attribute() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    // The reverse-DNS attribute is set on a real Elastic IP, so allocate one.
+    let alloc = c.allocate_address().send().await.unwrap();
+    let id = alloc.allocation_id().unwrap();
     let r = c
         .modify_address_attribute()
-        .allocation_id("eipalloc-1")
+        .allocation_id(id)
         .domain_name("x.com")
         .send()
         .await
         .unwrap();
-    assert!(r.address().is_some());
+    assert_eq!(
+        r.address().and_then(|a| a.ptr_record()),
+        Some("x.com")
+    );
 }
 
 #[test_action("ec2", "ResetAddressAttribute", checksum = "6d8e2e96")]
@@ -1830,9 +1836,11 @@ async fn ec2_modify_address_attribute() {
 async fn ec2_reset_address_attribute() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let alloc = c.allocate_address().send().await.unwrap();
+    let id = alloc.allocation_id().unwrap();
     let r = c
         .reset_address_attribute()
-        .allocation_id("eipalloc-1")
+        .allocation_id(id)
         .attribute(aws_sdk_ec2::types::AddressAttributeName::DomainName)
         .send()
         .await
@@ -4423,9 +4431,19 @@ async fn ec2_delete_vpc_endpoint_service_configurations() {
 async fn ec2_modify_vpc_endpoint_service_configuration() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let id = c
+        .create_vpc_endpoint_service_configuration()
+        .send()
+        .await
+        .unwrap()
+        .service_configuration()
+        .unwrap()
+        .service_id()
+        .unwrap()
+        .to_string();
     let r = c
         .modify_vpc_endpoint_service_configuration()
-        .service_id("vpce-svc-1")
+        .service_id(&id)
         .send()
         .await
         .unwrap();
@@ -4437,9 +4455,19 @@ async fn ec2_modify_vpc_endpoint_service_configuration() {
 async fn ec2_describe_vpc_endpoint_service_permissions() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let id = c
+        .create_vpc_endpoint_service_configuration()
+        .send()
+        .await
+        .unwrap()
+        .service_configuration()
+        .unwrap()
+        .service_id()
+        .unwrap()
+        .to_string();
     let r = c
         .describe_vpc_endpoint_service_permissions()
-        .service_id("vpce-svc-1")
+        .service_id(&id)
         .send()
         .await
         .unwrap();
@@ -4451,8 +4479,18 @@ async fn ec2_describe_vpc_endpoint_service_permissions() {
 async fn ec2_modify_vpc_endpoint_service_permissions() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    let id = c
+        .create_vpc_endpoint_service_configuration()
+        .send()
+        .await
+        .unwrap()
+        .service_configuration()
+        .unwrap()
+        .service_id()
+        .unwrap()
+        .to_string();
     c.modify_vpc_endpoint_service_permissions()
-        .service_id("vpce-svc-1")
+        .service_id(&id)
         .send()
         .await
         .unwrap();

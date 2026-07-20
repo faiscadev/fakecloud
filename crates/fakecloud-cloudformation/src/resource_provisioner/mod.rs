@@ -3194,6 +3194,8 @@ fn synth_acm_domain_validation(
             resource_record_name: Some(format!("_amzn-validations.{name}.")),
             resource_record_type: Some("CNAME".to_string()),
             resource_record_value: Some(format!("{}.acm-validations.aws.", Uuid::new_v4())),
+            http_redirect_from: None,
+            http_redirect_to: None,
         })
         .collect()
 }

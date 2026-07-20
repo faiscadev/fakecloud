@@ -1051,13 +1051,44 @@ async fn ssm_get_calendar_state() {
     let server = TestServer::start().await;
     let client = server.ssm_client().await;
 
+    // GetCalendarState evaluates a real Change Calendar document, so one must
+    // exist first (querying a nonexistent calendar is InvalidDocument on AWS).
+    // A DEFAULT_OPEN calendar with a single CLOSED window lets us assert both
+    // states from one document.
+    client
+        .create_document()
+        .name("cal")
+        .document_type(aws_sdk_ssm::types::DocumentType::ChangeCalendar)
+        .document_format(aws_sdk_ssm::types::DocumentFormat::Text)
+        .content(
+            "BEGIN:VCALENDAR\r\nPRODID:-//AWS//Change Calendar 1.0//EN\r\nVERSION:2.0\r\n\
+             X-CALENDAR-TYPE:DEFAULT_OPEN\r\nBEGIN:VEVENT\r\n\
+             DTSTART:20221130T230000Z\r\nDTEND:20221201T010000Z\r\nUID:e1\r\n\
+             SUMMARY:freeze\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        )
+        .send()
+        .await
+        .unwrap();
+
+    // Outside the freeze window -> OPEN (the calendar default).
     let resp = client
         .get_calendar_state()
         .calendar_names("arn:aws:ssm:us-east-1:123456789012:document/cal")
+        .at_time("2022-11-30T12:00:00Z")
         .send()
         .await
         .unwrap();
     assert_eq!(resp.state(), Some(&aws_sdk_ssm::types::CalendarState::Open));
+
+    // Inside the freeze window -> CLOSED.
+    let resp = client
+        .get_calendar_state()
+        .calendar_names("arn:aws:ssm:us-east-1:123456789012:document/cal")
+        .at_time("2022-11-30T23:30:00Z")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.state(), Some(&aws_sdk_ssm::types::CalendarState::Closed));
 }
 
 #[tokio::test]

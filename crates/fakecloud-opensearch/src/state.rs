@@ -130,6 +130,13 @@ pub struct Application {
     /// Capabilities registered on this application keyed by capability name.
     #[serde(default)]
     pub capabilities: BTreeMap<String, Value>,
+    /// Data-source attachments keyed by attachmentId (AttachDataSource).
+    #[serde(default)]
+    pub attachments: BTreeMap<String, Value>,
+    /// Whether this application is registered as the account default
+    /// (PutDefaultApplicationSetting).
+    #[serde(default)]
+    pub is_default_setting: bool,
 }
 
 /// An application migration (2021 API only), account-scoped.

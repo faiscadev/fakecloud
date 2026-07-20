@@ -78,12 +78,26 @@ impl EcsService {
     }
 
     pub fn run_task(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        self.run_task_impl(request, Vec::new())
+    }
+
+    /// Shared RunTask/StartTask core. `explicit_instances` is empty for RunTask
+    /// (placement is chosen by strategy) and holds the caller-specified
+    /// container-instance references for StartTask (one task placed per entry).
+    fn run_task_impl(
+        &self,
+        request: &AwsRequest,
+        explicit_instances: Vec<String>,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let body = request.json_body();
+        let start_task = !explicit_instances.is_empty();
         let td_ref = req_str(&body, "taskDefinition")?;
         let cluster_ref = opt_str(&body, "cluster");
         let cluster_name = EcsState::resolve_cluster_name(cluster_ref);
+        // StartTask places tasks on registered EC2/EXTERNAL container instances,
+        // so it is never FARGATE; RunTask defaults to FARGATE.
         let launch_type = opt_str(&body, "launchType")
-            .unwrap_or("FARGATE")
+            .unwrap_or(if start_task { "EC2" } else { "FARGATE" })
             .to_string();
         let placement_constraints: Vec<Value> = body
             .get("placementConstraints")
@@ -97,14 +111,20 @@ impl EcsService {
             .unwrap_or_default();
         // AWS caps RunTask at 1..=10 tasks per call and rejects anything else
         // with InvalidParameterException — it does NOT silently clamp to 1.
-        let count = match body.get("count").and_then(|v| v.as_i64()) {
-            Some(n) if (1..=10).contains(&n) => n as usize,
-            Some(n) => {
-                return Err(invalid_parameter(format!(
-                    "count should be between 1 and 10, inclusive. count={n}"
-                )))
+        // StartTask instead launches exactly one task per specified container
+        // instance.
+        let count = if start_task {
+            explicit_instances.len()
+        } else {
+            match body.get("count").and_then(|v| v.as_i64()) {
+                Some(n) if (1..=10).contains(&n) => n as usize,
+                Some(n) => {
+                    return Err(invalid_parameter(format!(
+                        "count should be between 1 and 10, inclusive. count={n}"
+                    )))
+                }
+                None => 1,
             }
-            None => 1,
         };
         // Defaulted to `family:<taskDefinitionFamily>` below once the task
         // definition is resolved, mirroring how real AWS labels a bare RunTask.
@@ -200,7 +220,11 @@ impl EcsService {
 
         let mut spawned_tasks: Vec<String> = Vec::new();
         let mut task_jsons: Vec<Value> = Vec::new();
-        for _ in 0..count {
+        // `task_index` maps a StartTask task to its explicit container instance;
+        // for RunTask (count from `count`) it is unused, so a plain range loop
+        // is clearer than restructuring around the two shapes.
+        #[allow(clippy::needless_range_loop)]
+        for task_index in 0..count {
             let task_id = uuid::Uuid::new_v4().to_string().replace('-', "");
             let task_arn = state.task_arn(&cluster_name, &task_id);
             let containers: Vec<Container> = td_containers
@@ -332,9 +356,28 @@ impl EcsService {
                 volume_configurations: volume_configurations.clone(),
                 task_set_arn: None,
             };
-            // Best-effort placement for EC2 / EXTERNAL launch types.
-            if launch_type != "FARGATE" {
-                if let Some(arn) = crate::placement::select_container_instance(
+            // Placement. StartTask targets the caller's explicit container
+            // instances (one per task); RunTask picks by strategy. Either way we
+            // resolve to a real registered instance and bump its pending count.
+            let placement_arn = if start_task {
+                let reference = &explicit_instances[task_index];
+                let tail = reference
+                    .rsplit_once("container-instance/")
+                    .map(|(_, t)| t)
+                    .unwrap_or(reference);
+                match super::helpers::resolve_container_instance_key(state, tail) {
+                    Some(key) => state
+                        .container_instances
+                        .get(&key)
+                        .map(|ci| ci.container_instance_arn.clone()),
+                    None => {
+                        return Err(invalid_parameter(format!(
+                            "Container instance {reference} is not registered in cluster {cluster_name}"
+                        )));
+                    }
+                }
+            } else if launch_type != "FARGATE" {
+                crate::placement::select_container_instance(
                     state,
                     &cluster_name,
                     &placement_constraints,
@@ -342,15 +385,18 @@ impl EcsService {
                     task.group.as_deref(),
                     &td_arn,
                     &launch_type,
-                ) {
-                    task.container_instance_arn = Some(arn.clone());
-                    if let Some(ci) = state
-                        .container_instances
-                        .values_mut()
-                        .find(|ci| ci.container_instance_arn == arn)
-                    {
-                        ci.pending_tasks_count += 1;
-                    }
+                )
+            } else {
+                None
+            };
+            if let Some(arn) = placement_arn {
+                task.container_instance_arn = Some(arn.clone());
+                if let Some(ci) = state
+                    .container_instances
+                    .values_mut()
+                    .find(|ci| ci.container_instance_arn == arn)
+                {
+                    ci.pending_tasks_count += 1;
                 }
             }
             state.tasks.insert(task_id.clone(), task.clone());
@@ -434,11 +480,24 @@ impl EcsService {
     }
 
     pub(super) fn start_task(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        // StartTask targets explicit container instances. Our ECS emulator
-        // has no concept of registered container instances yet (Batch 4);
-        // fall through to the same semantics as RunTask so the API is
-        // usable while the container-instance surface is pending.
-        self.run_task(request)
+        // StartTask places one task on each caller-specified container instance
+        // (as opposed to RunTask, which picks placement by strategy).
+        let body = request.json_body();
+        let instances: Vec<String> = body
+            .get("containerInstances")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if instances.is_empty() {
+            return Err(invalid_parameter(
+                "containerInstances is required and must not be empty for StartTask",
+            ));
+        }
+        self.run_task_impl(request, instances)
     }
 
     pub(super) async fn stop_task(

@@ -247,6 +247,9 @@ pub struct ElasticIp {
     pub public_ipv4_pool: String,
     #[serde(default = "default_eip_network_border_group")]
     pub network_border_group: String,
+    /// Reverse-DNS (PTR) record configured via ModifyAddressAttribute.
+    #[serde(default)]
+    pub domain_name: Option<String>,
 }
 
 fn default_eip_public_ipv4_pool() -> String {
@@ -696,6 +699,15 @@ pub struct EndpointService {
     pub payer_responsibility: String,
     #[serde(default)]
     pub nlb_arns: Vec<String>,
+    #[serde(default)]
+    pub gwlb_arns: Vec<String>,
+    #[serde(default)]
+    pub supported_ip_address_types: Vec<String>,
+    #[serde(default)]
+    pub private_dns_name: Option<String>,
+    /// Principal ARNs granted access via ModifyVpcEndpointServicePermissions.
+    #[serde(default)]
+    pub allowed_principals: Vec<String>,
 }
 
 /// A VPC endpoint connection notification.
@@ -1032,6 +1044,34 @@ pub struct VerifiedAccessEndpoint {
     pub instance_id: String,
     pub endpoint_type: String,
     pub attachment_type: String,
+    #[serde(default)]
+    pub description: String,
+}
+
+/// Access-logging configuration for a Verified Access instance, set by
+/// ModifyVerifiedAccessInstanceLoggingConfiguration.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct VerifiedAccessLoggingConfig {
+    #[serde(default)]
+    pub log_version: Option<String>,
+    #[serde(default)]
+    pub include_trust_context: bool,
+    #[serde(default)]
+    pub cloudwatch_logs_enabled: bool,
+    #[serde(default)]
+    pub cloudwatch_logs_group: Option<String>,
+    #[serde(default)]
+    pub kinesis_firehose_enabled: bool,
+    #[serde(default)]
+    pub kinesis_firehose_stream: Option<String>,
+    #[serde(default)]
+    pub s3_enabled: bool,
+    #[serde(default)]
+    pub s3_bucket_name: Option<String>,
+    #[serde(default)]
+    pub s3_prefix: Option<String>,
+    #[serde(default)]
+    pub s3_bucket_owner: Option<String>,
 }
 
 /// A Network Insights reachability path.
@@ -1662,6 +1702,9 @@ pub struct Ec2State {
     /// endpoint-id -> policy document.
     #[serde(default)]
     pub va_endpoint_policies: BTreeMap<String, String>,
+    /// instance-id -> access-logging configuration.
+    #[serde(default)]
+    pub va_logging: BTreeMap<String, VerifiedAccessLoggingConfig>,
     #[serde(default)]
     pub ni_paths: BTreeMap<String, NetworkInsightsPath>,
     #[serde(default)]
