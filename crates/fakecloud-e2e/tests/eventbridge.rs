@@ -1418,7 +1418,8 @@ async fn eb_put_targets_full_field_roundtrip() {
         .id("full-target")
         .arn("arn:aws:sqs:us-east-1:123456789012:queue.fifo")
         .role_arn(target_role_arn)
-        .input_path("$.detail")
+        // InputPath / Input / InputTransformer are mutually exclusive on a Target
+        // (AWS returns a FailedEntry otherwise); this target exercises InputTransformer.
         .dead_letter_config(DeadLetterConfig::builder().arn(dlq_arn).build())
         .retry_policy(
             RetryPolicy::builder()
@@ -1560,7 +1561,8 @@ async fn eb_put_targets_full_field_roundtrip() {
     assert_eq!(got.id(), "full-target");
     assert_eq!(got.arn(), "arn:aws:sqs:us-east-1:123456789012:queue.fifo");
     assert_eq!(got.role_arn(), Some(target_role_arn));
-    assert_eq!(got.input_path(), Some("$.detail"));
+    // InputPath omitted: mutually exclusive with the InputTransformer this target sets.
+    assert_eq!(got.input_path(), None);
 
     let dlc = got.dead_letter_config().expect("dlc");
     assert_eq!(dlc.arn(), Some(dlq_arn));
