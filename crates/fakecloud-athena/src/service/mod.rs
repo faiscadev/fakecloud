@@ -1152,6 +1152,8 @@ mod tests {
             parameters: std::collections::BTreeMap::new(),
             created_at: Utc::now(),
             catalog_id: "123456789012".to_string(),
+            target_database: None,
+            federated_database: None,
             tables: std::collections::BTreeMap::new(),
         }
     }
