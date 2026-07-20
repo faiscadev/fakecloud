@@ -480,17 +480,45 @@ pub(crate) fn matches_value(pattern: &Value, event_value: &Value) -> bool {
             true
         }
         // A content-filter list matches if ANY of its elements matches the
-        // event value. When the event value is itself an array, AWS matches
-        // if ANY element of the event array satisfies the filter element
-        // (the whole array is still passed first so presence-style matchers
-        // like `exists` see it), so array-valued event fields are matchable.
-        Value::Array(arr) => arr.iter().any(|elem| {
-            matches_single(elem, event_value)
-                || matches!(event_value, Value::Array(items)
-                    if items.iter().any(|item| matches_single(elem, item)))
-        }),
+        // event value.
+        Value::Array(arr) => arr
+            .iter()
+            .any(|elem| matches_content_filter(elem, event_value)),
         _ => false,
     }
+}
+
+/// Evaluate a single content-filter element against an event value, applying
+/// the correct array-vs-matcher semantics.
+///
+/// Positive matchers (`prefix`, `suffix`, `exists`, plain equality, ...) match
+/// if the whole value matches (so presence matchers like `exists` see the
+/// array) or, for an array-valued field, if ANY element matches.
+///
+/// Negation matchers (`anything-but`) invert this: the filter matches only when
+/// NONE of the event values are excluded. Against an array field that means
+/// EVERY element must individually satisfy the negation. Feeding the whole array
+/// to the scalar matcher (as positive matchers do) would always pass -- a
+/// scalar forbidden value never equals the whole array -- silently bypassing
+/// the filter and over-delivering to targets.
+fn matches_content_filter(elem: &Value, event_value: &Value) -> bool {
+    if is_negation_matcher(elem) {
+        match event_value {
+            Value::Array(items) => items.iter().all(|item| matches_single(elem, item)),
+            other => matches_single(elem, other),
+        }
+    } else {
+        matches_single(elem, event_value)
+            || matches!(event_value, Value::Array(items)
+                if items.iter().any(|item| matches_single(elem, item)))
+    }
+}
+
+/// A content-filter element is a negation matcher when it is an object carrying
+/// an `anything-but` key (in any of its sub-forms: string, list, number, or a
+/// nested inner matcher).
+fn is_negation_matcher(elem: &Value) -> bool {
+    matches!(elem, Value::Object(obj) if obj.contains_key("anything-but"))
 }
 
 pub(crate) fn matches_single(pattern_elem: &Value, event_value: &Value) -> bool {

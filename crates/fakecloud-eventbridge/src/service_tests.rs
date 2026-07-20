@@ -368,6 +368,112 @@ fn array_valued_field_matches_prefix_filter() {
     ));
 }
 
+// ---- anything-but against array-valued event fields (filter bypass) ----
+
+#[test]
+fn anything_but_array_field_excludes_when_element_forbidden() {
+    let pattern = r#"{"detail":{"category":[{"anything-but":["blocked"]}]}}"#;
+    // Array contains only the forbidden value -> must NOT match.
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"category":["blocked"]}"#
+    ));
+    // Array contains an allowed value only -> match.
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"category":["allowed"]}"#
+    ));
+    // Array contains one allowed and one forbidden -> one element is excluded,
+    // so the whole array must NOT match.
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"category":["allowed","blocked"]}"#
+    ));
+}
+
+#[test]
+fn anything_but_string_array_field_excludes() {
+    let pattern = r#"{"detail":{"category":[{"anything-but":"blocked"}]}}"#;
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"category":["blocked"]}"#
+    ));
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"category":["allowed"]}"#
+    ));
+}
+
+#[test]
+fn anything_but_number_array_field_excludes() {
+    let pattern = r#"{"detail":{"code":[{"anything-but":404}]}}"#;
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"code":[404]}"#
+    ));
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"code":[200]}"#
+    ));
+    // Mixed array with one forbidden value -> NO match.
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"code":[200,404]}"#
+    ));
+}
+
+#[test]
+fn anything_but_nested_prefix_array_field_excludes() {
+    let pattern = r#"{"detail":{"name":[{"anything-but":{"prefix":"tmp-"}}]}}"#;
+    // Every element must avoid the forbidden prefix.
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"name":["prod-a","prod-b"]}"#
+    ));
+    // One element hits the forbidden prefix -> NO match.
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"name":["prod-a","tmp-b"]}"#
+    ));
+}
+
+#[test]
+fn positive_matcher_array_field_still_matches_any_element() {
+    // Regression guard: positive matchers keep ANY-element semantics.
+    assert!(test_matches(
+        Some(r#"{"detail":{"tags":["b"]}}"#),
+        "app",
+        "Event",
+        r#"{"tags":["a","b"]}"#
+    ));
+    assert!(test_matches(
+        Some(r#"{"detail":{"tags":[{"prefix":"pre"}]}}"#),
+        "app",
+        "Event",
+        r#"{"tags":["nope","prefixed"]}"#
+    ));
+}
+
 // ---- anything-but nested matchers (L1) ----
 
 #[test]
