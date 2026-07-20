@@ -515,11 +515,23 @@ async fn ecs_start_task() {
         .await
         .unwrap();
     register_conformance_task_def(&client, "confo-start-td").await;
+    // StartTask places the task on a real registered container instance.
+    let ci = client
+        .register_container_instance()
+        .cluster("confo-start")
+        .send()
+        .await
+        .unwrap();
+    let ci_arn = ci
+        .container_instance()
+        .and_then(|c| c.container_instance_arn())
+        .unwrap()
+        .to_string();
     let resp = client
         .start_task()
         .cluster("confo-start")
         .task_definition("confo-start-td")
-        .container_instances("ci-placeholder")
+        .container_instances(ci_arn)
         .send()
         .await
         .unwrap();

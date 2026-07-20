@@ -686,26 +686,44 @@ impl AutoScalingService {
         Ok(self.ok("SetDesiredCapacity", String::new(), req))
     }
 
-    fn delete_auto_scaling_group(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+    async fn delete_auto_scaling_group(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let name = required_query_param(req, "AutoScalingGroupName")?;
         let force = optional_query_param(req, "ForceDelete")
             .map(|v| v == "true")
             .unwrap_or(false);
-        let mut accounts = self.state.write();
-        let st = accounts.get_or_create(&req.account_id);
-        if let Some(g) = st.groups.get(&name) {
-            if !g.instances.is_empty() && !force {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ResourceInUse",
-                    format!(
-                        "You cannot delete an AutoScalingGroup while there are instances or \
-                         pending Spot instance requests still in the group. ({name})"
-                    ),
-                ));
+        // Collect the backing instance ids under the lock, then drop the group.
+        // ForceDelete must terminate them; without force a non-empty group is an
+        // error. The EC2 termination happens off the lock below.
+        let backing_ids = {
+            let mut accounts = self.state.write();
+            let st = accounts.get_or_create(&req.account_id);
+            if let Some(g) = st.groups.get(&name) {
+                if !g.instances.is_empty() && !force {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ResourceInUse",
+                        format!(
+                            "You cannot delete an AutoScalingGroup while there are instances or \
+                             pending Spot instance requests still in the group. ({name})"
+                        ),
+                    ));
+                }
             }
-        }
-        st.groups.remove(&name);
+            st.groups
+                .remove(&name)
+                .map(|g| {
+                    g.instances
+                        .into_iter()
+                        .map(|i| i.instance_id)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        };
+        // ForceDelete reaps the backing EC2 instances instead of leaking them.
+        self.terminate_ec2_instances(&backing_ids, req).await;
         Ok(self.ok("DeleteAutoScalingGroup", String::new(), req))
     }
 
@@ -1273,7 +1291,7 @@ impl AwsService for AutoScalingService {
             "CreateAutoScalingGroup" => self.create_auto_scaling_group(&req).await,
             "DescribeAutoScalingGroups" => self.describe_auto_scaling_groups(&req),
             "UpdateAutoScalingGroup" => self.update_auto_scaling_group(&req).await,
-            "DeleteAutoScalingGroup" => self.delete_auto_scaling_group(&req),
+            "DeleteAutoScalingGroup" => self.delete_auto_scaling_group(&req).await,
             "SetDesiredCapacity" => self.set_desired_capacity(&req).await,
             "DescribeAutoScalingInstances" => self.describe_auto_scaling_instances(&req),
             "DescribeScalingActivities" => self.describe_scaling_activities(&req),
@@ -1423,6 +1441,69 @@ mod tests {
         ))) {
             Err(e) => assert!(format!("{e:?}").contains("ValidationError")),
             Ok(_) => panic!("desired capacity above MaxSize must be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn force_delete_terminates_backing_ec2_instances() {
+        let account = "123456789012";
+        let ec2_state: fakecloud_ec2::SharedEc2State = Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(account, "us-east-1", ""),
+        ));
+        let s = AutoScalingService::new(Arc::new(parking_lot::RwLock::new(
+            AutoScalingAccounts::new(),
+        )))
+        .with_ec2(ec2_state.clone(), None);
+
+        s.handle(req(
+            "CreateLaunchConfiguration",
+            &[
+                ("LaunchConfigurationName", "lc1"),
+                ("ImageId", "ami-1"),
+                ("InstanceType", "t3.micro"),
+            ],
+        ))
+        .await
+        .unwrap();
+        s.handle(req(
+            "CreateAutoScalingGroup",
+            &[
+                ("AutoScalingGroupName", "asg1"),
+                ("LaunchConfigurationName", "lc1"),
+                ("MinSize", "2"),
+                ("MaxSize", "5"),
+                ("DesiredCapacity", "2"),
+                ("AvailabilityZones.member.1", "us-east-1a"),
+            ],
+        ))
+        .await
+        .unwrap();
+
+        // Two real EC2 instances were launched and are running.
+        let running: Vec<String> = ec2_state
+            .read()
+            .default_ref()
+            .instances
+            .iter()
+            .filter(|(_, i)| i.state_name != "terminated")
+            .map(|(id, _)| id.clone())
+            .collect();
+        assert_eq!(running.len(), 2, "ASG must launch 2 real EC2 instances");
+
+        // Force-delete the non-empty group -> the backing instances terminate.
+        s.handle(req(
+            "DeleteAutoScalingGroup",
+            &[("AutoScalingGroupName", "asg1"), ("ForceDelete", "true")],
+        ))
+        .await
+        .unwrap();
+        let ec2 = ec2_state.read();
+        for id in &running {
+            assert_eq!(
+                ec2.default_ref().instances.get(id).unwrap().state_name,
+                "terminated",
+                "instance {id} must be terminated by ForceDelete"
+            );
         }
     }
 

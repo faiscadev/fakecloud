@@ -91,6 +91,21 @@ pub struct AccountState {
     /// Resource tags keyed by resource ARN (applications and environments).
     #[serde(default)]
     pub tags: BTreeMap<String, Vec<ResourceTag>>,
+    /// Custom platform versions keyed by platform ARN (CreatePlatformVersion).
+    #[serde(default)]
+    pub platforms: BTreeMap<String, CustomPlatform>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPlatform {
+    pub arn: String,
+    pub name: String,
+    pub version: String,
+    pub owner: String,
+    pub status: String,
+    pub category: String,
+    pub date_created: DateTime<Utc>,
+    pub date_updated: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

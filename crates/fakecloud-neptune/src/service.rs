@@ -676,16 +676,44 @@ impl NeptuneService {
     fn failover_db_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let id = optional_query_param(req, "DBClusterIdentifier")
             .ok_or_else(|| db_cluster_not_found("<unspecified>"))?;
-        let accounts = self.state.read();
-        let empty = NeptuneState::new(&req.account_id, &req.region);
-        let st = accounts.get(&req.account_id).unwrap_or(&empty);
+        // Optional: promote a specific instance to writer, else the first
+        // non-writer member is promoted.
+        let target = optional_query_param(req, "TargetDBInstanceIdentifier");
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
         let cluster = st
             .clusters
-            .get(&id)
+            .get_mut(&id)
             .ok_or_else(|| db_cluster_not_found(&id))?;
+
+        // Pick the new writer: the requested target if valid, otherwise the
+        // first member that isn't already the writer.
+        let new_writer = target
+            .as_deref()
+            .filter(|t| {
+                cluster
+                    .members
+                    .iter()
+                    .any(|m| m.db_instance_identifier == *t)
+            })
+            .map(String::from)
+            .or_else(|| {
+                cluster
+                    .members
+                    .iter()
+                    .find(|m| !m.is_writer)
+                    .map(|m| m.db_instance_identifier.clone())
+            });
+        if let Some(writer) = new_writer {
+            for m in &mut cluster.members {
+                m.is_writer = m.db_instance_identifier == writer;
+            }
+        }
+        let cluster = cluster.clone();
         Ok(ok_xml(
             "FailoverDBCluster",
-            format!("<DBCluster>{}</DBCluster>", xml::db_cluster(cluster)),
+            format!("<DBCluster>{}</DBCluster>", xml::db_cluster(&cluster)),
             &req.request_id,
         ))
     }
@@ -922,6 +950,10 @@ impl NeptuneService {
         let cluster_pmw = cluster.preferred_maintenance_window.clone();
         let cluster_subnet = cluster.db_subnet_group.clone();
         let cluster_engine_version = cluster.engine_version.clone();
+        // A Neptune instance inherits its cluster's storage encryption; it is a
+        // cluster-level property (there is no per-instance StorageEncrypted knob).
+        let cluster_storage_encrypted = cluster.storage_encrypted;
+        let cluster_kms_key_id = cluster.kms_key_id.clone();
         let az = cluster
             .availability_zones
             .first()
@@ -954,8 +986,8 @@ impl NeptuneService {
             preferred_maintenance_window: optional_query_param(req, "PreferredMaintenanceWindow")
                 .unwrap_or(cluster_pmw),
             backup_retention_period: 1,
-            storage_encrypted: false,
-            kms_key_id: None,
+            storage_encrypted: cluster_storage_encrypted,
+            kms_key_id: cluster_kms_key_id,
             db_subnet_group: cluster_subnet,
             enabled_cloudwatch_logs_exports: Vec::new(),
             instance_create_time: Utc::now(),
@@ -1014,6 +1046,12 @@ impl NeptuneService {
         }
         if let Some(v) = optional_query_param(req, "AutoMinorVersionUpgrade") {
             inst.auto_minor_version_upgrade = v == "true";
+        }
+        if let Some(v) = optional_query_param(req, "PubliclyAccessible") {
+            inst.publicly_accessible = v == "true";
+        }
+        if let Some(v) = optional_query_param(req, "EngineVersion") {
+            inst.engine_version = v;
         }
         let mut inst = inst.clone();
         if let Some(new_id) =

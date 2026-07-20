@@ -664,3 +664,59 @@ fn worker_tier_environment_has_no_endpoint() {
     );
     assert!(!out.contains("<CNAME>"), "worker has no CNAME; out={out}");
 }
+
+#[test]
+fn platform_version_create_describe_list_delete_roundtrip() {
+    let svc = svc();
+    // Unknown platform describes as a service exception, not a fake "Ready".
+    assert_eq!(
+        err_code(
+            &svc,
+            "DescribePlatformVersion",
+            &[(
+                "PlatformArn",
+                "arn:aws:elasticbeanstalk:us-east-1:123456789012:platform/ghost/1.0.0",
+            )],
+        ),
+        "ElasticBeanstalkServiceException"
+    );
+
+    // Create persists a custom platform.
+    let created = body(
+        &svc,
+        "CreatePlatformVersion",
+        &[
+            ("PlatformName", "custom-node"),
+            ("PlatformVersion", "1.0.0"),
+            ("PlatformDefinitionBundle.S3Bucket", "b"),
+            ("PlatformDefinitionBundle.S3Key", "k"),
+        ],
+    );
+    assert!(
+        created.contains("<PlatformStatus>Ready</PlatformStatus>"),
+        "{created}"
+    );
+    let arn = "arn:aws:elasticbeanstalk:us-east-1:123456789012:platform/custom-node/1.0.0";
+
+    // Describe returns the created platform.
+    let described = body(&svc, "DescribePlatformVersion", &[("PlatformArn", arn)]);
+    assert!(
+        described.contains("<PlatformName>custom-node</PlatformName>"),
+        "{described}"
+    );
+    assert!(
+        described.contains("<PlatformCategory>custom</PlatformCategory>"),
+        "{described}"
+    );
+
+    // List includes it alongside the managed stacks.
+    let listed = body(&svc, "ListPlatformVersions", &[]);
+    assert!(listed.contains(arn), "custom platform in list: {listed}");
+
+    // Delete removes it; a subsequent describe is a service exception again.
+    body(&svc, "DeletePlatformVersion", &[("PlatformArn", arn)]);
+    assert_eq!(
+        err_code(&svc, "DescribePlatformVersion", &[("PlatformArn", arn)]),
+        "ElasticBeanstalkServiceException"
+    );
+}

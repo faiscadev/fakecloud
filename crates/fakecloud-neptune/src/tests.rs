@@ -181,6 +181,148 @@ async fn instance_attaches_to_cluster() {
 }
 
 #[tokio::test]
+async fn failover_flips_cluster_writer() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[("DBClusterIdentifier", "c1"), ("Engine", "neptune")],
+    )
+    .await;
+    for id in ["writer", "reader"] {
+        call(
+            &svc,
+            "CreateDBInstance",
+            &[
+                ("DBInstanceIdentifier", id),
+                ("DBInstanceClass", "db.r5.large"),
+                ("Engine", "neptune"),
+                ("DBClusterIdentifier", "c1"),
+            ],
+        )
+        .await;
+    }
+    // The first instance is the writer.
+    {
+        let st = svc.state.read();
+        let members = &st
+            .get("123456789012")
+            .unwrap()
+            .clusters
+            .get("c1")
+            .unwrap()
+            .members;
+        assert!(
+            members
+                .iter()
+                .find(|m| m.db_instance_identifier == "writer")
+                .unwrap()
+                .is_writer
+        );
+        assert!(
+            !members
+                .iter()
+                .find(|m| m.db_instance_identifier == "reader")
+                .unwrap()
+                .is_writer
+        );
+    }
+
+    // Failover with an explicit target promotes it.
+    call(
+        &svc,
+        "FailoverDBCluster",
+        &[
+            ("DBClusterIdentifier", "c1"),
+            ("TargetDBInstanceIdentifier", "reader"),
+        ],
+    )
+    .await;
+    let st = svc.state.read();
+    let members = &st
+        .get("123456789012")
+        .unwrap()
+        .clusters
+        .get("c1")
+        .unwrap()
+        .members;
+    assert!(
+        members
+            .iter()
+            .find(|m| m.db_instance_identifier == "reader")
+            .unwrap()
+            .is_writer
+    );
+    assert!(
+        !members
+            .iter()
+            .find(|m| m.db_instance_identifier == "writer")
+            .unwrap()
+            .is_writer
+    );
+}
+
+#[tokio::test]
+async fn instance_inherits_cluster_encryption_and_modify_persists_fields() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "enc"),
+            ("Engine", "neptune"),
+            ("StorageEncrypted", "true"),
+        ],
+    )
+    .await;
+    let resp = call(
+        &svc,
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "i1"),
+            ("DBInstanceClass", "db.r5.large"),
+            ("Engine", "neptune"),
+            ("DBClusterIdentifier", "enc"),
+        ],
+    )
+    .await;
+    // The instance inherits the cluster's encryption rather than hardcoding false.
+    assert!(body(&resp).contains("<StorageEncrypted>true</StorageEncrypted>"));
+
+    // ModifyDBInstance persists PubliclyAccessible + EngineVersion.
+    let resp = call(
+        &svc,
+        "ModifyDBInstance",
+        &[
+            ("DBInstanceIdentifier", "i1"),
+            ("PubliclyAccessible", "true"),
+            ("EngineVersion", "1.3.0.0"),
+        ],
+    )
+    .await;
+    let xml = body(&resp);
+    assert!(
+        xml.contains("<PubliclyAccessible>true</PubliclyAccessible>"),
+        "{xml}"
+    );
+    assert!(
+        xml.contains("<EngineVersion>1.3.0.0</EngineVersion>"),
+        "{xml}"
+    );
+
+    // And they survive a subsequent Describe.
+    let resp = call(
+        &svc,
+        "DescribeDBInstances",
+        &[("DBInstanceIdentifier", "i1")],
+    )
+    .await;
+    let xml = body(&resp);
+    assert!(xml.contains("<PubliclyAccessible>true</PubliclyAccessible>"));
+    assert!(xml.contains("<EngineVersion>1.3.0.0</EngineVersion>"));
+}
+
+#[tokio::test]
 async fn cluster_endpoint_lifecycle() {
     let svc = service();
     call(

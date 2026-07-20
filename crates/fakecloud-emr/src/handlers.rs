@@ -93,12 +93,23 @@ impl EmrService {
                 cluster.insert(out_key.into(), json!(v));
             }
         }
-        for key in ["Applications", "Tags", "Configurations", "PlacementGroups"] {
+        for key in ["Applications", "Tags", "Configurations"] {
             if let Some(arr) = body.get(key).filter(|v| v.is_array()) {
                 cluster.insert(key.into(), arr.clone());
             }
         }
+        // The RunJobFlow input field is `PlacementGroupConfigs`, but the Cluster
+        // output field (read back by DescribeCluster) is `PlacementGroups`.
+        if let Some(arr) = body.get("PlacementGroupConfigs").filter(|v| v.is_array()) {
+            cluster.insert("PlacementGroups".into(), arr.clone());
+        }
         let cluster = Value::Object(cluster);
+
+        // Inline ManagedScalingPolicy / AutoTerminationPolicy passed to
+        // RunJobFlow must be stored where Get{ManagedScaling,AutoTermination}Policy
+        // read them, otherwise they are silently dropped.
+        let managed_scaling_policy = body.get("ManagedScalingPolicy").cloned();
+        let auto_termination_policy = body.get("AutoTerminationPolicy").cloned();
 
         // Sub-resources derived from the RunJobFlow request.
         let groups = self.build_instance_groups(&instances, created);
@@ -131,6 +142,12 @@ impl EmrService {
                 if !tags.is_empty() {
                     acct.tags.insert(id.clone(), tags.clone());
                 }
+            }
+            if let Some(p) = managed_scaling_policy {
+                acct.managed_scaling_policies.insert(id.clone(), p);
+            }
+            if let Some(p) = auto_termination_policy {
+                acct.auto_termination_policies.insert(id.clone(), p);
             }
         });
 
@@ -1596,4 +1613,102 @@ fn release_labels() -> Vec<String> {
         "emr-6.14.0".into(),
         "emr-5.36.1".into(),
     ]
+}
+
+#[cfg(test)]
+mod run_job_flow_tests {
+    use super::*;
+    use crate::state::SharedEmrState;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn svc() -> EmrService {
+        let state: SharedEmrState = Arc::new(RwLock::new(MultiAccountState::new(
+            "000000000000",
+            "us-east-1",
+            "",
+        )));
+        EmrService::new(state)
+    }
+
+    fn req(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "emr".into(),
+            action: action.into(),
+            region: "us-east-1".into(),
+            account_id: "000000000000".into(),
+            request_id: "test".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn json_of(resp: AwsResponse) -> Value {
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[test]
+    fn run_job_flow_persists_placement_groups_and_inline_policies() {
+        let s = svc();
+        let resp = s
+            .run_job_flow(&req(
+                "RunJobFlow",
+                json!({
+                    "Name": "c",
+                    "Instances": {"KeepJobFlowAliveWhenNoSteps": true},
+                    "PlacementGroupConfigs": [
+                        {"InstanceRole": "MASTER", "PlacementStrategy": "SPREAD"}
+                    ],
+                    "ManagedScalingPolicy": {
+                        "ComputeLimits": {
+                            "UnitType": "Instances",
+                            "MinimumCapacityUnits": 1,
+                            "MaximumCapacityUnits": 5
+                        }
+                    },
+                    "AutoTerminationPolicy": {"IdleTimeout": 60}
+                }),
+            ))
+            .unwrap();
+        let id = json_of(resp)["JobFlowId"].as_str().unwrap().to_string();
+
+        // DescribeCluster echoes the placement groups (read from the correct
+        // input key PlacementGroupConfigs, stored under output key PlacementGroups).
+        let desc = json_of(
+            s.describe_cluster(&req("DescribeCluster", json!({"ClusterId": id})))
+                .unwrap(),
+        );
+        let pgs = desc["Cluster"]["PlacementGroups"].as_array().unwrap();
+        assert_eq!(pgs.len(), 1);
+        assert_eq!(pgs[0]["InstanceRole"], "MASTER");
+        assert_eq!(pgs[0]["PlacementStrategy"], "SPREAD");
+
+        // Inline policies are retrievable via their Get ops.
+        let msp = json_of(
+            s.get_managed_scaling_policy(&req("GetManagedScalingPolicy", json!({"ClusterId": id})))
+                .unwrap(),
+        );
+        assert_eq!(
+            msp["ManagedScalingPolicy"]["ComputeLimits"]["MaximumCapacityUnits"],
+            5
+        );
+        let atp = json_of(
+            s.get_auto_termination_policy(&req(
+                "GetAutoTerminationPolicy",
+                json!({"ClusterId": id}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(atp["AutoTerminationPolicy"]["IdleTimeout"], 60);
+    }
 }

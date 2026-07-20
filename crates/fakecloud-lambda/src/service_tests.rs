@@ -3304,6 +3304,82 @@ async fn put_function_event_invoke_destination_config_echo_variants() {
     );
 }
 
+// UpdateFunctionEventInvokeConfig (HTTP POST) merges: updating only
+// MaximumRetryAttempts must NOT drop a previously-stored DestinationConfig.
+// Put (HTTP PUT) replaces the whole config.
+#[tokio::test]
+async fn update_function_event_invoke_merges_and_put_replaces() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "ei-fn").await;
+
+    // Put (PUT) a full config with a DestinationConfig.
+    let put = make_request(
+        Method::PUT,
+        "/2019-09-25/functions/ei-fn/event-invoke-config",
+        &json!({
+            "MaximumRetryAttempts": 2,
+            "MaximumEventAgeInSeconds": 3600,
+            "DestinationConfig": {
+                "OnFailure": {"Destination": "arn:aws:sqs:us-east-1:123456789012:dlq"}
+            }
+        })
+        .to_string(),
+    );
+    svc.handle(put).await.unwrap();
+
+    // Update (POST) only MaximumRetryAttempts -> DestinationConfig must survive.
+    let upd = make_request(
+        Method::POST,
+        "/2019-09-25/functions/ei-fn/event-invoke-config",
+        &json!({"MaximumRetryAttempts": 0}).to_string(),
+    );
+    let v: Value =
+        serde_json::from_slice(svc.handle(upd).await.unwrap().body.expect_bytes()).unwrap();
+    assert_eq!(v["MaximumRetryAttempts"], json!(0));
+    assert_eq!(v["MaximumEventAgeInSeconds"], json!(3600), "age preserved");
+    assert_eq!(
+        v["DestinationConfig"]["OnFailure"]["Destination"],
+        "arn:aws:sqs:us-east-1:123456789012:dlq",
+        "Update must not drop the existing DestinationConfig"
+    );
+
+    // Get confirms the merged state persisted.
+    let get = make_request(
+        Method::GET,
+        "/2019-09-25/functions/ei-fn/event-invoke-config",
+        "",
+    );
+    let g: Value =
+        serde_json::from_slice(svc.handle(get).await.unwrap().body.expect_bytes()).unwrap();
+    assert_eq!(g["MaximumRetryAttempts"], json!(0));
+    assert_eq!(
+        g["DestinationConfig"]["OnFailure"]["Destination"],
+        "arn:aws:sqs:us-east-1:123456789012:dlq"
+    );
+
+    // Put (PUT) again without DestinationConfig -> full replace clears it.
+    let put2 = make_request(
+        Method::PUT,
+        "/2019-09-25/functions/ei-fn/event-invoke-config",
+        &json!({"MaximumRetryAttempts": 1}).to_string(),
+    );
+    let r: Value =
+        serde_json::from_slice(svc.handle(put2).await.unwrap().body.expect_bytes()).unwrap();
+    // Put synthesizes empty halves when DestinationConfig omitted.
+    assert_eq!(
+        r["DestinationConfig"],
+        json!({"OnSuccess": {}, "OnFailure": {}})
+    );
+
+    // Update on a non-existent function's config is a not-found error.
+    let upd_missing = make_request(
+        Method::POST,
+        "/2019-09-25/functions/ghost-fn/event-invoke-config",
+        &json!({"MaximumRetryAttempts": 1}).to_string(),
+    );
+    assert!(svc.handle(upd_missing).await.is_err());
+}
+
 /// In-memory `LambdaBackend` used by the pre-pull regression test below.
 /// Records every `prepull_image` call so the test can assert that
 /// CreateFunction kicked one off, without spinning up a real container.

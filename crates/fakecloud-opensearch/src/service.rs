@@ -1035,14 +1035,9 @@ impl OpenSearchService {
             "AttachDataSource" => self.attach_data_source(l, req),
             "DetachDataSource" => self.detach_data_source(l, req),
             "DescribeDataSourceAttachment" => self.describe_data_source_attachment(l, req),
-            "ListDataSourceAttachments" => self.list_data_source_attachments(l),
-            "GetDefaultApplicationSetting" | "PutDefaultApplicationSetting" => {
-                let arn = format!(
-                    "arn:aws:es:{}:{}:application/default",
-                    req.region, req.account_id
-                );
-                Ok(ok(json!({ "applicationArn": arn })))
-            }
+            "ListDataSourceAttachments" => self.list_data_source_attachments(l, req),
+            "PutDefaultApplicationSetting" => self.put_default_application_setting(l, req),
+            "GetDefaultApplicationSetting" => self.get_default_application_setting(req),
             // ---- Data sources (per domain) ----
             "AddDataSource" => self.add_data_source(l, req),
             "GetDataSource" => self.get_data_source(l, req),
@@ -2124,6 +2119,8 @@ impl OpenSearchService {
             app_configs: b.get("appConfigs").cloned().unwrap_or(json!([])),
             tags: parse_tag_list(b.get("tagList")),
             capabilities: Default::default(),
+            attachments: Default::default(),
+            is_default_setting: false,
         };
         // CreateApplicationResponse is a distinct (smaller) shape than
         // GetApplication: no endpoint/status/lastUpdatedAt.
@@ -2226,13 +2223,16 @@ impl OpenSearchService {
             .applications
             .get_mut(&id)
             .ok_or_else(|| not_found_generic(&format!("Application {id} not found.")))?;
-        app.capabilities
-            .insert(name.clone(), json!({"capabilityName": name}));
+        let config = b.get("capabilityConfig").cloned().unwrap_or(json!({}));
+        app.capabilities.insert(
+            name.clone(),
+            json!({"capabilityName": name, "capabilityConfig": config}),
+        );
         Ok(ok(json!({
             "capabilityName": name,
             "applicationId": id,
             "status": "ACTIVE",
-            "capabilityConfig": {},
+            "capabilityConfig": config,
         })))
     }
 
@@ -2244,12 +2244,17 @@ impl OpenSearchService {
             .get(&req.account_id)
             .and_then(|st| st.applications.get(&id))
             .ok_or_else(|| not_found_generic(&format!("Application {id} not found.")))?;
-        let _ = &app.capabilities;
+        // Return the stored capability config rather than a hardcoded empty one.
+        let stored = app
+            .capabilities
+            .get(&cap)
+            .ok_or_else(|| not_found_generic(&format!("Capability {cap} not found.")))?;
+        let config = stored.get("capabilityConfig").cloned().unwrap_or(json!({}));
         Ok(ok(json!({
             "capabilityName": cap,
             "applicationId": id,
             "status": "ACTIVE",
-            "capabilityConfig": {},
+            "capabilityConfig": config,
         })))
     }
 
@@ -2275,13 +2280,24 @@ impl OpenSearchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let app_id = label(l.id.as_deref())?;
         let b = body(req);
-        Ok(ok(json!({
-            "attachmentId": short_id(),
+        let attachment_id = short_id();
+        let ds_arn = b.get("dataSourceArn").cloned().unwrap_or(json!(""));
+        let record = json!({
+            "attachmentId": attachment_id,
             "id": app_id,
-            "arn": b.get("dataSourceArn").cloned().unwrap_or(json!("")),
-            "dataSourceArn": b.get("dataSourceArn").cloned().unwrap_or(json!("")),
+            "arn": ds_arn,
+            "dataSourceArn": ds_arn,
             "status": "ATTACHED",
-        })))
+        });
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let app = st
+            .applications
+            .get_mut(&app_id)
+            .ok_or_else(|| not_found_generic(&format!("Application {app_id} not found.")))?;
+        app.attachments
+            .insert(attachment_id.clone(), record.clone());
+        Ok(ok(record))
     }
 
     fn detach_data_source(
@@ -2291,10 +2307,18 @@ impl OpenSearchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let app_id = label(l.id.as_deref())?;
         let b = body(req);
+        let ds_arn = b.get("dataSourceArn").cloned().unwrap_or(json!(""));
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        if let Some(app) = st.applications.get_mut(&app_id) {
+            // Drop any attachment(s) for this data-source ARN.
+            app.attachments
+                .retain(|_, v| v.get("dataSourceArn") != Some(&ds_arn));
+        }
         Ok(ok(json!({
             "id": app_id,
-            "arn": b.get("dataSourceArn").cloned().unwrap_or(json!("")),
-            "dataSourceArn": b.get("dataSourceArn").cloned().unwrap_or(json!("")),
+            "arn": ds_arn,
+            "dataSourceArn": ds_arn,
         })))
     }
 
@@ -2305,18 +2329,79 @@ impl OpenSearchService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let app_id = label(l.id.as_deref())?;
         let b = body(req);
-        Ok(ok(json!({
-            "attachmentId": b.get("attachmentId").cloned().unwrap_or(json!(short_id())),
-            "id": app_id,
-            "arn": "",
-            "dataSourceArn": "",
-            "status": "ATTACHED",
-        })))
+        let attachment_id = b
+            .get("attachmentId")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let accounts = self.state.read();
+        let app = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&app_id))
+            .ok_or_else(|| not_found_generic(&format!("Application {app_id} not found.")))?;
+        let record = app
+            .attachments
+            .get(&attachment_id)
+            .cloned()
+            .ok_or_else(|| not_found_generic(&format!("Attachment {attachment_id} not found.")))?;
+        Ok(ok(record))
     }
 
-    fn list_data_source_attachments(&self, l: &Labels) -> Result<AwsResponse, AwsServiceError> {
-        let _ = label(l.id.as_deref())?;
-        Ok(ok(json!({ "attachments": [] })))
+    fn list_data_source_attachments(
+        &self,
+        l: &Labels,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let app_id = label(l.id.as_deref())?;
+        let accounts = self.state.read();
+        let attachments: Vec<Value> = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.applications.get(&app_id))
+            .map(|app| app.attachments.values().cloned().collect())
+            .unwrap_or_default();
+        Ok(ok(json!({ "attachments": attachments })))
+    }
+
+    fn put_default_application_setting(
+        &self,
+        l: &Labels,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let b = body(req);
+        let arn = b
+            .get("applicationArn")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| l.id.clone())
+            .ok_or_else(|| not_found_generic("applicationArn is required."))?;
+        let set_as_default = b
+            .get("setAsDefault")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        // Exactly one application is the account default; clear the others.
+        for app in st.applications.values_mut() {
+            app.is_default_setting = set_as_default && (app.arn == arn || app.id == arn);
+        }
+        Ok(ok(json!({ "applicationArn": arn })))
+    }
+
+    fn get_default_application_setting(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let arn = accounts
+            .get(&req.account_id)
+            .and_then(|st| {
+                st.applications
+                    .values()
+                    .find(|a| a.is_default_setting)
+                    .map(|a| a.arn.clone())
+            })
+            .unwrap_or_default();
+        Ok(ok(json!({ "applicationArn": arn })))
     }
 
     // ===================================================================
@@ -2552,7 +2637,13 @@ impl OpenSearchService {
         match op {
             "CreateIndex" => {
                 let name = req_str(&b, "IndexName")?;
-                d.indices.insert(name.clone(), json!({"IndexName": name}));
+                // Persist the submitted IndexSchema so GetIndex returns it
+                // rather than a stub.
+                let schema = b.get("IndexSchema").cloned().unwrap_or(json!({}));
+                d.indices.insert(
+                    name.clone(),
+                    json!({"IndexName": name, "IndexSchema": schema}),
+                );
                 Ok(ok(json!({ "Status": "CREATED" })))
             }
             "DeleteIndex" => {
@@ -2562,9 +2653,15 @@ impl OpenSearchService {
             }
             "UpdateIndex" => {
                 let ix = label(l.index.as_deref())?;
-                d.indices
+                let entry = d
+                    .indices
                     .entry(ix.clone())
-                    .or_insert_with(|| json!({"IndexName": ix}));
+                    .or_insert_with(|| json!({"IndexName": ix, "IndexSchema": {}}));
+                if let Some(schema) = b.get("IndexSchema") {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("IndexSchema".to_string(), schema.clone());
+                    }
+                }
                 Ok(ok(json!({ "Status": "UPDATED" })))
             }
             "GetIndex" => {
@@ -2572,8 +2669,8 @@ impl OpenSearchService {
                 let schema = d
                     .indices
                     .get(&ix)
-                    .cloned()
-                    .unwrap_or_else(|| json!({"IndexName": ix}));
+                    .and_then(|entry| entry.get("IndexSchema").cloned())
+                    .unwrap_or(json!({}));
                 Ok(ok(json!({ "IndexSchema": schema })))
             }
             _ => Ok(ok(json!({}))),

@@ -336,14 +336,21 @@ pub(crate) fn reject_vpc_endpoint_connections(
 // ---- endpoint service configurations ----
 
 fn service_config_xml(s: &EndpointService, tags: &[Tag]) -> String {
+    let private_dns = match &s.private_dns_name {
+        Some(name) => ec2_elem("privateDnsName", name),
+        None => String::new(),
+    };
     format!(
-        "{}{}{}<acceptanceRequired>{}</acceptanceRequired><managesVpcEndpoints>false</managesVpcEndpoints>{}{}{}",
+        "{}{}{}<acceptanceRequired>{}</acceptanceRequired><managesVpcEndpoints>false</managesVpcEndpoints>{}{}{}{}{}{}",
         ec2_elem("serviceId", &s.service_id),
         ec2_elem("serviceName", &s.service_name),
         ec2_elem("serviceState", &s.state),
         s.acceptance_required,
         ec2_elem("payerResponsibility", &s.payer_responsibility),
         ec2_list("networkLoadBalancerArnSet", &s.nlb_arns),
+        ec2_list("gatewayLoadBalancerArnSet", &s.gwlb_arns),
+        ec2_list("supportedIpAddressTypes", &s.supported_ip_address_types),
+        private_dns,
         super::tags::tag_set_xml(tags),
     )
 }
@@ -371,6 +378,10 @@ pub(crate) fn create_vpc_endpoint_service_configuration(
             .unwrap_or(true),
         payer_responsibility: "ServiceOwner".to_string(),
         nlb_arns: indexed_list(&req.query_params, "NetworkLoadBalancerArn"),
+        gwlb_arns: indexed_list(&req.query_params, "GatewayLoadBalancerArn"),
+        supported_ip_address_types: indexed_list(&req.query_params, "SupportedIpAddressType"),
+        private_dns_name: req.query_params.get("PrivateDnsName").cloned(),
+        allowed_principals: Vec::new(),
     };
     let tags = {
         let mut accounts = svc.state.write();
@@ -440,10 +451,48 @@ pub(crate) fn describe_vpc_endpoint_service_configurations(
 }
 
 pub(crate) fn modify_vpc_endpoint_service_configuration(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ServiceId")?;
+    let id = require(&req.query_params, "ServiceId")?;
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let s = state
+        .endpoint_services
+        .get_mut(&id)
+        .ok_or_else(|| invalid_service_id(&id))?;
+
+    if let Some(v) = req.query_params.get("AcceptanceRequired") {
+        s.acceptance_required = v == "true";
+    }
+    // Add/remove NLB + GWLB ARN sets.
+    apply_set_edit(
+        &mut s.nlb_arns,
+        &indexed_list(&req.query_params, "AddNetworkLoadBalancerArn"),
+        &indexed_list(&req.query_params, "RemoveNetworkLoadBalancerArn"),
+    );
+    apply_set_edit(
+        &mut s.gwlb_arns,
+        &indexed_list(&req.query_params, "AddGatewayLoadBalancerArn"),
+        &indexed_list(&req.query_params, "RemoveGatewayLoadBalancerArn"),
+    );
+    apply_set_edit(
+        &mut s.supported_ip_address_types,
+        &indexed_list(&req.query_params, "AddSupportedIpAddressType"),
+        &indexed_list(&req.query_params, "RemoveSupportedIpAddressType"),
+    );
+    // PrivateDnsName: set or (via RemovePrivateDnsName) clear.
+    if req
+        .query_params
+        .get("RemovePrivateDnsName")
+        .map(|v| v == "true")
+        == Some(true)
+    {
+        s.private_dns_name = None;
+    } else if let Some(name) = req.query_params.get("PrivateDnsName") {
+        s.private_dns_name = Some(name.clone());
+    }
+
     Ok(Ec2Service::respond(
         "ModifyVpcEndpointServiceConfiguration",
         &req.request_id,
@@ -452,28 +501,90 @@ pub(crate) fn modify_vpc_endpoint_service_configuration(
 }
 
 pub(crate) fn describe_vpc_endpoint_service_permissions(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ServiceId")?;
+    let id = require(&req.query_params, "ServiceId")?;
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let s = state
+        .endpoint_services
+        .get(&id)
+        .ok_or_else(|| invalid_service_id(&id))?;
+    let principals: Vec<String> = s
+        .allowed_principals
+        .iter()
+        .map(|p| allowed_principal_xml(p))
+        .collect();
     Ok(Ec2Service::respond(
         "DescribeVpcEndpointServicePermissions",
         &req.request_id,
-        &ec2_list("allowedPrincipals", &[]),
+        &ec2_list("allowedPrincipals", &principals),
     ))
 }
 
 pub(crate) fn modify_vpc_endpoint_service_permissions(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "ServiceId")?;
-    let body = format!("{}{}", ec2_list("addedPrincipalSet", &[]), ec2_return(true));
+    let id = require(&req.query_params, "ServiceId")?;
+    let add = indexed_list(&req.query_params, "AddAllowedPrincipal");
+    let remove = indexed_list(&req.query_params, "RemoveAllowedPrincipal");
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let s = state
+        .endpoint_services
+        .get_mut(&id)
+        .ok_or_else(|| invalid_service_id(&id))?;
+    apply_set_edit(&mut s.allowed_principals, &add, &remove);
+    let added: Vec<String> = add.iter().map(|p| allowed_principal_xml(p)).collect();
+    let body = format!(
+        "{}{}",
+        ec2_list("addedPrincipalSet", &added),
+        ec2_return(true)
+    );
     Ok(Ec2Service::respond(
         "ModifyVpcEndpointServicePermissions",
         &req.request_id,
         &body,
     ))
+}
+
+/// Serialize one allowed principal into the `AllowedPrincipal` member shape.
+fn allowed_principal_xml(principal: &str) -> String {
+    let principal_type = if principal.contains(":root") || principal.ends_with(":root") {
+        "Account"
+    } else if principal.contains(":user/") {
+        "User"
+    } else if principal.contains(":role/") {
+        "Role"
+    } else {
+        "Account"
+    };
+    format!(
+        "{}{}",
+        ec2_elem("principalType", principal_type),
+        ec2_elem("principal", principal),
+    )
+}
+
+/// Apply an add/remove edit to a de-duplicated ordered set of strings.
+fn apply_set_edit(set: &mut Vec<String>, add: &[String], remove: &[String]) {
+    set.retain(|x| !remove.contains(x));
+    for a in add {
+        if !set.contains(a) {
+            set.push(a.clone());
+        }
+    }
+}
+
+fn invalid_service_id(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        http::StatusCode::BAD_REQUEST,
+        "InvalidVpcEndpointServiceId.NotFound",
+        format!("The VpcEndpointServiceId '{id}' does not exist"),
+    )
 }
 
 pub(crate) fn modify_vpc_endpoint_service_payer_responsibility(
@@ -899,5 +1010,127 @@ mod tests {
             Ok(_) => panic!("expected NotFound error"),
         };
         assert!(format!("{err:?}").contains("InvalidVpcEndpointId.NotFound"));
+    }
+
+    fn body_str(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn modify_endpoint_service_config_persists_and_describes() {
+        let svc = Ec2Service::new();
+        let created = create_vpc_endpoint_service_configuration(
+            &svc,
+            &req(
+                "CreateVpcEndpointServiceConfiguration",
+                &[("NetworkLoadBalancerArn.1", "arn:nlb:a")],
+            ),
+        )
+        .unwrap();
+        let created_body = body_str(created);
+        let id = created_body
+            .split("<serviceId>")
+            .nth(1)
+            .and_then(|s| s.split("</serviceId>").next())
+            .unwrap()
+            .to_string();
+
+        modify_vpc_endpoint_service_configuration(
+            &svc,
+            &req(
+                "ModifyVpcEndpointServiceConfiguration",
+                &[
+                    ("ServiceId", &id),
+                    ("AddNetworkLoadBalancerArn.1", "arn:nlb:b"),
+                    ("RemoveNetworkLoadBalancerArn.1", "arn:nlb:a"),
+                    ("AcceptanceRequired", "false"),
+                    ("PrivateDnsName", "svc.example.com"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let desc = body_str(
+            describe_vpc_endpoint_service_configurations(
+                &svc,
+                &req(
+                    "DescribeVpcEndpointServiceConfigurations",
+                    &[("ServiceId.1", &id)],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(desc.contains("arn:nlb:b"), "new NLB persisted: {desc}");
+        assert!(!desc.contains("arn:nlb:a"), "old NLB removed: {desc}");
+        assert!(desc.contains("<acceptanceRequired>false</acceptanceRequired>"));
+        assert!(desc.contains("<privateDnsName>svc.example.com</privateDnsName>"));
+    }
+
+    #[test]
+    fn modify_endpoint_service_permissions_persists_and_describes() {
+        let svc = Ec2Service::new();
+        let created = body_str(
+            create_vpc_endpoint_service_configuration(
+                &svc,
+                &req("CreateVpcEndpointServiceConfiguration", &[]),
+            )
+            .unwrap(),
+        );
+        let id = created
+            .split("<serviceId>")
+            .nth(1)
+            .and_then(|s| s.split("</serviceId>").next())
+            .unwrap()
+            .to_string();
+
+        modify_vpc_endpoint_service_permissions(
+            &svc,
+            &req(
+                "ModifyVpcEndpointServicePermissions",
+                &[
+                    ("ServiceId", &id),
+                    ("AddAllowedPrincipal.1", "arn:aws:iam::111122223333:root"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc = body_str(
+            describe_vpc_endpoint_service_permissions(
+                &svc,
+                &req(
+                    "DescribeVpcEndpointServicePermissions",
+                    &[("ServiceId", &id)],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            desc.contains("arn:aws:iam::111122223333:root"),
+            "principal added: {desc}"
+        );
+
+        // Removing it clears the Describe view.
+        modify_vpc_endpoint_service_permissions(
+            &svc,
+            &req(
+                "ModifyVpcEndpointServicePermissions",
+                &[
+                    ("ServiceId", &id),
+                    ("RemoveAllowedPrincipal.1", "arn:aws:iam::111122223333:root"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc = body_str(
+            describe_vpc_endpoint_service_permissions(
+                &svc,
+                &req(
+                    "DescribeVpcEndpointServicePermissions",
+                    &[("ServiceId", &id)],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(!desc.contains("111122223333"), "principal removed: {desc}");
     }
 }

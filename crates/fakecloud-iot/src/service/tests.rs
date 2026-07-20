@@ -165,6 +165,60 @@ fn update_thing_merges_attributes() {
     assert_eq!(got["thingTypeName"], "b");
 }
 
+#[test]
+fn update_thing_remove_thing_type_clears_association() {
+    let s = svc();
+    run(&s, "POST", "/things/t1", &[], json!({"thingTypeName": "a"})).unwrap();
+    // removeThingType must drop thingTypeName rather than persisting the toggle.
+    run(
+        &s,
+        "PATCH",
+        "/things/t1",
+        &[],
+        json!({"removeThingType": true}),
+    )
+    .unwrap();
+    let got = body_of(&run(&s, "GET", "/things/t1", &[], Value::Null).unwrap());
+    assert!(
+        got.get("thingTypeName").is_none() || got["thingTypeName"].is_null(),
+        "thingTypeName should be cleared: {got}"
+    );
+    // The request-only toggle must not leak into the stored/returned resource.
+    assert!(got.get("removeThingType").is_none());
+}
+
+#[test]
+fn update_security_profile_delete_behaviors_and_alert_targets() {
+    let s = svc();
+    run(
+        &s,
+        "POST",
+        "/security-profiles/sp1",
+        &[],
+        json!({
+            "behaviors": [{"name": "b1", "metric": "aws:num-messages-received"}],
+            "alertTargets": {"SNS": {"alertTargetArn": "arn:aws:sns:us-east-1:000000000000:t", "roleArn": "arn:aws:iam::000000000000:role/r"}}
+        }),
+    )
+    .unwrap();
+    run(
+        &s,
+        "PATCH",
+        "/security-profiles/sp1",
+        &[],
+        json!({"deleteBehaviors": true, "deleteAlertTargets": true}),
+    )
+    .unwrap();
+    let got = body_of(&run(&s, "GET", "/security-profiles/sp1", &[], Value::Null).unwrap());
+    assert!(got.get("behaviors").is_none(), "behaviors cleared: {got}");
+    assert!(
+        got.get("alertTargets").is_none(),
+        "alertTargets cleared: {got}"
+    );
+    assert!(got.get("deleteBehaviors").is_none());
+    assert!(got.get("deleteAlertTargets").is_none());
+}
+
 // ---------- thing types / groups / billing groups ----------
 
 #[test]

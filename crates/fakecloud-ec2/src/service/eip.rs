@@ -93,6 +93,7 @@ pub(crate) fn allocate_address(
         private_ip_address: None,
         public_ipv4_pool: public_ipv4_pool.clone(),
         network_border_group: network_border_group.clone(),
+        domain_name: None,
     };
     {
         let mut accounts = svc.state.write();
@@ -290,54 +291,86 @@ pub(crate) fn disassociate_address(
 }
 
 pub(crate) fn describe_addresses_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_max_results(&req.query_params, 1, 1000)?;
     validate_enum(&req.query_params, "Attribute", &["domain-name"])?;
+    let wanted = indexed_list(&req.query_params, "AllocationId");
+    let accounts = svc.state.read();
+    let empty = Ec2State::new(&req.account_id, &req.region);
+    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    // AWS only returns addresses that have a domain-name attribute set.
+    let mut items: Vec<String> = state
+        .elastic_ips
+        .values()
+        .filter(|e| wanted.is_empty() || wanted.contains(&e.allocation_id))
+        .filter(|e| e.domain_name.is_some())
+        .map(address_attribute_xml)
+        .collect();
+    items.sort();
     Ok(Ec2Service::respond(
         "DescribeAddressesAttribute",
         &req.request_id,
-        &ec2_list("addressSet", &[]),
+        &ec2_list("addressSet", &items),
     ))
 }
 
-fn address_attribute_body(req: &AwsRequest) -> String {
-    let alloc = req
-        .query_params
-        .get("AllocationId")
-        .cloned()
-        .unwrap_or_default();
+fn address_attribute_xml(eip: &ElasticIp) -> String {
+    let ptr = match &eip.domain_name {
+        Some(name) => ec2_elem("ptrRecord", name),
+        None => String::new(),
+    };
     format!(
-        "<address>{}{}</address>",
-        ec2_elem("publicIp", "52.0.0.1"),
-        ec2_elem("allocationId", &alloc),
+        "{}{}{}",
+        ec2_elem("publicIp", &eip.public_ip),
+        ec2_elem("allocationId", &eip.allocation_id),
+        ptr,
     )
 }
 
 pub(crate) fn modify_address_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "AllocationId")?;
+    let alloc = require(&req.query_params, "AllocationId")?;
+    let domain_name = req.query_params.get("DomainName").cloned();
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let eip = state
+        .elastic_ips
+        .get_mut(&alloc)
+        .ok_or_else(|| not_found("InvalidAllocationID.NotFound", &alloc))?;
+    if let Some(name) = domain_name {
+        eip.domain_name = Some(name);
+    }
+    let body = format!("<address>{}</address>", address_attribute_xml(eip));
     Ok(Ec2Service::respond(
         "ModifyAddressAttribute",
         &req.request_id,
-        &address_attribute_body(req),
+        &body,
     ))
 }
 
 pub(crate) fn reset_address_attribute(
-    _svc: &Ec2Service,
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "AllocationId")?;
+    let alloc = require(&req.query_params, "AllocationId")?;
     require(&req.query_params, "Attribute")?;
     validate_enum(&req.query_params, "Attribute", &["domain-name"])?;
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let eip = state
+        .elastic_ips
+        .get_mut(&alloc)
+        .ok_or_else(|| not_found("InvalidAllocationID.NotFound", &alloc))?;
+    eip.domain_name = None;
+    let body = format!("<address>{}</address>", address_attribute_xml(eip));
     Ok(Ec2Service::respond(
         "ResetAddressAttribute",
         &req.request_id,
-        &address_attribute_body(req),
+        &body,
     ))
 }
 
@@ -757,6 +790,93 @@ mod eip_tests {
 
     fn body(resp: AwsResponse) -> String {
         String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn modify_address_attribute_persists_ptr_record() {
+        let svc = Ec2Service::new();
+        let alloc = {
+            let out = body(
+                allocate_address(&svc, &req("AllocateAddress", &[("Domain", "vpc")])).unwrap(),
+            );
+            out.split("<allocationId>")
+                .nth(1)
+                .and_then(|s| s.split("</allocationId>").next())
+                .unwrap()
+                .to_string()
+        };
+
+        // Before any modify, the address has no domain-name attribute so it is
+        // omitted from DescribeAddressesAttribute.
+        let empty = body(
+            describe_addresses_attribute(
+                &svc,
+                &req(
+                    "DescribeAddressesAttribute",
+                    &[("Attribute", "domain-name")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            !empty.contains("ptrRecord"),
+            "no PTR before modify: {empty}"
+        );
+
+        let modified = body(
+            modify_address_attribute(
+                &svc,
+                &req(
+                    "ModifyAddressAttribute",
+                    &[("AllocationId", &alloc), ("DomainName", "host.example.com")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            modified.contains("<ptrRecord>host.example.com</ptrRecord>"),
+            "{modified}"
+        );
+
+        // DescribeAddressesAttribute now reflects it.
+        let desc = body(
+            describe_addresses_attribute(
+                &svc,
+                &req(
+                    "DescribeAddressesAttribute",
+                    &[("Attribute", "domain-name"), ("AllocationId.1", &alloc)],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            desc.contains("<ptrRecord>host.example.com</ptrRecord>"),
+            "{desc}"
+        );
+
+        // ResetAddressAttribute clears it.
+        reset_address_attribute(
+            &svc,
+            &req(
+                "ResetAddressAttribute",
+                &[("AllocationId", &alloc), ("Attribute", "domain-name")],
+            ),
+        )
+        .unwrap();
+        let after = body(
+            describe_addresses_attribute(
+                &svc,
+                &req(
+                    "DescribeAddressesAttribute",
+                    &[("Attribute", "domain-name")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            !after.contains("ptrRecord"),
+            "PTR cleared after reset: {after}"
+        );
     }
 
     #[test]

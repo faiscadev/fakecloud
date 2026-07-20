@@ -112,6 +112,13 @@ pub struct DomainValidation {
     pub resource_record_name: Option<String>,
     pub resource_record_type: Option<String>,
     pub resource_record_value: Option<String>,
+    /// HTTP validation redirect (`HttpRedirect.RedirectFrom`) — set for
+    /// ValidationMethod=HTTP certificates.
+    #[serde(default)]
+    pub http_redirect_from: Option<String>,
+    /// HTTP validation redirect target (`HttpRedirect.RedirectTo`).
+    #[serde(default)]
+    pub http_redirect_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
