@@ -326,6 +326,47 @@ fn paginate(items: Vec<Value>, b: &Value, default_max: usize) -> (Vec<Value>, Op
     (items[start..end].to_vec(), next)
 }
 
+/// Build the shard/node topology for a cluster of `num_shards` shards, each with
+/// `replicas` read replicas (so `replicas + 1` nodes per shard). Shared by
+/// CreateCluster and UpdateCluster's scaling path so both produce identical
+/// node naming, endpoints and contiguous 16384-slot partitioning. New shards
+/// start `creating` and settle to `available` on the next DescribeClusters.
+fn build_shards(name: &str, num_shards: i32, replicas: i32, port: i32, region: &str) -> Vec<Shard> {
+    (0..num_shards)
+        .map(|i| {
+            let sname = format!("{:04}", i + 1);
+            let nodes = (0..=replicas)
+                .map(|j| Node {
+                    name: format!("{name}-{sname}-{:03}", j + 1),
+                    status: "creating".to_string(),
+                    availability_zone: format!("{region}a"),
+                    create_time: Utc::now(),
+                    endpoint: Endpoint {
+                        address: format!(
+                            "{name}-{sname}-{:03}.{name}.abc123.memorydb.{region}.amazonaws.com",
+                            j + 1
+                        ),
+                        port,
+                    },
+                })
+                .collect::<Vec<_>>();
+            // Partition the 16384 keyspace slots contiguously across shards,
+            // the way MemoryDB/Redis Cluster does (shard 1 `0-8191`,
+            // shard 2 `8192-16383`, ...), instead of giving every shard the
+            // full range.
+            let start = (i as i64 * 16384 / num_shards as i64) as i32;
+            let end = ((i as i64 + 1) * 16384 / num_shards as i64) as i32 - 1;
+            Shard {
+                name: sname,
+                status: "creating".to_string(),
+                slots: format!("{start}-{end}"),
+                number_of_nodes: nodes.len() as i32,
+                nodes,
+            }
+        })
+        .collect()
+}
+
 // ===== JSON builders (member names match the Smithy model) =====
 
 fn endpoint_json(e: &Endpoint) -> Value {
@@ -554,40 +595,7 @@ impl MemoryDbService {
             ),
             port,
         };
-        let shards = (0..num_shards)
-            .map(|i| {
-                let sname = format!("{:04}", i + 1);
-                let nodes = (0..=replicas)
-                    .map(|j| Node {
-                        name: format!("{name}-{sname}-{:03}", j + 1),
-                        status: "creating".to_string(),
-                        availability_zone: format!("{}a", req.region),
-                        create_time: Utc::now(),
-                        endpoint: Endpoint {
-                            address: format!(
-                                "{name}-{sname}-{:03}.{name}.abc123.memorydb.{}.amazonaws.com",
-                                j + 1,
-                                req.region
-                            ),
-                            port,
-                        },
-                    })
-                    .collect::<Vec<_>>();
-                // Partition the 16384 keyspace slots contiguously across shards,
-                // the way MemoryDB/Redis Cluster does (shard 1 `0-8191`,
-                // shard 2 `8192-16383`, ...), instead of giving every shard the
-                // full range.
-                let start = (i as i64 * 16384 / num_shards as i64) as i32;
-                let end = ((i as i64 + 1) * 16384 / num_shards as i64) as i32 - 1;
-                Shard {
-                    name: sname,
-                    status: "creating".to_string(),
-                    slots: format!("{start}-{end}"),
-                    number_of_nodes: nodes.len() as i32,
-                    nodes,
-                }
-            })
-            .collect();
+        let shards = build_shards(&name, num_shards, replicas, port, &req.region);
         let cluster = Cluster {
             name: name.clone(),
             description: opt_str(&b, "Description"),
@@ -744,6 +752,52 @@ impl MemoryDbService {
                 .iter()
                 .filter_map(|x| x.as_str().map(str::to_string))
                 .collect();
+        }
+        // Scaling: ShardConfiguration.ShardCount changes the number of shards and
+        // ReplicaConfiguration.ReplicaCount changes replicas-per-shard. Either can
+        // appear alone; the current replica count is recovered from an existing
+        // shard's node count (nodes = replicas + 1). Rebuilding the topology keeps
+        // node naming, endpoints and slot partitioning consistent with create.
+        let new_shard_count = b
+            .get("ShardConfiguration")
+            .and_then(|s| s.get("ShardCount"))
+            .and_then(Value::as_i64);
+        let new_replica_count = b
+            .get("ReplicaConfiguration")
+            .and_then(|s| s.get("ReplicaCount"))
+            .and_then(Value::as_i64);
+        if new_shard_count.is_some() || new_replica_count.is_some() {
+            let cur_replicas = c
+                .shards
+                .first()
+                .map(|sh| (sh.number_of_nodes - 1).max(0))
+                .unwrap_or(0) as i64;
+            let target_shards = new_shard_count.unwrap_or(c.number_of_shards as i64);
+            if !(1..=500).contains(&target_shards) {
+                return Err(fault(
+                    "InvalidParameterValueException",
+                    "NumShards must be between 1 and 500.",
+                ));
+            }
+            let target_replicas = new_replica_count.unwrap_or(cur_replicas);
+            if !(0..=5).contains(&target_replicas) {
+                return Err(fault(
+                    "InvalidParameterValueException",
+                    "NumReplicasPerShard must be between 0 and 5.",
+                ));
+            }
+            let target_shards = target_shards as i32;
+            let target_replicas = target_replicas as i32;
+            c.number_of_shards = target_shards;
+            c.shards = build_shards(&name, target_shards, target_replicas, c.port, &req.region);
+            c.availability_mode = if target_replicas > 0 {
+                "MultiAZ".to_string()
+            } else {
+                "SingleAZ".to_string()
+            };
+            // Freshly-built shards start `creating`; mark the cluster so the
+            // existing lazy DescribeClusters transition settles it to `available`.
+            c.status = "creating".to_string();
         }
         let out = cluster_json(c);
         // Apply any ACL reassignment to the ACL -> clusters back-references.
@@ -1854,6 +1908,51 @@ mod tests {
         assert_eq!(clusters.len(), 1);
         // Lazily transitions creating -> available on describe.
         assert_eq!(clusters[0]["Status"], "available");
+    }
+
+    #[test]
+    fn update_cluster_applies_shard_and_replica_scaling() {
+        let s = service();
+        call(
+            &s,
+            "CreateCluster",
+            json!({"ClusterName": "scale", "NodeType": "db.r6g.large", "ACLName": "open-access", "NumShards": 2, "NumReplicasPerShard": 1}),
+        )
+        .unwrap();
+
+        // Scale out to 4 shards and 2 replicas each (3 nodes per shard).
+        let upd = call(
+            &s,
+            "UpdateCluster",
+            json!({
+                "ClusterName": "scale",
+                "ShardConfiguration": {"ShardCount": 4},
+                "ReplicaConfiguration": {"ReplicaCount": 2}
+            }),
+        )
+        .unwrap();
+        assert_eq!(upd["Cluster"]["NumberOfShards"], 4);
+
+        let desc = call(&s, "DescribeClusters", json!({"ClusterName": "scale"})).unwrap();
+        let c = &desc["Clusters"][0];
+        assert_eq!(c["NumberOfShards"], 4);
+        let shards = c["Shards"].as_array().unwrap();
+        assert_eq!(shards.len(), 4, "shard vector rebuilt to new count");
+        assert_eq!(shards[0]["NumberOfNodes"], 3, "2 replicas + 1 primary");
+        assert_eq!(c["AvailabilityMode"], "MultiAZ");
+
+        // Scale replicas down to 0 alone (shard count unchanged).
+        call(
+            &s,
+            "UpdateCluster",
+            json!({"ClusterName": "scale", "ReplicaConfiguration": {"ReplicaCount": 0}}),
+        )
+        .unwrap();
+        let desc = call(&s, "DescribeClusters", json!({"ClusterName": "scale"})).unwrap();
+        let c = &desc["Clusters"][0];
+        assert_eq!(c["NumberOfShards"], 4, "shard count preserved");
+        assert_eq!(c["Shards"][0]["NumberOfNodes"], 1);
+        assert_eq!(c["AvailabilityMode"], "SingleAZ");
     }
 
     #[test]

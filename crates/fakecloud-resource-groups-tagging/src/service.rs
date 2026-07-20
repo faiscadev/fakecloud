@@ -551,6 +551,41 @@ fn paginate_strings(all: Vec<String>, start: Option<usize>) -> (Vec<String>, Str
 
 /// `service:resourceType` from an ARN, per the tagging API's resource-type
 /// convention. Returns just the service when there's no meaningful sub-type.
+/// A [`TagProvider`] over the tagging API's own `api_tags` store, so that ARNs
+/// tagged via `TagResources` (which no modelled service owns) are visible
+/// through the shared [`TagProviderRegistry`] to every reader -- notably
+/// Resource Groups tag-query resolution. Register this once at startup.
+pub struct ApiTagProvider {
+    state: SharedResourceGroupsTaggingState,
+}
+
+impl ApiTagProvider {
+    pub fn new(state: SharedResourceGroupsTaggingState) -> Self {
+        Self { state }
+    }
+}
+
+impl fakecloud_core::tag_index::TagProvider for ApiTagProvider {
+    fn tagged_resources(&self, account_id: &str) -> Vec<fakecloud_core::tag_index::TaggedResource> {
+        let accounts = self.state.read();
+        accounts
+            .get(account_id)
+            .map(|st| {
+                st.api_tags
+                    .iter()
+                    .map(|(arn, tags)| {
+                        fakecloud_core::tag_index::TaggedResource::new(
+                            arn.clone(),
+                            resource_type_from_arn(arn),
+                            tags.clone(),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
 fn resource_type_from_arn(arn: &str) -> String {
     let parts: Vec<&str> = arn.split(':').collect();
     if parts.len() < 6 || parts[0] != "arn" {

@@ -152,18 +152,33 @@ impl ComprehendData {
             }
         }
 
-        // Endpoints -> IN_SERVICE, publishing the desired inference units.
+        // Endpoints -> IN_SERVICE, publishing the desired inference units and
+        // promoting the desired ModelArn / DataAccessRoleArn to their active
+        // fields. Without this promotion an UpdateEndpoint settles the status but
+        // DescribeEndpoint keeps returning the pre-update ModelArn/role forever
+        // (the new values sit unread under Desired*) (bug-hunt).
         for ep in self.endpoints.values_mut() {
             let desired = ep.get("DesiredInferenceUnits").cloned().unwrap_or(json!(1));
+            let mut stamp: Vec<(&str, Value)> = vec![
+                ("CurrentInferenceUnits", desired),
+                ("LastModifiedTime", json!(now)),
+            ];
+            if let Some(m) = ep.get("DesiredModelArn").filter(|v| !v.is_null()).cloned() {
+                stamp.push(("ModelArn", m));
+            }
+            if let Some(r) = ep
+                .get("DesiredDataAccessRoleArn")
+                .filter(|v| !v.is_null())
+                .cloned()
+            {
+                stamp.push(("DataAccessRoleArn", r));
+            }
             if settle_status(
                 ep,
                 "Status",
                 &["CREATING", "UPDATING"],
                 "IN_SERVICE",
-                &[
-                    ("CurrentInferenceUnits", desired),
-                    ("LastModifiedTime", json!(now)),
-                ],
+                &stamp,
             ) {
                 changed = true;
             }
@@ -293,6 +308,31 @@ mod tests {
         assert!(d.reconcile());
         assert_eq!(d.endpoints["arn"]["Status"], "IN_SERVICE");
         assert_eq!(d.endpoints["arn"]["CurrentInferenceUnits"], 2);
+    }
+
+    #[test]
+    fn updating_endpoint_promotes_desired_model_and_role() {
+        // An UpdateEndpoint sets Desired* fields and status UPDATING; settling
+        // must promote them to the active ModelArn / DataAccessRoleArn so a
+        // DescribeEndpoint returns the new values, not the pre-update ones.
+        let mut d = data();
+        d.endpoints.insert(
+            "arn".into(),
+            json!({
+                "Status": "UPDATING",
+                "ModelArn": "arn:old-model",
+                "DataAccessRoleArn": "arn:old-role",
+                "DesiredInferenceUnits": 3,
+                "DesiredModelArn": "arn:new-model",
+                "DesiredDataAccessRoleArn": "arn:new-role"
+            }),
+        );
+        assert!(d.reconcile());
+        let ep = &d.endpoints["arn"];
+        assert_eq!(ep["Status"], "IN_SERVICE");
+        assert_eq!(ep["CurrentInferenceUnits"], 3);
+        assert_eq!(ep["ModelArn"], "arn:new-model");
+        assert_eq!(ep["DataAccessRoleArn"], "arn:new-role");
     }
 
     #[test]

@@ -969,6 +969,12 @@ impl LakeFormationService {
         if let Some(h) = body.get("HybridAccessEnabled").and_then(Value::as_bool) {
             r.hybrid_access_enabled = Some(h);
         }
+        if let Some(p) = body.get("WithPrivilegedAccess").and_then(Value::as_bool) {
+            r.with_privileged_access = Some(p);
+        }
+        if let Some(a) = str_field(body, "ExpectedResourceOwnerAccount") {
+            r.expected_resource_owner_account = Some(a);
+        }
         r.last_modified = Utc::now();
         Ok(ok(json!({})))
     }
@@ -2148,6 +2154,33 @@ mod tests {
             Ok(_) => panic!("expected an error, got Ok"),
             Err(e) => e,
         }
+    }
+
+    #[test]
+    fn update_resource_persists_expected_owner_and_privileged_access() {
+        let svc = svc();
+        let arn = "arn:aws:s3:::my-data-lake";
+        let reg = json!({
+            "ResourceArn": arn,
+            "RoleArn": "arn:aws:iam::123456789012:role/lf-role",
+        });
+        svc.register_resource(&req(reg.clone()), &reg).unwrap();
+
+        let upd = json!({
+            "ResourceArn": arn,
+            "RoleArn": "arn:aws:iam::123456789012:role/lf-role",
+            "ExpectedResourceOwnerAccount": "210987654321",
+            "WithPrivilegedAccess": true,
+        });
+        svc.update_resource(&req(upd.clone()), &upd).unwrap();
+
+        let desc = json!({ "ResourceArn": arn });
+        let out = body_of(svc.describe_resource(&req(desc.clone()), &desc).unwrap());
+        assert_eq!(
+            out["ResourceInfo"]["ExpectedResourceOwnerAccount"],
+            "210987654321"
+        );
+        assert_eq!(out["ResourceInfo"]["WithPrivilegedAccess"], true);
     }
 
     #[test]

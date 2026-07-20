@@ -288,6 +288,14 @@ pub struct Database {
     pub parameters: BTreeMap<String, String>,
     pub created_at: DateTime<Utc>,
     pub catalog_id: String,
+    /// `DatabaseInput.TargetDatabase` for a resource-linked database, stored as
+    /// the raw wire object (`{CatalogId, DatabaseName, Region}`) and echoed back.
+    #[serde(default)]
+    pub target_database: Option<Value>,
+    /// `DatabaseInput.FederatedDatabase` (`{Identifier, ConnectionName,
+    /// ConnectionType}`) for a federated database, stored + echoed verbatim.
+    #[serde(default)]
+    pub federated_database: Option<Value>,
     /// Tables keyed by name.
     pub tables: BTreeMap<String, Table>,
 }

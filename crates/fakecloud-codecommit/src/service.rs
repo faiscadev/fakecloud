@@ -1298,7 +1298,7 @@ impl CodeCommitService {
     fn list_file_commit_history(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let name = require_repository_name(&b)?;
-        let _path = require(&b, "filePath", "PathRequiredException")?;
+        let path = require(&b, "filePath", "PathRequiredException")?.to_string();
         let account = self.account(req);
         let guard = self.state.read();
         let st = guard.get(&account);
@@ -1306,7 +1306,17 @@ impl CodeCommitService {
             .and_then(|s| s.repositories.get(&name))
             .ok_or_else(|| repo_not_found(&name))?;
         let commit_id = resolve_commit(repo, &b, "commitSpecifier")?;
-        // Walk the first-parent chain from the resolved commit.
+        // The blob id of `path` in a given commit's materialized tree, if present.
+        let blob_at = |cid: &str| -> Option<String> {
+            repo.trees
+                .get(cid)
+                .and_then(|t| t.get(&path))
+                .map(|e| e.blob_id.clone())
+        };
+        // Walk the first-parent chain, keeping only the commits that actually
+        // TOUCHED `filePath` (its blob differs from the first parent's, covering
+        // add/modify/delete). Previously every commit was returned regardless of
+        // the path (bug-hunt).
         let mut dag = Vec::new();
         let mut cur = Some(commit_id);
         while let Some(cid) = cur {
@@ -1318,11 +1328,22 @@ impl CodeCommitService {
                 .and_then(Value::as_array)
                 .cloned()
                 .unwrap_or_default();
-            dag.push(json!({
-                "commit": cid,
-                "parents": parents.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>(),
-            }));
-            cur = parents.first().and_then(Value::as_str).map(str::to_string);
+            let first_parent = parents.first().and_then(Value::as_str);
+            let cur_blob = blob_at(&cid);
+            let parent_blob = first_parent.and_then(blob_at);
+            let touched = match first_parent {
+                // Root commit: touched iff the file exists in it.
+                None => cur_blob.is_some(),
+                // Otherwise the blob changed (add/modify/delete).
+                Some(_) => cur_blob != parent_blob,
+            };
+            if touched {
+                dag.push(json!({
+                    "commit": cid,
+                    "parents": parents.iter().filter_map(|p| p.as_str()).collect::<Vec<_>>(),
+                }));
+            }
+            cur = first_parent.map(str::to_string);
         }
         ok(json!({ "revisionDag": dag }))
     }
@@ -4399,5 +4420,57 @@ mod handler_tests {
             json!({ "approvalRuleTemplateName": "t" }),
         );
         assert_eq!(after["repositoryNames"], json!([]));
+    }
+
+    #[test]
+    fn list_file_commit_history_filters_by_file_path() {
+        // ListFileCommitHistory ignored filePath, returning every commit; it
+        // must return only commits that touched the given path (bug-hunt).
+        let s = svc();
+        make_repo(&s);
+        // c1 touches a.txt; c2 touches b.txt; c3 modifies a.txt again.
+        let c1 = put(&s, "main", "a.txt", "a1", None);
+        let c2 = put(&s, "main", "b.txt", "b1", Some(&c1));
+        let c3 = put(&s, "main", "a.txt", "a2", Some(&c2));
+
+        // History for a.txt: only c3 (modify) and c1 (add).
+        let hist = call(
+            &s,
+            "ListFileCommitHistory",
+            json!({
+                "repositoryName": "repo",
+                "commitSpecifier": "main",
+                "filePath": "a.txt"
+            }),
+        );
+        let commits: Vec<&str> = hist["revisionDag"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["commit"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            commits,
+            vec![c3.as_str(), c1.as_str()],
+            "only a.txt commits"
+        );
+
+        // History for b.txt: only c2.
+        let hist_b = call(
+            &s,
+            "ListFileCommitHistory",
+            json!({
+                "repositoryName": "repo",
+                "commitSpecifier": "main",
+                "filePath": "b.txt"
+            }),
+        );
+        let commits_b: Vec<&str> = hist_b["revisionDag"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|d| d["commit"].as_str().unwrap())
+            .collect();
+        assert_eq!(commits_b, vec![c2.as_str()], "only b.txt commit");
     }
 }

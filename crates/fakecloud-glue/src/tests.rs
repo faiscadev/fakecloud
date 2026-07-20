@@ -803,3 +803,71 @@ fn get_tables_pagination_round_trips_next_token() {
         "last page has no token: {page2}"
     );
 }
+
+#[test]
+fn create_database_persists_target_and_federated() {
+    // CreateDatabase dropped TargetDatabase/FederatedDatabase; GetDatabase must
+    // echo them back (bug-hunt).
+    let svc = GlueService::default();
+    svc.create_database(&req(
+        "CreateDatabase",
+        json!({"DatabaseInput": {
+            "Name": "linked",
+            "TargetDatabase": {"CatalogId": "210987654321", "DatabaseName": "src", "Region": "us-west-2"},
+            "FederatedDatabase": {"Identifier": "fed-id", "ConnectionName": "conn"}
+        }}),
+    ))
+    .unwrap();
+
+    let got = body_of(
+        svc.get_database(&req("GetDatabase", json!({"Name": "linked"})))
+            .unwrap(),
+    );
+    let db = &got["Database"];
+    assert_eq!(db["TargetDatabase"]["DatabaseName"], "src");
+    assert_eq!(db["TargetDatabase"]["Region"], "us-west-2");
+    assert_eq!(db["FederatedDatabase"]["Identifier"], "fed-id");
+    assert_eq!(db["FederatedDatabase"]["ConnectionName"], "conn");
+}
+
+#[test]
+fn update_classifier_bumps_version_and_preserves_creation_time() {
+    // UpdateClassifier dropped CreationTime and never bumped Version (bug-hunt).
+    let svc = GlueService::default();
+    svc.create_classifier(&req(
+        "CreateClassifier",
+        json!({"CsvClassifier": {"Name": "c", "Delimiter": ","}}),
+    ))
+    .unwrap();
+
+    let got = body_of(
+        svc.get_classifier(&req("GetClassifier", json!({"Name": "c"})))
+            .unwrap(),
+    );
+    let created = &got["Classifier"]["CsvClassifier"];
+    assert_eq!(created["Version"], 1);
+    let creation_time = created["CreationTime"].clone();
+    assert!(
+        !creation_time.is_null(),
+        "CreationTime present after create"
+    );
+
+    svc.update_classifier(&req(
+        "UpdateClassifier",
+        json!({"CsvClassifier": {"Name": "c", "Delimiter": ";"}}),
+    ))
+    .unwrap();
+
+    let got = body_of(
+        svc.get_classifier(&req("GetClassifier", json!({"Name": "c"})))
+            .unwrap(),
+    );
+    let updated = &got["Classifier"]["CsvClassifier"];
+    assert_eq!(updated["Version"], 2, "version bumped: {got}");
+    assert_eq!(updated["Delimiter"], ";", "update applied");
+    assert_eq!(
+        updated["CreationTime"], creation_time,
+        "CreationTime preserved across update"
+    );
+    assert!(!updated["LastUpdated"].is_null());
+}

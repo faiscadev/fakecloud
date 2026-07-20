@@ -20,6 +20,8 @@ pub struct CreateConnectionGroupRequest {
     pub anycast_ip_list_id: Option<String>,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "skip_if_none")]
+    pub tags: Option<crate::model::Tags>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

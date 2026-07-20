@@ -400,6 +400,14 @@ pub fn create_broker_record(
             .cloned()
             .unwrap_or(json!("NONE")),
     );
+    // LDAP integration supplied at create time is persisted so DescribeBroker
+    // echoes it. AWS's DescribeBroker returns LdapServerMetadataOutput, which
+    // omits the write-only serviceAccountPassword, so we strip it before storing.
+    if let Some(ldap) = b.get("ldapServerMetadata").and_then(Value::as_object) {
+        let mut ldap = ldap.clone();
+        ldap.remove("serviceAccountPassword");
+        broker.insert("ldapServerMetadata".into(), Value::Object(ldap));
+    }
 
     // Users supplied inline at create time become the broker's current users.
     let mut user_map = std::collections::BTreeMap::new();

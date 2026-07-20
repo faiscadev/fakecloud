@@ -5196,8 +5196,15 @@ async fn main() {
         } else {
             None
         };
+    // Shared cross-service tag index. Resource Groups tag-query resolution and
+    // the Resource Groups Tagging API both read through it. Created here (before
+    // Resource Groups is built) and reused by the tagging service below; the
+    // ApiTagProvider over directly-tagged ARNs is registered alongside the
+    // tagging service.
+    let tag_provider_registry = fakecloud_core::tag_index::TagProviderRegistry::new();
     let mut resource_groups_service =
-        fakecloud_resource_groups::ResourceGroupsService::new(resource_groups_state.clone());
+        fakecloud_resource_groups::ResourceGroupsService::new(resource_groups_state.clone())
+            .with_tag_registry(tag_provider_registry.clone());
     if let Some(store) = resource_groups_snapshot_store {
         resource_groups_service = resource_groups_service.with_snapshot_store(store);
     }
@@ -6665,7 +6672,15 @@ async fn main() {
     // a given service is wired, its native tags simply don't appear here; tags
     // applied through this API always do. The registry starts empty and grows
     // as providers register at startup.
-    let tag_provider_registry = fakecloud_core::tag_index::TagProviderRegistry::new();
+    // Expose ARNs tagged directly via TagResources (which no modelled service
+    // owns) through the shared registry (created earlier, alongside Resource
+    // Groups), so Resource Groups tag-query resolution can match against them
+    // just as the tagging API does.
+    tag_provider_registry.register(std::sync::Arc::new(
+        fakecloud_resource_groups_tagging::ApiTagProvider::new(
+            resource_groups_tagging_state.clone(),
+        ),
+    ));
     let resource_groups_tagging_snapshot_store: Option<
         Arc<dyn fakecloud_persistence::SnapshotStore>,
     > = if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

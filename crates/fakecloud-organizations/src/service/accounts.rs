@@ -72,6 +72,16 @@ impl OrganizationsService {
         let org = guard.as_mut().expect("management gate proved Some");
         let status = org.begin_create_account(&email, &name, None);
         let request_id = status.id.clone();
+        // Apply create-time Tags to the reserved account id so
+        // ListTagsForResource reflects them without a follow-up TagResource.
+        // The id is reserved synchronously (before background enrollment), so
+        // the tags survive and are queryable immediately (bug-hunt).
+        let tags = parse_tags(body.get("Tags"));
+        if !tags.is_empty() {
+            if let Some(acct_id) = status.account_id.clone() {
+                org.set_resource_tags(&acct_id, &tags);
+            }
+        }
         drop(guard);
 
         self.spawn_create_account_completion(request_id);
@@ -98,6 +108,14 @@ impl OrganizationsService {
         let gov_id = org.next_account_id();
         let status = org.begin_create_account(&email, &name, Some(gov_id));
         let request_id = status.id.clone();
+        // Apply create-time Tags to the reserved (primary) account id, mirroring
+        // CreateAccount; the id is reserved synchronously (bug-hunt).
+        let tags = parse_tags(body.get("Tags"));
+        if !tags.is_empty() {
+            if let Some(acct_id) = status.account_id.clone() {
+                org.set_resource_tags(&acct_id, &tags);
+            }
+        }
         drop(guard);
 
         self.spawn_create_account_completion(request_id);

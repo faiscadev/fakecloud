@@ -35,6 +35,7 @@ impl CloudFrontService {
         if cfg.name.is_empty() {
             return Err(invalid_argument("Name is required"));
         }
+        let tags = crate::extras_service::tags_to_state(&cfg.tags);
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -62,7 +63,7 @@ impl CloudFrontService {
         let stored = StoredConnectionGroup {
             id: id.clone(),
             name: cfg.name,
-            arn,
+            arn: arn.clone(),
             routing_endpoint,
             status: "InProgress".to_string(),
             etag: etag.clone(),
@@ -74,6 +75,9 @@ impl CloudFrontService {
             is_default: false,
         };
         account.connection_groups.insert(id.clone(), stored.clone());
+        if !tags.is_empty() {
+            account.tags.insert(arn, tags);
+        }
         drop(state);
         self.schedule_connection_group_deploy(id.clone());
         let body = render_connection_group(&stored);

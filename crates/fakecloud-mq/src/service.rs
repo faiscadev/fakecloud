@@ -2101,6 +2101,39 @@ mod tests {
     }
 
     #[test]
+    fn create_broker_persists_ldap_metadata_and_describe_echoes_it_without_password() {
+        let s = svc();
+        let c = ctx("us-east-1");
+        let mut body = active_body("ldap");
+        body["ldapServerMetadata"] = json!({
+            "hosts": ["ldap.example.com"],
+            "roleBase": "ou=roles,dc=example,dc=com",
+            "roleSearchMatching": "(member=uid={0})",
+            "serviceAccountUsername": "cn=admin",
+            "serviceAccountPassword": "secret",
+            "userBase": "ou=users,dc=example,dc=com",
+            "userSearchMatching": "(uid={0})"
+        });
+        let created = json_of(s.create_broker(&c, &body).unwrap());
+        let id = created["brokerId"].as_str().unwrap().to_string();
+
+        let mut settled = false;
+        let described = json_of(s.describe_broker(&c, &id, &mut settled).unwrap());
+        let ldap = &described["ldapServerMetadata"];
+        assert_eq!(ldap["hosts"][0].as_str(), Some("ldap.example.com"));
+        assert_eq!(ldap["serviceAccountUsername"].as_str(), Some("cn=admin"));
+        assert_eq!(
+            ldap["userBase"].as_str(),
+            Some("ou=users,dc=example,dc=com")
+        );
+        // The write-only password is never echoed by DescribeBroker.
+        assert!(
+            ldap.get("serviceAccountPassword").is_none(),
+            "serviceAccountPassword must be stripped from DescribeBroker"
+        );
+    }
+
+    #[test]
     fn delete_configuration_in_use_by_broker_is_rejected() {
         let s = svc();
         let c = ctx("us-east-1");

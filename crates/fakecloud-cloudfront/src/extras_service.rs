@@ -25,6 +25,24 @@ use crate::xml_io;
 const NS: &str = crate::NAMESPACE;
 const XML_DECL: &str = r#"<?xml version="1.0" encoding="UTF-8"?>"#;
 
+/// Convert a parsed restXml `Tags` payload into the account-keyed tag list used
+/// by ListTagsForResource. Shared by the create ops that accept create-time
+/// Tags (VPC origins, anycast IP lists, trust stores, connection groups).
+pub(crate) fn tags_to_state(tags: &Option<crate::model::Tags>) -> Vec<crate::state::Tag> {
+    tags.as_ref()
+        .and_then(|t| t.items.as_ref())
+        .map(|list| {
+            list.tag
+                .iter()
+                .map(|t| crate::state::Tag {
+                    key: t.key.clone(),
+                    value: t.value.clone(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 // ─── VPC Origin ───────────────────────────────────────────────────────
 
 impl CloudFrontService {
@@ -35,6 +53,7 @@ impl CloudFrontService {
         let parsed: CreateVpcOriginRequest = xml_io::from_xml_root(&req.body)
             .map_err(|e| invalid_argument(format!("invalid CreateVpcOriginRequest XML: {e}")))?;
         let cfg = parsed.vpc_origin_endpoint_config;
+        let tags = tags_to_state(&parsed.tags);
         if cfg.name.is_empty() {
             return Err(invalid_argument("Name is required"));
         }
@@ -64,7 +83,7 @@ impl CloudFrontService {
             Arn::global("cloudfront", DEFAULT_ACCOUNT, &format!("vpc-origin/{id}")).to_string();
         let stored = StoredVpcOrigin {
             id: id.clone(),
-            arn,
+            arn: arn.clone(),
             status: "Deployed".to_string(),
             etag: etag.clone(),
             created_time: now,
@@ -72,6 +91,9 @@ impl CloudFrontService {
             config: cfg,
         };
         account.vpc_origins.insert(id.clone(), stored.clone());
+        if !tags.is_empty() {
+            account.tags.insert(arn, tags);
+        }
         drop(state);
         let body = render_vpc_origin(&stored);
         Ok(xml_with_etag(StatusCode::CREATED, body, &etag, Some(&id)))
@@ -217,6 +239,14 @@ impl CloudFrontService {
         if cfg.ip_count != 3 && cfg.ip_count != 21 {
             return Err(invalid_argument("IpCount must be 3 or 21"));
         }
+        let tags = tags_to_state(&cfg.tags);
+        // Retain the bring-your-own-IP IPAM CIDR configs supplied at create time
+        // so GetAnycastIpList echoes them as IpamConfig (previously dropped).
+        let ipam_cidr_configs = cfg
+            .ipam_cidr_configs
+            .as_ref()
+            .map(|l| l.ipam_cidr_config.clone())
+            .unwrap_or_default();
         let mut state = self.state.write();
         let account = state
             .accounts
@@ -247,14 +277,18 @@ impl CloudFrontService {
             id: id.clone(),
             name: cfg.name,
             status: "Deployed".to_string(),
-            arn,
+            arn: arn.clone(),
             ip_count: cfg.ip_count,
             ip_address_type: cfg.ip_address_type,
             anycast_ips,
             last_modified_time: Utc::now(),
             etag: etag.clone(),
+            ipam_cidr_configs,
         };
         account.anycast_ip_lists.insert(id.clone(), stored.clone());
+        if !tags.is_empty() {
+            account.tags.insert(arn, tags);
+        }
         drop(state);
         let body = render_anycast_ip_list(&stored);
         Ok(xml_with_etag(StatusCode::CREATED, body, &etag, Some(&id)))
@@ -300,6 +334,9 @@ impl CloudFrontService {
         }
         if let Some(t) = cfg.ip_address_type {
             a.ip_address_type = Some(t);
+        }
+        if let Some(l) = cfg.ipam_cidr_configs {
+            a.ipam_cidr_configs = l.ipam_cidr_config;
         }
         a.last_modified_time = Utc::now();
         a.etag = generate_id_with_prefix("E");
@@ -404,15 +441,20 @@ impl CloudFrontService {
         let arn =
             Arn::global("cloudfront", DEFAULT_ACCOUNT, &format!("trust-store/{id}")).to_string();
         let etag = generate_id_with_prefix("E");
+        let tags = tags_to_state(&cfg.tags);
         let stored = StoredTrustStore {
             id: id.clone(),
-            arn,
+            arn: arn.clone(),
             name: cfg.name,
             etag: etag.clone(),
             last_modified_time: Utc::now(),
             ca_certificates_bundle_source: cfg.ca_certificates_bundle_source,
+            use_client_certificate_ocsp_endpoint: cfg.use_client_certificate_ocsp_endpoint,
         };
         account.trust_stores.insert(id.clone(), stored.clone());
+        if !tags.is_empty() {
+            account.tags.insert(arn, tags);
+        }
         drop(state);
         let body = render_trust_store(&stored);
         Ok(xml_with_etag(StatusCode::CREATED, body, &etag, Some(&id)))
@@ -677,6 +719,31 @@ fn render_anycast_ip_list(a: &StoredAnycastIpList) -> String {
     if let Some(t) = &a.ip_address_type {
         out.push_str(&format!("<IpAddressType>{}</IpAddressType>", esc(t)));
     }
+    if !a.ipam_cidr_configs.is_empty() {
+        out.push_str("<IpamConfig>");
+        out.push_str(&format!(
+            "<Quantity>{}</Quantity>",
+            a.ipam_cidr_configs.len()
+        ));
+        out.push_str("<IpamCidrConfigs>");
+        for c in &a.ipam_cidr_configs {
+            out.push_str("<IpamCidrConfig>");
+            out.push_str(&format!("<Cidr>{}</Cidr>", esc(&c.cidr)));
+            out.push_str(&format!(
+                "<IpamPoolArn>{}</IpamPoolArn>",
+                esc(&c.ipam_pool_arn)
+            ));
+            if let Some(ip) = &c.anycast_ip {
+                out.push_str(&format!("<AnycastIp>{}</AnycastIp>", esc(ip)));
+            }
+            if let Some(s) = &c.status {
+                out.push_str(&format!("<Status>{}</Status>", esc(s)));
+            }
+            out.push_str("</IpamCidrConfig>");
+        }
+        out.push_str("</IpamCidrConfigs>");
+        out.push_str("</IpamConfig>");
+    }
     out.push_str("<AnycastIps>");
     for ip in &a.anycast_ips {
         out.push_str(&format!("<AnycastIp>{}</AnycastIp>", esc(ip)));
@@ -718,6 +785,11 @@ fn render_trust_store(t: &StoredTrustStore) -> String {
         rfc3339(&t.last_modified_time)
     ));
     out.push_str(&render_bundle_source(&t.ca_certificates_bundle_source));
+    if let Some(ocsp) = t.use_client_certificate_ocsp_endpoint {
+        out.push_str(&format!(
+            "<UseClientCertificateOCSPEndpoint>{ocsp}</UseClientCertificateOCSPEndpoint>"
+        ));
+    }
     out.push_str("</TrustStore>");
     out
 }
@@ -737,4 +809,166 @@ fn render_bundle_source(s: &CaCertificatesBundleSource) -> String {
     }
     out.push_str("</CaCertificatesBundleSource>");
     out
+}
+
+#[cfg(test)]
+mod extras_create_tests {
+    use super::*;
+    use crate::state::CloudFrontAccounts;
+    use fakecloud_core::service::{AwsService, ResponseBody};
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn svc() -> CloudFrontService {
+        CloudFrontService::new(Arc::new(RwLock::new(CloudFrontAccounts::new())))
+    }
+
+    fn req(method: http::Method, path: &str, raw_query: &str, body: &str) -> AwsRequest {
+        AwsRequest {
+            service: "cloudfront".into(),
+            action: String::new(),
+            region: "us-east-1".into(),
+            account_id: DEFAULT_ACCOUNT.into(),
+            request_id: "t".into(),
+            headers: HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            body: bytes::Bytes::from(body.to_string()),
+            path_segments: vec![],
+            raw_path: path.into(),
+            raw_query: raw_query.into(),
+            method,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_str(resp: &AwsResponse) -> String {
+        match &resp.body {
+            ResponseBody::Bytes(b) => String::from_utf8(b.to_vec()).unwrap(),
+            _ => panic!("expected bytes body"),
+        }
+    }
+
+    fn between<'a>(xml: &'a str, tag: &str) -> Option<&'a str> {
+        xml.split(&format!("<{tag}>"))
+            .nth(1)
+            .and_then(|s| s.split(&format!("</{tag}>")).next())
+    }
+
+    #[tokio::test]
+    async fn create_trust_store_persists_ocsp_and_tags() {
+        let s = svc();
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<CreateTrustStoreRequest xmlns="{NS}">
+  <Name>ts1</Name>
+  <CaCertificatesBundleSource>
+    <CaCertificatesBundleS3Location><Bucket>b</Bucket><Key>k</Key><Region>us-east-1</Region></CaCertificatesBundleS3Location>
+  </CaCertificatesBundleSource>
+  <UseClientCertificateOCSPEndpoint>true</UseClientCertificateOCSPEndpoint>
+  <Tags><Items><Tag><Key>team</Key><Value>edge</Value></Tag></Items></Tags>
+</CreateTrustStoreRequest>"#
+        );
+        let created = s
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/trust-store",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        let xml = body_str(&created);
+        let id = between(&xml, "Id").unwrap().to_string();
+        let arn = between(&xml, "Arn").unwrap().to_string();
+
+        // GetTrustStore echoes the OCSP flag.
+        let got = s
+            .handle(req(
+                http::Method::GET,
+                &format!("/2020-05-31/trust-store/{id}"),
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let gxml = body_str(&got);
+        assert_eq!(
+            between(&gxml, "UseClientCertificateOCSPEndpoint"),
+            Some("true"),
+            "OCSP echoed: {gxml}"
+        );
+
+        // Create-time tags are visible via ListTagsForResource.
+        let tags = s
+            .handle(req(
+                http::Method::GET,
+                "/2020-05-31/tagging",
+                &format!("Resource={arn}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let txml = body_str(&tags);
+        assert!(txml.contains("<Key>team</Key>"), "tag listed: {txml}");
+        assert!(txml.contains("<Value>edge</Value>"));
+    }
+
+    #[tokio::test]
+    async fn create_anycast_ip_list_persists_ipam_and_tags() {
+        let s = svc();
+        let body = format!(
+            r#"<?xml version="1.0"?>
+<CreateAnycastIpListRequest xmlns="{NS}">
+  <Name>ail1</Name>
+  <IpCount>3</IpCount>
+  <IpamCidrConfigs>
+    <IpamCidrConfig>
+      <Cidr>10.0.0.0/24</Cidr>
+      <IpamPoolArn>arn:aws:ec2::123456789012:ipam-pool/ipam-pool-1</IpamPoolArn>
+    </IpamCidrConfig>
+  </IpamCidrConfigs>
+  <Tags><Items><Tag><Key>env</Key><Value>prod</Value></Tag></Items></Tags>
+</CreateAnycastIpListRequest>"#
+        );
+        let created = s
+            .handle(req(
+                http::Method::POST,
+                "/2020-05-31/anycast-ip-list",
+                "",
+                &body,
+            ))
+            .await
+            .unwrap();
+        let xml = body_str(&created);
+        let id = between(&xml, "Id").unwrap().to_string();
+        let arn = between(&xml, "Arn").unwrap().to_string();
+
+        let got = s
+            .handle(req(
+                http::Method::GET,
+                &format!("/2020-05-31/anycast-ip-list/{id}"),
+                "",
+                "",
+            ))
+            .await
+            .unwrap();
+        let gxml = body_str(&got);
+        assert!(gxml.contains("<IpamConfig>"), "IpamConfig echoed: {gxml}");
+        assert!(gxml.contains("<Cidr>10.0.0.0/24</Cidr>"));
+        assert!(gxml.contains("ipam-pool-1"));
+
+        let tags = s
+            .handle(req(
+                http::Method::GET,
+                "/2020-05-31/tagging",
+                &format!("Resource={arn}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        assert!(body_str(&tags).contains("<Key>env</Key>"));
+    }
 }

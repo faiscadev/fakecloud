@@ -49,6 +49,10 @@ pub struct ResourceGroupsService {
     state: SharedResourceGroupsState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// Shared cross-service tag index, used to resolve TAG_FILTERS resource
+    /// queries (ListGroupResources / SearchResources) against live tagged
+    /// resources. `None` in unit tests that don't exercise query resolution.
+    tag_registry: Option<fakecloud_core::tag_index::TagProviderRegistry>,
 }
 
 /// A resolved route: the operation plus any path-derived argument.
@@ -104,11 +108,20 @@ impl ResourceGroupsService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            tag_registry: None,
         }
     }
 
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self
+    }
+
+    pub fn with_tag_registry(
+        mut self,
+        registry: fakecloud_core::tag_index::TagProviderRegistry,
+    ) -> Self {
+        self.tag_registry = Some(registry);
         self
     }
 
@@ -400,8 +413,17 @@ impl ResourceGroupsService {
         let group = st
             .and_then(|s| s.resolve_name(&key).and_then(|n| s.groups.get(n)))
             .ok_or_else(|| not_found(&key))?;
-        let items: Vec<Value> = group
-            .resources
+        // A group's members are the ARNs explicitly grouped via GroupResources
+        // PLUS everything its ResourceQuery matches in the cross-service tag
+        // index. Previously the query was never evaluated, so tag-based groups
+        // always reported zero members (bug-hunt).
+        let mut arns: BTreeSet<String> = group.resources.clone();
+        if let Some(rq) = &group.query {
+            for arn in self.evaluate_query(&req.account_id, &req.region, rq) {
+                arns.insert(arn);
+            }
+        }
+        let items: Vec<Value> = arns
             .iter()
             .map(|arn| {
                 json!({
@@ -410,8 +432,7 @@ impl ResourceGroupsService {
                 })
             })
             .collect();
-        let idents: Vec<Value> = group
-            .resources
+        let idents: Vec<Value> = arns
             .iter()
             .map(|arn| resource_identifier_json(arn))
             .collect();
@@ -432,15 +453,58 @@ impl ResourceGroupsService {
         let body = parse_json(&req.body)?;
         validate_max_results(&body)?;
         validate_next_token(&body)?;
-        // Evaluating a free-standing ResourceQuery against live resources needs
-        // the cross-service tag index (Resource Groups Tagging API batch). Until
-        // then SearchResources returns no matches rather than a fabricated set.
-        parse_resource_query(body.get("ResourceQuery"))?
+        let rq = parse_resource_query(body.get("ResourceQuery"))?
             .ok_or_else(|| bad_request("ResourceQuery is required."))?;
-        Ok(AwsResponse::json_value(
-            StatusCode::OK,
-            json!({ "ResourceIdentifiers": [], "QueryErrors": [] }),
-        ))
+        // Evaluate the free-standing ResourceQuery against the cross-service tag
+        // index (previously always empty -- bug-hunt).
+        let arns = self.evaluate_query(&req.account_id, &req.region, &rq);
+        let idents: Vec<Value> = arns
+            .iter()
+            .map(|arn| resource_identifier_json(arn))
+            .collect();
+        let (idents_page, next) = paginate(idents, &body);
+        let mut out = json!({ "ResourceIdentifiers": idents_page, "QueryErrors": [] });
+        if let Some(nt) = next {
+            out["NextToken"] = json!(nt);
+        }
+        Ok(AwsResponse::json_value(StatusCode::OK, out))
+    }
+
+    /// Resolve a TAG_FILTERS_1_0 resource query to matching ARNs by evaluating
+    /// its `ResourceTypeFilters` + `TagFilters` against the cross-service tag
+    /// index. Returns empty for CLOUDFORMATION_STACK_1_0 (no CFN-membership hook
+    /// is available here) or when no tag registry is wired.
+    fn evaluate_query(&self, account: &str, region: &str, rq: &ResourceQuery) -> Vec<String> {
+        if rq.type_ != "TAG_FILTERS_1_0" {
+            return Vec::new();
+        }
+        let Some(registry) = &self.tag_registry else {
+            return Vec::new();
+        };
+        let Ok(parsed) = serde_json::from_str::<Value>(&rq.query) else {
+            return Vec::new();
+        };
+        let type_filters = string_list(parsed.get("ResourceTypeFilters"));
+        let tag_filters: Vec<(String, Vec<String>)> = parsed
+            .get("TagFilters")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|f| {
+                        let key = f.get("Key").and_then(Value::as_str)?.to_string();
+                        let values = string_list(f.get("Values"));
+                        Some((key, values))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        registry
+            .resources(account, Some(region))
+            .into_iter()
+            .filter(|r| type_query_matches(&type_filters, &r.resource_type))
+            .filter(|r| tag_filters_match(&tag_filters, &r.tags))
+            .map(|r| r.arn)
+            .collect()
     }
 
     // --- configuration ----------------------------------------------------
@@ -868,6 +932,58 @@ fn parse_resource_query(v: Option<&Value>) -> Result<Option<ResourceQuery>, AwsS
     }))
 }
 
+/// Split a tagging resource type into `(service, Option<subtype>)`, e.g.
+/// `"ec2:instance"` -> `("ec2", Some("instance"))`, `"s3"` -> `("s3", None)`.
+fn split_service_type(t: &str) -> (String, Option<String>) {
+    let t = t.to_lowercase();
+    match t.split_once(':') {
+        Some((s, ty)) => (s.to_string(), Some(ty.to_string())),
+        None => (t, None),
+    }
+}
+
+/// Normalize a single `ResourceTypeFilters` entry (CloudFormation-style
+/// `AWS::EC2::Instance`, or already tagging-style `ec2:instance`) into a
+/// `(service, Option<subtype>)` pair.
+fn normalize_type_filter(filter: &str) -> (String, Option<String>) {
+    if filter.contains("::") {
+        let parts: Vec<&str> = filter.split("::").collect();
+        // ["AWS", "EC2", "Instance"] -> ("ec2", Some("instance"))
+        match parts.as_slice() {
+            [_, service, ty] => (service.to_lowercase(), Some(ty.to_lowercase())),
+            [_, service] => (service.to_lowercase(), None),
+            _ => split_service_type(filter),
+        }
+    } else {
+        split_service_type(filter)
+    }
+}
+
+/// Whether a resource's tagging type satisfies the query's `ResourceTypeFilters`.
+/// Empty filters or `AWS::AllSupported` match everything. A service-only filter
+/// matches every subtype of that service; a `service:type` filter matches a
+/// bare `service` resource (the tag index stores some services without a
+/// subtype).
+fn type_query_matches(filters: &[String], resource_type: &str) -> bool {
+    if filters.is_empty() || filters.iter().any(|f| f == "AWS::AllSupported") {
+        return true;
+    }
+    let (rs, rt) = split_service_type(resource_type);
+    filters.iter().any(|f| {
+        let (fs, ft) = normalize_type_filter(f);
+        fs == rs && (ft.is_none() || rt.is_none() || ft == rt)
+    })
+}
+
+/// Whether a resource's tags satisfy every `TagFilter` (ANDed). A filter with
+/// no values matches any value for the key; otherwise the value must be listed.
+fn tag_filters_match(filters: &[(String, Vec<String>)], tags: &BTreeMap<String, String>) -> bool {
+    filters.iter().all(|(key, values)| match tags.get(key) {
+        None => false,
+        Some(v) => values.is_empty() || values.iter().any(|x| x == v),
+    })
+}
+
 fn parse_tags(v: Option<&Value>) -> BTreeMap<String, String> {
     v.and_then(|t| t.as_object())
         .map(|o| {
@@ -1035,4 +1151,139 @@ fn not_found(what: &str) -> AwsServiceError {
         "NotFoundException",
         format!("The specified group or resource '{what}' was not found."),
     )
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::tag_index::{TagProvider, TagProviderRegistry, TaggedResource};
+    use parking_lot::RwLock;
+    use std::collections::BTreeMap;
+
+    /// A fixed set of tagged resources, standing in for real service providers.
+    struct FakeProvider(Vec<TaggedResource>);
+    impl TagProvider for FakeProvider {
+        fn tagged_resources(&self, _account_id: &str) -> Vec<TaggedResource> {
+            self.0.clone()
+        }
+    }
+
+    fn tagged(arn: &str, rtype: &str, tags: &[(&str, &str)]) -> TaggedResource {
+        let map: BTreeMap<String, String> = tags
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        TaggedResource::new(arn, rtype, map)
+    }
+
+    fn svc_with(resources: Vec<TaggedResource>) -> ResourceGroupsService {
+        let registry = TagProviderRegistry::new();
+        registry.register(Arc::new(FakeProvider(resources)));
+        let state: SharedResourceGroupsState = Arc::new(RwLock::new(MultiAccountState::new(
+            "123456789012",
+            "us-east-1",
+            "",
+        )));
+        ResourceGroupsService::new(state).with_tag_registry(registry)
+    }
+
+    fn req(path: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "resource-groups".into(),
+            action: String::new(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "test".into(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap().into(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: path.into(),
+            raw_query: String::new(),
+            method: Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    async fn body_of(s: &ResourceGroupsService, path: &str, body: Value) -> Value {
+        let resp = s.handle(req(path, body)).await.unwrap();
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn tag_query(type_filters: Value, tag_filters: Value) -> Value {
+        let q = json!({ "ResourceTypeFilters": type_filters, "TagFilters": tag_filters });
+        json!({ "Type": "TAG_FILTERS_1_0", "Query": q.to_string() })
+    }
+
+    #[tokio::test]
+    async fn search_resources_evaluates_tag_query() {
+        let s = svc_with(vec![
+            tagged(
+                "arn:aws:ec2:us-east-1:123456789012:instance/i-1",
+                "ec2:instance",
+                &[("stage", "test")],
+            ),
+            tagged(
+                "arn:aws:ec2:us-east-1:123456789012:instance/i-2",
+                "ec2:instance",
+                &[("stage", "prod")],
+            ),
+        ]);
+        let out = body_of(
+            &s,
+            "/resources/search",
+            json!({
+                "ResourceQuery": tag_query(
+                    json!(["AWS::AllSupported"]),
+                    json!([{ "Key": "stage", "Values": ["test"] }])
+                )
+            }),
+        )
+        .await;
+        let ids = out["ResourceIdentifiers"].as_array().unwrap();
+        assert_eq!(ids.len(), 1, "only the test-tagged instance: {out}");
+        assert_eq!(
+            ids[0]["ResourceArn"],
+            "arn:aws:ec2:us-east-1:123456789012:instance/i-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_group_resources_evaluates_group_query_and_type_filter() {
+        let s = svc_with(vec![
+            tagged(
+                "arn:aws:ec2:us-east-1:123456789012:instance/i-1",
+                "ec2:instance",
+                &[("team", "core")],
+            ),
+            tagged("arn:aws:s3:::my-bucket", "s3", &[("team", "core")]),
+        ]);
+        // Create a tag-query group scoped to EC2 instances tagged team=core.
+        s.handle(req(
+            "/groups",
+            json!({
+                "Name": "core-ec2",
+                "ResourceQuery": tag_query(
+                    json!(["AWS::EC2::Instance"]),
+                    json!([{ "Key": "team", "Values": ["core"] }])
+                )
+            }),
+        ))
+        .await
+        .unwrap();
+
+        let out = body_of(&s, "/list-group-resources", json!({ "Group": "core-ec2" })).await;
+        let ids = out["ResourceIdentifiers"].as_array().unwrap();
+        assert_eq!(ids.len(), 1, "only the EC2 instance matches: {out}");
+        assert_eq!(
+            ids[0]["ResourceArn"],
+            "arn:aws:ec2:us-east-1:123456789012:instance/i-1"
+        );
+        // Members are also surfaced under Resources with a status.
+        assert_eq!(out["Resources"][0]["Status"]["Name"], "ACTIVE");
+    }
 }

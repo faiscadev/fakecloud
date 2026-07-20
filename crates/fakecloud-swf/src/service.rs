@@ -920,6 +920,7 @@ impl SwfService {
                 .executions
                 .values()
                 .filter(|e| e.domain == domain && e.status == want)
+                .filter(|e| execution_matches_filters(e, body, open))
                 .map(wire_execution_info)
                 .collect();
             if reverse {
@@ -945,6 +946,7 @@ impl SwfService {
                 .executions
                 .values()
                 .filter(|e| e.domain == domain && e.status == want)
+                .filter(|e| execution_matches_filters(e, body, open))
                 .count();
             ok(json!({ "count": count, "truncated": false }))
         })
@@ -1176,13 +1178,124 @@ fn wire_open_counts(exec: &Execution) -> Value {
         .filter(|a| a.state != ActivityState::Closed)
         .count();
     let open_decisions = i64::from(exec.decision_scheduled || exec.decision_task_token.is_some());
+    // Timers / child workflows / lambdas are derived from the event history:
+    // each is opened by a *start* event and closed by a matching terminal one.
+    // The count is (started - closed), clamped at zero.
+    let count_events = |types: &[&str]| -> i64 {
+        exec.events
+            .iter()
+            .filter(|ev| {
+                ev.get("eventType")
+                    .and_then(Value::as_str)
+                    .is_some_and(|t| types.contains(&t))
+            })
+            .count() as i64
+    };
+    let open_timers =
+        (count_events(&["TimerStarted"]) - count_events(&["TimerFired", "TimerCanceled"])).max(0);
+    let open_children = (count_events(&["StartChildWorkflowExecutionInitiated"])
+        - count_events(&[
+            "ChildWorkflowExecutionCompleted",
+            "ChildWorkflowExecutionFailed",
+            "ChildWorkflowExecutionTimedOut",
+            "ChildWorkflowExecutionCanceled",
+            "ChildWorkflowExecutionTerminated",
+        ]))
+    .max(0);
+    let open_lambdas = (count_events(&["LambdaFunctionScheduled"])
+        - count_events(&[
+            "LambdaFunctionCompleted",
+            "LambdaFunctionFailed",
+            "LambdaFunctionTimedOut",
+        ]))
+    .max(0);
     json!({
         "openActivityTasks": open_activities,
         "openDecisionTasks": open_decisions,
-        "openTimers": 0,
-        "openChildWorkflowExecutions": 0,
-        "openLambdaFunctions": 0,
+        "openTimers": open_timers,
+        "openChildWorkflowExecutions": open_children,
+        "openLambdaFunctions": open_lambdas,
     })
+}
+
+/// Apply the List/Count*WorkflowExecutions filters to a single execution.
+/// `executionFilter`, `typeFilter` and `tagFilter` are mutually exclusive on
+/// AWS, but any that are present are ANDed with the time/close-status filters.
+/// `closeStatusFilter`/`closeTimeFilter` only apply to closed executions.
+fn execution_matches_filters(e: &Execution, body: &Value, open: bool) -> bool {
+    // executionFilter.workflowId
+    if let Some(wid) = body
+        .get("executionFilter")
+        .and_then(|f| f.get("workflowId"))
+        .and_then(Value::as_str)
+    {
+        if e.workflow_id != wid {
+            return false;
+        }
+    }
+    // typeFilter.name (+ optional version)
+    if let Some(tf) = body.get("typeFilter") {
+        if let Some(name) = tf.get("name").and_then(Value::as_str) {
+            if e.workflow_type_name != name {
+                return false;
+            }
+        }
+        if let Some(version) = tf.get("version").and_then(Value::as_str) {
+            if e.workflow_type_version != version {
+                return false;
+            }
+        }
+    }
+    // tagFilter.tag
+    if let Some(tag) = body
+        .get("tagFilter")
+        .and_then(|f| f.get("tag"))
+        .and_then(Value::as_str)
+    {
+        if !e.tag_list.iter().any(|t| t == tag) {
+            return false;
+        }
+    }
+    // startTimeFilter.oldestDate / latestDate (epoch seconds)
+    if let Some(stf) = body.get("startTimeFilter") {
+        if let Some(oldest) = stf.get("oldestDate").and_then(Value::as_f64) {
+            if e.start_timestamp < oldest {
+                return false;
+            }
+        }
+        if let Some(latest) = stf.get("latestDate").and_then(Value::as_f64) {
+            if e.start_timestamp > latest {
+                return false;
+            }
+        }
+    }
+    if !open {
+        // closeStatusFilter.status
+        if let Some(status) = body
+            .get("closeStatusFilter")
+            .and_then(|f| f.get("status"))
+            .and_then(Value::as_str)
+        {
+            if e.close_status.as_deref() != Some(status) {
+                return false;
+            }
+        }
+        // closeTimeFilter.oldestDate / latestDate
+        if let Some(ctf) = body.get("closeTimeFilter") {
+            let close = e.close_timestamp;
+            if let Some(oldest) = ctf.get("oldestDate").and_then(Value::as_f64) {
+                if close.is_none_or(|c| c < oldest) {
+                    return false;
+                }
+            }
+            if let Some(latest) = ctf.get("latestDate").and_then(Value::as_f64) {
+                if close.is_none_or(|c| c > latest) {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
 
 // ---- decider / worker loop ------------------------------------------------
@@ -2165,5 +2278,152 @@ mod tests {
         )
         .unwrap();
         assert_eq!(closed["count"], 1);
+    }
+
+    #[test]
+    fn list_and_count_open_executions_apply_filters() {
+        // List/Count*WorkflowExecutions previously ignored every filter; they
+        // must honor executionFilter / typeFilter / tagFilter (bug-hunt).
+        let svc = service();
+        call(
+            &svc,
+            "RegisterDomain",
+            json!({ "name": "d", "workflowExecutionRetentionPeriodInDays": "1" }),
+        )
+        .unwrap();
+        for (name, version) in [("wfA", "1"), ("wfB", "1")] {
+            call(
+                &svc,
+                "RegisterWorkflowType",
+                json!({
+                    "domain": "d", "name": name, "version": version,
+                    "defaultTaskList": { "name": "dtl" },
+                    "defaultChildPolicy": "TERMINATE",
+                    "defaultExecutionStartToCloseTimeout": "3600",
+                    "defaultTaskStartToCloseTimeout": "60"
+                }),
+            )
+            .unwrap();
+        }
+        // w1: type wfA, tag "red"; w2: type wfB, tag "blue".
+        call(
+            &svc,
+            "StartWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w1", "workflowType": {"name": "wfA", "version": "1"}, "tagList": ["red"] }),
+        )
+        .unwrap();
+        call(
+            &svc,
+            "StartWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w2", "workflowType": {"name": "wfB", "version": "1"}, "tagList": ["blue"] }),
+        )
+        .unwrap();
+
+        // No filter -> both.
+        let all = call(
+            &svc,
+            "ListOpenWorkflowExecutions",
+            json!({ "domain": "d", "startTimeFilter": { "oldestDate": 0 } }),
+        )
+        .unwrap();
+        assert_eq!(all["executionInfos"].as_array().unwrap().len(), 2);
+
+        // executionFilter by workflowId.
+        let by_id = call(
+            &svc,
+            "ListOpenWorkflowExecutions",
+            json!({ "domain": "d", "startTimeFilter": { "oldestDate": 0 }, "executionFilter": { "workflowId": "w1" } }),
+        )
+        .unwrap();
+        let ids = by_id["executionInfos"].as_array().unwrap();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(ids[0]["execution"]["workflowId"], "w1");
+
+        // typeFilter by name.
+        let by_type = call(
+            &svc,
+            "CountOpenWorkflowExecutions",
+            json!({ "domain": "d", "startTimeFilter": { "oldestDate": 0 }, "typeFilter": { "name": "wfB" } }),
+        )
+        .unwrap();
+        assert_eq!(by_type["count"], 1);
+
+        // tagFilter.
+        let by_tag = call(
+            &svc,
+            "CountOpenWorkflowExecutions",
+            json!({ "domain": "d", "startTimeFilter": { "oldestDate": 0 }, "tagFilter": { "tag": "red" } }),
+        )
+        .unwrap();
+        assert_eq!(by_tag["count"], 1);
+
+        // A tag that matches nothing.
+        let none = call(
+            &svc,
+            "CountOpenWorkflowExecutions",
+            json!({ "domain": "d", "startTimeFilter": { "oldestDate": 0 }, "tagFilter": { "tag": "green" } }),
+        )
+        .unwrap();
+        assert_eq!(none["count"], 0);
+    }
+
+    #[test]
+    fn describe_execution_reports_real_open_counts() {
+        // openTimers / openChildWorkflowExecutions / openLambdaFunctions were
+        // hardcoded to 0; they must be derived from the event history (bug-hunt).
+        let svc = service();
+        call(
+            &svc,
+            "RegisterDomain",
+            json!({ "name": "d", "workflowExecutionRetentionPeriodInDays": "1" }),
+        )
+        .unwrap();
+        call(
+            &svc,
+            "RegisterWorkflowType",
+            json!({
+                "domain": "d", "name": "wf", "version": "1",
+                "defaultTaskList": { "name": "dtl" },
+                "defaultChildPolicy": "TERMINATE",
+                "defaultExecutionStartToCloseTimeout": "3600",
+                "defaultTaskStartToCloseTimeout": "60"
+            }),
+        )
+        .unwrap();
+        let start = call(
+            &svc,
+            "StartWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w1", "workflowType": { "name": "wf", "version": "1" } }),
+        )
+        .unwrap();
+        let run_id = start["runId"].as_str().unwrap().to_string();
+
+        // Inject history: 2 timers started, 1 fired -> 1 open; 1 child started,
+        // none closed -> 1 open; 1 lambda scheduled -> 1 open.
+        {
+            let mut guard = svc.state.write();
+            let data = guard.get_or_create("000000000000");
+            let exec = data.executions.get_mut(&run_id).unwrap();
+            for t in [
+                "TimerStarted",
+                "TimerStarted",
+                "TimerFired",
+                "StartChildWorkflowExecutionInitiated",
+                "LambdaFunctionScheduled",
+            ] {
+                exec.events.push(json!({ "eventType": t }));
+            }
+        }
+
+        let desc = call(
+            &svc,
+            "DescribeWorkflowExecution",
+            json!({ "domain": "d", "execution": { "workflowId": "w1", "runId": run_id } }),
+        )
+        .unwrap();
+        let oc = &desc["openCounts"];
+        assert_eq!(oc["openTimers"], 1);
+        assert_eq!(oc["openChildWorkflowExecutions"], 1);
+        assert_eq!(oc["openLambdaFunctions"], 1);
     }
 }
