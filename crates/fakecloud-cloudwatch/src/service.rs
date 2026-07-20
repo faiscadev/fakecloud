@@ -1463,6 +1463,12 @@ impl CloudWatchService {
                 .unwrap_or(now),
             alarm_configuration_updated_timestamp: now,
             metrics,
+            // Preserve a prior manual override across a config update; a brand
+            // new alarm has never been manually set.
+            state_manually_set: existing
+                .as_ref()
+                .map(|a| a.state_manually_set)
+                .unwrap_or(false),
         };
         let alarm_arn = alarm.alarm_arn.clone();
         let history_name = alarm_name.clone();
@@ -1652,6 +1658,16 @@ impl CloudWatchService {
         let namespace = required_query_param(req, "Namespace")?;
         let dim_filter = parse_dimensions_query(req, "Dimensions");
 
+        // Recompute alarm states from stored metric data first, so this returns
+        // the same fresh state DescribeAlarms would (a PutMetricData crossing a
+        // threshold is reflected here rather than a stale stored value).
+        {
+            let mut state = self.state.write();
+            if let Some(acct) = state.accounts.get_mut(&req.account_id) {
+                crate::alarm_eval::evaluate_alarms(acct, &req.region, Utc::now());
+            }
+        }
+
         let state = self.state.read();
         let mut inner = String::from("<MetricAlarms>");
         if let Some(acct) = state.get(&req.account_id) {
@@ -1769,6 +1785,9 @@ impl CloudWatchService {
                 alarm.state_value = new_state;
                 alarm.state_reason = state_reason.clone();
                 alarm.state_updated_timestamp = now;
+                // Mark this as a manual override so a later evaluation with no
+                // datapoints keeps it rather than resetting to INSUFFICIENT_DATA.
+                alarm.state_manually_set = true;
                 (old, "MetricAlarm")
             } else if let Some(composite) = acct
                 .composite_alarms_in_mut(&req.region)

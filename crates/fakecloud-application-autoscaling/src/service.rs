@@ -12,7 +12,7 @@ use uuid::Uuid;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_aws::arn::{partition_for, Arn};
-use fakecloud_core::pagination::paginate;
+use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::{SnapshotHook, SnapshotStore};
 
@@ -346,7 +346,8 @@ impl ApplicationAutoScalingService {
             .unwrap_or_default();
         drop(state);
         all.sort_by(|a, b| a.arn.cmp(&b.arn));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_next_token())?;
         let mut response = json!({
             "ScalableTargets": page.iter().map(scalable_target_json).collect::<Vec<_>>(),
         });
@@ -514,7 +515,8 @@ impl ApplicationAutoScalingService {
             .unwrap_or_default();
         drop(state);
         all.sort_by(|a, b| a.arn.cmp(&b.arn));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_next_token())?;
         let mut response = json!({
             "ScalingPolicies": page.iter().map(scaling_policy_json).collect::<Vec<_>>(),
         });
@@ -684,7 +686,8 @@ impl ApplicationAutoScalingService {
             .unwrap_or_default();
         drop(state);
         all.sort_by(|a, b| a.arn.cmp(&b.arn));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_next_token())?;
         let mut response = json!({
             "ScheduledActions": page.iter().map(scheduled_action_json).collect::<Vec<_>>(),
         });
@@ -771,7 +774,8 @@ impl ApplicationAutoScalingService {
             .unwrap_or_default();
         drop(state);
         all.sort_by_key(|a| std::cmp::Reverse(a.start_time));
-        let (page, next) = paginate(&all, next_token.as_deref(), max_results);
+        let (page, next) = paginate_checked(&all, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_next_token())?;
         let mut response = json!({
             "ScalingActivities": page.iter().map(scaling_activity_json).collect::<Vec<_>>(),
         });
@@ -930,6 +934,18 @@ fn require_str(body: &Value, field: &str) -> Result<String, AwsServiceError> {
 
 fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
+}
+
+/// A malformed pagination token. AWS Application Auto Scaling declares
+/// `InvalidNextTokenException` on its Describe* ops for this case; returning it
+/// (rather than silently restarting at page 0) stops a client that feeds back a
+/// garbage token from looping forever.
+fn invalid_next_token() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidNextTokenException",
+        "The specified next token is not valid.",
+    )
 }
 
 // Smithy: com.amazonaws.applicationautoscaling#ServiceNamespace
@@ -1553,15 +1569,28 @@ mod tests {
     }
 
     // bug-audit 2026-05-28, 1.7: list ops reject a malformed NextToken
-    // (paginate_checked -> ValidationException) instead of silently restarting
-    // at page 0. The rejection primitive is exercised here; the wiring lives in
-    // the Describe* paginated handlers above.
+    // (paginate_checked -> InvalidNextTokenException) instead of silently
+    // restarting at page 0.
     #[test]
     fn paginate_checked_rejects_invalid_token() {
-        use fakecloud_core::pagination::paginate_checked;
         let items: Vec<i32> = (0..5).collect();
         assert!(paginate_checked(&items, Some("not-a-valid-token"), 3).is_err());
         assert!(paginate_checked(&items, Some("2"), 3).is_ok());
         assert!(paginate_checked(&items, None, 3).is_ok());
+    }
+
+    // The rejection is wired into the Describe* handlers: a garbage NextToken
+    // returns InvalidNextTokenException, not page 0.
+    #[test]
+    fn describe_scalable_targets_rejects_garbage_next_token() {
+        let svc = ApplicationAutoScalingService::default();
+        let err = match svc.describe_scalable_targets(&make_req(
+            "DescribeScalableTargets",
+            json!({ "ServiceNamespace": "ecs", "NextToken": "not-a-number" }),
+        )) {
+            Ok(_) => panic!("expected InvalidNextTokenException"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "InvalidNextTokenException");
     }
 }

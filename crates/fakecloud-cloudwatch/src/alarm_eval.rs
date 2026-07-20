@@ -16,10 +16,12 @@
 //! transitions in the alarm history. It is invoked from `DescribeAlarms` so a
 //! `PutMetricData` -> `DescribeAlarms` sequence reflects the alarm firing.
 //!
-//! Evaluation never clobbers an alarm whose watched metric has no datapoints in
-//! the window when `treat_missing_data` is the default `missing` (or `ignore`):
-//! such an alarm keeps whatever state it already holds — including one set
-//! explicitly via `SetAlarmState`.
+//! Missing-data handling follows `treat_missing_data`: `breaching` /
+//! `notBreaching` force ALARM / OK, `ignore` keeps the current state, and the
+//! default `missing` transitions an alarm with no datapoints to
+//! INSUFFICIENT_DATA. A state forced via `SetAlarmState` is kept sticky (so it
+//! can drive composite alarms) until real datapoints arrive, at which point
+//! data governs the state.
 
 use std::collections::HashMap;
 
@@ -43,7 +45,15 @@ pub(crate) fn evaluate_alarms(state: &mut CloudWatchState, region: &str, now: Da
                     .as_ref()
                     .and_then(|ns| data_map.and_then(|m| m.get(ns)))
                     .map(|v| v.as_slice());
-                if let Some((new_state, reason)) = evaluate_metric_alarm(alarm, data, now) {
+                let manually_set = alarm.state_manually_set;
+                if let Some((new_state, reason, had_data)) =
+                    evaluate_metric_alarm(alarm, data, now, manually_set)
+                {
+                    // Once real datapoints govern the alarm, a prior manual
+                    // override no longer applies.
+                    if had_data {
+                        alarm.state_manually_set = false;
+                    }
                     if new_state != alarm.state_value {
                         let old = alarm.state_value.as_str().to_string();
                         alarm.state_value = new_state;
@@ -147,11 +157,18 @@ fn evaluate_composite_alarms(state: &mut CloudWatchState, region: &str, now: Dat
 /// Compute the state a single-metric alarm should hold, or `None` to leave the
 /// current state unchanged (metric-math / anomaly alarms, or a metric with no
 /// datapoints under the default missing-data treatment).
+/// Returns `Some((state, reason, had_data))` where `had_data` is whether the
+/// evaluation window held any real datapoints, or `None` to leave the current
+/// state unchanged. `manually_set` is whether the current state came from
+/// `SetAlarmState`; when true, a metric with no data under the default
+/// missing-data treatment keeps its manual state instead of resetting to
+/// INSUFFICIENT_DATA.
 pub(crate) fn evaluate_metric_alarm(
     alarm: &MetricAlarm,
     data: Option<&[MetricDatum]>,
     now: DateTime<Utc>,
-) -> Option<(AlarmState, String)> {
+    manually_set: bool,
+) -> Option<(AlarmState, String, bool)> {
     // Only plain single-metric alarms with a static threshold are evaluated.
     // Metric-math (`Metrics`) and anomaly-detection (`ThresholdMetricId`)
     // alarms are left untouched.
@@ -223,19 +240,35 @@ pub(crate) fn evaluate_metric_alarm(
     }
     let missing = eval_periods - present;
 
-    // No real datapoints: don't clobber the current state unless the caller
-    // explicitly asked to treat missing data as (not)breaching.
+    // No real datapoints in the evaluation window. How the alarm reacts depends
+    // on treat_missing_data:
+    //   * breaching    -> ALARM
+    //   * notBreaching -> OK
+    //   * ignore       -> keep the current state (None)
+    //   * missing (default) -> INSUFFICIENT_DATA
     if present == 0 {
         return match treat.as_str() {
             "breaching" => Some((
                 AlarmState::Alarm,
                 "Insufficient data treated as breaching.".to_string(),
+                false,
             )),
             "notbreaching" => Some((
                 AlarmState::Ok,
                 "Insufficient data treated as not breaching.".to_string(),
+                false,
             )),
-            _ => None,
+            "ignore" => None,
+            // Default treatment: a metric with no datapoints across the window
+            // transitions to INSUFFICIENT_DATA (so a stale OK/ALARM alarm does
+            // not stay pinned to a value it can no longer justify). A state
+            // forced via SetAlarmState is kept until real data arrives.
+            _ if manually_set => None,
+            _ => Some((
+                AlarmState::InsufficientData,
+                format!("Insufficient Data: {eval_periods} datapoints were unknown."),
+                false,
+            )),
         };
     }
 
@@ -251,14 +284,14 @@ pub(crate) fn evaluate_metric_alarm(
             latest_value.map(|v| v.to_string()).unwrap_or_default(),
             operator_phrase(&alarm.comparison_operator),
         );
-        Some((AlarmState::Alarm, reason))
+        Some((AlarmState::Alarm, reason, true))
     } else {
         let reason = format!(
             "Threshold not crossed: {breaching} out of the last {eval_periods} datapoints was {} \
              the threshold ({threshold}).",
             operator_phrase(&alarm.comparison_operator),
         );
-        Some((AlarmState::Ok, reason))
+        Some((AlarmState::Ok, reason, true))
     }
 }
 
@@ -609,5 +642,90 @@ mod tests {
         assert_eq!(evaluate_rule("ALARM(a)", &s), Some(AlarmState::Alarm));
         assert_eq!(evaluate_rule("OK(a)", &s), Some(AlarmState::Ok));
         assert_eq!(evaluate_rule("!!!", &s), None);
+    }
+
+    fn sum_alarm(state: AlarmState, treat: Option<&str>) -> MetricAlarm {
+        MetricAlarm {
+            alarm_name: "a".into(),
+            alarm_arn: "arn:aws:cloudwatch:us-east-1:123456789012:alarm:a".into(),
+            alarm_description: None,
+            actions_enabled: true,
+            ok_actions: vec![],
+            alarm_actions: vec![],
+            insufficient_data_actions: vec![],
+            state_value: state,
+            state_reason: String::new(),
+            state_updated_timestamp: Utc::now(),
+            metric_name: Some("M".into()),
+            namespace: Some("Test/NS".into()),
+            statistic: Some("Sum".into()),
+            extended_statistic: None,
+            dimensions: Default::default(),
+            period: Some(60),
+            unit: None,
+            evaluation_periods: 1,
+            datapoints_to_alarm: None,
+            threshold: Some(1.0),
+            comparison_operator: "GreaterThanThreshold".into(),
+            treat_missing_data: treat.map(|s| s.to_string()),
+            evaluate_low_sample_count_percentile: None,
+            threshold_metric_id: None,
+            configuration_updated_timestamp: Utc::now(),
+            alarm_configuration_updated_timestamp: Utc::now(),
+            metrics: vec![],
+            state_manually_set: false,
+        }
+    }
+
+    fn datum(value: f64, ts: DateTime<Utc>) -> MetricDatum {
+        MetricDatum {
+            metric_name: "M".into(),
+            dimensions: Default::default(),
+            timestamp: ts,
+            value: Some(value),
+            statistic_values: None,
+            unit: None,
+            storage_resolution: None,
+        }
+    }
+
+    // Default (missing) treatment: a stale alarm with no datapoints transitions
+    // to INSUFFICIENT_DATA rather than staying pinned to its old state.
+    #[test]
+    fn missing_data_default_transitions_to_insufficient_data() {
+        let now = Utc::now();
+        let alarm = sum_alarm(AlarmState::Alarm, None);
+        let out = evaluate_metric_alarm(&alarm, None, now, false);
+        assert!(matches!(
+            out,
+            Some((AlarmState::InsufficientData, _, false))
+        ));
+    }
+
+    // `ignore` keeps the current state when data is missing.
+    #[test]
+    fn missing_data_ignore_keeps_state() {
+        let now = Utc::now();
+        let alarm = sum_alarm(AlarmState::Alarm, Some("ignore"));
+        assert_eq!(evaluate_metric_alarm(&alarm, None, now, false), None);
+    }
+
+    // A manually-set state (SetAlarmState) is kept sticky when data is missing.
+    #[test]
+    fn manual_state_survives_missing_data() {
+        let now = Utc::now();
+        let alarm = sum_alarm(AlarmState::Alarm, None);
+        assert_eq!(evaluate_metric_alarm(&alarm, None, now, true), None);
+    }
+
+    // Real datapoints govern the state and report had_data = true so the caller
+    // can clear a stale manual override.
+    #[test]
+    fn present_data_drives_state_and_reports_had_data() {
+        let now = Utc::now();
+        let alarm = sum_alarm(AlarmState::InsufficientData, None);
+        let data = [datum(5.0, now)];
+        let out = evaluate_metric_alarm(&alarm, Some(&data), now, true);
+        assert!(matches!(out, Some((AlarmState::Alarm, _, true))), "{out:?}");
     }
 }

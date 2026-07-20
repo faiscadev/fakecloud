@@ -273,6 +273,14 @@ pub struct MetricAlarm {
     /// alarm evaluates an expression or a metric in another account.
     #[serde(default)]
     pub metrics: Vec<AlarmMetricQuery>,
+    /// Whether the current state was forced by `SetAlarmState`. AWS reverts a
+    /// manual state on the next evaluation, but the emulator keeps it sticky
+    /// (so it can be used to drive composite alarms) until real datapoints
+    /// arrive — at which point evaluation clears this and data governs the
+    /// state. It only suppresses the default missing-data INSUFFICIENT_DATA
+    /// transition, never a real threshold crossing.
+    #[serde(default)]
+    pub state_manually_set: bool,
 }
 
 /// A single `MetricDataQuery` entry in a `PutMetricAlarm` `Metrics` list.

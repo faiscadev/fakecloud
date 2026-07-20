@@ -231,7 +231,7 @@ impl GlueService {
                     .collect()
             })
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, list);
+        let (page, token) = crate::common::paginate_body(&body, list)?;
         let mut resp = json!({ "UserDefinedFunctions": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);

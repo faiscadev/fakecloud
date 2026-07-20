@@ -1101,6 +1101,47 @@ mod tests {
         );
     }
 
+    #[test]
+    fn list_resource_record_sets_rejects_type_without_name() {
+        let (svc, zid) = svc_with_zone(vec![]);
+        let route = Route {
+            action: "ListResourceRecordSets",
+            id: Some(zid.clone()),
+            second_id: None,
+        };
+        let mut query_params = std::collections::HashMap::new();
+        // StartRecordType without StartRecordName is invalid.
+        query_params.insert("type".to_string(), "A".to_string());
+        let req = AwsRequest {
+            service: "route53".to_string(),
+            action: "ListResourceRecordSets".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: DEFAULT_ACCOUNT.to_string(),
+            request_id: "rid".to_string(),
+            headers: HeaderMap::new(),
+            query_params,
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![
+                "2013-04-01".into(),
+                "hostedzone".into(),
+                zid.clone(),
+                "rrset".into(),
+            ],
+            raw_path: format!("/2013-04-01/hostedzone/{zid}/rrset"),
+            raw_query: String::new(),
+            method: http::Method::GET,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        };
+        let err = match svc.list_resource_record_sets(&req, &route) {
+            Ok(_) => panic!("expected InvalidInput"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), "InvalidInput");
+    }
+
     fn empty_lookup() -> AliasLookup<'static> {
         AliasLookup {
             elbv2: None,

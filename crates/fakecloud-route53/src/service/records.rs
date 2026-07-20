@@ -134,6 +134,12 @@ impl Route53Service {
         let start_name = req.query_params.get("name").map(|s| s.to_ascii_lowercase());
         let start_type = req.query_params.get("type").cloned();
         let start_ident = req.query_params.get("identifier").cloned();
+        // Route 53 rejects StartRecordType supplied without StartRecordName.
+        if start_type.is_some() && start_name.is_none() {
+            return Err(invalid_argument(
+                "The input is not valid: StartRecordName must be specified when StartRecordType is specified",
+            ));
+        }
 
         let mut sorted: Vec<&crate::model::ResourceRecordSet> =
             zone.resource_record_sets.iter().collect();

@@ -148,11 +148,23 @@ pub(crate) fn validate_attribute_value(v: &Value) -> Result<(), AwsServiceError>
             format!("The parameter cannot be converted to a numeric value: {n}"),
         )
     };
+    // DynamoDB Numbers are decimals with at most 38 significant digits; a longer
+    // coefficient is rejected with ValidationException.
+    const MAX_SIGNIFICANT_DIGITS: usize = 38;
+    let too_many_digits = || {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "ValidationException",
+            "Attempting to store more than 38 significant digits in a Number",
+        )
+    };
     match tag.as_str() {
         "N" => {
             let s = val.as_str().unwrap_or_default();
-            if !is_valid_number(s) {
-                return Err(bad_number(s));
+            match significant_digit_count(s) {
+                None => return Err(bad_number(s)),
+                Some(digits) if digits > MAX_SIGNIFICANT_DIGITS => return Err(too_many_digits()),
+                Some(_) => {}
             }
         }
         "SS" => {
@@ -180,8 +192,12 @@ pub(crate) fn validate_attribute_value(v: &Value) -> Result<(), AwsServiceError>
             validate_set_not_empty("number", members.is_empty())?;
             let mut seen = std::collections::HashSet::new();
             for s in &members {
-                if !is_valid_number(s) {
-                    return Err(bad_number(s));
+                match significant_digit_count(s) {
+                    None => return Err(bad_number(s)),
+                    Some(digits) if digits > MAX_SIGNIFICANT_DIGITS => {
+                        return Err(too_many_digits())
+                    }
+                    Some(_) => {}
                 }
                 // Number-set members are deduped by numeric value, so `"1"` and
                 // `"1.0"` collide. `canonical_number` never returns `None` here
@@ -366,6 +382,36 @@ mod attr_value_validation_tests {
             ("ns".to_string(), json!({"NS": ["1", "2.5"]})),
         ]);
         assert!(validate_item_attribute_values(&item).is_ok());
+    }
+
+    // DynamoDB rejects a Number with more than 38 significant digits.
+    #[test]
+    fn rejects_number_over_38_significant_digits() {
+        let thirty_nine = "1".repeat(39);
+        let err = err_of(json!({ "N": thirty_nine }));
+        assert_eq!(err.code(), "ValidationException");
+        assert!(
+            err.message().contains("38 significant digits"),
+            "{}",
+            err.message()
+        );
+
+        // Same limit inside a Number Set.
+        let err = err_of(json!({ "NS": ["1", "9".repeat(39)] }));
+        assert_eq!(err.code(), "ValidationException");
+    }
+
+    #[test]
+    fn accepts_number_at_and_below_38_digit_limit() {
+        // Exactly 38 significant digits is allowed.
+        assert!(validate_attribute_value(&json!({ "N": "1".repeat(38) })).is_ok());
+        // A 39-character string that is only 1 significant digit (1E38) is fine:
+        // trailing zeros collapse into the exponent, not the coefficient.
+        let one_e38 = format!("1{}", "0".repeat(38));
+        assert!(validate_attribute_value(&json!({ "N": one_e38 })).is_ok());
+        // Leading zeros in a fraction are likewise insignificant.
+        let small = format!("0.{}1", "0".repeat(40));
+        assert!(validate_attribute_value(&json!({ "N": small })).is_ok());
     }
 
     fn err_of(v: serde_json::Value) -> AwsServiceError {

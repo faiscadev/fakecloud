@@ -75,6 +75,21 @@ pub(crate) fn is_valid_number(s: &str) -> bool {
     normalize_decimal(s).is_some()
 }
 
+/// Number of significant digits in a DynamoDB Number literal, or `None` if the
+/// string is not a valid number. Leading zeros, trailing zeros, the sign, the
+/// decimal point and the exponent are all insignificant — DynamoDB stores a
+/// number as a coefficient plus an exponent, so `1E38` (a 39-character string)
+/// is a single significant digit while `1234...` with 39 non-zero digits is 39.
+/// AWS rejects a Number with more than 38 significant digits.
+pub(crate) fn significant_digit_count(s: &str) -> Option<usize> {
+    let (_, (int_norm, frac_norm)) = normalize_decimal(s)?;
+    // `int_norm` already has leading zeros stripped and `frac_norm` trailing
+    // zeros stripped; the remaining leading zeros (value < 1) and trailing
+    // zeros (integer with a zeroed tail) collapse into the exponent.
+    let coeff = format!("{int_norm}{frac_norm}");
+    Some(coeff.trim_start_matches('0').trim_end_matches('0').len())
+}
+
 /// Canonical decimal form of a DynamoDB Number, so numerically-equal literals
 /// (`"1"`, `"1.0"`, `"1e0"`) collapse to one key. Used to detect duplicate
 /// members in a Number Set (`NS`), which AWS compares by numeric value rather

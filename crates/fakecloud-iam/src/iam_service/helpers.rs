@@ -552,11 +552,14 @@ pub(crate) fn resolve_calling_user(state: &crate::state::IamState, _account_id: 
 }
 
 pub(crate) fn generate_id() -> String {
-    // Generate 16 uppercase hex chars (used with 4-char prefixes like FKIA, AIDA = 20 chars)
+    // AWS unique IDs (AIDA/AROA/AGPA/ANPA/AIPA/ASCA...) are a 4-char prefix
+    // followed by 17 alphanumerics for 21 characters total, so this returns 17
+    // chars. Access-key-style IDs (AKIA/APKA) are 20 chars total and slice this
+    // down to 16 at their call sites.
     uuid::Uuid::new_v4()
         .to_string()
         .replace('-', "")
-        .to_uppercase()[..16]
+        .to_uppercase()[..17]
         .to_string()
 }
 
@@ -1122,4 +1125,24 @@ pub(crate) fn empty_response(action: &str, request_id: &str) -> String {
   </ResponseMetadata>
 </{action}Response>"#,
     )
+}
+
+#[cfg(test)]
+mod id_tests {
+    use super::*;
+
+    // AWS principal unique IDs are a 4-char prefix + 17 alphanumerics = 21 chars.
+    #[test]
+    fn generate_id_yields_21_char_unique_ids() {
+        let id = generate_id();
+        assert_eq!(id.len(), 17, "generate_id suffix must be 17 chars");
+        for prefix in ["AIDA", "AROA", "AGPA", "ANPA", "AIPA"] {
+            let unique = format!("{prefix}{}", generate_id());
+            assert_eq!(unique.len(), 21, "{unique} must be 21 chars total");
+            assert!(unique.starts_with(prefix));
+        }
+        // Access-key-style IDs stay 20 chars total (prefix + 16).
+        let access_key = format!("FKIA{}", &generate_id()[..16]);
+        assert_eq!(access_key.len(), 20);
+    }
 }

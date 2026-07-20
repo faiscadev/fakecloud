@@ -406,15 +406,26 @@ pub(crate) fn require_starting_sequence_number(body: &Value) -> Result<&str, Aws
         .ok_or_else(|| invalid_argument("StartingSequenceNumber is required"))
 }
 
+/// Extract the 5-digit shard discriminator packed into the front of a
+/// sequence number by [`append_record`]. Returns `None` for anything that is
+/// not a well-formed 56-digit sequence number, so a malformed or foreign token
+/// can never be mistaken for a value this shard minted.
+fn sequence_shard_discriminator(sequence_number: &str) -> Option<u32> {
+    if sequence_number.len() != 56 || !sequence_number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    sequence_number[..5].parse::<u32>().ok()
+}
+
 /// Resolve an `AT_/AFTER_SEQUENCE_NUMBER` iterator start index.
 ///
 /// When the exact sequence number is still present we return its index (or
-/// the next one for `AFTER`). When it is *not* present but sorts before the
-/// earliest retained record, the record it named was aged out by the
-/// retention window, so — like real Kinesis — we resolve to the trim horizon
-/// (the earliest available record) instead of raising InvalidArgumentException.
-/// A sequence number that is neither present nor below the horizon is a
-/// genuinely invalid argument.
+/// the next one for `AFTER`). When it is *not* present but was minted by this
+/// shard and sorts before the earliest retained record, the record it named
+/// was aged out by the retention window, so — like real Kinesis — we resolve
+/// to the trim horizon (the earliest available record). A sequence number that
+/// belongs to a different shard, is malformed, or is otherwise not valid for
+/// this shard raises InvalidArgumentException, matching AWS.
 pub(crate) fn resolve_sequence_number_index(
     shard: &KinesisShard,
     sequence_number: &str,
@@ -427,11 +438,15 @@ pub(crate) fn resolve_sequence_number_index(
     {
         return Ok(if after { pos + 1 } else { pos });
     }
-    // Sequence numbers are fixed-width, zero-padded and per-shard monotonic,
-    // so a lexicographic comparison against the earliest retained record is
-    // an exact numeric ordering — a smaller value was trimmed off the front.
+    // A below-horizon token is only "trimmed off the front" if it could have
+    // been minted by THIS shard — its packed discriminator must match. A
+    // cross-shard or malformed token that merely happens to sort low is an
+    // invalid argument, not a trim-horizon resolution.
     if let Some(first) = shard.records.first() {
-        if sequence_number < first.sequence_number.as_str() {
+        if sequence_number < first.sequence_number.as_str()
+            && sequence_shard_discriminator(sequence_number)
+                == Some(shard_discriminator(&shard.shard_id))
+        {
             return Ok(0);
         }
     }

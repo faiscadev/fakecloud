@@ -1060,7 +1060,7 @@ impl GlueService {
             .and_then(|s| s.dbs_in(&req.region))
             .map(|map| map.values().map(database_json).collect())
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, dbs);
+        let (page, token) = crate::common::paginate_body(&body, dbs)?;
         let mut resp = json!({ "DatabaseList": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
@@ -1197,7 +1197,7 @@ impl GlueService {
                 }
             }
         }
-        let (page, token) = crate::common::paginate_body(&body, tables);
+        let (page, token) = crate::common::paginate_body(&body, tables)?;
         let mut resp = json!({ "TableList": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
@@ -1408,7 +1408,7 @@ impl GlueService {
                     .collect()
             })
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, parts);
+        let (page, token) = crate::common::paginate_body(&body, parts)?;
         let mut resp = json!({ "Partitions": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);

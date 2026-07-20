@@ -88,7 +88,7 @@ impl GlueService {
             .get(&req.account_id)
             .map(|s| s.crawlers.values().cloned().collect())
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, crawlers);
+        let (page, token) = crate::common::paginate_body(&body, crawlers)?;
         let mut resp = json!({ "Crawlers": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
