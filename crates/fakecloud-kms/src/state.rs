@@ -24,7 +24,7 @@ pub struct KmsState {
     /// lazily on first encrypt and persisted alongside the rest of the
     /// state so that ciphertexts produced before a server restart still
     /// decrypt afterwards.
-    #[serde(default = "default_master_key_bytes")]
+    #[serde(default = "default_master_key_bytes_on_load")]
     pub master_key_bytes: Vec<u8>,
     /// In-flight RSA wrapping keypairs handed out by GetParametersForImport
     /// and consumed by ImportKeyMaterial to RSA-OAEP-unwrap the encrypted
@@ -52,6 +52,24 @@ fn default_master_key_bytes() -> Vec<u8> {
     let mut bytes = vec![0u8; 32];
     OsRng.fill_bytes(&mut bytes);
     bytes
+}
+
+/// serde `default` for [`KmsState::master_key_bytes`], invoked ONLY when a
+/// persisted snapshot is deserialized WITHOUT the field — e.g. a state file
+/// written by a fakecloud build predating per-account master keys. Silently
+/// regenerating the key would make every ciphertext blob produced by that
+/// older build undecryptable (`Decrypt` -> `InvalidCiphertextException`) with
+/// no indication why, so we log a loud warning to surface the data-integrity
+/// break. Fresh accounts go through [`KmsState::new`], which calls
+/// [`default_master_key_bytes`] directly and stays quiet — only the on-load
+/// default path warns.
+fn default_master_key_bytes_on_load() -> Vec<u8> {
+    tracing::warn!(
+        "KMS state snapshot was missing the per-account master key; generating \
+         a fresh one. Ciphertext produced before this upgrade can NO LONGER be \
+         decrypted (Decrypt will fail with InvalidCiphertextException)."
+    );
+    default_master_key_bytes()
 }
 
 impl KmsState {
@@ -207,5 +225,35 @@ mod tests {
         assert!(!state.aliases.is_empty());
         state.reset();
         assert!(state.aliases.is_empty());
+    }
+
+    #[test]
+    fn snapshot_with_master_key_preserves_it() {
+        // A snapshot that carries the master key must round-trip it byte-for-byte
+        // so ciphertext produced before a restart still decrypts.
+        let mut original = KmsState::new("123456789012", "us-east-1");
+        original.master_key_bytes = vec![7u8; 32];
+        let json = serde_json::to_string(&original).unwrap();
+        let loaded: KmsState = serde_json::from_str(&json).unwrap();
+        assert_eq!(loaded.master_key_bytes, vec![7u8; 32]);
+    }
+
+    #[test]
+    fn snapshot_missing_master_key_is_defaulted_on_load() {
+        // An older snapshot with no `master_key_bytes` (predating per-account
+        // master keys) must still deserialize, with a freshly generated 32-byte
+        // key via the on-load default (which also logs a loud warning that the
+        // prior ciphertext is now undecryptable).
+        let json = r#"{
+            "account_id": "123456789012",
+            "region": "us-east-1",
+            "keys": {},
+            "aliases": {},
+            "grants": [],
+            "custom_key_stores": {}
+        }"#;
+        let loaded: KmsState = serde_json::from_str(json).unwrap();
+        assert_eq!(loaded.master_key_bytes.len(), 32);
+        assert!(loaded.import_wrapping_keys.is_empty());
     }
 }

@@ -1107,7 +1107,7 @@ impl RdsService {
                     .db_name
                     .clone()
                     .unwrap_or_else(|| default_db_name(&inst.engine).to_string());
-                let Ok(running) = runtime
+                let running = match runtime
                     .restart_container(
                         &id,
                         &inst.engine,
@@ -1116,8 +1116,42 @@ impl RdsService {
                         &logical_db,
                     )
                     .await
-                else {
-                    return;
+                {
+                    Ok(running) => running,
+                    Err(error) => {
+                        // The container restart failed. Without resetting the
+                        // status here the instance is stuck reporting
+                        // "rebooting" forever (DescribeDBInstances never clears
+                        // it), so flip it back to "available" — the previous
+                        // container is still running, the reboot just didn't
+                        // land — then persist and emit a failure event so the
+                        // stuck state is both cleared and observable. Mirrors the
+                        // CreateDBInstance background task's Err handling.
+                        tracing::error!(%error, db_instance_identifier=%id, "reboot_db_instance restart failed");
+                        let arn = {
+                            let mut accounts = state_handle.write();
+                            let state = accounts.get_or_create(&account_id);
+                            let Some(instance) = state.instances.get_mut(&id) else {
+                                return;
+                            };
+                            instance.db_instance_status = "available".to_string();
+                            instance.db_instance_arn.clone()
+                        };
+                        save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock)
+                            .await;
+                        emit_event_static_with_state(
+                            delivery_bus.as_ref(),
+                            Some(&state_handle),
+                            Some(&account_id),
+                            RdsSourceType::DbInstance,
+                            &id,
+                            &arn,
+                            "RDS-EVENT-0006",
+                            &["availability"],
+                            "DB instance reboot failed; instance returned to available",
+                        );
+                        return;
+                    }
                 };
                 let arn = {
                     let mut accounts = state_handle.write();

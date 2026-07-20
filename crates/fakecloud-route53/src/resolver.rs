@@ -245,6 +245,45 @@ pub fn resolve(accounts: &Route53Accounts, qname: &str, qtype: &str) -> Resoluti
         }
     };
 
+    // ANY (`*`, qtype 255): return every record type held at the exact name
+    // (RFC 8482 permits a minimal answer; a full one is also valid and more
+    // useful for a local service-discovery resolver). Wildcard synthesis and
+    // CNAME chasing don't apply — ANY reports what actually lives at the node.
+    if qtype_uc == "ANY" || qtype_uc == "*" {
+        let mut answers = Vec::new();
+        for rr in &records {
+            if normalize(&rr.name) != qname_norm {
+                continue;
+            }
+            let ttl = rr
+                .ttl
+                .and_then(|t| u32::try_from(t).ok())
+                .unwrap_or(DEFAULT_TTL);
+            if let Some(values) = &rr.resource_records {
+                for v in &values.resource_record {
+                    answers.push(AnswerRecord {
+                        name: qname_norm.clone(),
+                        rtype: rr.record_type.to_ascii_uppercase(),
+                        ttl,
+                        value: v.value.clone(),
+                    });
+                }
+            }
+        }
+        let status = if !answers.is_empty() {
+            ResolveStatus::Answered
+        } else if name_exists(&records, &qname_norm) {
+            ResolveStatus::NoData
+        } else {
+            ResolveStatus::NxDomain
+        };
+        return Resolution {
+            answers,
+            status,
+            external_cname: None,
+        };
+    }
+
     // Direct hits for the requested type.
     let direct = records_of_type(&records, &qname_norm, &qtype_uc);
     if !direct.is_empty() {
@@ -319,6 +358,28 @@ pub fn resolve(accounts: &Route53Accounts, qname: &str, qtype: &str) -> Resoluti
         status,
         external_cname: None,
     }
+}
+
+/// The apex `SOA` record of the most-specific local zone authoritative for
+/// `qname`, used to fill the authority section of a negative (NXDOMAIN/NODATA)
+/// response so clients can cache the negative answer (RFC 2308). `None` when no
+/// local zone is authoritative or the zone has no SOA record.
+pub fn zone_soa(accounts: &Route53Accounts, qname: &str) -> Option<AnswerRecord> {
+    let qname_norm = normalize(qname);
+    // Find the apex of the most-specific zone authoritative for the name (same
+    // best-match rule `authoritative_records` uses to scope the record set).
+    let mut apex: Option<String> = None;
+    for account in accounts.accounts.values() {
+        for zone in account.hosted_zones.values() {
+            let zn = normalize(&zone.name);
+            if name_in_zone(&qname_norm, &zn) && apex.as_ref().is_none_or(|a| zn.len() > a.len()) {
+                apex = Some(zn);
+            }
+        }
+    }
+    let apex = apex?;
+    let records = authoritative_records(accounts, &qname_norm)?;
+    collect(&records, &apex, &apex, "SOA").into_iter().next()
 }
 
 #[cfg(test)]
@@ -764,5 +825,90 @@ mod tests {
             resolve(&acc, "y.b.example", "A").answers[0].value,
             "2.2.2.2"
         );
+    }
+
+    #[test]
+    fn any_returns_all_record_types_at_name() {
+        let acc = accounts_with(
+            "000000000000",
+            vec![zone(
+                "example.com.",
+                vec![
+                    rrset("app.example.com.", "A", 60, &["10.0.0.5", "10.0.0.6"]),
+                    rrset("app.example.com.", "TXT", 300, &["\"hello\""]),
+                    rrset("other.example.com.", "A", 60, &["10.0.0.9"]),
+                ],
+            )],
+        );
+        let r = resolve(&acc, "app.example.com", "ANY");
+        assert_eq!(r.status, ResolveStatus::Answered);
+        // Both A values plus the TXT, and nothing from the unrelated owner.
+        assert_eq!(r.answers.len(), 3);
+        assert!(r
+            .answers
+            .iter()
+            .any(|a| a.rtype == "A" && a.value == "10.0.0.5"));
+        assert!(r
+            .answers
+            .iter()
+            .any(|a| a.rtype == "A" && a.value == "10.0.0.6"));
+        assert!(r.answers.iter().any(|a| a.rtype == "TXT"));
+        assert!(r.answers.iter().all(|a| a.name == "app.example.com."));
+    }
+
+    #[test]
+    fn any_on_absent_name_is_nxdomain() {
+        let acc = accounts_with(
+            "000000000000",
+            vec![zone(
+                "example.com.",
+                vec![rrset("app.example.com.", "A", 60, &["10.0.0.5"])],
+            )],
+        );
+        assert_eq!(
+            resolve(&acc, "missing.example.com", "ANY").status,
+            ResolveStatus::NxDomain
+        );
+    }
+
+    #[test]
+    fn zone_soa_returns_apex_soa_for_subdomain() {
+        let acc = accounts_with(
+            "000000000000",
+            vec![zone(
+                "example.com.",
+                vec![
+                    rrset(
+                        "example.com.",
+                        "SOA",
+                        900,
+                        &["ns.example.com. hostmaster.example.com. 1 7200 900 1209600 86400"],
+                    ),
+                    rrset("app.example.com.", "A", 60, &["10.0.0.5"]),
+                ],
+            )],
+        );
+        // A negative lookup deep in the zone still resolves the apex SOA.
+        let soa = zone_soa(&acc, "missing.example.com").expect("apex SOA");
+        assert_eq!(soa.rtype, "SOA");
+        assert_eq!(soa.name, "example.com.");
+        assert!(soa.value.starts_with("ns.example.com."));
+    }
+
+    #[test]
+    fn zone_soa_none_when_not_authoritative() {
+        let acc = accounts_with(
+            "000000000000",
+            vec![zone(
+                "example.com.",
+                vec![rrset(
+                    "example.com.",
+                    "SOA",
+                    900,
+                    &["ns.example.com. hostmaster.example.com. 1 7200 900 1209600 86400"],
+                )],
+            )],
+        );
+        assert!(zone_soa(&acc, "elsewhere.org").is_none());
     }
 }

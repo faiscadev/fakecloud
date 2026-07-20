@@ -50,7 +50,7 @@ Run fakecloud where containers can reach it (here on a fixed address in the comp
 ```yaml
 services:
   fakecloud:
-    image: faiscadev/fakecloud
+    image: ghcr.io/faiscadev/fakecloud
     command: ["--dns", "--dns-addr", "0.0.0.0:53"]
     networks:
       appnet:
