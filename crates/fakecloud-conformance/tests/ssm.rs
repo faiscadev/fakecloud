@@ -679,11 +679,11 @@ async fn ssm_patch_groups() {
 
 // -- Association lifecycle --
 
-#[test_action("ssm", "CreateAssociation", checksum = "507ad141")]
-#[test_action("ssm", "DescribeAssociation", checksum = "2ffc2f3f")]
-#[test_action("ssm", "UpdateAssociation", checksum = "2febcaea")]
+#[test_action("ssm", "CreateAssociation", checksum = "cbc39baf")]
+#[test_action("ssm", "DescribeAssociation", checksum = "1952f426")]
+#[test_action("ssm", "UpdateAssociation", checksum = "a0995d8e")]
 #[test_action("ssm", "ListAssociations", checksum = "5c740b80")]
-#[test_action("ssm", "ListAssociationVersions", checksum = "6d4e7407")]
+#[test_action("ssm", "ListAssociationVersions", checksum = "13d3cd38")]
 #[test_action("ssm", "DeleteAssociation", checksum = "89e9a7ab")]
 #[tokio::test]
 async fn ssm_association_lifecycle() {
@@ -745,7 +745,7 @@ async fn ssm_association_lifecycle() {
 
 // -- UpdateAssociationStatus --
 
-#[test_action("ssm", "UpdateAssociationStatus", checksum = "1668b3f6")]
+#[test_action("ssm", "UpdateAssociationStatus", checksum = "9b4daf9e")]
 #[tokio::test]
 async fn ssm_update_association_status() {
     let server = TestServer::start().await;
@@ -819,7 +819,7 @@ async fn ssm_start_associations_once() {
 
 // -- CreateAssociationBatch --
 
-#[test_action("ssm", "CreateAssociationBatch", checksum = "d64a58de")]
+#[test_action("ssm", "CreateAssociationBatch", checksum = "21591ce7")]
 #[tokio::test]
 async fn ssm_create_association_batch() {
     let server = TestServer::start().await;
@@ -1867,10 +1867,10 @@ async fn ssm_ops_metadata_lifecycle() {
 
 // -- Automation --
 
-#[test_action("ssm", "StartAutomationExecution", checksum = "623d906e")]
-#[test_action("ssm", "GetAutomationExecution", checksum = "77a91a2d")]
-#[test_action("ssm", "DescribeAutomationExecutions", checksum = "630f0f37")]
-#[test_action("ssm", "DescribeAutomationStepExecutions", checksum = "837ae952")]
+#[test_action("ssm", "StartAutomationExecution", checksum = "c2a57055")]
+#[test_action("ssm", "GetAutomationExecution", checksum = "0a0247e0")]
+#[test_action("ssm", "DescribeAutomationExecutions", checksum = "5b24f457")]
+#[test_action("ssm", "DescribeAutomationStepExecutions", checksum = "ccb2c087")]
 #[test_action("ssm", "SendAutomationSignal", checksum = "d85c40bb")]
 #[test_action("ssm", "StopAutomationExecution", checksum = "4200ac33")]
 #[tokio::test]
@@ -1928,7 +1928,7 @@ async fn ssm_automation_execution_lifecycle() {
         .unwrap();
 }
 
-#[test_action("ssm", "StartChangeRequestExecution", checksum = "c37a3f1c")]
+#[test_action("ssm", "StartChangeRequestExecution", checksum = "d73d6135")]
 #[tokio::test]
 async fn ssm_start_change_request_execution() {
     let server = TestServer::start().await;
@@ -1948,7 +1948,7 @@ async fn ssm_start_change_request_execution() {
     assert!(resp.automation_execution_id().is_some());
 }
 
-#[test_action("ssm", "StartExecutionPreview", checksum = "db7e07c5")]
+#[test_action("ssm", "StartExecutionPreview", checksum = "5cd68605")]
 #[test_action("ssm", "GetExecutionPreview", checksum = "91faf997")]
 #[tokio::test]
 async fn ssm_execution_preview() {

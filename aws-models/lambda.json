@@ -15751,6 +15751,15 @@
               "feature:public"
             ]
           }
+        },
+        "DependencyError": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "DependencyError",
+            "smithy.api#tags": [
+              "feature:dependency-error"
+            ]
+          }
         }
       },
       "traits": {
@@ -18837,7 +18846,7 @@
           "min": 1,
           "max": 256
         },
-        "smithy.api#pattern": "^(arn:(aws[a-zA-Z-]*)?:lambda:)?((eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:)?(\\d{12}:)?(function:)?([a-zA-Z0-9-_\\.]+)(:(\\$LATEST(\\.PUBLISHED)?|[a-zA-Z0-9-_]+))?$",
+        "smithy.api#pattern": "^(arn:(aws[a-zA-Z-]*)?:lambda:(eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:\\d{12}:|(((eusc-)?[a-z]{2}((-gov)|(-iso([a-z]?)))?-[a-z]+-\\d{1}:)?(\\d{12}:)?))(function:)?([a-zA-Z0-9-_\\.]+)(:(\\$LATEST(\\.PUBLISHED)?|[a-zA-Z0-9-_]+))?$",
         "smithy.api#tags": [
           "feature:public"
         ]
@@ -22383,6 +22392,33 @@
               "feature:public"
             ]
           }
+        },
+        "java8al2023": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "java8.al2023",
+            "smithy.api#tags": [
+              "feature:java-al2023"
+            ]
+          }
+        },
+        "java11al2023": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "java11.al2023",
+            "smithy.api#tags": [
+              "feature:java-al2023"
+            ]
+          }
+        },
+        "java17al2023": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "java17.al2023",
+            "smithy.api#tags": [
+              "feature:java-al2023"
+            ]
+          }
         }
       },
       "traits": {
@@ -24007,6 +24043,15 @@
             "smithy.api#enumValue": "DrainingDurableExecutions",
             "smithy.api#tags": [
               "feature:public"
+            ]
+          }
+        },
+        "DependencyError": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "DependencyError",
+            "smithy.api#tags": [
+              "feature:dependency-error"
             ]
           }
         }

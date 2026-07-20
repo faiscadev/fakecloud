@@ -888,7 +888,7 @@ async fn elbv2_describe_listener_certificates() {
         .unwrap();
 }
 
-#[test_action("elasticloadbalancingv2", "CreateRule", checksum = "9ef2043e")]
+#[test_action("elasticloadbalancingv2", "CreateRule", checksum = "30f89c13")]
 #[tokio::test]
 async fn elbv2_create_rule() {
     let server = TestServer::start().await;
@@ -939,7 +939,7 @@ async fn elbv2_create_rule() {
     assert_eq!(resp.rules().first().unwrap().priority(), Some("10"));
 }
 
-#[test_action("elasticloadbalancingv2", "DescribeRules", checksum = "8a119620")]
+#[test_action("elasticloadbalancingv2", "DescribeRules", checksum = "918d09e8")]
 #[tokio::test]
 async fn elbv2_describe_rules() {
     let server = TestServer::start().await;
@@ -996,7 +996,7 @@ async fn elbv2_describe_rules() {
     assert_eq!(resp.rules().len(), 1);
 }
 
-#[test_action("elasticloadbalancingv2", "ModifyRule", checksum = "dc4ec5b1")]
+#[test_action("elasticloadbalancingv2", "ModifyRule", checksum = "7544e745")]
 #[tokio::test]
 async fn elbv2_modify_rule() {
     let server = TestServer::start().await;
@@ -1108,7 +1108,7 @@ async fn elbv2_delete_rule() {
         .unwrap();
 }
 
-#[test_action("elasticloadbalancingv2", "SetRulePriorities", checksum = "f7ddaac0")]
+#[test_action("elasticloadbalancingv2", "SetRulePriorities", checksum = "b20f678f")]
 #[tokio::test]
 async fn elbv2_set_rule_priorities() {
     let server = TestServer::start().await;

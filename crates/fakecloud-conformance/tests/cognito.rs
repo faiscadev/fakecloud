@@ -7,7 +7,7 @@ use helpers::TestServer;
 // User Pool lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateUserPool", checksum = "4c00e8ed")]
+#[test_action("cognito-idp", "CreateUserPool", checksum = "fe28019c")]
 #[tokio::test]
 async fn cognito_create_user_pool() {
     let server = TestServer::start().await;
@@ -25,7 +25,7 @@ async fn cognito_create_user_pool() {
     assert_eq!(pool.name().unwrap(), "conformance-pool");
 }
 
-#[test_action("cognito-idp", "DescribeUserPool", checksum = "30076cfd")]
+#[test_action("cognito-idp", "DescribeUserPool", checksum = "8226bbf2")]
 #[tokio::test]
 async fn cognito_describe_user_pool() {
     let server = TestServer::start().await;
@@ -48,7 +48,7 @@ async fn cognito_describe_user_pool() {
     assert_eq!(resp.user_pool().unwrap().name().unwrap(), "desc-pool");
 }
 
-#[test_action("cognito-idp", "UpdateUserPool", checksum = "08737566")]
+#[test_action("cognito-idp", "UpdateUserPool", checksum = "848ec9e7")]
 #[tokio::test]
 async fn cognito_update_user_pool() {
     let server = TestServer::start().await;
@@ -2150,8 +2150,8 @@ async fn cognito_resend_confirmation_code() {
 // MFA / Software Tokens
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "SetUserPoolMfaConfig", checksum = "ede6d026")]
-#[test_action("cognito-idp", "GetUserPoolMfaConfig", checksum = "685386f6")]
+#[test_action("cognito-idp", "SetUserPoolMfaConfig", checksum = "2494a208")]
+#[test_action("cognito-idp", "GetUserPoolMfaConfig", checksum = "74cb03fb")]
 #[tokio::test]
 async fn cognito_set_get_user_pool_mfa_config() {
     let server = TestServer::start().await;
@@ -3017,9 +3017,9 @@ async fn cognito_tag_untag_list() {
 // Import Jobs
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateUserImportJob", checksum = "584bf0d4")]
-#[test_action("cognito-idp", "DescribeUserImportJob", checksum = "e5648858")]
-#[test_action("cognito-idp", "ListUserImportJobs", checksum = "02afb9e6")]
+#[test_action("cognito-idp", "CreateUserImportJob", checksum = "1575dddd")]
+#[test_action("cognito-idp", "DescribeUserImportJob", checksum = "ead3f532")]
+#[test_action("cognito-idp", "ListUserImportJobs", checksum = "1fe4c89c")]
 #[tokio::test]
 async fn cognito_import_jobs() {
     let server = TestServer::start().await;
@@ -3407,8 +3407,8 @@ async fn cognito_get_idp_by_identifier() {
 // Import Job State Transitions
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "StartUserImportJob", checksum = "203b5a53")]
-#[test_action("cognito-idp", "StopUserImportJob", checksum = "d81404ea")]
+#[test_action("cognito-idp", "StartUserImportJob", checksum = "d1cfce5b")]
+#[test_action("cognito-idp", "StopUserImportJob", checksum = "b39aec38")]
 #[tokio::test]
 async fn cognito_start_stop_import_job() {
     let server = TestServer::start().await;
