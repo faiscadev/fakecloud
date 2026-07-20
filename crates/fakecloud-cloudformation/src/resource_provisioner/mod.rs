@@ -853,6 +853,47 @@ impl ProvisionResult {
     }
 }
 
+/// Lowercase the first ASCII character of a key. `RoleArn` -> `roleArn`.
+pub(super) fn lower_first_char(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_ascii_lowercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// Recursively convert a CloudFormation PascalCase property tree into the
+/// camelCase API shape the AWS services store internally, so a CFN-provisioned
+/// resource reads back through `Describe*`/`Get*` identically to a direct-API
+/// one. Lowercases the first character of every object key and recurses into
+/// arrays and objects.
+///
+/// Keys listed in `opaque` carry their VALUE through verbatim (the value's own
+/// keys are not transformed): these are provider-defined free-form maps such as
+/// a CodePipeline action's `Configuration`, whose inner keys AWS preserves
+/// exactly as written.
+pub(super) fn cfn_props_to_camel(value: &serde_json::Value, opaque: &[&str]) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                let key = lower_first_char(k);
+                let converted = if opaque.contains(&k.as_str()) {
+                    v.clone()
+                } else {
+                    cfn_props_to_camel(v, opaque)
+                };
+                out.insert(key, converted);
+            }
+            serde_json::Value::Object(out)
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(|v| cfn_props_to_camel(v, opaque)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 /// Extract a resource policy's `PolicyDocument` property as a JSON string,
 /// accepting either an inline object or an already-serialized string. Shared by
 /// the SQS/SNS/S3 resource-policy provisioners.
@@ -917,6 +958,18 @@ pub struct ResourceProvisioner {
     pub redshift_state: fakecloud_redshift::SharedRedshiftState,
     pub docdb_state: fakecloud_docdb::SharedDocDbState,
     pub neptune_state: fakecloud_neptune::SharedNeptuneState,
+    pub codepipeline_state: fakecloud_codepipeline::SharedCodePipelineState,
+    pub codebuild_state: fakecloud_codebuild::SharedCodeBuildState,
+    pub codedeploy_state: fakecloud_codedeploy::SharedCodeDeployState,
+    pub opensearch_state: fakecloud_opensearch::SharedOpenSearchState,
+    pub emr_state: fakecloud_emr::SharedEmrState,
+    pub sagemaker_state: fakecloud_sagemaker::SharedSageMakerState,
+    pub backup_state: fakecloud_backup::SharedBackupState,
+    pub appsync_state: fakecloud_appsync::SharedAppSyncState,
+    pub timestream_state: fakecloud_timestream::SharedTimestreamState,
+    pub mwaa_state: fakecloud_mwaa::SharedMwaaState,
+    pub amplify_state: fakecloud_amplify::SharedAmplifyState,
+    pub appconfig_state: fakecloud_appconfig::SharedAppConfigState,
     pub cloudformation_state: SharedCloudFormationState,
     pub delivery: Arc<DeliveryBus>,
     /// Lambda container runtime for pre-pulling CFN-provisioned function
@@ -1073,17 +1126,24 @@ pub struct CustomInvokeIntent {
 
 mod acm;
 mod acmpca;
+mod amplify;
 mod apigw;
 mod apigwv2;
 mod appautoscaling;
+mod appconfig;
+mod appsync;
 mod athena;
 mod autoscaling;
+mod backup;
 mod batch;
 mod cloudformation;
 mod cloudfront;
 mod cloudwatch;
 mod codeartifact;
+mod codebuild;
 mod codecommit;
+mod codedeploy;
+mod codepipeline;
 mod cognito;
 mod config;
 mod cwlogs;
@@ -1096,6 +1156,7 @@ mod eks;
 mod elasticache;
 mod elasticbeanstalk;
 mod elbv2;
+mod emr;
 mod eventbridge;
 mod firehose;
 mod glue;
@@ -1107,6 +1168,8 @@ mod kms;
 mod lambda;
 mod logs;
 mod mq;
+mod mwaa;
+mod opensearch;
 mod organizations;
 mod pipes;
 mod rds;
@@ -1114,6 +1177,7 @@ mod redshiftlike;
 mod route;
 mod route53resolver;
 mod s3;
+mod sagemaker;
 mod secrets;
 mod servicediscovery;
 mod ses;
@@ -1121,6 +1185,7 @@ mod sns;
 mod sqs;
 mod ssm;
 mod stepfunctions;
+mod timestream;
 mod wafv2;
 
 impl ResourceProvisioner {
@@ -1455,6 +1520,31 @@ impl ResourceProvisioner {
             "AWS::CloudFormation::Stack" => self.create_cloudformation_stack(resource),
             "AWS::Glue::Table" => self.create_glue_table(resource),
             "AWS::Glue::Partition" => self.create_glue_partition(resource),
+            "AWS::CodePipeline::Pipeline" => self.create_codepipeline_pipeline(resource),
+            "AWS::CodeBuild::Project" => self.create_codebuild_project(resource),
+            "AWS::CodeDeploy::Application" => self.create_codedeploy_application(resource),
+            "AWS::CodeDeploy::DeploymentGroup" => self.create_codedeploy_deployment_group(resource),
+            "AWS::OpenSearchService::Domain" => self.create_opensearch_domain(resource),
+            "AWS::Elasticsearch::Domain" => self.create_elasticsearch_domain(resource),
+            "AWS::EMR::Cluster" => self.create_emr_cluster(resource),
+            "AWS::SageMaker::Model" => self.create_sagemaker_model(resource),
+            "AWS::SageMaker::EndpointConfig" => self.create_sagemaker_endpoint_config(resource),
+            "AWS::SageMaker::Endpoint" => self.create_sagemaker_endpoint(resource),
+            "AWS::SageMaker::NotebookInstance" => self.create_sagemaker_notebook_instance(resource),
+            "AWS::Backup::BackupVault" => self.create_backup_vault(resource),
+            "AWS::Backup::BackupPlan" => self.create_backup_plan(resource),
+            "AWS::AppSync::GraphQLApi" => self.create_appsync_graphql_api(resource),
+            "AWS::AppSync::DataSource" => self.create_appsync_data_source(resource),
+            "AWS::AppSync::Resolver" => self.create_appsync_resolver(resource),
+            "AWS::Timestream::Database" => self.create_timestream_database(resource),
+            "AWS::Timestream::Table" => self.create_timestream_table(resource),
+            "AWS::MWAA::Environment" => self.create_mwaa_environment(resource),
+            "AWS::Amplify::App" => self.create_amplify_app(resource),
+            "AWS::AppConfig::Application" => self.create_appconfig_application(resource),
+            "AWS::AppConfig::Environment" => self.create_appconfig_environment(resource),
+            "AWS::AppConfig::ConfigurationProfile" => {
+                self.create_appconfig_configuration_profile(resource)
+            }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => self
                 .create_custom_resource(resource)
                 .map(ProvisionResult::new),
@@ -1911,6 +2001,62 @@ impl ResourceProvisioner {
             }
             "AWS::ServiceDiscovery::Service" => {
                 self.get_att_sd_service(&resource.physical_id, attribute)
+            }
+            "AWS::CodePipeline::Pipeline" => {
+                self.get_att_codepipeline_pipeline(&resource.physical_id, attribute)
+            }
+            "AWS::CodeBuild::Project" => {
+                self.get_att_codebuild_project(&resource.physical_id, attribute)
+            }
+            "AWS::CodeDeploy::DeploymentGroup" => {
+                self.get_att_codedeploy_deployment_group(&resource.physical_id, attribute)
+            }
+            "AWS::OpenSearchService::Domain" | "AWS::Elasticsearch::Domain" => {
+                self.get_att_opensearch_domain(&resource.physical_id, attribute)
+            }
+            "AWS::EMR::Cluster" => self.get_att_emr_cluster(&resource.physical_id, attribute),
+            "AWS::SageMaker::Model" => {
+                self.get_att_sagemaker_resource("Model", &resource.physical_id, attribute)
+            }
+            "AWS::SageMaker::EndpointConfig" => {
+                self.get_att_sagemaker_resource("EndpointConfig", &resource.physical_id, attribute)
+            }
+            "AWS::SageMaker::Endpoint" => {
+                self.get_att_sagemaker_resource("Endpoint", &resource.physical_id, attribute)
+            }
+            "AWS::SageMaker::NotebookInstance" => self.get_att_sagemaker_resource(
+                "NotebookInstance",
+                &resource.physical_id,
+                attribute,
+            ),
+            "AWS::Backup::BackupVault" => {
+                self.get_att_backup_vault(&resource.physical_id, attribute)
+            }
+            "AWS::Backup::BackupPlan" => self.get_att_backup_plan(&resource.physical_id, attribute),
+            "AWS::AppSync::GraphQLApi" => {
+                self.get_att_appsync_graphql_api(&resource.physical_id, attribute)
+            }
+            "AWS::AppSync::DataSource" => {
+                self.get_att_appsync_data_source(&resource.physical_id, attribute)
+            }
+            "AWS::AppSync::Resolver" => {
+                self.get_att_appsync_resolver(&resource.physical_id, attribute)
+            }
+            "AWS::Timestream::Database" => {
+                self.get_att_timestream_database(&resource.physical_id, attribute)
+            }
+            "AWS::Timestream::Table" => {
+                self.get_att_timestream_table(&resource.physical_id, attribute)
+            }
+            "AWS::MWAA::Environment" => {
+                self.get_att_mwaa_environment(&resource.physical_id, attribute)
+            }
+            "AWS::Amplify::App" => self.get_att_amplify_app(&resource.physical_id, attribute),
+            "AWS::AppConfig::Environment" => {
+                self.get_att_appconfig_environment(&resource.physical_id, attribute)
+            }
+            "AWS::AppConfig::ConfigurationProfile" => {
+                self.get_att_appconfig_configuration_profile(&resource.physical_id, attribute)
             }
             t if t.starts_with("AWS::Route53Resolver::") => {
                 self.get_att_route53resolver(resource, attribute)
@@ -2450,6 +2596,50 @@ impl ResourceProvisioner {
             "AWS::ServiceDiscovery::Service" => self.delete_sd_service(&resource.physical_id),
             "AWS::ServiceDiscovery::Instance" => {
                 self.delete_sd_instance(&resource.physical_id, &resource.attributes)
+            }
+            "AWS::CodePipeline::Pipeline" => {
+                self.delete_codepipeline_pipeline(&resource.physical_id)
+            }
+            "AWS::CodeBuild::Project" => self.delete_codebuild_project(&resource.physical_id),
+            "AWS::CodeDeploy::Application" => {
+                self.delete_codedeploy_application(&resource.physical_id)
+            }
+            "AWS::CodeDeploy::DeploymentGroup" => {
+                self.delete_codedeploy_deployment_group(&resource.physical_id)
+            }
+            "AWS::OpenSearchService::Domain" | "AWS::Elasticsearch::Domain" => {
+                self.delete_opensearch_domain(&resource.physical_id)
+            }
+            "AWS::EMR::Cluster" => self.delete_emr_cluster(&resource.physical_id),
+            "AWS::SageMaker::Model" => {
+                self.delete_sagemaker_resource("Model", &resource.physical_id)
+            }
+            "AWS::SageMaker::EndpointConfig" => {
+                self.delete_sagemaker_resource("EndpointConfig", &resource.physical_id)
+            }
+            "AWS::SageMaker::Endpoint" => {
+                self.delete_sagemaker_resource("Endpoint", &resource.physical_id)
+            }
+            "AWS::SageMaker::NotebookInstance" => {
+                self.delete_sagemaker_resource("NotebookInstance", &resource.physical_id)
+            }
+            "AWS::Backup::BackupVault" => self.delete_backup_vault(&resource.physical_id),
+            "AWS::Backup::BackupPlan" => self.delete_backup_plan(&resource.physical_id),
+            "AWS::AppSync::GraphQLApi" => self.delete_appsync_graphql_api(&resource.physical_id),
+            "AWS::AppSync::DataSource" => self.delete_appsync_data_source(&resource.physical_id),
+            "AWS::AppSync::Resolver" => self.delete_appsync_resolver(&resource.physical_id),
+            "AWS::Timestream::Database" => self.delete_timestream_database(&resource.physical_id),
+            "AWS::Timestream::Table" => self.delete_timestream_table(&resource.physical_id),
+            "AWS::MWAA::Environment" => self.delete_mwaa_environment(&resource.physical_id),
+            "AWS::Amplify::App" => self.delete_amplify_app(&resource.physical_id),
+            "AWS::AppConfig::Application" => {
+                self.delete_appconfig_application(&resource.physical_id)
+            }
+            "AWS::AppConfig::Environment" => {
+                self.delete_appconfig_environment(&resource.physical_id)
+            }
+            "AWS::AppConfig::ConfigurationProfile" => {
+                self.delete_appconfig_configuration_profile(&resource.physical_id)
             }
             t if t.starts_with("Custom::") || t == "AWS::CloudFormation::CustomResource" => {
                 self.delete_custom_resource(resource)
@@ -3666,6 +3856,42 @@ mod tests {
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             neptune_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            codepipeline_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            codebuild_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            codedeploy_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            opensearch_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            emr_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            sagemaker_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            backup_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            appsync_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            timestream_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            mwaa_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            amplify_state: Arc::new(parking_lot::RwLock::new(
+                fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+            )),
+            appconfig_state: Arc::new(parking_lot::RwLock::new(
                 fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
             )),
             delivery: Arc::new(DeliveryBus::new()),
@@ -6434,5 +6660,433 @@ mod tests {
         assert_eq!(inst.db_instance_class, "db.t3.large");
         assert_eq!(inst.allocated_storage, 100);
         assert_eq!(inst.backup_retention_period, 7);
+    }
+
+    // --- Orchestration/persistence sweep (#1766 family): CFN write-through for
+    // codepipeline/codebuild/codedeploy/opensearch/emr/sagemaker/backup/appsync/
+    // timestream/mwaa/amplify/appconfig. Each test provisions via the CFN
+    // provisioner, asserts the resource landed in the OWNING service's store
+    // (so Describe/Get reads it), and checks the returned Ref/GetAtt.
+
+    fn attr<'a>(r: &'a StackResource, k: &str) -> &'a str {
+        r.attributes.get(k).map(String::as_str).unwrap_or("")
+    }
+
+    #[test]
+    fn codepipeline_pipeline_writes_through_and_survives_snapshot() {
+        let prov = make_provisioner();
+        let r = prov
+            .create_resource(&make_resource(
+                "AWS::CodePipeline::Pipeline",
+                "P",
+                serde_json::json!({
+                    "Name": "my-pipe",
+                    "RoleArn": "arn:aws:iam::123456789012:role/cp",
+                    "ArtifactStore": {"Type": "S3", "Location": "bkt"},
+                    "Stages": [{
+                        "Name": "Source",
+                        "Actions": [{
+                            "Name": "Src",
+                            "ActionTypeId": {"Category": "Source", "Owner": "AWS",
+                                "Provider": "S3", "Version": "1"},
+                            "Configuration": {"S3Bucket": "bkt", "S3ObjectKey": "k.zip"}
+                        }]
+                    }]
+                }),
+            ))
+            .expect("pipeline provisions");
+        assert_eq!(r.physical_id, "my-pipe");
+        assert_eq!(attr(&r, "Version"), "1");
+        {
+            let g = prov.codepipeline_state.read();
+            let st = g.get("123456789012").unwrap();
+            let decl = st.pipelines.get("my-pipe").expect("pipeline in store");
+            assert_eq!(decl["name"], "my-pipe");
+            assert_eq!(decl["roleArn"], "arn:aws:iam::123456789012:role/cp");
+            // Action Configuration keys are carried verbatim (not camel-cased).
+            assert_eq!(
+                decl["stages"][0]["actions"][0]["configuration"]["S3Bucket"],
+                "bkt"
+            );
+            assert_eq!(decl["stages"][0]["actions"][0]["runOrder"], 1);
+            assert!(st.pipeline_order.contains(&"my-pipe".to_string()));
+            assert!(st.pipeline_meta.contains_key("my-pipe"));
+        }
+        // Snapshot round-trip: the record must survive serialize/deserialize of
+        // the whole MultiAccountState (what the snapshot hook persists).
+        let json = serde_json::to_string(&*prov.codepipeline_state.read()).unwrap();
+        let restored: fakecloud_core::multi_account::MultiAccountState<
+            fakecloud_codepipeline::CodePipelineState,
+        > = serde_json::from_str(&json).unwrap();
+        assert!(restored
+            .get("123456789012")
+            .unwrap()
+            .pipelines
+            .contains_key("my-pipe"));
+
+        prov.delete_resource(&r).expect("delete");
+        assert!(prov
+            .codepipeline_state
+            .read()
+            .get("123456789012")
+            .unwrap()
+            .pipelines
+            .is_empty());
+    }
+
+    #[test]
+    fn codebuild_project_writes_through() {
+        let prov = make_provisioner();
+        let r = prov
+            .create_resource(&make_resource(
+                "AWS::CodeBuild::Project",
+                "B",
+                serde_json::json!({
+                    "Name": "builder",
+                    "ServiceRole": "arn:aws:iam::123456789012:role/cb",
+                    "Source": {"Type": "GITHUB", "Location": "https://x", "BuildSpec": "y"},
+                    "Artifacts": {"Type": "NO_ARTIFACTS"},
+                    "Environment": {"Type": "LINUX_CONTAINER", "Image": "img",
+                        "ComputeType": "BUILD_GENERAL1_SMALL"}
+                }),
+            ))
+            .expect("project provisions");
+        assert_eq!(r.physical_id, "builder");
+        let g = prov.codebuild_state.read();
+        let st = g.get("123456789012").unwrap();
+        let p = st.projects.get("builder").expect("project in store");
+        assert_eq!(p["name"], "builder");
+        assert_eq!(p["arn"], attr(&r, "Arn"));
+        assert_eq!(p["serviceRole"], "arn:aws:iam::123456789012:role/cb");
+        // BuildSpec is normalized to the API's lowercase `buildspec`.
+        assert_eq!(p["source"]["buildspec"], "y");
+        assert_eq!(p["badge"]["badgeEnabled"], false);
+    }
+
+    #[test]
+    fn codedeploy_application_and_group_write_through() {
+        let prov = make_provisioner();
+        let app = prov
+            .create_resource(&make_resource(
+                "AWS::CodeDeploy::Application",
+                "App",
+                serde_json::json!({"ApplicationName": "app1", "ComputePlatform": "Lambda"}),
+            ))
+            .expect("app provisions");
+        assert_eq!(app.physical_id, "app1");
+        let dg = prov
+            .create_resource(&make_resource(
+                "AWS::CodeDeploy::DeploymentGroup",
+                "Dg",
+                serde_json::json!({
+                    "ApplicationName": "app1",
+                    "DeploymentGroupName": "dg1",
+                    "ServiceRoleArn": "arn:aws:iam::123456789012:role/cd"
+                }),
+            ))
+            .expect("group provisions");
+        assert_eq!(dg.physical_id, "app1/dg1");
+        assert!(!attr(&dg, "Id").is_empty());
+        let g = prov.codedeploy_state.read();
+        let st = g.get("123456789012").unwrap();
+        assert_eq!(
+            st.applications.get("app1").unwrap()["computePlatform"],
+            "Lambda"
+        );
+        let group = st
+            .deployment_groups
+            .get("app1")
+            .unwrap()
+            .get("dg1")
+            .unwrap();
+        assert_eq!(group["computePlatform"], "Lambda");
+        assert_eq!(group["serviceRoleArn"], "arn:aws:iam::123456789012:role/cd");
+    }
+
+    #[test]
+    fn opensearch_domain_writes_through() {
+        let prov = make_provisioner();
+        let r = prov
+            .create_resource(&make_resource(
+                "AWS::OpenSearchService::Domain",
+                "D",
+                serde_json::json!({
+                    "DomainName": "logs",
+                    "EngineVersion": "OpenSearch_2.11",
+                    "ClusterConfig": {"InstanceType": "t3.small.search", "InstanceCount": 2}
+                }),
+            ))
+            .expect("domain provisions");
+        assert_eq!(r.physical_id, "logs");
+        let g = prov.opensearch_state.read();
+        let d = g
+            .get("123456789012")
+            .unwrap()
+            .domains
+            .get("logs")
+            .expect("domain in store");
+        assert_eq!(d.arn, attr(&r, "Arn"));
+        assert_eq!(d.engine_version, "OpenSearch_2.11");
+        assert_eq!(d.config["ClusterConfig"]["InstanceCount"], 2);
+    }
+
+    #[test]
+    fn emr_cluster_writes_through() {
+        let prov = make_provisioner();
+        let r = prov
+            .create_resource(&make_resource(
+                "AWS::EMR::Cluster",
+                "C",
+                serde_json::json!({
+                    "Name": "analytics",
+                    "ReleaseLabel": "emr-6.15.0",
+                    "ServiceRole": "EMR_DefaultRole"
+                }),
+            ))
+            .expect("cluster provisions");
+        assert!(r.physical_id.starts_with("j-"));
+        let g = prov.emr_state.read();
+        let st = g.get("123456789012").unwrap();
+        let c = st.clusters.get(&r.physical_id).expect("cluster in store");
+        assert_eq!(c["Name"], "analytics");
+        assert_eq!(c["ReleaseLabel"], "emr-6.15.0");
+        assert!(st.cluster_order.contains(&r.physical_id));
+    }
+
+    #[test]
+    fn sagemaker_model_writes_through() {
+        let prov = make_provisioner();
+        let r = prov
+            .create_resource(&make_resource(
+                "AWS::SageMaker::Model",
+                "M",
+                serde_json::json!({
+                    "ModelName": "m1",
+                    "ExecutionRoleArn": "arn:aws:iam::123456789012:role/sm"
+                }),
+            ))
+            .expect("model provisions");
+        assert_eq!(r.physical_id, "m1");
+        let g = prov.sagemaker_state.read();
+        let rec = g
+            .get("123456789012")
+            .unwrap()
+            .get_resource("Model", "m1")
+            .expect("model in store");
+        assert_eq!(rec["ModelName"], "m1");
+        assert_eq!(
+            rec["ModelArn"],
+            "arn:aws:sagemaker:us-east-1:123456789012:model/m1"
+        );
+        assert!(rec["CreationTime"].is_number());
+    }
+
+    #[test]
+    fn backup_vault_and_plan_write_through() {
+        let prov = make_provisioner();
+        let vault = prov
+            .create_resource(&make_resource(
+                "AWS::Backup::BackupVault",
+                "V",
+                serde_json::json!({"BackupVaultName": "vault1"}),
+            ))
+            .expect("vault provisions");
+        assert_eq!(vault.physical_id, "vault1");
+        let plan = prov
+            .create_resource(&make_resource(
+                "AWS::Backup::BackupPlan",
+                "Pl",
+                serde_json::json!({
+                    "BackupPlan": {
+                        "BackupPlanName": "daily",
+                        "BackupPlanRule": [{"RuleName": "r1", "TargetBackupVault": "vault1"}]
+                    }
+                }),
+            ))
+            .expect("plan provisions");
+        assert!(!attr(&plan, "BackupPlanId").is_empty());
+        let g = prov.backup_state.read();
+        let st = g.get("123456789012").unwrap();
+        assert!(st.vaults.contains_key("vault1"));
+        let p = st.plans.get(&plan.physical_id).expect("plan in store");
+        assert_eq!(p.plan["BackupPlanName"], "daily");
+        // BackupPlanRule normalized to the API's `Rules`.
+        assert!(p.plan.get("Rules").is_some());
+    }
+
+    #[test]
+    fn appsync_api_datasource_resolver_write_through() {
+        let prov = make_provisioner();
+        let api = prov
+            .create_resource(&make_resource(
+                "AWS::AppSync::GraphQLApi",
+                "Api",
+                serde_json::json!({"Name": "gql", "AuthenticationType": "API_KEY"}),
+            ))
+            .expect("api provisions");
+        let api_id = api.physical_id.clone();
+        let ds = prov
+            .create_resource(&make_resource(
+                "AWS::AppSync::DataSource",
+                "Ds",
+                serde_json::json!({"ApiId": api_id, "Name": "src", "Type": "NONE"}),
+            ))
+            .expect("datasource provisions");
+        let res = prov
+            .create_resource(&make_resource(
+                "AWS::AppSync::Resolver",
+                "Res",
+                serde_json::json!({
+                    "ApiId": api.physical_id, "TypeName": "Query", "FieldName": "getX",
+                    "DataSourceName": "src"
+                }),
+            ))
+            .expect("resolver provisions");
+        let g = prov.appsync_state.read();
+        let data = g.get("123456789012").unwrap();
+        let stored = data
+            .graphql_apis
+            .get(&api.physical_id)
+            .expect("api in store");
+        assert_eq!(stored["name"], "gql");
+        assert_eq!(stored["authenticationType"], "API_KEY");
+        assert!(!attr(&api, "GraphQLUrl").is_empty());
+        assert!(data
+            .data_sources
+            .get(&api.physical_id)
+            .unwrap()
+            .contains_key("src"));
+        assert_eq!(ds.physical_id, format!("{}|src", api.physical_id));
+        assert!(data
+            .resolvers
+            .get(&api.physical_id)
+            .unwrap()
+            .contains_key("Query::getX"));
+        assert!(res.physical_id.ends_with("|Query|getX"));
+    }
+
+    #[test]
+    fn timestream_database_and_table_write_through() {
+        let prov = make_provisioner();
+        let db = prov
+            .create_resource(&make_resource(
+                "AWS::Timestream::Database",
+                "Db",
+                serde_json::json!({"DatabaseName": "metrics"}),
+            ))
+            .expect("db provisions");
+        assert_eq!(db.physical_id, "metrics");
+        let table = prov
+            .create_resource(&make_resource(
+                "AWS::Timestream::Table",
+                "T",
+                serde_json::json!({"DatabaseName": "metrics", "TableName": "cpu"}),
+            ))
+            .expect("table provisions");
+        assert_eq!(table.physical_id, "metrics|cpu");
+        let g = prov.timestream_state.read();
+        let data = g.get("123456789012").unwrap();
+        assert!(data.databases.contains_key("metrics"));
+        assert_eq!(data.databases.get("metrics").unwrap().table_count, 1);
+        let key = fakecloud_timestream::shared::table_key("metrics", "cpu");
+        assert!(data.tables.contains_key(&key));
+    }
+
+    #[test]
+    fn mwaa_environment_writes_through() {
+        let prov = make_provisioner();
+        let r = prov
+            .create_resource(&make_resource(
+                "AWS::MWAA::Environment",
+                "E",
+                serde_json::json!({
+                    "Name": "airflow",
+                    "ExecutionRoleArn": "arn:aws:iam::123456789012:role/mwaa",
+                    "SourceBucketArn": "arn:aws:s3:::dags",
+                    "DagS3Path": "dags"
+                }),
+            ))
+            .expect("env provisions");
+        assert_eq!(r.physical_id, "airflow");
+        let g = prov.mwaa_state.read();
+        let env = g
+            .get("123456789012")
+            .unwrap()
+            .environments
+            .get("airflow")
+            .expect("env in store");
+        assert_eq!(env["Name"], "airflow");
+        assert_eq!(
+            env["ExecutionRoleArn"],
+            "arn:aws:iam::123456789012:role/mwaa"
+        );
+        assert_eq!(env["Arn"], attr(&r, "Arn"));
+    }
+
+    #[test]
+    fn amplify_app_writes_through() {
+        let prov = make_provisioner();
+        let r = prov
+            .create_resource(&make_resource(
+                "AWS::Amplify::App",
+                "A",
+                serde_json::json!({"Name": "web", "Repository": "https://git/x"}),
+            ))
+            .expect("app provisions");
+        let g = prov.amplify_state.read();
+        let rec = g
+            .get("123456789012")
+            .unwrap()
+            .apps
+            .get(&r.physical_id)
+            .expect("app in store");
+        assert_eq!(rec.app["name"], "web");
+        assert_eq!(rec.app["appId"], r.physical_id);
+        assert_eq!(attr(&r, "AppName"), "web");
+        assert!(!attr(&r, "DefaultDomain").is_empty());
+    }
+
+    #[test]
+    fn appconfig_application_environment_profile_write_through() {
+        let prov = make_provisioner();
+        let app = prov
+            .create_resource(&make_resource(
+                "AWS::AppConfig::Application",
+                "App",
+                serde_json::json!({"Name": "svc"}),
+            ))
+            .expect("app provisions");
+        let app_id = app.physical_id.clone();
+        let env = prov
+            .create_resource(&make_resource(
+                "AWS::AppConfig::Environment",
+                "Env",
+                serde_json::json!({"ApplicationId": app_id, "Name": "prod"}),
+            ))
+            .expect("env provisions");
+        let prof = prov
+            .create_resource(&make_resource(
+                "AWS::AppConfig::ConfigurationProfile",
+                "Prof",
+                serde_json::json!({
+                    "ApplicationId": app.physical_id, "Name": "cfg",
+                    "LocationUri": "hosted"
+                }),
+            ))
+            .expect("profile provisions");
+        let g = prov.appconfig_state.read();
+        let st = g.get("123456789012").unwrap();
+        let a = st.applications.get(&app.physical_id).expect("app in store");
+        assert_eq!(a.name, "svc");
+        assert_eq!(a.environments.len(), 1);
+        assert_eq!(a.profiles.len(), 1);
+        assert!(env
+            .physical_id
+            .starts_with(&format!("{}|", app.physical_id)));
+        assert!(prof
+            .physical_id
+            .starts_with(&format!("{}|", app.physical_id)));
+        let env_id = env.physical_id.split('|').nth(1).unwrap();
+        assert_eq!(a.environments.get(env_id).unwrap().name, "prod");
     }
 }
