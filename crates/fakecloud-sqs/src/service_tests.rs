@@ -3242,7 +3242,10 @@ fn queue_arn_uses_region_partition_and_resolves() {
     };
 
     let create_resp = svc
-        .create_queue(&cn_request("CreateQueue", json!({ "QueueName": "cn-queue" })))
+        .create_queue(&cn_request(
+            "CreateQueue",
+            json!({ "QueueName": "cn-queue" }),
+        ))
         .unwrap();
     let url = body_json(create_resp)["QueueUrl"]
         .as_str()
