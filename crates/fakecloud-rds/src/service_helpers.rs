@@ -400,7 +400,9 @@ pub(crate) fn validate_create_request(
     // full `<major>.<minor>.<patch>` triplets — AWS RDS validates both
     // forms and the runtime resolves the matching prebuilt image regardless.
     let supported_versions = match engine {
-        "postgres" => vec!["16", "15", "14", "13", "16.3", "15.5", "14.10", "13.13"],
+        "postgres" => vec![
+            "17", "16", "15", "14", "13", "17.4", "16.3", "15.5", "14.10", "13.13",
+        ],
         "mysql" => vec!["8.0", "8.0.35", "8.0.28", "5.7.44"],
         "mariadb" => vec!["10.6", "10.11", "11.4", "11.4.5", "10.11.6", "10.6.16"],
         "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {

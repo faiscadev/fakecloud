@@ -195,7 +195,7 @@ The Oracle / SQL Server / Db2 images are large (1-3 GB) and take 30-300 s to fir
 
 ### Prebuilt PostgreSQL image
 
-`ghcr.io/faiscadev/fakecloud-postgres:<major>-<fakecloud-version>` is published on every fakecloud release tag (workflow: `.github/workflows/docker-rds-images.yml`) for postgres `13`, `14`, `15`, `16`, both `linux/amd64` and `linux/arm64`. Each release also gets a rolling `:<major>` tag pointing at the latest version for that major. Resolution order at runtime:
+`ghcr.io/faiscadev/fakecloud-postgres:<major>-<fakecloud-version>` is published on every fakecloud release tag (workflow: `.github/workflows/docker-rds-images.yml`) for postgres `13`, `14`, `15`, `16`, `17`, both `linux/amd64` and `linux/arm64`. Each release also gets a rolling `:<major>` tag pointing at the latest version for that major. Resolution order at runtime:
 
 1. Image already on the local Docker daemon -> use it.
 2. `docker pull` of the version-pinned tag -> use it.
