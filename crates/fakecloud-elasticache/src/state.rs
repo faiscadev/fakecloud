@@ -680,6 +680,35 @@ impl ElastiCacheState {
         self.update_actions.clear();
     }
 
+    /// Whether a taggable resource with the given ARN currently exists in this
+    /// account's state. Used by the tag handlers (Add/List/Remove) to tell
+    /// "resource exists but has no tags" (return an empty TagList) apart from
+    /// "resource genuinely missing" (return a not-found fault). Matching on the
+    /// stored `arn` field is robust regardless of a collection's map-key scheme.
+    pub fn resource_exists(&self, arn: &str) -> bool {
+        self.parameter_groups.iter().any(|g| g.arn == arn)
+            || self.subnet_groups.values().any(|g| g.arn == arn)
+            || self.cache_clusters.values().any(|c| c.arn == arn)
+            || self.replication_groups.values().any(|r| r.arn == arn)
+            || self
+                .global_replication_groups
+                .values()
+                .any(|g| g.arn == arn)
+            || self.users.values().any(|u| u.arn == arn)
+            || self.user_groups.values().any(|g| g.arn == arn)
+            || self.snapshots.values().any(|s| s.arn == arn)
+            || self.serverless_caches.values().any(|c| c.arn == arn)
+            || self
+                .serverless_cache_snapshots
+                .values()
+                .any(|s| s.arn == arn)
+            || self
+                .reserved_cache_nodes
+                .values()
+                .any(|n| n.reservation_arn == arn)
+            || self.security_groups.values().any(|g| g.arn == arn)
+    }
+
     /// Ensure an UpdateAction exists for every (service_update, target) pair,
     /// where targets are this account's cache clusters and replication groups.
     /// AWS auto-creates these when a service update is released; we materialize
