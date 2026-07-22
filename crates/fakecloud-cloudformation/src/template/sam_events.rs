@@ -545,6 +545,552 @@ pub(super) fn synthesize_api_resources(routes: &[ApiRoute]) -> Vec<(String, Valu
     out
 }
 
+// ============================================================================
+// AWS::Serverless::StateMachine `Events` expansion
+// ============================================================================
+
+/// Expand an `AWS::Serverless::StateMachine`'s `Events` into native trigger
+/// resources, mirroring [`expand_function_extras`] for functions.
+///
+/// - `Schedule` / `ScheduleV2` and `EventBridgeRule` / `CloudWatchEvent`
+///   become `AWS::Events::Rule`s whose target is the state machine's ARN, with
+///   a shared execution role granting `states:StartExecution`.
+/// - `Api` / `HttpApi` become an `AWS::ApiGateway::RestApi` + `Resource` +
+///   `Method` with an AWS service integration that calls `StartExecution`,
+///   plus the role API Gateway assumes to do so.
+///
+/// Returns the extra native resources keyed by logical id. Previously the
+/// transform dropped `Events` entirely (`sfn_props.remove("Events")`), so an
+/// event-driven SAM state machine deployed with no trigger.
+pub(super) fn expand_state_machine_events(
+    state_machine_id: &str,
+    events: &Map<String, Value>,
+) -> Vec<(String, Value)> {
+    let mut extras: Vec<(String, Value)> = Vec::new();
+    let start_role_id = format!("{state_machine_id}EventsRole");
+    let mut needs_start_role = false;
+
+    for (event_name, event) in events {
+        let Some(event_obj) = event.as_object() else {
+            continue;
+        };
+        let event_type = event_obj.get("Type").and_then(|v| v.as_str()).unwrap_or("");
+        let props = event_obj
+            .get("Properties")
+            .and_then(|v| v.as_object())
+            .cloned()
+            .unwrap_or_default();
+        let id_base = format!("{state_machine_id}{event_name}");
+        match event_type {
+            "Schedule" | "ScheduleV2" => {
+                needs_start_role = true;
+                extras.push(sfn_schedule_rule(
+                    state_machine_id,
+                    &start_role_id,
+                    &id_base,
+                    &props,
+                ));
+            }
+            "EventBridgeRule" | "CloudWatchEvent" => {
+                needs_start_role = true;
+                extras.push(sfn_eventbridge_rule(
+                    state_machine_id,
+                    &start_role_id,
+                    &id_base,
+                    &props,
+                ));
+            }
+            "Api" | "HttpApi" => {
+                extras.extend(sfn_api_resources(state_machine_id, &id_base, &props));
+            }
+            _ => {}
+        }
+    }
+
+    if needs_start_role {
+        extras.insert(
+            0,
+            (
+                start_role_id.clone(),
+                start_execution_role(state_machine_id, "events.amazonaws.com"),
+            ),
+        );
+    }
+    extras
+}
+
+/// An IAM role that `assume_principal` can assume to call
+/// `states:StartExecution` on the given state machine.
+fn start_execution_role(state_machine_id: &str, assume_principal: &str) -> Value {
+    json!({
+        "Type": "AWS::IAM::Role",
+        "Properties": {
+            "AssumeRolePolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Principal": { "Service": assume_principal },
+                    "Action": "sts:AssumeRole"
+                }]
+            },
+            "Policies": [{
+                "PolicyName": "StartExecution",
+                "PolicyDocument": {
+                    "Version": "2012-10-17",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Action": "states:StartExecution",
+                        "Resource": { "Ref": state_machine_id }
+                    }]
+                }
+            }]
+        }
+    })
+}
+
+/// `Schedule`/`ScheduleV2` state-machine event -> `Events::Rule` whose target
+/// is the state machine, invoked through the shared StartExecution role.
+fn sfn_schedule_rule(
+    state_machine_id: &str,
+    role_id: &str,
+    id_base: &str,
+    props: &Map<String, Value>,
+) -> (String, Value) {
+    let schedule = props
+        .get("Schedule")
+        .or_else(|| props.get("ScheduleExpression"))
+        .cloned()
+        .unwrap_or(json!("rate(1 day)"));
+    let mut rule_props = json!({
+        "ScheduleExpression": schedule,
+        "State": props.get("Enabled").map(|e| if e.as_bool() == Some(false) { json!("DISABLED") } else { json!("ENABLED") }).unwrap_or(json!("ENABLED")),
+        "Targets": [{
+            "Id": format!("{state_machine_id}Target"),
+            "Arn": { "Fn::GetAtt": [state_machine_id, "Arn"] },
+            "RoleArn": { "Fn::GetAtt": [role_id, "Arn"] }
+        }]
+    });
+    if let Some(name) = props.get("Name") {
+        rule_props["Name"] = name.clone();
+    }
+    if let Some(input) = props.get("Input") {
+        rule_props["Targets"][0]["Input"] = input.clone();
+    }
+    (
+        format!("{id_base}Rule"),
+        json!({ "Type": "AWS::Events::Rule", "Properties": rule_props }),
+    )
+}
+
+/// `EventBridgeRule`/`CloudWatchEvent` state-machine event -> `Events::Rule`
+/// (EventPattern) targeting the state machine via the StartExecution role.
+fn sfn_eventbridge_rule(
+    state_machine_id: &str,
+    role_id: &str,
+    id_base: &str,
+    props: &Map<String, Value>,
+) -> (String, Value) {
+    let mut rule_props = json!({
+        "Targets": [{
+            "Id": format!("{state_machine_id}Target"),
+            "Arn": { "Fn::GetAtt": [state_machine_id, "Arn"] },
+            "RoleArn": { "Fn::GetAtt": [role_id, "Arn"] }
+        }]
+    });
+    if let Some(pattern) = props.get("Pattern").or_else(|| props.get("EventPattern")) {
+        rule_props["EventPattern"] = pattern.clone();
+    }
+    if let Some(bus) = props.get("EventBusName") {
+        rule_props["EventBusName"] = bus.clone();
+    }
+    if let Some(input) = props.get("Input") {
+        rule_props["Targets"][0]["Input"] = input.clone();
+    }
+    (
+        format!("{id_base}Rule"),
+        json!({ "Type": "AWS::Events::Rule", "Properties": rule_props }),
+    )
+}
+
+/// `Api`/`HttpApi` state-machine event -> a dedicated REST API + resource +
+/// method whose integration is the AWS service action `states:StartExecution`,
+/// plus the API-Gateway role that performs it. Structural (matches what SAM
+/// synthesizes) so the state machine is reachable over HTTP.
+fn sfn_api_resources(
+    state_machine_id: &str,
+    id_base: &str,
+    props: &Map<String, Value>,
+) -> Vec<(String, Value)> {
+    let path = props
+        .get("Path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("/")
+        .to_string();
+    let method = props
+        .get("Method")
+        .and_then(|v| v.as_str())
+        .unwrap_or("POST")
+        .to_uppercase();
+
+    let api_id = format!("{id_base}Api");
+    let role_id = format!("{id_base}ApiRole");
+    let mut out: Vec<(String, Value)> = Vec::new();
+
+    out.push((
+        api_id.clone(),
+        json!({
+            "Type": "AWS::ApiGateway::RestApi",
+            "Properties": { "Name": api_id, "EndpointConfiguration": { "Types": ["REGIONAL"] } }
+        }),
+    ));
+    out.push((
+        role_id.clone(),
+        start_execution_role(state_machine_id, "apigateway.amazonaws.com"),
+    ));
+
+    // Resolve (creating as needed) the resource tree for the path.
+    let mut parent_ref = json!({ "Fn::GetAtt": [api_id, "RootResourceId"] });
+    let mut prefix = String::new();
+    let mut leaf_resource_id: Option<String> = None;
+    for segment in path.split('/').filter(|s| !s.is_empty()) {
+        prefix.push('/');
+        prefix.push_str(segment);
+        let res_id = format!("{api_id}Resource{}", sanitize(&prefix));
+        out.push((
+            res_id.clone(),
+            json!({
+                "Type": "AWS::ApiGateway::Resource",
+                "Properties": {
+                    "RestApiId": { "Ref": api_id },
+                    "ParentId": parent_ref,
+                    "PathPart": segment,
+                }
+            }),
+        ));
+        parent_ref = json!({ "Fn::GetAtt": [res_id, "ResourceId"] });
+        leaf_resource_id = Some(res_id);
+    }
+    let resource_ref = match &leaf_resource_id {
+        Some(id) => json!({ "Ref": id }),
+        None => json!({ "Fn::GetAtt": [api_id, "RootResourceId"] }),
+    };
+
+    out.push((
+        format!("{api_id}Method"),
+        json!({
+            "Type": "AWS::ApiGateway::Method",
+            "Properties": {
+                "RestApiId": { "Ref": api_id },
+                "ResourceId": resource_ref,
+                "HttpMethod": method,
+                "AuthorizationType": "NONE",
+                "Integration": {
+                    "Type": "AWS",
+                    "IntegrationHttpMethod": "POST",
+                    "Uri": { "Fn::Sub": "arn:aws:apigateway:${AWS::Region}:states:action/StartExecution" },
+                    "Credentials": { "Fn::GetAtt": [role_id, "Arn"] },
+                }
+            }
+        }),
+    ));
+    out
+}
+
+// ============================================================================
+// AWS::Serverless::Connector expansion
+// ============================================================================
+
+/// Expand an `AWS::Serverless::Connector` into the IAM policy that grants the
+/// Source's role the requested Read/Write actions on the Destination.
+///
+/// SAM connectors are IAM sugar: `{Source, Destination, Permissions}` becomes a
+/// policy on the source's role scoped to the destination. This implements the
+/// common source (Lambda function) -> destination (DynamoDB table, SQS queue,
+/// SNS topic, S3 bucket, Lambda function) pairs. The policy is attached to the
+/// source's implicit execution role (`<SourceId>Role`, the role the SAM
+/// function transform synthesizes) unless the source *is* an IAM role.
+/// `resources` is the original resource set, used to resolve a
+/// Source/Destination type that the connector doesn't state inline.
+pub(super) fn expand_connector(
+    connector_id: &str,
+    properties: &Value,
+    resources: &Map<String, Value>,
+) -> Vec<(String, Value)> {
+    let Some(props) = properties.as_object() else {
+        return Vec::new();
+    };
+    let source = props.get("Source").and_then(|v| v.as_object());
+    let dest = props.get("Destination").and_then(|v| v.as_object());
+    let (Some(source), Some(dest)) = (source, dest) else {
+        return Vec::new();
+    };
+
+    let dest_id = dest.get("Id").and_then(|v| v.as_str());
+    let Some(dest_id) = dest_id else {
+        return Vec::new();
+    };
+    let dest_type = resolve_ref_type(dest, dest_id, resources);
+
+    // Permissions: ["Read", "Write"] (default to both when omitted).
+    let perms: Vec<String> = props
+        .get("Permissions")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|p| p.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_else(|| vec!["Read".to_string(), "Write".to_string()]);
+    let want_read = perms.iter().any(|p| p.eq_ignore_ascii_case("Read"));
+    let want_write = perms.iter().any(|p| p.eq_ignore_ascii_case("Write"));
+
+    let Some((actions, resource_arns)) =
+        connector_actions(&dest_type, dest_id, want_read, want_write)
+    else {
+        // Unknown/unsupported destination pairing: nothing to synthesize.
+        return Vec::new();
+    };
+
+    // Which role does the policy attach to? If the source is itself an IAM
+    // role, attach directly; otherwise the source's implicit execution role.
+    let Some(source_id) = source.get("Id").and_then(|v| v.as_str()) else {
+        return Vec::new();
+    };
+    let source_type = resolve_ref_type(source, source_id, resources);
+    let role_ref = if source_type == "AWS::IAM::Role" {
+        json!({ "Ref": source_id })
+    } else {
+        json!({ "Ref": format!("{source_id}Role") })
+    };
+
+    let policy = json!({
+        "Type": "AWS::IAM::Policy",
+        "Properties": {
+            "PolicyName": format!("{connector_id}Policy"),
+            "Roles": [role_ref],
+            "PolicyDocument": {
+                "Version": "2012-10-17",
+                "Statement": [{
+                    "Effect": "Allow",
+                    "Action": actions,
+                    "Resource": resource_arns
+                }]
+            }
+        }
+    });
+
+    vec![(format!("{connector_id}Policy"), policy)]
+}
+
+/// Resolve the AWS resource type of a Source/Destination reference: prefer an
+/// inline `Type`, else look the id up in the template and map SAM sugar to its
+/// native type.
+fn resolve_ref_type(
+    reference: &Map<String, Value>,
+    id: &str,
+    resources: &Map<String, Value>,
+) -> String {
+    if let Some(t) = reference.get("Type").and_then(|v| v.as_str()) {
+        return t.to_string();
+    }
+    let raw = resources
+        .get(id)
+        .and_then(|r| r.get("Type"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    match raw {
+        "AWS::Serverless::Function" => "AWS::Lambda::Function".to_string(),
+        "AWS::Serverless::SimpleTable" => "AWS::DynamoDB::Table".to_string(),
+        "AWS::Serverless::StateMachine" => "AWS::StepFunctions::StateMachine".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Build the `(actions, resource_arns)` a connector policy grants for a given
+/// destination type and Read/Write selection. Returns `None` for unsupported
+/// destination types.
+fn connector_actions(
+    dest_type: &str,
+    dest_id: &str,
+    read: bool,
+    write: bool,
+) -> Option<(Vec<Value>, Vec<Value>)> {
+    let mut actions: Vec<Value> = Vec::new();
+    let arn = json!({ "Fn::GetAtt": [dest_id, "Arn"] });
+    let arns: Vec<Value> = match dest_type {
+        "AWS::DynamoDB::Table" => {
+            if read {
+                for a in [
+                    "dynamodb:GetItem",
+                    "dynamodb:Query",
+                    "dynamodb:Scan",
+                    "dynamodb:BatchGetItem",
+                    "dynamodb:ConditionCheckItem",
+                    "dynamodb:DescribeTable",
+                ] {
+                    actions.push(json!(a));
+                }
+            }
+            if write {
+                for a in [
+                    "dynamodb:PutItem",
+                    "dynamodb:UpdateItem",
+                    "dynamodb:DeleteItem",
+                    "dynamodb:BatchWriteItem",
+                ] {
+                    actions.push(json!(a));
+                }
+            }
+            vec![
+                arn.clone(),
+                json!({ "Fn::Sub": [ "${Arn}/index/*", { "Arn": arn } ] }),
+            ]
+        }
+        "AWS::SQS::Queue" => {
+            if read {
+                for a in [
+                    "sqs:ReceiveMessage",
+                    "sqs:DeleteMessage",
+                    "sqs:GetQueueAttributes",
+                    "sqs:GetQueueUrl",
+                ] {
+                    actions.push(json!(a));
+                }
+            }
+            if write {
+                for a in [
+                    "sqs:SendMessage",
+                    "sqs:GetQueueAttributes",
+                    "sqs:GetQueueUrl",
+                ] {
+                    actions.push(json!(a));
+                }
+            }
+            vec![arn]
+        }
+        "AWS::SNS::Topic" => {
+            if read {
+                for a in ["sns:GetTopicAttributes", "sns:ListSubscriptionsByTopic"] {
+                    actions.push(json!(a));
+                }
+            }
+            if write {
+                actions.push(json!("sns:Publish"));
+            }
+            // SNS `Ref` resolves to the topic ARN.
+            vec![json!({ "Ref": dest_id })]
+        }
+        "AWS::S3::Bucket" => {
+            if read {
+                for a in [
+                    "s3:GetObject",
+                    "s3:GetObjectVersion",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ] {
+                    actions.push(json!(a));
+                }
+            }
+            if write {
+                for a in ["s3:PutObject", "s3:DeleteObject"] {
+                    actions.push(json!(a));
+                }
+            }
+            vec![
+                arn.clone(),
+                json!({ "Fn::Sub": [ "${Arn}/*", { "Arn": arn } ] }),
+            ]
+        }
+        "AWS::Lambda::Function" => {
+            // Invoking a function is a "write" in connector terms.
+            for a in ["lambda:InvokeFunction", "lambda:InvokeAsync"] {
+                actions.push(json!(a));
+            }
+            vec![arn]
+        }
+        "AWS::StepFunctions::StateMachine" => {
+            if write {
+                actions.push(json!("states:StartExecution"));
+            }
+            if read {
+                for a in ["states:DescribeExecution", "states:DescribeStateMachine"] {
+                    actions.push(json!(a));
+                }
+            }
+            vec![json!({ "Ref": dest_id })]
+        }
+        _ => return None,
+    };
+    if actions.is_empty() {
+        return None;
+    }
+    Some((actions, arns))
+}
+
+// ============================================================================
+// AWS::Serverless::Application expansion
+// ============================================================================
+
+/// Expand an `AWS::Serverless::Application` into a native
+/// `AWS::CloudFormation::Stack` (nested stack) pointing at the referenced
+/// template, carrying `Parameters` through. `Location` may be a template URL /
+/// `s3://` path (string), an object with `{Bucket, Key, Version}` or
+/// `{TemplateURL}`, or a SAR reference (`{ApplicationId, SemanticVersion}`);
+/// each is mapped onto the nested stack's `TemplateURL` so the resource has a
+/// real backing instead of being recorded as a no-backing phantom.
+pub(super) fn expand_application(properties: &Value, resource_obj: &Map<String, Value>) -> Value {
+    let props = properties.as_object().cloned().unwrap_or_default();
+    let template_url = match props.get("Location") {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Object(loc)) => {
+            if let Some(url) = loc.get("TemplateURL").and_then(|v| v.as_str()) {
+                url.to_string()
+            } else if let (Some(bucket), Some(key)) = (
+                loc.get("Bucket").and_then(|v| v.as_str()),
+                loc.get("Key").and_then(|v| v.as_str()),
+            ) {
+                format!("s3://{bucket}/{key}")
+            } else if let Some(app_id) = loc.get("ApplicationId").and_then(|v| v.as_str()) {
+                // SAR reference we can't resolve to a template body; still
+                // record it as a real nested stack keyed by the SAR app id +
+                // version so the resource isn't a phantom.
+                match loc.get("SemanticVersion").and_then(|v| v.as_str()) {
+                    Some(ver) => format!("{app_id}/{ver}"),
+                    None => app_id.to_string(),
+                }
+            } else {
+                String::new()
+            }
+        }
+        _ => String::new(),
+    };
+
+    let mut stack_props = serde_json::Map::new();
+    stack_props.insert("TemplateURL".to_string(), json!(template_url));
+    if let Some(params) = props.get("Parameters") {
+        stack_props.insert("Parameters".to_string(), params.clone());
+    }
+    if let Some(tags) = props.get("Tags") {
+        stack_props.insert("Tags".to_string(), tags.clone());
+    }
+    if let Some(notif) = props.get("NotificationARNs") {
+        stack_props.insert("NotificationARNs".to_string(), notif.clone());
+    }
+    if let Some(timeout) = props.get("TimeoutInMinutes") {
+        stack_props.insert("TimeoutInMinutes".to_string(), timeout.clone());
+    }
+
+    let mut stack_resource = serde_json::Map::new();
+    stack_resource.insert("Type".to_string(), json!("AWS::CloudFormation::Stack"));
+    stack_resource.insert("Properties".to_string(), Value::Object(stack_props));
+    for (k, v) in resource_obj {
+        if k != "Type" && k != "Properties" {
+            stack_resource.insert(k.clone(), v.clone());
+        }
+    }
+    Value::Object(stack_resource)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
