@@ -1799,7 +1799,15 @@ impl ResourceProvisioner {
             "AWS::ElasticBeanstalk::ConfigurationTemplate" => {
                 Some(self.update_eb_configuration_template(existing, new_def)?)
             }
-            _ => None,
+            // No dedicated in-place update arm for this type. Real
+            // CloudFormation, lacking an in-place mutator for a changed
+            // property, falls back to REPLACEMENT: it deletes the old backing
+            // resource and creates a new one from the updated definition. Do
+            // the same here so the update actually applies (the owning
+            // service's stored resource reflects the new properties) instead
+            // of silently reporting UPDATE_COMPLETE while the old config
+            // lingers. See `reprovision_resource`.
+            _ => self.reprovision_resource(existing, new_def)?,
         };
 
         Ok(result.map(|res| StackResource {
@@ -1809,6 +1817,40 @@ impl ResourceProvisioner {
             status: "UPDATE_COMPLETE".to_string(),
             service_token: existing.service_token.clone(),
             attributes: res.attributes,
+        }))
+    }
+
+    /// Fallback update path for resource types that have create/delete
+    /// provisioners but no dedicated in-place `update_*` arm.
+    ///
+    /// Before this existed, `update_resource` returned `Ok(None)` for every
+    /// such type and the update driver treated that as "leave the resource
+    /// untouched" while still transitioning the stack to `UPDATE_COMPLETE`
+    /// and recording no `ResourceChange` -- so `update-stack` / `cdk deploy`
+    /// changing a property on any of the many write-through services
+    /// (AppConfig, Timestream, OpenSearch, EMR, Glue, RDS DBCluster, ...)
+    /// reported success while the backing resource kept its old config.
+    ///
+    /// Mirroring CloudFormation replacement semantics, this tears down the
+    /// old backing resource and re-provisions it from the new definition
+    /// through the exact same write-through path `create_resource` uses, so
+    /// the stored resource reflects the update. For name-keyed services the
+    /// physical id is derived from an unchanged `Name`/`Id` property and stays
+    /// stable (an effectively in-place update); for others it is regenerated,
+    /// matching replacement. Genuinely-unmodeled types (no backing state) have
+    /// a no-op delete and a create that records `physical_id == logical_id`;
+    /// they still yield `Some(..)` here so the caller records a
+    /// `ResourceChange` rather than a silent no-op.
+    fn reprovision_resource(
+        &self,
+        existing: &StackResource,
+        new_def: &ResourceDefinition,
+    ) -> Result<Option<ProvisionResult>, String> {
+        self.delete_resource(existing)?;
+        let created = self.create_resource(new_def)?;
+        Ok(Some(ProvisionResult {
+            physical_id: created.physical_id,
+            attributes: created.attributes,
         }))
     }
 
@@ -6990,6 +7032,60 @@ mod tests {
         assert_eq!(data.databases.get("metrics").unwrap().table_count, 1);
         let key = fakecloud_timestream::shared::table_key("metrics", "cpu");
         assert!(data.tables.contains_key(&key));
+    }
+
+    // Fix 1: UpdateStack changing a property on a type that has a create/delete
+    // provisioner but no dedicated `update_*` arm must re-provision so the
+    // service's stored resource reflects the change -- and must return a
+    // resource (not `None`) so the driver records a ResourceChange -- instead
+    // of silently reporting UPDATE_COMPLETE while applying nothing.
+    #[test]
+    fn update_reprovisions_type_without_update_arm() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::Timestream::Database",
+                "Db",
+                serde_json::json!({
+                    "DatabaseName": "metrics",
+                    "KmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/old"
+                }),
+            ))
+            .expect("db provisions");
+        // Sanity: stored with the old KMS key.
+        {
+            let g = prov.timestream_state.read();
+            let data = g.get("123456789012").unwrap();
+            assert_eq!(
+                data.databases.get("metrics").unwrap().kms_key_id.as_deref(),
+                Some("arn:aws:kms:us-east-1:123456789012:key/old")
+            );
+        }
+
+        // Change the KmsKeyId. Timestream::Database has no dedicated update arm.
+        let new_def = make_resource(
+            "AWS::Timestream::Database",
+            "Db",
+            serde_json::json!({
+                "DatabaseName": "metrics",
+                "KmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/new"
+            }),
+        );
+        let updated = prov
+            .update_resource(&created, &new_def)
+            .expect("update ok")
+            .expect("update returns a resource (not None) so a ResourceChange is recorded");
+        // Name-keyed service: physical id is preserved (in-place-style update).
+        assert_eq!(updated.physical_id, "metrics");
+        assert_eq!(updated.status, "UPDATE_COMPLETE");
+
+        // The stored resource now reflects the new property -- not a no-op.
+        let g = prov.timestream_state.read();
+        let data = g.get("123456789012").unwrap();
+        assert_eq!(
+            data.databases.get("metrics").unwrap().kms_key_id.as_deref(),
+            Some("arn:aws:kms:us-east-1:123456789012:key/new")
+        );
     }
 
     #[test]

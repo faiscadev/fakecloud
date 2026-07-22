@@ -138,6 +138,11 @@ pub(super) fn expand_sam(value: &Value) -> Value {
         return value;
     };
 
+    // Immutable snapshot of the original resource set, used to resolve a
+    // Connector's Source/Destination types (a Connector references other
+    // logical resources by id) while the main loop iterates.
+    let resources_map_snapshot = resources_map.clone();
+
     let mut new_resources = serde_json::Map::new();
     // Api/HttpApi routes collected from every function's Events, synthesized
     // into the implicit API after the loop.
@@ -344,10 +349,18 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                 if let Some(machine_type) = sfn_props.remove("Type") {
                     sfn_props.insert("StateMachineType".to_string(), machine_type);
                 }
-                // TODO: expand `Events` (Api/Schedule/EventBridge/SQS/etc.)
-                // into the corresponding trigger resources. Deferred — the
-                // state machine itself expands and provisions without it.
-                sfn_props.remove("Events");
+                // Expand `Events` (Schedule/ScheduleV2/EventBridgeRule/
+                // CloudWatchEvent/Api/HttpApi) into the corresponding native
+                // trigger resources targeting the state machine, mirroring the
+                // function-events expansion. Without this a scheduled/event-
+                // driven SAM state machine deployed with no trigger at all.
+                let sfn_extras = sfn_props
+                    .remove("Events")
+                    .and_then(|e| e.as_object().cloned())
+                    .map(|events| {
+                        super::sam_events::expand_state_machine_events(logical_id, &events)
+                    })
+                    .unwrap_or_default();
 
                 let mut sfn_resource = serde_json::Map::new();
                 sfn_resource.insert(
@@ -361,6 +374,36 @@ pub(super) fn expand_sam(value: &Value) -> Value {
                     }
                 }
                 new_resources.insert(logical_id.clone(), Value::Object(sfn_resource));
+                for (extra_id, extra) in sfn_extras {
+                    new_resources.entry(extra_id).or_insert(extra);
+                }
+            }
+            "AWS::Serverless::Connector" => {
+                // A Connector is pure IAM sugar: it grants the Source's role the
+                // requested Read/Write actions on the Destination. Expand it into
+                // the equivalent IAM policy resource(s) so the deploy actually
+                // wires up access instead of recording a phantom resource with no
+                // backing. `resources_map` is consulted to resolve the
+                // Destination's (SAM or native) type when the connector doesn't
+                // state it inline.
+                let connector_extras = super::sam_events::expand_connector(
+                    logical_id,
+                    &properties,
+                    &resources_map_snapshot,
+                );
+                for (extra_id, extra) in connector_extras {
+                    new_resources.entry(extra_id).or_insert(extra);
+                }
+            }
+            "AWS::Serverless::Application" => {
+                // A nested SAR/template application. Expand it into a native
+                // `AWS::CloudFormation::Stack` (which has a real provisioner +
+                // nested-stack persistence) pointing at the referenced template,
+                // carrying the `Parameters` through, instead of recording a
+                // no-backing phantom.
+                let stack_resource =
+                    super::sam_events::expand_application(&properties, resource_obj);
+                new_resources.insert(logical_id.clone(), stack_resource);
             }
             _ => {
                 new_resources.insert(logical_id.clone(), resource.clone());
@@ -772,6 +815,217 @@ mod tests {
         assert_eq!(
             props["RoleArn"],
             json!("arn:aws:iam::123456789012:role/sfn-role")
+        );
+    }
+
+    // Fix 3: a SAM StateMachine with a Schedule event expands into an
+    // EventBridge rule targeting the state machine + a StartExecution role,
+    // instead of dropping `Events`.
+    #[test]
+    fn expand_sam_statemachine_schedule_event() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "MySM": {
+                    "Type": "AWS::Serverless::StateMachine",
+                    "Properties": {
+                        "Definition": {"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}},
+                        "Events": {
+                            "Nightly": {
+                                "Type": "Schedule",
+                                "Properties": { "Schedule": "rate(1 day)" }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let expanded = expand_sam(&template);
+        let resources = &expanded["Resources"];
+        // The state machine no longer carries Events.
+        assert!(resources["MySM"]["Properties"].get("Events").is_none());
+        // A trigger rule was synthesized targeting the state machine.
+        let rule = &resources["MySMNightlyRule"];
+        assert_eq!(rule["Type"], json!("AWS::Events::Rule"));
+        assert_eq!(
+            rule["Properties"]["ScheduleExpression"],
+            json!("rate(1 day)")
+        );
+        assert_eq!(
+            rule["Properties"]["Targets"][0]["Arn"],
+            json!({"Fn::GetAtt": ["MySM", "Arn"]})
+        );
+        // The shared StartExecution role was synthesized and referenced.
+        let role = &resources["MySMEventsRole"];
+        assert_eq!(role["Type"], json!("AWS::IAM::Role"));
+        assert_eq!(
+            rule["Properties"]["Targets"][0]["RoleArn"],
+            json!({"Fn::GetAtt": ["MySMEventsRole", "Arn"]})
+        );
+        assert_eq!(
+            role["Properties"]["Policies"][0]["PolicyDocument"]["Statement"][0]["Action"],
+            json!("states:StartExecution")
+        );
+    }
+
+    // Fix 3: an EventBridgeRule state-machine event expands into an
+    // EventPattern rule targeting the state machine.
+    #[test]
+    fn expand_sam_statemachine_eventbridge_event() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "MySM": {
+                    "Type": "AWS::Serverless::StateMachine",
+                    "Properties": {
+                        "Definition": {"StartAt": "Done", "States": {"Done": {"Type": "Succeed"}}},
+                        "Events": {
+                            "OnOrder": {
+                                "Type": "EventBridgeRule",
+                                "Properties": { "Pattern": {"source": ["orders"]} }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let resources = expand_sam(&template)["Resources"].clone();
+        let rule = &resources["MySMOnOrderRule"];
+        assert_eq!(rule["Type"], json!("AWS::Events::Rule"));
+        assert_eq!(
+            rule["Properties"]["EventPattern"],
+            json!({"source": ["orders"]})
+        );
+        assert_eq!(
+            rule["Properties"]["Targets"][0]["Arn"],
+            json!({"Fn::GetAtt": ["MySM", "Arn"]})
+        );
+    }
+
+    // Fix 2: a SAM Connector (Lambda -> DynamoDB, [Read, Write]) expands into
+    // an IAM policy on the source function's implicit role granting the CRUD
+    // actions on the table, instead of a no-backing phantom.
+    #[test]
+    fn expand_sam_connector_lambda_to_dynamodb() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "Writer": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": { "Handler": "i.h", "Runtime": "python3.13", "InlineCode": "x" }
+                },
+                "Table": { "Type": "AWS::Serverless::SimpleTable" },
+                "WriterToTable": {
+                    "Type": "AWS::Serverless::Connector",
+                    "Properties": {
+                        "Source": { "Id": "Writer" },
+                        "Destination": { "Id": "Table" },
+                        "Permissions": ["Read", "Write"]
+                    }
+                }
+            }
+        });
+
+        let resources = expand_sam(&template)["Resources"].clone();
+        // The connector itself is gone; an IAM policy took its place.
+        assert!(resources.get("WriterToTable").is_none());
+        let policy = &resources["WriterToTablePolicy"];
+        assert_eq!(policy["Type"], json!("AWS::IAM::Policy"));
+        // Attached to the function's implicit execution role.
+        assert_eq!(
+            policy["Properties"]["Roles"][0],
+            json!({"Ref": "WriterRole"})
+        );
+        let stmt = &policy["Properties"]["PolicyDocument"]["Statement"][0];
+        let actions = stmt["Action"].as_array().unwrap();
+        assert!(actions.iter().any(|a| a == "dynamodb:GetItem"));
+        assert!(actions.iter().any(|a| a == "dynamodb:PutItem"));
+        // Resource scoped to the table + its indexes.
+        let resource = stmt["Resource"].as_array().unwrap();
+        assert_eq!(resource[0], json!({"Fn::GetAtt": ["Table", "Arn"]}));
+    }
+
+    // Fix 2: a SAM Connector write-only permission grants only the write action
+    // set (no read actions), proving Permissions is honored.
+    #[test]
+    fn expand_sam_connector_write_only_sqs() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "Producer": {
+                    "Type": "AWS::Serverless::Function",
+                    "Properties": { "Handler": "i.h", "Runtime": "python3.13", "InlineCode": "x" }
+                },
+                "Queue": { "Type": "AWS::SQS::Queue" },
+                "ProducerToQueue": {
+                    "Type": "AWS::Serverless::Connector",
+                    "Properties": {
+                        "Source": { "Id": "Producer" },
+                        "Destination": { "Id": "Queue", "Type": "AWS::SQS::Queue" },
+                        "Permissions": ["Write"]
+                    }
+                }
+            }
+        });
+
+        let resources = expand_sam(&template)["Resources"].clone();
+        let stmt =
+            &resources["ProducerToQueuePolicy"]["Properties"]["PolicyDocument"]["Statement"][0];
+        let actions = stmt["Action"].as_array().unwrap();
+        assert!(actions.iter().any(|a| a == "sqs:SendMessage"));
+        assert!(!actions.iter().any(|a| a == "sqs:ReceiveMessage"));
+    }
+
+    // Fix 2: a SAM Application expands into a native nested
+    // AWS::CloudFormation::Stack pointing at the referenced template, carrying
+    // Parameters through, instead of a no-backing phantom.
+    #[test]
+    fn expand_sam_application_to_nested_stack() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "Nested": {
+                    "Type": "AWS::Serverless::Application",
+                    "Properties": {
+                        "Location": "https://s3.amazonaws.com/bucket/child.template",
+                        "Parameters": { "Env": "prod" }
+                    }
+                }
+            }
+        });
+
+        let resources = expand_sam(&template)["Resources"].clone();
+        let stack = &resources["Nested"];
+        assert_eq!(stack["Type"], json!("AWS::CloudFormation::Stack"));
+        assert_eq!(
+            stack["Properties"]["TemplateURL"],
+            json!("https://s3.amazonaws.com/bucket/child.template")
+        );
+        assert_eq!(stack["Properties"]["Parameters"], json!({"Env": "prod"}));
+    }
+
+    // Fix 2: an Application whose Location is an S3 object form maps to an
+    // s3:// TemplateURL.
+    #[test]
+    fn expand_sam_application_s3_location_object() {
+        let template = json!({
+            "Transform": "AWS::Serverless-2016-10-31",
+            "Resources": {
+                "Nested": {
+                    "Type": "AWS::Serverless::Application",
+                    "Properties": {
+                        "Location": { "Bucket": "b", "Key": "k/child.yaml" }
+                    }
+                }
+            }
+        });
+
+        let resources = expand_sam(&template)["Resources"].clone();
+        assert_eq!(
+            resources["Nested"]["Properties"]["TemplateURL"],
+            json!("s3://b/k/child.yaml")
         );
     }
 }
