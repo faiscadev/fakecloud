@@ -23,7 +23,8 @@ use super::{
     apply_update_expression, build_consumed_capacity, evaluate_condition, execute_partiql_in_state,
     extract_key, get_table, get_table_mut, keys_equal, parse_expression_attribute_names,
     parse_expression_attribute_values, require_str_with_code, return_consumed_mode,
-    return_icm_mode, validate_key_attributes_in_key, validate_key_in_item, DynamoDbService,
+    return_icm_mode, validate_attribute_value, validate_item_attribute_values,
+    validate_key_attributes_in_key, validate_key_in_item, DynamoDbService,
 };
 
 impl DynamoDbService {
@@ -238,6 +239,11 @@ impl DynamoDbService {
                             )
                         })?;
                     validate_key_in_item(table, &item)?;
+                    // Reject malformed values (bad numbers, empty/duplicate
+                    // sets) up front, before applying any write, so
+                    // BatchWriteItem enforces the same per-attribute validation
+                    // single PutItem does and a bad item persists nothing.
+                    validate_item_attribute_values(&item)?;
                     extract_key(table, &item)
                 } else if let Some(del_req) = request.get("DeleteRequest") {
                     let key: HashMap<String, AttributeValue> =
@@ -800,12 +806,26 @@ impl DynamoDbService {
                 if let Some(table) = state.tables.get(table_name) {
                     validate_key_in_item(table, &item)?;
                 }
+                // Malformed values (bad numbers, empty/duplicate sets) are a
+                // structural error surfaced as a plain ValidationException
+                // before the transaction runs — the same per-attribute
+                // validation single PutItem enforces.
+                validate_item_attribute_values(&item)?;
             } else if let Some(op) = ti.get("Delete").or_else(|| ti.get("Update")) {
                 let table_name = op["TableName"].as_str().unwrap_or_default();
                 let key: HashMap<String, AttributeValue> =
                     serde_json::from_value(op["Key"].clone()).unwrap_or_default();
                 if let Some(table) = state.tables.get(table_name) {
                     validate_key_attributes_in_key(table, &key)?;
+                }
+                // An Update's ExpressionAttributeValues get the same value
+                // validation single UpdateItem enforces, so a malformed number
+                // or empty/duplicate set never reaches an item.
+                if ti.get("Update").is_some() {
+                    let expr_attr_values = parse_expression_attribute_values(op);
+                    for v in expr_attr_values.values() {
+                        validate_attribute_value(v)?;
+                    }
                 }
             }
         }
@@ -1787,6 +1807,131 @@ mod tests {
             .get("Widgets")
             .unwrap();
         assert_eq!(table.items.len(), 0);
+    }
+
+    // bug-hunt 2026-07-22: BatchWriteItem PutRequest must run the same
+    // per-attribute value validation single PutItem does. A malformed number
+    // is rejected with ValidationException and nothing is persisted.
+    #[tokio::test]
+    async fn batch_write_item_rejects_malformed_value() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        let err = svc
+            .batch_write_item(&req_for(
+                "BatchWriteItem",
+                json!({"RequestItems": {"Widgets": [
+                    {"PutRequest": {"Item": {"pk": {"S": "a"}, "n": {"N": "abc"}}}},
+                ]}}),
+            ))
+            .err()
+            .expect("malformed number rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+        // All-or-nothing up front: nothing persisted.
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        assert_eq!(table.items.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn batch_write_item_valid_batch_still_succeeds() {
+        // Regression guard: a well-formed batch is unaffected by the new
+        // per-value validation.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        svc.batch_write_item(&req_for(
+            "BatchWriteItem",
+            json!({"RequestItems": {"Widgets": [
+                {"PutRequest": {"Item": {"pk": {"S": "a"}, "n": {"N": "1"}, "s": {"SS": ["x", "y"]}}}},
+                {"PutRequest": {"Item": {"pk": {"S": "b"}, "n": {"N": "2.5"}}}},
+            ]}}),
+        ))
+        .unwrap();
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        assert_eq!(table.items.len(), 2);
+    }
+
+    // bug-hunt 2026-07-22: TransactWriteItems Put must reject a malformed value
+    // (here an empty set) with ValidationException, persisting nothing.
+    #[tokio::test]
+    async fn transact_write_items_put_rejects_empty_set() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        let err = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({"TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}, "s": {"SS": []}}}},
+                ]}),
+            ))
+            .err()
+            .expect("empty set rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+        let accts = state.read();
+        let table = accts
+            .get("123456789012")
+            .unwrap()
+            .tables
+            .get("Widgets")
+            .unwrap();
+        assert_eq!(table.items.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn transact_write_items_put_rejects_duplicate_set_member() {
+        // A Number Set with two numerically-equal members ("1"/"1.0") is a
+        // duplicate-member set: rejected with ValidationException.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        let err = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({"TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}, "ns": {"NS": ["1", "1.0"]}}}},
+                ]}),
+            ))
+            .err()
+            .expect("duplicate-member set rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
+    }
+
+    #[tokio::test]
+    async fn transact_write_items_update_validates_expr_attr_values() {
+        // The Update path's ExpressionAttributeValues get the same validation
+        // single UpdateItem enforces: a malformed number is rejected.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+        let err = svc
+            .transact_write_items(&req_for(
+                "TransactWriteItems",
+                json!({"TransactItems": [
+                    {"Update": {
+                        "TableName": "Widgets",
+                        "Key": {"pk": {"S": "a"}},
+                        "UpdateExpression": "SET #c = :bad",
+                        "ExpressionAttributeNames": {"#c": "c"},
+                        "ExpressionAttributeValues": {":bad": {"N": "abc"}},
+                    }},
+                ]}),
+            ))
+            .err()
+            .expect("malformed expr value rejected");
+        assert!(format!("{err:?}").contains("ValidationException"));
     }
 
     /// 1.26: ExecuteStatement must keep a genuine PartiQL

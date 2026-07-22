@@ -8,7 +8,7 @@ use fakecloud_core::validation::*;
 
 use super::{
     apply_update_expression, build_consumed_capacity, build_item_collection_metrics,
-    evaluate_condition_with_return, extract_key, get_table, get_table_mut,
+    evaluate_condition_with_return, extract_key, get_table, get_table_mut, ns_members_equal,
     parse_expression_attribute_names, parse_expression_attribute_values, project_item,
     require_object, require_str, resolve_write_condition, return_consumed_mode, return_icm_mode,
     validate_attribute_value, validate_item_attribute_values, validate_key_attributes_in_key,
@@ -681,7 +681,15 @@ fn add_to_attribute(
                     ) {
                         let mut merged = a.clone();
                         for e in b {
-                            if !merged.contains(e) {
+                            // A Number Set dedups by numeric value ("1" == "1.0"),
+                            // so a raw `contains` would build an invalid set.
+                            // SS/BS keep exact equality.
+                            let already = if set_type == "NS" {
+                                merged.iter().any(|m| ns_members_equal(m, e))
+                            } else {
+                                merged.contains(e)
+                            };
+                            if !already {
                                 merged.push(e.clone());
                             }
                         }
@@ -708,7 +716,14 @@ fn remove_set_elements(
         if let Some(remove) = val.get(set_type).and_then(|v| v.as_array()) {
             if let Some(cur) = item.get_mut(attr).and_then(|v| v.get_mut(set_type)) {
                 if let Some(arr) = cur.as_array_mut() {
-                    arr.retain(|e| !remove.contains(e));
+                    // Number-set members are removed by numeric value, so
+                    // DELETEing "1.0" drops the stored "1". SS/BS use exact
+                    // string equality.
+                    if set_type == "NS" {
+                        arr.retain(|e| !remove.iter().any(|r| ns_members_equal(r, e)));
+                    } else {
+                        arr.retain(|e| !remove.contains(e));
+                    }
                 }
             }
             return;
@@ -859,5 +874,31 @@ mod tests {
         let post = map(&[("a", "1")]);
         assert!(diff_updated_attributes(Some(&pre), &post, UpdatedSide::New).is_empty());
         assert!(diff_updated_attributes(Some(&pre), &post, UpdatedSide::Old).is_empty());
+    }
+
+    // Legacy AttributeUpdates ADD/DELETE path: a Number Set compares members by
+    // numeric value, so "1" and "1.0" are the same member (bug-hunt 2026-07-22).
+    #[test]
+    fn legacy_add_number_set_dedups_by_numeric_value() {
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("scores".to_string(), json!({"NS": ["1", "2"]}));
+        add_to_attribute(&mut item, "scores", &json!({"NS": ["1.0"]})).unwrap();
+        assert_eq!(item["scores"], json!({"NS": ["1", "2"]}));
+    }
+
+    #[test]
+    fn legacy_add_string_set_keeps_exact_equality() {
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("tags".to_string(), json!({"SS": ["1", "2"]}));
+        add_to_attribute(&mut item, "tags", &json!({"SS": ["1.0"]})).unwrap();
+        assert_eq!(item["tags"], json!({"SS": ["1", "2", "1.0"]}));
+    }
+
+    #[test]
+    fn legacy_delete_number_set_removes_by_numeric_value() {
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("scores".to_string(), json!({"NS": ["1", "2"]}));
+        remove_set_elements(&mut item, "scores", &json!({"NS": ["1.0"]}));
+        assert_eq!(item["scores"], json!({"NS": ["2"]}));
     }
 }
