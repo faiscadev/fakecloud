@@ -55,8 +55,24 @@ fn settle_crawler(crawler: &mut Value) {
     if crawler.get("State").and_then(Value::as_str) != Some("RUNNING") {
         return;
     }
+    // Real Glue reports a just-started crawler as RUNNING on the first read and
+    // only transitions to READY once the crawl finishes. Settling on a read
+    // counter keeps the first GetCrawler after StartCrawler at RUNNING (matching
+    // AWS) while still guaranteeing a poll-until-READY loop terminates instead of
+    // hanging forever.
+    let reads = crawler
+        .get("_settle_reads")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if reads < 1 {
+        if let Some(obj) = crawler.as_object_mut() {
+            obj.insert("_settle_reads".into(), json!(reads + 1));
+        }
+        return;
+    }
     let now = now_ts();
     if let Some(obj) = crawler.as_object_mut() {
+        obj.remove("_settle_reads");
         obj.insert("State".into(), json!("READY"));
         obj.insert(
             "LastCrawl".into(),
@@ -207,6 +223,7 @@ impl GlueService {
         }
         if let Some(obj) = crawler.as_object_mut() {
             obj.insert("State".into(), json!("RUNNING"));
+            obj.insert("_settle_reads".into(), json!(0));
         }
         Ok(AwsResponse::ok_json(json!({})))
     }

@@ -87,7 +87,22 @@ pub(crate) fn settle_run_status(
     if !running {
         return false;
     }
+    // Real Glue reports a just-started run as RUNNING on the first read and only
+    // moves to a terminal state once it finishes. Settling on a read counter keeps
+    // the first Get*Run after Start*Run at RUNNING (matching AWS) while still
+    // guaranteeing a poll-until-terminal loop converges instead of hanging.
+    let reads = run
+        .get("_settle_reads")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if reads < 1 {
+        if let Some(obj) = run.as_object_mut() {
+            obj.insert("_settle_reads".to_string(), json!(reads + 1));
+        }
+        return false;
+    }
     if let Some(obj) = run.as_object_mut() {
+        obj.remove("_settle_reads");
         obj.insert(status_field.to_string(), json!(terminal));
         if let Some(cf) = completed_field {
             obj.insert(cf.to_string(), json!(now_ts()));

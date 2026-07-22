@@ -58,12 +58,20 @@ fn crawler_state_transitions() {
     svc.start_crawler(&req("StartCrawler", json!({"Name": "c"})))
         .unwrap();
     // A back-to-back start (before the crawl is polled) is still rejected: the
-    // crawler is RUNNING in storage until the first read settles it.
+    // crawler is RUNNING in storage until a read settles it.
     assert!(svc
         .start_crawler(&req("StartCrawler", json!({"Name": "c"})))
         .is_err());
 
-    // Reading the crawler settles the finished crawl to READY with a LastCrawl
+    // The first read after StartCrawler still reports RUNNING, matching AWS
+    // (the crawl is in progress).
+    let got = body_of(
+        svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
+            .unwrap(),
+    );
+    assert_eq!(got["Crawler"]["State"], "RUNNING");
+
+    // A subsequent read settles the finished crawl to READY with a LastCrawl
     // summary. Before the fix it stayed RUNNING forever, hanging poll loops.
     let got = body_of(
         svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
@@ -80,7 +88,10 @@ fn crawler_state_transitions() {
     // A second start after completion now succeeds.
     svc.start_crawler(&req("StartCrawler", json!({"Name": "c"})))
         .unwrap();
-    // Poll again to settle, then delete is no longer permanently blocked.
+    // Poll twice to settle back to READY (first read RUNNING, second READY),
+    // then delete is no longer permanently blocked.
+    svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
+        .unwrap();
     svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
         .unwrap();
     svc.delete_crawler(&req("DeleteCrawler", json!({"Name": "c"})))
@@ -365,6 +376,17 @@ fn ml_transform_and_task_run() {
         .unwrap(),
     );
     let task = run["TaskRunId"].as_str().unwrap().to_string();
+    // First read reports RUNNING (matching AWS).
+    let running = body_of(
+        svc.get_ml_task_run(&req(
+            "GetMLTaskRun",
+            json!({"TransformId": tid, "TaskRunId": task}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["Status"], "RUNNING");
+    // A subsequent read settles the task run to a terminal state instead of
+    // hanging in RUNNING forever.
     let got = body_of(
         svc.get_ml_task_run(&req(
             "GetMLTaskRun",
@@ -372,8 +394,6 @@ fn ml_transform_and_task_run() {
         ))
         .unwrap(),
     );
-    // The task run settles to a terminal state on read instead of hanging in
-    // RUNNING forever.
     assert_eq!(got["Status"], "SUCCEEDED");
 }
 
@@ -670,7 +690,18 @@ fn resume_workflow_run_returns_observable_run_id() {
     );
     let new_id = resumed["RunId"].as_str().unwrap().to_string();
     assert_ne!(new_id, "");
-    // The resumed run must be persisted and readable.
+    // The resumed run must be persisted and readable; the first read reports
+    // RUNNING (matching AWS).
+    let running = body_of(
+        svc.get_workflow_run(&req(
+            "GetWorkflowRun",
+            json!({"Name": "wf", "RunId": new_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["Run"]["WorkflowRunId"], new_id);
+    assert_eq!(running["Run"]["Status"], "RUNNING");
+    // A subsequent GetWorkflowRun settles the run to a terminal state.
     let got = body_of(
         svc.get_workflow_run(&req(
             "GetWorkflowRun",
@@ -678,8 +709,6 @@ fn resume_workflow_run_returns_observable_run_id() {
         ))
         .unwrap(),
     );
-    assert_eq!(got["Run"]["WorkflowRunId"], new_id);
-    // GetWorkflowRun settles the run to a terminal state on read.
     assert_eq!(got["Run"]["Status"], "COMPLETED");
 }
 
@@ -958,6 +987,16 @@ fn data_quality_ruleset_run_settles_and_publishes_result() {
         .unwrap(),
     );
     let run_id = started["RunId"].as_str().unwrap().to_string();
+    // First read reports the run as still RUNNING (matching AWS).
+    let running = body_of(
+        svc.get_data_quality_ruleset_evaluation_run(&req(
+            "GetDataQualityRulesetEvaluationRun",
+            json!({"RunId": run_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["Status"], "RUNNING");
+    // A subsequent read settles it to SUCCEEDED and publishes the result.
     let got = body_of(
         svc.get_data_quality_ruleset_evaluation_run(&req(
             "GetDataQualityRulesetEvaluationRun",
@@ -992,6 +1031,15 @@ fn blueprint_run_settles_to_terminal_on_read() {
         .unwrap(),
     );
     let run_id = started["RunId"].as_str().unwrap().to_string();
+    // First read reports RUNNING (matching AWS); a subsequent read settles it.
+    let running = body_of(
+        svc.get_blueprint_run(&req(
+            "GetBlueprintRun",
+            json!({"BlueprintName": "bp", "RunId": run_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["BlueprintRun"]["State"], "RUNNING");
     let got = body_of(
         svc.get_blueprint_run(&req(
             "GetBlueprintRun",
