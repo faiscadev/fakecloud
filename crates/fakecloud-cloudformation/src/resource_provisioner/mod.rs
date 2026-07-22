@@ -3724,6 +3724,9 @@ fn parse_firehose_s3_destination(value: &serde_json::Value) -> Result<S3Destinat
         custom_time_zone: None,
         s3_backup_mode: None,
         file_extension: None,
+        dynamic_partitioning_configuration: None,
+        encryption_configuration: None,
+        s3_backup_description: None,
     })
 }
 

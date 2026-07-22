@@ -402,6 +402,18 @@ fn is_mutating(action: &str) -> bool {
             | "PutDefaultApplicationSetting"
             | "UpgradeDomain"
             | "UpgradeElasticsearchDomain"
+            // Application data-source attachments write to `app.attachments`.
+            | "AttachDataSource"
+            | "DetachDataSource"
+            // Service-software update transitions persist the domain's
+            // ServiceSoftwareOptions status and seed a scheduled action.
+            | "StartServiceSoftwareUpdate"
+            | "StartElasticsearchServiceSoftwareUpdate"
+            | "CancelServiceSoftwareUpdate"
+            | "CancelElasticsearchServiceSoftwareUpdate"
+            | "RollbackServiceSoftwareUpdate"
+            // Scheduled-action updates mutate the stored scheduled action.
+            | "UpdateScheduledAction"
     )
 }
 
@@ -1097,14 +1109,12 @@ impl OpenSearchService {
             }))),
             // ---- Software update ----
             "StartServiceSoftwareUpdate" | "StartElasticsearchServiceSoftwareUpdate" => {
-                self.service_software_update(l, req, "UPDATE_IN_PROGRESS")
+                self.service_software_update(req, "IN_PROGRESS")
             }
             "CancelServiceSoftwareUpdate" | "CancelElasticsearchServiceSoftwareUpdate" => {
-                self.service_software_update(l, req, "PENDING_UPDATE")
+                self.service_software_update(req, "PENDING_UPDATE")
             }
-            "RollbackServiceSoftwareUpdate" => {
-                self.service_software_update(l, req, "PENDING_UPDATE")
-            }
+            "RollbackServiceSoftwareUpdate" => self.service_software_update(req, "IN_PROGRESS"),
             // ---- Maintenance ----
             "StartDomainMaintenance" => self.start_domain_maintenance(l, req),
             "GetDomainMaintenanceStatus" => Ok(ok(json!({
@@ -1112,18 +1122,8 @@ impl OpenSearchService {
                 "StatusMessage": "Maintenance completed"
             }))),
             "ListDomainMaintenances" => self.list_domain_maintenances(l, req),
-            "ListScheduledActions" => Ok(ok(json!({"ScheduledActions": []}))),
-            "UpdateScheduledAction" => {
-                let b = body(req);
-                Ok(ok(json!({"ScheduledAction": {
-                    "Id": b.get("ActionID").cloned().unwrap_or(json!("action-1")),
-                    "Type": b.get("ActionType").cloned().unwrap_or(json!("SERVICE_SOFTWARE_UPDATE")),
-                    "Severity": "MEDIUM",
-                    "ScheduledTime": Utc::now().timestamp(),
-                    "ScheduledBy": "CUSTOMER",
-                    "Status": "PENDING_UPDATE",
-                }})))
-            }
+            "ListScheduledActions" => self.list_scheduled_actions(l, req),
+            "UpdateScheduledAction" => self.update_scheduled_action(l, req),
             // ---- Insights ----
             "ListInsights" => Ok(ok(json!({"Insights": []}))),
             "DescribeInsightDetails" => Ok(ok(json!({"Fields": []}))),
@@ -1200,6 +1200,7 @@ impl OpenSearchService {
             indices: Default::default(),
             scheduled_actions: Default::default(),
             maintenances: Default::default(),
+            service_software_status: None,
         };
         // A domain's tags live on the domain itself (`d.tags`); `AddTags` /
         // `RemoveTags` / `ListTags` all operate there via `apply_tag_target`.
@@ -2888,17 +2889,121 @@ impl OpenSearchService {
 
     fn service_software_update(
         &self,
-        l: &Labels,
         req: &AwsRequest,
         status: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let _ = l;
         let b = body(req);
         let dom = req_str(&b, "DomainName")?;
-        self.require_domain(&dom, &req.account_id)?;
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let d = st
+            .domains
+            .get_mut(&dom)
+            .ok_or_else(|| not_found_domain(&dom))?;
+        // Persist the ServiceSoftwareOptions transition so DescribeDomain and a
+        // restarted server both reflect it.
+        d.service_software_status = Some(status.to_string());
+        // Starting (or rolling back) an update materializes a scheduled action a
+        // caller can then reschedule via UpdateScheduledAction. Cancelling clears
+        // any in-flight SERVICE_SOFTWARE_UPDATE action.
+        if status == "IN_PROGRESS" {
+            let id = short_id();
+            d.scheduled_actions.insert(
+                id.clone(),
+                json!({
+                    "Id": id,
+                    "Type": "SERVICE_SOFTWARE_UPDATE",
+                    "Severity": "MEDIUM",
+                    "ScheduledTime": Utc::now().timestamp(),
+                    "ScheduledBy": "SYSTEM",
+                    "Status": "PENDING_UPDATE",
+                    "Description": "A service software update is scheduled for this domain.",
+                    "Mandatory": false,
+                    "Cancellable": true,
+                }),
+            );
+        } else {
+            d.scheduled_actions.retain(|_, a| {
+                a.get("Type").and_then(|t| t.as_str()) != Some("SERVICE_SOFTWARE_UPDATE")
+            });
+        }
         Ok(ok(
             json!({ "ServiceSoftwareOptions": service_software_options(status) }),
         ))
+    }
+
+    fn list_scheduled_actions(
+        &self,
+        l: &Labels,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let dom = label(l.domain.as_deref())?;
+        self.require_domain(&dom, &req.account_id)?;
+        let accounts = self.state.read();
+        let actions: Vec<Value> = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.domains.get(&dom))
+            .map(|d| d.scheduled_actions.values().cloned().collect())
+            .unwrap_or_default();
+        Ok(ok(json!({ "ScheduledActions": actions })))
+    }
+
+    fn update_scheduled_action(
+        &self,
+        l: &Labels,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let dom = label(l.domain.as_deref())?;
+        let b = body(req);
+        let action_id = b
+            .get("ActionID")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let schedule_at = b
+            .get("ScheduleAt")
+            .and_then(|v| v.as_str())
+            .unwrap_or("NOW")
+            .to_string();
+        let desired_time = b.get("DesiredStartTime").and_then(|v| v.as_i64());
+
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        let d = st
+            .domains
+            .get_mut(&dom)
+            .ok_or_else(|| not_found_domain(&dom))?;
+
+        // Resolve the target action: the requested ActionID, else the sole
+        // pending action. AWS rejects an update when no such action exists.
+        let key = match action_id {
+            Some(id) if d.scheduled_actions.contains_key(&id) => id,
+            Some(id) => {
+                return Err(not_found_generic(&format!(
+                    "Scheduled action {id} not found for domain {dom}."
+                )));
+            }
+            None if d.scheduled_actions.len() == 1 => {
+                d.scheduled_actions.keys().next().cloned().unwrap()
+            }
+            None => {
+                return Err(not_found_generic(&format!(
+                    "No scheduled action found for domain {dom}."
+                )));
+            }
+        };
+        let new_time = match schedule_at.as_str() {
+            "NOW" => Utc::now().timestamp(),
+            _ => desired_time.unwrap_or_else(|| Utc::now().timestamp()),
+        };
+        let action = d.scheduled_actions.get_mut(&key).unwrap();
+        action["ScheduledTime"] = json!(new_time);
+        action["ScheduledBy"] = json!("CUSTOMER");
+        action["Status"] = json!(if schedule_at == "NOW" {
+            "IN_PROGRESS"
+        } else {
+            "PENDING_UPDATE"
+        });
+        Ok(ok(json!({ "ScheduledAction": action.clone() })))
     }
 
     fn start_domain_maintenance(
@@ -3020,7 +3125,11 @@ fn domain_status(d: &Domain, api: Api, created: bool, processing: bool) -> Value
     }
     m.insert(
         "ServiceSoftwareOptions".into(),
-        service_software_options("NOT_ELIGIBLE"),
+        service_software_options(
+            d.service_software_status
+                .as_deref()
+                .unwrap_or("NOT_ELIGIBLE"),
+        ),
     );
     m.insert("DomainProcessingStatus".into(), json!("Active"));
     Value::Object(m)
@@ -3127,13 +3236,24 @@ fn version_number(engine_version: &str) -> String {
 }
 
 fn service_software_options(status: &str) -> Value {
+    // Cancellable while an update is pending or in progress; an update is
+    // available while eligible or pending. Description tracks the state.
+    let cancellable = matches!(status, "PENDING_UPDATE" | "IN_PROGRESS");
+    let update_available = matches!(status, "ELIGIBLE" | "PENDING_UPDATE");
+    let description = match status {
+        "IN_PROGRESS" => "Your domain is being updated to the latest service software.",
+        "PENDING_UPDATE" => "A service software update is available and pending for this domain.",
+        "ELIGIBLE" => "A new service software release is available for this domain.",
+        "COMPLETED" => "Your domain is running the latest service software.",
+        _ => "There is no software update available for this domain.",
+    };
     json!({
         "CurrentVersion": "R20240502",
         "NewVersion": "",
-        "UpdateAvailable": false,
-        "Cancellable": false,
+        "UpdateAvailable": update_available,
+        "Cancellable": cancellable,
         "UpdateStatus": status,
-        "Description": "There is no software update available for this domain.",
+        "Description": description,
         "AutomatedUpdateDate": 0,
         "OptionalDeployment": true,
     })
@@ -3624,4 +3744,34 @@ fn unknown_op(req: &AwsRequest) -> AwsServiceError {
         "ValidationException",
         format!("No route for {} {}", req.method, req.raw_path),
     )
+}
+
+#[cfg(test)]
+mod is_mutating_tests {
+    use super::is_mutating;
+
+    #[test]
+    fn state_writing_actions_are_mutating() {
+        // These write to domain / application state; if they are not treated as
+        // mutating, their writes are never snapshotted and are lost on restart.
+        for action in [
+            "AttachDataSource",
+            "DetachDataSource",
+            "StartServiceSoftwareUpdate",
+            "StartElasticsearchServiceSoftwareUpdate",
+            "CancelServiceSoftwareUpdate",
+            "CancelElasticsearchServiceSoftwareUpdate",
+            "RollbackServiceSoftwareUpdate",
+            "UpdateScheduledAction",
+        ] {
+            assert!(is_mutating(action), "{action} must be mutating");
+        }
+    }
+
+    #[test]
+    fn read_only_actions_are_not_mutating() {
+        for action in ["ListScheduledActions", "ListDataSourceAttachments"] {
+            assert!(!is_mutating(action), "{action} must not be mutating");
+        }
+    }
 }

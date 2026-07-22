@@ -132,4 +132,17 @@ pub struct S3Destination {
     /// Optional appended object-name extension (e.g. `.parquet`).
     #[serde(default)]
     pub file_extension: Option<String>,
+    /// ExtendedS3 dynamic partitioning config. Broad shape stored as raw JSON so
+    /// it round-trips through DescribeDeliveryStream instead of being dropped.
+    #[serde(default)]
+    pub dynamic_partitioning_configuration: Option<serde_json::Value>,
+    /// Delivered-object server-side encryption (SSE-KMS) config. Stored as raw
+    /// JSON and echoed as `EncryptionConfiguration`.
+    #[serde(default)]
+    pub encryption_configuration: Option<serde_json::Value>,
+    /// Nested S3 backup destination description, parsed from
+    /// `S3BackupConfiguration` on create / `S3BackupUpdate` on update. Emitted as
+    /// `S3BackupDescription`. Distinct from the `s3_backup_mode` string.
+    #[serde(default)]
+    pub s3_backup_description: Option<serde_json::Value>,
 }

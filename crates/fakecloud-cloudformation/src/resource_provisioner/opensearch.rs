@@ -91,6 +91,7 @@ impl ResourceProvisioner {
             indices: Default::default(),
             scheduled_actions: Default::default(),
             maintenances: Default::default(),
+            service_software_status: None,
         };
 
         let mut guard = self.opensearch_state.write();
