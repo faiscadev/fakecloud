@@ -815,6 +815,42 @@ fn publish_validates_subject_length() {
 }
 
 #[test]
+fn publish_size_limit_counts_message_attributes() {
+    let (svc, _state) = make_sns();
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "size-topic")])));
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:size-topic";
+
+    // A ~250 KB body plus a large attribute value pushes the total over the
+    // 256 KiB (262144-byte) limit; the whole publish must be rejected. Before
+    // the fix, only the body length was measured so this incorrectly succeeded.
+    let body = "x".repeat(250_000);
+    let attr_value = "y".repeat(20_000);
+    let req = sns_request(
+        "Publish",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Message", &body),
+            ("MessageAttributes.entry.1.Name", "big"),
+            ("MessageAttributes.entry.1.Value.DataType", "String"),
+            ("MessageAttributes.entry.1.Value.StringValue", &attr_value),
+        ],
+    );
+    let err = svc
+        .publish(&req)
+        .err()
+        .expect("body + attributes over 256 KiB must be rejected");
+    assert_eq!(err.code(), "InvalidParameter");
+
+    // A body-only message just under the limit still succeeds.
+    let ok_body = "z".repeat(262_144);
+    let ok_req = sns_request(
+        "Publish",
+        vec![("TopicArn", topic_arn), ("Message", &ok_body)],
+    );
+    assert_ok(&svc.publish(&ok_req));
+}
+
+#[test]
 fn publish_to_sms_phone_number() {
     let (svc, state) = make_sns();
     let req = sns_request(

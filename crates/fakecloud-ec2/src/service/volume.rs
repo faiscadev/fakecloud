@@ -210,6 +210,18 @@ fn vol_match(v: &Volume, tags: &[Tag], filters: &[Filter]) -> bool {
             "snapshot-id" => v.snapshot_id.clone().into_iter().collect(),
             "encrypted" => vec![v.encrypted.to_string()],
             "size" => vec![v.size.to_string()],
+            "attachment.instance-id" => v
+                .attachments
+                .iter()
+                .map(|a| a.instance_id.clone())
+                .collect(),
+            "attachment.status" => v.attachments.iter().map(|a| a.status.clone()).collect(),
+            "attachment.device" => v.attachments.iter().map(|a| a.device.clone()).collect(),
+            "attachment.delete-on-termination" => v
+                .attachments
+                .iter()
+                .map(|a| a.delete_on_termination.to_string())
+                .collect(),
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
@@ -918,5 +930,61 @@ mod tests {
             ),
         ));
         assert_eq!(err.code(), "InvalidVolume.NotFound");
+    }
+
+    #[test]
+    fn describe_volumes_attachment_filters() {
+        let svc = Ec2Service::new();
+        seed_volume(&svc, "vol-1", "in-use", true);
+        seed_volume(&svc, "vol-2", "available", false);
+
+        // attachment.instance-id matches only the attached volume.
+        let body = body_of(
+            describe_volumes(
+                &svc,
+                &req(
+                    "DescribeVolumes",
+                    &[
+                        ("Filter.1.Name", "attachment.instance-id"),
+                        ("Filter.1.Value.1", "i-1"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(body.contains("<volumeId>vol-1</volumeId>"), "{body}");
+        assert!(!body.contains("<volumeId>vol-2</volumeId>"), "{body}");
+
+        // attachment.device and attachment.status also resolve.
+        let body = body_of(
+            describe_volumes(
+                &svc,
+                &req(
+                    "DescribeVolumes",
+                    &[
+                        ("Filter.1.Name", "attachment.device"),
+                        ("Filter.1.Value.1", "/dev/sdf"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(body.contains("<volumeId>vol-1</volumeId>"), "{body}");
+
+        // A device that matches nothing filters out both volumes.
+        let body = body_of(
+            describe_volumes(
+                &svc,
+                &req(
+                    "DescribeVolumes",
+                    &[
+                        ("Filter.1.Name", "attachment.status"),
+                        ("Filter.1.Value.1", "detached"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(!body.contains("<volumeId>vol-1</volumeId>"), "{body}");
     }
 }

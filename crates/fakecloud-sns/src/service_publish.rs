@@ -48,8 +48,14 @@ impl SnsService {
             }
         }
 
-        // Validate message length (256KB)
-        if message.len() > 262144 {
+        // Parse MessageAttributes from query params
+        let message_attributes = parse_message_attributes(req);
+
+        // Validate total size (256 KiB). AWS counts the message body PLUS all
+        // message attributes (name + data type + value) against the limit, the
+        // same way PublishBatch does — not just the body length.
+        let total_size = message.len() + message_attributes_size(&message_attributes);
+        if total_size > 262144 {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameter",
@@ -61,9 +67,6 @@ impl SnsService {
         if message_structure.as_deref() == Some("json") {
             validate_message_structure_json(&message)?;
         }
-
-        // Parse MessageAttributes from query params
-        let message_attributes = parse_message_attributes(req);
 
         if let Some(ref phone) = phone_number {
             return self.publish_to_phone_number(
@@ -407,16 +410,7 @@ impl SnsService {
             .enumerate()
             .map(|(idx, e)| {
                 let attrs = parse_batch_message_attributes(req, idx + 1);
-                let attr_size: usize = attrs
-                    .iter()
-                    .map(|(name, attr)| {
-                        name.len()
-                            + attr.data_type.len()
-                            + attr.string_value.as_ref().map_or(0, |s| s.len())
-                            + attr.binary_value.as_ref().map_or(0, |b| b.len())
-                    })
-                    .sum();
-                e.1.len() + attr_size
+                e.1.len() + message_attributes_size(&attrs)
             })
             .sum();
         if total_batch_size > 262_144 {

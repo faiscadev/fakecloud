@@ -6,8 +6,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    filter_value_matches, gen_id, indexed_list, invalid_parameter_value, not_found, parse_filters,
-    require, require_struct, validate_enum, validate_int_range, validate_max_results, Filter,
+    filter_value_matches, gen_id, indexed_list, invalid_parameter_value, not_found, paginate,
+    parse_filters, require, require_struct, validate_enum, validate_int_range,
+    validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Snapshot, Tag};
 
@@ -151,35 +152,70 @@ pub(crate) fn describe_snapshots(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    validate_max_results(&req.query_params, 5, 1000)?;
     let filters = parse_filters(&req.query_params);
     let wanted = indexed_list(&req.query_params, "SnapshotId");
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+    // An explicitly-requested SnapshotId that does not exist (or is in the
+    // recycle bin) is a hard error on AWS (InvalidSnapshot.NotFound), not a
+    // silently-empty result. Matches the sibling Describe ops.
+    for id in &wanted {
+        if !state.snapshots.get(id).is_some_and(|s| !s.in_recycle_bin) {
+            return Err(not_found("InvalidSnapshot.NotFound", id));
+        }
+    }
+
     let mut items: Vec<String> = state
         .snapshots
         .values()
         .filter(|s| !s.in_recycle_bin)
         .filter(|s| wanted.is_empty() || wanted.contains(&s.snapshot_id))
-        .filter(|s| snap_match(s, state.tags_for(&s.snapshot_id), &filters))
+        .filter(|s| snap_match(s, state.tags_for(&s.snapshot_id), &filters, &owner))
         .map(|s| snapshot_xml(s, state.tags_for(&s.snapshot_id), &owner))
         .collect();
     items.sort();
+
+    // DescribeSnapshots is `paginated` in the model; honor MaxResults +
+    // NextToken instead of always returning the full set.
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("snapshotSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond(
         "DescribeSnapshots",
         &req.request_id,
-        &ec2_list("snapshotSet", &items),
+        &body,
     ))
 }
 
-fn snap_match(s: &Snapshot, tags: &[Tag], filters: &[Filter]) -> bool {
+fn snap_match(s: &Snapshot, tags: &[Tag], filters: &[Filter], owner: &str) -> bool {
     filters.iter().all(|f| {
         let candidates: Vec<String> = match f.name.as_str() {
             "snapshot-id" => vec![s.snapshot_id.clone()],
             "volume-id" => vec![s.volume_id.clone()],
             "status" => vec![s.state.clone()],
             "storage-tier" => vec![s.storage_tier.clone()],
+            "owner-id" => vec![owner.to_string()],
+            // Self-owned snapshots have no owner alias on AWS.
+            "owner-alias" => vec![String::new()],
+            // Snapshots are rendered as fully complete (see `snapshot_xml`).
+            "progress" => vec!["100%".to_string()],
+            "start-time" => vec![FIXED_TIME.to_string()],
+            "encrypted" => vec![s.encrypted.to_string()],
+            "volume-size" => vec![s.volume_size.to_string()],
+            "description" => vec![s.description.clone()],
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -1028,5 +1064,110 @@ mod modify_tests {
             ],
         );
         assert!(format!("{err:?}").contains("InvalidParameterValue"));
+    }
+
+    fn describe_body(svc: &Ec2Service, query: &[(&str, &str)]) -> String {
+        let resp = describe_snapshots(svc, &req("DescribeSnapshots", query)).unwrap();
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn describe_snapshots_unknown_id_errors() {
+        let svc = Ec2Service::new();
+        seed_snapshot(&svc);
+        let err = crate::test_support::err_of(describe_snapshots(
+            &svc,
+            &req("DescribeSnapshots", &[("SnapshotId.1", "snap-missing")]),
+        ));
+        assert_eq!(err.code(), "InvalidSnapshot.NotFound");
+    }
+
+    #[test]
+    fn describe_snapshots_rejects_below_min_max_results() {
+        let svc = Ec2Service::new();
+        let err = crate::test_support::err_of(describe_snapshots(
+            &svc,
+            &req("DescribeSnapshots", &[("MaxResults", "3")]),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn describe_snapshots_paginates() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            for i in 0..8 {
+                let mut s = build_snapshot("vol-x".into(), format!("d{i}"));
+                s.snapshot_id = format!("snap-{i:02}");
+                state.snapshots.insert(s.snapshot_id.clone(), s);
+            }
+        }
+        let body = describe_body(&svc, &[("MaxResults", "5")]);
+        assert!(body.contains("<nextToken>"), "expected a NextToken: {body}");
+        // The token round-trips to the next page.
+        let token = body
+            .split("<nextToken>")
+            .nth(1)
+            .and_then(|s| s.split("</nextToken>").next())
+            .unwrap()
+            .to_string();
+        let page2 = describe_body(&svc, &[("MaxResults", "5"), ("NextToken", &token)]);
+        assert!(
+            page2.contains("<snapshotId>snap-07</snapshotId>"),
+            "{page2}"
+        );
+    }
+
+    #[test]
+    fn describe_snapshots_owner_and_field_filters() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            let mut s = build_snapshot("vol-9".into(), "backup-nightly".into());
+            s.snapshot_id = "snap-9".into();
+            s.encrypted = true;
+            s.volume_size = 20;
+            state.snapshots.insert("snap-9".into(), s);
+        }
+        // owner-id matches the requesting account.
+        assert!(describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "owner-id"),
+                ("Filter.1.Value.1", "000000000000")
+            ],
+        )
+        .contains("<snapshotId>snap-9</snapshotId>"));
+        // volume-size, encrypted and description filters resolve.
+        assert!(describe_body(
+            &svc,
+            &[("Filter.1.Name", "volume-size"), ("Filter.1.Value.1", "20")],
+        )
+        .contains("<snapshotId>snap-9</snapshotId>"));
+        assert!(describe_body(
+            &svc,
+            &[("Filter.1.Name", "encrypted"), ("Filter.1.Value.1", "true")],
+        )
+        .contains("<snapshotId>snap-9</snapshotId>"));
+        assert!(describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "description"),
+                ("Filter.1.Value.1", "backup-nightly")
+            ],
+        )
+        .contains("<snapshotId>snap-9</snapshotId>"));
+        // A non-matching owner-id filters it out.
+        assert!(!describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "owner-id"),
+                ("Filter.1.Value.1", "999999999999")
+            ],
+        )
+        .contains("<snapshotId>snap-9</snapshotId>"));
     }
 }
