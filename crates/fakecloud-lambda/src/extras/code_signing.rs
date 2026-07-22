@@ -15,7 +15,7 @@ impl LambdaService {
         let id = id_from_time("csc-");
         let arn = format!(
             "arn:aws:lambda:{}:{}:code-signing-config:{}",
-            state.region, state.account_id, id
+            req.region, state.account_id, id
         );
         let publishers: Vec<String> = body
             .get("AllowedPublishers")

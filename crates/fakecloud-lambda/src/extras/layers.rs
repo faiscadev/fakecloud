@@ -88,9 +88,13 @@ impl LambdaService {
             .entry(layer_name.to_string())
             .or_insert_with(|| Layer {
                 layer_name: layer_name.to_string(),
+                // Layer ARN carries the request's credential-scope region
+                // (`req.region`), not the server default (`state.region`);
+                // the version ARN below is derived from it, so both stay in
+                // the caller's region.
                 layer_arn: format!(
                     "arn:aws:lambda:{}:{}:layer:{}",
-                    state.region, state.account_id, layer_name
+                    req.region, state.account_id, layer_name
                 ),
                 versions: Vec::new(),
             });

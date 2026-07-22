@@ -56,9 +56,12 @@ impl LambdaService {
         if !state.functions.contains_key(function_name) {
             return Err(not_found("Function", function_name));
         }
+        // Derive the alias ARN from the request's credential-scope region
+        // (`req.region`), consistent with the function's own ARN, rather than
+        // the server default (`state.region`).
         let alias_arn = format!(
             "arn:aws:lambda:{}:{}:function:{}:{}",
-            state.region, state.account_id, function_name, name
+            req.region, state.account_id, function_name, name
         );
         let alias = FunctionAlias {
             alias_arn: alias_arn.clone(),

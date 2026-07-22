@@ -149,9 +149,10 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        region: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let region = self.region_for(account_id);
-        self.with_state_read(account_id, &region, |state| {
+        let state_region = self.region_for(account_id);
+        self.with_state_read(account_id, &state_region, |state| {
             let prefix = format!("{function_name}:");
             let configs: Vec<Value> = state
                 .provisioned_concurrency
@@ -162,7 +163,7 @@ impl LambdaService {
                     json!({
                         "FunctionArn": format!(
                             "arn:aws:lambda:{}:{}:function:{}:{}",
-                            state.region, state.account_id, function_name, qualifier
+                            region, state.account_id, function_name, qualifier
                         ),
                         "Status": cfg.status,
                         "RequestedProvisionedConcurrentExecutions": cfg.requested,
@@ -229,7 +230,7 @@ impl LambdaService {
             }
             let function_arn = format!(
                 "arn:aws:lambda:{}:{}:function:{}",
-                state.region, state.account_id, function_name
+                req.region, state.account_id, function_name
             );
             ok(json!({
                 "FunctionArn": function_arn,

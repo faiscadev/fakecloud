@@ -5,11 +5,13 @@ use base64::Engine as _;
 use super::*;
 
 impl LambdaService {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn invoke(
         &self,
         function_name: &str,
         payload: &[u8],
         account_id: &str,
+        region: &str,
         invocation_type: InvocationType,
         qualifier: Option<&str>,
         log_tail: bool,
@@ -32,7 +34,7 @@ impl LambdaService {
                         "ResourceNotFoundException",
                         format!(
                             "Function not found: arn:aws:lambda:{}:{}:function:{function_name}:{q}",
-                            state.region, state.account_id
+                            region, state.account_id
                         ),
                     ));
                 }
@@ -93,7 +95,7 @@ impl LambdaService {
                     "ResourceNotFoundException",
                     format!(
                         "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                        state.region, state.account_id, function_name
+                        region, state.account_id, function_name
                     ),
                 )
             })?;

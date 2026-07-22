@@ -75,7 +75,9 @@ impl LambdaService {
             "PutProvisionedConcurrencyConfig" => self.put_provisioned_concurrency(res, req),
             "GetProvisionedConcurrencyConfig" => self.get_provisioned_concurrency(res, req),
             "DeleteProvisionedConcurrencyConfig" => self.delete_provisioned_concurrency(res, req),
-            "ListProvisionedConcurrencyConfigs" => self.list_provisioned_concurrency(res, aid),
+            "ListProvisionedConcurrencyConfigs" => {
+                self.list_provisioned_concurrency(res, aid, req.region.as_str())
+            }
 
             // Code signing
             "CreateCodeSigningConfig" => self.create_code_signing_config(req),

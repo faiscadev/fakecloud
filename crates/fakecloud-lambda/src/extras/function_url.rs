@@ -53,16 +53,17 @@ impl LambdaService {
         if !state.functions.contains_key(function_name) {
             return Err(not_found("Function", function_name));
         }
+        // Derive the FunctionArn and the function URL's region label from the
+        // request's credential-scope region (`req.region`), matching the
+        // function's own ARN, not the server default (`state.region`). Both
+        // are persisted and re-emitted by Get/Update/List.
         let function_arn = format!(
             "arn:aws:lambda:{}:{}:function:{}",
-            state.region, state.account_id, function_name
+            req.region, state.account_id, function_name
         );
         let cfg = FunctionUrlConfig {
             function_arn: function_arn.clone(),
-            function_url: format!(
-                "https://{function_name}.lambda-url.{}.on.aws/",
-                state.region
-            ),
+            function_url: format!("https://{function_name}.lambda-url.{}.on.aws/", req.region),
             auth_type: auth_type.clone(),
             cors: body.get("Cors").cloned(),
             creation_time: now,

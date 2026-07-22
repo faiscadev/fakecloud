@@ -66,9 +66,15 @@ impl LambdaService {
         let code_sha256 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, hash);
         let code_size = code_bytes.len() as i64;
 
+        // Build the FunctionArn from the request's SigV4 credential-scope
+        // region (`req.region`), not the server default (`state.region`).
+        // A CreateFunction signed for eu-central-1 must advertise an
+        // eu-central-1 ARN; fakecloud's own lookups are region-insensitive
+        // (see `normalize_function_name`), so follow-up calls still resolve,
+        // but Terraform / cross-service IAM compare the ARN region.
         let function_arn = format!(
             "arn:aws:lambda:{}:{}:function:{}",
-            state.region, state.account_id, input.function_name
+            req.region, state.account_id, input.function_name
         );
         let now = Utc::now();
 
@@ -171,7 +177,7 @@ impl LambdaService {
                 "ResourceNotFoundException",
                 format!(
                     "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                    state.region, state.account_id, function_name
+                    req.region, state.account_id, function_name
                 ),
             )
         })?;
@@ -194,7 +200,7 @@ impl LambdaService {
                             "ResourceNotFoundException",
                             format!(
                                 "Function not found: arn:aws:lambda:{}:{}:function:{}:{v}",
-                                state.region, state.account_id, function_name
+                                req.region, state.account_id, function_name
                             ),
                         )
                     })?;
@@ -247,11 +253,11 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        region: &str,
         qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
-        let region = state.region.clone();
         let account_id_owned = state.account_id.clone();
 
         // Qualifier=N targets a single immutable version snapshot; the

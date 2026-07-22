@@ -16,11 +16,12 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
         let qualifier = parse_qualifier(req);
+        // Persist the FunctionArn under the request's credential-scope region
+        // (`req.region`), consistent with the function's own ARN, not the
+        // server default. Get/Update/List re-emit this stored value.
         let function_arn = format!(
             "arn:aws:lambda:{}:{}:function:{}",
-            self.region_for(&req.account_id),
-            req.account_id,
-            function_name
+            req.region, req.account_id, function_name
         );
         // Validate Smithy ranges before persisting:
         //   MaximumEventAgeInSeconds: 60..=21600
