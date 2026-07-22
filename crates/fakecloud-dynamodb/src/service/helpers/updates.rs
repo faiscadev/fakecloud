@@ -212,7 +212,16 @@ pub(crate) fn apply_add_assignment(
                 };
                 let mut merged: Vec<Value> = existing_set.clone();
                 for v in add_set {
-                    if !merged.contains(v) {
+                    // A Number Set dedups by numeric value ("1" and "1.0" are
+                    // the same member), so a raw `contains` (exact JSON-string
+                    // match) would produce an invalid set holding two
+                    // numerically-equal members. SS/BS keep exact equality.
+                    let already = if *set_type == "NS" {
+                        merged.iter().any(|m| ns_members_equal(m, v))
+                    } else {
+                        merged.contains(v)
+                    };
+                    if !already {
                         merged.push(v.clone());
                     }
                 }
@@ -331,9 +340,12 @@ pub(crate) fn apply_delete_assignment(
             existing.get("NS").and_then(|v| v.as_array()),
             del_val.get("NS").and_then(|v| v.as_array()),
         ) {
+            // Number-set members are removed by numeric value, so `DELETE`ing
+            // "1.0" drops the stored "1". A raw `contains` (exact string match)
+            // would miss it.
             let filtered: Vec<Value> = existing_set
                 .iter()
-                .filter(|v| !del_set.contains(v))
+                .filter(|v| !del_set.iter().any(|d| ns_members_equal(d, v)))
                 .cloned()
                 .collect();
             if filtered.is_empty() {
@@ -465,6 +477,70 @@ mod remove_path_tests {
         .unwrap();
         assert_eq!(item["count"], json!({"N": "8"}));
         assert_eq!(item["tags"], json!({"SS": ["x", "y"]}));
+    }
+
+    #[test]
+    fn add_number_set_dedups_by_numeric_value() {
+        // A Number Set compares members by numeric value, so ADD of "1.0" to a
+        // set already holding "1" is a no-op: the result must stay {"1","2"}
+        // and never become an invalid set with two numerically-equal members
+        // (bug-hunt 2026-07-22).
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("scores".to_string(), json!({"NS": ["1", "2"]}));
+        apply_add_assignment(
+            &mut item,
+            "scores :n",
+            &names(),
+            &vals(&[(":n", json!({"NS": ["1.0"]}))]),
+        )
+        .unwrap();
+        assert_eq!(item["scores"], json!({"NS": ["1", "2"]}));
+    }
+
+    #[test]
+    fn add_number_set_appends_genuinely_new_member() {
+        // A numerically-distinct member is still added.
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("scores".to_string(), json!({"NS": ["1", "2"]}));
+        apply_add_assignment(
+            &mut item,
+            "scores :n",
+            &names(),
+            &vals(&[(":n", json!({"NS": ["1.0", "3"]}))]),
+        )
+        .unwrap();
+        assert_eq!(item["scores"], json!({"NS": ["1", "2", "3"]}));
+    }
+
+    #[test]
+    fn delete_number_set_removes_by_numeric_value() {
+        // DELETE of "1.0" removes the stored "1" (numeric equality), leaving
+        // {"2"} (bug-hunt 2026-07-22).
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("scores".to_string(), json!({"NS": ["1", "2"]}));
+        apply_delete_assignment(
+            &mut item,
+            "scores :n",
+            &names(),
+            &vals(&[(":n", json!({"NS": ["1.0"]}))]),
+        )
+        .unwrap();
+        assert_eq!(item["scores"], json!({"NS": ["2"]}));
+    }
+
+    #[test]
+    fn delete_string_set_keeps_exact_equality() {
+        // SS keeps exact string equality: "1.0" does not remove "1".
+        let mut item: HashMap<String, AttributeValue> = HashMap::new();
+        item.insert("tags".to_string(), json!({"SS": ["1", "2"]}));
+        apply_delete_assignment(
+            &mut item,
+            "tags :s",
+            &names(),
+            &vals(&[(":s", json!({"SS": ["1.0"]}))]),
+        )
+        .unwrap();
+        assert_eq!(item["tags"], json!({"SS": ["1", "2"]}));
     }
 
     #[test]

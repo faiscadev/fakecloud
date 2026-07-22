@@ -376,6 +376,21 @@ pub(crate) fn values_equal(a: Option<&Value>, b: Option<&Value>) -> bool {
     }
 }
 
+/// Whether two Number-set (`NS`) members are the same member. AWS compares NS
+/// members by numeric value, so `"1"` and `"1.0"` are one member: a set can
+/// never hold both, `ADD` dedups by value, and `DELETE` removes by value. The
+/// members are the bare decimal strings stored inside the `NS` array. Malformed
+/// members fall back to exact string equality so a bad operand can never be
+/// mistaken for a valid stored member. Mirrors the read side's `values_equal`.
+pub(crate) fn ns_members_equal(a: &Value, b: &Value) -> bool {
+    match (a.as_str(), b.as_str()) {
+        (Some(x), Some(y)) if is_valid_number(x) && is_valid_number(y) => {
+            compare_number_strings(x, y) == std::cmp::Ordering::Equal
+        }
+        _ => a == b,
+    }
+}
+
 pub(crate) fn execute_partiql_in_state(
     state: &mut crate::state::DynamoDbState,
     statement: &str,
