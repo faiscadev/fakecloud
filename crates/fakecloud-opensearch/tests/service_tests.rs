@@ -1646,3 +1646,211 @@ async fn create_index_persists_schema() {
         "date"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Service-software-update / scheduled-action / data-source-attachment state.
+// These previously accepted-and-discarded their writes; they must now persist.
+// ---------------------------------------------------------------------------
+
+async fn create_os_domain(svc: &OpenSearchService, name: &str) {
+    call(
+        svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": name, "EngineVersion": "OpenSearch_2.11"}),
+        ),
+    )
+    .await;
+}
+
+fn service_software_options_of(svc_status: &Value) -> Value {
+    svc_status["DomainStatus"]["ServiceSoftwareOptions"].clone()
+}
+
+#[tokio::test]
+async fn service_software_update_persists_and_describe_reflects() {
+    let svc = service();
+    create_os_domain(&svc, "ssu-dom").await;
+
+    // Start: the domain's ServiceSoftwareOptions transitions to IN_PROGRESS.
+    let started = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/serviceSoftwareUpdate/start"),
+                json!({"DomainName": "ssu-dom"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        started["ServiceSoftwareOptions"]["UpdateStatus"],
+        "IN_PROGRESS"
+    );
+
+    // DescribeDomain reflects the persisted transition.
+    let described = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/ssu-dom"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    let opts = service_software_options_of(&described);
+    assert_eq!(opts["UpdateStatus"], "IN_PROGRESS", "{described}");
+    assert_eq!(opts["Cancellable"], true);
+
+    // Cancel reverts the persisted status (no longer IN_PROGRESS).
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/serviceSoftwareUpdate/cancel"),
+            json!({"DomainName": "ssu-dom"}),
+        ),
+    )
+    .await;
+    let after_cancel = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/ssu-dom"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        service_software_options_of(&after_cancel)["UpdateStatus"],
+        "PENDING_UPDATE",
+        "{after_cancel}"
+    );
+}
+
+#[tokio::test]
+async fn scheduled_actions_seeded_by_update_and_mutated() {
+    let svc = service();
+    create_os_domain(&svc, "sched-dom").await;
+
+    // Before any update, there are no scheduled actions.
+    let empty = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/sched-dom/scheduledActions"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(empty["ScheduledActions"].as_array().unwrap().len(), 0);
+
+    // Starting a software update seeds a SERVICE_SOFTWARE_UPDATE scheduled action.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/serviceSoftwareUpdate/start"),
+            json!({"DomainName": "sched-dom"}),
+        ),
+    )
+    .await;
+    let listed = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/sched-dom/scheduledActions"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    let actions = listed["ScheduledActions"].as_array().unwrap();
+    assert_eq!(actions.len(), 1, "{listed}");
+    let action_id = actions[0]["Id"].as_str().unwrap().to_string();
+    assert_eq!(actions[0]["Status"], "PENDING_UPDATE");
+    assert_eq!(actions[0]["ScheduledBy"], "SYSTEM");
+
+    // UpdateScheduledAction mutates the stored action (NOW -> IN_PROGRESS, CUSTOMER).
+    let updated = json_of(
+        &call(
+            &svc,
+            req(
+                Method::PUT,
+                &format!("{OS}/opensearch/domain/sched-dom/scheduledAction/update"),
+                json!({"ActionID": action_id, "ActionType": "SERVICE_SOFTWARE_UPDATE", "ScheduleAt": "NOW"}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(updated["ScheduledAction"]["Status"], "IN_PROGRESS");
+    assert_eq!(updated["ScheduledAction"]["ScheduledBy"], "CUSTOMER");
+
+    // The list reflects the mutation rather than a constant.
+    let relisted = json_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("{OS}/opensearch/domain/sched-dom/scheduledActions"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    let after = relisted["ScheduledActions"].as_array().unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0]["Status"], "IN_PROGRESS", "{relisted}");
+    assert_eq!(after[0]["ScheduledBy"], "CUSTOMER");
+}
+
+#[tokio::test]
+async fn attach_data_source_persists_through_list() {
+    let svc = service();
+    let created = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/application"),
+                json!({"name": "attach-app"}),
+            ),
+        )
+        .await,
+    );
+    let app_id = created["id"].as_str().unwrap().to_string();
+
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/application/{app_id}/attachDataSource"),
+            json!({"dataSourceArn": "arn:aws:s3:::my-bucket"}),
+        ),
+    )
+    .await;
+
+    let listed = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/application/{app_id}/listDataSourceAttachments"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    let attachments = listed["attachments"].as_array().unwrap();
+    assert_eq!(attachments.len(), 1, "{listed}");
+    assert_eq!(attachments[0]["dataSourceArn"], "arn:aws:s3:::my-bucket");
+}

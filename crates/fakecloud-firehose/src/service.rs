@@ -277,6 +277,17 @@ fn parse_s3_destination(val: &Value) -> Result<Option<S3Destination>, AwsService
         custom_time_zone: val["CustomTimeZone"].as_str().map(|s| s.to_string()),
         s3_backup_mode: val["S3BackupMode"].as_str().map(|s| s.to_string()),
         file_extension: val["FileExtension"].as_str().map(|s| s.to_string()),
+        dynamic_partitioning_configuration: val["DynamicPartitioningConfiguration"]
+            .is_object()
+            .then(|| val["DynamicPartitioningConfiguration"].clone()),
+        encryption_configuration: val["EncryptionConfiguration"]
+            .is_object()
+            .then(|| val["EncryptionConfiguration"].clone()),
+        // The `S3BackupConfiguration` create block is a full S3 destination
+        // config; stored as raw JSON and echoed back as `S3BackupDescription`.
+        s3_backup_description: val["S3BackupConfiguration"]
+            .is_object()
+            .then(|| val["S3BackupConfiguration"].clone()),
     }))
 }
 
@@ -334,7 +345,37 @@ fn apply_s3_update(dest: &mut S3Destination, val: &Value) -> Result<(), AwsServi
     if let Some(v) = val["FileExtension"].as_str() {
         dest.file_extension = Some(v.to_string());
     }
+    if val["DynamicPartitioningConfiguration"].is_object() {
+        dest.dynamic_partitioning_configuration =
+            Some(val["DynamicPartitioningConfiguration"].clone());
+    }
+    if val["EncryptionConfiguration"].is_object() {
+        dest.encryption_configuration = Some(val["EncryptionConfiguration"].clone());
+    }
+    // `S3BackupUpdate` is an all-optional S3 destination update; merge it field-
+    // wise onto the stored backup description rather than replacing it.
+    if val["S3BackupUpdate"].is_object() {
+        match dest.s3_backup_description.as_mut() {
+            Some(existing) => merge_json(existing, &val["S3BackupUpdate"]),
+            None => dest.s3_backup_description = Some(val["S3BackupUpdate"].clone()),
+        }
+    }
     Ok(())
+}
+
+/// Recursively merge `update` into `target`: for every key present in `update`,
+/// objects recurse and all other values overwrite; keys absent from `update`
+/// are left untouched. Firehose's `*Update` shapes are all-optional with merge
+/// semantics, so a partial update must not drop the fields the caller omitted.
+fn merge_json(target: &mut Value, update: &Value) {
+    match (target, update) {
+        (Value::Object(tgt), Value::Object(upd)) => {
+            for (k, v) in upd {
+                merge_json(tgt.entry(k.clone()).or_insert(Value::Null), v);
+            }
+        }
+        (tgt, upd) => *tgt = upd.clone(),
+    }
 }
 
 /// Increment a Firehose delivery-stream version id. AWS version ids are
@@ -439,6 +480,17 @@ fn s3_destination_json(dest: &S3Destination) -> Value {
     extended["S3BackupMode"] = json!(dest.s3_backup_mode.as_deref().unwrap_or("Disabled"));
     if let Some(ref ext) = dest.file_extension {
         extended["FileExtension"] = json!(ext);
+    }
+    // ExtendedS3-only descriptions: dynamic partitioning, delivered-object SSE
+    // config, and the nested S3 backup destination description.
+    if let Some(ref dp) = dest.dynamic_partitioning_configuration {
+        extended["DynamicPartitioningConfiguration"] = dp.clone();
+    }
+    if let Some(ref enc) = dest.encryption_configuration {
+        extended["EncryptionConfiguration"] = enc.clone();
+    }
+    if let Some(ref backup) = dest.s3_backup_description {
+        extended["S3BackupDescription"] = backup.clone();
     }
     json!({
         "DestinationId": dest.destination_id,
@@ -902,10 +954,18 @@ impl FirehoseService {
             }
         }
 
-        // Non-S3 destinations (Redshift/OpenSearch/Splunk/HTTP/...) were
-        // previously dropped on update; merge any supplied ones in.
+        // Non-S3 destinations (Redshift/OpenSearch/Splunk/HTTP/...) carry
+        // all-optional `*Update` shapes. Merge each supplied update field-wise
+        // onto the stored `*DestinationDescription` instead of replacing the
+        // whole object, so a partial update (e.g. only RetryOptions) does not
+        // drop the other fields the caller omitted.
         for (key, value) in extract_extra_destinations(&body, "Update") {
-            stream.extra_destinations.insert(key, value);
+            match stream.extra_destinations.get_mut(&key) {
+                Some(existing) => merge_json(existing, &value),
+                None => {
+                    stream.extra_destinations.insert(key, value);
+                }
+            }
         }
 
         // A successful update advances the stream version.
@@ -1431,6 +1491,107 @@ mod tests {
         );
         // Version advanced from 1 -> 2.
         assert_eq!(after["VersionId"], "2");
+    }
+
+    #[test]
+    fn update_non_s3_destination_merges_field_wise() {
+        // A partial RedshiftDestinationUpdate must merge onto the stored
+        // description instead of replacing it, so untouched fields survive.
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "rs-stream",
+                "RedshiftDestinationConfiguration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "ClusterJDBCURL": "jdbc:redshift://cluster:5439/db",
+                    "Username": "admin",
+                    "CopyCommand": { "DataTableName": "events" },
+                    "RetryOptions": { "DurationInSeconds": 3600 }
+                }
+            }),
+        ))
+        .unwrap();
+
+        let dest_id = describe(&svc, "rs-stream")["Destinations"][0]["DestinationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Update only the RetryOptions sub-field.
+        svc.update_destination(&request(
+            "UpdateDestination",
+            json!({
+                "DeliveryStreamName": "rs-stream",
+                "CurrentDeliveryStreamVersionId": "1",
+                "DestinationId": dest_id,
+                "RedshiftDestinationUpdate": {
+                    "RetryOptions": { "DurationInSeconds": 7200 }
+                }
+            }),
+        ))
+        .unwrap();
+
+        let after = describe(&svc, "rs-stream");
+        let rs = &after["Destinations"][0]["RedshiftDestinationDescription"];
+        // Changed field applied.
+        assert_eq!(rs["RetryOptions"]["DurationInSeconds"], 7200, "{after}");
+        // Untouched fields preserved (not dropped by a whole-object replace).
+        assert_eq!(rs["ClusterJDBCURL"], "jdbc:redshift://cluster:5439/db");
+        assert_eq!(rs["Username"], "admin");
+        assert_eq!(rs["CopyCommand"]["DataTableName"], "events");
+        assert_eq!(rs["RoleARN"], "arn:aws:iam::123456789012:role/fh");
+    }
+
+    #[test]
+    fn extended_s3_dynamic_partition_encryption_backup_round_trip() {
+        // DynamicPartitioningConfiguration, EncryptionConfiguration and the
+        // nested S3 backup destination were dropped entirely; all three must
+        // round-trip through DescribeDeliveryStream.
+        let svc = service();
+        svc.create_delivery_stream(&request(
+            "CreateDeliveryStream",
+            json!({
+                "DeliveryStreamName": "ext-stream",
+                "ExtendedS3DestinationConfiguration": {
+                    "RoleARN": "arn:aws:iam::123456789012:role/fh",
+                    "BucketARN": "arn:aws:s3:::bucket",
+                    "DynamicPartitioningConfiguration": {
+                        "Enabled": true,
+                        "RetryOptions": { "DurationInSeconds": 300 }
+                    },
+                    "EncryptionConfiguration": {
+                        "KMSEncryptionConfig": {
+                            "AWSKMSKeyARN": "arn:aws:kms:us-east-1:123456789012:key/abc"
+                        }
+                    },
+                    "S3BackupMode": "Enabled",
+                    "S3BackupConfiguration": {
+                        "RoleARN": "arn:aws:iam::123456789012:role/backup",
+                        "BucketARN": "arn:aws:s3:::backup-bucket",
+                        "Prefix": "backup/"
+                    }
+                }
+            }),
+        ))
+        .unwrap();
+
+        let desc = describe(&svc, "ext-stream");
+        let ext = &desc["Destinations"][0]["ExtendedS3DestinationDescription"];
+        assert_eq!(
+            ext["DynamicPartitioningConfiguration"]["Enabled"], true,
+            "{desc}"
+        );
+        assert_eq!(
+            ext["EncryptionConfiguration"]["KMSEncryptionConfig"]["AWSKMSKeyARN"],
+            "arn:aws:kms:us-east-1:123456789012:key/abc"
+        );
+        assert_eq!(ext["S3BackupMode"], "Enabled");
+        assert_eq!(
+            ext["S3BackupDescription"]["BucketARN"],
+            "arn:aws:s3:::backup-bucket"
+        );
+        assert_eq!(ext["S3BackupDescription"]["Prefix"], "backup/");
     }
 
     fn create_ver_stream(svc: &FirehoseService) -> String {

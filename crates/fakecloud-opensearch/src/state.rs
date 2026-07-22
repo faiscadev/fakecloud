@@ -62,6 +62,11 @@ pub struct Domain {
     /// Per-domain maintenance actions keyed by id.
     #[serde(default)]
     pub maintenances: BTreeMap<String, Value>,
+    /// Current `ServiceSoftwareOptions.UpdateStatus` after a
+    /// Start/Cancel/RollbackServiceSoftwareUpdate. `None` means the default
+    /// `NOT_ELIGIBLE` (no update in flight) is reported.
+    #[serde(default)]
+    pub service_software_status: Option<String>,
 }
 
 /// An installable package (dictionary / plugin / config) shared by both APIs.
