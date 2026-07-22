@@ -90,6 +90,16 @@ fn validate_create_request_accepts_new_engines() {
 }
 
 #[test]
+fn validate_create_request_accepts_postgres_17() {
+    // Regression for #2352: real AWS RDS offers postgres 17.x. Both the
+    // major ("17") and full-triplet ("17.4") forms must validate.
+    for version in ["17", "17.4"] {
+        validate_create_request("test-db", 20, "db.t3.micro", "postgres", version, 5432)
+            .unwrap_or_else(|e| panic!("postgres {version} should be accepted: {e:?}"));
+    }
+}
+
+#[test]
 fn validate_create_request_rejects_unsupported_engine_version() {
     let err = validate_create_request("test-db", 20, "db.t3.micro", "oracle-ee", "12.0.0", 1521)
         .expect_err("12.x is not in the supported list");
@@ -103,7 +113,7 @@ fn filter_engine_versions_matches_requested_engine() {
 
     let filtered = filter_engine_versions(&versions, &Some("postgres".to_string()), &None, &None);
 
-    assert_eq!(filtered.len(), 4); // All postgres versions
+    assert_eq!(filtered.len(), 5); // All postgres versions
     assert!(filtered.iter().all(|v| v.engine == "postgres"));
 }
 

@@ -702,6 +702,14 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
         // PostgreSQL versions
         EngineVersionInfo {
             engine: "postgres".to_string(),
+            engine_version: "17.4".to_string(),
+            db_parameter_group_family: "postgres17".to_string(),
+            db_engine_description: "PostgreSQL".to_string(),
+            db_engine_version_description: "PostgreSQL 17.4".to_string(),
+            status: "available".to_string(),
+        },
+        EngineVersionInfo {
+            engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
             db_parameter_group_family: "postgres16".to_string(),
             db_engine_description: "PostgreSQL".to_string(),
@@ -788,6 +796,7 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
 pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
     let mut options = Vec::new();
     let engines_and_versions = vec![
+        ("postgres", "17.4", "postgresql-license"),
         ("postgres", "16.3", "postgresql-license"),
         ("postgres", "15.5", "postgresql-license"),
         ("postgres", "14.10", "postgresql-license"),
@@ -824,6 +833,7 @@ pub fn default_parameter_groups(
     let mut groups = BTreeMap::new();
 
     let families = vec![
+        ("postgres17", "Default parameter group for postgres17"),
         ("postgres16", "Default parameter group for postgres16"),
         ("postgres15", "Default parameter group for postgres15"),
         ("postgres14", "Default parameter group for postgres14"),
@@ -1024,11 +1034,11 @@ mod tests {
     fn default_engine_versions_are_postgres_metadata() {
         let versions = default_engine_versions();
 
-        assert_eq!(versions.len(), 10); // 4 postgres + 3 mysql + 3 mariadb
-                                        // Check first postgres version
+        assert_eq!(versions.len(), 11); // 5 postgres + 3 mysql + 3 mariadb
+                                        // Check first (newest) postgres version
         assert_eq!(versions[0].engine, "postgres");
-        assert_eq!(versions[0].engine_version, "16.3");
-        assert_eq!(versions[0].db_parameter_group_family, "postgres16");
+        assert_eq!(versions[0].engine_version, "17.4");
+        assert_eq!(versions[0].db_parameter_group_family, "postgres17");
     }
 
     #[test]
@@ -1036,7 +1046,7 @@ mod tests {
         let versions = default_engine_versions();
         let options = default_orderable_options();
 
-        assert_eq!(options.len(), 70); // 10 versions * 7 instance classes
+        assert_eq!(options.len(), 77); // 11 versions * 7 instance classes
                                        // Verify all engines and versions have orderable options
         for version in &versions {
             assert!(options.iter().any(|opt| {
