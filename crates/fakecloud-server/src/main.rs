@@ -1780,9 +1780,97 @@ async fn main() {
         } else {
             None
         };
+    // CloudWatch Logs persistence store + a shared save-lock, created ahead of
+    // the EventBridge service/scheduler so their Logs-target delivery can write
+    // through to the same snapshot LogsService persists to. Loading here (before
+    // the scheduler is spawned) also means the background rule scheduler fires
+    // against the restored Logs state rather than an empty one. The lock is
+    // shared with LogsService (below) so the two Logs writers can't
+    // stale-overwrite each other's clone-serialize-write.
+    let logs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
+        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+            let data_path = persistence_config
+                .data_path
+                .as_ref()
+                .expect("validated above")
+                .clone();
+            let path = data_path.join("logs").join("snapshot.json");
+            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
+            match fakecloud_persistence::SnapshotStore::load(&store) {
+                Ok(Some(bytes)) => {
+                    match serde_json::from_slice::<fakecloud_logs::LogsSnapshot>(&bytes) {
+                        Ok(snapshot) => {
+                            if snapshot.schema_version
+                                > fakecloud_logs::LOGS_SNAPSHOT_SCHEMA_VERSION
+                            {
+                                fatal_exit(format_args!(
+                                    "logs persistence schema too new: on-disk={}, max supported={}",
+                                    snapshot.schema_version,
+                                    fakecloud_logs::LOGS_SNAPSHOT_SCHEMA_VERSION,
+                                ));
+                            }
+                            if let Some(accounts) = snapshot.accounts {
+                                let account_count = accounts.account_count();
+                                *logs_state.write() = accounts;
+                                tracing::info!(
+                                    accounts = account_count,
+                                    "loaded logs persistence snapshot (multi-account)"
+                                );
+                            } else if let Some(single_state) = snapshot.state {
+                                let group_count = single_state.log_groups.len();
+                                let account_id = single_state.account_id.clone();
+                                let mut mas = logs_state.write();
+                                *mas.get_or_create(&account_id) = single_state;
+                                tracing::info!(
+                                    log_groups = group_count,
+                                    "loaded logs persistence snapshot (migrated from v1)"
+                                );
+                            } else {
+                                tracing::warn!("logs persistence snapshot has neither accounts nor state; starting empty");
+                            }
+                        }
+                        Err(err) => fatal_exit(format_args!(
+                            "failed to parse logs persistence snapshot: {err}"
+                        )),
+                    }
+                }
+                Ok(None) => {
+                    tracing::info!("no logs persistence snapshot found; starting empty");
+                }
+                Err(err) => fatal_exit(format_args!(
+                    "failed to read logs persistence snapshot: {err}"
+                )),
+            }
+            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
+        } else {
+            None
+        };
+    let logs_snapshot_lock = Arc::new(tokio::sync::Mutex::new(()));
+    // Persist hook routing EventBridge -> CloudWatch Logs deliveries through the
+    // Logs snapshot store, so an event delivered to a Logs target (including
+    // from the background rule scheduler) survives a restart, matching every
+    // other target type (which persists via the DeliveryBus).
+    let logs_persist_hook: Option<fakecloud_persistence::SnapshotHook> =
+        logs_snapshot_store.clone().map(|store| {
+            let state = logs_state.clone();
+            let lock = logs_snapshot_lock.clone();
+            Arc::new(move || {
+                let state = state.clone();
+                let store = store.clone();
+                let lock = lock.clone();
+                Box::pin(async move {
+                    fakecloud_logs::save_logs_snapshot(&state, Some(store), &lock).await;
+                })
+                    as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            }) as fakecloud_persistence::SnapshotHook
+        });
+    let eb_sim_logs_persist = logs_persist_hook.clone();
     let mut eb_service = EventBridgeService::new(eb_state.clone(), delivery_for_eb.clone())
         .with_lambda(lambda_state.clone())
         .with_logs(logs_state.clone());
+    if let Some(ref hook) = logs_persist_hook {
+        eb_service = eb_service.with_logs_persist(hook.clone());
+    }
     if let Some(ref rt) = container_runtime {
         eb_service = eb_service.with_runtime(rt.clone());
     }
@@ -1803,6 +1891,9 @@ async fn main() {
         fakecloud_eventbridge::scheduler::Scheduler::new(eb_state.clone(), delivery_for_eb)
             .with_lambda(lambda_state.clone())
             .with_logs(logs_state.clone());
+    if let Some(ref hook) = logs_persist_hook {
+        scheduler = scheduler.with_logs_persist(hook.clone());
+    }
     if let Some(ref rt) = container_runtime {
         scheduler = scheduler.with_runtime(rt.clone());
     }
@@ -1965,6 +2056,10 @@ async fn main() {
     if let Some(h) = ssm_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("ssm", h);
     }
+    // Re-arm the async lifecycle tick for any SendCommand restored as
+    // Pending/InProgress, so a command that only completed in the background
+    // before a restart still settles to Success instead of being stranded.
+    ssm_service.rearm_in_flight_commands();
     registry.register(Arc::new(ssm_service));
     // DynamoDB is registered later, after s3_store is constructed, so the
     // export path can persist result objects through the S3 store.
@@ -2146,66 +2241,12 @@ async fn main() {
         cfn_snapshot_hooks.insert("secretsmanager", h);
     }
     registry.register(Arc::new(secretsmanager_service));
-    let logs_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
-        if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
-            let data_path = persistence_config
-                .data_path
-                .as_ref()
-                .expect("validated above")
-                .clone();
-            let path = data_path.join("logs").join("snapshot.json");
-            let store = fakecloud_persistence::DiskSnapshotStore::new(path);
-            match fakecloud_persistence::SnapshotStore::load(&store) {
-                Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_logs::LogsSnapshot>(&bytes) {
-                        Ok(snapshot) => {
-                            if snapshot.schema_version
-                                > fakecloud_logs::LOGS_SNAPSHOT_SCHEMA_VERSION
-                            {
-                                fatal_exit(format_args!(
-                                    "logs persistence schema too new: on-disk={}, max supported={}",
-                                    snapshot.schema_version,
-                                    fakecloud_logs::LOGS_SNAPSHOT_SCHEMA_VERSION,
-                                ));
-                            }
-                            if let Some(accounts) = snapshot.accounts {
-                                let account_count = accounts.account_count();
-                                *logs_state.write() = accounts;
-                                tracing::info!(
-                                    accounts = account_count,
-                                    "loaded logs persistence snapshot (multi-account)"
-                                );
-                            } else if let Some(single_state) = snapshot.state {
-                                let group_count = single_state.log_groups.len();
-                                let account_id = single_state.account_id.clone();
-                                let mut mas = logs_state.write();
-                                *mas.get_or_create(&account_id) = single_state;
-                                tracing::info!(
-                                    log_groups = group_count,
-                                    "loaded logs persistence snapshot (migrated from v1)"
-                                );
-                            } else {
-                                tracing::warn!("logs persistence snapshot has neither accounts nor state; starting empty");
-                            }
-                        }
-                        Err(err) => fatal_exit(format_args!(
-                            "failed to parse logs persistence snapshot: {err}"
-                        )),
-                    }
-                }
-                Ok(None) => {
-                    tracing::info!("no logs persistence snapshot found; starting empty");
-                }
-                Err(err) => fatal_exit(format_args!(
-                    "failed to read logs persistence snapshot: {err}"
-                )),
-            }
-            Some(Arc::new(store) as Arc<dyn fakecloud_persistence::SnapshotStore>)
-        } else {
-            None
-        };
+    // `logs_snapshot_store` + `logs_snapshot_lock` are created earlier (ahead of
+    // the EventBridge service/scheduler) so the EventBridge -> Logs delivery can
+    // persist through the same store; see that block above.
     let logs_anomalies_state = logs_state.clone();
-    let mut logs_service = LogsService::new(logs_state.clone(), delivery_for_logs);
+    let mut logs_service = LogsService::new(logs_state.clone(), delivery_for_logs)
+        .with_snapshot_lock(logs_snapshot_lock);
     if let Some(store) = logs_snapshot_store {
         logs_service = logs_service.with_snapshot_store(store);
     }
@@ -8399,6 +8440,7 @@ async fn main() {
                 let delivery = eb_sim_delivery;
                 let lambda_state = eb_sim_lambda_state;
                 let logs_state = eb_sim_logs_state;
+                let logs_persist = eb_sim_logs_persist;
                 let container_runtime = eb_sim_container_runtime;
                 move |axum::Json(body): axum::Json<types::FireRuleRequest>| async move {
                     let bus_name = body.bus_name.as_deref().unwrap_or("default");
@@ -8407,6 +8449,7 @@ async fn main() {
                         delivery: &delivery,
                         lambda_state: &lambda_state,
                         logs_state: &logs_state,
+                        logs_persist: &logs_persist,
                         container_runtime: &container_runtime,
                     };
                     match fakecloud_eventbridge::simulation::fire_rule(

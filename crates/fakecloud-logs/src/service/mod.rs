@@ -108,6 +108,15 @@ impl LogsService {
         self
     }
 
+    /// Share the snapshot lock with another writer of the Logs state (e.g. the
+    /// EventBridge -> Logs delivery persist hook). Serialising both writers on
+    /// the same lock prevents a stale-last-write where an older clone-serialize
+    /// overwrites a newer one when the two persist paths interleave.
+    pub fn with_snapshot_lock(mut self, lock: Arc<AsyncMutex<()>>) -> Self {
+        self.snapshot_lock = lock;
+        self
+    }
+
     /// Persist current state as a snapshot. Held across the
     /// clone-serialize-write sequence to prevent stale-last writes,
     /// with serde + file I/O offloaded to the blocking pool.

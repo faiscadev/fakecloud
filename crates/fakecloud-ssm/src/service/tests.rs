@@ -5547,3 +5547,138 @@ fn get_parameters_resolves_full_arn() {
     assert!(body["InvalidParameters"].as_array().unwrap().is_empty());
     assert_eq!(body["Parameters"][0]["Value"], "v");
 }
+
+// ===== SendCommand completion persistence (bug-hunt: side-channel skips save) =====
+
+/// Snapshot store that records the last bytes written, so tests can assert the
+/// background `SendCommand` advance actually persisted a completed command.
+#[derive(Default)]
+struct CapturingSnapshotStore {
+    last: std::sync::Mutex<Option<Vec<u8>>>,
+}
+
+impl fakecloud_persistence::SnapshotStore for CapturingSnapshotStore {
+    fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+        Ok(self.last.lock().unwrap().clone())
+    }
+    fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+        *self.last.lock().unwrap() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+/// Decode the last-persisted snapshot and return the status of `command_id`,
+/// or `None` if no snapshot was written or the command isn't present.
+fn persisted_command_status(store: &CapturingSnapshotStore, command_id: &str) -> Option<String> {
+    let bytes = store.last.lock().unwrap().clone()?;
+    let snapshot: SsmSnapshot = serde_json::from_slice(&bytes).ok()?;
+    let accounts = snapshot.accounts?;
+    accounts
+        .get("123456789012")?
+        .commands
+        .iter()
+        .find(|c| c.command_id == command_id)
+        .map(|c| c.status.clone())
+}
+
+fn insert_pending_command(svc: &SsmService, command_id: &str, instance_id: &str) {
+    let now = chrono::Utc::now();
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create("123456789012");
+    state.commands.push(crate::state::SsmCommand {
+        command_id: command_id.to_string(),
+        document_name: "AWS-RunShellScript".to_string(),
+        instance_ids: vec![instance_id.to_string()],
+        parameters: std::collections::BTreeMap::new(),
+        status: "Pending".to_string(),
+        requested_date_time: now,
+        expires_after: now + chrono::Duration::hours(1),
+        comment: None,
+        output_s3_bucket_name: None,
+        output_s3_key_prefix: None,
+        output_s3_region: None,
+        timeout_seconds: None,
+        service_role_arn: None,
+        notification_config: None,
+        targets: vec![],
+        document_hash: None,
+        document_hash_type: None,
+        invocations: vec![crate::state::SsmCommandInvocation {
+            instance_id: instance_id.to_string(),
+            status: "Pending".to_string(),
+            status_details: "Pending".to_string(),
+            standard_output_content: String::new(),
+            standard_error_content: String::new(),
+            response_code: -1,
+            requested_date_time: now,
+            last_update_at: now,
+        }],
+    });
+}
+
+/// Poll the in-memory command status until it reaches `Success` or the deadline
+/// elapses. Returns the final status.
+async fn wait_for_command_status(svc: &SsmService, command_id: &str, want: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let status = {
+            let accounts = svc.state.read();
+            accounts
+                .get("123456789012")
+                .and_then(|s| s.commands.iter().find(|c| c.command_id == command_id))
+                .map(|c| c.status.clone())
+        };
+        if status.as_deref() == Some(want) || std::time::Instant::now() >= deadline {
+            return status.unwrap_or_default();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// The background advance task must persist a snapshot after the terminal
+/// `Success` flip. Previously the detached task mutated `cmd.status` under the
+/// write lock but never called `save_snapshot`, so a completed command reverted
+/// to `Pending` on the next restart.
+#[tokio::test]
+async fn send_command_completion_persists_success() {
+    let store: Arc<CapturingSnapshotStore> = Arc::new(CapturingSnapshotStore::default());
+    let svc = make_service().with_snapshot_store(store.clone());
+
+    let command_id = send_command(&svc, "AWS-RunShellScript");
+    let status = wait_for_command_status(&svc, &command_id, "Success").await;
+    assert_eq!(status, "Success", "command should complete in-memory");
+
+    // The completed command must be on disk as Success, not stranded at Pending.
+    assert_eq!(
+        persisted_command_status(&store, &command_id).as_deref(),
+        Some("Success"),
+        "background advance must persist the Success transition"
+    );
+}
+
+/// A command restored as `Pending` (its background completion never having run
+/// before the previous process exited) must be re-advanced to `Success` on
+/// restore rather than stranded forever.
+#[tokio::test]
+async fn rearm_in_flight_commands_settles_restored_pending() {
+    let store: Arc<CapturingSnapshotStore> = Arc::new(CapturingSnapshotStore::default());
+    let svc = make_service().with_snapshot_store(store.clone());
+
+    // Simulate a snapshot restored with an in-flight (Pending) command.
+    let command_id = "11111111-2222-3333-4444-555555555555";
+    insert_pending_command(&svc, command_id, "i-restore0");
+
+    // Re-arm as the server does after loading a snapshot.
+    svc.rearm_in_flight_commands();
+
+    let status = wait_for_command_status(&svc, command_id, "Success").await;
+    assert_eq!(
+        status, "Success",
+        "restored Pending command must be re-advanced, not stranded"
+    );
+    assert_eq!(
+        persisted_command_status(&store, command_id).as_deref(),
+        Some("Success"),
+        "re-armed completion must persist the terminal status"
+    );
+}

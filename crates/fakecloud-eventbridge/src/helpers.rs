@@ -1179,6 +1179,37 @@ pub(crate) fn deliver_to_logs(
     }
 }
 
+/// Deliver an EventBridge event to CloudWatch Logs and persist the mutated
+/// Logs state through its snapshot hook, so an event delivered to a Logs
+/// target survives a restart. Every other target type routes through
+/// `DeliveryBus`, which persists the target service; the Logs path is a
+/// direct `logs_state.write()`, so without firing `logs_persist` here the
+/// delivered `LogEvent` would be lost on the next restart.
+///
+/// The write is synchronous (under the Logs state lock); the persist is
+/// offloaded to a detached task because the dispatch path is synchronous
+/// (the `EventBridgeDelivery` trait and the scheduler tick are not async at
+/// this layer). This fire-and-forget shape matches the other target types.
+/// When invoked outside a tokio runtime (e.g. a direct unit test), the
+/// persist is skipped rather than panicking.
+pub(crate) fn deliver_to_logs_and_persist(
+    logs_state: &SharedLogsState,
+    logs_persist: Option<&fakecloud_persistence::SnapshotHook>,
+    log_group_arn: &str,
+    payload: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+) {
+    deliver_to_logs(logs_state, log_group_arn, payload, timestamp);
+    if let Some(hook) = logs_persist {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let hook = hook.clone();
+            tokio::spawn(async move {
+                hook().await;
+            });
+        }
+    }
+}
+
 /// Apply connection auth parameters to an outgoing HTTP request.
 pub(crate) fn apply_connection_auth(
     mut builder: reqwest::RequestBuilder,
@@ -1231,6 +1262,11 @@ pub(crate) struct EventDispatchContext<'a> {
     pub(crate) delivery: &'a std::sync::Arc<fakecloud_core::delivery::DeliveryBus>,
     pub(crate) lambda_state: Option<&'a fakecloud_lambda::SharedLambdaState>,
     pub(crate) logs_state: Option<&'a fakecloud_logs::SharedLogsState>,
+    /// Persist hook for the CloudWatch Logs state, fired after a delivery to a
+    /// Logs target so the written `LogEvent` survives a restart. `None` when no
+    /// Logs snapshot store is wired (memory mode) or the caller doesn't route
+    /// to Logs.
+    pub(crate) logs_persist: Option<&'a fakecloud_persistence::SnapshotHook>,
     pub(crate) container_runtime:
         &'a Option<std::sync::Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
     pub(crate) account_id: &'a str,
@@ -1333,7 +1369,7 @@ pub(crate) fn dispatch_event_target(
             });
         }
         if let Some(log_state) = ctx.logs_state {
-            deliver_to_logs(log_state, arn, &body_str, now);
+            deliver_to_logs_and_persist(log_state, ctx.logs_persist, arn, &body_str, now);
         }
     } else if arn.contains(":kinesis:") {
         tracing::info!(
@@ -1414,5 +1450,116 @@ pub(crate) fn dispatch_event_target(
                 );
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod logs_persist_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Snapshot store that records the last bytes written, so the test can
+    /// assert the delivered LogEvent was actually persisted.
+    #[derive(Default)]
+    struct CapturingSnapshotStore {
+        last: std::sync::Mutex<Option<Vec<u8>>>,
+    }
+
+    impl fakecloud_persistence::SnapshotStore for CapturingSnapshotStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.last.lock().unwrap().clone())
+        }
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            *self.last.lock().unwrap() = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    fn empty_logs_state() -> fakecloud_logs::SharedLogsState {
+        Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                "123456789012",
+                "us-east-1",
+                "http://localhost:4566",
+            ),
+        ))
+    }
+
+    /// Delivering an EventBridge event to a CloudWatch Logs target must persist
+    /// the mutated Logs state through the snapshot hook, so the LogEvent
+    /// survives a restart. Every other target type persists via the
+    /// DeliveryBus; the Logs path is a direct `logs_state.write()` that
+    /// previously had no persistence at all.
+    #[tokio::test]
+    async fn deliver_to_logs_persists_through_hook() {
+        let logs_state = empty_logs_state();
+        let store: Arc<CapturingSnapshotStore> = Arc::new(CapturingSnapshotStore::default());
+
+        // Build the same persist hook shape the server wires from main.rs.
+        let hook: fakecloud_persistence::SnapshotHook = {
+            let state = logs_state.clone();
+            let store_dyn: Arc<dyn fakecloud_persistence::SnapshotStore> = store.clone();
+            let lock = Arc::new(tokio::sync::Mutex::new(()));
+            Arc::new(move || {
+                let state = state.clone();
+                let store_dyn = store_dyn.clone();
+                let lock = lock.clone();
+                Box::pin(async move {
+                    fakecloud_logs::save_logs_snapshot(&state, Some(store_dyn), &lock).await;
+                })
+            })
+        };
+
+        let arn = "arn:aws:logs:us-east-1:123456789012:log-group:/eb/target:*";
+        deliver_to_logs_and_persist(
+            &logs_state,
+            Some(&hook),
+            arn,
+            "{\"hello\":\"world\"}",
+            chrono::Utc::now(),
+        );
+
+        // The persist is a detached task; poll the capturing store until it
+        // records the write (bounded so a regression fails fast).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if store.last.lock().unwrap().is_some() {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "logs persist hook never fired after a Logs-target delivery"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+
+        // The persisted snapshot must round-trip and contain the delivered event.
+        let bytes = store.last.lock().unwrap().clone().unwrap();
+        let snapshot: fakecloud_logs::LogsSnapshot = serde_json::from_slice(&bytes).unwrap();
+        let accounts = snapshot.accounts.expect("multi-account snapshot");
+        let logs = accounts.get("123456789012").expect("account present");
+        let group = logs
+            .log_groups
+            .get("/eb/target")
+            .expect("auto-created log group persisted");
+        let stream = group
+            .log_streams
+            .get("events")
+            .expect("events stream persisted");
+        assert_eq!(stream.events.len(), 1, "one delivered event persisted");
+        assert_eq!(stream.events[0].message, "{\"hello\":\"world\"}");
+    }
+
+    /// Without a persist hook (memory mode), delivery still writes to the live
+    /// Logs state and does not panic.
+    #[tokio::test]
+    async fn deliver_to_logs_without_hook_still_writes_state() {
+        let logs_state = empty_logs_state();
+        let arn = "arn:aws:logs:us-east-1:123456789012:log-group:/eb/nohook:*";
+        deliver_to_logs_and_persist(&logs_state, None, arn, "payload", chrono::Utc::now());
+
+        let accounts = logs_state.read();
+        let logs = accounts.get("123456789012").unwrap();
+        assert!(logs.log_groups.contains_key("/eb/nohook"));
     }
 }

@@ -312,6 +312,11 @@ pub struct Scheduler {
     delivery: Arc<DeliveryBus>,
     lambda_state: Option<SharedLambdaState>,
     logs_state: Option<SharedLogsState>,
+    /// Persist hook for CloudWatch Logs, fired after a scheduled rule delivers
+    /// to a Logs target. The rule scheduler is the pure side-channel: it fires
+    /// on a timer with no request-path snapshot, so without writing through
+    /// here the delivered `LogEvent` would vanish on the next restart.
+    logs_persist: Option<fakecloud_persistence::SnapshotHook>,
     container_runtime: Option<Arc<ContainerRuntime>>,
     /// Persist hook. Firing a rule advances its `last_fired` directly, outside
     /// the service's action-dispatch path that is otherwise the only thing that
@@ -330,6 +335,7 @@ impl Scheduler {
             delivery,
             lambda_state: None,
             logs_state: None,
+            logs_persist: None,
             container_runtime: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
@@ -350,6 +356,13 @@ impl Scheduler {
 
     pub fn with_logs(mut self, logs_state: SharedLogsState) -> Self {
         self.logs_state = Some(logs_state);
+        self
+    }
+
+    /// Wire the CloudWatch Logs persist hook so a scheduled rule delivering to
+    /// a Logs target writes the event through to the Logs snapshot.
+    pub fn with_logs_persist(mut self, hook: fakecloud_persistence::SnapshotHook) -> Self {
+        self.logs_persist = Some(hook);
         self
     }
 
@@ -506,6 +519,7 @@ impl Scheduler {
                 delivery: &self.delivery,
                 lambda_state: self.lambda_state.as_ref(),
                 logs_state: self.logs_state.as_ref(),
+                logs_persist: self.logs_persist.as_ref(),
                 container_runtime: &self.container_runtime,
                 account_id: &account_id,
                 region: &region,
