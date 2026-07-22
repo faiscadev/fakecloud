@@ -771,6 +771,21 @@ pub(crate) async fn settle_cluster_up(
     }
 }
 
+/// Whether a persisted cluster in this state should have its backing broker
+/// container re-spawned on restart. `UPDATING` is included: an `Update*` in
+/// flight when the snapshot was taken left the cluster mid-window, and
+/// `state.rs` `reconcile` settles `UPDATING -> ACTIVE` on the next read -- so
+/// without re-spawning here a describe would report ACTIVE with a dead broker
+/// (RDS #1338 class). `HEALING`/`MAINTENANCE` are never persisted (they only
+/// appear transiently in the reconcile match), but are treated as recoverable
+/// too so any future code path that persists them stays safe.
+fn cluster_state_recoverable(state: &str) -> bool {
+    matches!(
+        state,
+        "ACTIVE" | "CREATING" | "REBOOTING_BROKER" | "UPDATING" | "HEALING" | "MAINTENANCE"
+    )
+}
+
 /// Bring a persisted cluster's broker back after a restart: re-attach the
 /// persisted container if it still exists (preserving the topic log), otherwise
 /// create a fresh one. Both phases retry with backoff so a transient failure
@@ -1164,9 +1179,7 @@ impl KafkaService {
                     if !runtime_present || serverless {
                         continue;
                     }
-                    let recoverable =
-                        matches!(st.as_str(), "ACTIVE" | "CREATING" | "REBOOTING_BROKER");
-                    if !recoverable {
+                    if !cluster_state_recoverable(&st) {
                         continue;
                     }
                     // Mark CREATING so a describe during recovery doesn't advertise
@@ -2932,6 +2945,22 @@ mod tests {
             "",
         )));
         KafkaService::new(state)
+    }
+
+    #[test]
+    fn updating_cluster_is_recoverable_on_restart() {
+        // A cluster snapshotted mid-Update (state UPDATING) must be re-spawned
+        // on restart, otherwise reconcile settles it to ACTIVE with a dead
+        // broker container.
+        assert!(cluster_state_recoverable("UPDATING"));
+        // Existing recoverable states stay recoverable.
+        assert!(cluster_state_recoverable("ACTIVE"));
+        assert!(cluster_state_recoverable("CREATING"));
+        assert!(cluster_state_recoverable("REBOOTING_BROKER"));
+        // Terminal / not-yet-provisioned states are not recovered.
+        assert!(!cluster_state_recoverable("DELETING"));
+        assert!(!cluster_state_recoverable("FAILED"));
+        assert!(!cluster_state_recoverable(""));
     }
 
     fn ctx(region: &str) -> Ctx {
