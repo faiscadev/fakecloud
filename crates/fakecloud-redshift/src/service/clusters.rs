@@ -292,6 +292,28 @@ impl RedshiftService {
         if let Some(v) = param(req, "MaintenanceTrackName") {
             c.maintenance_track_name = v;
         }
+        if let Some(v) = bool_param(req, "Encrypted") {
+            c.encrypted = v;
+        }
+        if let Some(v) = param(req, "KmsKeyId") {
+            c.kms_key_id = Some(v);
+        }
+        if let Some(v) = param(req, "ElasticIp") {
+            c.elastic_ip = Some(v);
+        }
+        if let Some(v) = int_param(req, "Port") {
+            c.endpoint_port = v;
+        }
+        if let Some(v) = param(req, "AvailabilityZone") {
+            c.availability_zone = v;
+        }
+        if let Some(v) = bool_param(req, "AvailabilityZoneRelocation") {
+            c.availability_zone_relocation_status = if v {
+                "enabled".to_string()
+            } else {
+                "disabled".to_string()
+            };
+        }
         let sgs = member_list(req, "ClusterSecurityGroups", "ClusterSecurityGroupName");
         if !sgs.is_empty() {
             c.cluster_security_groups = sgs;
@@ -300,7 +322,19 @@ impl RedshiftService {
         if !vpc_sgs.is_empty() {
             c.vpc_security_group_ids = vpc_sgs;
         }
+        // A rename stamps the new identifier onto the cluster before it is
+        // rendered so the response echoes the new name.
+        let new_id = param(req, "NewClusterIdentifier").filter(|n| n != &id);
+        if let Some(nid) = &new_id {
+            c.cluster_identifier = nid.clone();
+        }
         let out = render_cluster(c);
+        // Re-key the cluster in the map so subsequent Describe/Modify/Delete
+        // resolve under the new identifier (the old name 404s).
+        if let Some(nid) = new_id {
+            let renamed = acct.clusters.remove(&id).expect("cluster fetched above");
+            acct.clusters.insert(nid, renamed);
+        }
         Ok(xml_resp(
             "ModifyCluster",
             format!("<Cluster>{out}</Cluster>"),

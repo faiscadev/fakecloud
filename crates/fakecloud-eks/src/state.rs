@@ -74,6 +74,12 @@ pub struct Nodegroup {
     /// Per-nodegroup updates keyed by update id, disambiguated from cluster
     /// updates by the `nodegroupName` query param on Describe/ListUpdates.
     pub updates: BTreeMap<String, Update>,
+    /// Present only when the caller supplied `nodeRepairConfig`.
+    #[serde(default)]
+    pub node_repair_config: Option<serde_json::Value>,
+    /// Present only when the caller supplied `warmPoolConfig`.
+    #[serde(default)]
+    pub warm_pool_config: Option<serde_json::Value>,
 }
 
 /// An EKS add-on, a sub-resource of a cluster (e.g. `vpc-cni`, `coredns`).

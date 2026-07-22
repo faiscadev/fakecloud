@@ -567,3 +567,40 @@ async fn put_configuration_aggregator_persists_create_time_tags() {
     assert_eq!(tags["Tags"][0]["Key"], "owner");
     assert_eq!(tags["Tags"][0]["Value"], "data");
 }
+
+/// PutRemediationExceptions must store the supplied ExpirationTime and
+/// DescribeRemediationExceptions must echo it back (it was previously dropped,
+/// producing a Terraform perpetual diff on the expiration field).
+#[tokio::test]
+async fn remediation_exception_round_trips_expiration_time() {
+    let svc = service();
+    let acct = "111111111111";
+    // 2026-08-01T00:00:00Z in epoch seconds.
+    let expiration = 1_785_542_400_f64;
+    call(
+        &svc,
+        "PutRemediationExceptions",
+        acct,
+        json!({
+            "ConfigRuleName": "my-rule",
+            "ResourceKeys": [
+                { "ResourceType": "AWS::S3::Bucket", "ResourceId": "b-1" }
+            ],
+            "Message": "temporary waiver",
+            "ExpirationTime": expiration,
+        }),
+    )
+    .await;
+
+    let out = call(
+        &svc,
+        "DescribeRemediationExceptions",
+        acct,
+        json!({ "ConfigRuleName": "my-rule" }),
+    )
+    .await;
+    let exc = &out["RemediationExceptions"][0];
+    assert_eq!(exc["ConfigRuleName"], json!("my-rule"));
+    assert_eq!(exc["ResourceId"], json!("b-1"));
+    assert_eq!(exc["ExpirationTime"], json!(expiration));
+}

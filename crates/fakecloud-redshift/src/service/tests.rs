@@ -698,3 +698,82 @@ fn scheduled_action_start_end_time_round_trip() {
     assert!(after.contains("<StartTime>2026-08-15T12:30:00.000Z</StartTime>"));
     assert!(after.contains("<EndTime>2026-09-01T00:00:00.000Z</EndTime>"));
 }
+
+#[test]
+fn modify_cluster_rename_rekeys_the_cluster() {
+    let svc = service();
+    ok(
+        &svc,
+        "CreateCluster",
+        &[
+            ("ClusterIdentifier", "old-name"),
+            ("NodeType", "ra3.xlplus"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "Passw0rd123"),
+        ],
+    );
+    // The rename echoes the new identifier in the ModifyCluster response.
+    let renamed = ok(
+        &svc,
+        "ModifyCluster",
+        &[
+            ("ClusterIdentifier", "old-name"),
+            ("NewClusterIdentifier", "new-name"),
+        ],
+    );
+    assert!(renamed.contains("<ClusterIdentifier>new-name</ClusterIdentifier>"));
+
+    // DescribeClusters on the new id returns it; the old id 404s.
+    let listed = ok(
+        &svc,
+        "DescribeClusters",
+        &[("ClusterIdentifier", "new-name")],
+    );
+    assert!(listed.contains("<ClusterIdentifier>new-name</ClusterIdentifier>"));
+    assert_eq!(
+        err_code(
+            &svc,
+            "DescribeClusters",
+            &[("ClusterIdentifier", "old-name")]
+        ),
+        "ClusterNotFound"
+    );
+    // A later op on the new name resolves (delete succeeds, no 404).
+    ok(&svc, "DeleteCluster", &[("ClusterIdentifier", "new-name")]);
+}
+
+#[test]
+fn modify_cluster_persists_encryption_kms_and_port() {
+    let svc = service();
+    ok(
+        &svc,
+        "CreateCluster",
+        &[
+            ("ClusterIdentifier", "enc"),
+            ("NodeType", "ra3.xlplus"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "Passw0rd123"),
+        ],
+    );
+    let out = ok(
+        &svc,
+        "ModifyCluster",
+        &[
+            ("ClusterIdentifier", "enc"),
+            ("Encrypted", "true"),
+            ("KmsKeyId", "arn:aws:kms:us-east-1:123456789012:key/abcd"),
+            ("Port", "5555"),
+            ("AvailabilityZone", "us-east-1b"),
+            ("AvailabilityZoneRelocation", "true"),
+        ],
+    );
+    assert!(out.contains("<Encrypted>true</Encrypted>"));
+
+    let listed = ok(&svc, "DescribeClusters", &[("ClusterIdentifier", "enc")]);
+    assert!(listed.contains("<Encrypted>true</Encrypted>"));
+    assert!(listed.contains("<KmsKeyId>arn:aws:kms:us-east-1:123456789012:key/abcd</KmsKeyId>"));
+    assert!(listed.contains("<Port>5555</Port>"));
+    assert!(listed.contains("<AvailabilityZone>us-east-1b</AvailabilityZone>"));
+    assert!(listed
+        .contains("<AvailabilityZoneRelocationStatus>enabled</AvailabilityZoneRelocationStatus>"));
+}

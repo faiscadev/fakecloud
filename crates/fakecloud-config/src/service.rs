@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use http::StatusCode;
 use parking_lot::Mutex;
 use serde_json::{json, Value};
@@ -2394,6 +2394,11 @@ impl ConfigService {
             .get("Message")
             .and_then(Value::as_str)
             .map(String::from);
+        // ExpirationTime is a request-level field applied to every supplied key.
+        let expiration_time = body
+            .get("ExpirationTime")
+            .and_then(Value::as_f64)
+            .and_then(|s| DateTime::from_timestamp(s as i64, 0));
         let mut st = self.state.write();
         let acc = st.account_mut(account);
         for k in &keys {
@@ -2415,7 +2420,7 @@ impl ConfigService {
                     resource_type: rt,
                     resource_id: rid,
                     message: message.clone(),
-                    expiration_time: None,
+                    expiration_time,
                 },
             );
         }
@@ -2436,12 +2441,16 @@ impl ConfigService {
                     .values()
                     .filter(|e| e.config_rule_name == rule_name)
                     .map(|e| {
-                        json!({
+                        let mut v = json!({
                             "ConfigRuleName": e.config_rule_name,
                             "ResourceType": e.resource_type,
                             "ResourceId": e.resource_id,
                             "Message": e.message,
-                        })
+                        });
+                        if let Some(exp) = e.expiration_time {
+                            v["ExpirationTime"] = json!(exp.timestamp() as f64);
+                        }
+                        v
                     })
                     .collect()
             })

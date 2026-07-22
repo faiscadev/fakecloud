@@ -656,6 +656,12 @@ pub(crate) fn nodegroup_json(n: &Nodegroup) -> Value {
     if let Some(lt) = &n.launch_template {
         out["launchTemplate"] = lt.clone();
     }
+    if let Some(nrc) = &n.node_repair_config {
+        out["nodeRepairConfig"] = nrc.clone();
+    }
+    if let Some(wpc) = &n.warm_pool_config {
+        out["warmPoolConfig"] = wpc.clone();
+    }
     out
 }
 

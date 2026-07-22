@@ -2393,3 +2393,70 @@ async fn create_cluster_stores_encryption_config() {
         "arn:aws:kms:us-east-1:111122223333:key/abc"
     );
 }
+
+#[tokio::test]
+async fn nodegroup_round_trips_node_repair_and_warm_pool_config() {
+    let svc = EksService::new(make_state());
+    svc.handle(make_request(
+        Method::POST,
+        "/clusters",
+        &create_body("ng-cl"),
+    ))
+    .await
+    .unwrap();
+
+    let create = json!({
+        "nodegroupName": "ng1",
+        "nodeRole": "arn:aws:iam::111122223333:role/eks-node",
+        "subnets": ["subnet-1", "subnet-2"],
+        "nodeRepairConfig": { "enabled": true },
+        "warmPoolConfig": { "enabled": true, "minSize": 1, "maxGroupPreparedCapacity": 3 },
+    })
+    .to_string();
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/clusters/ng-cl/node-groups",
+            &create,
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["nodegroup"]["nodeRepairConfig"]["enabled"], true);
+    assert_eq!(v["nodegroup"]["warmPoolConfig"]["minSize"], 1);
+
+    // Describe echoes both configs back.
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            "/clusters/ng-cl/node-groups/ng1",
+            "",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["nodegroup"]["nodeRepairConfig"]["enabled"], true);
+    assert_eq!(
+        v["nodegroup"]["warmPoolConfig"]["maxGroupPreparedCapacity"],
+        3
+    );
+
+    // UpdateNodegroupConfig toggling nodeRepairConfig is reflected on Describe.
+    svc.handle(make_request(
+        Method::POST,
+        "/clusters/ng-cl/node-groups/ng1/update-config",
+        &json!({ "nodeRepairConfig": { "enabled": false } }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            "/clusters/ng-cl/node-groups/ng1",
+            "",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["nodegroup"]["nodeRepairConfig"]["enabled"], false);
+}
