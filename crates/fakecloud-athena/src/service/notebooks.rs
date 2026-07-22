@@ -391,12 +391,46 @@ impl AthenaService {
             .get("CodeBlock")
             .and_then(Value::as_str)
             .map(str::to_owned);
+        let id = synth_uuid();
+        let now = Utc::now();
+
+        // Resolve the result location from the session's workgroup so any written
+        // result is addressable. Without a configured location we advertise no
+        // ResultS3Uri at all rather than a dangling one pointing at a nonexistent
+        // object (the pre-fix behaviour fabricated s3://athena-calc-results/...).
+        let output_location = {
+            let mut state = self.state.write();
+            let account = account_mut(&mut state, &req.account_id);
+            let session = account
+                .sessions
+                .get(&session_id)
+                .ok_or_else(|| invalid_request(format!("Session {session_id} not found")))?;
+            let wg = session.work_group.clone();
+            account
+                .work_groups
+                .get(&wg)
+                .and_then(|w| w.configuration.as_ref())
+                .and_then(|c| c.get("ResultConfiguration"))
+                .and_then(|rc| rc.get("OutputLocation"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+
+        // Write a small result object to the fake S3 store so the ResultS3Uri
+        // resolves. Only when both a location and its bucket exist; otherwise no
+        // result URI is advertised.
+        let (working_directory, result_type) = self.write_calculation_result(
+            &req.account_id,
+            output_location.as_deref(),
+            &id,
+            code_block.as_deref(),
+        );
+
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
         if !account.sessions.contains_key(&session_id) {
             return Err(invalid_request(format!("Session {session_id} not found")));
         }
-        let id = synth_uuid();
         account.calculations.insert(
             id.clone(),
             Calculation {
@@ -405,16 +439,73 @@ impl AthenaService {
                 description,
                 state: "COMPLETED".to_string(),
                 state_change_reason: None,
-                working_directory: Some(format!("s3://athena-calc-results/{}", Uuid::new_v4())),
+                working_directory,
                 code_block,
-                submission_date_time: Utc::now(),
-                completion_date_time: Some(Utc::now()),
+                submission_date_time: now,
+                completion_date_time: Some(now),
+                dpu_execution_in_millis: Some(0),
+                progress: Some("100%".to_string()),
+                result_type,
             },
         );
         Ok(AwsResponse::ok_json(json!({
             "CalculationExecutionId": id,
             "State": "COMPLETED",
         })))
+    }
+
+    /// Persist a small JSON result object for a calculation to the fake S3 store
+    /// so the advertised `ResultS3Uri` resolves. Returns `(working_directory,
+    /// result_type)`; both `None` when there is no configured result location,
+    /// no S3 store wired, or the target bucket does not exist (in which case the
+    /// calculation advertises no downloadable result rather than a dangling URI).
+    fn write_calculation_result(
+        &self,
+        account_id: &str,
+        output_location: Option<&str>,
+        calc_id: &str,
+        code_block: Option<&str>,
+    ) -> (Option<String>, Option<String>) {
+        let (Some(base), Some(s3)) = (output_location, self.s3.as_ref()) else {
+            return (None, None);
+        };
+        let Some((bucket_name, mut prefix)) = parse_s3_location(base) else {
+            return (None, None);
+        };
+        if !prefix.is_empty() && !prefix.ends_with('/') {
+            prefix.push('/');
+        }
+        let key = format!("{prefix}{calc_id}/result.json");
+        let payload = serde_json::to_vec(&json!({
+            "calculationExecutionId": calc_id,
+            "codeBlock": code_block.unwrap_or_default(),
+        }))
+        .unwrap_or_default();
+        let size = payload.len() as u64;
+        let etag = format!("\"{}\"", Uuid::new_v4().simple());
+
+        let mut guard = s3.write();
+        let acct = guard.get_or_create(account_id);
+        let Some(bucket) = acct.buckets.get_mut(&bucket_name) else {
+            return (None, None);
+        };
+        bucket.objects.insert(
+            key.clone(),
+            fakecloud_s3::S3Object {
+                key: key.clone(),
+                body: fakecloud_s3::memory_body(bytes::Bytes::from(payload)),
+                content_type: "application/json".to_string(),
+                etag,
+                size,
+                last_modified: Utc::now(),
+                storage_class: "STANDARD".to_string(),
+                ..Default::default()
+            },
+        );
+        (
+            Some(format!("s3://{bucket_name}/{key}")),
+            Some("JSON".to_string()),
+        )
     }
 
     pub(super) fn stop_calculation_execution(
@@ -481,8 +572,8 @@ impl AthenaService {
         Ok(AwsResponse::ok_json(json!({
             "Status": calculation_status_json(c),
             "Statistics": {
-                "DpuExecutionInMillis": 100,
-                "Progress": "100%",
+                "DpuExecutionInMillis": c.dpu_execution_in_millis.unwrap_or(0),
+                "Progress": c.progress.clone().unwrap_or_else(|| "100%".to_string()),
             }
         })))
     }
@@ -546,4 +637,18 @@ impl AthenaService {
         }
         Ok(AwsResponse::ok_json(response))
     }
+}
+
+/// Split an `s3://bucket/prefix` URL into `(bucket, prefix)`. Returns `None` for
+/// a non-`s3://` URL or an empty bucket.
+fn parse_s3_location(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("s3://")?;
+    let (bucket, prefix) = match rest.split_once('/') {
+        Some((b, p)) => (b.to_string(), p.to_string()),
+        None => (rest.to_string(), String::new()),
+    };
+    if bucket.is_empty() {
+        return None;
+    }
+    Some((bucket, prefix))
 }

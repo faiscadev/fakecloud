@@ -513,7 +513,7 @@ impl AppSyncService {
             "StartSchemaMerge" => self.start_schema_merge(&ctx, l(1)),
 
             // ---- Data-source introspection ----
-            "StartDataSourceIntrospection" => Self::start_ds_introspection(),
+            "StartDataSourceIntrospection" => self.start_ds_introspection(&ctx, &body),
             "GetDataSourceIntrospection" => self.get_ds_introspection(&ctx, l(0)),
 
             // ---- Tags ----
@@ -1798,14 +1798,18 @@ impl AppSyncService {
         require_label(assoc_id, "associationId")?;
         require_query(q, "format")?;
         let guard = self.state.read();
-        let exists = guard
+        let data = guard
             .get(&ctx.account)
-            .map(|d| d.source_api_associations.contains_key(assoc_id))
-            .unwrap_or(false);
-        if !exists {
-            return Err(not_found(&format!("Association {assoc_id} not found.")));
-        }
-        Ok(ok(json!({ "types": [] })))
+            .filter(|d| d.source_api_associations.contains_key(assoc_id))
+            .ok_or_else(|| not_found(&format!("Association {assoc_id} not found.")))?;
+        // Types merged into the merged API by StartSchemaMerge. Empty until a
+        // merge has run for this association.
+        let items: Vec<Value> = data
+            .association_types
+            .get(assoc_id)
+            .map(|m| m.values().cloned().collect())
+            .unwrap_or_default();
+        Ok(ok(json!({ "types": items })))
     }
 
     fn update_source_api_association(
@@ -1853,42 +1857,118 @@ impl AppSyncService {
         assoc_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         require_label(assoc_id, "associationId")?;
-        let guard = self.state.read();
-        let exists = guard
-            .get(&ctx.account)
-            .map(|d| d.source_api_associations.contains_key(assoc_id))
-            .unwrap_or(false);
-        if exists {
-            Ok(ok(
-                json!({ "sourceApiAssociationStatus": "MERGE_IN_PROGRESS" }),
-            ))
-        } else {
-            Err(not_found(&format!("Association {assoc_id} not found.")))
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        // Resolve the source + merged APIs from the association before mutating.
+        let (source_id, merged_id) = {
+            let assoc = data
+                .source_api_associations
+                .get(assoc_id)
+                .ok_or_else(|| not_found(&format!("Association {assoc_id} not found.")))?;
+            let source_id = assoc
+                .get("sourceApiId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            let merged_id = assoc
+                .get("mergedApiId")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            (source_id, merged_id)
+        };
+        // Copy the source API's types into both the association's merged-type set
+        // (returned by ListTypesByAssociation) and the merged API's own type
+        // store, so the merge is observable rather than a no-op.
+        let source_types: Vec<(String, Value)> = data
+            .types
+            .get(&source_id)
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+            .unwrap_or_default();
+        let merged_types = data
+            .association_types
+            .entry(assoc_id.to_string())
+            .or_default();
+        for (name, ty) in &source_types {
+            merged_types.insert(name.clone(), ty.clone());
         }
+        if !merged_id.is_empty() {
+            let dest = data.types.entry(merged_id).or_default();
+            for (name, ty) in &source_types {
+                dest.insert(name.clone(), ty.clone());
+            }
+        }
+        // Reflect the completed synchronous merge on the association record.
+        if let Some(assoc) = data
+            .source_api_associations
+            .get_mut(assoc_id)
+            .and_then(Value::as_object_mut)
+        {
+            assoc.insert("sourceApiAssociationStatus".into(), json!("MERGE_SUCCESS"));
+        }
+        Ok(ok(json!({ "sourceApiAssociationStatus": "MERGE_SUCCESS" })))
     }
 
     // ===================== Data-source introspection =====================
 
-    fn start_ds_introspection() -> Result<AwsResponse, AwsServiceError> {
+    fn start_ds_introspection(
+        &self,
+        ctx: &Ctx,
+        body: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
         let id = gen_hex(20);
+        // The emulator has no live RDS instance to introspect, so the discovered
+        // schema is an empty-but-well-formed IntrospectionResult. The record is
+        // persisted so the Start -> Get poll flow retrieves it instead of a
+        // permanent 404. The RDS config the caller supplied is echoed back on the
+        // stored record so a reader can see what was requested.
+        let rds_config = body.get("rdsDataApiConfig").cloned().unwrap_or(Value::Null);
+        let record = json!({
+            "introspectionId": id,
+            "introspectionStatus": "SUCCESS",
+            "introspectionStatusDetail": "Introspection completed.",
+            "introspectionResult": {
+                "models": [],
+            },
+            // Retained for reads/introspection; not part of the Get output shape.
+            "rdsDataApiConfig": rds_config,
+        });
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        data.introspections.insert(id.clone(), record);
         Ok(ok(json!({
             "introspectionId": id,
-            "introspectionStatus": "PROCESSING",
-            "introspectionStatusDetail": "Introspection started.",
+            "introspectionStatus": "SUCCESS",
+            "introspectionStatusDetail": "Introspection completed.",
         })))
     }
 
     fn get_ds_introspection(
         &self,
-        _ctx: &Ctx,
+        ctx: &Ctx,
         introspection_id: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         require_label(introspection_id, "introspectionId")?;
-        // Introspection jobs are ephemeral; a synthetic/unknown id is a
-        // declared NotFoundException. Real jobs would settle here.
-        Err(not_found(&format!(
-            "Introspection {introspection_id} not found."
-        )))
+        let guard = self.state.read();
+        let record = guard
+            .get(&ctx.account)
+            .and_then(|d| d.introspections.get(introspection_id))
+            .ok_or_else(|| not_found(&format!("Introspection {introspection_id} not found.")))?;
+        Ok(ok(json!({
+            "introspectionId": record.get("introspectionId").cloned().unwrap_or(Value::Null),
+            "introspectionStatus": record
+                .get("introspectionStatus")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "introspectionStatusDetail": record
+                .get("introspectionStatusDetail")
+                .cloned()
+                .unwrap_or(Value::Null),
+            "introspectionResult": record
+                .get("introspectionResult")
+                .cloned()
+                .unwrap_or(json!({ "models": [] })),
+        })))
     }
 
     // ===================== Tags =====================
@@ -2509,6 +2589,87 @@ mod tests {
             .unwrap();
         let listed = body_json(&s.list_tags_for_resource(&ctx(), arn).unwrap());
         assert_eq!(listed["tags"]["team"], json!("obs"));
+    }
+
+    #[test]
+    fn data_source_introspection_start_then_get_is_retrievable() {
+        // Regression: StartDataSourceIntrospection persisted nothing and
+        // GetDataSourceIntrospection unconditionally 404'd, so the Start -> Get
+        // poll flow could never retrieve the discovered schema.
+        let s = svc();
+        let started = body_json(
+            &s.start_ds_introspection(
+                &ctx(),
+                &json!({
+                    "rdsDataApiConfig": {
+                        "resourceArn": "arn:aws:rds:us-east-1:000000000000:cluster:db",
+                        "secretArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:s",
+                        "databaseName": "app",
+                    }
+                }),
+            )
+            .unwrap(),
+        );
+        let id = started["introspectionId"].as_str().unwrap().to_string();
+        assert_eq!(started["introspectionStatus"], json!("SUCCESS"));
+
+        let got = body_json(&s.get_ds_introspection(&ctx(), &id).unwrap());
+        assert_eq!(got["introspectionId"], json!(id));
+        assert_eq!(got["introspectionStatus"], json!("SUCCESS"));
+        assert!(got["introspectionResult"]["models"].is_array());
+
+        // Unknown id is still a declared NotFoundException.
+        let err = err_of(s.get_ds_introspection(&ctx(), "does-not-exist"));
+        assert_eq!(err.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn schema_merge_populates_types_by_association() {
+        // Regression: StartSchemaMerge never merged source types and
+        // ListTypesByAssociation always returned an empty list.
+        let s = svc();
+        let source_id = make_api(&s);
+        let merged_id = make_api(&s);
+        // Define a type on the source API.
+        s.create_type(
+            &ctx(),
+            &source_id,
+            &json!({ "definition": "type Widget { id: ID! }", "format": "SDL" }),
+        )
+        .unwrap();
+        // Before a merge there is nothing to list.
+        let assoc = body_json(
+            &s.associate_source_api(
+                &ctx(),
+                &merged_id,
+                &json!({ "sourceApiIdentifier": source_id }),
+            )
+            .unwrap(),
+        );
+        let assoc_id = assoc["sourceApiAssociation"]["associationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let fmt = [("format".to_string(), "SDL".to_string())];
+        let empty = body_json(
+            &s.list_types_by_association(&ctx(), &merged_id, &assoc_id, &fmt)
+                .unwrap(),
+        );
+        assert!(empty["types"].as_array().unwrap().is_empty());
+
+        // After the merge the source type is associated with the merged API.
+        let merged = body_json(&s.start_schema_merge(&ctx(), &assoc_id).unwrap());
+        assert_eq!(merged["sourceApiAssociationStatus"], json!("MERGE_SUCCESS"));
+        let listed = body_json(
+            &s.list_types_by_association(&ctx(), &merged_id, &assoc_id, &fmt)
+                .unwrap(),
+        );
+        let types = listed["types"].as_array().unwrap();
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0]["name"], json!("Widget"));
+        // The merged API's own type store now carries the merged type too.
+        let on_merged = body_json(&s.list_types(&ctx(), &merged_id, &fmt).unwrap());
+        assert_eq!(on_merged["types"].as_array().unwrap().len(), 1);
     }
 
     #[test]

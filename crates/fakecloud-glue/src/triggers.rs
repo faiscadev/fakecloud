@@ -4,7 +4,9 @@ use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::common::{entity, entity_not_found, new_id, now_ts, req_present, req_str};
+use crate::common::{
+    entity, entity_not_found, new_id, now_ts, req_present, req_str, settle_run_status,
+};
 use crate::generic;
 use crate::service::GlueService;
 
@@ -302,12 +304,15 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         req_str(&body, "Name")?;
-        let run_id = req_str(&body, "RunId")?;
-        let accounts = self.state.read();
-        let run = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.workflow_runs.get(run_id))
+        let run_id = req_str(&body, "RunId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let run = st
+            .workflow_runs
+            .get_mut(&run_id)
             .ok_or_else(|| entity_not_found(format!("WorkflowRun {run_id} not found")))?;
+        settle_run_status(run, "Status", "COMPLETED", Some("CompletedOn"));
+        let run = run.clone();
         Ok(AwsResponse::ok_json(json!({ "Run": run })))
     }
 
@@ -316,18 +321,18 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = req_str(&body, "Name")?;
-        let accounts = self.state.read();
-        let runs: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| {
-                s.workflow_runs
-                    .values()
-                    .filter(|r| r.get("Name").and_then(|n| n.as_str()) == Some(name))
-                    .cloned()
-                    .collect()
+        let name = req_str(&body, "Name")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let runs: Vec<Value> = st
+            .workflow_runs
+            .values_mut()
+            .filter(|r| r.get("Name").and_then(|n| n.as_str()) == Some(name.as_str()))
+            .map(|r| {
+                settle_run_status(r, "Status", "COMPLETED", Some("CompletedOn"));
+                r.clone()
             })
-            .unwrap_or_default();
+            .collect();
         Ok(AwsResponse::ok_json(json!({ "Runs": runs })))
     }
 

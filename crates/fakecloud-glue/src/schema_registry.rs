@@ -60,6 +60,76 @@ fn schema_key(id: &Value) -> Option<String> {
     Some(format!("{reg}\u{1f}{name}"))
 }
 
+/// Compute a diff between two schema-definition strings. Returns an empty string
+/// when the definitions are identical, and a JSON-encoded structural (for JSON
+/// definitions) or line-level (otherwise) diff when they differ. AWS returns a
+/// jsondiffpatch-style `SchemaDiff`; this is a faithful, self-consistent
+/// approximation that is non-empty exactly when the versions differ.
+fn schema_definition_diff(first: &str, second: &str) -> String {
+    if first == second {
+        return String::new();
+    }
+    if let (Ok(a), Ok(b)) = (
+        serde_json::from_str::<Value>(first),
+        serde_json::from_str::<Value>(second),
+    ) {
+        return serde_json::to_string(&json_value_diff(&a, &b)).unwrap_or_default();
+    }
+    let a_lines: Vec<&str> = first.lines().collect();
+    let b_lines: Vec<&str> = second.lines().collect();
+    let added: Vec<&str> = b_lines
+        .iter()
+        .filter(|l| !a_lines.contains(l))
+        .copied()
+        .collect();
+    let removed: Vec<&str> = a_lines
+        .iter()
+        .filter(|l| !b_lines.contains(l))
+        .copied()
+        .collect();
+    serde_json::to_string(&json!({ "added": added, "removed": removed })).unwrap_or_default()
+}
+
+/// Structural diff of two JSON values: added/removed/changed keys, recursing into
+/// nested objects.
+fn json_value_diff(a: &Value, b: &Value) -> Value {
+    match (a, b) {
+        (Value::Object(am), Value::Object(bm)) => {
+            let mut added = serde_json::Map::new();
+            let mut removed = serde_json::Map::new();
+            let mut changed = serde_json::Map::new();
+            for (k, bv) in bm {
+                match am.get(k) {
+                    None => {
+                        added.insert(k.clone(), bv.clone());
+                    }
+                    Some(av) if av != bv => {
+                        changed.insert(k.clone(), json_value_diff(av, bv));
+                    }
+                    _ => {}
+                }
+            }
+            for (k, av) in am {
+                if !bm.contains_key(k) {
+                    removed.insert(k.clone(), av.clone());
+                }
+            }
+            let mut out = serde_json::Map::new();
+            if !added.is_empty() {
+                out.insert("added".into(), Value::Object(added));
+            }
+            if !removed.is_empty() {
+                out.insert("removed".into(), Value::Object(removed));
+            }
+            if !changed.is_empty() {
+                out.insert("changed".into(), Value::Object(changed));
+            }
+            Value::Object(out)
+        }
+        _ => json!({ "old": a, "new": b }),
+    }
+}
+
 impl GlueService {
     // --- registries ---
 
@@ -492,11 +562,50 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        req_present(&body, "SchemaId")?;
-        req_present(&body, "FirstSchemaVersionNumber")?;
-        req_present(&body, "SecondSchemaVersionNumber")?;
+        let schema_id = req_present(&body, "SchemaId")?.clone();
+        let first = req_present(&body, "FirstSchemaVersionNumber")?.clone();
+        let second = req_present(&body, "SecondSchemaVersionNumber")?.clone();
         req_str(&body, "SchemaDiffType")?;
-        Ok(AwsResponse::ok_json(json!({ "Diff": "" })))
+        let key = schema_key(&schema_id)
+            .ok_or_else(|| invalid_input("SchemaId.SchemaName or SchemaId.SchemaArn required"))?;
+        let (reg, name) = key.split_once('\u{1f}').unwrap_or(("", ""));
+
+        let accounts = self.state.read();
+        let st = accounts.get(&req.account_id);
+        // Resolve the two version definitions from stored state rather than
+        // returning a constant empty diff. A version selector is a
+        // `SchemaVersionNumber` ({VersionNumber} or {LatestVersion: true}).
+        let resolve = |selector: &Value| -> Option<String> {
+            let st = st?;
+            let vnum = selector.get("VersionNumber").and_then(|v| v.as_i64());
+            let latest = selector
+                .get("LatestVersion")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            st.schema_versions
+                .values()
+                .filter(|v| {
+                    (v["RegistryName"].as_str() == Some(reg)
+                        && v["SchemaName"].as_str() == Some(name))
+                        || v["SchemaArn"]
+                            .as_str()
+                            .is_some_and(|a| a.ends_with(&format!("/{reg}/{name}")))
+                })
+                .filter(|v| match vnum {
+                    Some(n) if !latest => v["VersionNumber"].as_i64() == Some(n),
+                    _ => true,
+                })
+                .max_by_key(|v| v["VersionNumber"].as_i64().unwrap_or(0))
+                .and_then(|v| v["SchemaDefinition"].as_str().map(str::to_string))
+        };
+        let first_def =
+            resolve(&first).ok_or_else(|| entity_not_found("First schema version not found"))?;
+        let second_def =
+            resolve(&second).ok_or_else(|| entity_not_found("Second schema version not found"))?;
+
+        Ok(AwsResponse::ok_json(json!({
+            "Diff": schema_definition_diff(&first_def, &second_def),
+        })))
     }
 
     // --- schema version metadata ---

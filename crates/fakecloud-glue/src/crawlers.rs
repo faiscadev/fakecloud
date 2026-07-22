@@ -45,6 +45,26 @@ fn crawler_not_running(name: &str) -> AwsServiceError {
     )
 }
 
+/// Settle a crawler that is still `RUNNING` to `READY` on read, attaching a
+/// `LastCrawl` summary. Without this a `StartCrawler` left the crawler `RUNNING`
+/// forever: poll-until-`READY` loops hung, a second `StartCrawler` returned a
+/// permanent `CrawlerRunningException`, and `DeleteCrawler` stayed blocked. The
+/// emulator has no background crawl worker, so the crawl is treated as complete
+/// once the caller polls its state.
+fn settle_crawler(crawler: &mut Value) {
+    if crawler.get("State").and_then(Value::as_str) != Some("RUNNING") {
+        return;
+    }
+    let now = now_ts();
+    if let Some(obj) = crawler.as_object_mut() {
+        obj.insert("State".into(), json!("READY"));
+        obj.insert(
+            "LastCrawl".into(),
+            json!({ "Status": "SUCCEEDED", "StartTime": now }),
+        );
+    }
+}
+
 impl GlueService {
     pub(crate) fn create_crawler(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
@@ -72,22 +92,30 @@ impl GlueService {
 
     pub(crate) fn get_crawler(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let name = req_str(&body, "Name")?;
-        let accounts = self.state.read();
-        let crawler = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.crawlers.get(name))
+        let name = req_str(&body, "Name")?.to_string();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id, &req.region);
+        let crawler = state
+            .crawlers
+            .get_mut(&name)
             .ok_or_else(|| entity_not_found(format!("Crawler {name} not found")))?;
+        settle_crawler(crawler);
+        let crawler = crawler.clone();
         Ok(AwsResponse::ok_json(json!({ "Crawler": crawler })))
     }
 
     pub(crate) fn get_crawlers(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let accounts = self.state.read();
-        let crawlers: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| s.crawlers.values().cloned().collect())
-            .unwrap_or_default();
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id, &req.region);
+        let crawlers: Vec<Value> = state
+            .crawlers
+            .values_mut()
+            .map(|c| {
+                settle_crawler(c);
+                c.clone()
+            })
+            .collect();
         let (page, token) = crate::common::paginate_body(&body, crawlers)?;
         let mut resp = json!({ "Crawlers": page });
         if let Some(t) = token {
@@ -102,14 +130,17 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let names = body["CrawlerNames"].as_array().cloned().unwrap_or_default();
-        let accounts = self.state.read();
-        let store = accounts.get(&req.account_id).map(|s| &s.crawlers);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id, &req.region);
         let mut found = Vec::new();
         let mut not_found = Vec::new();
         for n in &names {
             let Some(name) = n.as_str() else { continue };
-            match store.and_then(|m| m.get(name)) {
-                Some(c) => found.push(c.clone()),
+            match state.crawlers.get_mut(name) {
+                Some(c) => {
+                    settle_crawler(c);
+                    found.push(c.clone());
+                }
                 None => not_found.push(json!(name)),
             }
         }
