@@ -75,14 +75,14 @@ pub(crate) struct Cli {
     #[arg(long, env = "FAKECLOUD_DATA_PATH")]
     pub data_path: Option<PathBuf>,
 
-    /// Bulk-load an AWS-format DynamoDB export at startup (additive; no API
-    /// round-trip). Points at the local `AWSDynamoDB/{export-id}/` folder that
-    /// holds `manifest-summary.json`. Requires `--dynamodb-import-describe-table`.
+    /// Bulk-load AWS-format DynamoDB export(s) at startup. Single export dir if
+    /// --dynamodb-import-describe-table is also set, multi-table root dir if
+    /// not. See /docs/services/dynamodb#importing-an-aws-export-at-startup.
     #[arg(long, env = "FAKECLOUD_DYNAMODB_IMPORT_PATH")]
     pub dynamodb_import_path: Option<PathBuf>,
 
-    /// Path to an `aws dynamodb describe-table` JSON dump supplying the table
-    /// shape (key schema, indexes, billing mode) for `--dynamodb-import-path`.
+    /// `aws dynamodb describe-table` JSON for --dynamodb-import-path in
+    /// single-table mode. Omit for multi-table mode.
     #[arg(long, env = "FAKECLOUD_DYNAMODB_DESCRIBE_TABLE")]
     pub dynamodb_import_describe_table: Option<PathBuf>,
 

@@ -34,7 +34,11 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
 ## Importing an AWS export at startup
 
-Seed a local table from a real DynamoDB S3 export. Two boot flags bulk-load an AWS-format export directly into the store before the server starts serving:
+Seed one or many local tables from real DynamoDB S3 exports. Two boot flags bulk-load AWS-format export(s) directly into the store before the server starts serving. Which mode you get is decided purely by whether `--dynamodb-import-describe-table` is also set:
+
+### Single-table mode
+
+Both flags set together:
 
 - `--dynamodb-import-path` (`FAKECLOUD_DYNAMODB_IMPORT_PATH`) — the local `AWSDynamoDB/<export-id>/` folder that holds `manifest-summary.json` (as produced by an AWS DynamoDB S3 export).
 - `--dynamodb-import-describe-table` (`FAKECLOUD_DYNAMODB_DESCRIBE_TABLE`) — an `aws dynamodb describe-table` JSON dump supplying the table shape (key schema, attribute definitions, indexes, billing mode).
@@ -45,15 +49,39 @@ fakecloud \
   --dynamodb-import-describe-table ./describe-table.json
 ```
 
-Constraints:
+### Multi-table mode
 
-- **Both flags are required together** — passing only one aborts startup.
-- **Idempotent.** The import creates a new table. If a table of that name already exists, the import is skipped with a warning and the existing data is left untouched (no merge, no append, no overwrite). This makes restarting with the flags still set safe.
-- **Additive:** the table is materialised straight in the store. It does not go through `BatchWriteItem` and does not touch the modeled `ImportTable` API operation.
+`--dynamodb-import-path` set alone (no `--dynamodb-import-describe-table`): the path is a root directory of per-table subdirectories, each self-contained with its own `describe-table.json` alongside that table's `manifest-summary.json` / `manifest-files.json` / `data/*.json.gz`. Subdirectory names carry no meaning — each table's name comes from its own `describe-table.json`.
+
+```
+root/
+  Music/
+    describe-table.json
+    manifest-summary.json
+    manifest-files.json
+    data/0001.json.gz
+  Orders/
+    describe-table.json
+    manifest-summary.json
+    manifest-files.json
+    data/0001.json.gz
+```
+
+```sh
+fakecloud --dynamodb-import-path ./root
+```
+
+Every subdirectory is imported using the same rules as single-table mode. Passing `--dynamodb-import-describe-table` together with a multi-table root doesn't apply — it's only read in single-table mode.
+
+### Constraints (both modes)
+
+- **`--dynamodb-import-describe-table` alone, without `--dynamodb-import-path`, aborts startup** — it has nothing to pair with.
+- **Idempotent, per table.** Each import creates a new table. If a table of that name already exists, that table's import is skipped with a warning and its existing data is left untouched (no merge, no append, no overwrite). This makes restarting with the flags still set safe.
+- **Additive:** tables are materialised straight in the store. They do not go through `BatchWriteItem` and do not touch the modeled `ImportTable` API operation.
 - **Targets the default (single) account** named by `--account-id` in the configured region.
 - Only the AWS **`DYNAMODB_JSON`** export format is supported (manifests plus gzipped `data/*.json.gz` files); ION and CSV are not.
-- Every imported item must carry the key attributes declared in the describe-table `KeySchema` with the type declared in `AttributeDefinitions` (the same presence and type checks the normal write path enforces). If the manifests declare an `itemCount` that disagrees with the data actually read, the import is rejected as truncated or corrupt. Any bad or unreadable input aborts startup loudly.
-- Works in either storage mode. Under `--storage-mode=persistent` the imported table is persisted like any other state, so on a later restart it is already present and the import step is skipped (see the idempotent behavior above) rather than re-run.
+- Every imported item must carry the key attributes declared in its describe-table `KeySchema` with the type declared in `AttributeDefinitions` (the same presence and type checks the normal write path enforces). If a table's manifests declare an `itemCount` that disagrees with the data actually read, the whole import is rejected as truncated or corrupt. Any bad or unreadable input — including a multi-table root with no subdirectories, or a subdirectory missing its `describe-table.json` — aborts startup loudly before any table is written to state.
+- Works in either storage mode. Under `--storage-mode=persistent` imported tables are persisted like any other state (written once after the whole batch, not per table), so on a later restart they're already present and skipped (see the idempotent behavior above) rather than re-imported.
 
 ## Cross-service delivery
 

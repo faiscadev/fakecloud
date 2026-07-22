@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 use std::io::Read as _;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 
@@ -93,6 +93,45 @@ pub fn import_aws_export(
         table: table_name,
         items: item_count,
     })
+}
+
+/// Multi-table counterpart to `import_aws_export`: imports every immediate
+/// subdirectory of `root_dir` as its own table (see docs/services/dynamodb.md
+/// for the on-disk layout). Stops at the first table that fails; tables
+/// already imported before that point are not rolled back.
+pub fn import_aws_exports_dir(
+    state: &SharedDynamoDbState,
+    account_id: &str,
+    region: &str,
+    root_dir: &Path,
+) -> Result<Vec<ImportOutcome>, String> {
+    let mut subdirs: Vec<PathBuf> = std::fs::read_dir(root_dir)
+        .map_err(|e| format!("read {}: {e}", root_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    // Deterministic order: stable logging/import order across runs regardless
+    // of the OS's directory-listing order.
+    subdirs.sort();
+
+    if subdirs.is_empty() {
+        return Err(format!(
+            "no per-table subdirectories found under {}",
+            root_dir.display()
+        ));
+    }
+
+    let mut outcomes = Vec::with_capacity(subdirs.len());
+    for dir in subdirs {
+        let describe = read_json(&dir.join("describe-table.json"))
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        let outcome = import_aws_export(state, account_id, region, &dir, &describe)
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        outcomes.push(outcome);
+    }
+
+    Ok(outcomes)
 }
 
 /// True if `account_id` already holds a table named `table_name`.
@@ -669,5 +708,131 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Writes a minimal self-contained single-item table export under
+    /// `root/<subdir_name>`, as `import_aws_exports_dir` expects.
+    fn write_table_subdir(root: &Path, subdir_name: &str, table_name: &str) {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write as _;
+
+        let dir = root.join(subdir_name);
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(
+            dir.join("describe-table.json"),
+            json!({
+                "Table": {
+                    "TableName": table_name,
+                    "KeySchema": [{ "AttributeName": "Id", "KeyType": "HASH" }],
+                    "AttributeDefinitions": [{ "AttributeName": "Id", "AttributeType": "S" }],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("manifest-summary.json"),
+            r#"{"version":"2020-06-30","exportFormat":"DYNAMODB_JSON","itemCount":1}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("manifest-files.json"),
+            r#"{"itemCount":1,"dataFileS3Key":"AWSDynamoDB/01700000000000-abcd/data/0001.json.gz"}"#,
+        )
+        .unwrap();
+        let data_file = std::fs::File::create(dir.join("data/0001.json.gz")).unwrap();
+        let mut enc = GzEncoder::new(data_file, Compression::default());
+        enc.write_all(format!(r#"{{"Item":{{"Id":{{"S":"{table_name}-row"}}}}}}"#).as_bytes())
+            .unwrap();
+        enc.write_all(b"\n").unwrap();
+        enc.finish().unwrap();
+    }
+
+    #[test]
+    fn imports_multiple_tables_from_root_dir() {
+        let root = std::env::temp_dir().join(format!("fc-ddb-multi-{}", uuid::Uuid::new_v4()));
+        write_table_subdir(&root, "a-table", "TableA");
+        write_table_subdir(&root, "b-table", "TableB");
+
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+
+        let outcomes = import_aws_exports_dir(&state, "123456789012", "us-east-1", &root)
+            .expect("multi-table import should succeed");
+        assert_eq!(outcomes.len(), 2);
+        assert!(outcomes
+            .iter()
+            .all(|o| matches!(o, ImportOutcome::Imported { items: 1, .. })));
+
+        let mut guard = state.write();
+        let account = guard.get_or_create("123456789012");
+        assert!(account.tables.contains_key("TableA"));
+        assert!(account.tables.contains_key("TableB"));
+        drop(guard);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn multi_table_import_fails_when_root_has_no_subdirectories() {
+        let root =
+            std::env::temp_dir().join(format!("fc-ddb-multi-empty-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let err = import_aws_exports_dir(&state, "123456789012", "us-east-1", &root)
+            .expect_err("empty root should fail");
+        assert!(err.contains("no per-table subdirectories"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn multi_table_import_fails_on_subdir_missing_describe_table() {
+        let root = std::env::temp_dir().join(format!("fc-ddb-multi-bad-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("bad-table")).unwrap();
+
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let err = import_aws_exports_dir(&state, "123456789012", "us-east-1", &root)
+            .expect_err("subdir without describe-table.json should fail");
+        assert!(
+            err.contains("bad-table"),
+            "error should name the offending subdirectory: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn multi_table_import_stops_at_first_failure_leaving_earlier_tables_committed() {
+        let root =
+            std::env::temp_dir().join(format!("fc-ddb-multi-partial-{}", uuid::Uuid::new_v4()));
+        write_table_subdir(&root, "a-table", "TableA");
+        std::fs::create_dir_all(root.join("b-table")).unwrap(); // no describe-table.json
+
+        let state: SharedDynamoDbState = std::sync::Arc::new(parking_lot::RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+        ));
+        let err = import_aws_exports_dir(&state, "123456789012", "us-east-1", &root)
+            .expect_err("second table should fail");
+        assert!(err.contains("b-table"));
+
+        // "a-table" sorts before "b-table", so it was already imported and
+        // committed to state before the second subdirectory failed.
+        let mut guard = state.write();
+        assert!(guard
+            .get_or_create("123456789012")
+            .tables
+            .contains_key("TableA"));
+        drop(guard);
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
