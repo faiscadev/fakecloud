@@ -460,6 +460,50 @@ fn fs_arn(ctx: &Ctx, fsid: &str) -> String {
     )
 }
 
+/// Build the FileSystem record for a replication destination EFS provisions on
+/// the caller's behalf, so DescribeFileSystems on the destination id resolves.
+/// Destinations are always encrypted and have replication-overwrite protection
+/// DISABLED (which is how a destination file system is distinguished).
+fn destination_file_system(ctx: &Ctx, fsid: &str, region: &str, az: Option<&str>) -> Value {
+    let mut fs = Map::new();
+    fs.insert("OwnerId".into(), json!(ctx.account));
+    fs.insert("FileSystemId".into(), json!(fsid));
+    fs.insert(
+        "FileSystemArn".into(),
+        json!(format!(
+            "arn:aws:elasticfilesystem:{}:{}:file-system/{}",
+            region, ctx.account, fsid
+        )),
+    );
+    fs.insert("CreationTime".into(), json!(now_ts()));
+    // Transient state; reconcile_lifecycle settles it to `available` on describe.
+    fs.insert("LifeCycleState".into(), json!("creating"));
+    fs.insert("NumberOfMountTargets".into(), json!(0));
+    fs.insert(
+        "SizeInBytes".into(),
+        json!({
+            "Value": 6144,
+            "Timestamp": now_ts(),
+            "ValueInIA": 0,
+            "ValueInStandard": 6144,
+            "ValueInArchive": 0
+        }),
+    );
+    fs.insert("PerformanceMode".into(), json!("generalPurpose"));
+    fs.insert("ThroughputMode".into(), json!("bursting"));
+    fs.insert("Encrypted".into(), json!(true));
+    fs.insert("Tags".into(), json!([]));
+    fs.insert(
+        "FileSystemProtection".into(),
+        json!({ "ReplicationOverwriteProtection": "DISABLED" }),
+    );
+    if let Some(az) = az {
+        fs.insert("AvailabilityZoneName".into(), json!(az));
+        fs.insert("AvailabilityZoneId".into(), json!(format!("{region}-az1")));
+    }
+    Value::Object(fs)
+}
+
 fn ap_arn(ctx: &Ctx, apid: &str) -> String {
     format!(
         "arn:aws:elasticfilesystem:{}:{}:access-point/{}",
@@ -1403,35 +1447,52 @@ impl EfsService {
         if !data.file_systems.contains_key(&fsid) {
             return Err(fs_not_found(&fsid));
         }
-        let destinations: Vec<Value> = b
+        let requested = b
             .get("Destinations")
             .and_then(Value::as_array)
             .cloned()
-            .unwrap_or_default()
-            .iter()
-            .map(|d| {
-                let region = d
-                    .get("Region")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&ctx.region)
-                    .to_string();
-                let dest_fs = d
-                    .get("FileSystemId")
-                    .and_then(Value::as_str)
-                    .map(normalize_fs_id)
-                    .unwrap_or_else(|| format!("fs-{}", hex17()));
-                let mut dest = Map::new();
-                dest.insert("Status".into(), json!("ENABLED"));
-                dest.insert("FileSystemId".into(), json!(dest_fs));
-                dest.insert("Region".into(), json!(region));
-                dest.insert("LastReplicatedTimestamp".into(), json!(now_ts()));
-                dest.insert("OwnerId".into(), json!(ctx.account));
-                if let Some(role) = d.get("RoleArn") {
-                    dest.insert("RoleArn".into(), role.clone());
-                }
-                Value::Object(dest)
-            })
-            .collect();
+            .unwrap_or_default();
+        let mut destinations: Vec<Value> = Vec::with_capacity(requested.len());
+        // Any destination file system EFS itself provisions (the caller did not
+        // point at a pre-existing one) must become a real FileSystem so
+        // DescribeFileSystems on it resolves instead of 404ing.
+        let mut new_dest_systems: Vec<(String, Value)> = Vec::new();
+        for d in &requested {
+            let region = d
+                .get("Region")
+                .and_then(Value::as_str)
+                .unwrap_or(&ctx.region)
+                .to_string();
+            let az = d.get("AvailabilityZoneName").and_then(Value::as_str);
+            let provided = d
+                .get("FileSystemId")
+                .and_then(Value::as_str)
+                .map(normalize_fs_id);
+            let dest_fs = provided
+                .clone()
+                .unwrap_or_else(|| format!("fs-{}", hex17()));
+            // Synthesize the destination FileSystem unless the caller pointed at
+            // one that already exists.
+            if !data.file_systems.contains_key(&dest_fs) {
+                new_dest_systems.push((
+                    dest_fs.clone(),
+                    destination_file_system(ctx, &dest_fs, &region, az),
+                ));
+            }
+            let mut dest = Map::new();
+            dest.insert("Status".into(), json!("ENABLED"));
+            dest.insert("FileSystemId".into(), json!(dest_fs));
+            dest.insert("Region".into(), json!(region));
+            dest.insert("LastReplicatedTimestamp".into(), json!(now_ts()));
+            dest.insert("OwnerId".into(), json!(ctx.account));
+            if let Some(role) = d.get("RoleArn") {
+                dest.insert("RoleArn".into(), role.clone());
+            }
+            destinations.push(Value::Object(dest));
+        }
+        for (id, fs) in new_dest_systems {
+            data.file_systems.insert(id, fs);
+        }
 
         let desc = json!({
             "SourceFileSystemId": fsid,
@@ -1901,6 +1962,47 @@ mod tests {
             body_value(&resp)["Replications"].as_array().unwrap().len(),
             0
         );
+    }
+
+    // CreateReplicationConfiguration must create the destination file system so
+    // DescribeFileSystems on it resolves instead of 404ing (bug-hunt).
+    #[test]
+    fn create_replication_creates_the_destination_file_system() {
+        let s = svc();
+        seed_fs(&s, "fs-source", "available");
+        let resp = s
+            .create_replication_configuration(
+                &ctx(),
+                "fs-source",
+                &json!({ "Destinations": [{ "Region": "us-west-2" }] }),
+            )
+            .unwrap();
+        assert!(resp.status.is_success());
+        let dest_id = body_value(&resp)["Destinations"][0]["FileSystemId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(dest_id.starts_with("fs-"));
+
+        // The destination is a real, describable file system (previously 404).
+        let described = s
+            .describe_file_systems(&ctx(), &[("FileSystemId".to_string(), dest_id.clone())])
+            .unwrap();
+        let fs = &body_value(&described)["FileSystems"][0];
+        assert_eq!(fs["FileSystemId"], dest_id);
+        assert_eq!(
+            fs["FileSystemProtection"]["ReplicationOverwriteProtection"],
+            "DISABLED"
+        );
+
+        // The replication configuration is still queryable.
+        let repl = s
+            .describe_replication_configurations(
+                &ctx(),
+                &[("FileSystemId".to_string(), "fs-source".to_string())],
+            )
+            .unwrap();
+        assert!(repl.status.is_success());
     }
 
     // Defect #5: DescribeMountTargets requires exactly one filter; supplying two

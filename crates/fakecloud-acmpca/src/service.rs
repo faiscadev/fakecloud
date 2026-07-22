@@ -764,16 +764,26 @@ impl AcmPcaService {
                 ));
             }
         }
+        // Store the imported certificate's real validity window + serial so
+        // DescribeCertificateAuthority / GetCertificateAuthorityCertificate
+        // match it, rather than fabricating now / now+10y / a random serial.
+        if let Some(meta) = validate::imported_cert_metadata(&cert_pem) {
+            ca.not_before = Some(meta.not_before);
+            ca.not_after = Some(meta.not_after);
+            ca.serial = Some(meta.serial_hex);
+        } else {
+            // Unreachable: verify_imported_cert already parsed the X.509 above.
+            if ca.not_before.is_none() {
+                ca.not_before = Some(Utc::now());
+                ca.not_after = Some(Utc::now() + chrono::Duration::days(3650));
+            }
+            if ca.serial.is_none() {
+                ca.serial = Some(format!("{:x}", Uuid::new_v4().as_u128()));
+            }
+        }
         ca.ca_cert_pem = Some(cert_pem);
         ca.ca_cert_chain_pem = chain_pem;
         ca.status = "ACTIVE".to_string();
-        if ca.not_before.is_none() {
-            ca.not_before = Some(Utc::now());
-            ca.not_after = Some(Utc::now() + chrono::Duration::days(3650));
-        }
-        if ca.serial.is_none() {
-            ca.serial = Some(format!("{:x}", Uuid::new_v4().as_u128()));
-        }
         ca.last_state_change_at = Some(Utc::now());
         Ok(AwsResponse::ok_json(json!({})))
     }

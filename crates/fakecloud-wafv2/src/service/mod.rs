@@ -1346,6 +1346,77 @@ mod managed_rule_set_validation_tests {
         );
     }
 
+    // UpdateManagedRuleSetVersionExpiryDate persisted nothing (validated then
+    // returned Ok); it must look up the set + version and store the expiry so
+    // GetManagedRuleSet surfaces it (bug-hunt).
+    #[test]
+    fn update_managed_rule_set_version_expiry_persists() {
+        let svc = Wafv2Service::default();
+
+        // A nonexistent set -> WAFNonexistentItemException.
+        let res = svc.update_managed_rule_set_version_expiry_date(&req_json(
+            "UpdateManagedRuleSetVersionExpiryDate",
+            json!({
+                "Name": "Nope", "Id": "abc123", "Scope": "REGIONAL",
+                "LockToken": "tok", "VersionToExpire": "Version_1.0",
+                "ExpiryTimestamp": 1_800_000_000.0
+            }),
+        ));
+        assert_eq!(res.err().unwrap().code(), "WAFNonexistentItemException");
+
+        // Publish a set with one version.
+        svc.put_managed_rule_set_versions(&req_json(
+            "PutManagedRuleSetVersions",
+            json!({
+                "Name": "MyRuleSet",
+                "Id": "abc123",
+                "Scope": "REGIONAL",
+                "LockToken": "tok",
+                "VersionsToPublish": { "Version_1.0": {"ForecastedLifetime": 30} },
+            }),
+        ))
+        .unwrap();
+
+        // Expiring an unpublished version -> WAFNonexistentItemException.
+        let res = svc.update_managed_rule_set_version_expiry_date(&req_json(
+            "UpdateManagedRuleSetVersionExpiryDate",
+            json!({
+                "Name": "MyRuleSet", "Id": "abc123", "Scope": "REGIONAL",
+                "LockToken": "tok", "VersionToExpire": "Version_9.9",
+                "ExpiryTimestamp": 1_800_000_000.0
+            }),
+        ));
+        assert_eq!(res.err().unwrap().code(), "WAFNonexistentItemException");
+
+        // Set the expiry on the published version.
+        let resp = svc
+            .update_managed_rule_set_version_expiry_date(&req_json(
+                "UpdateManagedRuleSetVersionExpiryDate",
+                json!({
+                    "Name": "MyRuleSet", "Id": "abc123", "Scope": "REGIONAL",
+                    "LockToken": "tok", "VersionToExpire": "Version_1.0",
+                    "ExpiryTimestamp": 1_800_000_000.0
+                }),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["ExpiringVersion"].as_str(), Some("Version_1.0"));
+        assert_eq!(body["ExpiryTimestamp"].as_f64(), Some(1_800_000_000.0));
+
+        // GetManagedRuleSet now surfaces the persisted expiry.
+        let resp = svc
+            .get_managed_rule_set(&req_json(
+                "GetManagedRuleSet",
+                json!({"Name": "MyRuleSet", "Id": "abc123", "Scope": "REGIONAL"}),
+            ))
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            body["ManagedRuleSet"]["PublishedVersions"]["Version_1.0"]["ExpiryTimestamp"].as_f64(),
+            Some(1_800_000_000.0)
+        );
+    }
+
     // UpdateWebACL is full-replace: an optional member omitted from the update
     // request is cleared, not carried over from the previous version.
     #[test]

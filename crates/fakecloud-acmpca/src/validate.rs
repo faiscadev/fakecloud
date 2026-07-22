@@ -432,6 +432,29 @@ pub fn verify_imported_cert(ca_cert_pem: &str, ca_key: &KeyPair) -> ImportCheck 
     }
 }
 
+/// The validity window + serial extracted from an imported CA certificate.
+pub struct ImportedCertMeta {
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+    /// Lowercase hex, matching the serial format the issue path emits.
+    pub serial_hex: String,
+}
+
+/// Read the real `NotBefore` / `NotAfter` / `Serial` from an imported CA
+/// certificate so they can be stored instead of fabricated. Returns `None` only
+/// if the PEM/X.509 fails to parse (already rejected by `verify_imported_cert`).
+pub fn imported_cert_metadata(ca_cert_pem: &str) -> Option<ImportedCertMeta> {
+    let (_, pem) = x509_parser::pem::parse_x509_pem(ca_cert_pem.as_bytes()).ok()?;
+    let cert = pem.parse_x509().ok()?;
+    let not_before = DateTime::from_timestamp(cert.validity().not_before.timestamp(), 0)?;
+    let not_after = DateTime::from_timestamp(cert.validity().not_after.timestamp(), 0)?;
+    Some(ImportedCertMeta {
+        not_before,
+        not_after,
+        serial_hex: hex::encode(cert.raw_serial()),
+    })
+}
+
 /// A random 19-byte (positive) serial, matching AWS's serial width.
 fn random_serial() -> Vec<u8> {
     use rand::RngCore;
@@ -575,5 +598,28 @@ mod tests {
         let end = resolve_validity(now, 365, "DAYS").unwrap();
         assert!(end > now);
         assert!(end.year() <= MAX_CERT_YEAR);
+    }
+
+    /// The imported certificate's real validity window + serial are recovered,
+    /// so the CA can store them instead of fabricating now / now+10y / random.
+    #[test]
+    fn imported_cert_metadata_reads_real_window_and_serial() {
+        let key = generate_key_pair("EC_prime256v1").unwrap();
+        let mut params = CertificateParams::default();
+        params.distinguished_name = build_dn(&serde_json::json!({ "CommonName": "Test Root CA" }));
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let nb = Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, 5).unwrap();
+        let na = Utc.with_ymd_and_hms(2030, 6, 7, 8, 9, 10).unwrap();
+        params.not_before = to_offset(nb);
+        params.not_after = to_offset(na);
+        // High bit clear so the DER INTEGER has no leading 0x00 pad byte.
+        params.serial_number = Some(vec![0x01u8, 0x02, 0x03, 0x04].into());
+        let cert = params.self_signed(&key).unwrap();
+        let pem = cert.pem();
+
+        let meta = imported_cert_metadata(&pem).expect("parses the just-built cert");
+        assert_eq!(meta.not_before.timestamp(), nb.timestamp());
+        assert_eq!(meta.not_after.timestamp(), na.timestamp());
+        assert_eq!(meta.serial_hex, "01020304");
     }
 }

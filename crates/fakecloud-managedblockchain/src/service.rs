@@ -430,15 +430,32 @@ impl ManagedBlockchainService {
 
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        // The invitation must exist and be pending; joining consumes it.
-        if let Some(inv) = data.invitations.get_mut(&invitation_id) {
-            if let Some(obj) = inv.as_object_mut() {
-                obj.insert("Status".into(), json!("ACCEPTED"));
+        if !data.networks.contains_key(network_id) {
+            return Err(not_found(&format!("Network {network_id} was not found.")));
+        }
+        // The invitation must exist AND still be PENDING; joining consumes it by
+        // flipping it to ACCEPTED so the same invitation cannot mint a second
+        // member. A REJECTED / EXPIRED / already-ACCEPTED invitation is rejected.
+        match data
+            .invitations
+            .get(&invitation_id)
+            .and_then(|inv| inv.get("Status"))
+            .and_then(Value::as_str)
+        {
+            Some("PENDING") => {
+                if let Some(obj) = data
+                    .invitations
+                    .get_mut(&invitation_id)
+                    .and_then(Value::as_object_mut)
+                {
+                    obj.insert("Status".into(), json!("ACCEPTED"));
+                }
             }
-        } else {
-            return Err(invalid_request(&format!(
-                "Invitation {invitation_id} was not found or is not pending."
-            )));
+            _ => {
+                return Err(invalid_request(&format!(
+                    "Invitation {invitation_id} was not found or is not pending."
+                )));
+            }
         }
         let member = build_member(ctx, network_id, &member_id, &member_config, &now, true);
         let arn = shared::member_arn(&ctx.region, &ctx.account, &member_id);
@@ -558,6 +575,9 @@ impl ManagedBlockchainService {
 
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
+        if !data.networks.contains_key(network_id) {
+            return Err(not_found(&format!("Network {network_id} was not found.")));
+        }
         let framework = data
             .networks
             .get(network_id)
@@ -1871,6 +1891,72 @@ mod tests {
         let invs = body_of(&s.list_invitations(&ctx(), &[]).unwrap());
         assert_eq!(invs["Invitations"].as_array().unwrap().len(), 1);
         assert_eq!(invs["Invitations"][0]["Status"], "PENDING");
+    }
+
+    #[test]
+    fn create_member_requires_pending_invitation_and_existing_network() {
+        // CreateMember accepted any invitation regardless of status and reused
+        // it indefinitely, and neither CreateMember nor CreateNode verified the
+        // network existed (bug-hunt).
+        let s = svc();
+        let (net_id, member_id) = fabric_network(&s);
+        // Materialize a PENDING invitation for our own account.
+        let prop = body_of(
+            &s.create_proposal(
+                &ctx(),
+                &net_id,
+                &json!({
+                    "ClientRequestToken": "tp",
+                    "MemberId": member_id,
+                    "Actions": { "Invitations": [ { "Principal": "000000000000" } ] }
+                }),
+            )
+            .unwrap(),
+        );
+        let pid = prop["ProposalId"].as_str().unwrap().to_string();
+        s.vote_on_proposal(
+            &ctx(),
+            &net_id,
+            &pid,
+            &json!({ "VoterMemberId": member_id, "Vote": "YES" }),
+        )
+        .unwrap();
+        let invs = body_of(&s.list_invitations(&ctx(), &[]).unwrap());
+        let inv_id = invs["Invitations"][0]["InvitationId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let member_body = json!({
+            "InvitationId": inv_id,
+            "MemberConfiguration": {
+                "Name": "member2",
+                "FrameworkConfiguration": { "Fabric": {
+                    "AdminUsername": "admin", "AdminPassword": "Password123!"
+                } }
+            }
+        });
+
+        // First join succeeds and consumes the invitation.
+        let created = body_of(&s.create_member(&ctx(), &net_id, &member_body).unwrap());
+        assert!(created["MemberId"].as_str().unwrap().starts_with("m-"));
+
+        // Reusing the now-ACCEPTED invitation is rejected.
+        let err = expect_err(s.create_member(&ctx(), &net_id, &member_body));
+        assert!(format!("{err:?}").contains("InvalidRequestException"));
+
+        // CreateMember / CreateNode against a nonexistent network 404.
+        let err2 = expect_err(s.create_member(&ctx(), "n-DOESNOTEXIST0001", &member_body));
+        assert!(format!("{err2:?}").contains("ResourceNotFoundException"));
+        let err3 = expect_err(s.create_node(
+            &ctx(),
+            "n-DOESNOTEXIST0001",
+            &json!({
+                "ClientRequestToken": "tn",
+                "NodeConfiguration": { "InstanceType": "bc.t3.small", "StateDB": "CouchDB" }
+            }),
+        ));
+        assert!(format!("{err3:?}").contains("ResourceNotFoundException"));
     }
 
     #[test]

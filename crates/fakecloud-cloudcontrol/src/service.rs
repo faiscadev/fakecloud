@@ -636,10 +636,26 @@ fn progress_event_response(record: &ResourceRequest) -> AwsResponse {
 }
 
 fn resource_description(managed: &ManagedResource) -> Value {
+    // The stored `properties` is only the caller's DesiredState. The
+    // provisioner-captured `attributes` (Arn, auto-generated names, the primary
+    // identifier) are read-only properties AWS surfaces on read too, so overlay
+    // them onto the returned model. Attributes are GetAtt-resolvable strings;
+    // parse ones that are JSON-encoded (lists/objects) back into structured
+    // values, keep the rest as plain strings.
+    let mut props = managed.properties.clone();
+    if let Value::Object(map) = &mut props {
+        for (k, v) in &managed.attributes {
+            let value = serde_json::from_str::<Value>(v)
+                .ok()
+                .filter(|parsed| parsed.is_array() || parsed.is_object())
+                .unwrap_or_else(|| json!(v));
+            map.insert(k.clone(), value);
+        }
+    }
     json!({
         "Identifier": managed.identifier,
         // Properties is the Properties type: a JSON *string*.
-        "Properties": managed.properties.to_string(),
+        "Properties": props.to_string(),
     })
 }
 
@@ -781,4 +797,42 @@ fn request_token_not_found(token: &str) -> AwsServiceError {
         "RequestTokenNotFoundException",
         format!("Request token '{token}' was not found."),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn resource_description_surfaces_read_only_attributes() {
+        // GetResource/ListResources previously returned only the caller's
+        // DesiredState; server-generated read-only props (Arn, generated names,
+        // the primary id) captured as attributes were dropped (bug-hunt).
+        let mut attributes = BTreeMap::new();
+        attributes.insert(
+            "Arn".to_string(),
+            "arn:aws:s3:::generated-bucket".to_string(),
+        );
+        attributes.insert("BucketName".to_string(), "generated-bucket".to_string());
+        // A JSON-encoded list attribute round-trips as structured JSON.
+        attributes.insert("Tags".to_string(), "[{\"Key\":\"a\"}]".to_string());
+        let managed = ManagedResource {
+            type_name: "AWS::S3::Bucket".to_string(),
+            identifier: "generated-bucket".to_string(),
+            properties: json!({ "VersioningConfiguration": { "Status": "Enabled" } }),
+            attributes,
+            created_at: Utc::now(),
+        };
+
+        let desc = resource_description(&managed);
+        let props: Value = serde_json::from_str(desc["Properties"].as_str().unwrap()).unwrap();
+        // Caller's desired state preserved.
+        assert_eq!(props["VersioningConfiguration"]["Status"], "Enabled");
+        // Read-only attributes merged in.
+        assert_eq!(props["Arn"], "arn:aws:s3:::generated-bucket");
+        assert_eq!(props["BucketName"], "generated-bucket");
+        // JSON-encoded attribute parsed back to structure.
+        assert_eq!(props["Tags"][0]["Key"], "a");
+    }
 }
