@@ -561,7 +561,7 @@ impl KmsService {
 
         let arn = format!(
             "arn:aws:kms:{}:{}:key/{}",
-            state.region, state.account_id, key_id
+            req.region, state.account_id, key_id
         );
         let now = Utc::now().timestamp() as f64;
 
@@ -1388,7 +1388,14 @@ impl KmsService {
             })?
             .clone();
         let account_id = state.account_id.clone();
-        let source_region = state.region.clone();
+        // The primary key's region is whatever region its ARN was minted in
+        // (the request region at CreateKey time), not the server default.
+        let source_region = source_key
+            .arn
+            .split(':')
+            .nth(3)
+            .unwrap_or(&state.region)
+            .to_string();
 
         let replica_arn = format!(
             "arn:aws:kms:{}:{}:key/{}",

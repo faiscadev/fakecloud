@@ -85,7 +85,7 @@ impl ResourceProvisioner {
         let queue_url = format!("{}/{}/{}", state.endpoint, state.account_id, queue_name);
         let arn = format!(
             "arn:aws:sqs:{}:{}:{}",
-            state.region, state.account_id, queue_name
+            self.region, state.account_id, queue_name
         );
 
         let is_fifo = queue_name.ends_with(".fifo");

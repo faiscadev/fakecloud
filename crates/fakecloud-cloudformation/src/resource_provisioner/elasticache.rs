@@ -408,9 +408,9 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         let arn = format!(
             "arn:aws:elasticache:{}:{}:cluster:{}",
-            state.region, state.account_id, id
+            self.region, state.account_id, id
         );
-        let endpoint_address = format!("{id}.fakecloud.{}.cache.amazonaws.com", state.region);
+        let endpoint_address = format!("{id}.fakecloud.{}.cache.amazonaws.com", self.region);
         let cluster = EcCacheCluster {
             cache_cluster_id: id.clone(),
             cache_node_type,
@@ -603,16 +603,14 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         let arn = format!(
             "arn:aws:elasticache:{}:{}:replicationgroup:{}",
-            state.region, state.account_id, id
+            self.region, state.account_id, id
         );
-        let endpoint_address = format!(
-            "{id}.fakecloud.ng.0001.{}.cache.amazonaws.com",
-            state.region
-        );
+        let endpoint_address =
+            format!("{id}.fakecloud.ng.0001.{}.cache.amazonaws.com", self.region);
         let configuration_endpoint = if cluster_enabled {
             Some(format!(
                 "{id}.fakecloud.cfg.{}.cache.amazonaws.com",
-                state.region
+                self.region
             ))
         } else {
             None

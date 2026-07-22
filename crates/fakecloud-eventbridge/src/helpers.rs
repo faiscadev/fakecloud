@@ -47,6 +47,28 @@ pub(crate) fn validate_put_events_entry(
 /// accepts (RFC 3339 string, fractional seconds as a float, integer
 /// seconds). Falls back to "now" if the field is absent or
 /// unparseable, which matches the real service.
+/// Re-stamp the region segment of an ARN with the caller's request region.
+///
+/// The default event bus is created at account-state bootstrap, which only
+/// has access to the server's frozen startup region — not the caller's
+/// credential-scope region. Custom buses created through `CreateEventBus`
+/// already carry the request region, so this rewrite is idempotent for them
+/// and only corrects the bootstrap default bus when a client is configured
+/// for a non-default region. ARNs that don't have the expected
+/// `arn:partition:service:region:account:resource` shape are returned
+/// unchanged.
+pub(crate) fn arn_with_request_region(arn: &str, region: &str) -> String {
+    let parts: Vec<&str> = arn.splitn(6, ':').collect();
+    if parts.len() == 6 && parts[0] == "arn" {
+        format!(
+            "{}:{}:{}:{}:{}:{}",
+            parts[0], parts[1], parts[2], region, parts[4], parts[5]
+        )
+    } else {
+        arn.to_string()
+    }
+}
+
 pub(crate) fn parse_put_events_time(raw: &Value) -> DateTime<Utc> {
     if let Some(s) = raw.as_str() {
         return DateTime::parse_from_rfc3339(s)

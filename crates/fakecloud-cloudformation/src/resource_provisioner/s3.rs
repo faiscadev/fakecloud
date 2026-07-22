@@ -42,8 +42,8 @@ impl ResourceProvisioner {
 
         let mut __s3_mas = self.s3_state.write();
         let state = __s3_mas.get_or_create(&self.account_id);
-        let region = state.region.clone();
-        let mut bucket = S3Bucket::new(bucket_name, &state.region, &state.account_id);
+        let region = self.region.clone();
+        let mut bucket = S3Bucket::new(bucket_name, &self.region, &state.account_id);
         // Translate every modeled CFN property (VersioningConfiguration,
         // BucketEncryption, PublicAccessBlockConfiguration,
         // NotificationConfiguration, Tags, Website/Cors/Lifecycle/Logging) into
@@ -87,7 +87,7 @@ impl ResourceProvisioner {
         let bucket_name = &existing.physical_id;
         let mut __s3_mas = self.s3_state.write();
         let state = __s3_mas.get_or_create(&self.account_id);
-        let region = state.region.clone();
+        let region = self.region.clone();
         {
             let bucket = state
                 .buckets

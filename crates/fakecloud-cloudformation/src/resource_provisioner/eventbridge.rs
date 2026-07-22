@@ -33,12 +33,12 @@ impl ResourceProvisioner {
         let arn = if event_bus_name == "default" {
             format!(
                 "arn:aws:events:{}:{}:rule/{}",
-                state.region, state.account_id, rule_name
+                self.region, state.account_id, rule_name
             )
         } else {
             format!(
                 "arn:aws:events:{}:{}:rule/{}/{}",
-                state.region, state.account_id, event_bus_name, rule_name
+                self.region, state.account_id, event_bus_name, rule_name
             )
         };
 
@@ -204,14 +204,14 @@ impl ResourceProvisioner {
         let now = Utc::now();
         let arn = format!(
             "arn:aws:events:{}:{}:connection/{}/{}",
-            state.region,
+            self.region,
             state.account_id,
             name,
             Uuid::new_v4().as_simple()
         );
         let secret_arn = format!(
             "arn:aws:secretsmanager:{}:{}:secret:events!connection/{}-{}",
-            state.region,
+            self.region,
             state.account_id,
             name,
             Uuid::new_v4().as_simple()
@@ -283,7 +283,7 @@ impl ResourceProvisioner {
         let now = Utc::now();
         let arn = format!(
             "arn:aws:events:{}:{}:api-destination/{}/{}",
-            state.region,
+            self.region,
             state.account_id,
             name,
             Uuid::new_v4().as_simple()
@@ -355,7 +355,7 @@ impl ResourceProvisioner {
         }
         let arn = format!(
             "arn:aws:events:{}:{}:archive/{}",
-            state.region, state.account_id, name
+            self.region, state.account_id, name
         );
         state.archives.insert(
             name.clone(),

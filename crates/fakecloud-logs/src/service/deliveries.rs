@@ -112,7 +112,7 @@ impl LogsService {
 
         let arn = format!(
             "arn:aws:logs:{}:{}:delivery-destination:{}",
-            state.region, state.account_id, name
+            req.region, state.account_id, name
         );
 
         // The destination type is either supplied explicitly or inferred from
@@ -503,7 +503,7 @@ impl LogsService {
 
         let arn = format!(
             "arn:aws:logs:{}:{}:delivery-source:{}",
-            state.region, state.account_id, name
+            req.region, state.account_id, name
         );
 
         let created_at = state
@@ -757,7 +757,7 @@ impl LogsService {
         let delivery_id = uuid::Uuid::new_v4().to_string();
         let arn = format!(
             "arn:aws:logs:{}:{}:delivery:{}",
-            state.region, state.account_id, delivery_id
+            req.region, state.account_id, delivery_id
         );
 
         let delivery = Delivery {

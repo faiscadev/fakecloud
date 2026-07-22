@@ -68,7 +68,7 @@ impl LogsService {
 
         let arn = format!(
             "arn:aws:logs:{}:{}:log-group:{}:*",
-            state.region, state.account_id, name
+            req.region, state.account_id, name
         );
         let now = Utc::now().timestamp_millis();
 

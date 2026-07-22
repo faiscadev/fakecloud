@@ -24,7 +24,7 @@ impl ResourceProvisioner {
         let state = logs_accounts.get_or_create(&self.account_id);
         let arn = format!(
             "arn:aws:logs:{}:{}:log-group:{}:*",
-            state.region, state.account_id, log_group_name
+            self.region, state.account_id, log_group_name
         );
 
         let log_group = fakecloud_logs::LogGroup {

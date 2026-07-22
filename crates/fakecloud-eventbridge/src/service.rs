@@ -417,7 +417,7 @@ impl EventBridgeService {
                 // aws_cloudwatch_event_buses data source expects to be set.
                 json!({
                     "Name": b.name,
-                    "Arn": b.arn,
+                    "Arn": arn_with_request_region(&b.arn, &req.region),
                     "CreationTime": b.creation_time.timestamp() as f64,
                     "LastModifiedTime": b.last_modified_time.timestamp() as f64,
                 })
@@ -449,7 +449,7 @@ impl EventBridgeService {
 
         let mut resp = json!({
             "Name": bus.name,
-            "Arn": bus.arn,
+            "Arn": arn_with_request_region(&bus.arn, &req.region),
             "CreationTime": bus.creation_time.timestamp() as f64,
             "LastModifiedTime": bus.last_modified_time.timestamp() as f64,
         });
@@ -533,7 +533,7 @@ impl EventBridgeService {
             "Effect": "Allow",
             "Principal": principal_value,
             "Action": action,
-            "Resource": bus.arn,
+            "Resource": arn_with_request_region(&bus.arn, &req.region),
         });
 
         let policy = bus.policy.get_or_insert_with(|| {
@@ -1311,7 +1311,7 @@ impl EventBridgeService {
         }
         bus.last_modified_time = Utc::now();
 
-        let arn = bus.arn.clone();
+        let arn = arn_with_request_region(&bus.arn, &req.region);
         let bus_name = bus.name.clone();
 
         Ok(AwsResponse::ok_json(json!({

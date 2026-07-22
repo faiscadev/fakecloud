@@ -43,7 +43,7 @@ impl ResourceProvisioner {
         }
         let stream_arn = format!(
             "arn:aws:kinesis:{}:{}:stream/{}",
-            state.region, state.account_id, stream_name
+            self.region, state.account_id, stream_name
         );
         let stream = KinesisStream {
             stream_name: stream_name.clone(),

@@ -40,7 +40,7 @@ impl KmsService {
         if state.aliases.contains_key(&alias_name) {
             let alias_arn = format!(
                 "arn:aws:kms:{}:{}:{}",
-                state.region, state.account_id, alias_name
+                req.region, state.account_id, alias_name
             );
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -51,7 +51,7 @@ impl KmsService {
 
         let alias_arn = format!(
             "arn:aws:kms:{}:{}:{}",
-            state.region, state.account_id, alias_name
+            req.region, state.account_id, alias_name
         );
 
         state.aliases.insert(
@@ -93,7 +93,7 @@ impl KmsService {
         if state.aliases.remove(alias_name).is_none() {
             let alias_arn = format!(
                 "arn:aws:kms:{}:{}:{}",
-                state.region, state.account_id, alias_name
+                req.region, state.account_id, alias_name
             );
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,

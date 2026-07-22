@@ -465,10 +465,18 @@ impl ResourceProvisioner {
 
         let mut accounts = self.rds_state.write();
         let state = accounts.get_or_create(&self.account_id);
-        let arn = state.db_instance_arn(&identifier);
+        // Build the instance ARN from the stack's request region (self.region),
+        // not the RDS sub-service state's frozen startup region.
+        let arn = Arn::new(
+            "rds",
+            &self.region,
+            &state.account_id,
+            &format!("db:{identifier}"),
+        )
+        .to_string();
         let endpoint_address = format!(
             "{identifier}.cluster-fakecloud.{}.rds.amazonaws.com",
-            state.region
+            self.region
         );
         let dbi_resource_id = format!("db-{}", Uuid::new_v4().simple());
         let dbi_resource_id_attr = dbi_resource_id.clone();
@@ -800,16 +808,16 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         let arn = format!(
             "arn:aws:rds:{}:{}:cluster:{}",
-            state.region, state.account_id, identifier
+            self.region, state.account_id, identifier
         );
         let cluster_resource_id = format!("cluster-{}", Uuid::new_v4().simple());
         let endpoint = format!(
             "{identifier}.cluster-fakecloud.{}.rds.amazonaws.com",
-            state.region
+            self.region
         );
         let reader_endpoint = format!(
             "{identifier}.cluster-ro-fakecloud.{}.rds.amazonaws.com",
-            state.region
+            self.region
         );
         let body = serde_json::json!({
             "DBClusterIdentifier": identifier,

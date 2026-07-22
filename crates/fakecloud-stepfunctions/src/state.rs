@@ -284,17 +284,22 @@ impl StepFunctionsState {
         self.task_tokens.clear();
     }
 
-    pub fn state_machine_arn(&self, name: &str) -> String {
+    pub fn state_machine_arn(&self, region: &str, name: &str) -> String {
         format!(
             "arn:aws:states:{}:{}:stateMachine:{}",
-            self.region, self.account_id, name
+            region, self.account_id, name
         )
     }
 
-    pub fn execution_arn(&self, state_machine_name: &str, execution_name: &str) -> String {
+    pub fn execution_arn(
+        &self,
+        region: &str,
+        state_machine_name: &str,
+        execution_name: &str,
+    ) -> String {
         format!(
             "arn:aws:states:{}:{}:execution:{}:{}",
-            self.region, self.account_id, state_machine_name, execution_name
+            region, self.account_id, state_machine_name, execution_name
         )
     }
 }
@@ -342,7 +347,7 @@ mod tests {
     fn state_machine_arn_format() {
         let state = StepFunctionsState::new("123456789012", "us-east-1");
         assert_eq!(
-            state.state_machine_arn("my-sm"),
+            state.state_machine_arn("us-east-1", "my-sm"),
             "arn:aws:states:us-east-1:123456789012:stateMachine:my-sm"
         );
     }
@@ -351,8 +356,23 @@ mod tests {
     fn execution_arn_format() {
         let state = StepFunctionsState::new("123456789012", "us-east-1");
         assert_eq!(
-            state.execution_arn("sm", "exec-1"),
+            state.execution_arn("us-east-1", "sm", "exec-1"),
             "arn:aws:states:us-east-1:123456789012:execution:sm:exec-1"
+        );
+    }
+
+    #[test]
+    fn arns_use_request_region_not_server_default() {
+        // Server default region is us-east-1, but a client whose credential
+        // scope resolves to eu-central-1 must get eu-central-1 ARNs.
+        let state = StepFunctionsState::new("123456789012", "us-east-1");
+        assert_eq!(
+            state.state_machine_arn("eu-central-1", "my-sm"),
+            "arn:aws:states:eu-central-1:123456789012:stateMachine:my-sm"
+        );
+        assert_eq!(
+            state.execution_arn("eu-central-1", "sm", "exec-1"),
+            "arn:aws:states:eu-central-1:123456789012:execution:sm:exec-1"
         );
     }
 

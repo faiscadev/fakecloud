@@ -47,7 +47,7 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         let arn = format!(
             "arn:aws:secretsmanager:{}:{}:secret:{}",
-            state.region, state.account_id, name
+            self.region, state.account_id, name
         );
 
         if state.secrets.contains_key(&arn) {
@@ -242,7 +242,7 @@ impl ResourceProvisioner {
         } else {
             let candidate = format!(
                 "arn:aws:secretsmanager:{}:{}:secret:{}",
-                state.region, state.account_id, secret_id
+                self.region, state.account_id, secret_id
             );
             if state.secrets.contains_key(&candidate) {
                 candidate
@@ -304,7 +304,7 @@ impl ResourceProvisioner {
         } else {
             let candidate = format!(
                 "arn:aws:secretsmanager:{}:{}:secret:{}",
-                state.region, state.account_id, secret_id
+                self.region, state.account_id, secret_id
             );
             if state.secrets.contains_key(&candidate) {
                 candidate
@@ -359,7 +359,7 @@ impl ResourceProvisioner {
         } else {
             let candidate = format!(
                 "arn:aws:secretsmanager:{}:{}:secret:{}",
-                state.region, state.account_id, secret_id
+                self.region, state.account_id, secret_id
             );
             if state.secrets.contains_key(&candidate) {
                 candidate
