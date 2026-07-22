@@ -82,7 +82,8 @@ impl LambdaService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let func = resolve_policy_target_mut(state, function_name, qualifier.as_deref())?;
+        let func =
+            resolve_policy_target_mut(state, function_name, &req.region, qualifier.as_deref())?;
 
         // Load current policy or seed a fresh canonical doc. Any
         // stored blob that doesn't parse as a JSON object is treated
@@ -198,11 +199,12 @@ impl LambdaService {
         function_name: &str,
         statement_id: &str,
         account_id: &str,
+        region: &str,
         qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(account_id);
-        let func = resolve_policy_target_mut(state, function_name, qualifier)?;
+        let func = resolve_policy_target_mut(state, function_name, region, qualifier)?;
         let policy_str = func.policy.as_deref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -247,12 +249,13 @@ impl LambdaService {
         &self,
         function_name: &str,
         account_id: &str,
+        region: &str,
         qualifier: Option<&str>,
     ) -> Result<AwsResponse, AwsServiceError> {
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, "");
         let state = accounts.get(account_id).unwrap_or(&empty);
-        let func = resolve_policy_target_ref(state, function_name, qualifier)?;
+        let func = resolve_policy_target_ref(state, function_name, region, qualifier)?;
         let policy = func.policy.as_deref().ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -281,11 +284,11 @@ impl LambdaService {
 fn resolve_policy_target_mut<'a>(
     state: &'a mut crate::state::LambdaState,
     function_name: &str,
+    region: &str,
     qualifier: Option<&str>,
 ) -> Result<&'a mut crate::state::LambdaFunction, AwsServiceError> {
     let resolved_version =
         crate::service::resolve_qualifier_to_version(state, function_name, qualifier);
-    let region = state.region.clone();
     let account_id = state.account_id.clone();
     match resolved_version {
         None => state.functions.get_mut(function_name).ok_or_else(|| {
@@ -316,6 +319,7 @@ fn resolve_policy_target_mut<'a>(
 fn resolve_policy_target_ref<'a>(
     state: &'a crate::state::LambdaState,
     function_name: &str,
+    region: &str,
     qualifier: Option<&str>,
 ) -> Result<&'a crate::state::LambdaFunction, AwsServiceError> {
     let resolved_version =
@@ -327,7 +331,7 @@ fn resolve_policy_target_ref<'a>(
                 "ResourceNotFoundException",
                 format!(
                     "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                    state.region, state.account_id, function_name
+                    region, state.account_id, function_name
                 ),
             )
         }),
@@ -341,7 +345,7 @@ fn resolve_policy_target_ref<'a>(
                     "ResourceNotFoundException",
                     format!(
                         "Function not found: arn:aws:lambda:{}:{}:function:{}:{v}",
-                        state.region, state.account_id, function_name
+                        region, state.account_id, function_name
                     ),
                 )
             }),

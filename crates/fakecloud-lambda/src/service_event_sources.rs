@@ -51,7 +51,7 @@ impl LambdaService {
                     "ResourceNotFoundException",
                     format!(
                         "Function not found: arn:aws:lambda:{}:{}:function:{}",
-                        state.region, state.account_id, function_name
+                        req.region, state.account_id, function_name
                     ),
                 )
             })?;

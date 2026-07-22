@@ -1375,6 +1375,7 @@ impl AwsService for LambdaService {
             "DeleteFunction" => self.delete_function(
                 resource_name.as_deref().unwrap_or(""),
                 aid,
+                req.region.as_str(),
                 req.query_params.get("Qualifier").map(String::as_str),
             ),
             "Invoke" => {
@@ -1399,6 +1400,7 @@ impl AwsService for LambdaService {
                     resource_name.as_deref().unwrap_or(""),
                     &req.body,
                     aid,
+                    req.region.as_str(),
                     invocation_type,
                     qualifier,
                     log_tail,
@@ -1437,6 +1439,7 @@ impl AwsService for LambdaService {
             "GetPolicy" => self.get_policy(
                 resource_name.as_deref().unwrap_or(""),
                 aid,
+                req.region.as_str(),
                 req.query_params.get("Qualifier").map(String::as_str),
             ),
             "RemovePermission" => {
@@ -1446,6 +1449,7 @@ impl AwsService for LambdaService {
                     resource_name.as_deref().unwrap_or(""),
                     &sid,
                     aid,
+                    req.region.as_str(),
                     req.query_params.get("Qualifier").map(String::as_str),
                 )
             }
@@ -1734,7 +1738,7 @@ impl AwsService for LambdaService {
                     let name = normalize_function_name(&raw);
                     format!(
                         "arn:aws:lambda:{}:{}:function:{}",
-                        state.region, state.account_id, name
+                        request.region, state.account_id, name
                     )
                 }
             }
@@ -1749,7 +1753,7 @@ impl AwsService for LambdaService {
                         v.get("FunctionName").and_then(|f| f.as_str()).map(|n| {
                             format!(
                                 "arn:aws:lambda:{}:{}:function:{}",
-                                state.region, state.account_id, n
+                                request.region, state.account_id, n
                             )
                         })
                     })

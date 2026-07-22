@@ -1373,7 +1373,92 @@ async fn get_function_unknown_errors() {
 #[tokio::test]
 async fn delete_function_unknown_errors() {
     let svc = LambdaService::new(make_state());
-    assert!(svc.delete_function("ghost", "123456789012", None).is_err());
+    assert!(svc
+        .delete_function("ghost", "123456789012", "us-east-1", None)
+        .is_err());
+}
+
+#[tokio::test]
+async fn arns_derive_from_request_region_not_server_default() {
+    // Regression for #2356. The server default region is us-east-1 (see
+    // `make_state`), but a request signed for eu-central-1 must get
+    // eu-central-1 ARNs back. fakecloud's own lookups ignore the ARN region
+    // (see `normalize_function_name`), yet Terraform / cross-service IAM
+    // compare it, so a wrong-region ARN is a real break.
+    let svc = LambdaService::new(make_state());
+
+    // Build a request scoped to eu-central-1 (SigV4 credential-scope region).
+    let eu = |method: Method, path: &str, body: &str| {
+        let mut r = make_request(method, path, body);
+        r.region = "eu-central-1".to_string();
+        r
+    };
+
+    // CreateFunction -> eu-central-1 FunctionArn (the persisted base ARN).
+    let body = json!({
+        "FunctionName": "eufn",
+        "Runtime": "python3.12",
+        "Role": "arn:aws:iam::123456789012:role/r",
+        "Handler": "index.handler",
+        "Code": {}
+    });
+    let resp = svc
+        .handle(eu(Method::POST, "/2015-03-31/functions", &body.to_string()))
+        .await
+        .unwrap();
+    let created: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        created["FunctionArn"].as_str().unwrap(),
+        "arn:aws:lambda:eu-central-1:123456789012:function:eufn"
+    );
+
+    // GetFunction re-emits the stored ARN unchanged (no re-derivation from
+    // the server default).
+    let resp = svc
+        .handle(eu(Method::GET, "/2015-03-31/functions/eufn", ""))
+        .await
+        .unwrap();
+    let got: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        got["Configuration"]["FunctionArn"].as_str().unwrap(),
+        "arn:aws:lambda:eu-central-1:123456789012:function:eufn"
+    );
+
+    // CreateAlias -> eu-central-1 AliasArn.
+    let alias_body = json!({"Name": "PROD", "FunctionVersion": "$LATEST"});
+    let resp = svc
+        .handle(eu(
+            Method::POST,
+            "/2015-03-31/functions/eufn/aliases",
+            &alias_body.to_string(),
+        ))
+        .await
+        .unwrap();
+    let alias: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        alias["AliasArn"].as_str().unwrap(),
+        "arn:aws:lambda:eu-central-1:123456789012:function:eufn:PROD"
+    );
+
+    // PublishLayerVersion -> eu-central-1 LayerArn and version ARN.
+    let layer_body = json!({"Content": {"ZipFile": ""}});
+    let resp = svc
+        .handle(eu(
+            Method::POST,
+            "/2018-10-31/layers/eulayer/versions",
+            &layer_body.to_string(),
+        ))
+        .await
+        .unwrap();
+    let layer: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        layer["LayerArn"].as_str().unwrap(),
+        "arn:aws:lambda:eu-central-1:123456789012:layer:eulayer"
+    );
+    assert_eq!(
+        layer["LayerVersionArn"].as_str().unwrap(),
+        "arn:aws:lambda:eu-central-1:123456789012:layer:eulayer:1"
+    );
 }
 
 #[tokio::test]
@@ -3537,6 +3622,7 @@ async fn invoke_unknown_alias_returns_not_found() {
             "afn",
             b"{}",
             "123456789012",
+            "us-east-1",
             InvocationType::RequestResponse,
             Some("no-such-alias"),
             false,

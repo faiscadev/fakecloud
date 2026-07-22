@@ -75,7 +75,7 @@ impl LambdaService {
             .runtime_management
             .insert(format!("{function_name}:{qualifier}"), cfg.clone());
         let mut resp = json!({
-            "FunctionArn": Arn::new("lambda", &state.region, &state.account_id, &format!("function:{function_name}:{qualifier}")).to_string(),
+            "FunctionArn": Arn::new("lambda", &req.region, &state.account_id, &format!("function:{function_name}:{qualifier}")).to_string(),
             "UpdateRuntimeOn": cfg.update_runtime_on,
         });
         // RuntimeVersionArn is an ARN-typed field; an empty value fails the
@@ -112,7 +112,7 @@ impl LambdaService {
             let mut resp = json!({
                 "FunctionArn": format!(
                     "arn:aws:lambda:{}:{}:function:{}:{}",
-                    state.region, state.account_id, function_name, qualifier
+                    req.region, state.account_id, function_name, qualifier
                 ),
                 "UpdateRuntimeOn": cfg.update_runtime_on,
             });

@@ -934,7 +934,7 @@ impl LambdaService {
         if let Some(name) = body["FunctionName"].as_str() {
             esm.function_arn = format!(
                 "arn:aws:lambda:{}:{}:function:{}",
-                state.region, state.account_id, name
+                req.region, state.account_id, name
             );
         }
         if let Some(filters) = body
