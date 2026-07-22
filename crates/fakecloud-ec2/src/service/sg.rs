@@ -56,13 +56,14 @@ fn rule_xml(r: &SecurityGroupRule, owner: &str, region: &str) -> String {
     out
 }
 
-/// Render one `<item>` IpPermission from a rule.
-fn ip_permission_xml(r: &SecurityGroupRule) -> String {
-    // For the "all traffic" protocol (`-1`), AWS omits FromPort/ToPort entirely;
-    // the provider then normalises them to 0. Emitting `-1` here makes the
-    // `aws_security_group` resource see a perpetual port diff. tcp/udp/icmp
-    // always carry their port range.
-    let mut inner = if r.ip_protocol == "-1" {
+/// Emit the protocol/port header of an IpPermission group.
+///
+/// For the "all traffic" protocol (`-1`), AWS omits FromPort/ToPort entirely;
+/// the provider then normalises them to 0. Emitting `-1` here makes the
+/// `aws_security_group` resource see a perpetual port diff. tcp/udp/icmp
+/// always carry their port range.
+fn ip_permission_header(r: &SecurityGroupRule) -> String {
+    if r.ip_protocol == "-1" {
         ec2_elem("ipProtocol", &r.ip_protocol)
     } else {
         format!(
@@ -71,7 +72,14 @@ fn ip_permission_xml(r: &SecurityGroupRule) -> String {
             r.from_port,
             r.to_port,
         )
-    };
+    }
+}
+
+/// Emit the range children (`ipRanges`/`ipv6Ranges`/`prefixListIds`/`groups`)
+/// for a single stored rule record. Storage keeps one range source per record,
+/// so each record contributes at most one range child; the aggregator
+/// concatenates the children of every record that shares a permission group.
+fn ip_permission_ranges(r: &SecurityGroupRule) -> String {
     let mut ranges = String::new();
     if let Some(c) = &r.cidr_ipv4 {
         ranges.push_str(&format!(
@@ -110,23 +118,38 @@ fn ip_permission_xml(r: &SecurityGroupRule) -> String {
         }
         ranges.push_str(&format!("<groups><item>{item}</item></groups>"));
     }
-    inner.push_str(&ranges);
-    inner
+    ranges
+}
+
+/// Aggregate stored rules into IpPermission `<item>` bodies for
+/// DescribeSecurityGroups. Records that share the same protocol/from-port/
+/// to-port collapse into ONE permission entry -- matching how real EC2 groups
+/// ranges -- concatenating each record's range children. Description is
+/// per-range (attached to each range child), so it is NOT part of the group
+/// key. Stored order is preserved: groups appear in first-seen order and range
+/// children within a group keep their stored order, making the output
+/// deterministic.
+fn grouped_permissions<'a>(rules: impl Iterator<Item = &'a SecurityGroupRule>) -> Vec<String> {
+    // Parallel vectors keyed by (protocol, from_port, to_port); `bodies[i]` is
+    // the accumulating `<item>` inner XML for `keys[i]`.
+    let mut keys: Vec<(String, i64, i64)> = Vec::new();
+    let mut bodies: Vec<String> = Vec::new();
+    for r in rules {
+        let key = (r.ip_protocol.clone(), r.from_port, r.to_port);
+        let ranges = ip_permission_ranges(r);
+        if let Some(pos) = keys.iter().position(|k| *k == key) {
+            bodies[pos].push_str(&ranges);
+        } else {
+            keys.push(key);
+            bodies.push(format!("{}{}", ip_permission_header(r), ranges));
+        }
+    }
+    bodies
 }
 
 fn sg_xml(sg: &SecurityGroup, tags: &[Tag], owner: &str, region: &str) -> String {
-    let ingress: Vec<String> = sg
-        .rules
-        .iter()
-        .filter(|r| !r.is_egress)
-        .map(ip_permission_xml)
-        .collect();
-    let egress: Vec<String> = sg
-        .rules
-        .iter()
-        .filter(|r| r.is_egress)
-        .map(ip_permission_xml)
-        .collect();
+    let ingress = grouped_permissions(sg.rules.iter().filter(|r| !r.is_egress));
+    let egress = grouped_permissions(sg.rules.iter().filter(|r| r.is_egress));
     format!(
         "{}{}{}{}{}{}{}{}",
         ec2_elem("groupId", &sg.group_id),
@@ -1411,6 +1434,102 @@ mod modify_tests {
         assert!(
             body.contains("<description>https from vpc</description>"),
             "describe body missing inline description: {body}"
+        );
+    }
+
+    #[test]
+    fn describe_aggregates_v4_and_v6_ranges_into_one_permission() {
+        let svc = Ec2Service::new();
+        empty_group(&svc);
+        // One IpPermission carrying BOTH an IpRange and an Ipv6Range.
+        authorize_security_group_egress(
+            &svc,
+            &req(
+                "AuthorizeSecurityGroupEgress",
+                &[
+                    ("GroupId", "sg-1"),
+                    ("IpPermissions.1.IpProtocol", "-1"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "0.0.0.0/0"),
+                    ("IpPermissions.1.Ipv6Ranges.1.CidrIpv6", "::/0"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let resp = describe_security_groups(&svc, &req("DescribeSecurityGroups", &[])).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+
+        // Isolate the egress permission set.
+        let egress = body
+            .split("<ipPermissionsEgress>")
+            .nth(1)
+            .and_then(|s| s.split("</ipPermissionsEgress>").next())
+            .expect("no ipPermissionsEgress in describe body");
+
+        // Exactly ONE permission <item> (aggregated), not two.
+        assert_eq!(
+            egress.matches("<item>").count(),
+            // one permission item + one ipRanges item + one ipv6Ranges item
+            3,
+            "expected a single aggregated egress permission, got: {egress}"
+        );
+        // The single permission carries BOTH range families.
+        assert!(
+            egress.contains("<ipRanges><item><cidrIp>0.0.0.0/0</cidrIp>"),
+            "aggregated permission missing ipRanges: {egress}"
+        );
+        assert!(
+            egress.contains("<ipv6Ranges><item><cidrIpv6>::/0</cidrIpv6>"),
+            "aggregated permission missing ipv6Ranges: {egress}"
+        );
+    }
+
+    #[test]
+    fn describe_keeps_distinct_protocols_as_separate_permissions() {
+        let svc = Ec2Service::new();
+        empty_group(&svc);
+        // Two distinct protocol/port permissions must NOT be over-aggregated.
+        authorize_security_group_ingress(
+            &svc,
+            &req(
+                "AuthorizeSecurityGroupIngress",
+                &[
+                    ("GroupId", "sg-1"),
+                    ("IpPermissions.1.IpProtocol", "tcp"),
+                    ("IpPermissions.1.FromPort", "22"),
+                    ("IpPermissions.1.ToPort", "22"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "10.0.0.0/8"),
+                    ("IpPermissions.2.IpProtocol", "tcp"),
+                    ("IpPermissions.2.FromPort", "443"),
+                    ("IpPermissions.2.ToPort", "443"),
+                    ("IpPermissions.2.IpRanges.1.CidrIp", "0.0.0.0/0"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let resp = describe_security_groups(&svc, &req("DescribeSecurityGroups", &[])).unwrap();
+        let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        let ingress = body
+            .split("<ipPermissions>")
+            .nth(1)
+            .and_then(|s| s.split("</ipPermissions>").next())
+            .expect("no ipPermissions in describe body");
+
+        // Two separate permission items, one per port.
+        assert!(
+            ingress.contains("<fromPort>22</fromPort><toPort>22</toPort>"),
+            "missing port-22 permission: {ingress}"
+        );
+        assert!(
+            ingress.contains("<fromPort>443</fromPort><toPort>443</toPort>"),
+            "missing port-443 permission: {ingress}"
+        );
+        // Two <fromPort> occurrences => two distinct permission groups.
+        assert_eq!(
+            ingress.matches("<fromPort>").count(),
+            2,
+            "distinct protocol/port permissions were over-aggregated: {ingress}"
         );
     }
 
