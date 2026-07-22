@@ -56,77 +56,118 @@ fn rule_xml(r: &SecurityGroupRule, owner: &str, region: &str) -> String {
     out
 }
 
-/// Render one `<item>` IpPermission from a rule.
-fn ip_permission_xml(r: &SecurityGroupRule) -> String {
+/// Render the aggregated IpPermission `<item>` elements for one direction.
+///
+/// Rules are stored one-per-range, but real EC2 collapses every range that
+/// shares the same (protocol, from-port, to-port) into a SINGLE `ipPermissions`
+/// entry that carries all of its IpRanges, Ipv6Ranges, prefix-list ids, and
+/// referenced-group pairs. The terraform `aws_security_group_rule` create-waiter
+/// polls `DescribeSecurityGroups` for exactly that aggregated shape (one
+/// permission holding both the v4 and v6 range it authorized); rendering each
+/// stored range as its own permission never matches, so the waiter spins for
+/// ~5 minutes and then reports "couldn't find resource". Grouping preserves the
+/// first-seen order of the permission keys and each range's own Description.
+fn aggregated_ip_permissions_xml(rules: &[&SecurityGroupRule]) -> Vec<String> {
+    let mut order: Vec<(String, i64, i64)> = Vec::new();
+    let mut groups: HashMap<(String, i64, i64), Vec<&SecurityGroupRule>> = HashMap::new();
+    for r in rules {
+        let key = (r.ip_protocol.clone(), r.from_port, r.to_port);
+        groups.entry(key.clone()).or_default().push(r);
+        if !order.contains(&key) {
+            order.push(key);
+        }
+    }
+    order
+        .into_iter()
+        .map(|key| ip_permission_group_xml(&key.0, key.1, key.2, &groups[&key]))
+        .collect()
+}
+
+/// Render one aggregated IpPermission `<item>` for a group of rules that all
+/// share `proto`/`from`/`to`.
+fn ip_permission_group_xml(
+    proto: &str,
+    from: i64,
+    to: i64,
+    rules: &[&SecurityGroupRule],
+) -> String {
     // For the "all traffic" protocol (`-1`), AWS omits FromPort/ToPort entirely;
     // the provider then normalises them to 0. Emitting `-1` here makes the
     // `aws_security_group` resource see a perpetual port diff. tcp/udp/icmp
     // always carry their port range.
-    let mut inner = if r.ip_protocol == "-1" {
-        ec2_elem("ipProtocol", &r.ip_protocol)
+    let mut inner = if proto == "-1" {
+        ec2_elem("ipProtocol", proto)
     } else {
         format!(
             "{}<fromPort>{}</fromPort><toPort>{}</toPort>",
-            ec2_elem("ipProtocol", &r.ip_protocol),
-            r.from_port,
-            r.to_port,
+            ec2_elem("ipProtocol", proto),
+            from,
+            to,
         )
     };
-    let mut ranges = String::new();
-    if let Some(c) = &r.cidr_ipv4 {
-        ranges.push_str(&format!(
-            "<ipRanges><item>{}{}</item></ipRanges>",
-            ec2_elem("cidrIp", c),
-            ec2_elem("description", &r.description)
-        ));
-    }
-    if let Some(c) = &r.cidr_ipv6 {
-        ranges.push_str(&format!(
-            "<ipv6Ranges><item>{}{}</item></ipv6Ranges>",
-            ec2_elem("cidrIpv6", c),
-            ec2_elem("description", &r.description)
-        ));
-    }
-    if let Some(p) = &r.prefix_list_id {
-        ranges.push_str(&format!(
-            "<prefixListIds><item>{}{}</item></prefixListIds>",
-            ec2_elem("prefixListId", p),
-            ec2_elem("description", &r.description)
-        ));
-    }
-    if r.referenced_group_id.is_some() || r.referenced_group_name.is_some() {
-        let mut item = String::new();
-        if let Some(u) = &r.referenced_user_id {
-            item.push_str(&ec2_elem("userId", u));
+    let mut v4 = String::new();
+    let mut v6 = String::new();
+    let mut prefix = String::new();
+    let mut group_refs = String::new();
+    for r in rules {
+        if let Some(c) = &r.cidr_ipv4 {
+            v4.push_str(&format!(
+                "<item>{}{}</item>",
+                ec2_elem("cidrIp", c),
+                ec2_elem("description", &r.description)
+            ));
         }
-        if let Some(g) = &r.referenced_group_id {
-            item.push_str(&ec2_elem("groupId", g));
+        if let Some(c) = &r.cidr_ipv6 {
+            v6.push_str(&format!(
+                "<item>{}{}</item>",
+                ec2_elem("cidrIpv6", c),
+                ec2_elem("description", &r.description)
+            ));
         }
-        if let Some(n) = &r.referenced_group_name {
-            item.push_str(&ec2_elem("groupName", n));
+        if let Some(p) = &r.prefix_list_id {
+            prefix.push_str(&format!(
+                "<item>{}{}</item>",
+                ec2_elem("prefixListId", p),
+                ec2_elem("description", &r.description)
+            ));
         }
-        if !r.description.is_empty() {
-            item.push_str(&ec2_elem("description", &r.description));
+        if r.referenced_group_id.is_some() || r.referenced_group_name.is_some() {
+            let mut item = String::new();
+            if let Some(u) = &r.referenced_user_id {
+                item.push_str(&ec2_elem("userId", u));
+            }
+            if let Some(g) = &r.referenced_group_id {
+                item.push_str(&ec2_elem("groupId", g));
+            }
+            if let Some(n) = &r.referenced_group_name {
+                item.push_str(&ec2_elem("groupName", n));
+            }
+            if !r.description.is_empty() {
+                item.push_str(&ec2_elem("description", &r.description));
+            }
+            group_refs.push_str(&format!("<item>{item}</item>"));
         }
-        ranges.push_str(&format!("<groups><item>{item}</item></groups>"));
     }
-    inner.push_str(&ranges);
+    if !v4.is_empty() {
+        inner.push_str(&format!("<ipRanges>{v4}</ipRanges>"));
+    }
+    if !v6.is_empty() {
+        inner.push_str(&format!("<ipv6Ranges>{v6}</ipv6Ranges>"));
+    }
+    if !prefix.is_empty() {
+        inner.push_str(&format!("<prefixListIds>{prefix}</prefixListIds>"));
+    }
+    if !group_refs.is_empty() {
+        inner.push_str(&format!("<groups>{group_refs}</groups>"));
+    }
     inner
 }
 
 fn sg_xml(sg: &SecurityGroup, tags: &[Tag], owner: &str, region: &str) -> String {
-    let ingress: Vec<String> = sg
-        .rules
-        .iter()
-        .filter(|r| !r.is_egress)
-        .map(ip_permission_xml)
-        .collect();
-    let egress: Vec<String> = sg
-        .rules
-        .iter()
-        .filter(|r| r.is_egress)
-        .map(ip_permission_xml)
-        .collect();
+    let ingress_rules: Vec<&SecurityGroupRule> = sg.rules.iter().filter(|r| !r.is_egress).collect();
+    let egress_rules: Vec<&SecurityGroupRule> = sg.rules.iter().filter(|r| r.is_egress).collect();
+    let ingress = aggregated_ip_permissions_xml(&ingress_rules);
+    let egress = aggregated_ip_permissions_xml(&egress_rules);
     format!(
         "{}{}{}{}{}{}{}{}",
         ec2_elem("groupId", &sg.group_id),
@@ -1441,6 +1482,72 @@ mod modify_tests {
         assert_eq!(r.referenced_group_name.as_deref(), Some("peer-sg"));
         assert_eq!(r.referenced_user_id.as_deref(), Some("111122223333"));
         assert_eq!(r.description, "from peer");
+    }
+
+    #[test]
+    fn describe_aggregates_ipv4_and_ipv6_into_one_permission() {
+        // Authorizing ONE egress permission carrying both an IpRange and an
+        // Ipv6Range is stored as two per-range rules, but DescribeSecurityGroups
+        // must re-aggregate them into a single ipPermissionsEgress entry holding
+        // both ranges (the real EC2 shape the terraform aws_security_group_rule
+        // waiter polls for). A distinct protocol/port is used so it forms its
+        // own permission entry alongside the default all-traffic egress rule =
+        // 2 aggregated entries total (real EC2 would merge same-protocol ranges,
+        // so a `-1` authorize would instead fold into the default's entry).
+        let svc = Ec2Service::new();
+        let resp = create_security_group(
+            &svc,
+            &req(
+                "CreateSecurityGroup",
+                &[
+                    ("GroupName", "agg"),
+                    ("GroupDescription", "d"),
+                    ("VpcId", "vpc-1"),
+                ],
+            ),
+        )
+        .unwrap();
+        let sg_id = {
+            let body = String::from_utf8_lossy(resp.body.expect_bytes());
+            body.split("<groupId>")
+                .nth(1)
+                .and_then(|s| s.split("</groupId>").next())
+                .unwrap()
+                .to_string()
+        };
+        authorize_security_group_egress(
+            &svc,
+            &req(
+                "AuthorizeSecurityGroupEgress",
+                &[
+                    ("GroupId", &sg_id),
+                    ("IpPermissions.1.IpProtocol", "tcp"),
+                    ("IpPermissions.1.FromPort", "443"),
+                    ("IpPermissions.1.ToPort", "443"),
+                    ("IpPermissions.1.IpRanges.1.CidrIp", "0.0.0.0/0"),
+                    ("IpPermissions.1.Ipv6Ranges.1.CidrIpv6", "::/0"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let account = svc.state.read();
+        let rules = &account.get("000000000000").unwrap().security_groups[&sg_id].rules;
+        // Storage stays per-range: default(1) + tcp/443 v4 + tcp/443 v6 = 3 rules.
+        assert_eq!(rules.iter().filter(|r| r.is_egress).count(), 3);
+        let egress_refs: Vec<&SecurityGroupRule> = rules.iter().filter(|r| r.is_egress).collect();
+        let perms = aggregated_ip_permissions_xml(&egress_refs);
+        // ...but only 2 aggregated permission entries are rendered.
+        assert_eq!(perms.len(), 2, "expected 2 aggregated egress permissions");
+        // The tcp/443 entry is a SINGLE permission holding BOTH ranges.
+        let tcp = perms
+            .iter()
+            .find(|p| p.contains("<ipProtocol>tcp</ipProtocol>"))
+            .expect("no tcp/443 permission");
+        assert!(
+            tcp.contains("<cidrIp>0.0.0.0/0</cidrIp>") && tcp.contains("<cidrIpv6>::/0</cidrIpv6>"),
+            "v4 and v6 ranges not aggregated into one permission: {tcp}"
+        );
     }
 
     #[test]

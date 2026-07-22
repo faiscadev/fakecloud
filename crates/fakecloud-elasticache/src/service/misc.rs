@@ -440,15 +440,28 @@ impl ElastiCacheService {
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let tag_list = state.tags.get(&resource_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
+        // A resource that exists but has never been tagged has no entry in the
+        // tags map yet (CreateCacheParameterGroup and friends do not seed one).
+        // Real ElastiCache returns an empty TagList for such a resource and only
+        // errors when the resource itself is absent, so resolve existence
+        // against the resource collections instead of the tags map — keying off
+        // tags 404'd every freshly-created untagged resource, which broke every
+        // `aws_elasticache_parameter_group` apply (it reads tags right after
+        // create to populate tags_all).
+        if !resource_arn_exists(state, &resource_name) {
+            let resource_type = resource_name.split(':').nth(5).unwrap_or("");
+            return Err(AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
-                "CacheClusterNotFound",
+                resource_not_found_code(resource_type),
                 format!("The resource {resource_name} could not be found."),
-            )
-        })?;
+            ));
+        }
 
-        let tag_xml: String = tag_list.iter().map(tag_xml).collect();
+        let tag_xml: String = state
+            .tags
+            .get(&resource_name)
+            .map(|t| t.iter().map(tag_xml).collect())
+            .unwrap_or_default();
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -885,6 +898,49 @@ impl ElastiCacheService {
             StatusCode::OK,
             query_response_xml(action, ELASTICACHE_NS, &body, &request.request_id),
         ))
+    }
+}
+
+/// True when `arn` matches an existing ElastiCache resource in `state`,
+/// scanning every tag-bearing resource collection. Used to decide whether a
+/// tags lookup should return an empty list (resource exists, no tags) or a
+/// not-found error (resource absent) — independent of the tags map, which is
+/// only populated once a resource is actually tagged.
+fn resource_arn_exists(state: &ElastiCacheState, arn: &str) -> bool {
+    state.cache_clusters.values().any(|c| c.arn == arn)
+        || state.parameter_groups.iter().any(|g| g.arn == arn)
+        || state.subnet_groups.values().any(|g| g.arn == arn)
+        || state.replication_groups.values().any(|g| g.arn == arn)
+        || state
+            .global_replication_groups
+            .values()
+            .any(|g| g.arn == arn)
+        || state.users.values().any(|u| u.arn == arn)
+        || state.user_groups.values().any(|g| g.arn == arn)
+        || state.snapshots.values().any(|s| s.arn == arn)
+        || state.serverless_caches.values().any(|c| c.arn == arn)
+        || state
+            .serverless_cache_snapshots
+            .values()
+            .any(|s| s.arn == arn)
+}
+
+/// AWS not-found error code for an ElastiCache ARN resource-type segment
+/// (`arn:aws:elasticache:region:account:<type>:<name>`), so a genuinely-absent
+/// resource errors with the code AWS uses for that type.
+fn resource_not_found_code(resource_type: &str) -> &'static str {
+    match resource_type {
+        "parametergroup" => "CacheParameterGroupNotFound",
+        "subnetgroup" => "CacheSubnetGroupNotFoundFault",
+        "replicationgroup" => "ReplicationGroupNotFoundFault",
+        "globalreplicationgroup" => "GlobalReplicationGroupNotFoundFault",
+        "user" => "UserNotFound",
+        "usergroup" => "UserGroupNotFound",
+        "snapshot" => "SnapshotNotFoundFault",
+        "serverlesscache" => "ServerlessCacheNotFoundFault",
+        "serverlesssnapshot" => "ServerlessCacheSnapshotNotFoundFault",
+        // "cluster" and any unrecognised type default to the cluster error.
+        _ => "CacheClusterNotFound",
     }
 }
 

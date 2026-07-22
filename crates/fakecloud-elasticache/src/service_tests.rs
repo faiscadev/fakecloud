@@ -3605,6 +3605,45 @@ fn list_tags_unknown_arn_errors() {
     assert!(svc.list_tags_for_resource(&req).is_err());
 }
 
+#[test]
+fn list_tags_existing_untagged_resource_returns_empty_list() {
+    // Real ElastiCache returns an empty TagList for a resource that exists but
+    // has never been tagged. Keying the lookup off the tags map 404'd every
+    // freshly-created parameter group, breaking `aws_elasticache_parameter_group`
+    // apply (it reads tags right after create). Regression for #2354.
+    let svc = fresh_service();
+    svc.create_cache_parameter_group(&request(
+        "CreateCacheParameterGroup",
+        &[
+            ("CacheParameterGroupName", "pg-untagged"),
+            ("CacheParameterGroupFamily", "redis7"),
+            ("Description", "test"),
+        ],
+    ))
+    .unwrap();
+
+    let arn = "arn:aws:elasticache:us-east-1:123456789012:parametergroup:pg-untagged";
+    let resp = svc
+        .list_tags_for_resource(&request("ListTagsForResource", &[("ResourceName", arn)]))
+        .expect("existing untagged resource must not 404");
+    let xml = body(resp);
+    assert!(
+        xml.contains("<TagList></TagList>") || xml.contains("<TagList/>"),
+        "{xml}"
+    );
+
+    // A genuinely-nonexistent resource still errors.
+    let missing = "arn:aws:elasticache:us-east-1:123456789012:parametergroup:does-not-exist";
+    let err = match svc.list_tags_for_resource(&request(
+        "ListTagsForResource",
+        &[("ResourceName", missing)],
+    )) {
+        Err(e) => e,
+        Ok(_) => panic!("nonexistent resource should error"),
+    };
+    assert_eq!(err.code(), "CacheParameterGroupNotFound");
+}
+
 // ── Coverage for the closure batch ──
 
 fn fresh_service() -> ElastiCacheService {

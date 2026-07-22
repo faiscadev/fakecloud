@@ -460,6 +460,49 @@ async fn stage_crud_lifecycle() {
     assert!(svc.handle(req).await.is_err());
 }
 
+#[tokio::test]
+async fn get_stage_default_is_percent_decoded() {
+    // Regression for #2355: the `$default` stage travels on the wire as the
+    // percent-encoded segment `%24default`. Without decoding the path label,
+    // GetStage/DeleteStage/UpdateStage compared `%24default` against the stored
+    // `$default` and 404'd with "Stage not found: %24default".
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+
+    // Create the $default stage (name comes from the JSON body).
+    let body = serde_json::json!({"stageName": "$default"});
+    let req = make_request(
+        Method::POST,
+        &format!("/v2/apis/{api_id}/stages"),
+        &body.to_string(),
+    );
+    let resp = svc.handle(req).await.unwrap();
+    assert_eq!(body_json(&resp)["stageName"], "$default");
+
+    // GetStage via the encoded path segment must resolve to the stage.
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/stages/%24default"),
+        "",
+    );
+    let resp = svc
+        .handle(req)
+        .await
+        .expect("GetStage on %24default must not 404");
+    assert_eq!(body_json(&resp)["stageName"], "$default");
+
+    // DeleteStage via the encoded segment resolves too.
+    let req = make_request(
+        Method::DELETE,
+        &format!("/v2/apis/{api_id}/stages/%24default"),
+        "",
+    );
+    svc.handle(req)
+        .await
+        .expect("DeleteStage on %24default must not 404");
+}
+
 // ── Deployment CRUD ──
 
 #[tokio::test]

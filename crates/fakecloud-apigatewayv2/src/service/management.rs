@@ -12,7 +12,21 @@ impl ApiGatewayV2Service {
         // (and our internal conformance probe) serialize with the raw
         // PascalCase member names instead. Normalize both shapes here so
         // every handler can read a single canonical lowercase-first form.
-        let req = normalize_request_body_keys(req);
+        let mut req = normalize_request_body_keys(req);
+        // Path-label segments (stage names, route/integration/authorizer ids,
+        // domain names, ...) arrive percent-encoded on the wire. The `$default`
+        // stage travels as `%24default`, so an undecoded segment never matches
+        // the stored `$default` literal and GetStage/DeleteStage/UpdateStage
+        // (and any other encodable id) fail with "Stage not found: %24default".
+        // Decode every segment once here so all downstream lookups compare the
+        // literal id. (Only the control plane is affected — the execute-api data
+        // plane keeps its raw path.)
+        for seg in &mut req.path_segments {
+            let decoded = percent_encoding::percent_decode_str(seg)
+                .decode_utf8_lossy()
+                .into_owned();
+            *seg = decoded;
+        }
         let (action, api_id, resource_id) = Self::resolve_action(&req).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
