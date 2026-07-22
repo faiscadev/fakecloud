@@ -75,16 +75,30 @@ pub(crate) struct Cli {
     #[arg(long, env = "FAKECLOUD_DATA_PATH")]
     pub data_path: Option<PathBuf>,
 
-    /// Bulk-load AWS-format DynamoDB export(s) at startup. Single export dir if
-    /// --dynamodb-import-describe-table is also set, multi-table root dir if
-    /// not. See /docs/services/dynamodb#importing-an-aws-export-at-startup.
-    #[arg(long, env = "FAKECLOUD_DYNAMODB_IMPORT_PATH")]
+    /// Bulk-load a single AWS-format DynamoDB export at startup. Requires
+    /// --dynamodb-import-describe-table. See
+    /// /docs/services/dynamodb#importing-an-aws-export-at-startup.
+    #[arg(
+        long,
+        env = "FAKECLOUD_DYNAMODB_IMPORT_PATH",
+        conflicts_with = "dynamodb_import_dir"
+    )]
     pub dynamodb_import_path: Option<PathBuf>,
 
-    /// `aws dynamodb describe-table` JSON for --dynamodb-import-path in
-    /// single-table mode. Omit for multi-table mode.
-    #[arg(long, env = "FAKECLOUD_DYNAMODB_DESCRIBE_TABLE")]
+    /// `aws dynamodb describe-table` JSON for --dynamodb-import-path.
+    #[arg(
+        long,
+        env = "FAKECLOUD_DYNAMODB_DESCRIBE_TABLE",
+        conflicts_with = "dynamodb_import_dir"
+    )]
     pub dynamodb_import_describe_table: Option<PathBuf>,
+
+    /// Bulk-load many AWS-format DynamoDB exports at startup from a root
+    /// directory of per-table subdirectories, each self-contained with its
+    /// own describe-table.json. See
+    /// /docs/services/dynamodb#importing-an-aws-export-at-startup.
+    #[arg(long, env = "FAKECLOUD_DYNAMODB_IMPORT_DIR")]
+    pub dynamodb_import_dir: Option<PathBuf>,
 
     /// In-memory LRU cache for S3 object bodies in persistent mode. Plain bytes,
     /// no SI/IEC suffix parsing. Default 256 MiB.

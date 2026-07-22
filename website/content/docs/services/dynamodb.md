@@ -34,14 +34,14 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 
 ## Importing an AWS export at startup
 
-Seed one or many local tables from real DynamoDB S3 exports. Two boot flags bulk-load AWS-format export(s) directly into the store before the server starts serving. Which mode you get is decided purely by whether `--dynamodb-import-describe-table` is also set:
+Seed one or many local tables from real DynamoDB S3 exports, bulk-loaded directly into the store before the server starts serving. Single-table and multi-table each use their own flag — the two are mutually exclusive (startup aborts if both are set).
 
 ### Single-table mode
 
-Both flags set together:
-
 - `--dynamodb-import-path` (`FAKECLOUD_DYNAMODB_IMPORT_PATH`) — the local `AWSDynamoDB/<export-id>/` folder that holds `manifest-summary.json` (as produced by an AWS DynamoDB S3 export).
 - `--dynamodb-import-describe-table` (`FAKECLOUD_DYNAMODB_DESCRIBE_TABLE`) — an `aws dynamodb describe-table` JSON dump supplying the table shape (key schema, attribute definitions, indexes, billing mode).
+
+Both are required together.
 
 ```sh
 fakecloud \
@@ -51,7 +51,7 @@ fakecloud \
 
 ### Multi-table mode
 
-`--dynamodb-import-path` set alone (no `--dynamodb-import-describe-table`): the path is a root directory of per-table subdirectories, each self-contained with its own `describe-table.json` alongside that table's `manifest-summary.json` / `manifest-files.json` / `data/*.json.gz`. Subdirectory names carry no meaning — each table's name comes from its own `describe-table.json`.
+- `--dynamodb-import-dir` (`FAKECLOUD_DYNAMODB_IMPORT_DIR`) — a root directory of per-table subdirectories, each self-contained with its own `describe-table.json` alongside that table's `manifest-summary.json` / `manifest-files.json` / `data/*.json.gz`. Subdirectory names carry no meaning — each table's name comes from its own `describe-table.json`.
 
 ```
 root/
@@ -68,14 +68,15 @@ root/
 ```
 
 ```sh
-fakecloud --dynamodb-import-path ./root
+fakecloud --dynamodb-import-dir ./root
 ```
 
-Every subdirectory is imported using the same rules as single-table mode. Passing `--dynamodb-import-describe-table` together with a multi-table root doesn't apply — it's only read in single-table mode.
+Every subdirectory is imported using the same rules as single-table mode.
 
 ### Constraints (both modes)
 
 - **`--dynamodb-import-describe-table` alone, without `--dynamodb-import-path`, aborts startup** — it has nothing to pair with.
+- **`--dynamodb-import-path`/`--dynamodb-import-describe-table` and `--dynamodb-import-dir` are mutually exclusive** — passing both aborts startup before any import runs.
 - **Idempotent, per table.** Each import creates a new table. If a table of that name already exists, that table's import is skipped with a warning and its existing data is left untouched (no merge, no append, no overwrite). This makes restarting with the flags still set safe.
 - **Additive:** tables are materialised straight in the store. They do not go through `BatchWriteItem` and do not touch the modeled `ImportTable` API operation.
 - **Targets the default (single) account** named by `--account-id` in the configured region.

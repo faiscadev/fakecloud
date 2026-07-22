@@ -2568,8 +2568,16 @@ async fn main() {
     // Optional: bulk-load an AWS-format DynamoDB export straight into the
     // internal store before the service is built. See docs/services/dynamodb.md
     // for the single- vs multi-table mode split.
-    if let Some(import_path) = cli.dynamodb_import_path.as_ref() {
-        let outcomes = if let Some(describe_path) = cli.dynamodb_import_describe_table.as_ref() {
+    let dynamodb_import_outcomes: Option<Vec<fakecloud_dynamodb::ImportOutcome>> =
+        if let Some(import_path) = cli.dynamodb_import_path.as_ref() {
+            let describe_path = cli
+                .dynamodb_import_describe_table
+                .as_ref()
+                .unwrap_or_else(|| {
+                    fatal_exit(format_args!(
+                        "--dynamodb-import-path requires --dynamodb-import-describe-table"
+                    ))
+                });
             let describe_bytes = std::fs::read(describe_path).unwrap_or_else(|e| {
                 fatal_exit(format_args!(
                     "failed to read describe-table file {}: {e}",
@@ -2590,23 +2598,30 @@ async fn main() {
                 import_path,
                 &describe,
             ) {
-                Ok(outcome) => vec![outcome],
+                Ok(outcome) => Some(vec![outcome]),
                 Err(e) => fatal_exit(format_args!("dynamodb export import failed: {e}")),
             }
-        } else {
+        } else if let Some(import_dir) = cli.dynamodb_import_dir.as_ref() {
             match fakecloud_dynamodb::import_aws_exports_dir(
                 &dynamodb_state_for_register,
                 &cli.account_id,
                 &cli.region,
-                import_path,
+                import_dir,
             ) {
-                Ok(outcomes) => outcomes,
+                Ok(outcomes) => Some(outcomes),
                 Err(e) => fatal_exit(format_args!(
                     "dynamodb multi-table export import failed: {e}"
                 )),
             }
+        } else if cli.dynamodb_import_describe_table.is_some() {
+            fatal_exit(format_args!(
+                "--dynamodb-import-describe-table requires --dynamodb-import-path"
+            ));
+        } else {
+            None
         };
 
+    if let Some(outcomes) = dynamodb_import_outcomes {
         let mut any_imported = false;
         for outcome in outcomes {
             match outcome {
@@ -2637,10 +2652,6 @@ async fn main() {
                 }
             }
         }
-    } else if cli.dynamodb_import_describe_table.is_some() {
-        fatal_exit(format_args!(
-            "--dynamodb-import-describe-table requires --dynamodb-import-path"
-        ));
     }
 
     // Keep a clone of the snapshot store (and a dedicated write lock) for the

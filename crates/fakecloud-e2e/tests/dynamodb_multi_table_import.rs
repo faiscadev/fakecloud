@@ -7,10 +7,10 @@ use flate2::write::GzEncoder;
 use flate2::Compression;
 use helpers::TestServer;
 
-/// Real-SDK end-to-end proof of multi-table import: `FAKECLOUD_DYNAMODB_IMPORT_PATH`
-/// set alone (no `FAKECLOUD_DYNAMODB_DESCRIBE_TABLE`) treats the path as a root
-/// directory of self-contained per-table subdirectories. Builds two such
-/// subdirectories at test time and asserts both tables are queryable after boot.
+/// Real-SDK end-to-end proof of multi-table import: `FAKECLOUD_DYNAMODB_IMPORT_DIR`
+/// treats its path as a root directory of self-contained per-table
+/// subdirectories. Builds two such subdirectories at test time and asserts
+/// both tables are queryable after boot.
 #[tokio::test]
 async fn startup_import_loads_every_table_from_root_dir() {
     let root = tempfile::tempdir().unwrap();
@@ -20,7 +20,7 @@ async fn startup_import_loads_every_table_from_root_dir() {
     let server = TestServer::start_with_env(&[
         ("FAKECLOUD_CONTAINER_CLI", "false"),
         (
-            "FAKECLOUD_DYNAMODB_IMPORT_PATH",
+            "FAKECLOUD_DYNAMODB_IMPORT_DIR",
             root.path().to_str().unwrap(),
         ),
     ])
