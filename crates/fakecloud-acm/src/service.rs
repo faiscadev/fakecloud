@@ -735,6 +735,15 @@ impl AcmService {
             .ok_or_else(|| invalid_param("Certificate is required"))?;
         let key_pem = decode_blob(body.get("PrivateKey"))
             .ok_or_else(|| invalid_param("PrivateKey is required"))?;
+        // Reject a structurally-invalid private key up front. Without this,
+        // a malformed key is stored as-is and only blows up later when
+        // ExportCertificate tries to PEM-decode it (IMPORTED certs are
+        // always exportable), which previously panicked the request task.
+        if !is_pem_private_key(&key_pem) {
+            return Err(invalid_param(
+                "PrivateKey could not be decoded as a PEM-encoded private key",
+            ));
+        }
         let chain_pem = decode_blob(body.get("CertificateChain"));
         let arn_in = body
             .get("CertificateArn")
@@ -1994,16 +2003,57 @@ fn pem_decode_private_key(pem: &str) -> Result<Vec<u8>, String> {
         .find("-----END PRIVATE KEY-----")
         .ok_or("missing END line")?;
     let body_start = begin + 11 + dash + 5;
+    // A well-formed block has END after the base64 body. A malformed
+    // single-line block (`BEGIN...X-----END...`) or an END-before-BEGIN
+    // ordering leaves `body_start > end`, and the first newline after
+    // `body_start` can also fall beyond END. Guard both before slicing so
+    // a bad key returns a validation error instead of panicking the task.
+    if end < body_start {
+        return Err("malformed PEM: END marker precedes the key body".to_string());
+    }
     let nl = pem[body_start..]
         .find('\n')
         .ok_or("missing newline after BEGIN")?;
-    let body: String = pem[body_start + nl + 1..end]
+    let body_from = body_start + nl + 1;
+    if body_from > end {
+        return Err("malformed PEM: no key body between BEGIN and END".to_string());
+    }
+    let body: String = pem[body_from..end]
         .chars()
         .filter(|c| !c.is_whitespace())
         .collect();
     base64::engine::general_purpose::STANDARD
         .decode(body.as_bytes())
         .map_err(|e| format!("PEM body is not valid base64: {e}"))
+}
+
+/// Structural check that `pem` looks like a PEM-encoded private key: a
+/// `-----BEGIN ... PRIVATE KEY-----` marker followed by a matching
+/// `-----END ... PRIVATE KEY-----`, with a non-empty body between them.
+/// Accepts any private-key label (PKCS#8 `PRIVATE KEY`, `RSA PRIVATE KEY`,
+/// `EC PRIVATE KEY`); it does not validate the inner DER. ACM
+/// ImportCertificate rejects a key that is not structurally a PEM private
+/// key with a validation error rather than storing an unusable blob.
+fn is_pem_private_key(pem: &str) -> bool {
+    let Some(begin) = pem.find("-----BEGIN ") else {
+        return false;
+    };
+    let after_begin = &pem[begin + 11..];
+    let Some(dash) = after_begin.find("-----") else {
+        return false;
+    };
+    let label = after_begin[..dash].trim();
+    if !label.ends_with("PRIVATE KEY") {
+        return false;
+    }
+    let body_start = begin + 11 + dash + 5;
+    let end_marker = format!("-----END {label}-----");
+    let Some(end_rel) = pem[body_start..].find(&end_marker) else {
+        return false;
+    };
+    let end = body_start + end_rel;
+    // Body between BEGIN and END must be non-empty (whitespace aside).
+    pem[body_start..end].chars().any(|c| !c.is_whitespace())
 }
 
 #[cfg(test)]
@@ -3071,5 +3121,95 @@ mod tests {
         }))
         .await;
         assert!(got.is_empty());
+    }
+
+    #[test]
+    fn pem_decode_private_key_rejects_malformed_without_panic() {
+        // Single-line block: the first newline falls after END, so the body
+        // range would be inverted and slice-panic without the guard.
+        assert!(
+            pem_decode_private_key("-----BEGIN PRIVATE KEY-----X-----END PRIVATE KEY-----\n")
+                .is_err()
+        );
+        // END marker appears before BEGIN.
+        assert!(
+            pem_decode_private_key("-----END PRIVATE KEY-----\n-----BEGIN PRIVATE KEY-----\n")
+                .is_err()
+        );
+        // No markers, and empty input.
+        assert!(pem_decode_private_key("not a pem at all").is_err());
+        assert!(pem_decode_private_key("").is_err());
+        // A real PKCS#8 key still decodes.
+        let (_c, key) = generate_self_signed_cert("example.com", &[]).unwrap();
+        assert!(pem_decode_private_key(&key).is_ok());
+    }
+
+    #[test]
+    fn is_pem_private_key_accepts_real_key_rejects_junk() {
+        let (_c, key) = generate_self_signed_cert("example.com", &[]).unwrap();
+        assert!(is_pem_private_key(&key));
+        // Certificate label is not a private key.
+        assert!(!is_pem_private_key(
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"
+        ));
+        // Markers present but empty body.
+        assert!(!is_pem_private_key(
+            "-----BEGIN PRIVATE KEY-----\n-----END PRIVATE KEY-----\n"
+        ));
+        // No markers.
+        assert!(!is_pem_private_key("definitely not a pem key"));
+    }
+
+    #[tokio::test]
+    async fn import_certificate_rejects_malformed_private_key() {
+        use base64::engine::general_purpose::STANDARD as B64;
+        let svc = AcmService::default();
+        let req = make_req(
+            "ImportCertificate",
+            json!({
+                "Certificate": B64.encode("-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"),
+                "PrivateKey": B64.encode("definitely not a pem key"),
+            }),
+        );
+        match svc.handle(req).await {
+            Err(AwsServiceError::AwsError { code, .. }) => {
+                assert_eq!(code, "InvalidParameterException")
+            }
+            Err(other) => panic!("expected an InvalidParameterException, got {other:?}"),
+            Ok(_) => panic!("expected import of a malformed key to be rejected"),
+        }
+    }
+
+    #[tokio::test]
+    async fn export_with_passphrase_on_malformed_stored_key_errors_not_panics() {
+        // A cert whose stored private key is structurally malformed (e.g. it
+        // slipped in before validation existed) must surface a validation
+        // error on export-with-passphrase, never panic the request task.
+        let svc = AcmService::default();
+        let arn = make_exportable_cert(&svc).await;
+        {
+            let mut state = svc.state.write();
+            let cert = state
+                .accounts
+                .get_mut("123456789012")
+                .unwrap()
+                .certificates
+                .get_mut(&arn)
+                .unwrap();
+            cert.private_key_pem =
+                Some("-----BEGIN PRIVATE KEY-----X-----END PRIVATE KEY-----\n".to_string());
+        }
+        let passphrase = base64::engine::general_purpose::STANDARD.encode("hunter2");
+        let req = make_req(
+            "ExportCertificate",
+            json!({ "CertificateArn": arn, "Passphrase": passphrase }),
+        );
+        match svc.handle(req).await {
+            Err(AwsServiceError::AwsError { code, .. }) => {
+                assert_eq!(code, "InvalidParameterException")
+            }
+            Err(other) => panic!("expected an InvalidParameterException, got {other:?}"),
+            Ok(_) => panic!("expected export of a malformed key to error, not panic"),
+        }
     }
 }

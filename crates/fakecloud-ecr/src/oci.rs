@@ -868,14 +868,32 @@ async fn blob_upload_finish(
     })?;
     append_stream(&spool, stream).await?;
 
-    let combined = read_spool(&spool).map_err(|e| {
-        AwsServiceError::aws_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "InternalError",
-            format!("failed to read upload spool: {e}"),
-        )
-    })?;
-    let computed = sha256_digest(&combined);
+    // Read the full spool and compute its SHA-256 on a blocking thread so a
+    // large-layer `docker push` (100s of MB) doesn't stall a tokio worker and
+    // starve concurrent pushes. Mirrors the JSON CompleteLayerUpload path
+    // (service/layers.rs, bug-audit 2026-06-13, 3.2).
+    let read_path = spool.clone();
+    let (combined, computed) =
+        tokio::task::spawn_blocking(move || -> std::io::Result<(Vec<u8>, String)> {
+            let bytes = read_spool(&read_path)?;
+            let digest = sha256_digest(&bytes);
+            Ok((bytes, digest))
+        })
+        .await
+        .map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("layer read/hash task failed: {e}"),
+            )
+        })?
+        .map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("failed to read upload spool: {e}"),
+            )
+        })?;
     if digest != computed {
         // Spool stays in place — the OCI client can retry the final
         // PUT with the correct digest instead of re-uploading every
@@ -1290,5 +1308,56 @@ mod immutability_tests {
         manifest_put(&svc, &manifest_req(&manifest("aaaa")), "app", "v1").unwrap();
         // Overwrite allowed on a MUTABLE repo.
         manifest_put(&svc, &manifest_req(&manifest("bbbb")), "app", "v1").unwrap();
+    }
+
+    // A multi-MB blob commit must produce the exact SHA-256 the client sent,
+    // proving the read+hash offloaded to spawn_blocking preserves correctness.
+    #[tokio::test]
+    async fn blob_upload_finish_commits_correct_digest_for_multi_mb_layer() {
+        let svc = svc_with_repo("MUTABLE");
+        let data: Vec<u8> = (0..(4 * 1024 * 1024u32)).map(|i| (i % 251) as u8).collect();
+        let expected = super::sha256_digest(&data);
+
+        let dir = tempfile::tempdir().unwrap();
+        let spool = dir.path().join("spool.bin");
+        let upload_id = "upload-1";
+        {
+            let mut guard = svc.state_handle().write();
+            let s = guard.get_or_create(ACCT);
+            s.layer_uploads.insert(
+                upload_id.to_string(),
+                crate::state::LayerUpload {
+                    upload_id: upload_id.to_string(),
+                    repository_name: "app".to_string(),
+                    created_at: chrono::Utc::now(),
+                    spool_path: spool.to_string_lossy().into_owned(),
+                    last_byte_received: 0,
+                },
+            );
+        }
+
+        let mut req = manifest_req("");
+        req.query_params
+            .insert("digest".to_string(), expected.clone());
+        *req.body_stream.lock() = Some(fakecloud_core::service::RequestBodyStream::from(
+            data.clone(),
+        ));
+
+        let resp = blob_upload_finish(&svc, &req, "app", upload_id)
+            .await
+            .expect("blob commit should succeed");
+        assert_eq!(
+            resp.headers
+                .get("Docker-Content-Digest")
+                .and_then(|v| v.to_str().ok()),
+            Some(expected.as_str())
+        );
+
+        let guard = svc.state_handle().read();
+        let repo = guard.get(ACCT).unwrap().repositories.get("app").unwrap();
+        let layer = repo.layers.get(&expected).expect("layer stored by digest");
+        assert_eq!(layer.size, data.len() as u64);
+        // The upload spool is consumed on a successful commit.
+        assert!(guard.get(ACCT).unwrap().layer_uploads.is_empty());
     }
 }
