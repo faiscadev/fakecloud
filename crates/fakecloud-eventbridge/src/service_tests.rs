@@ -2748,6 +2748,40 @@ fn describe_event_bus_default_returns_arn() {
 }
 
 #[test]
+fn default_bus_arn_uses_request_region_not_server_default() {
+    // The default bus is created at account-state bootstrap with the server's
+    // frozen startup region (us-east-1). A client scoped to eu-central-1 must
+    // still see an eu-central-1 ARN on DescribeEventBus / ListEventBuses.
+    let svc = make_service();
+
+    let mut describe = make_request("DescribeEventBus", json!({}));
+    describe.region = "eu-central-1".to_string();
+    let resp = svc.describe_event_bus(&describe).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        body["Arn"].as_str().unwrap(),
+        "arn:aws:events:eu-central-1:123456789012:event-bus/default"
+    );
+
+    let mut list = make_request("ListEventBuses", json!({}));
+    list.region = "eu-central-1".to_string();
+    let resp = svc.list_event_buses(&list).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let default_arn = body["EventBuses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|b| b["Name"].as_str() == Some("default"))
+        .expect("default bus present")["Arn"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        default_arn,
+        "arn:aws:events:eu-central-1:123456789012:event-bus/default"
+    );
+}
+
+#[test]
 fn delete_event_bus_default_fails() {
     let svc = make_service();
     let req = make_request("DeleteEventBus", json!({ "Name": "default" }));

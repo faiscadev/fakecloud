@@ -47,7 +47,7 @@ impl LogsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let region = state.region.clone();
+        let region = req.region.clone();
         let account_id = state.account_id.clone();
 
         let group = state.log_groups.get_mut(group_name).ok_or_else(|| {
@@ -507,7 +507,7 @@ impl LogsService {
             .filter(|f| f.log_group_name == group_name_owned)
             .cloned()
             .collect();
-        let region_owned = state.region.clone();
+        let region_owned = req.region.clone();
         let account_id_for_metrics = state.account_id.clone();
 
         // Collect delivery pipeline info: find active deliveries whose source

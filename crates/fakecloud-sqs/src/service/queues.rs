@@ -188,8 +188,8 @@ impl SqsService {
         let queue = SqsQueue {
             arn: format!(
                 "arn:{}:sqs:{}:{}:{}",
-                fakecloud_aws::arn::partition_for(&state.region),
-                state.region,
+                fakecloud_aws::arn::partition_for(&req.region),
+                req.region,
                 state.account_id,
                 queue_name
             ),

@@ -79,7 +79,7 @@ impl LogsService {
         let detector_id = uuid::Uuid::new_v4().to_string();
         let arn = format!(
             "arn:aws:logs:{}:{}:anomaly-detector:{}",
-            state.region, state.account_id, detector_id
+            req.region, state.account_id, detector_id
         );
 
         let detector = AnomalyDetector {

@@ -558,6 +558,31 @@ fn get_queue_attributes_all() {
 }
 
 #[test]
+fn queue_arn_uses_request_region_not_server_default() {
+    // The server default region is us-east-1 (see make_service), but a client
+    // whose credential scope resolves to eu-central-1 must get an ARN carrying
+    // eu-central-1 — not the frozen startup region.
+    let svc = make_service();
+    let mut create = make_request("CreateQueue", json!({ "QueueName": "region-queue" }));
+    create.region = "eu-central-1".to_string();
+    let resp = svc.create_queue(&create).unwrap();
+    let url = {
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        body["QueueUrl"].as_str().unwrap().to_string()
+    };
+
+    let mut get = make_request(
+        "GetQueueAttributes",
+        json!({ "QueueUrl": url, "AttributeNames": ["QueueArn"] }),
+    );
+    get.region = "eu-central-1".to_string();
+    let resp = svc.get_queue_attributes(&get).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let arn = body["Attributes"]["QueueArn"].as_str().unwrap();
+    assert_eq!(arn, "arn:aws:sqs:eu-central-1:123456789012:region-queue");
+}
+
+#[test]
 fn get_queue_attributes_specific() {
     let svc = make_service();
     let url = create_queue(&svc, "specific-attrs-queue");
@@ -3204,23 +3229,30 @@ async fn redriven_message_resets_receive_count_in_dlq() {
 
 /// In a non-`aws` partition (cn / gov-cloud) the queue ARN must carry the
 /// region's partition, and that partition-correct ARN must resolve back to the
-/// queue on send/receive.
+/// queue on send/receive. The partition/region come from the request's
+/// credential scope, not the server's startup region — so the request itself
+/// carries cn-north-1 here.
 #[test]
 fn queue_arn_uses_region_partition_and_resolves() {
-    let state: SharedSqsState = Arc::new(RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new(
-            "123456789012",
-            "cn-north-1",
-            "http://localhost:4566",
-        ),
-    ));
-    let svc = SqsService::new(state);
-    let url = create_queue(&svc, "cn-queue");
+    let svc = make_service();
+    let cn_request = |action: &str, body: Value| {
+        let mut req = make_request(action, body);
+        req.region = "cn-north-1".to_string();
+        req
+    };
+
+    let create_resp = svc
+        .create_queue(&cn_request("CreateQueue", json!({ "QueueName": "cn-queue" })))
+        .unwrap();
+    let url = body_json(create_resp)["QueueUrl"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let arn = "arn:aws-cn:sqs:cn-north-1:123456789012:cn-queue";
 
     // GetQueueAttributes reports the aws-cn ARN.
     let resp = svc
-        .get_queue_attributes(&make_request(
+        .get_queue_attributes(&cn_request(
             "GetQueueAttributes",
             json!({ "QueueUrl": url, "AttributeNames": ["QueueArn"] }),
         ))

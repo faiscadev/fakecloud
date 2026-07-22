@@ -1033,7 +1033,14 @@ pub fn start_execution_from_delivery(
 
     let sm_name = sm.name.clone();
     let definition = sm.definition.clone();
-    let exec_arn = st.execution_arn(&sm_name, &execution_name);
+    // No request in this delivery path; the execution inherits the region its
+    // state machine ARN was minted in (the request region at CreateStateMachine).
+    let region = state_machine_arn
+        .split(':')
+        .nth(3)
+        .unwrap_or("us-east-1")
+        .to_string();
+    let exec_arn = st.execution_arn(&region, &sm_name, &execution_name);
 
     let now = Utc::now();
     let execution = Execution {

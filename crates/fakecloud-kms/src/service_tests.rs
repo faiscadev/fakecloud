@@ -43,6 +43,48 @@ fn create_key(svc: &KmsService) -> String {
     body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string()
 }
 
+#[test]
+fn key_and_alias_arns_use_request_region_not_server_default() {
+    // Server default region is us-east-1 (see make_service); a client scoped
+    // to eu-central-1 must get eu-central-1 key + alias ARNs.
+    let svc = make_service();
+
+    let mut create = make_request("CreateKey", json!({}));
+    create.region = "eu-central-1".to_string();
+    let resp = svc.create_key(&create).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let key_arn = body["KeyMetadata"]["Arn"].as_str().unwrap();
+    let key_id = body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string();
+    assert!(
+        key_arn.starts_with("arn:aws:kms:eu-central-1:123456789012:key/"),
+        "key ARN must carry the request region, got {key_arn}"
+    );
+
+    let mut alias = make_request(
+        "CreateAlias",
+        json!({ "AliasName": "alias/region-test", "TargetKeyId": key_id }),
+    );
+    alias.region = "eu-central-1".to_string();
+    svc.create_alias(&alias).unwrap();
+
+    let mut list = make_request("ListAliases", json!({}));
+    list.region = "eu-central-1".to_string();
+    let resp = svc.list_aliases(&list).unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let alias_arn = body["Aliases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["AliasName"].as_str() == Some("alias/region-test"))
+        .expect("created alias present")["AliasArn"]
+        .as_str()
+        .unwrap();
+    assert_eq!(
+        alias_arn,
+        "arn:aws:kms:eu-central-1:123456789012:alias/region-test"
+    );
+}
+
 /// Helper: run GetParametersForImport, RSA-OAEP-wrap `material` under
 /// the returned public key, and call ImportKeyMaterial. Used by every
 /// import-flow test so they exercise the real OAEP unwrap path

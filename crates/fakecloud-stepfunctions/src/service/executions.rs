@@ -45,7 +45,7 @@ impl StepFunctionsService {
         let sm_name = sm.name.clone();
         let sm_type = sm.machine_type;
         let definition = sm.definition.clone();
-        let exec_arn = state.execution_arn(&sm_name, &execution_name);
+        let exec_arn = state.execution_arn(&req.region, &sm_name, &execution_name);
 
         // Handle name collisions. For STANDARD workflows, StartExecution is
         // idempotent: re-issuing the same name AND the same input returns the
@@ -438,7 +438,7 @@ impl StepFunctionsService {
                 let candidate = format!("sync-{}", uuid::Uuid::new_v4());
                 let arn = format!(
                     "arn:aws:states:{}:{}:express:{}:{}",
-                    state.region, state.account_id, sm.name, candidate
+                    req.region, state.account_id, sm.name, candidate
                 );
                 if !state.executions.contains_key(&arn) {
                     break (candidate, arn);

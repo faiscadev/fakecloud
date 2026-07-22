@@ -41,7 +41,7 @@ impl EventBridgeService {
         }
         let arn = format!(
             "arn:aws:events:{}::event-source/aws.partner/{}",
-            state.region, name
+            req.region, name
         );
         let now = Utc::now();
         let ps = PartnerEventSource {

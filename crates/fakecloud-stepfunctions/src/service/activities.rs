@@ -13,7 +13,7 @@ impl StepFunctionsService {
         let state = accounts.get_or_create(&req.account_id);
         let arn = format!(
             "arn:aws:states:{}:{}:activity:{}",
-            state.region, state.account_id, name
+            req.region, state.account_id, name
         );
         if state.activities.contains_key(&arn) {
             return Err(AwsServiceError::aws_error(

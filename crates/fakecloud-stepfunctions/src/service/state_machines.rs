@@ -42,7 +42,7 @@ impl StepFunctionsService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let arn = state.state_machine_arn(name);
+        let arn = state.state_machine_arn(&req.region, name);
 
         // Check if name already exists
         if state.state_machines.values().any(|sm| sm.name == name) {
