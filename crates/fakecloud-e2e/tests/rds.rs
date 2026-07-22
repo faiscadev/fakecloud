@@ -16,9 +16,10 @@ async fn rds_describe_db_engine_versions() {
         .unwrap();
 
     let versions = response.db_engine_versions();
-    assert_eq!(versions.len(), 4); // All postgres versions
+    assert_eq!(versions.len(), 5); // All postgres versions
     assert!(versions.iter().all(|v| v.engine() == Some("postgres")));
     assert!(versions.iter().any(|v| v.engine_version() == Some("16.3")));
+    assert!(versions.iter().any(|v| v.engine_version() == Some("17.4")));
 }
 
 #[tokio::test]
