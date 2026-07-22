@@ -124,14 +124,7 @@ impl GlueService {
         let body = req.json_body();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
-        let crawlers: Vec<Value> = state
-            .crawlers
-            .values_mut()
-            .map(|c| {
-                settle_crawler(c);
-                c.clone()
-            })
-            .collect();
+        let crawlers: Vec<Value> = state.crawlers.values().cloned().collect();
         let (page, token) = crate::common::paginate_body(&body, crawlers)?;
         let mut resp = json!({ "Crawlers": page });
         if let Some(t) = token {
@@ -152,9 +145,8 @@ impl GlueService {
         let mut not_found = Vec::new();
         for n in &names {
             let Some(name) = n.as_str() else { continue };
-            match state.crawlers.get_mut(name) {
+            match state.crawlers.get(name) {
                 Some(c) => {
-                    settle_crawler(c);
                     found.push(c.clone());
                 }
                 None => not_found.push(json!(name)),

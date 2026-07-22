@@ -519,15 +519,12 @@ impl GlueService {
         let st = accounts.get_or_create(&req.account_id, &req.region);
         let runs: Vec<Value> = st
             .column_stats_task_runs
-            .values_mut()
+            .values()
             .filter(|r| {
                 r.get("DatabaseName").and_then(|v| v.as_str()) == Some(db.as_str())
                     && r.get("TableName").and_then(|v| v.as_str()) == Some(table.as_str())
             })
-            .map(|r| {
-                settle_run_status(r, "Status", "SUCCEEDED", Some("EndTime"));
-                r.clone()
-            })
+            .cloned()
             .collect();
         Ok(AwsResponse::ok_json(json!({
             "ColumnStatisticsTaskRuns": runs,
@@ -1250,14 +1247,7 @@ impl GlueService {
         req_str(&body, "CatalogId")?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
-        let runs: Vec<Value> = st
-            .mv_refresh_runs
-            .values_mut()
-            .map(|r| {
-                settle_run_status(r, "Status", "SUCCEEDED", Some("EndTime"));
-                r.clone()
-            })
-            .collect();
+        let runs: Vec<Value> = st.mv_refresh_runs.values().cloned().collect();
         Ok(AwsResponse::ok_json(json!({
             "MaterializedViewRefreshTaskRuns": runs,
         })))

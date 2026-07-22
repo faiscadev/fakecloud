@@ -246,14 +246,11 @@ impl GlueService {
         let st = accounts.get_or_create(&req.account_id, &req.region);
         let runs: Vec<Value> = st
             .ml_task_runs
-            .values_mut()
+            .values()
             .filter(|r| {
                 r.get("TransformId").and_then(|v| v.as_str()) == Some(transform_id.as_str())
             })
-            .map(|r| {
-                settle_run_status(r, "Status", "SUCCEEDED", Some("CompletedOn"));
-                r.clone()
-            })
+            .cloned()
             .collect();
         Ok(AwsResponse::ok_json(json!({ "TaskRuns": runs })))
     }
@@ -479,14 +476,7 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
-        let runs: Vec<Value> = st
-            .dq_ruleset_runs
-            .values_mut()
-            .map(|r| {
-                settle_run_status(r, "Status", "SUCCEEDED", Some("CompletedOn"));
-                r.clone()
-            })
-            .collect();
+        let runs: Vec<Value> = st.dq_ruleset_runs.values().cloned().collect();
         Ok(AwsResponse::ok_json(json!({ "Runs": runs })))
     }
 
@@ -559,14 +549,7 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id, &req.region);
-        let runs: Vec<Value> = st
-            .dq_recommendation_runs
-            .values_mut()
-            .map(|r| {
-                settle_run_status(r, "Status", "SUCCEEDED", Some("CompletedOn"));
-                r.clone()
-            })
-            .collect();
+        let runs: Vec<Value> = st.dq_recommendation_runs.values().cloned().collect();
         Ok(AwsResponse::ok_json(json!({ "Runs": runs })))
     }
 

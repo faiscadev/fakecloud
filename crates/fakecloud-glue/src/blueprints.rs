@@ -168,12 +168,9 @@ impl GlueService {
         let st = accounts.get_or_create(&req.account_id, &req.region);
         let runs: Vec<Value> = st
             .blueprint_runs
-            .values_mut()
+            .values()
             .filter(|r| r.get("BlueprintName").and_then(|n| n.as_str()) == Some(bp.as_str()))
-            .map(|r| {
-                settle_run_status(r, "State", "SUCCEEDED", Some("CompletedOn"));
-                r.clone()
-            })
+            .cloned()
             .collect();
         Ok(AwsResponse::ok_json(json!({ "BlueprintRuns": runs })))
     }

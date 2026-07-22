@@ -326,12 +326,9 @@ impl GlueService {
         let st = accounts.get_or_create(&req.account_id, &req.region);
         let runs: Vec<Value> = st
             .workflow_runs
-            .values_mut()
+            .values()
             .filter(|r| r.get("Name").and_then(|n| n.as_str()) == Some(name.as_str()))
-            .map(|r| {
-                settle_run_status(r, "Status", "COMPLETED", Some("CompletedOn"));
-                r.clone()
-            })
+            .cloned()
             .collect();
         Ok(AwsResponse::ok_json(json!({ "Runs": runs })))
     }
