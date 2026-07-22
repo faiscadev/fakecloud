@@ -26,6 +26,9 @@ pub struct FireRuleContext<'a> {
     pub delivery: &'a Arc<DeliveryBus>,
     pub lambda_state: &'a Option<SharedLambdaState>,
     pub logs_state: &'a Option<SharedLogsState>,
+    /// Persist hook for CloudWatch Logs, fired after a fire-rule delivery to a
+    /// Logs target so the written event survives a restart.
+    pub logs_persist: &'a Option<fakecloud_persistence::SnapshotHook>,
     pub container_runtime: &'a Option<Arc<fakecloud_lambda::runtime::ContainerRuntime>>,
 }
 
@@ -43,6 +46,7 @@ pub fn fire_rule(
     let delivery = ctx.delivery;
     let lambda_state = ctx.lambda_state;
     let logs_state = ctx.logs_state;
+    let logs_persist = ctx.logs_persist;
     let container_runtime = ctx.container_runtime;
 
     let (targets, rule_arn, account_id, region) = {
@@ -113,6 +117,7 @@ pub fn fire_rule(
         delivery,
         lambda_state: lambda_state.as_ref(),
         logs_state: logs_state.as_ref(),
+        logs_persist: logs_persist.as_ref(),
         container_runtime,
         account_id: &account_id,
         region: &region,
@@ -240,6 +245,7 @@ mod tests {
             delivery: &delivery,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let result = fire_rule(&ctx, "default", "my-rule");
@@ -267,6 +273,7 @@ mod tests {
             delivery: &delivery,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let result = fire_rule(&ctx, "default", "no-such-rule");
@@ -300,6 +307,7 @@ mod tests {
             delivery: &delivery,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let result = fire_rule(&ctx, "default", "disabled-rule");
@@ -317,6 +325,7 @@ mod tests {
             delivery: &delivery,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let err = fire_rule(&ctx, "missing-bus", "rule").unwrap_err();
@@ -333,6 +342,7 @@ mod tests {
             delivery: &delivery,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let targets = fire_rule(&ctx, "default", "no-targets").unwrap();
@@ -383,6 +393,7 @@ mod tests {
             delivery: &delivery,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let fired = fire_rule(&ctx, "default", "multi").unwrap();
@@ -416,6 +427,7 @@ mod tests {
             delivery: &delivery,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let fired = fire_rule(&ctx, "default", "fifo").unwrap();
@@ -448,6 +460,7 @@ mod tests {
             delivery: &bus,
             lambda_state: &None,
             logs_state: &None,
+            logs_persist: &None,
             container_runtime: &None,
         };
         let fired = fire_rule(&ctx, "default", "constant").unwrap();

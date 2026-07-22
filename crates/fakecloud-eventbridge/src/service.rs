@@ -30,6 +30,7 @@ pub struct EventBridgeService {
     delivery: Arc<DeliveryBus>,
     lambda_state: Option<SharedLambdaState>,
     logs_state: Option<SharedLogsState>,
+    logs_persist: Option<fakecloud_persistence::SnapshotHook>,
     container_runtime: Option<Arc<ContainerRuntime>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
@@ -42,6 +43,7 @@ impl EventBridgeService {
             delivery,
             lambda_state: None,
             logs_state: None,
+            logs_persist: None,
             container_runtime: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
@@ -55,6 +57,14 @@ impl EventBridgeService {
 
     pub fn with_logs(mut self, logs_state: SharedLogsState) -> Self {
         self.logs_state = Some(logs_state);
+        self
+    }
+
+    /// Wire the CloudWatch Logs persist hook so PutEvents/StartReplay deliveries
+    /// to a Logs target are written through to the Logs snapshot (see
+    /// `EventDispatchContext::logs_persist`).
+    pub fn with_logs_persist(mut self, hook: fakecloud_persistence::SnapshotHook) -> Self {
+        self.logs_persist = Some(hook);
         self
     }
 
@@ -1532,6 +1542,7 @@ impl EventBridgeService {
                 delivery: &self.delivery,
                 lambda_state: self.lambda_state.as_ref(),
                 logs_state: self.logs_state.as_ref(),
+                logs_persist: self.logs_persist.as_ref(),
                 container_runtime: &self.container_runtime,
                 account_id: &req.account_id,
                 region: &req.region,

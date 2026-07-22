@@ -547,7 +547,13 @@ impl EventBridgeService {
             });
             drop(accounts);
             if let Some(ref log_state) = self.logs_state {
-                deliver_to_logs(log_state, target_arn, &body_str, Utc::now());
+                deliver_to_logs_and_persist(
+                    log_state,
+                    self.logs_persist.as_ref(),
+                    target_arn,
+                    &body_str,
+                    Utc::now(),
+                );
             }
         } else if target_arn.contains(":states:") {
             self.delivery

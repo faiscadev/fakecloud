@@ -443,6 +443,7 @@ impl EventBridgeService {
                 delivery: &self.delivery,
                 lambda_state: self.lambda_state.as_ref(),
                 logs_state: self.logs_state.as_ref(),
+                logs_persist: self.logs_persist.as_ref(),
                 container_runtime: &self.container_runtime,
                 account_id: &req.account_id,
                 region: &req.region,
