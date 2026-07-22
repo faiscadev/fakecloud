@@ -3,6 +3,42 @@
 
 use super::*;
 
+/// Map a taggable resource ARN to the AWS not-found fault code appropriate for
+/// its resource type. The type is the prefix of the ARN's resource segment
+/// before the first `:` (e.g. `parametergroup:default.redis7`). Unparseable or
+/// unrecognized ARNs fall back to `CacheClusterNotFound`, matching the
+/// historical behavior of the tag handlers.
+fn tag_resource_not_found_code(resource_name: &str) -> &'static str {
+    let Ok(arn) = resource_name.parse::<fakecloud_aws::arn::Arn>() else {
+        return "CacheClusterNotFound";
+    };
+    match arn.resource.split(':').next().unwrap_or_default() {
+        "parametergroup" => "CacheParameterGroupNotFound",
+        "subnetgroup" => "CacheSubnetGroupNotFoundFault",
+        "cluster" => "CacheClusterNotFound",
+        "replicationgroup" => "ReplicationGroupNotFoundFault",
+        "globalreplicationgroup" => "GlobalReplicationGroupNotFoundFault",
+        "user" => "UserNotFound",
+        "usergroup" => "UserGroupNotFound",
+        "snapshot" => "SnapshotNotFoundFault",
+        "serverlesscache" => "ServerlessCacheNotFoundFault",
+        "serverlesssnapshot" => "ServerlessCacheSnapshotNotFoundFault",
+        "reserved-instance" => "ReservedCacheNodeNotFound",
+        "securitygroup" => "CacheSecurityGroupNotFound",
+        _ => "CacheClusterNotFound",
+    }
+}
+
+/// Build the resource-type-appropriate not-found fault for a tag operation on
+/// an ARN that does not correspond to an existing resource.
+fn tag_resource_not_found(resource_name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        tag_resource_not_found_code(resource_name),
+        format!("The resource {resource_name} could not be found."),
+    )
+}
+
 impl ElastiCacheService {
     pub(super) fn describe_reserved_cache_nodes(
         &self,
@@ -408,13 +444,13 @@ impl ElastiCacheService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let tag_list = state.tags.get_mut(&resource_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "CacheClusterNotFound",
-                format!("The resource {resource_name} could not be found."),
-            )
-        })?;
+        // The resource must exist, but it need not already have a tag entry:
+        // freshly-created resources (e.g. parameter groups) register no tags
+        // until the first AddTagsToResource. Create the entry on demand.
+        if !state.resource_exists(&resource_name) {
+            return Err(tag_resource_not_found(&resource_name));
+        }
+        let tag_list = state.tags.entry(resource_name.clone()).or_default();
 
         merge_tags(tag_list, &tags);
 
@@ -440,13 +476,14 @@ impl ElastiCacheService {
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let tag_list = state.tags.get(&resource_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "CacheClusterNotFound",
-                format!("The resource {resource_name} could not be found."),
-            )
-        })?;
+        // Real ElastiCache returns an empty TagList for an existing untagged
+        // resource and only faults when the resource is genuinely missing.
+        // A missing tag entry must NOT be treated as "resource not found".
+        if !state.resource_exists(&resource_name) {
+            return Err(tag_resource_not_found(&resource_name));
+        }
+        let empty_tags = Vec::new();
+        let tag_list = state.tags.get(&resource_name).unwrap_or(&empty_tags);
 
         let tag_xml: String = tag_list.iter().map(tag_xml).collect();
 
@@ -470,13 +507,12 @@ impl ElastiCacheService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let tag_list = state.tags.get_mut(&resource_name).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "CacheClusterNotFound",
-                format!("The resource {resource_name} could not be found."),
-            )
-        })?;
+        // Existence is keyed on the resource, not on a pre-existing tag entry:
+        // removing tags from an existing untagged resource is a no-op success.
+        if !state.resource_exists(&resource_name) {
+            return Err(tag_resource_not_found(&resource_name));
+        }
+        let tag_list = state.tags.entry(resource_name.clone()).or_default();
 
         tag_list.retain(|(key, _)| !tag_keys.contains(key));
 

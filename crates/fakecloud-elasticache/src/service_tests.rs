@@ -3605,6 +3605,68 @@ fn list_tags_unknown_arn_errors() {
     assert!(svc.list_tags_for_resource(&req).is_err());
 }
 
+/// Regression for #2354: ListTagsForResource on a freshly-created parameter
+/// group (which registers no tag entry at create time) must return an empty
+/// TagList, not CacheClusterNotFound. Terraform's aws_elasticache_parameter_group
+/// apply calls ListTagsForResource right after create and previously 404'd.
+#[test]
+fn list_tags_existing_untagged_parameter_group_returns_empty() {
+    let svc = fresh_service();
+    let create = request(
+        "CreateCacheParameterGroup",
+        &[
+            ("CacheParameterGroupName", "pg-tags"),
+            ("CacheParameterGroupFamily", "redis7"),
+            ("Description", "test"),
+        ],
+    );
+    svc.create_cache_parameter_group(&create).unwrap();
+
+    let arn = "arn:aws:elasticache:us-east-1:123456789012:parametergroup:pg-tags";
+    let list = request("ListTagsForResource", &[("ResourceName", arn)]);
+    let resp = svc.list_tags_for_resource(&list).unwrap();
+    let out = body(resp);
+    assert!(
+        out.contains("<TagList></TagList>"),
+        "expected empty TagList, got {out}"
+    );
+}
+
+/// AddTagsToResource then ListTagsForResource round-trips on a freshly-created
+/// parameter group (no pre-seeded tag entry) — the add creates the entry.
+#[test]
+fn add_then_list_tags_on_parameter_group_roundtrips() {
+    let svc = fresh_service();
+    let create = request(
+        "CreateCacheParameterGroup",
+        &[
+            ("CacheParameterGroupName", "pg-tags2"),
+            ("CacheParameterGroupFamily", "redis7"),
+            ("Description", "test"),
+        ],
+    );
+    svc.create_cache_parameter_group(&create).unwrap();
+
+    let arn = "arn:aws:elasticache:us-east-1:123456789012:parametergroup:pg-tags2";
+    let add = request(
+        "AddTagsToResource",
+        &[
+            ("ResourceName", arn),
+            ("Tags.Tag.1.Key", "env"),
+            ("Tags.Tag.1.Value", "prod"),
+        ],
+    );
+    svc.add_tags_to_resource(&add).unwrap();
+
+    let list = request("ListTagsForResource", &[("ResourceName", arn)]);
+    let out = body(svc.list_tags_for_resource(&list).unwrap());
+    assert!(out.contains("<Key>env</Key>"), "missing tag key in {out}");
+    assert!(
+        out.contains("<Value>prod</Value>"),
+        "missing tag value in {out}"
+    );
+}
+
 // ── Coverage for the closure batch ──
 
 fn fresh_service() -> ElastiCacheService {
