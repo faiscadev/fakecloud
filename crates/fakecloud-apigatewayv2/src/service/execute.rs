@@ -185,8 +185,24 @@ impl ApiGatewayV2Service {
         // that has one; `resource_id` is segs[4] (the routes/integrations/
         // stages/... child id). We resolve both once here so the match
         // body only picks the action name.
-        let api_id = segs.get(2).map(|s| s.to_string());
-        let resource_id = segs.get(4).map(|s| s.to_string());
+        // Percent-decode the apis-collection ids: core dispatch splits the raw
+        // path without decoding, so the child id in segs[4] arrives URL-encoded
+        // (e.g. `%24default` for the `$default` stage). Decoding here restores
+        // the literal name handlers compare against stored keys. Server-generated
+        // ids (routes/integrations/authorizers/...) contain no encodable chars,
+        // so decoding is a no-op for them. This branch is guarded by
+        // `second == Some("apis")` above, so it never touches the tags ARN path
+        // (which intentionally keeps segments encoded and decodes later).
+        let api_id = segs.get(2).map(|s| {
+            percent_encoding::percent_decode_str(s)
+                .decode_utf8_lossy()
+                .into_owned()
+        });
+        let resource_id = segs.get(4).map(|s| {
+            percent_encoding::percent_decode_str(s)
+                .decode_utf8_lossy()
+                .into_owned()
+        });
         let collection = segs.get(3).map(|s| s.as_str());
         let method = &req.method;
 

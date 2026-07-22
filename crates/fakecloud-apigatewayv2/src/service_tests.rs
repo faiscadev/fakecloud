@@ -149,6 +149,17 @@ fn resolve_action_stages() {
 }
 
 #[test]
+fn resolve_action_decodes_encoded_stage_name() {
+    // #2355: the `$default` stage arrives as `%24default` because core dispatch
+    // splits the raw path without percent-decoding. resolve_action must decode
+    // the apis-collection child id so handlers see the literal `$default`.
+    let req = make_request(Method::GET, "/v2/apis/a1/stages/%24default", "");
+    let (action, _, resource_id) = ApiGatewayV2Service::resolve_action(&req).unwrap();
+    assert_eq!(action, "GetStage");
+    assert_eq!(resource_id.as_deref(), Some("$default"));
+}
+
+#[test]
 fn resolve_action_deployments() {
     let req = make_request(Method::POST, "/v2/apis/a1/deployments", "{}");
     assert_eq!(
@@ -1114,6 +1125,51 @@ async fn delete_stage_removes() {
     svc.handle(req).await.unwrap();
 
     let req = make_request(Method::GET, &format!("/v2/apis/{api_id}/stages/todel"), "");
+    assert!(svc.handle(req).await.is_err());
+}
+
+#[tokio::test]
+async fn get_stage_reads_back_encoded_default_stage() {
+    // #2355: creating the `$default` stage stores the literal `$default`, but
+    // GetStage arrives with the name percent-encoded (`%24default`) because core
+    // dispatch does not decode path segments. It must still resolve.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+    create_stage_named(&svc, &api_id, "$default").await;
+
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/stages/%24default"),
+        "",
+    );
+    let resp = svc.handle(req).await.unwrap();
+    let body = body_json(&resp);
+    assert_eq!(body["stageName"].as_str(), Some("$default"));
+}
+
+#[tokio::test]
+async fn delete_stage_removes_encoded_default_stage() {
+    // #2355: DeleteStage for `$default` arrives percent-encoded and must remove
+    // the stored `$default` stage.
+    let state = make_state();
+    let svc = ApiGatewayV2Service::new(state);
+    let api_id = create_api(&svc);
+    create_stage_named(&svc, &api_id, "$default").await;
+
+    let req = make_request(
+        Method::DELETE,
+        &format!("/v2/apis/{api_id}/stages/%24default"),
+        "",
+    );
+    svc.handle(req).await.unwrap();
+
+    // Gone afterwards (encoded read now 404s).
+    let req = make_request(
+        Method::GET,
+        &format!("/v2/apis/{api_id}/stages/%24default"),
+        "",
+    );
     assert!(svc.handle(req).await.is_err());
 }
 
