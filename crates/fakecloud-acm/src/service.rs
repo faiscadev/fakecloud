@@ -3172,7 +3172,9 @@ mod tests {
             }),
         );
         match svc.handle(req).await {
-            Err(AwsServiceError::AwsError { code, .. }) => assert_eq!(code, "InvalidParameterException"),
+            Err(AwsServiceError::AwsError { code, .. }) => {
+                assert_eq!(code, "InvalidParameterException")
+            }
             Err(other) => panic!("expected an InvalidParameterException, got {other:?}"),
             Ok(_) => panic!("expected import of a malformed key to be rejected"),
         }
@@ -3203,7 +3205,9 @@ mod tests {
             json!({ "CertificateArn": arn, "Passphrase": passphrase }),
         );
         match svc.handle(req).await {
-            Err(AwsServiceError::AwsError { code, .. }) => assert_eq!(code, "InvalidParameterException"),
+            Err(AwsServiceError::AwsError { code, .. }) => {
+                assert_eq!(code, "InvalidParameterException")
+            }
             Err(other) => panic!("expected an InvalidParameterException, got {other:?}"),
             Ok(_) => panic!("expected export of a malformed key to error, not panic"),
         }
