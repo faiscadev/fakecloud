@@ -350,6 +350,8 @@ impl ResourceProvisioner {
             asg_name: format!("eks-{name}-{}", &id[..8]),
             tags: parse_eks_tags(props.get("Tags")),
             updates: Default::default(),
+            node_repair_config: props.get("NodeRepairConfig").cloned(),
+            warm_pool_config: None,
         };
         state
             .nodegroups

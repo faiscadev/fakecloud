@@ -2330,6 +2330,15 @@ impl Route53ResolverService {
             {
                 rule.firewall_domain_redirection_action = Some(a.to_string());
             }
+            if let Some(d) = e.get("DnsThreatProtection").and_then(Value::as_str) {
+                rule.dns_threat_protection = Some(d.to_string());
+            }
+            if let Some(c) = e.get("ConfidenceThreshold").and_then(Value::as_str) {
+                rule.confidence_threshold = Some(c.to_string());
+            }
+            if let Some(frt) = e.get("FirewallRuleType").filter(|v| !v.is_null()) {
+                rule.firewall_rule_type = Some(frt.clone());
+            }
             rule.modification_time = now_rfc3339();
             updated.push(to_val(&rule.clone()));
         }
@@ -3702,6 +3711,69 @@ mod tests {
         let listed_rule = &listed["FirewallRules"][0];
         assert_eq!(listed_rule["DnsThreatProtection"], "DGA");
         assert_eq!(listed_rule["ConfidenceThreshold"], "HIGH");
+    }
+
+    // BatchUpdateFirewallRule must apply DnsThreatProtection / ConfidenceThreshold
+    // / FirewallRuleType exactly like the single-rule update, so the batch path
+    // persists them and they round-trip on List.
+    #[tokio::test]
+    async fn batch_update_firewall_rule_persists_threat_protection_fields() {
+        let svc = Route53ResolverService::default();
+        let (_, g) = call(
+            &svc,
+            "CreateFirewallRuleGroup",
+            json!({ "CreatorRequestId": "c", "Name": "g" }),
+        )
+        .await;
+        let group_id = g["FirewallRuleGroup"]["Id"].as_str().unwrap().to_string();
+        let (s, _) = call(
+            &svc,
+            "CreateFirewallRule",
+            json!({
+                "FirewallRuleGroupId": group_id,
+                "Name": "r",
+                "Priority": 5,
+                "Action": "BLOCK",
+                "BlockResponse": "NODATA",
+                "DnsThreatProtection": "DGA",
+                "ConfidenceThreshold": "LOW",
+            }),
+        )
+        .await;
+        assert_eq!(s, 200);
+
+        let (s, upd) = call(
+            &svc,
+            "BatchUpdateFirewallRule",
+            json!({
+                "UpdateFirewallRuleEntries": [{
+                    "FirewallRuleGroupId": group_id,
+                    "DnsThreatProtection": "DNS_TUNNELING",
+                    "ConfidenceThreshold": "HIGH",
+                    "FirewallRuleType": { "DnsThreatProtection": { "Detector": "DNS_TUNNELING" } },
+                }],
+            }),
+        )
+        .await;
+        assert_eq!(s, 200, "{upd}");
+        let updated = &upd["UpdatedFirewallRules"][0];
+        assert_eq!(updated["DnsThreatProtection"], "DNS_TUNNELING");
+        assert_eq!(updated["ConfidenceThreshold"], "HIGH");
+
+        // The change persists to state, visible on List.
+        let (_, listed) = call(
+            &svc,
+            "ListFirewallRules",
+            json!({ "FirewallRuleGroupId": group_id }),
+        )
+        .await;
+        let listed_rule = &listed["FirewallRules"][0];
+        assert_eq!(listed_rule["DnsThreatProtection"], "DNS_TUNNELING");
+        assert_eq!(listed_rule["ConfidenceThreshold"], "HIGH");
+        assert_eq!(
+            listed_rule["FirewallRuleType"]["DnsThreatProtection"]["Detector"],
+            "DNS_TUNNELING"
+        );
     }
 
     // Finding 5: a NextToken that this service never minted is rejected with

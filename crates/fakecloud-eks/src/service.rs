@@ -1092,6 +1092,8 @@ impl EksService {
             asg_name: format!("eks-{name}-{}", &id[..8]),
             tags: parse_tag_map(body.get("tags")),
             updates: Default::default(),
+            node_repair_config: body.get("nodeRepairConfig").cloned(),
+            warm_pool_config: body.get("warmPoolConfig").cloned(),
         };
 
         let out = nodegroup_json(&ng);
@@ -1251,6 +1253,14 @@ impl EksService {
         if let Some(update_config) = body.get("updateConfig") {
             ng.update_config = build_nodegroup_update_config(Some(update_config));
             params.push(("MaxUnavailable".to_string(), update_config.to_string()));
+        }
+        if let Some(node_repair) = body.get("nodeRepairConfig") {
+            ng.node_repair_config = Some(node_repair.clone());
+            params.push(("NodeRepairConfig".to_string(), node_repair.to_string()));
+        }
+        if let Some(warm_pool) = body.get("warmPoolConfig") {
+            ng.warm_pool_config = Some(warm_pool.clone());
+            params.push(("WarmPoolConfig".to_string(), warm_pool.to_string()));
         }
         ng.modified_at = Utc::now();
 
