@@ -588,6 +588,19 @@ impl Ec2Runtime {
         }
     }
 
+    /// Whether the runtime holds an in-memory backing record for this instance.
+    /// After a fakecloud restart the registry is rebuilt only for instances that
+    /// persisted as `running`/`pending` (see `recover_persisted_containers`), so
+    /// an instance that persisted as `stopped` has no record here. `StartInstances`
+    /// uses this to distinguish "reattach the existing container" (`start_instance`)
+    /// from "the registry was lost across a restart, boot a fresh container"
+    /// (`run_instance`) — without it, starting a stopped-then-restarted instance
+    /// flips it to `running` with no backing container (the EC2 analogue of the
+    /// RDS restart-recovery bug).
+    pub fn is_registered(&self, instance_id: &str) -> bool {
+        self.instances.read().contains_key(instance_id)
+    }
+
     fn handle_of(&self, instance_id: &str) -> Option<String> {
         self.instances
             .read()

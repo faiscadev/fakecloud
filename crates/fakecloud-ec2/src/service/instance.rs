@@ -611,6 +611,50 @@ fn reconcile_started(
     }
 }
 
+/// The inputs [`crate::runtime::Ec2Runtime::run_instance`] needs to boot a
+/// backing container, reconstituted from a persisted instance: base64
+/// user-data, the tag map (carries `fakecloud-k8s/*` Pod scheduling tags), and
+/// the subnet network placement.
+type RunInstanceInputs = (
+    Option<String>,
+    std::collections::BTreeMap<String, String>,
+    Option<crate::runtime::InstanceNetwork>,
+);
+
+/// Gather the inputs needed to boot a fresh backing container for an already
+/// persisted instance (`user_data`, the tag map, and the subnet network
+/// placement), reading them from the persisted instance metadata. Mirrors the
+/// per-instance derivation in
+/// [`recover_persisted_containers`](crate::service::Ec2Service::recover_persisted_containers)
+/// so a container reconstituted here rejoins the same VPC/subnet (and re-runs
+/// the same user-data) as one recovered on restart. Returns `None` if the
+/// instance no longer exists.
+fn run_instance_inputs(
+    state: &crate::state::SharedEc2State,
+    account_id: &str,
+    id: &str,
+) -> Option<RunInstanceInputs> {
+    let accounts = state.read();
+    let s = accounts.get(account_id)?;
+    let inst = s.instances.get(id)?;
+    let user_data = inst.user_data.clone();
+    // A subnet with no `0.0.0.0/0 -> igw` route is private -> `internal`
+    // network, matching RunInstances / recover_persisted_containers.
+    let network = inst
+        .subnet_id
+        .clone()
+        .map(|sid| crate::runtime::InstanceNetwork {
+            internal: !crate::defaults::subnet_is_public(s, &sid),
+            subnet_id: sid,
+        });
+    let tags = s
+        .tags_for(id)
+        .iter()
+        .map(|t| (t.key.clone(), t.value.clone()))
+        .collect();
+    Some((user_data, tags, network))
+}
+
 /// Build a [`MetadataOptions`](crate::state::MetadataOptions) from launch-time
 /// `MetadataOptions.*` request params, defaulting each unset field to the AWS
 /// default. Shared by RunInstances (the CFN provisioner parses its own JSON
@@ -1094,7 +1138,39 @@ async fn change_state(
                 match new_code {
                     16 => {
                         let running = match &runtime {
-                            Some(rt) => rt.start_instance(id).await,
+                            // The runtime holds a backing record for this
+                            // instance: reattach/restart the existing container.
+                            Some(rt) if rt.is_registered(id) => rt.start_instance(id).await,
+                            // No backing record: the instance persisted as
+                            // `stopped` and fakecloud restarted, so its runtime
+                            // registry entry was never rebuilt (recovery only
+                            // reconstitutes running/pending instances). `start_instance`
+                            // would return `None` and `reconcile_started` would
+                            // flip the instance to `running` with no live
+                            // container — a phantom-running instance where every
+                            // later container-backed op silently no-ops (the EC2
+                            // analogue of the RDS restart-recovery bug). Boot a
+                            // fresh container from the persisted metadata instead,
+                            // mirroring `recover_persisted_containers`.
+                            Some(rt) => match run_instance_inputs(&svc_state, &account_id, id) {
+                                Some((user_data, tags, network)) => match rt
+                                    .run_instance(
+                                        &account_id,
+                                        id,
+                                        user_data.as_deref(),
+                                        &tags,
+                                        network.as_ref(),
+                                    )
+                                    .await
+                                {
+                                    Ok(r) => Some(r),
+                                    Err(e) => {
+                                        tracing::warn!(instance_id = %id, error = %e, "EC2 instance container failed to start after restart; serving metadata-only");
+                                        None
+                                    }
+                                },
+                                None => None,
+                            },
                             None => None,
                         };
                         reconcile_started(&svc_state, &account_id, id, running);
@@ -2403,6 +2479,80 @@ mod modify_tests {
             enable_resource_name_dns_aaaa_record: false,
         };
         state.instances.insert(id.to_string(), inst);
+    }
+
+    // Docker-free coverage of the metadata threading the StartInstances
+    // stopped-then-restart fallback relies on: after a restart the runtime
+    // registry has no handle for a `stopped` instance, so the boot task must
+    // reconstitute a fresh container via `run_instance`, feeding it the same
+    // user-data / tags / subnet placement as `recover_persisted_containers`
+    // would. This asserts `run_instance_inputs` extracts exactly those from the
+    // persisted instance (the container spawn itself needs Docker and is not
+    // exercised here).
+    #[test]
+    fn run_instance_inputs_mirror_persisted_metadata() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            let inst = crate::state::Instance {
+                instance_id: "i-1".into(),
+                image_id: "ami-1".into(),
+                instance_type: "t3.micro".into(),
+                state_code: 80,
+                state_name: "stopped".into(),
+                private_ip: "10.0.0.5".into(),
+                public_ip: None,
+                subnet_id: Some("subnet-1".into()),
+                vpc_id: Some("vpc-1".into()),
+                key_name: None,
+                security_group_ids: vec![],
+                reservation_id: "r-1".into(),
+                ami_launch_index: 0,
+                monitoring: false,
+                az: "us-east-1a".into(),
+                launch_time: "2024-01-01T00:00:00.000Z".into(),
+                container_id: None,
+                disable_api_termination: false,
+                disable_api_stop: false,
+                source_dest_check: true,
+                ebs_optimized: false,
+                instance_initiated_shutdown_behavior: "stop".into(),
+                user_data: Some("Zm9v".into()),
+                metadata_options: Default::default(),
+                cpu_options: None,
+                bandwidth_weighting: None,
+                maintenance_options: Default::default(),
+                placement_tenancy: None,
+                placement_affinity: None,
+                placement_group_name: None,
+                private_dns_hostname_type: None,
+                enable_resource_name_dns_a_record: false,
+                enable_resource_name_dns_aaaa_record: false,
+            };
+            state.instances.insert("i-1".into(), inst);
+            state.upsert_tags(
+                "i-1",
+                &[Tag {
+                    key: "Name".into(),
+                    value: "web".into(),
+                }],
+            );
+        }
+
+        let (user_data, tags, network) =
+            run_instance_inputs(&svc.state, "000000000000", "i-1").expect("instance exists");
+        assert_eq!(user_data.as_deref(), Some("Zm9v"), "user-data is threaded");
+        assert_eq!(
+            tags.get("Name").map(String::as_str),
+            Some("web"),
+            "tags threaded"
+        );
+        let net = network.expect("subnet-bound instance gets a network placement");
+        assert_eq!(net.subnet_id, "subnet-1", "rejoins the same subnet");
+
+        // A missing instance yields None (mirrors a concurrent terminate).
+        assert!(run_instance_inputs(&svc.state, "000000000000", "i-missing").is_none());
     }
 
     #[test]
