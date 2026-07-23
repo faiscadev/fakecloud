@@ -146,7 +146,10 @@ impl RdsService {
             let accounts = self.state.read();
             let empty = RdsState::new(&request.account_id, &request.region);
             let s = accounts.get(&request.account_id).unwrap_or(&empty);
-            (s.next_dbi_resource_id(), s.db_instance_arn(&target_id))
+            (
+                s.next_dbi_resource_id(),
+                s.db_instance_arn(request.region.as_str(), &target_id),
+            )
         };
         let created_at = Utc::now();
 
@@ -285,7 +288,7 @@ impl RdsService {
 
             (
                 state.next_dbi_resource_id(),
-                state.db_instance_arn(&db_instance_identifier),
+                state.db_instance_arn(request.region.as_str(), &db_instance_identifier),
             )
         };
 

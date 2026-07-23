@@ -226,13 +226,15 @@ impl EcsService {
         #[allow(clippy::needless_range_loop)]
         for task_index in 0..count {
             let task_id = uuid::Uuid::new_v4().to_string().replace('-', "");
-            let task_arn = state.task_arn(&cluster_name, &task_id);
+            // ARN carries the request's credential-scope region (req.region), not
+            // the frozen server default.
+            let task_arn = state.task_arn(request.region.as_str(), &cluster_name, &task_id);
             let containers: Vec<Container> = td_containers
                 .iter()
                 .map(|def| Container {
                     container_arn: format!(
                         "arn:aws:ecs:{}:{}:container/{}/{}/{}",
-                        state.region,
+                        request.region.as_str(),
                         state.account_id,
                         cluster_name,
                         task_id,
@@ -292,7 +294,7 @@ impl EcsService {
                     region: opts
                         .get("awslogs-region")
                         .and_then(|v| v.as_str())
-                        .unwrap_or(&state.region)
+                        .unwrap_or(request.region.as_str())
                         .to_string(),
                     container_name: name,
                 })
@@ -679,7 +681,7 @@ mod multi_container_tests {
         // Pre-create the cluster so RunTask doesn't trip on a missing one.
         let mut accounts = state.write();
         let s = accounts.get_or_create("000000000000");
-        let arn = s.cluster_arn("default");
+        let arn = s.cluster_arn("us-east-1", "default");
         s.clusters
             .insert("default".into(), Cluster::new("default", arn));
         drop(accounts);
@@ -1278,7 +1280,7 @@ mod port_mapping_tests {
         let mut accounts: MultiAccountState<EcsState> =
             MultiAccountState::new("000000000000", "us-east-1", "http://localhost:4566");
         let acct = accounts.get_or_create("000000000000");
-        let arn = acct.cluster_arn("default");
+        let arn = acct.cluster_arn("us-east-1", "default");
         acct.clusters
             .insert("default".into(), Cluster::new("default", arn));
         let mut task = Task {

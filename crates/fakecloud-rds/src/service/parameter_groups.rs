@@ -44,7 +44,8 @@ impl RdsService {
             ));
         }
 
-        let db_parameter_group_arn = state.db_parameter_group_arn(&db_parameter_group_name);
+        let db_parameter_group_arn =
+            state.db_parameter_group_arn(request.region.as_str(), &db_parameter_group_name);
         let tags = parse_tags(request)?;
 
         let parameter_group = DbParameterGroup {

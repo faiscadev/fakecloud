@@ -296,8 +296,18 @@ impl EcsService {
                     } else {
                         &service.launch_type
                     };
+                    // Background re-spawn has no request region; keep the new
+                    // tasks in the region the service's stored ARN already
+                    // carries (stamped from req.region at CreateService time).
+                    let svc_region = service
+                        .cluster_arn
+                        .split(':')
+                        .nth(3)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| state.region.clone());
                     let ids = spawn_service_tasks(
                         state,
+                        &svc_region,
                         &service,
                         shortfall,
                         service.role_arn.as_deref().unwrap_or(""),

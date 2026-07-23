@@ -599,8 +599,8 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
     let now = Utc::now();
     let mut accounts = svc.state_handle().write();
     let state = accounts.get_or_create("000000000000");
-    let arn = state.db_instance_arn(replica_id);
-    let source_arn = state.db_instance_arn(source_id);
+    let arn = state.db_instance_arn(&state.region, replica_id);
+    let source_arn = state.db_instance_arn(&state.region, source_id);
     // Source first.
     state.instances.insert(
         source_id.to_string(),
@@ -1480,7 +1480,7 @@ fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
     let now = Utc::now();
     let mut accounts = svc.state_handle().write();
     let state = accounts.get_or_create("000000000000");
-    let arn = state.db_instance_arn(id);
+    let arn = state.db_instance_arn(&state.region, id);
     state.instances.insert(
         id.to_string(),
         DbInstance {

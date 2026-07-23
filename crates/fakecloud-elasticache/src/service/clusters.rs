@@ -158,10 +158,14 @@ impl ElastiCacheService {
 
             let preferred_availability_zone =
                 optional_query_param(request, "PreferredAvailabilityZone")
-                    .unwrap_or_else(|| format!("{}a", state.region));
+                    .unwrap_or_else(|| format!("{}a", request.region));
+            // ARN carries the request's credential-scope region (req.region), not
+            // the frozen server default.
             let arn = format!(
                 "arn:aws:elasticache:{}:{}:cluster:{}",
-                state.region, state.account_id, cache_cluster_id
+                request.region.as_str(),
+                state.account_id,
+                cache_cluster_id
             );
             (preferred_availability_zone, arn, rdb_path)
         };

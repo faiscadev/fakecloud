@@ -80,8 +80,11 @@ impl EcsService {
             ));
         }
 
-        let service_arn = s.express_gateway_arn(&cluster_name, &service_name);
-        let cluster_arn = s.cluster_arn(&cluster_name);
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
+        let service_arn =
+            s.express_gateway_arn(request.region.as_str(), &cluster_name, &service_name);
+        let cluster_arn = s.cluster_arn(request.region.as_str(), &cluster_name);
 
         let svc = ExpressGatewayService {
             service_name: service_name.clone(),

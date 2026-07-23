@@ -114,7 +114,9 @@ impl EcsService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
         let revision = state.allocate_revision(&family);
-        let arn = state.task_definition_arn(&family, revision);
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
+        let arn = state.task_definition_arn(request.region.as_str(), &family, revision);
         let td = TaskDefinition {
             family: family.clone(),
             revision,

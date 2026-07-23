@@ -376,7 +376,7 @@ impl ElastiCacheService {
         group.member_clusters = build_member_clusters(&replication_group_id, new_total);
 
         let group = group.clone();
-        let region = state.region.clone();
+        let region = request.region.clone();
         let xml = replication_group_xml(&group, &region);
 
         Ok(AwsResponse::xml(
@@ -421,7 +421,7 @@ impl ElastiCacheService {
             ));
         }
 
-        let region = state.region.clone();
+        let region = request.region.clone();
         let xml = replication_group_xml(group, &region);
 
         Ok(AwsResponse::xml(

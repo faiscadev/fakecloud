@@ -432,9 +432,14 @@ impl SsmService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // ARN carries the request's credential-scope region (req.region). It is
+        // also the storage key, but Get/Update/Delete look up by the exact ARN
+        // string the client received here, so keying stays consistent.
         let arn = format!(
             "arn:aws:ssm:{}:{}:opsmetadata/{}",
-            state.region, state.account_id, resource_id
+            req.region.as_str(),
+            state.account_id,
+            resource_id
         );
 
         if state.ops_metadata.contains_key(&arn) {

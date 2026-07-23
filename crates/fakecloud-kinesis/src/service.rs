@@ -270,7 +270,7 @@ impl KinesisService {
 
         let stream = KinesisStream {
             stream_name: stream_name.to_string(),
-            stream_arn: state.stream_arn(stream_name),
+            stream_arn: state.stream_arn(request.region.as_str(), stream_name),
             stream_status: "ACTIVE".to_string(),
             stream_creation_timestamp: Utc::now(),
             retention_period_hours: 24,
@@ -493,7 +493,7 @@ impl KinesisService {
         if stream.is_none() {
             return Err(stream_not_found(&state.account_id, &stream_name));
         }
-        let stream_arn = state.stream_arn(&stream_name);
+        let stream_arn = state.stream_arn(request.region.as_str(), &stream_name);
         state.consumers.retain(|_, c| c.stream_arn != stream_arn);
 
         Ok(AwsResponse::ok_json(json!({})))
@@ -1122,7 +1122,7 @@ impl KinesisService {
         let state = accounts.get_or_create(&request.account_id);
         let stream_name = resolve_stream_name(state, &body)?;
         let account_id = state.account_id.clone();
-        let stream_arn = state.stream_arn(&stream_name);
+        let stream_arn = state.stream_arn(request.region.as_str(), &stream_name);
         let stream = state
             .streams
             .get_mut(&stream_name)
@@ -1177,7 +1177,7 @@ impl KinesisService {
         let state = accounts.get_or_create(&request.account_id);
         let stream_name = resolve_stream_name(state, &body)?;
         let account_id = state.account_id.clone();
-        let stream_arn = state.stream_arn(&stream_name);
+        let stream_arn = state.stream_arn(request.region.as_str(), &stream_name);
         let stream = state
             .streams
             .get_mut(&stream_name)
@@ -1317,7 +1317,7 @@ impl KinesisService {
         let state = accounts.get_or_create(&request.account_id);
         let stream_name = resolve_stream_name(state, &body)?;
         let account_id = state.account_id.clone();
-        let stream_arn = state.stream_arn(&stream_name);
+        let stream_arn = state.stream_arn(request.region.as_str(), &stream_name);
         let stream = state
             .streams
             .get_mut(&stream_name)
@@ -1795,7 +1795,7 @@ impl KinesisService {
         let state = accounts.get_or_create(&request.account_id);
         let stream_name = resolve_stream_name(state, &body)?;
         let account_id = state.account_id.clone();
-        let stream_arn = state.stream_arn(&stream_name);
+        let stream_arn = state.stream_arn(request.region.as_str(), &stream_name);
         let stream = state
             .streams
             .get_mut(&stream_name)

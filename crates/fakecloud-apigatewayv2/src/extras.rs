@@ -48,7 +48,7 @@ fn to_camel(v: Value) -> Value {
 /// fills in: `DomainNameStatus = AVAILABLE`, plus a regional endpoint name and
 /// hosted-zone id. The Terraform provider's create-waiter reads
 /// `DomainNameStatus`, so it must be present.
-fn domain_configs_with_status(configs: Option<&Value>, domain: &str) -> Value {
+fn domain_configs_with_status(configs: Option<&Value>, domain: &str, region: &str) -> Value {
     let mut arr = match configs.and_then(|c| c.as_array()) {
         Some(a) if !a.is_empty() => a.clone(),
         _ => vec![json!({})],
@@ -61,7 +61,7 @@ fn domain_configs_with_status(configs: Option<&Value>, domain: &str) -> Value {
             if !obj.contains_key("ApiGatewayDomainName") {
                 obj.insert(
                     "ApiGatewayDomainName".into(),
-                    json!(format!("d-{domain}.execute-api.us-east-1.amazonaws.com")),
+                    json!(format!("d-{domain}.execute-api.{region}.amazonaws.com")),
                 );
             }
             if !obj.contains_key("HostedZoneId") {
@@ -538,11 +538,14 @@ impl ApiGatewayV2Service {
                 // fakecloud provisions domains synchronously, so each
                 // configuration is immediately AVAILABLE. The Terraform
                 // provider's create-waiter polls GetDomainName for that status.
-                let configs =
-                    domain_configs_with_status(body.get("DomainNameConfigurations"), &name);
+                let configs = domain_configs_with_status(
+                    body.get("DomainNameConfigurations"),
+                    &name,
+                    req.region.as_str(),
+                );
                 let mut entry = json!({
                     "DomainName": name,
-                    "DomainNameArn": Arn::new("apigateway", "us-east-1", "", &format!("/domainnames/{name}")).to_string(),
+                    "DomainNameArn": Arn::new("apigateway", req.region.as_str(), "", &format!("/domainnames/{name}")).to_string(),
                     "DomainNameConfigurations": configs,
                     "ApiMappingSelectionExpression": "$request.basepath",
                     "RoutingMode": "API_MAPPING_ONLY",
@@ -583,8 +586,11 @@ impl ApiGatewayV2Service {
                     .get_mut(name)
                     .ok_or_else(|| not_found("DomainName", name))?;
                 if body.get("DomainNameConfigurations").is_some() {
-                    entry["DomainNameConfigurations"] =
-                        domain_configs_with_status(body.get("DomainNameConfigurations"), name);
+                    entry["DomainNameConfigurations"] = domain_configs_with_status(
+                        body.get("DomainNameConfigurations"),
+                        name,
+                        req.region.as_str(),
+                    );
                 }
                 // Previously dropped (bug-hunt 2026-06-24, 1.11): the mTLS
                 // truststore config could not be updated.
@@ -1859,7 +1865,7 @@ impl ApiGatewayV2Service {
                 }
                 json!({
                     id_field: id,
-                    "PortalArn": Arn::new("apigateway", "us-east-1", "", &format!("/portals/{id}")).to_string(),
+                    "PortalArn": Arn::new("apigateway", req.region.as_str(), "", &format!("/portals/{id}")).to_string(),
                     "LastModified": now,
                     "LastPublished": now,
                     "LastPublishedDescription": "",
@@ -1875,7 +1881,7 @@ impl ApiGatewayV2Service {
             }
             "portal_products" => json!({
                 id_field: id,
-                "PortalProductArn": Arn::new("apigateway", "us-east-1", "", &format!("/portalproducts/{id}")).to_string(),
+                "PortalProductArn": Arn::new("apigateway", req.region.as_str(), "", &format!("/portalproducts/{id}")).to_string(),
                 "LastModified": now,
                 "Description": input.get("Description").and_then(|x| x.as_str()).unwrap_or(""),
                 "DisplayName": input.get("DisplayName").and_then(|x| x.as_str()).unwrap_or(&id),

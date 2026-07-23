@@ -2039,6 +2039,9 @@ fn generate_tokens_with_overrides(
     let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
+    // The issuer region is read back out of the pool id (`{region}_{rand}`) so
+    // the token `iss` always matches the pool's ARN, not the frozen server default.
+    let region = pool_id.split('_').next().unwrap_or(region);
     let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
     let access_ttl = claims.access_ttl();
     let id_ttl = claims.id_ttl();
@@ -2315,6 +2318,9 @@ pub fn oidc_discovery_document(
     base_url: &str,
     pool_domain: Option<&str>,
 ) -> Value {
+    // Issuer region comes from the pool id prefix so the discovery document
+    // matches the token `iss`, not the frozen server default.
+    let region = pool_id.split('_').next().unwrap_or(region);
     let issuer = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
     let trimmed = base_url.trim_end_matches('/');
     let mut doc = serde_json::json!({
@@ -2932,6 +2938,8 @@ fn build_client_credentials_access_token(
 ) -> String {
     let now = Utc::now().timestamp();
     let jti = Uuid::new_v4().to_string();
+    // Issuer region comes from the pool id prefix so `iss` matches the pool ARN.
+    let region = pool_id.split('_').next().unwrap_or(region);
     let iss = format!("https://cognito-idp.{region}.amazonaws.com/{pool_id}");
 
     // Synthesize a keypair on the fly when callers haven't loaded one

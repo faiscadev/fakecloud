@@ -119,7 +119,10 @@ impl RdsService {
         let action = req.action.clone();
         let aid = req.account_id.clone();
         let rid = req.request_id.clone();
-        let region = "us-east-1"; // RDS uses us-east-1 by default in fakecloud
+        // ARNs and endpoint hosts carry the request's credential-scope region
+        // (req.region), not a hardcoded default. Storage is keyed by
+        // account/identifier, so this only affects returned strings.
+        let region = req.region.as_str();
 
         macro_rules! write_state {
             () => {{
@@ -1301,9 +1304,9 @@ impl RdsService {
                 let source_arn_full = if source_arn.starts_with("arn:") {
                     source_arn.clone()
                 } else {
-                    state.db_instance_arn(&source_id)
+                    state.db_instance_arn(region, &source_id)
                 };
-                let target_arn = state.db_instance_arn(&target_id);
+                let target_arn = state.db_instance_arn(region, &target_id);
                 // AWS accepts either a DBInstance ARN or an Aurora
                 // DBCluster ARN as the BG source. Look up under both
                 // the real instance store and the cluster map under
@@ -1766,7 +1769,7 @@ impl RdsService {
                         .get(&source_key)
                         .cloned()
                         .ok_or_else(|| crate::service::service_helpers::db_snapshot_not_found(&source_id))?;
-                    let arn = state.db_snapshot_arn(&target_id);
+                    let arn = state.db_snapshot_arn(region, &target_id);
                     snapshot.db_snapshot_identifier = target_id.clone();
                     snapshot.db_snapshot_arn = arn.clone();
                     snapshot.snapshot_create_time = chrono::Utc::now();
@@ -1832,7 +1835,7 @@ impl RdsService {
                             )
                         })?;
                     group.db_parameter_group_name = target.clone();
-                    group.db_parameter_group_arn = state.db_parameter_group_arn(&target);
+                    group.db_parameter_group_arn = state.db_parameter_group_arn(region, &target);
                     if let Some(desc) = description {
                         group.description = desc;
                     }

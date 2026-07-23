@@ -317,7 +317,7 @@ fn replicate_image_copies_to_destination_account() {
             repository_filters: Vec::new(),
         }],
     });
-    let arn = source_state.repository_arn("app");
+    let arn = source_state.repository_arn("us-east-1", "app");
     let mut repo = Repository::new("app", arn, SOURCE, "fakecloud:4566");
     repo.images.insert(
         "sha256:abc".to_string(),
@@ -573,7 +573,7 @@ mod replication_tests {
         if !rules.is_empty() {
             source.replication_configuration = Some(ReplicationConfiguration { rules });
         }
-        let arn = source.repository_arn("app");
+        let arn = source.repository_arn("us-east-1", "app");
         let repo = Repository::new("app", arn, SOURCE, "fakecloud:4566");
         source.repositories.insert("app".to_string(), repo);
         let state: SharedEcrState = Arc::new(RwLock::new(mas));
@@ -800,7 +800,7 @@ mod repo_policy_enforcement_tests {
         let mut mas: MultiAccountState<EcrState> =
             MultiAccountState::new(OWNER, "us-east-1", "http://fakecloud:4566");
         let owner = mas.get_or_create(OWNER);
-        let arn = owner.repository_arn("app");
+        let arn = owner.repository_arn("us-east-1", "app");
         let mut repo = Repository::new("app", arn, OWNER, "fakecloud:4566");
         repo.policy = policy.map(|s| s.to_string());
         // Seed an image so BatchGetImage has something to look up after the
@@ -1068,7 +1068,7 @@ mod scan_on_push_tests {
             MultiAccountState::new(ACCOUNT, "us-east-1", "http://fakecloud:4566");
         let state = mas.get_or_create(ACCOUNT);
         state.registry_scanning_configuration = registry_cfg;
-        let arn = state.repository_arn(repo_name);
+        let arn = state.repository_arn("us-east-1", repo_name);
         let mut repo = Repository::new(repo_name, arn, ACCOUNT, "fakecloud:4566");
         repo.image_scanning_configuration = ImageScanningConfiguration {
             scan_on_push: repo_scan_on_push,
@@ -1257,7 +1257,7 @@ mod lifecycle_timestamp_tests {
         let mut mas: MultiAccountState<EcrState> =
             MultiAccountState::new(ACCOUNT, "us-east-1", "http://fakecloud:4566");
         let s = mas.get_or_create(ACCOUNT);
-        let arn = s.repository_arn("app");
+        let arn = s.repository_arn("us-east-1", "app");
         let mut repo = Repository::new("app", arn, ACCOUNT, "fakecloud:4566");
         // Seed an image old enough to be eligible for `sinceImagePushed`.
         repo.images.insert(
@@ -1468,7 +1468,7 @@ mod p5_polish_tests {
         let mut mas: MultiAccountState<EcrState> =
             MultiAccountState::new(ACCOUNT, "us-east-1", "http://fakecloud:4566");
         let state = mas.get_or_create(ACCOUNT);
-        let arn = state.repository_arn("app");
+        let arn = state.repository_arn("us-east-1", "app");
         let repo = Repository::new("app", arn, ACCOUNT, "fakecloud:4566");
         state.repositories.insert("app".to_string(), repo);
         let shared: SharedEcrState = Arc::new(RwLock::new(mas));

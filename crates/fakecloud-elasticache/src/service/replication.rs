@@ -178,9 +178,11 @@ impl ElastiCacheService {
             let state = accounts.get(&request.account_id).unwrap_or(&empty);
             let arn = format!(
                 "arn:aws:elasticache:{}:{}:replicationgroup:{}",
-                state.region, state.account_id, replication_group_id
+                request.region.as_str(),
+                state.account_id,
+                replication_group_id
             );
-            (arn, state.region.clone())
+            (arn, request.region.clone())
         };
 
         let group = ReplicationGroup {
@@ -351,7 +353,7 @@ impl ElastiCacheService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let region = state.region.clone();
+        let region = request.region.clone();
         let account_id = state.account_id.clone();
         let global_replication_group_id = global_replication_group_id(&region, suffix.as_str());
         if state
@@ -505,7 +507,7 @@ impl ElastiCacheService {
         let accounts = self.state.read();
         let empty = ElastiCacheState::new(&request.account_id, &request.region);
         let state = accounts.get(&request.account_id).unwrap_or(&empty);
-        let region = state.region.clone();
+        let region = request.region.clone();
 
         let groups: Vec<&ReplicationGroup> = if let Some(ref id) = group_id {
             match state.replication_groups.get(id) {
@@ -932,7 +934,7 @@ impl ElastiCacheService {
             }
 
             let group = state.replication_groups[&replication_group_id].clone();
-            let region = state.region.clone();
+            let region = request.region.clone();
             let rg_id = replication_group_id.clone();
             let had_user_group_changes = !user_group_ids_to_add.is_empty()
                 || remove_user_groups == Some(true)
@@ -1299,7 +1301,7 @@ impl ElastiCacheService {
         }
 
         let group = group.clone();
-        let region = state.region.clone();
+        let region = request.region.clone();
         let xml = replication_group_xml(&group, &region);
         Ok(AwsResponse::xml(
             StatusCode::OK,

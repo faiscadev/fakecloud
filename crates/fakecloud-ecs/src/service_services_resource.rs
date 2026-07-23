@@ -146,7 +146,10 @@ impl EcsService {
                 .get(&cluster_name)
                 .map(|c| c.cluster_arn.clone())
                 .ok_or_else(|| cluster_not_found(&cluster_name))?;
-            let service_arn = state.service_arn(&cluster_name, &service_name);
+            // ARN carries the request's credential-scope region (req.region), not
+            // the frozen server default.
+            let service_arn =
+                state.service_arn(request.region.as_str(), &cluster_name, &service_name);
             let key = EcsState::service_key(&cluster_name, &service_name);
             if let Some(existing) = state.services.get(&key) {
                 if existing.status != "INACTIVE" {
@@ -256,6 +259,7 @@ impl EcsService {
             });
             let ids = spawn_service_tasks(
                 state,
+                request.region.as_str(),
                 &service,
                 desired_count,
                 &principal_arn,
@@ -266,7 +270,11 @@ impl EcsService {
                 let ts_id = uuid::Uuid::new_v4().to_string().replace('-', "");
                 let ts_arn = format!(
                     "arn:aws:ecs:{}:{}:task-set/{}/{}/{}",
-                    state.region, state.account_id, cluster_name, service_name, ts_id
+                    request.region.as_str(),
+                    state.account_id,
+                    cluster_name,
+                    service_name,
+                    ts_id
                 );
                 let task_set = TaskSet {
                     task_set_id: ts_id,
@@ -617,7 +625,11 @@ impl EcsService {
                 let ts_id = uuid::Uuid::new_v4().to_string().replace('-', "");
                 let ts_arn = format!(
                     "arn:aws:ecs:{}:{}:task-set/{}/{}/{}",
-                    state.region, state.account_id, cluster_name, service_name, ts_id
+                    request.region.as_str(),
+                    state.account_id,
+                    cluster_name,
+                    service_name,
+                    ts_id
                 );
                 let svc_snapshot = state.services.get(&key).unwrap().clone();
                 let task_set = TaskSet {
@@ -652,6 +664,7 @@ impl EcsService {
                 // Spawn tasks for the new task set
                 let mut new_ids = spawn_service_tasks(
                     state,
+                    request.region.as_str(),
                     &svc_snapshot,
                     effective_desired,
                     &principal_arn,
@@ -720,6 +733,7 @@ impl EcsService {
                     let svc_snapshot = state.services.get(&key).unwrap().clone();
                     let mut new_ids = spawn_service_tasks(
                         state,
+                        request.region.as_str(),
                         &svc_snapshot,
                         add as i32,
                         &principal_arn,
@@ -783,6 +797,7 @@ impl EcsService {
                         let svc_snapshot = state.services.get(&key).unwrap().clone();
                         let mut more = spawn_service_tasks(
                             state,
+                            request.region.as_str(),
                             &svc_snapshot,
                             need,
                             &principal_arn,

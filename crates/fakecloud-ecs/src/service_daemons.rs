@@ -59,7 +59,9 @@ impl EcsService {
         let account_id = request.account_id.clone();
         let s = accounts.get_or_create(&account_id);
         let revision = s.allocate_daemon_revision(&family);
-        let arn = s.daemon_task_definition_arn(&family, revision);
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
+        let arn = s.daemon_task_definition_arn(request.region.as_str(), &family, revision);
 
         let def = DaemonTaskDefinition {
             family: family.clone(),
@@ -253,7 +255,8 @@ impl EcsService {
             let mut accounts = self.state.write();
             let s = accounts.get_or_create(&account);
             let cluster_name = cluster_arn_to_name(cluster_input.unwrap_or("default"));
-            let cluster_arn = s.cluster_arn(&cluster_name);
+            // ARN carries the request's credential-scope region (req.region).
+            let cluster_arn = s.cluster_arn(request.region.as_str(), &cluster_name);
 
             if !s.clusters.contains_key(&cluster_name) {
                 return Err(AwsServiceError::aws_error(
@@ -275,9 +278,10 @@ impl EcsService {
                 ));
             }
 
-            let daemon_arn = s.daemon_arn(&cluster_name, &daemon_name);
+            let daemon_arn = s.daemon_arn(request.region.as_str(), &cluster_name, &daemon_name);
             let deployment_id = uuid::Uuid::new_v4().to_string();
-            let deployment_arn = s.daemon_deployment_arn(&daemon_name, &deployment_id);
+            let deployment_arn =
+                s.daemon_deployment_arn(request.region.as_str(), &daemon_name, &deployment_id);
 
             let deployment = DaemonDeployment {
                 deployment_arn: deployment_arn.clone(),
@@ -315,7 +319,8 @@ impl EcsService {
             s.daemons.insert(key.clone(), daemon.clone());
             s.daemon_deployments
                 .insert(deployment_arn.clone(), deployment);
-            let ids = spawn_daemon_tasks(s, &daemon, &principal_arn, "EC2");
+            let ids =
+                spawn_daemon_tasks(s, request.region.as_str(), &daemon, &principal_arn, "EC2");
             if let Some(d) = s.daemons.get_mut(&key) {
                 d.task_arns = ids.clone();
             }
@@ -444,7 +449,8 @@ impl EcsService {
                     .map(|d| d.daemon_arn.clone())
                     .unwrap_or_default();
                 let deployment_id = uuid::Uuid::new_v4().to_string();
-                let deployment_arn = s.daemon_deployment_arn(&daemon_name, &deployment_id);
+                let deployment_arn =
+                    s.daemon_deployment_arn(request.region.as_str(), &daemon_name, &deployment_id);
                 let revision = s
                     .daemons
                     .get(&key)
@@ -490,7 +496,7 @@ impl EcsService {
             // Re-spawn tasks when definition or providers changed.
             let ids = {
                 let daemon = s.daemons.get(&key).unwrap().clone();
-                spawn_daemon_tasks(s, &daemon, &principal_arn, "EC2")
+                spawn_daemon_tasks(s, request.region.as_str(), &daemon, &principal_arn, "EC2")
             };
             if let Some(d) = s.daemons.get_mut(&key) {
                 d.task_arns = ids.clone();

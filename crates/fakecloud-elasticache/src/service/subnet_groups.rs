@@ -45,9 +45,13 @@ impl ElastiCacheService {
             ));
         }
 
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
         let arn = format!(
             "arn:aws:elasticache:{}:{}:subnetgroup:{}",
-            state.region, state.account_id, name
+            request.region.as_str(),
+            state.account_id,
+            name
         );
         let vpc_id = format!(
             "vpc-{:08x}",
@@ -64,7 +68,7 @@ impl ElastiCacheService {
             arn,
         };
 
-        let xml = cache_subnet_group_xml(&group, &state.region);
+        let xml = cache_subnet_group_xml(&group, request.region.as_str());
         state.register_arn(&group.arn);
         state.tags.entry(group.arn.clone()).or_default();
         if !tags.is_empty() {
@@ -120,7 +124,7 @@ impl ElastiCacheService {
             .map(|g| {
                 format!(
                     "<CacheSubnetGroup>{}</CacheSubnetGroup>",
-                    cache_subnet_group_xml(g, &state.region)
+                    cache_subnet_group_xml(g, request.region.as_str())
                 )
             })
             .collect();
@@ -194,7 +198,7 @@ impl ElastiCacheService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
-        let region = state.region.clone();
+        let region = request.region.clone();
 
         let group = state.subnet_groups.get_mut(&name).ok_or_else(|| {
             AwsServiceError::aws_error(

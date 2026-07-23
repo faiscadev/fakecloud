@@ -187,7 +187,9 @@ impl SchedulerService {
         }
 
         let now = Utc::now();
-        let arn = schedule_arn(&state.region, &state.account_id, &group_name, name);
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
+        let arn = schedule_arn(req.region.as_str(), &state.account_id, &group_name, name);
         let sched = Schedule {
             arn: arn.clone(),
             name: name.to_string(),
@@ -431,7 +433,9 @@ impl SchedulerService {
         }
 
         let now = Utc::now();
-        let arn = group_arn(&state.region, &state.account_id, name);
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
+        let arn = group_arn(req.region.as_str(), &state.account_id, name);
         state.groups.insert(
             name.to_string(),
             ScheduleGroup {

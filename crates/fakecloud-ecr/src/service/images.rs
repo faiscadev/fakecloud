@@ -928,7 +928,7 @@ mod pagination_and_validation_tests {
         let mut mas: MultiAccountState<EcrState> =
             MultiAccountState::new(ACCT, "us-east-1", "http://fakecloud:4566");
         let s = mas.get_or_create(ACCT);
-        let arn = s.repository_arn("app");
+        let arn = s.repository_arn("us-east-1", "app");
         s.repositories.insert(
             "app".into(),
             Repository::new("app", arn, ACCT, "fakecloud:4566"),

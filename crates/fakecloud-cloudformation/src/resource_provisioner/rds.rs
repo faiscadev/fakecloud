@@ -35,7 +35,7 @@ impl ResourceProvisioner {
         let tags = parse_rds_tags(props.get("Tags"));
         let mut accounts = self.rds_state.write();
         let state = accounts.get_or_create(&self.account_id);
-        let arn = state.db_subnet_group_arn(&name);
+        let arn = state.db_subnet_group_arn(&self.region, &name);
         let group = DbSubnetGroup {
             db_subnet_group_name: name.clone(),
             db_subnet_group_arn: arn.clone(),
@@ -89,7 +89,7 @@ impl ResourceProvisioner {
 
         let mut accounts = self.rds_state.write();
         let state = accounts.get_or_create(&self.account_id);
-        let arn = state.db_parameter_group_arn(&name);
+        let arn = state.db_parameter_group_arn(&self.region, &name);
         let group = DbParameterGroup {
             db_parameter_group_name: name.clone(),
             db_parameter_group_arn: arn.clone(),

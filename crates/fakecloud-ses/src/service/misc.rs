@@ -875,14 +875,16 @@ impl SesV2Service {
                 }
             }
         }
-        // The primary region is always the current region
-        if !regions.contains(&state.region) {
-            regions.insert(0, state.region.clone());
+        // The primary region is the request's credential-scope region (req.region),
+        // not the frozen server default; the endpoint id encodes it too.
+        let primary_region = req.region.clone();
+        if !regions.contains(&primary_region) {
+            regions.insert(0, primary_region.clone());
         }
 
         let endpoint_id = format!(
             "ses-{}-{}",
-            state.region,
+            primary_region,
             uuid::Uuid::new_v4().to_string().split('-').next().unwrap()
         );
         let now = Utc::now();

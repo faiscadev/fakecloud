@@ -503,7 +503,7 @@ mod concurrency_tests {
         let mut mas: MultiAccountState<EcrState> =
             MultiAccountState::new(ACCOUNT, "us-east-1", "http://fakecloud:4566");
         let state = mas.get_or_create(ACCOUNT);
-        let arn = state.repository_arn("app");
+        let arn = state.repository_arn("us-east-1", "app");
         let repo = Repository::new("app", arn, ACCOUNT, "fakecloud:4566");
         state.repositories.insert("app".to_string(), repo);
         let shared: SharedEcrState = Arc::new(RwLock::new(mas));

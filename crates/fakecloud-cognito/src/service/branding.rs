@@ -457,9 +457,12 @@ impl CognitoService {
         let challenge = Uuid::new_v4().to_string();
         let user_id = Uuid::new_v4().to_string();
 
+        // The relying-party id host region is read out of the pool id prefix so
+        // it matches the pool's issuer/ARN region, not a hardcoded default.
+        let rp_region = pool_id.split('_').next().unwrap_or("us-east-1");
         let credential_creation_options = json!({
             "rp": {
-                "id": format!("cognito-idp.us-east-1.amazonaws.com/{pool_id}"),
+                "id": format!("cognito-idp.{rp_region}.amazonaws.com/{pool_id}"),
                 "name": "Amazon Cognito"
             },
             "user": {
@@ -606,7 +609,10 @@ impl CognitoService {
         let cred = WebAuthnCredential {
             credential_id,
             friendly_credential_name: friendly_name,
-            relying_party_id: format!("cognito-idp.us-east-1.amazonaws.com/{pool_id}"),
+            relying_party_id: format!(
+                "cognito-idp.{}.amazonaws.com/{pool_id}",
+                pool_id.split('_').next().unwrap_or("us-east-1")
+            ),
             authenticator_attachment,
             authenticator_transport,
             created_at: now,
