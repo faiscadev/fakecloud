@@ -58,6 +58,21 @@ pub(super) fn dispatch(
             Ok(Some(get_portfolio_status(svc, ctx, body)))
         }
         "RetryPipelineExecution" => Ok(Some(retry_pipeline_execution(svc, ctx, meta, body))),
+        "BatchAddClusterNodes" => Ok(Some(batch_add_cluster_nodes(svc, ctx, meta, body))),
+        "BatchDeleteClusterNodes" => Ok(Some(batch_delete_cluster_nodes(svc, ctx, meta, body))),
+        "BatchRebootClusterNodes" => Ok(Some(batch_reboot_cluster_nodes(svc, ctx, meta, body))),
+        "BatchReplaceClusterNodes" => Ok(Some(batch_replace_cluster_nodes(svc, ctx, meta, body))),
+        "AssociateTrialComponent" => Ok(Some(associate_trial_component(svc, ctx, meta, body))),
+        "DisassociateTrialComponent" => {
+            Ok(Some(disassociate_trial_component(svc, ctx, meta, body)))
+        }
+        "ListTrialComponents" => Ok(list_trial_components(svc, ctx, meta, body)),
+        "SendPipelineExecutionStepSuccess" => Ok(Some(send_pipeline_execution_step(
+            svc, ctx, meta, body, true,
+        ))),
+        "SendPipelineExecutionStepFailure" => Ok(Some(send_pipeline_execution_step(
+            svc, ctx, meta, body, false,
+        ))),
         op if is_lifecycle_transition(op) => Ok(lifecycle_transition(svc, ctx, meta, body)),
         _ => Ok(None),
     }
@@ -492,6 +507,379 @@ fn association_key(body: &Map<String, Value>) -> String {
         str_member(body, "SourceArn"),
         str_member(body, "DestinationArn")
     )
+}
+
+// ── HyperPod cluster nodes ───────────────────────────────────────────────
+//
+// `BatchAddClusterNodes` / `BatchDeleteClusterNodes` / `BatchRebootClusterNodes`
+// / `BatchReplaceClusterNodes` are Action verbs the generic arm accepted and
+// discarded, so a node added by one call was invisible to `ListClusterNodes`.
+// Persist each node under the `ClusterNode` family (the family the read
+// siblings project) keyed by a minted `NodeLogicalId`, carrying its owning
+// `ClusterName` for in-cluster scoping. Only scalar members that are real
+// `ClusterNodeSummary` fields are stored, so the generic list projection stays
+// shape-valid; `ClusterName` is an internal scoping member the projection drops
+// (it is not a `ClusterNodeSummary` field).
+
+const CLUSTER_NODE_FAMILY: &str = "ClusterNode";
+
+/// The set of caller-supplied node identifiers (`NodeIds` are instance ids,
+/// `NodeLogicalIds` are logical ids) a batch node operation targets.
+fn requested_node_ids(body: &Map<String, Value>) -> Vec<String> {
+    let mut ids = Vec::new();
+    for key in ["NodeIds", "NodeLogicalIds"] {
+        if let Some(arr) = body.get(key).and_then(Value::as_array) {
+            ids.extend(arr.iter().filter_map(Value::as_str).map(str::to_string));
+        }
+    }
+    ids
+}
+
+/// The stored node's logical id and instance id (either may match a request).
+fn node_identifiers(rec: &Value) -> (Option<&str>, Option<&str>) {
+    let obj = rec.as_object();
+    (
+        obj.and_then(|o| o.get("NodeLogicalId"))
+            .and_then(Value::as_str),
+        obj.and_then(|o| o.get("InstanceId"))
+            .and_then(Value::as_str),
+    )
+}
+
+/// Whether a stored node belongs to `cluster`.
+fn node_in_cluster(rec: &Value, cluster: &str) -> bool {
+    rec.as_object()
+        .and_then(|o| o.get("ClusterName"))
+        .and_then(Value::as_str)
+        == Some(cluster)
+}
+
+fn batch_add_cluster_nodes(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let cluster = str_member(body, "ClusterName");
+    let mut successful: Vec<Value> = Vec::new();
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        if let Some(specs) = body.get("NodesToAdd").and_then(Value::as_array) {
+            for spec in specs {
+                let obj = spec.as_object();
+                let group = obj
+                    .and_then(|o| o.get("InstanceGroupName"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("default")
+                    .to_string();
+                let count = obj
+                    .and_then(|o| o.get("IncrementTargetCountBy"))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(1)
+                    .max(1);
+                for _ in 0..count {
+                    let seq = data.next_seq();
+                    let node_logical_id =
+                        super::mint_id(&ctx.account, "ClusterNode", &seq.to_string());
+                    let instance_id = format!("i-{seq:017x}");
+                    let mut record = Map::new();
+                    record.insert(
+                        "NodeLogicalId".to_string(),
+                        Value::String(node_logical_id.clone()),
+                    );
+                    record.insert("InstanceId".to_string(), Value::String(instance_id));
+                    record.insert(
+                        "InstanceGroupName".to_string(),
+                        Value::String(group.clone()),
+                    );
+                    record.insert("ClusterName".to_string(), Value::String(cluster.clone()));
+                    record.insert("LaunchTime".to_string(), now_epoch());
+                    data.put_resource(CLUSTER_NODE_FAMILY, &node_logical_id, Value::Object(record));
+
+                    let mut summary = Map::new();
+                    summary.insert("NodeLogicalId".to_string(), Value::String(node_logical_id));
+                    summary.insert(
+                        "InstanceGroupName".to_string(),
+                        Value::String(group.clone()),
+                    );
+                    summary.insert("Status".to_string(), Value::String("Running".to_string()));
+                    successful.push(Value::Object(summary));
+                }
+            }
+        }
+    }
+    // Return the real minted nodes in `Successful`, completed to a shape-valid
+    // response by the generic output builder.
+    let mut aug = body.clone();
+    aug.insert("Successful".to_string(), Value::Array(successful));
+    (engine::action(ctx, meta, &aug), true)
+}
+
+fn batch_delete_cluster_nodes(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let cluster = str_member(body, "ClusterName");
+    let ids = requested_node_ids(body);
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        let victims: Vec<String> = data
+            .list_resource_entries(CLUSTER_NODE_FAMILY)
+            .into_iter()
+            .filter(|(_k, rec)| {
+                node_in_cluster(rec, &cluster) && {
+                    let (nlid, iid) = node_identifiers(rec);
+                    ids.iter()
+                        .any(|id| Some(id.as_str()) == nlid || Some(id.as_str()) == iid)
+                }
+            })
+            .map(|(k, _)| k)
+            .collect();
+        for key in victims {
+            data.remove_resource(CLUSTER_NODE_FAMILY, &key);
+        }
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+fn batch_reboot_cluster_nodes(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let cluster = str_member(body, "ClusterName");
+    let ids = requested_node_ids(body);
+    // A reboot changes no queryable node attribute (the node keeps its id and
+    // group), so this is a read: `Successful` reports exactly the requested ids
+    // that resolve to a node in the cluster, reflecting real persisted state.
+    let successful: Vec<Value> = {
+        let g = svc.state.read();
+        let entries = g
+            .get(&ctx.account)
+            .map(|d| d.list_resource_entries(CLUSTER_NODE_FAMILY))
+            .unwrap_or_default();
+        ids.iter()
+            .filter(|id| {
+                entries.iter().any(|(_k, rec)| {
+                    node_in_cluster(rec, &cluster) && {
+                        let (nlid, iid) = node_identifiers(rec);
+                        Some(id.as_str()) == nlid || Some(id.as_str()) == iid
+                    }
+                })
+            })
+            .map(|id| Value::String(id.clone()))
+            .collect()
+    };
+    let mut aug = body.clone();
+    aug.insert("Successful".to_string(), Value::Array(successful));
+    (engine::action(ctx, meta, &aug), false)
+}
+
+fn batch_replace_cluster_nodes(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let cluster = str_member(body, "ClusterName");
+    let ids = requested_node_ids(body);
+    let mut successful: Vec<Value> = Vec::new();
+    let mut mutated = false;
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        // Resolve each requested id to a stored node key, then replace the node's
+        // underlying instance (a fresh InstanceId + boot time), keeping its
+        // logical id so `ListClusterNodes` reflects the replacement.
+        let matches: Vec<(String, String)> = data
+            .list_resource_entries(CLUSTER_NODE_FAMILY)
+            .into_iter()
+            .filter(|(_k, rec)| node_in_cluster(rec, &cluster))
+            .filter_map(|(k, rec)| {
+                let (nlid, iid) = node_identifiers(&rec);
+                ids.iter()
+                    .find(|id| Some(id.as_str()) == nlid || Some(id.as_str()) == iid)
+                    .map(|id| (k.clone(), id.clone()))
+            })
+            .collect();
+        for (key, requested) in matches {
+            let seq = data.next_seq();
+            if let Some(rec) = data.get_resource_mut(CLUSTER_NODE_FAMILY, &key) {
+                if let Some(obj) = rec.as_object_mut() {
+                    obj.insert(
+                        "InstanceId".to_string(),
+                        Value::String(format!("i-{seq:017x}")),
+                    );
+                    obj.insert("LaunchTime".to_string(), now_epoch());
+                    mutated = true;
+                }
+            }
+            successful.push(Value::String(requested));
+        }
+    }
+    let mut aug = body.clone();
+    aug.insert("Successful".to_string(), Value::Array(successful));
+    (engine::action(ctx, meta, &aug), mutated)
+}
+
+// ── Trial ⇄ trial-component association ───────────────────────────────────
+//
+// `AssociateTrialComponent` / `DisassociateTrialComponent` are Action verbs the
+// generic arm discarded, so the association never round-tripped. Record the
+// association on the trial-component record as an internal set of associated
+// trial names (`__AssociatedTrials`, dropped by every output projection), and
+// serve the scoped `ListTrialComponents(TrialName=…)` read from it.
+
+const TRIAL_COMPONENT_FAMILY: &str = "TrialComponent";
+const ASSOCIATED_TRIALS: &str = "__AssociatedTrials";
+
+fn associate_trial_component(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let component = str_member(body, "TrialComponentName");
+    let trial = str_member(body, "TrialName");
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        if let Some(key) = data.resolve_key(TRIAL_COMPONENT_FAMILY, &component) {
+            if let Some(rec) = data.get_resource_mut(TRIAL_COMPONENT_FAMILY, &key) {
+                if let Some(obj) = rec.as_object_mut() {
+                    let arr = obj
+                        .entry(ASSOCIATED_TRIALS.to_string())
+                        .or_insert_with(|| Value::Array(Vec::new()));
+                    if let Some(list) = arr.as_array_mut() {
+                        if !list.iter().any(|v| v.as_str() == Some(trial.as_str())) {
+                            list.push(Value::String(trial.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+fn disassociate_trial_component(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let component = str_member(body, "TrialComponentName");
+    let trial = str_member(body, "TrialName");
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        if let Some(key) = data.resolve_key(TRIAL_COMPONENT_FAMILY, &component) {
+            if let Some(rec) = data.get_resource_mut(TRIAL_COMPONENT_FAMILY, &key) {
+                if let Some(list) = rec
+                    .as_object_mut()
+                    .and_then(|o| o.get_mut(ASSOCIATED_TRIALS))
+                    .and_then(Value::as_array_mut)
+                {
+                    list.retain(|v| v.as_str() != Some(trial.as_str()));
+                }
+            }
+        }
+    }
+    (engine::action(ctx, meta, body), true)
+}
+
+/// Scoped `ListTrialComponents`: when the request carries a `TrialName`, return
+/// only the components associated with that trial (the `AssociateTrialComponent`
+/// edge). Returns `None` when no `TrialName` filter is present so the caller
+/// falls through to the generic, unfiltered list engine (unchanged behaviour).
+fn list_trial_components(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Option<(AwsResponse, bool)> {
+    let trial = body.get("TrialName").and_then(Value::as_str)?;
+    let g = svc.state.read();
+    let entries = g
+        .get(&ctx.account)
+        .map(|d| d.list_resource_entries(TRIAL_COMPONENT_FAMILY))
+        .unwrap_or_default();
+    let filtered: Vec<(String, Value)> = entries
+        .into_iter()
+        .filter(|(_k, rec)| {
+            rec.as_object()
+                .and_then(|o| o.get(ASSOCIATED_TRIALS))
+                .and_then(Value::as_array)
+                .is_some_and(|a| a.iter().any(|v| v.as_str() == Some(trial)))
+        })
+        .collect();
+    Some((
+        engine::list_entries_response(ctx, meta, body, filtered),
+        false,
+    ))
+}
+
+// ── Pipeline callback steps ──────────────────────────────────────────────
+//
+// `SendPipelineExecutionStepSuccess` / `SendPipelineExecutionStepFailure`
+// resolve a pipeline execution's waiting callback step (identified by its
+// `CallbackToken`). The generic arm discarded them, so the step never advanced.
+// Persist / advance the step under the `PipelineExecutionStep` family keyed by
+// the callback token: an existing waiting step transitions to Succeeded/Failed,
+// and one is upserted otherwise. `ListPipelineExecutionSteps` projects the
+// resulting `StepStatus` / `FailureReason` (both real `PipelineExecutionStep`
+// fields); the token is the storage key, not a projected member.
+
+const PIPELINE_STEP_FAMILY: &str = "PipelineExecutionStep";
+
+fn send_pipeline_execution_step(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+    success: bool,
+) -> (AwsResponse, bool) {
+    let token = str_member(body, "CallbackToken");
+    {
+        let mut g = svc.state.write();
+        let data = g.get_or_create(&ctx.account);
+        let mut record = data
+            .get_resource(PIPELINE_STEP_FAMILY, &token)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        record
+            .entry("StepName".to_string())
+            .or_insert_with(|| Value::String("Callback".to_string()));
+        record.insert(
+            "StepStatus".to_string(),
+            Value::String(if success { "Succeeded" } else { "Failed" }.to_string()),
+        );
+        if success {
+            record.remove("FailureReason");
+        } else if let Some(reason) = body.get("FailureReason") {
+            record.insert("FailureReason".to_string(), reason.clone());
+        }
+        data.put_resource(PIPELINE_STEP_FAMILY, &token, Value::Object(record));
+    }
+    // Echo the execution the callback belongs to. The callback token is the
+    // only handle the caller holds (the execution arn is embedded in it on real
+    // AWS); with no minted-token registry we derive a stable execution arn from
+    // the token so the required-shape `PipelineExecutionArn` is populated.
+    let mut aug = body.clone();
+    aug.insert(
+        "PipelineExecutionArn".to_string(),
+        Value::String(format!(
+            "arn:aws:sagemaker:{}:{}:pipeline/callback/execution/{}",
+            ctx.region, ctx.account, token
+        )),
+    );
+    (engine::action(ctx, meta, &aug), true)
 }
 
 fn tags_to_array(tags: &std::collections::BTreeMap<String, String>) -> Value {
