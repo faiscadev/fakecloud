@@ -5,7 +5,7 @@ pub mod streams;
 pub mod streams_dataplane;
 pub mod ttl;
 
-pub use export_import::{import_aws_export, ImportOutcome};
+pub use export_import::{import_aws_export, import_aws_exports_dir, ImportOutcome};
 pub(crate) use service::helpers::schemas::{
     parse_attribute_definitions, parse_key_schema, parse_provisioned_throughput,
 };

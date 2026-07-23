@@ -2607,65 +2607,92 @@ async fn main() {
             None
         };
     // Optional: bulk-load an AWS-format DynamoDB export straight into the
-    // internal store before the service is built. Additive — no BatchWriteItem,
-    // no effect on the recorded `ImportTable` op. Both inputs required together.
-    if let (Some(import_path), Some(describe_path)) = (
-        cli.dynamodb_import_path.as_ref(),
-        cli.dynamodb_import_describe_table.as_ref(),
-    ) {
-        let describe_bytes = std::fs::read(describe_path).unwrap_or_else(|e| {
-            fatal_exit(format_args!(
-                "failed to read describe-table file {}: {e}",
-                describe_path.display()
-            ))
-        });
-        let describe: serde_json::Value =
-            serde_json::from_slice(&describe_bytes).unwrap_or_else(|e| {
+    // internal store before the service is built. See docs/services/dynamodb.md
+    // for the single- vs multi-table mode split.
+    let dynamodb_import_outcomes: Option<Vec<fakecloud_dynamodb::ImportOutcome>> =
+        if let Some(import_path) = cli.dynamodb_import_path.as_ref() {
+            let describe_path = cli
+                .dynamodb_import_describe_table
+                .as_ref()
+                .unwrap_or_else(|| {
+                    fatal_exit(format_args!(
+                        "--dynamodb-import-path requires --dynamodb-import-describe-table"
+                    ))
+                });
+            let describe_bytes = std::fs::read(describe_path).unwrap_or_else(|e| {
                 fatal_exit(format_args!(
-                    "failed to parse describe-table JSON {}: {e}",
+                    "failed to read describe-table file {}: {e}",
                     describe_path.display()
                 ))
             });
-        match fakecloud_dynamodb::import_aws_export(
-            &dynamodb_state_for_register,
-            &cli.account_id,
-            &cli.region,
-            import_path,
-            &describe,
-        ) {
-            Ok(fakecloud_dynamodb::ImportOutcome::Imported { table, items }) => {
-                tracing::info!(table, items, "bulk-loaded AWS DynamoDB export at startup");
-                // Persist the imported table immediately. A DynamoDB snapshot is
-                // otherwise only written by a mutating API call, so a read-only
-                // workload against the imported data would lose it on restart.
-                if let Some(store) = dynamodb_snapshot_store.clone() {
-                    let lock = tokio::sync::Mutex::new(());
-                    if let Err(e) = fakecloud_dynamodb::save_dynamodb_snapshot(
-                        &dynamodb_state_for_register,
-                        Some(store),
-                        &lock,
-                    )
-                    .await
-                    {
-                        fatal_exit(format_args!(
-                            "failed to persist bulk-loaded dynamodb import: {e}"
-                        ));
-                    }
+            let describe: serde_json::Value = serde_json::from_slice(&describe_bytes)
+                .unwrap_or_else(|e| {
+                    fatal_exit(format_args!(
+                        "failed to parse describe-table JSON {}: {e}",
+                        describe_path.display()
+                    ))
+                });
+            match fakecloud_dynamodb::import_aws_export(
+                &dynamodb_state_for_register,
+                &cli.account_id,
+                &cli.region,
+                import_path,
+                &describe,
+            ) {
+                Ok(outcome) => Some(vec![outcome]),
+                Err(e) => fatal_exit(format_args!("dynamodb export import failed: {e}")),
+            }
+        } else if let Some(import_dir) = cli.dynamodb_import_dir.as_ref() {
+            match fakecloud_dynamodb::import_aws_exports_dir(
+                &dynamodb_state_for_register,
+                &cli.account_id,
+                &cli.region,
+                import_dir,
+            ) {
+                Ok(outcomes) => Some(outcomes),
+                Err(e) => fatal_exit(format_args!(
+                    "dynamodb multi-table export import failed: {e}"
+                )),
+            }
+        } else if cli.dynamodb_import_describe_table.is_some() {
+            fatal_exit(format_args!(
+                "--dynamodb-import-describe-table requires --dynamodb-import-path"
+            ));
+        } else {
+            None
+        };
+
+    if let Some(outcomes) = dynamodb_import_outcomes {
+        let mut any_imported = false;
+        for outcome in outcomes {
+            match outcome {
+                fakecloud_dynamodb::ImportOutcome::Imported { table, items } => {
+                    tracing::info!(table, items, "bulk-loaded AWS DynamoDB export at startup");
+                    any_imported = true;
+                }
+                fakecloud_dynamodb::ImportOutcome::SkippedExisting { table } => tracing::info!(
+                    table,
+                    "skipped AWS DynamoDB export import: table already exists in state"
+                ),
+            }
+        }
+        // Persist once for the whole batch, not per table.
+        if any_imported {
+            if let Some(store) = dynamodb_snapshot_store.clone() {
+                let lock = tokio::sync::Mutex::new(());
+                if let Err(e) = fakecloud_dynamodb::save_dynamodb_snapshot(
+                    &dynamodb_state_for_register,
+                    Some(store),
+                    &lock,
+                )
+                .await
+                {
+                    fatal_exit(format_args!(
+                        "failed to persist bulk-loaded dynamodb import: {e}"
+                    ));
                 }
             }
-            // Idempotent restart: the table was already present (e.g. from a
-            // persisted snapshot). The importer already logged a warning and
-            // left the existing data untouched, so booting continues normally.
-            Ok(fakecloud_dynamodb::ImportOutcome::SkippedExisting { table }) => tracing::info!(
-                table,
-                "skipped AWS DynamoDB export import: table already exists in state"
-            ),
-            Err(e) => fatal_exit(format_args!("dynamodb export import failed: {e}")),
         }
-    } else if cli.dynamodb_import_path.is_some() || cli.dynamodb_import_describe_table.is_some() {
-        fatal_exit(format_args!(
-            "--dynamodb-import-path and --dynamodb-import-describe-table must be provided together"
-        ));
     }
 
     // Keep a clone of the snapshot store (and a dedicated write lock) for the
