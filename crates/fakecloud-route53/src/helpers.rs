@@ -1353,19 +1353,46 @@ impl Route53Service {
             .unwrap_or_default();
         drop(state);
         sets.sort_by(|a, b| a.id.cmp(&b.id));
+
+        // Paginate on `marker` (the next delegation set id) + `maxitems`,
+        // mirroring the other route53 List operations.
+        let max_items = req
+            .query_params
+            .get("maxitems")
+            .and_then(|v| v.parse::<usize>().ok())
+            .filter(|n| *n > 0)
+            .unwrap_or(100);
+        let marker = req.query_params.get("marker").cloned().unwrap_or_default();
+        let start_idx = if marker.is_empty() {
+            0
+        } else {
+            sets.iter()
+                .position(|d| d.id == marker)
+                .unwrap_or(sets.len())
+        };
+        let page: Vec<&StoredReusableDelegationSet> =
+            sets.iter().skip(start_idx).take(max_items).collect();
+        let next_marker = sets.get(start_idx + page.len()).map(|d| d.id.clone());
+
         let mut body = String::with_capacity(512);
         body.push_str(XML_DECL);
         body.push_str(&format!(
             "<ListReusableDelegationSetsResponse xmlns=\"{NS}\">"
         ));
         body.push_str("<DelegationSets>");
-        for d in &sets {
+        for d in &page {
             push_delegation_set(&mut body, d);
         }
         body.push_str("</DelegationSets>");
-        body.push_str("<Marker></Marker>");
-        body.push_str("<IsTruncated>false</IsTruncated>");
-        body.push_str("<MaxItems>100</MaxItems>");
+        body.push_str(&format!("<Marker>{}</Marker>", esc(&marker)));
+        body.push_str(&format!(
+            "<IsTruncated>{}</IsTruncated>",
+            next_marker.is_some()
+        ));
+        body.push_str(&format!("<MaxItems>{max_items}</MaxItems>"));
+        if let Some(nm) = next_marker {
+            body.push_str(&format!("<NextMarker>{}</NextMarker>", esc(&nm)));
+        }
         body.push_str("</ListReusableDelegationSetsResponse>");
         Ok(xml_response(StatusCode::OK, body, HeaderMap::new()))
     }
