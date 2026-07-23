@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn k_factor_uses_cognito_signed_magnitude_encoding() {
         let expected = BigUint::parse_bytes(
-            b"5e7a9a2ed6c8b6de1908433b1f59b344faa536373d3337534ecd6bb67a00b551",
+            b"538282c4354742d7cbbde2359fcf67f9f5b3a6b08791e5011b43b8a5b66d9ee6",
             16,
         )
         .expect("valid Cognito SRP multiplier");
