@@ -669,6 +669,9 @@ impl AcmService {
             })
             .unwrap_or_default();
 
+        let sort_by = body.get("SortBy").and_then(Value::as_str);
+        let sort_order = body.get("SortOrder").and_then(Value::as_str);
+
         let state = self.state.read();
         let mut all: Vec<StoredCertificate> = state
             .accounts
@@ -676,7 +679,17 @@ impl AcmService {
             .map(|a| a.certificates.values().cloned().collect())
             .unwrap_or_default();
         drop(state);
-        all.sort_by(|a, b| a.arn.cmp(&b.arn));
+        // When `SortBy=CREATED_AT` is requested, order by creation time in the
+        // requested direction (AWS defaults to ASCENDING). Otherwise fall back to
+        // the stable ARN ordering.
+        if sort_by == Some("CREATED_AT") {
+            all.sort_by_key(|c| c.created_at);
+            if sort_order == Some("DESCENDING") {
+                all.reverse();
+            }
+        } else {
+            all.sort_by(|a, b| a.arn.cmp(&b.arn));
+        }
         all.retain(|c| {
             (statuses.is_empty() || statuses.contains(&c.status))
                 && (key_types.is_empty() || key_types.contains(&c.key_algorithm))
@@ -2880,6 +2893,81 @@ mod tests {
                 arn["c.example.com"].clone(),
                 arn["b.example.com"].clone(),
                 arn["a.example.com"].clone(),
+            ]
+        );
+    }
+
+    // ListCertificates must honor SortBy=CREATED_AT / SortOrder (previously
+    // validated then ignored — always sorted by ARN).
+    #[tokio::test]
+    async fn list_certificates_sorts_by_created_at() {
+        let svc = AcmService::default();
+        let mut arn: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        for d in ["a.example.com", "b.example.com", "c.example.com"] {
+            let resp = svc
+                .handle(make_req("RequestCertificate", json!({ "DomainName": d })))
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            arn.insert(d, body["CertificateArn"].as_str().unwrap().to_string());
+        }
+
+        // a oldest, c newest.
+        {
+            let mut state = svc.state.write();
+            let certs = &mut state.accounts.get_mut("123456789012").unwrap().certificates;
+            let now = chrono::Utc::now();
+            for c in certs.values_mut() {
+                match c.domain_name.as_str() {
+                    "a.example.com" => c.created_at = now - chrono::Duration::hours(2),
+                    "b.example.com" => c.created_at = now - chrono::Duration::hours(1),
+                    _ => c.created_at = now,
+                }
+            }
+        }
+
+        let arns = |body: &Value| -> Vec<String> {
+            body["CertificateSummaryList"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["CertificateArn"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // DESCENDING -> newest (c) first.
+        let resp = svc
+            .handle(make_req(
+                "ListCertificates",
+                json!({ "SortBy": "CREATED_AT", "SortOrder": "DESCENDING" }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            arns(&body),
+            vec![
+                arn["c.example.com"].clone(),
+                arn["b.example.com"].clone(),
+                arn["a.example.com"].clone(),
+            ]
+        );
+
+        // ASCENDING -> oldest (a) first.
+        let resp = svc
+            .handle(make_req(
+                "ListCertificates",
+                json!({ "SortBy": "CREATED_AT", "SortOrder": "ASCENDING" }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            arns(&body),
+            vec![
+                arn["a.example.com"].clone(),
+                arn["b.example.com"].clone(),
+                arn["c.example.com"].clone(),
             ]
         );
     }

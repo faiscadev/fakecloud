@@ -345,6 +345,61 @@ async fn reusable_delegation_set_lifecycle() {
 }
 
 #[tokio::test]
+async fn list_reusable_delegation_sets_paginates() {
+    let server = TestServer::start().await;
+    let r53 = server.route53_client().await;
+
+    // Create several delegation sets.
+    let mut created: Vec<String> = Vec::new();
+    for i in 0..3 {
+        let c = r53
+            .create_reusable_delegation_set()
+            .caller_reference(format!("page-ds-{i}"))
+            .send()
+            .await
+            .expect("create ds");
+        created.push(c.delegation_set().unwrap().id().unwrap().to_string());
+    }
+    created.sort();
+
+    // Page one at a time, following NextMarker, and collect every id.
+    let mut collected: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    loop {
+        let mut req = r53.list_reusable_delegation_sets().max_items(1);
+        if let Some(m) = &marker {
+            req = req.marker(m);
+        }
+        let page = req.send().await.expect("list ds page");
+        assert!(
+            page.delegation_sets().len() <= 1,
+            "MaxItems=1 must cap the page at one element"
+        );
+        for d in page.delegation_sets() {
+            collected.push(d.id().unwrap().to_string());
+        }
+        if page.is_truncated() {
+            let nm = page
+                .next_marker()
+                .expect("truncated page must carry a NextMarker")
+                .to_string();
+            marker = Some(nm);
+        } else {
+            assert!(
+                page.next_marker().is_none(),
+                "final page must not carry a NextMarker"
+            );
+            break;
+        }
+    }
+    collected.sort();
+    assert_eq!(
+        collected, created,
+        "paginated ids must equal the full set exactly once each"
+    );
+}
+
+#[tokio::test]
 async fn duplicate_delegation_set_caller_reference_rejected() {
     let server = TestServer::start().await;
     let r53 = server.route53_client().await;
