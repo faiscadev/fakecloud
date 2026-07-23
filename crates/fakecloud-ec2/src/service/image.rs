@@ -1298,7 +1298,10 @@ mod tests {
         let page1 = String::from_utf8(
             super::describe_images(
                 &svc,
-                &req("DescribeImages", &[("MaxResults", "2"), ("Owner.1", "self")]),
+                &req(
+                    "DescribeImages",
+                    &[("MaxResults", "2"), ("Owner.1", "self")],
+                ),
             )
             .unwrap()
             .body
