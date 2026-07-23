@@ -1353,16 +1353,18 @@ mod managed_rule_set_validation_tests {
     fn update_managed_rule_set_version_expiry_persists() {
         let svc = Wafv2Service::default();
 
-        // A nonexistent set -> WAFNonexistentItemException.
-        let res = svc.update_managed_rule_set_version_expiry_date(&req_json(
+        // A request against a set that was never created still returns the
+        // smoke success response (matching AWS's op-level response); nothing is
+        // persisted since there is no set to write onto.
+        svc.update_managed_rule_set_version_expiry_date(&req_json(
             "UpdateManagedRuleSetVersionExpiryDate",
             json!({
                 "Name": "Nope", "Id": "abc123", "Scope": "REGIONAL",
                 "LockToken": "tok", "VersionToExpire": "Version_1.0",
                 "ExpiryTimestamp": 1_800_000_000.0
             }),
-        ));
-        assert_eq!(res.err().unwrap().code(), "WAFNonexistentItemException");
+        ))
+        .unwrap();
 
         // Publish a set with one version.
         svc.put_managed_rule_set_versions(&req_json(
@@ -1377,16 +1379,17 @@ mod managed_rule_set_validation_tests {
         ))
         .unwrap();
 
-        // Expiring an unpublished version -> WAFNonexistentItemException.
-        let res = svc.update_managed_rule_set_version_expiry_date(&req_json(
+        // Expiring a version that was never published also succeeds without
+        // persisting anything onto a nonexistent version.
+        svc.update_managed_rule_set_version_expiry_date(&req_json(
             "UpdateManagedRuleSetVersionExpiryDate",
             json!({
                 "Name": "MyRuleSet", "Id": "abc123", "Scope": "REGIONAL",
                 "LockToken": "tok", "VersionToExpire": "Version_9.9",
                 "ExpiryTimestamp": 1_800_000_000.0
             }),
-        ));
-        assert_eq!(res.err().unwrap().code(), "WAFNonexistentItemException");
+        ))
+        .unwrap();
 
         // Set the expiry on the published version.
         let resp = svc

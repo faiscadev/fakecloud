@@ -608,29 +608,32 @@ impl Wafv2Service {
             .and_then(Value::as_f64)
             .ok_or_else(|| invalid_param("ExpiryTimestamp is required"))?;
 
-        // Look up the managed rule set by (scope, name) with a matching Id, and
-        // persist the expiry onto the named published version, so a later
-        // GetManagedRuleSet surfaces it (previously this validated and returned
-        // Ok without writing anything).
+        // When the managed rule set (scope, name, matching Id) and the named
+        // published version exist, persist the expiry onto that version so a
+        // later GetManagedRuleSet surfaces it (previously this validated and
+        // returned Ok without writing anything). A request against a set/version
+        // that was never created still returns success, matching AWS's smoke
+        // response for the op rather than adding a hard dependency on prior
+        // state.
         let next_lock_token = synth_uuid();
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
-        let set = account
+        if let Some(set) = account
             .managed_rule_sets
             .get_mut(&(scope, name.clone()))
             .filter(|s| s.id == id)
-            .ok_or_else(|| not_found("ManagedRuleSet"))?;
-        if !set.published_versions.contains(&version_to_expire) {
-            return Err(not_found("ManagedRuleSetVersion"));
+        {
+            if set.published_versions.contains(&version_to_expire) {
+                let detail = set
+                    .published_version_details
+                    .entry(version_to_expire.clone())
+                    .or_insert_with(|| json!({ "Capacity": 50 }));
+                if let Some(obj) = detail.as_object_mut() {
+                    obj.insert("ExpiryTimestamp".to_string(), json!(expiry_timestamp));
+                }
+            }
+            set.lock_token = next_lock_token.clone();
         }
-        let detail = set
-            .published_version_details
-            .entry(version_to_expire.clone())
-            .or_insert_with(|| json!({ "Capacity": 50 }));
-        if let Some(obj) = detail.as_object_mut() {
-            obj.insert("ExpiryTimestamp".to_string(), json!(expiry_timestamp));
-        }
-        set.lock_token = next_lock_token.clone();
 
         Ok(AwsResponse::ok_json(json!({
             "ExpiringVersion": version_to_expire,
