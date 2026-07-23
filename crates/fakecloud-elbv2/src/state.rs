@@ -161,6 +161,14 @@ pub struct TargetDescription {
     pub id: String,
     pub port: Option<i32>,
     pub availability_zone: Option<String>,
+    // Per-target health is runtime-only and must NOT persist across a
+    // restart. If it did, a stale "unhealthy" would load and, since the
+    // data plane filters non-healthy targets out of routing, an ALB could
+    // drop that target for up to one health-check interval until the prober
+    // re-probes it. Skipping it means a restored target starts at the
+    // default (healthy) state and participates in routing until the prober
+    // re-derives its real health.
+    #[serde(skip, default)]
     pub health: TargetHealth,
     #[serde(default)]
     pub consecutive_success: u32,
@@ -324,4 +332,46 @@ pub struct TrustStoreRevocation {
     pub revocation_type: String,
     pub number_of_revoked_entries: i64,
     pub content: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn target_health_does_not_persist_across_snapshot() {
+        // A target marked unhealthy at runtime must NOT round-trip through a
+        // serialize/deserialize of the state. If it did, a restart would load
+        // the stale "unhealthy" and, because the data plane filters non-healthy
+        // targets out of routing, silently drop the target until the prober
+        // re-probes it.
+        let target = TargetDescription {
+            id: "i-abc".to_string(),
+            port: Some(8080),
+            availability_zone: None,
+            health: TargetHealth {
+                state: "unhealthy".to_string(),
+                reason: Some("Target.FailedHealthChecks".to_string()),
+                description: Some("stale".to_string()),
+            },
+            consecutive_success: 0,
+            consecutive_failure: 3,
+            last_probe_at: None,
+        };
+
+        let json = serde_json::to_string(&target).expect("serialize");
+        assert!(
+            !json.contains("unhealthy"),
+            "target health must not be serialized, got: {json}"
+        );
+
+        let restored: TargetDescription = serde_json::from_str(&json).expect("deserialize");
+        // Restores to the default (healthy) state so the target participates in
+        // routing until the prober re-derives its real health.
+        assert_eq!(restored.health.state, TargetHealth::default().state);
+        assert_ne!(restored.health.state, "unhealthy");
+        // The rest of the target survives the round-trip.
+        assert_eq!(restored.id, "i-abc");
+        assert_eq!(restored.port, Some(8080));
+    }
 }

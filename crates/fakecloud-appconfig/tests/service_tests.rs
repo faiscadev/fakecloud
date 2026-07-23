@@ -1027,3 +1027,104 @@ async fn missing_and_invalid_inputs_error() {
     .await;
     assert_eq!(code, 400);
 }
+
+/// Create a configuration profile carrying an explicit `Validators` list.
+async fn make_profile_with_validators(
+    svc: &AppConfigService,
+    app: &str,
+    name: &str,
+    validators: Value,
+) -> String {
+    let resp = call(
+        svc,
+        req(
+            Method::POST,
+            &format!("/applications/{app}/configurationprofiles"),
+            json!({ "Name": name, "LocationUri": "hosted", "Validators": validators }),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 201);
+    id_of(&body_of(&resp))
+}
+
+#[tokio::test]
+async fn validate_configuration_runs_json_schema_validator() {
+    let svc = service();
+    let app = make_app(&svc, "cfg-app").await;
+    let schema = json!({
+        "type": "object",
+        "required": ["name"],
+        "properties": { "name": { "type": "string" } },
+        "additionalProperties": false
+    })
+    .to_string();
+    let profile = make_profile_with_validators(
+        &svc,
+        &app,
+        "cfg-profile",
+        json!([{ "Type": "JSON_SCHEMA", "Content": schema }]),
+    )
+    .await;
+
+    // Invalid content (missing required `name`) is rejected with
+    // BadRequestException.
+    make_hosted_version(&svc, &app, &profile, br#"{"other": 1}"#, "application/json").await;
+    let (code, name) = call_err(
+        &svc,
+        req(
+            Method::POST,
+            &format!(
+                "/applications/{app}/configurationprofiles/{profile}/validators?configuration_version=1"
+            ),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(code, 400);
+    assert_eq!(name, "BadRequestException");
+
+    // Valid content passes and returns 204.
+    make_hosted_version(
+        &svc,
+        &app,
+        &profile,
+        br#"{"name": "ok"}"#,
+        "application/json",
+    )
+    .await;
+    let resp = call(
+        &svc,
+        req(
+            Method::POST,
+            &format!(
+                "/applications/{app}/configurationprofiles/{profile}/validators?configuration_version=2"
+            ),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 204);
+}
+
+#[tokio::test]
+async fn validate_configuration_with_no_validators_succeeds() {
+    let svc = service();
+    let app = make_app(&svc, "novalidators-app").await;
+    let profile = make_profile(&svc, &app, "plain-profile").await;
+    make_hosted_version(&svc, &app, &profile, br#"not even json"#, "text/plain").await;
+    // No JSON_SCHEMA validators means nothing to enforce; ValidateConfiguration
+    // returns 204 regardless of content.
+    let resp = call(
+        &svc,
+        req(
+            Method::POST,
+            &format!(
+                "/applications/{app}/configurationprofiles/{profile}/validators?configuration_version=1"
+            ),
+            Value::Null,
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 204);
+}

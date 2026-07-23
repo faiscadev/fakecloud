@@ -170,3 +170,37 @@ fn invalid_enum_is_rejected() {
         "ValidationException"
     );
 }
+
+#[test]
+fn update_cost_allocation_tags_status_rejects_invalid_nested_status() {
+    let s = svc();
+    assert_eq!(
+        err_code(
+            &s,
+            "UpdateCostAllocationTagsStatus",
+            json!({
+                "CostAllocationTagsStatus": [
+                    { "TagKey": "team", "Status": "Bogus" }
+                ]
+            })
+        ),
+        "ValidationException"
+    );
+}
+
+#[test]
+fn update_cost_allocation_tags_status_accepts_valid_nested_status() {
+    let s = svc();
+    let out = call(
+        &s,
+        "UpdateCostAllocationTagsStatus",
+        json!({
+            "CostAllocationTagsStatus": [
+                { "TagKey": "team", "Status": "Active" },
+                { "TagKey": "env", "Status": "Inactive" }
+            ]
+        }),
+    );
+    // No per-key failures for a well-formed request.
+    assert_eq!(out["Errors"].as_array().map(|a| a.len()), Some(0));
+}

@@ -703,6 +703,7 @@ fn blob_upload_start(
             created_at: Utc::now(),
             spool_path: spool.to_string_lossy().to_string(),
             last_byte_received: 0,
+            append_in_flight: false,
         },
     );
     let mut resp = base_response(StatusCode::ACCEPTED, "application/json", Vec::new());
@@ -735,37 +736,50 @@ async fn blob_upload_patch(
     name: &str,
     upload_id: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    // Resolve the upload + spool path under a short-lived read guard
-    // so the streaming append below doesn't hold a Send-unfriendly
-    // `parking_lot::RwLockWriteGuard` across `.await`.
-    let (spool, expected_start) = {
-        let accounts = service.state_handle().read();
+    // Parse the optional Content-Range start once so we can validate it
+    // under the same lock that reserves the append below.
+    let range_start = request
+        .headers
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(parse_content_range_start);
+
+    // Resolve the upload + spool path under a short-lived write guard,
+    // validating the offset and RESERVING the append (marking the upload
+    // in-flight) before the lock is released. The streaming append below
+    // never holds the `parking_lot` write guard across `.await`, but the
+    // reservation guarantees a concurrent PATCH for the same upload is
+    // rejected before it can append into the spool and corrupt the blob.
+    let spool = {
+        let mut accounts = service.state_handle().write();
         let state = accounts
-            .get(&request.account_id)
+            .get_mut(&request.account_id)
             .ok_or_else(|| repo_not_found(name))?;
         let upload = state
             .layer_uploads
-            .get(upload_id)
+            .get_mut(upload_id)
             .ok_or_else(|| upload_unknown(upload_id))?;
         if upload.repository_name != name {
             return Err(upload_unknown(upload_id));
         }
-        (PathBuf::from(&upload.spool_path), upload.last_byte_received)
-    };
-
-    // A chunked PATCH carries a Content-Range whose start must equal the
-    // number of bytes already received. Docker retries a failed chunk by
-    // re-sending the same range; without this check the retry appends the
-    // chunk a second time and silently corrupts the blob (detected only at
-    // the finishing digest). Reject a non-contiguous range with 416 so the
-    // client resumes from the right offset instead of double-appending.
-    if let Some(cr) = request
-        .headers
-        .get("content-range")
-        .and_then(|v| v.to_str().ok())
-    {
-        if let Some(start) = parse_content_range_start(cr) {
-            if start != expected_start {
+        // Another PATCH for this upload is already appending. Reject before
+        // touching the spool so two chunks can't interleave into corruption.
+        if upload.append_in_flight {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "BLOB_UPLOAD_INVALID",
+                "another blob upload PATCH for this upload is already in progress",
+            ));
+        }
+        // A chunked PATCH carries a Content-Range whose start must equal the
+        // number of bytes already received. Docker retries a failed chunk by
+        // re-sending the same range; without this check the retry appends the
+        // chunk a second time and silently corrupts the blob (detected only
+        // at the finishing digest). Reject a non-contiguous range with 416 so
+        // the client resumes from the right offset instead of double-appending.
+        if let Some(start) = range_start {
+            if start != upload.last_byte_received {
+                let expected_start = upload.last_byte_received;
                 return Err(AwsServiceError::aws_error(
                     StatusCode::RANGE_NOT_SATISFIABLE,
                     "BLOB_UPLOAD_INVALID",
@@ -776,19 +790,44 @@ async fn blob_upload_patch(
                 ));
             }
         }
-    }
+        upload.append_in_flight = true;
+        PathBuf::from(&upload.spool_path)
+    };
+
+    // Clear the in-flight reservation. Called on every early-return after the
+    // reservation is taken so a failed append doesn't wedge the upload as
+    // permanently in-flight (the success path clears the flag inline while it
+    // advances the cursor below).
+    let clear_in_flight = || {
+        let mut accounts = service.state_handle().write();
+        if let Some(state) = accounts.get_mut(&request.account_id) {
+            if let Some(upload) = state.layer_uploads.get_mut(upload_id) {
+                upload.append_in_flight = false;
+            }
+        }
+    };
 
     // Streaming-only: dispatch flags blob-upload PATCH/PUT to keep
     // `body_stream` populated, so we always consume it here. A 1 GiB
     // push lands in constant memory.
-    let stream = request.take_body_stream().ok_or_else(|| {
-        AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "BLOB_UPLOAD_INVALID",
-            "blob upload PATCH requires a streaming request body",
-        )
-    })?;
-    let appended = append_stream(&spool, stream).await?;
+    let stream = match request.take_body_stream() {
+        Some(s) => s,
+        None => {
+            clear_in_flight();
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "BLOB_UPLOAD_INVALID",
+                "blob upload PATCH requires a streaming request body",
+            ));
+        }
+    };
+    let appended = match append_stream(&spool, stream).await {
+        Ok(n) => n,
+        Err(e) => {
+            clear_in_flight();
+            return Err(e);
+        }
+    };
 
     let mut accounts = service.state_handle().write();
     let state = accounts
@@ -801,11 +840,11 @@ async fn blob_upload_patch(
     if upload.repository_name != name {
         return Err(upload_unknown(upload_id));
     }
-    // Increment the live counter under the write lock instead of from a
-    // pre-append snapshot — concurrent PATCH calls are serialized by
-    // append order on the spool file, so adding `appended` here is the
+    // Advance the live counter and release the reservation. The reservation
+    // blocked any concurrent append, so adding `appended` here is the
     // race-free progress update.
     upload.last_byte_received = upload.last_byte_received.saturating_add(appended);
+    upload.append_in_flight = false;
     let range_end = upload.last_byte_received.saturating_sub(1);
     let mut resp = base_response(StatusCode::ACCEPTED, "application/json", Vec::new());
     resp.headers.insert(
@@ -1332,6 +1371,7 @@ mod immutability_tests {
                     created_at: chrono::Utc::now(),
                     spool_path: spool.to_string_lossy().into_owned(),
                     last_byte_received: 0,
+                    append_in_flight: false,
                 },
             );
         }
