@@ -384,9 +384,13 @@ fn eval_expr(expr: &str, ctx: &mut Context) -> Value {
     if expr.is_empty() {
         return Value::Null;
     }
-    // String literal
-    if (expr.starts_with('\'') && expr.ends_with('\''))
-        || (expr.starts_with('"') && expr.ends_with('"'))
+    // String literal. The `len() >= 2` guard is load-bearing: a lone `'` or `"`
+    // satisfies both `starts_with` and `ends_with` (the single char is
+    // simultaneously first and last), which would make `expr[1..expr.len() - 1]`
+    // slice `[1..0]` and panic, dropping the connection.
+    if expr.len() >= 2
+        && ((expr.starts_with('\'') && expr.ends_with('\''))
+            || (expr.starts_with('"') && expr.ends_with('"')))
     {
         return Value::String(expr[1..expr.len() - 1].to_string());
     }
@@ -565,8 +569,9 @@ fn access_property(val: &Value, prop: &str) -> Value {
     } else {
         prop
     };
-    let prop = if (prop.starts_with('\'') && prop.ends_with('\''))
-        || (prop.starts_with('"') && prop.ends_with('"'))
+    let prop = if prop.len() >= 2
+        && ((prop.starts_with('\'') && prop.ends_with('\''))
+            || (prop.starts_with('"') && prop.ends_with('"')))
     {
         &prop[1..prop.len() - 1]
     } else {
@@ -1080,5 +1085,40 @@ mod tests {
         let mut ctx = Context::new().with_var("util", json!({"_type":"util"}));
         let out = render(r#"$util.base64Encode('hello')"#, &mut ctx);
         assert_eq!(out, "aGVsbG8=");
+    }
+
+    #[test]
+    fn eval_expr_lone_quote_does_not_panic() {
+        // A lone `'` or `"` satisfies both starts_with and ends_with; without the
+        // len>=2 guard `expr[1..expr.len()-1]` slices [1..0] and panics, dropping
+        // the connection. Treat it as a plain one-char string instead.
+        let mut ctx = Context::new();
+        assert_eq!(eval_expr("'", &mut ctx), Value::String("'".to_string()));
+        assert_eq!(eval_expr("\"", &mut ctx), Value::String("\"".to_string()));
+        // Balanced literals still strip.
+        assert_eq!(eval_expr("'hi'", &mut ctx), Value::String("hi".to_string()));
+        assert_eq!(eval_expr("''", &mut ctx), Value::String(String::new()));
+    }
+
+    #[test]
+    fn access_property_lone_quote_does_not_panic() {
+        // Same guard on access_property's quote-strip: a bare-quote property
+        // segment must not panic.
+        let obj = json!({"'": "v", "k": "w"});
+        assert_eq!(access_property(&obj, "'"), Value::String("v".to_string()));
+        assert_eq!(access_property(&obj, "\""), Value::Null);
+        // Balanced-quoted key still resolves.
+        assert_eq!(access_property(&obj, "'k'"), Value::String("w".to_string()));
+    }
+
+    #[test]
+    fn lone_quote_template_renders_without_crash() {
+        // End-to-end: the exact template from the bug report must render without
+        // unwinding (pre-fix it panicked and dropped the connection). The rendered
+        // value itself is incidental; not crashing is the contract under test.
+        let mut ctx = Context::new();
+        let _ = render("#set($x = ')$x", &mut ctx);
+        let mut ctx2 = Context::new().with_var("obj", json!({"a": 1}));
+        let _ = render("$obj.'", &mut ctx2);
     }
 }
