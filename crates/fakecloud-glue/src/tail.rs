@@ -9,6 +9,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::common::{
     entity_not_found, error_detail, new_id, now_ts, req_present, req_str, resource_arn,
+    settle_run_status,
 };
 use crate::service::GlueService;
 
@@ -493,12 +494,15 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let id = req_str(&body, "ColumnStatisticsTaskRunId")?;
-        let accounts = self.state.read();
-        let r = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.column_stats_task_runs.get(id))
+        let id = req_str(&body, "ColumnStatisticsTaskRunId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let r = st
+            .column_stats_task_runs
+            .get_mut(&id)
             .ok_or_else(|| entity_not_found(format!("Task run {id} not found")))?;
+        settle_run_status(r, "Status", "SUCCEEDED", Some("EndTime"));
+        let r = r.clone();
         Ok(AwsResponse::ok_json(
             json!({ "ColumnStatisticsTaskRun": r }),
         ))
@@ -509,22 +513,19 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let db = req_str(&body, "DatabaseName")?;
-        let table = req_str(&body, "TableName")?;
-        let accounts = self.state.read();
-        let runs: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| {
-                s.column_stats_task_runs
-                    .values()
-                    .filter(|r| {
-                        r.get("DatabaseName").and_then(|v| v.as_str()) == Some(db)
-                            && r.get("TableName").and_then(|v| v.as_str()) == Some(table)
-                    })
-                    .cloned()
-                    .collect()
+        let db = req_str(&body, "DatabaseName")?.to_string();
+        let table = req_str(&body, "TableName")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let runs: Vec<Value> = st
+            .column_stats_task_runs
+            .values()
+            .filter(|r| {
+                r.get("DatabaseName").and_then(|v| v.as_str()) == Some(db.as_str())
+                    && r.get("TableName").and_then(|v| v.as_str()) == Some(table.as_str())
             })
-            .unwrap_or_default();
+            .cloned()
+            .collect();
         Ok(AwsResponse::ok_json(json!({
             "ColumnStatisticsTaskRuns": runs,
         })))
@@ -1224,12 +1225,15 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         req_str(&body, "CatalogId")?;
-        let id = req_str(&body, "MaterializedViewRefreshTaskRunId")?;
-        let accounts = self.state.read();
-        let r = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.mv_refresh_runs.get(id))
+        let id = req_str(&body, "MaterializedViewRefreshTaskRunId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let r = st
+            .mv_refresh_runs
+            .get_mut(&id)
             .ok_or_else(|| entity_not_found(format!("Task run {id} not found")))?;
+        settle_run_status(r, "Status", "SUCCEEDED", Some("EndTime"));
+        let r = r.clone();
         Ok(AwsResponse::ok_json(json!({
             "MaterializedViewRefreshTaskRun": r,
         })))
@@ -1241,11 +1245,9 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         req_str(&body, "CatalogId")?;
-        let accounts = self.state.read();
-        let runs: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| s.mv_refresh_runs.values().cloned().collect())
-            .unwrap_or_default();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let runs: Vec<Value> = st.mv_refresh_runs.values().cloned().collect();
         Ok(AwsResponse::ok_json(json!({
             "MaterializedViewRefreshTaskRuns": runs,
         })))

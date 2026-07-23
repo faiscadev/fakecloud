@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::common::{entity_not_found, new_id, now_ts, req_present, req_str};
+use crate::common::{entity_not_found, new_id, now_ts, req_present, req_str, settle_run_status};
 use crate::generic;
 use crate::service::GlueService;
 
@@ -225,12 +225,14 @@ impl GlueService {
     pub(crate) fn get_ml_task_run(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         req_str(&body, "TransformId")?;
-        let task_id = req_str(&body, "TaskRunId")?;
-        let accounts = self.state.read();
-        let r = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.ml_task_runs.get(task_id))
+        let task_id = req_str(&body, "TaskRunId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let r = st
+            .ml_task_runs
+            .get_mut(&task_id)
             .ok_or_else(|| entity_not_found(format!("MLTaskRun {task_id} not found")))?;
+        settle_run_status(r, "Status", "SUCCEEDED", Some("CompletedOn"));
         Ok(AwsResponse::ok_json(r.clone()))
     }
 
@@ -239,18 +241,17 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let transform_id = req_str(&body, "TransformId")?;
-        let accounts = self.state.read();
-        let runs: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| {
-                s.ml_task_runs
-                    .values()
-                    .filter(|r| r.get("TransformId").and_then(|v| v.as_str()) == Some(transform_id))
-                    .cloned()
-                    .collect()
+        let transform_id = req_str(&body, "TransformId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let runs: Vec<Value> = st
+            .ml_task_runs
+            .values()
+            .filter(|r| {
+                r.get("TransformId").and_then(|v| v.as_str()) == Some(transform_id.as_str())
             })
-            .unwrap_or_default();
+            .cloned()
+            .collect();
         Ok(AwsResponse::ok_json(json!({ "TaskRuns": runs })))
     }
 
@@ -409,13 +410,46 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let run_id = req_str(&body, "RunId")?;
-        let accounts = self.state.read();
-        let r = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.dq_ruleset_runs.get(run_id))
+        let run_id = req_str(&body, "RunId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let r = st
+            .dq_ruleset_runs
+            .get_mut(&run_id)
             .ok_or_else(|| entity_not_found(format!("Run {run_id} not found")))?;
-        Ok(AwsResponse::ok_json(r.clone()))
+        // Settle to a terminal state on read and, on the transition, publish a
+        // DataQuality result so ResultIds/GetDataQualityResult resolve.
+        let mut new_result: Option<Value> = None;
+        if settle_run_status(r, "Status", "SUCCEEDED", Some("CompletedOn")) {
+            let result_id = format!("dqresult-{}", new_id());
+            let ruleset0 = r
+                .get("RulesetNames")
+                .and_then(|v| v.as_array())
+                .and_then(|a| a.first())
+                .cloned()
+                .unwrap_or(Value::Null);
+            let data_source = r.get("DataSource").cloned().unwrap_or(Value::Null);
+            let started_on = r.get("StartedOn").cloned().unwrap_or(Value::Null);
+            if let Some(obj) = r.as_object_mut() {
+                obj.insert("ResultIds".into(), json!([result_id]));
+            }
+            new_result = Some(json!({
+                "ResultId": result_id,
+                "RulesetName": ruleset0,
+                "Score": 1.0,
+                "DataSource": data_source,
+                "StartedOn": started_on,
+                "CompletedOn": now_ts(),
+                "RuleResults": [],
+            }));
+        }
+        let run_json = r.clone();
+        if let Some(result) = new_result {
+            if let Some(rid) = result.get("ResultId").and_then(|v| v.as_str()) {
+                st.dq_results.insert(rid.to_string(), result);
+            }
+        }
+        Ok(AwsResponse::ok_json(run_json))
     }
 
     pub(crate) fn cancel_data_quality_ruleset_evaluation_run(
@@ -440,11 +474,9 @@ impl GlueService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let runs: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| s.dq_ruleset_runs.values().cloned().collect())
-            .unwrap_or_default();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let runs: Vec<Value> = st.dq_ruleset_runs.values().cloned().collect();
         Ok(AwsResponse::ok_json(json!({ "Runs": runs })))
     }
 
@@ -475,12 +507,21 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let run_id = req_str(&body, "RunId")?;
-        let accounts = self.state.read();
-        let r = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.dq_recommendation_runs.get(run_id))
+        let run_id = req_str(&body, "RunId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let r = st
+            .dq_recommendation_runs
+            .get_mut(&run_id)
             .ok_or_else(|| entity_not_found(format!("Run {run_id} not found")))?;
+        // Settle on read and attach a recommended ruleset so the completed run
+        // carries the output a poller expects.
+        if settle_run_status(r, "Status", "SUCCEEDED", Some("CompletedOn")) {
+            if let Some(obj) = r.as_object_mut() {
+                obj.entry("RecommendedRuleset".to_string())
+                    .or_insert(json!("Rules = [ ]"));
+            }
+        }
         Ok(AwsResponse::ok_json(r.clone()))
     }
 
@@ -506,11 +547,9 @@ impl GlueService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let runs: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| s.dq_recommendation_runs.values().cloned().collect())
-            .unwrap_or_default();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let runs: Vec<Value> = st.dq_recommendation_runs.values().cloned().collect();
         Ok(AwsResponse::ok_json(json!({ "Runs": runs })))
     }
 

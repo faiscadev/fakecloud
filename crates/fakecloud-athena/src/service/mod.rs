@@ -966,10 +966,13 @@ fn calculation_detail_json(c: &Calculation) -> Value {
             .unwrap()
             .insert("Description".to_string(), Value::String(d.clone()));
     }
-    if let Some(w) = &c.working_directory {
+    // Only advertise a Result when a result object was actually written (a real,
+    // resolvable ResultS3Uri). A COMPLETED calculation with no written result
+    // carries no Result block rather than a dangling URI.
+    if let (Some(w), Some(rt)) = (&c.working_directory, &c.result_type) {
         obj.as_object_mut().unwrap().insert(
             "Result".to_string(),
-            json!({ "ResultS3Uri": w, "ResultType": "JSON" }),
+            json!({ "ResultS3Uri": w, "ResultType": rt }),
         );
     }
     obj
@@ -1442,6 +1445,109 @@ mod tests {
             .unwrap();
         let qe = parse_json(&qe_resp).get("QueryExecution").unwrap().clone();
         assert_eq!(qe.get("Query").unwrap(), "SELECT 1 AS id");
+    }
+
+    #[test]
+    fn query_records_workgroup_engine_version() {
+        // Regression: StartQueryExecution stored a hardcoded AUTO / v3
+        // EngineVersion, ignoring the workgroup's pinned version.
+        let svc = AthenaService::new(SharedAthenaState::default());
+        svc.create_work_group(&req(
+            "CreateWorkGroup",
+            json!({
+                "Name": "v2wg",
+                "Configuration": {
+                    "EngineVersion": { "SelectedEngineVersion": "Athena engine version 2" }
+                }
+            }),
+        ))
+        .unwrap();
+
+        let exec = parse_json(
+            &svc.start_query_execution(&req(
+                "StartQueryExecution",
+                json!({ "QueryString": "SELECT 1 AS id", "WorkGroup": "v2wg" }),
+            ))
+            .unwrap(),
+        );
+        let qe_id = exec["QueryExecutionId"].as_str().unwrap().to_string();
+        let qe = parse_json(
+            &svc.get_query_execution(&req(
+                "GetQueryExecution",
+                json!({ "QueryExecutionId": qe_id }),
+            ))
+            .unwrap(),
+        );
+        let ev = &qe["QueryExecution"]["EngineVersion"];
+        assert_eq!(ev["SelectedEngineVersion"], "Athena engine version 2");
+        assert_eq!(ev["EffectiveEngineVersion"], "Athena engine version 2");
+
+        // The default primary workgroup pins nothing, so it falls back to AUTO/v3.
+        let exec2 = parse_json(
+            &svc.start_query_execution(&req(
+                "StartQueryExecution",
+                json!({ "QueryString": "SELECT 1 AS id", "WorkGroup": "primary" }),
+            ))
+            .unwrap(),
+        );
+        let qe2_id = exec2["QueryExecutionId"].as_str().unwrap().to_string();
+        let qe2 = parse_json(
+            &svc.get_query_execution(&req(
+                "GetQueryExecution",
+                json!({ "QueryExecutionId": qe2_id }),
+            ))
+            .unwrap(),
+        );
+        let ev2 = &qe2["QueryExecution"]["EngineVersion"];
+        assert_eq!(ev2["SelectedEngineVersion"], "AUTO");
+        assert_eq!(ev2["EffectiveEngineVersion"], "Athena engine version 3");
+    }
+
+    #[test]
+    fn calculation_execution_advertises_no_dangling_result() {
+        // Regression: StartCalculationExecution fabricated a COMPLETED state with
+        // a dangling s3://athena-calc-results/{uuid} ResultS3Uri and reported a
+        // hardcoded DpuExecutionInMillis:100. With no result location configured
+        // no Result block is advertised, and Statistics come from the record.
+        let svc = AthenaService::new(SharedAthenaState::default());
+        let sess = parse_json(
+            &svc.start_session(&req("StartSession", json!({ "WorkGroup": "primary" })))
+                .unwrap(),
+        );
+        let session_id = sess["SessionId"].as_str().unwrap().to_string();
+
+        let calc = parse_json(
+            &svc.start_calculation_execution(&req(
+                "StartCalculationExecution",
+                json!({ "SessionId": session_id, "CodeBlock": "print(1)" }),
+            ))
+            .unwrap(),
+        );
+        let calc_id = calc["CalculationExecutionId"].as_str().unwrap().to_string();
+
+        let detail = parse_json(
+            &svc.get_calculation_execution(&req(
+                "GetCalculationExecution",
+                json!({ "CalculationExecutionId": calc_id }),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(detail["Status"]["State"], "COMPLETED");
+        assert!(
+            detail.get("Result").is_none(),
+            "no dangling ResultS3Uri should be advertised, got {:?}",
+            detail.get("Result")
+        );
+
+        let status = parse_json(
+            &svc.get_calculation_execution_status(&req(
+                "GetCalculationExecutionStatus",
+                json!({ "CalculationExecutionId": calc_id }),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(status["Statistics"]["DpuExecutionInMillis"], 0);
+        assert_eq!(status["Statistics"]["Progress"], "100%");
     }
 
     #[test]

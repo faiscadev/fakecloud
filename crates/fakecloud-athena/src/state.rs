@@ -221,6 +221,17 @@ pub struct Calculation {
     pub code_block: Option<String>,
     pub submission_date_time: DateTime<Utc>,
     pub completion_date_time: Option<DateTime<Utc>>,
+    /// Per-calculation execution statistics reported by
+    /// `GetCalculationExecutionStatus`, stored on the record rather than emitted
+    /// as a hardcoded global constant.
+    #[serde(default)]
+    pub dpu_execution_in_millis: Option<i64>,
+    #[serde(default)]
+    pub progress: Option<String>,
+    /// Result type advertised alongside `working_directory` when a result object
+    /// was actually written; `None` when no downloadable result exists.
+    #[serde(default)]
+    pub result_type: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

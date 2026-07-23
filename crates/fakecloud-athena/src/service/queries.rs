@@ -62,14 +62,20 @@ impl AthenaService {
         }
 
         // Workgroup existence check before kicking off SQL execution so we
-        // surface the same error users hit on real Athena.
-        {
+        // surface the same error users hit on real Athena. Resolve the query's
+        // EngineVersion from the workgroup it runs in (the workgroup's
+        // Configuration/EngineVersion, set at Create/UpdateWorkGroup) rather than
+        // hardcoding AUTO/v3.
+        let engine_version = {
             let mut state = self.state.write();
             let account = account_mut(&mut state, &req.account_id);
-            if !account.work_groups.contains_key(&work_group) {
-                return Err(invalid_request(format!("Workgroup {work_group} not found")));
+            match account.work_groups.get(&work_group) {
+                Some(wg) => resolve_engine_version(wg),
+                None => {
+                    return Err(invalid_request(format!("Workgroup {work_group} not found")));
+                }
             }
-        }
+        };
 
         let id = synth_uuid();
         let now = Utc::now();
@@ -141,10 +147,7 @@ impl AthenaService {
             completion_time: Some(now),
             query_execution_context: context,
             result_configuration: effective_result_config,
-            engine_version: Some(json!({
-                "SelectedEngineVersion": "AUTO",
-                "EffectiveEngineVersion": "Athena engine version 3",
-            })),
+            engine_version: Some(engine_version),
             data_scanned_bytes: scanned,
             engine_execution_time_ms: 1,
             query_planning_time_ms: 1,
@@ -387,5 +390,54 @@ impl AthenaService {
                 },
             }
         })))
+    }
+}
+
+/// Resolve the `EngineVersion` a query should run under from the workgroup it
+/// runs in. Athena pins the effective engine version to the workgroup's
+/// configured `EngineVersion`; only when the workgroup pins nothing does it fall
+/// back to AUTO / "Athena engine version 3".
+fn resolve_engine_version(wg: &WorkGroup) -> Value {
+    // Prefer the EngineVersion object stored in the workgroup Configuration.
+    if let Some(ev) = wg
+        .configuration
+        .as_ref()
+        .and_then(|c| c.get("EngineVersion"))
+        .filter(|v| v.is_object())
+    {
+        let selected = ev
+            .get("SelectedEngineVersion")
+            .and_then(Value::as_str)
+            .unwrap_or("AUTO");
+        let effective = ev
+            .get("EffectiveEngineVersion")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .unwrap_or_else(|| effective_engine_version(selected));
+        return json!({
+            "SelectedEngineVersion": selected,
+            "EffectiveEngineVersion": effective,
+        });
+    }
+    // Fall back to the summary's SelectedEngineVersion string.
+    if let Some(selected) = wg.engine_version.as_deref() {
+        return json!({
+            "SelectedEngineVersion": selected,
+            "EffectiveEngineVersion": effective_engine_version(selected),
+        });
+    }
+    json!({
+        "SelectedEngineVersion": "AUTO",
+        "EffectiveEngineVersion": "Athena engine version 3",
+    })
+}
+
+/// The effective engine version for a `SelectedEngineVersion`: an explicit pin
+/// is its own effective version; AUTO resolves to the current default.
+fn effective_engine_version(selected: &str) -> String {
+    if selected.eq_ignore_ascii_case("AUTO") {
+        "Athena engine version 3".to_string()
+    } else {
+        selected.to_string()
     }
 }

@@ -57,28 +57,43 @@ fn crawler_state_transitions() {
 
     svc.start_crawler(&req("StartCrawler", json!({"Name": "c"})))
         .unwrap();
+    // A back-to-back start (before the crawl is polled) is still rejected: the
+    // crawler is RUNNING in storage until a read settles it.
+    assert!(svc
+        .start_crawler(&req("StartCrawler", json!({"Name": "c"})))
+        .is_err());
+
+    // The first read after StartCrawler still reports RUNNING, matching AWS
+    // (the crawl is in progress).
     let got = body_of(
         svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
             .unwrap(),
     );
     assert_eq!(got["Crawler"]["State"], "RUNNING");
-    // double-start is rejected
-    assert!(svc
-        .start_crawler(&req("StartCrawler", json!({"Name": "c"})))
-        .is_err());
 
-    svc.stop_crawler(&req("StopCrawler", json!({"Name": "c"})))
-        .unwrap();
+    // A subsequent read settles the finished crawl to READY with a LastCrawl
+    // summary. Before the fix it stayed RUNNING forever, hanging poll loops.
     let got = body_of(
         svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
             .unwrap(),
     );
     assert_eq!(got["Crawler"]["State"], "READY");
+    assert_eq!(got["Crawler"]["LastCrawl"]["Status"], "SUCCEEDED");
+
     // stop-when-idle is rejected
     assert!(svc
         .stop_crawler(&req("StopCrawler", json!({"Name": "c"})))
         .is_err());
 
+    // A second start after completion now succeeds.
+    svc.start_crawler(&req("StartCrawler", json!({"Name": "c"})))
+        .unwrap();
+    // Poll twice to settle back to READY (first read RUNNING, second READY),
+    // then delete is no longer permanently blocked.
+    svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
+        .unwrap();
+    svc.get_crawler(&req("GetCrawler", json!({"Name": "c"})))
+        .unwrap();
     svc.delete_crawler(&req("DeleteCrawler", json!({"Name": "c"})))
         .unwrap();
     assert!(svc
@@ -361,6 +376,17 @@ fn ml_transform_and_task_run() {
         .unwrap(),
     );
     let task = run["TaskRunId"].as_str().unwrap().to_string();
+    // First read reports RUNNING (matching AWS).
+    let running = body_of(
+        svc.get_ml_task_run(&req(
+            "GetMLTaskRun",
+            json!({"TransformId": tid, "TaskRunId": task}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["Status"], "RUNNING");
+    // A subsequent read settles the task run to a terminal state instead of
+    // hanging in RUNNING forever.
     let got = body_of(
         svc.get_ml_task_run(&req(
             "GetMLTaskRun",
@@ -368,7 +394,7 @@ fn ml_transform_and_task_run() {
         ))
         .unwrap(),
     );
-    assert_eq!(got["Status"], "RUNNING");
+    assert_eq!(got["Status"], "SUCCEEDED");
 }
 
 #[test]
@@ -664,7 +690,18 @@ fn resume_workflow_run_returns_observable_run_id() {
     );
     let new_id = resumed["RunId"].as_str().unwrap().to_string();
     assert_ne!(new_id, "");
-    // The resumed run must be persisted and readable.
+    // The resumed run must be persisted and readable; the first read reports
+    // RUNNING (matching AWS).
+    let running = body_of(
+        svc.get_workflow_run(&req(
+            "GetWorkflowRun",
+            json!({"Name": "wf", "RunId": new_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["Run"]["WorkflowRunId"], new_id);
+    assert_eq!(running["Run"]["Status"], "RUNNING");
+    // A subsequent GetWorkflowRun settles the run to a terminal state.
     let got = body_of(
         svc.get_workflow_run(&req(
             "GetWorkflowRun",
@@ -672,8 +709,7 @@ fn resume_workflow_run_returns_observable_run_id() {
         ))
         .unwrap(),
     );
-    assert_eq!(got["Run"]["WorkflowRunId"], new_id);
-    assert_eq!(got["Run"]["Status"], "RUNNING");
+    assert_eq!(got["Run"]["Status"], "COMPLETED");
 }
 
 #[test]
@@ -870,4 +906,146 @@ fn update_classifier_bumps_version_and_preserves_creation_time() {
         "CreationTime preserved across update"
     );
     assert!(!updated["LastUpdated"].is_null());
+}
+
+#[test]
+fn schema_versions_diff_reflects_stored_definitions() {
+    // Regression: GetSchemaVersionsDiff validated inputs then returned a constant
+    // {"Diff": ""} without reading the two stored schema versions.
+    let svc = GlueService::default();
+    svc.create_schema(&req(
+        "CreateSchema",
+        json!({
+            "SchemaName": "s",
+            "DataFormat": "JSON",
+            "Compatibility": "NONE",
+            "SchemaDefinition": "{\"type\":\"record\",\"a\":1}"
+        }),
+    ))
+    .unwrap();
+    svc.register_schema_version(&req(
+        "RegisterSchemaVersion",
+        json!({
+            "SchemaId": {"SchemaName": "s"},
+            "SchemaDefinition": "{\"type\":\"record\",\"a\":2,\"b\":3}"
+        }),
+    ))
+    .unwrap();
+
+    // Two different versions produce a non-empty diff.
+    let diff = body_of(
+        svc.get_schema_versions_diff(&req(
+            "GetSchemaVersionsDiff",
+            json!({
+                "SchemaId": {"SchemaName": "s"},
+                "FirstSchemaVersionNumber": {"VersionNumber": 1},
+                "SecondSchemaVersionNumber": {"VersionNumber": 2},
+                "SchemaDiffType": "SYNTAX_DIFF"
+            }),
+        ))
+        .unwrap(),
+    );
+    let diff_str = diff["Diff"].as_str().unwrap();
+    assert!(
+        !diff_str.is_empty(),
+        "expected a non-empty diff, got {diff_str:?}"
+    );
+    assert!(
+        diff_str.contains('b'),
+        "diff should mention the added field: {diff_str}"
+    );
+
+    // Identical versions produce an empty diff.
+    let same = body_of(
+        svc.get_schema_versions_diff(&req(
+            "GetSchemaVersionsDiff",
+            json!({
+                "SchemaId": {"SchemaName": "s"},
+                "FirstSchemaVersionNumber": {"VersionNumber": 2},
+                "SecondSchemaVersionNumber": {"VersionNumber": 2},
+                "SchemaDiffType": "SYNTAX_DIFF"
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(same["Diff"], "");
+}
+
+#[test]
+fn data_quality_ruleset_run_settles_and_publishes_result() {
+    // Regression: a DataQuality ruleset evaluation run stayed RUNNING forever.
+    let svc = GlueService::default();
+    let started = body_of(
+        svc.start_data_quality_ruleset_evaluation_run(&req(
+            "StartDataQualityRulesetEvaluationRun",
+            json!({
+                "DataSource": {"GlueTable": {"DatabaseName": "db", "TableName": "t"}},
+                "Role": "r",
+                "RulesetNames": ["rs1"]
+            }),
+        ))
+        .unwrap(),
+    );
+    let run_id = started["RunId"].as_str().unwrap().to_string();
+    // First read reports the run as still RUNNING (matching AWS).
+    let running = body_of(
+        svc.get_data_quality_ruleset_evaluation_run(&req(
+            "GetDataQualityRulesetEvaluationRun",
+            json!({"RunId": run_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["Status"], "RUNNING");
+    // A subsequent read settles it to SUCCEEDED and publishes the result.
+    let got = body_of(
+        svc.get_data_quality_ruleset_evaluation_run(&req(
+            "GetDataQualityRulesetEvaluationRun",
+            json!({"RunId": run_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["Status"], "SUCCEEDED");
+    let result_id = got["ResultIds"][0].as_str().unwrap().to_string();
+    // The published result resolves via GetDataQualityResult.
+    let result = body_of(
+        svc.get_data_quality_result(&req("GetDataQualityResult", json!({"ResultId": result_id})))
+            .unwrap(),
+    );
+    assert_eq!(result["ResultId"], got["ResultIds"][0]);
+    assert_eq!(result["RulesetName"], "rs1");
+}
+
+#[test]
+fn blueprint_run_settles_to_terminal_on_read() {
+    let svc = GlueService::default();
+    svc.create_blueprint(&req(
+        "CreateBlueprint",
+        json!({"Name": "bp", "BlueprintLocation": "s3://b/bp.zip"}),
+    ))
+    .unwrap();
+    let started = body_of(
+        svc.start_blueprint_run(&req(
+            "StartBlueprintRun",
+            json!({"BlueprintName": "bp", "RoleArn": "arn:aws:iam::123456789012:role/r"}),
+        ))
+        .unwrap(),
+    );
+    let run_id = started["RunId"].as_str().unwrap().to_string();
+    // First read reports RUNNING (matching AWS); a subsequent read settles it.
+    let running = body_of(
+        svc.get_blueprint_run(&req(
+            "GetBlueprintRun",
+            json!({"BlueprintName": "bp", "RunId": run_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(running["BlueprintRun"]["State"], "RUNNING");
+    let got = body_of(
+        svc.get_blueprint_run(&req(
+            "GetBlueprintRun",
+            json!({"BlueprintName": "bp", "RunId": run_id}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["BlueprintRun"]["State"], "SUCCEEDED");
 }

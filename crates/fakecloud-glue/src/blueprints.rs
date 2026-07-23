@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
-use crate::common::{entity_not_found, new_id, now_ts, req_str};
+use crate::common::{entity_not_found, new_id, now_ts, req_str, settle_run_status};
 use crate::generic;
 use crate::service::GlueService;
 
@@ -146,12 +146,15 @@ impl GlueService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         req_str(&body, "BlueprintName")?;
-        let run_id = req_str(&body, "RunId")?;
-        let accounts = self.state.read();
-        let run = accounts
-            .get(&req.account_id)
-            .and_then(|s| s.blueprint_runs.get(run_id))
+        let run_id = req_str(&body, "RunId")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let run = st
+            .blueprint_runs
+            .get_mut(&run_id)
             .ok_or_else(|| entity_not_found(format!("BlueprintRun {run_id} not found")))?;
+        settle_run_status(run, "State", "SUCCEEDED", Some("CompletedOn"));
+        let run = run.clone();
         Ok(AwsResponse::ok_json(json!({ "BlueprintRun": run })))
     }
 
@@ -160,18 +163,15 @@ impl GlueService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
-        let bp = req_str(&body, "BlueprintName")?;
-        let accounts = self.state.read();
-        let runs: Vec<Value> = accounts
-            .get(&req.account_id)
-            .map(|s| {
-                s.blueprint_runs
-                    .values()
-                    .filter(|r| r.get("BlueprintName").and_then(|n| n.as_str()) == Some(bp))
-                    .cloned()
-                    .collect()
-            })
-            .unwrap_or_default();
+        let bp = req_str(&body, "BlueprintName")?.to_string();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let runs: Vec<Value> = st
+            .blueprint_runs
+            .values()
+            .filter(|r| r.get("BlueprintName").and_then(|n| n.as_str()) == Some(bp.as_str()))
+            .cloned()
+            .collect();
         Ok(AwsResponse::ok_json(json!({ "BlueprintRuns": runs })))
     }
 

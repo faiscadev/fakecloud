@@ -61,6 +61,56 @@ pub(crate) fn now_ts() -> f64 {
     Utc::now().timestamp() as f64
 }
 
+/// Settle a still-`RUNNING` async run/task to a terminal state when it is read,
+/// so poll-until-done loops terminate instead of hanging forever. Glue's real
+/// runs finish asynchronously; the emulator has no background worker, so
+/// `StartJobRun` completes synchronously and every other `Start*Run` op must
+/// likewise reach a terminal state. Doing it on read (rather than at start)
+/// keeps the resource's initially persisted state `RUNNING`, so a `Stop*`/
+/// `Cancel*` call issued before the first poll still finds a running resource.
+///
+/// `status_field` is the member carrying the lifecycle state (`Status` for most
+/// runs, `State` for crawler/blueprint runs). When a transition happens and
+/// `completed_field` is `Some`, that timestamp member is stamped with the
+/// current time. Returns `true` when a transition occurred (so callers can
+/// attach op-specific completion fields such as `ResultIds`).
+pub(crate) fn settle_run_status(
+    run: &mut Value,
+    status_field: &str,
+    terminal: &str,
+    completed_field: Option<&str>,
+) -> bool {
+    let running = matches!(
+        run.get(status_field).and_then(Value::as_str),
+        Some("RUNNING") | Some("STARTING")
+    );
+    if !running {
+        return false;
+    }
+    // Real Glue reports a just-started run as RUNNING on the first read and only
+    // moves to a terminal state once it finishes. Settling on a read counter keeps
+    // the first Get*Run after Start*Run at RUNNING (matching AWS) while still
+    // guaranteeing a poll-until-terminal loop converges instead of hanging.
+    let reads = run
+        .get("_settle_reads")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if reads < 1 {
+        if let Some(obj) = run.as_object_mut() {
+            obj.insert("_settle_reads".to_string(), json!(reads + 1));
+        }
+        return false;
+    }
+    if let Some(obj) = run.as_object_mut() {
+        obj.remove("_settle_reads");
+        obj.insert(status_field.to_string(), json!(terminal));
+        if let Some(cf) = completed_field {
+            obj.insert(cf.to_string(), json!(now_ts()));
+        }
+    }
+    true
+}
+
 /// Copy the entries of `src` whose keys appear in `allowed` into a fresh
 /// object. Lets handlers echo the real stored input while guaranteeing the
 /// response carries only fields the Smithy output shape declares.

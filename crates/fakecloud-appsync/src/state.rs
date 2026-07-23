@@ -79,6 +79,12 @@ pub struct AppSyncData {
     /// Source-API associations keyed by `associationId` -> `SourceApiAssociation`.
     #[serde(default)]
     pub source_api_associations: BTreeMap<String, Value>,
+    /// Types merged into a merged API by `StartSchemaMerge`, keyed by
+    /// `associationId` -> `typeName` -> `Type` wire object. Populated when a
+    /// schema merge copies the source API's types so `ListTypesByAssociation`
+    /// can return them instead of a constant empty list.
+    #[serde(default)]
+    pub association_types: BTreeMap<String, BTreeMap<String, Value>>,
     /// Data-source introspection jobs keyed by `introspectionId`.
     #[serde(default)]
     pub introspections: BTreeMap<String, Value>,
