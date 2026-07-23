@@ -66,10 +66,14 @@ fn iam_action_service_prefix_is_case_insensitive() {
 }
 
 #[test]
-fn iam_action_name_is_case_sensitive() {
-    // Action name is case-sensitive in AWS.
-    assert!(!iam_glob_match("s3:getobject", "s3:GetObject", true));
+fn iam_action_name_is_case_insensitive() {
+    // AWS matches the Action element case-insensitively for BOTH the service
+    // prefix and the action name. A differently-cased action must still match.
+    assert!(iam_glob_match("s3:getobject", "s3:GetObject", true));
+    assert!(iam_glob_match("S3:GETOBJECT", "s3:GetObject", true));
     assert!(iam_glob_match("s3:GetObject", "s3:GetObject", true));
+    // Different action entirely still does not match.
+    assert!(!iam_glob_match("s3:putobject", "s3:GetObject", true));
 }
 
 #[test]
@@ -139,6 +143,29 @@ fn deny_takes_precedence_over_allow() {
     assert_eq!(
         evaluate(
             &[deny, allow],
+            &req(&p, "s3:DeleteObject", "arn:aws:s3:::bucket/key")
+        ),
+        Decision::ExplicitDeny
+    );
+}
+
+#[test]
+fn mixed_case_explicit_deny_still_wins() {
+    // Regression: a Deny written with a non-canonical action case (as a user
+    // copying a real AWS policy or typing lowercase easily does) must still
+    // deny the canonically-cased request. Pre-fix the action name was matched
+    // verbatim, so this Deny silently became a no-op and the request was
+    // allowed.
+    let p = principal_user("arn:aws:iam::123456789012:user/alice");
+    let allow = doc(json!({
+        "Statement": [{"Effect": "Allow", "Action": "s3:*", "Resource": "*"}]
+    }));
+    let deny = doc(json!({
+        "Statement": [{"Effect": "Deny", "Action": "s3:deleteobject", "Resource": "*"}]
+    }));
+    assert_eq!(
+        evaluate(
+            &[allow, deny],
             &req(&p, "s3:DeleteObject", "arn:aws:s3:::bucket/key")
         ),
         Decision::ExplicitDeny

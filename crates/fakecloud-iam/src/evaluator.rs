@@ -937,19 +937,24 @@ fn resource_matches(resource: &ResourceMatch, request_resource: &str) -> bool {
 }
 
 /// IAM-style glob match supporting `*` (any sequence) and `?` (single
-/// character). When `case_insensitive_service_prefix` is true and the
-/// pattern looks like an action (`service:Action`), the service prefix is
-/// matched case-insensitively while the action name is matched as-is —
-/// matches how AWS evaluates Action patterns.
-fn iam_glob_match(pattern: &str, value: &str, case_insensitive_service_prefix: bool) -> bool {
-    if case_insensitive_service_prefix {
+/// character). When `is_action` is true the pattern is an Action element
+/// (`service:Action`), which AWS evaluates **case-insensitively** for BOTH the
+/// service prefix and the action name — so `s3:deleteobject` and
+/// `s3:DeleteObject` match. Resource (ARN) patterns pass `false` and are
+/// matched case-sensitively.
+fn iam_glob_match(pattern: &str, value: &str, is_action: bool) -> bool {
+    if is_action {
         if let (Some((p_svc, p_act)), Some((v_svc, v_act))) =
             (pattern.split_once(':'), value.split_once(':'))
         {
             if !glob_match(&p_svc.to_ascii_lowercase(), &v_svc.to_ascii_lowercase()) {
                 return false;
             }
-            return glob_match(p_act, v_act);
+            // AWS matches the action NAME case-insensitively too. Comparing it
+            // verbatim let a mixed-case explicit Deny (e.g. `s3:deleteobject`)
+            // silently miss `s3:DeleteObject` and become a no-op, so the
+            // request fell through to an Allow.
+            return glob_match(&p_act.to_ascii_lowercase(), &v_act.to_ascii_lowercase());
         }
     }
     glob_match(pattern, value)
