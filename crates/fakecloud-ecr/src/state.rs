@@ -349,6 +349,15 @@ pub struct LayerUpload {
     #[serde(default)]
     pub spool_path: String,
     pub last_byte_received: u64,
+    /// True while a layer-part / blob-`PATCH` append for this upload is
+    /// in flight (validated + reserved under the state lock, but the
+    /// actual file append runs with the lock released so a multi-hundred-
+    /// MB chunk doesn't stall a worker). A second concurrent append that
+    /// observes this flag set is rejected BEFORE it appends, so two parts
+    /// racing on the same start offset can't both write into the spool and
+    /// corrupt it. Runtime-only, never persisted.
+    #[serde(default, skip)]
+    pub append_in_flight: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -438,6 +447,7 @@ mod tests {
                 created_at: Utc::now(),
                 spool_path: "/tmp/fakecloud-ecr-upload-upload-1".to_string(),
                 last_byte_received: 42,
+                append_in_flight: false,
             },
         );
 

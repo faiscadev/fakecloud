@@ -56,6 +56,131 @@ fn bad_request(msg: impl Into<String>) -> AwsServiceError {
     aws_err("BadRequestException", StatusCode::BAD_REQUEST, msg)
 }
 
+/// Validate `instance` against a JSON Schema `schema`. Supports the keyword
+/// subset AppConfig configurations exercise in practice: `type`, `enum`,
+/// `const`, `required`, `properties`, `additionalProperties: false`, `items`,
+/// `minLength`/`maxLength`, `minimum`/`maximum`, and `minItems`/`maxItems`.
+/// Unknown keywords are ignored (lenient), so the check only ever rejects a
+/// definite violation and never a valid document. `path` is the JSON pointer
+/// of `instance` used in error messages.
+fn json_schema_check(schema: &Value, instance: &Value, path: &str) -> Result<(), String> {
+    let obj = match schema.as_object() {
+        Some(o) => o,
+        // A non-object schema (`true`/`false` or malformed) imposes no
+        // enforceable constraint here.
+        None => return Ok(()),
+    };
+    let at = |p: &str| if p.is_empty() { "(root)".to_string() } else { p.to_string() };
+
+    if let Some(ty) = obj.get("type") {
+        let ok = match ty.as_str() {
+            Some("object") => instance.is_object(),
+            Some("array") => instance.is_array(),
+            Some("string") => instance.is_string(),
+            Some("boolean") => instance.is_boolean(),
+            Some("null") => instance.is_null(),
+            Some("integer") => instance.as_i64().is_some() || instance.as_u64().is_some(),
+            Some("number") => instance.is_number(),
+            // Union `type` array or unrecognised type keyword: accept.
+            _ => true,
+        };
+        if !ok {
+            return Err(format!(
+                "{} is not of type {}",
+                at(path),
+                ty.as_str().unwrap_or("<type>")
+            ));
+        }
+    }
+
+    if let Some(Value::Array(allowed)) = obj.get("enum") {
+        if !allowed.iter().any(|a| a == instance) {
+            return Err(format!("{} is not one of the enum values", at(path)));
+        }
+    }
+    if let Some(expected) = obj.get("const") {
+        if expected != instance {
+            return Err(format!("{} does not equal the const value", at(path)));
+        }
+    }
+
+    if let Some(s) = instance.as_str() {
+        if let Some(min) = obj.get("minLength").and_then(Value::as_u64) {
+            if (s.chars().count() as u64) < min {
+                return Err(format!("{} is shorter than minLength {min}", at(path)));
+            }
+        }
+        if let Some(max) = obj.get("maxLength").and_then(Value::as_u64) {
+            if (s.chars().count() as u64) > max {
+                return Err(format!("{} is longer than maxLength {max}", at(path)));
+            }
+        }
+    }
+
+    if let Some(n) = instance.as_f64() {
+        if let Some(min) = obj.get("minimum").and_then(Value::as_f64) {
+            if n < min {
+                return Err(format!("{} is less than minimum {min}", at(path)));
+            }
+        }
+        if let Some(max) = obj.get("maximum").and_then(Value::as_f64) {
+            if n > max {
+                return Err(format!("{} is greater than maximum {max}", at(path)));
+            }
+        }
+    }
+
+    if let Some(arr) = instance.as_array() {
+        if let Some(min) = obj.get("minItems").and_then(Value::as_u64) {
+            if (arr.len() as u64) < min {
+                return Err(format!("{} has fewer than minItems {min}", at(path)));
+            }
+        }
+        if let Some(max) = obj.get("maxItems").and_then(Value::as_u64) {
+            if (arr.len() as u64) > max {
+                return Err(format!("{} has more than maxItems {max}", at(path)));
+            }
+        }
+        if let Some(items) = obj.get("items") {
+            for (i, elem) in arr.iter().enumerate() {
+                json_schema_check(items, elem, &format!("{path}/{i}"))?;
+            }
+        }
+    }
+
+    if let Some(map) = instance.as_object() {
+        if let Some(Value::Array(required)) = obj.get("required") {
+            for key in required.iter().filter_map(Value::as_str) {
+                if !map.contains_key(key) {
+                    return Err(format!("{} is missing required property '{key}'", at(path)));
+                }
+            }
+        }
+        let properties = obj.get("properties").and_then(Value::as_object);
+        if let Some(props) = properties {
+            for (key, subschema) in props {
+                if let Some(child) = map.get(key) {
+                    json_schema_check(subschema, child, &format!("{path}/{key}"))?;
+                }
+            }
+        }
+        // `additionalProperties: false` rejects keys not named in `properties`.
+        if obj.get("additionalProperties") == Some(&Value::Bool(false)) {
+            for key in map.keys() {
+                let known = properties.map(|p| p.contains_key(key)).unwrap_or(false);
+                if !known {
+                    return Err(format!(
+                        "{} has property '{key}' not allowed by additionalProperties:false",
+                        at(path)
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn req_body(req: &AwsRequest) -> Value {
     serde_json::from_slice(&req.body).unwrap_or(Value::Null)
 }
@@ -566,8 +691,63 @@ impl AppConfigService {
             .get(&req.account_id)
             .and_then(|st| st.applications.get(app_id))
             .ok_or_else(|| not_found(format!("Application not found: {app_id}")))?;
-        if !app.profiles.contains_key(id) {
-            return Err(not_found(format!("ConfigurationProfile not found: {id}")));
+        let profile = app
+            .profiles
+            .get(id)
+            .ok_or_else(|| not_found(format!("ConfigurationProfile not found: {id}")))?;
+
+        // Collect the profile's JSON_SCHEMA validators. LAMBDA validators run a
+        // customer function on the real service; there is no Lambda in scope
+        // here, so we accept them rather than fabricate a pass/fail verdict.
+        let schemas: Vec<&str> = profile
+            .validators
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter(|v| {
+                        v.get("Type").and_then(Value::as_str) == Some("JSON_SCHEMA")
+                    })
+                    .filter_map(|v| v.get("Content").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if schemas.is_empty() {
+            // Nothing enforceable to validate against.
+            return Ok(empty(204));
+        }
+
+        // Resolve the configuration content to validate: the requested
+        // `configuration_version`, falling back to the latest hosted version.
+        let requested = req
+            .query_params
+            .get("configuration_version")
+            .and_then(|v| v.parse::<i64>().ok());
+        let record = match requested {
+            Some(ver) => profile.hosted_versions.get(&ver),
+            None => profile.hosted_versions.values().next_back(),
+        };
+        let Some(record) = record else {
+            // No hosted content to validate; a JSON_SCHEMA validator has
+            // nothing to reject.
+            return Ok(empty(204));
+        };
+
+        // A JSON_SCHEMA validator requires the content to be JSON.
+        let content: Value = serde_json::from_slice(&record.content).map_err(|e| {
+            bad_request(format!("Configuration content is not valid JSON: {e}"))
+        })?;
+
+        for schema_str in &schemas {
+            // A validator whose schema itself is not valid JSON can't be
+            // applied; skip it rather than reject otherwise-valid content.
+            let Ok(schema) = serde_json::from_str::<Value>(schema_str) else {
+                continue;
+            };
+            if let Err(msg) = json_schema_check(&schema, &content, "") {
+                return Err(bad_request(format!(
+                    "Configuration failed JSON schema validation: {msg}"
+                )));
+            }
         }
         Ok(empty(204))
     }

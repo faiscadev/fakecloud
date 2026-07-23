@@ -121,6 +121,36 @@ pub(crate) fn validate_input(action: &str, body: &Value) -> Result<(), AwsServic
             }
         }
     }
+    validate_nested(action, body)?;
+    Ok(())
+}
+
+/// Validate constrained members nested inside list/structure inputs that the
+/// flat top-level rule table can't express. The Smithy model constrains these
+/// (e.g. `CostAllocationTagStatusEntry.Status` is the `CostAllocationTagStatus`
+/// enum), so a garbage value is a `ValidationException` on the real service.
+/// Only fires when the offending value is actually present, so a well-formed
+/// request (including the conformance probe's valid-enum fill) still succeeds.
+fn validate_nested(action: &str, body: &Value) -> Result<(), AwsServiceError> {
+    if action == "UpdateCostAllocationTagsStatus" {
+        if let Some(entries) = body
+            .get("CostAllocationTagsStatus")
+            .and_then(Value::as_array)
+        {
+            for entry in entries {
+                if let Some(status) = entry.get("Status").and_then(Value::as_str) {
+                    if !TAG_STATUS.contains(&status) {
+                        return Err(invalid(format!(
+                            "CostAllocationTagsStatus.Status '{}' is not a valid value. \
+                             Valid values are: {}.",
+                            status,
+                            TAG_STATUS.join(", ")
+                        )));
+                    }
+                }
+            }
+        }
+    }
     Ok(())
 }
 
