@@ -2968,6 +2968,50 @@ pub(crate) fn apply_resource_updates(
         .map(|r| (r.logical_id.clone(), r.attributes.clone()))
         .collect();
 
+    // Resolve the OLD template's properties per logical id so an existing
+    // resource whose effective (resolved) definition is unchanged can be left
+    // completely untouched. Without this, every resource present in both
+    // templates was fed to `update_resource` on every deploy — and for any
+    // type lacking a dedicated in-place `update_*` arm that routes to
+    // `reprovision_resource` (delete + recreate). A single unrelated change
+    // (or an identical re-deploy) therefore tore down and recreated every
+    // co-existing ElastiCache/EC2/OpenSearch container and cascaded Glue
+    // database deletes, flushing their data while reporting UPDATE_COMPLETE.
+    // `stack.template`/`stack.parameters` still hold the pre-update values here
+    // (both callers overwrite them only after this function returns), and the
+    // `physical_ids`/`attributes` maps built above are the old stack's, so
+    // resolving against them yields the previous effective definition. Using
+    // the RESOLVED form (not the raw authored properties) means a resource
+    // whose `Ref`/`GetAtt` target was replaced still resolves to a new value
+    // and is correctly updated.
+    let old_resolved: BTreeMap<String, serde_json::Value> = {
+        let old_template = stack.template.clone();
+        let old_parameters = stack.parameters.clone();
+        let old_physical_ids = physical_ids.clone();
+        let old_attributes = attributes.clone();
+        match template::parse_template(&old_template, &old_parameters) {
+            Ok(parsed_old) => parsed_old
+                .resources
+                .iter()
+                .filter_map(|def| {
+                    template::resolve_resource_properties_with_attrs(
+                        def,
+                        &old_template,
+                        &old_parameters,
+                        &old_physical_ids,
+                        &old_attributes,
+                        imports,
+                    )
+                    .ok()
+                    .map(|resolved| (def.logical_id.clone(), resolved.properties))
+                })
+                .collect(),
+            // If the old template no longer parses, fall back to always
+            // attempting the update (prior behavior) rather than skipping.
+            Err(_) => BTreeMap::new(),
+        }
+    };
+
     // Create new resources / update resources that already exist. Provision in
     // dependency order so a `Ref`/`GetAtt`/`Fn::Sub`/`DependsOn` to another
     // resource resolves to that resource's physical id rather than its bare
@@ -3027,6 +3071,18 @@ pub(crate) fn apply_resource_updates(
             // resource types that don't support updates yet; in that case
             // the existing resource stays as-is so the rest of the stack
             // continues to validate.
+            // Skip resources whose resolved definition is unchanged: real
+            // CloudFormation performs no action and records no `ResourceChange`
+            // for an untouched resource. Critically, this prevents the
+            // replacement fallback (`reprovision_resource`) from destroying and
+            // recreating a stateful backing resource (cache/db/instance) or
+            // cascading a Glue-database delete on an unrelated stack update.
+            if old_resolved
+                .get(&resource_def.logical_id)
+                .is_some_and(|old_props| *old_props == resolved_def.properties)
+            {
+                continue;
+            }
             let existing = stack
                 .resources
                 .iter()
