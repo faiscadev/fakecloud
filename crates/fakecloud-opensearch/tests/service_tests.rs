@@ -1854,3 +1854,70 @@ async fn attach_data_source_persists_through_list() {
     assert_eq!(attachments.len(), 1, "{listed}");
     assert_eq!(attachments[0]["dataSourceArn"], "arn:aws:s3:::my-bucket");
 }
+
+#[tokio::test]
+async fn get_domain_maintenance_status_reflects_stored_entry() {
+    let svc = service();
+    // Create a domain, then start a maintenance action and capture its id.
+    call(
+        &svc,
+        req(
+            Method::POST,
+            &format!("{OS}/opensearch/domain"),
+            json!({"DomainName": "maint", "EngineVersion": "OpenSearch_2.11"}),
+        ),
+    )
+    .await;
+    let started = json_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("{OS}/opensearch/domain/maint/domainMaintenance"),
+                json!({"Action": "REBOOT_NODE"}),
+            ),
+        )
+        .await,
+    );
+    let mid = started["MaintenanceId"].as_str().unwrap().to_string();
+
+    // GetDomainMaintenanceStatus keyed by that id reflects the stored entry
+    // (the Action it recorded) rather than an id-blind constant.
+    let status = json_of(
+        &call(
+            &svc,
+            with_query(
+                req(
+                    Method::GET,
+                    &format!("{OS}/opensearch/domain/maint/domainMaintenance"),
+                    json!({}),
+                ),
+                "maintenanceId",
+                &mid,
+            ),
+        )
+        .await,
+    );
+    assert_eq!(status["Action"], "REBOOT_NODE");
+    assert_eq!(status["Status"], "COMPLETED");
+
+    // An unknown maintenance id falls back to the default terminal status
+    // instead of erroring.
+    let unknown = json_of(
+        &call(
+            &svc,
+            with_query(
+                req(
+                    Method::GET,
+                    &format!("{OS}/opensearch/domain/maint/domainMaintenance"),
+                    json!({}),
+                ),
+                "maintenanceId",
+                "does-not-exist",
+            ),
+        )
+        .await,
+    );
+    assert_eq!(unknown["Status"], "COMPLETED");
+    assert!(unknown.get("Action").is_none());
+}

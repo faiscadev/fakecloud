@@ -693,12 +693,16 @@ impl RedshiftService {
         let key = Self::partner_key(&cluster, &db, &partner);
         let mut guard = self.state.write();
         let acct = guard.account(&req.account_id);
-        if let Some(p) = acct.partners.get_mut(&key) {
-            if let Some(s) = param(req, "Status") {
-                p.status = s;
-            }
-            p.status_message = param(req, "StatusMessage");
+        // AWS returns PartnerNotFoundFault when the partner is not registered,
+        // rather than a silent 200 that pretends the status update succeeded.
+        let p = acct
+            .partners
+            .get_mut(&key)
+            .ok_or_else(|| partner_not_found(&partner))?;
+        if let Some(s) = param(req, "Status") {
+            p.status = s;
         }
+        p.status_message = param(req, "StatusMessage");
         Ok(xml_resp(
             "UpdatePartnerStatus",
             format!(

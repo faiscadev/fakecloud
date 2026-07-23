@@ -1895,6 +1895,70 @@ mod tests {
         .unwrap();
         assert_eq!(find_engine(&svc, "wg3"), "Athena engine version 2");
     }
+
+    #[test]
+    fn cancel_capacity_reservation_settles_to_cancelled() {
+        let (svc, _glue) = test_service();
+        svc.create_capacity_reservation(&req(
+            "CreateCapacityReservation",
+            json!({ "Name": "cr1", "TargetDpus": 24 }),
+        ))
+        .unwrap();
+
+        // Cancel leaves the reservation in CANCELLING immediately after the call.
+        svc.cancel_capacity_reservation(&req(
+            "CancelCapacityReservation",
+            json!({ "Name": "cr1" }),
+        ))
+        .unwrap();
+        {
+            let state = svc.state.read();
+            let cr = state
+                .accounts
+                .values()
+                .next()
+                .unwrap()
+                .capacity_reservations
+                .get("cr1")
+                .unwrap();
+            assert_eq!(cr.status, "CANCELLING");
+        }
+
+        // A subsequent Get settles it to CANCELLED (settle-on-read).
+        let got = parse_json(
+            &svc.get_capacity_reservation(&req("GetCapacityReservation", json!({ "Name": "cr1" })))
+                .unwrap(),
+        );
+        assert_eq!(got["CapacityReservation"]["Status"], "CANCELLED");
+
+        // ListCapacityReservations also reports the settled status.
+        let listed = parse_json(
+            &svc.list_capacity_reservations(&req("ListCapacityReservations", json!({})))
+                .unwrap(),
+        );
+        assert_eq!(
+            listed["CapacityReservations"][0]["Status"], "CANCELLED",
+            "list should report the settled status"
+        );
+    }
+
+    #[test]
+    fn delete_data_catalog_echoes_real_identity() {
+        let (svc, _glue) = test_service();
+        svc.create_data_catalog(&req(
+            "CreateDataCatalog",
+            json!({ "Name": "cat1", "Type": "GLUE" }),
+        ))
+        .unwrap();
+
+        let deleted = parse_json(
+            &svc.delete_data_catalog(&req("DeleteDataCatalog", json!({ "Name": "cat1" })))
+                .unwrap(),
+        );
+        assert_eq!(deleted["DataCatalog"]["Name"], "cat1");
+        assert_eq!(deleted["DataCatalog"]["Type"], "GLUE");
+        assert_eq!(deleted["DataCatalog"]["Status"], "DELETE_COMPLETE");
+    }
 }
 
 #[cfg(test)]

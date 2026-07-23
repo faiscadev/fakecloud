@@ -355,6 +355,14 @@ pub(crate) fn scheduled_action_not_found(id: &str) -> AwsServiceError {
     )
 }
 
+pub(crate) fn partner_not_found(partner: &str) -> AwsServiceError {
+    err(
+        404,
+        "PartnerNotFound",
+        format!("Partner {partner} not found."),
+    )
+}
+
 pub(crate) fn scheduled_action_already_exists(id: &str) -> AwsServiceError {
     err(
         400,
