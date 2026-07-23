@@ -410,7 +410,15 @@ async fn rds_create_db_snapshot() {
     assert_eq!(snapshot.db_snapshot_identifier(), Some("conf-snapshot"));
     assert_eq!(snapshot.db_instance_identifier(), Some("conf-rds-db"));
     assert_eq!(snapshot.engine(), Some("postgres"));
-    assert_eq!(snapshot.status(), Some("available"));
+    // AWS returns `creating` for the in-progress CreateDBSnapshot call while
+    // the dump runs in the background, then flips to `available`. (A build with
+    // no container runtime settles `available` immediately.) Accept either so
+    // the assertion doesn't depend on dump timing / runtime presence.
+    assert!(
+        matches!(snapshot.status(), Some("creating") | Some("available")),
+        "unexpected CreateDBSnapshot status: {:?}",
+        snapshot.status()
+    );
 }
 
 #[test_action("rds", "DescribeDBSnapshots", checksum = "c67cf62b")]
