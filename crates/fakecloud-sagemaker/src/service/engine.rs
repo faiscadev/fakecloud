@@ -512,7 +512,21 @@ pub(super) fn list(
         .map(|d| d.list_resource_entries(meta.family))
         .unwrap_or_default();
     entries.retain(|(id, r)| passes_filters(id, r, body));
+    list_entries_response(ctx, meta, body, entries)
+}
 
+/// Project a pre-filtered `(id, record)` entry set onto a list operation's
+/// output: build each element (scalar id or projected object), apply the
+/// request's `MaxResults` / `NextToken` pagination, and wrap in the op's list
+/// field. Shared by the generic [`list`] path and resource-specific handlers
+/// that scope the entry set themselves (e.g. `ListTrialComponents` filtered to
+/// a single trial's associated components).
+pub(super) fn list_entries_response(
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+    entries: Vec<(String, Value)>,
+) -> AwsResponse {
     // A `list<string>` element serialises as the resource's identifier string
     // (its storage key); otherwise each element is the projected object.
     let elements: Vec<Value> = if meta.list_scalar {

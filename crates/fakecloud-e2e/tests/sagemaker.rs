@@ -336,3 +336,170 @@ async fn sagemaker_list_name_contains_filter() {
         "NameContains=alpha should exclude beta-model, got {names:?}"
     );
 }
+
+// HyperPod cluster node-set management: BatchAddClusterNodes persists nodes that
+// ListClusterNodes reflects, BatchReplaceClusterNodes swaps the underlying
+// instance, and BatchDeleteClusterNodes removes them.
+#[tokio::test]
+async fn sagemaker_batch_cluster_nodes_round_trip() {
+    use aws_sdk_sagemaker::types::AddClusterNodeSpecification;
+
+    let server = TestServer::start().await;
+    let client = sagemaker_client(&server).await;
+
+    client
+        .batch_add_cluster_nodes()
+        .cluster_name("hp-cluster")
+        .nodes_to_add(
+            AddClusterNodeSpecification::builder()
+                .instance_group_name("workers")
+                .increment_target_count_by(2)
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .expect("batch_add_cluster_nodes");
+
+    let listed = client
+        .list_cluster_nodes()
+        .cluster_name("hp-cluster")
+        .send()
+        .await
+        .expect("list_cluster_nodes");
+    let nodes = listed.cluster_node_summaries();
+    assert_eq!(nodes.len(), 2, "two nodes should be listed after add");
+    let node_id = nodes[0]
+        .node_logical_id()
+        .expect("node_logical_id")
+        .to_string();
+    let old_instance = nodes[0].instance_id().expect("instance_id").to_string();
+
+    // Replace swaps the underlying instance, keeping the logical id.
+    client
+        .batch_replace_cluster_nodes()
+        .cluster_name("hp-cluster")
+        .node_logical_ids(node_id.clone())
+        .send()
+        .await
+        .expect("batch_replace_cluster_nodes");
+    let listed = client
+        .list_cluster_nodes()
+        .cluster_name("hp-cluster")
+        .send()
+        .await
+        .expect("list_cluster_nodes");
+    let replaced = listed
+        .cluster_node_summaries()
+        .iter()
+        .find(|n| n.node_logical_id() == Some(node_id.as_str()))
+        .expect("replaced node still present");
+    assert_ne!(
+        replaced.instance_id(),
+        Some(old_instance.as_str()),
+        "replace should mint a new InstanceId"
+    );
+
+    // Delete removes the node; the set shrinks to one.
+    client
+        .batch_delete_cluster_nodes()
+        .cluster_name("hp-cluster")
+        .node_logical_ids(node_id)
+        .send()
+        .await
+        .expect("batch_delete_cluster_nodes");
+    let listed = client
+        .list_cluster_nodes()
+        .cluster_name("hp-cluster")
+        .send()
+        .await
+        .expect("list_cluster_nodes");
+    assert_eq!(listed.cluster_node_summaries().len(), 1);
+}
+
+// AssociateTrialComponent makes a component visible under a scoped
+// ListTrialComponents(TrialName=…); DisassociateTrialComponent removes it.
+#[tokio::test]
+async fn sagemaker_trial_component_association_round_trip() {
+    let server = TestServer::start().await;
+    let client = sagemaker_client(&server).await;
+
+    client
+        .create_trial()
+        .trial_name("t1")
+        .experiment_name("e1")
+        .send()
+        .await
+        .expect("create_trial");
+    client
+        .create_trial_component()
+        .trial_component_name("tc1")
+        .send()
+        .await
+        .expect("create_trial_component");
+
+    client
+        .associate_trial_component()
+        .trial_component_name("tc1")
+        .trial_name("t1")
+        .send()
+        .await
+        .expect("associate_trial_component");
+
+    let scoped = client
+        .list_trial_components()
+        .trial_name("t1")
+        .send()
+        .await
+        .expect("list_trial_components scoped");
+    let names: Vec<&str> = scoped
+        .trial_component_summaries()
+        .iter()
+        .filter_map(|c| c.trial_component_name())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["tc1"],
+        "scoped list should return the associated component"
+    );
+
+    client
+        .disassociate_trial_component()
+        .trial_component_name("tc1")
+        .trial_name("t1")
+        .send()
+        .await
+        .expect("disassociate_trial_component");
+    let scoped = client
+        .list_trial_components()
+        .trial_name("t1")
+        .send()
+        .await
+        .expect("list_trial_components scoped");
+    assert!(
+        scoped.trial_component_summaries().is_empty(),
+        "component should no longer be associated with the trial"
+    );
+}
+
+// SendPipelineExecutionStepSuccess resolves a waiting callback step and echoes
+// the pipeline execution ARN.
+#[tokio::test]
+async fn sagemaker_send_pipeline_step_success_returns_execution_arn() {
+    let server = TestServer::start().await;
+    let client = sagemaker_client(&server).await;
+
+    let out = client
+        .send_pipeline_execution_step_success()
+        .callback_token("cbtoken001")
+        .send()
+        .await
+        .expect("send_pipeline_execution_step_success");
+    assert!(
+        out.pipeline_execution_arn()
+            .unwrap_or_default()
+            .contains(":pipeline/"),
+        "expected a pipeline execution arn, got {:?}",
+        out.pipeline_execution_arn()
+    );
+}

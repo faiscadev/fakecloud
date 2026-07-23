@@ -729,3 +729,258 @@ fn retry_pipeline_execution_transitions_status() {
     );
     assert_eq!(described["PipelineExecutionStatus"], "Executing");
 }
+
+// BatchAddClusterNodes persists nodes under the ClusterNode family so
+// ListClusterNodes reflects the added set; BatchDeleteClusterNodes removes them.
+#[test]
+fn batch_cluster_nodes_add_and_delete_round_trip() {
+    let s = svc();
+    let added = resp_json(
+        &run(
+            &s,
+            "BatchAddClusterNodes",
+            json!({
+                "ClusterName": "c1",
+                "NodesToAdd": [{"InstanceGroupName": "g1", "IncrementTargetCountBy": 2}],
+            }),
+        )
+        .unwrap(),
+    );
+    // The action output reflects the two real minted nodes.
+    let successful = added["Successful"].as_array().unwrap();
+    assert_eq!(successful.len(), 2, "add output: {added}");
+    assert!(successful
+        .iter()
+        .all(|n| n["NodeLogicalId"].is_string() && n["InstanceGroupName"] == "g1"));
+
+    // ListClusterNodes now surfaces both nodes.
+    let listed = resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "c1"})).unwrap());
+    let nodes = listed["ClusterNodeSummaries"].as_array().unwrap();
+    assert_eq!(nodes.len(), 2, "list after add: {listed}");
+    let node_id = nodes[0]["NodeLogicalId"].as_str().unwrap().to_string();
+
+    // Delete one by its logical id; the set shrinks to one.
+    run(
+        &s,
+        "BatchDeleteClusterNodes",
+        json!({"ClusterName": "c1", "NodeLogicalIds": [node_id]}),
+    )
+    .unwrap();
+    let listed = resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "c1"})).unwrap());
+    assert_eq!(listed["ClusterNodeSummaries"].as_array().unwrap().len(), 1);
+}
+
+// BatchRebootClusterNodes reports in Successful exactly the requested ids that
+// resolve to a node in the cluster (reading real persisted state).
+#[test]
+fn batch_reboot_cluster_nodes_reflects_membership() {
+    let s = svc();
+    run(
+        &s,
+        "BatchAddClusterNodes",
+        json!({"ClusterName": "c1", "NodesToAdd": [{"InstanceGroupName": "g1"}]}),
+    )
+    .unwrap();
+    let listed = resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "c1"})).unwrap());
+    let node_id = listed["ClusterNodeSummaries"][0]["NodeLogicalId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let rebooted = resp_json(
+        &run(
+            &s,
+            "BatchRebootClusterNodes",
+            json!({"ClusterName": "c1", "NodeLogicalIds": [node_id.clone(), "does-not-exist"]}),
+        )
+        .unwrap(),
+    );
+    let ok = rebooted["Successful"].as_array().unwrap();
+    assert_eq!(ok.len(), 1, "only the real node reboots: {rebooted}");
+    assert_eq!(ok[0], node_id);
+}
+
+// BatchReplaceClusterNodes swaps a node's underlying instance (new InstanceId),
+// keeping its logical id, visible via ListClusterNodes.
+#[test]
+fn batch_replace_cluster_nodes_swaps_instance() {
+    let s = svc();
+    run(
+        &s,
+        "BatchAddClusterNodes",
+        json!({"ClusterName": "c1", "NodesToAdd": [{"InstanceGroupName": "g1"}]}),
+    )
+    .unwrap();
+    let listed = resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "c1"})).unwrap());
+    let node_id = listed["ClusterNodeSummaries"][0]["NodeLogicalId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let old_instance = listed["ClusterNodeSummaries"][0]["InstanceId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let replaced = resp_json(
+        &run(
+            &s,
+            "BatchReplaceClusterNodes",
+            json!({"ClusterName": "c1", "NodeLogicalIds": [node_id.clone()]}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        replaced["Successful"].as_array().unwrap(),
+        &vec![json!(node_id)]
+    );
+
+    let listed = resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "c1"})).unwrap());
+    let summary = &listed["ClusterNodeSummaries"][0];
+    assert_eq!(summary["NodeLogicalId"], node_id, "logical id is stable");
+    assert_ne!(
+        summary["InstanceId"].as_str().unwrap(),
+        old_instance,
+        "the underlying instance was replaced"
+    );
+}
+
+// AssociateTrialComponent records the trial<->component edge so a scoped
+// ListTrialComponents(TrialName=…) returns it; DisassociateTrialComponent removes it.
+#[test]
+fn trial_component_association_round_trip() {
+    let s = svc();
+    run(
+        &s,
+        "CreateTrial",
+        json!({"TrialName": "t1", "ExperimentName": "e1"}),
+    )
+    .unwrap();
+    run(
+        &s,
+        "CreateTrialComponent",
+        json!({"TrialComponentName": "tc1"}),
+    )
+    .unwrap();
+
+    // Before association, the trial has no components.
+    let scoped = resp_json(&run(&s, "ListTrialComponents", json!({"TrialName": "t1"})).unwrap());
+    assert!(scoped["TrialComponentSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    run(
+        &s,
+        "AssociateTrialComponent",
+        json!({"TrialComponentName": "tc1", "TrialName": "t1"}),
+    )
+    .unwrap();
+
+    // The scoped list now returns the associated component.
+    let scoped = resp_json(&run(&s, "ListTrialComponents", json!({"TrialName": "t1"})).unwrap());
+    let sums = scoped["TrialComponentSummaries"].as_array().unwrap();
+    assert_eq!(sums.len(), 1, "scoped list after associate: {scoped}");
+    assert_eq!(sums[0]["TrialComponentName"], "tc1");
+
+    // An unrelated trial sees nothing.
+    let other =
+        resp_json(&run(&s, "ListTrialComponents", json!({"TrialName": "t-other"})).unwrap());
+    assert!(other["TrialComponentSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    // Disassociate empties the scoped list again.
+    run(
+        &s,
+        "DisassociateTrialComponent",
+        json!({"TrialComponentName": "tc1", "TrialName": "t1"}),
+    )
+    .unwrap();
+    let scoped = resp_json(&run(&s, "ListTrialComponents", json!({"TrialName": "t1"})).unwrap());
+    assert!(scoped["TrialComponentSummaries"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+}
+
+// ListTrialComponents without a TrialName filter keeps the generic, unscoped
+// behaviour (returns every component regardless of association).
+#[test]
+fn list_trial_components_unscoped_returns_all() {
+    let s = svc();
+    run(
+        &s,
+        "CreateTrialComponent",
+        json!({"TrialComponentName": "tc1"}),
+    )
+    .unwrap();
+    run(
+        &s,
+        "CreateTrialComponent",
+        json!({"TrialComponentName": "tc2"}),
+    )
+    .unwrap();
+    let all = resp_json(&run(&s, "ListTrialComponents", Value::Null).unwrap());
+    assert_eq!(all["TrialComponentSummaries"].as_array().unwrap().len(), 2);
+}
+
+// SendPipelineExecutionStepSuccess advances a waiting callback step to Succeeded;
+// SendPipelineExecutionStepFailure to Failed (visible via ListPipelineExecutionSteps).
+#[test]
+fn send_pipeline_execution_step_advances_callback() {
+    let s = svc();
+    let token = "cbtoken001"; // exactly 10 chars (model @length)
+                              // Seed a waiting callback step keyed by the token.
+    {
+        let mut g = s.state.write();
+        let data = g.get_or_create("000000000000");
+        data.put_resource(
+            "PipelineExecutionStep",
+            token,
+            json!({"StepName": "Callback", "StepStatus": "Executing"}),
+        );
+    }
+
+    let sent = resp_json(
+        &run(
+            &s,
+            "SendPipelineExecutionStepSuccess",
+            json!({"CallbackToken": token}),
+        )
+        .unwrap(),
+    );
+    assert!(sent["PipelineExecutionArn"].is_string());
+
+    // The step advanced from Executing to Succeeded.
+    {
+        let g = s.state.read();
+        let rec = g
+            .get("000000000000")
+            .unwrap()
+            .get_resource("PipelineExecutionStep", token)
+            .unwrap();
+        assert_eq!(rec["StepStatus"], "Succeeded");
+    }
+    let listed = resp_json(&run(&s, "ListPipelineExecutionSteps", json!({})).unwrap());
+    let steps = listed["PipelineExecutionSteps"].as_array().unwrap();
+    assert!(steps.iter().any(|st| st["StepStatus"] == "Succeeded"));
+
+    // A failure send transitions the step to Failed and records the reason.
+    run(
+        &s,
+        "SendPipelineExecutionStepFailure",
+        json!({"CallbackToken": token, "FailureReason": "boom"}),
+    )
+    .unwrap();
+    {
+        let g = s.state.read();
+        let rec = g
+            .get("000000000000")
+            .unwrap()
+            .get_resource("PipelineExecutionStep", token)
+            .unwrap();
+        assert_eq!(rec["StepStatus"], "Failed");
+        assert_eq!(rec["FailureReason"], "boom");
+    }
+}
