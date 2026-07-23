@@ -124,6 +124,27 @@ impl ElastiCacheRuntime {
         })
     }
 
+    /// Test-only runtime that needs no container daemon. Handler tests that
+    /// only assert the synchronously-recorded `creating` snapshot need
+    /// `self.runtime` to be `Some`; the backgrounded `dump_rdb` that follows
+    /// returns `Unavailable` immediately (no tracked container) without
+    /// shelling out.
+    #[cfg(test)]
+    pub(crate) fn new_stub() -> Self {
+        Self {
+            backend: CacheBackend::Docker(DockerCache {
+                cli: "true".to_string(),
+                net: fakecloud_core::container_net::HostNetworking {
+                    host_alias: String::new(),
+                    add_host_arg: None,
+                    sibling_host: "127.0.0.1".to_string(),
+                },
+                instance_id: format!("fakecloud-{}", std::process::id()),
+            }),
+            containers: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     /// Construct the Kubernetes backend. `server_port` is fakecloud's
     /// bound port (used when `FAKECLOUD_K8S_SELF_URL` omits one);
     /// `internal_token` guards the per-resource RDB endpoint that seeds

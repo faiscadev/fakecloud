@@ -2220,27 +2220,6 @@ pub(crate) fn default_parameter_group(engine: &str, engine_version: &str) -> Str
     }
 }
 
-pub(crate) fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceError {
-    // `InsufficientDBInstanceCapacity` is the closest Smithy-declared
-    // shape across the Create/Modify/Restore* DB instance ops that call
-    // this helper. Container start failures map to `InternalFailure`
-    // which all services accept as a framework-level error.
-    match error {
-        RuntimeError::Unavailable => AwsServiceError::aws_error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "InsufficientDBInstanceCapacity",
-            format!(
-                "Docker/Podman is required for RDS DB instances but is not available. {}",
-                fakecloud_core::container_net::CONTAINER_RUNTIME_HINT
-            ),
-        ),
-        RuntimeError::ContainerStartFailed(message) => AwsServiceError::aws_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "InternalFailure",
-            message,
-        ),
-    }
-}
 
 #[cfg(test)]
 mod instance_class_tests {

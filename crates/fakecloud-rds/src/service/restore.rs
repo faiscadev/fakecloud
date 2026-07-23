@@ -122,26 +122,6 @@ impl RdsService {
             }
         };
 
-        let dump_data = match runtime
-            .dump_database(
-                &source_id,
-                &source_instance.engine,
-                &source_instance.master_username,
-                &source_instance.master_user_password,
-                &db_name,
-            )
-            .await
-        {
-            Ok(data) => data,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_instance_creation(&target_id);
-                return Err(runtime_error_to_service_error(e));
-            }
-        };
-
         let (dbi_resource_id, db_instance_arn) = {
             let accounts = self.state.read();
             let empty = RdsState::new(&request.account_id, &request.region);
@@ -204,7 +184,10 @@ impl RdsService {
             source_instance.master_user_password.clone(),
             db_name,
             tags,
-            Some(dump_data),
+            None,
+            // Live-dump the source inside the finalizer so the slow dump never
+            // blocks this response (mirrors the container-start backgrounding).
+            Some(source_id.clone()),
             ("RDS-EVENT-0008", "DB instance restored to point in time"),
         );
 
@@ -335,6 +318,8 @@ impl RdsService {
             db_name,
             tags,
             Some(dump_data),
+            // In-memory dump pulled from S3; no live source to dump.
+            None,
             ("RDS-EVENT-0043", "DB instance restored from S3 backup"),
         );
 

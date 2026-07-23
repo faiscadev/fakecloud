@@ -719,6 +719,35 @@ fn is_declared_add_tags_not_found(code: &str) -> bool {
     )
 }
 
+/// Apply the outcome of a backgrounded snapshot dump to the stored row.
+/// Split out from `spawn_finalize_snapshot` so the state transition
+/// (`creating` -> `available`/`failed`) is unit-testable without a container
+/// runtime. A snapshot deleted while the dump was in flight is simply left
+/// untouched (the `get_mut` misses).
+fn apply_snapshot_dump_result(
+    state: &SharedRdsState,
+    account_id: &str,
+    snapshot_id: &str,
+    result: Result<Vec<u8>, RuntimeError>,
+) {
+    let mut accounts = state.write();
+    let s = accounts.get_or_create(account_id);
+    let Some(snapshot) = s.snapshots.get_mut(snapshot_id) else {
+        return;
+    };
+    match result {
+        Ok(data) => {
+            snapshot.dump_data = data;
+            snapshot.status = "available".to_string();
+            snapshot.percent_progress = Some(100);
+        }
+        Err(error) => {
+            tracing::error!(%error, snapshot = %snapshot_id, "snapshot dump failed");
+            snapshot.status = "failed".to_string();
+        }
+    }
+}
+
 /// no store is configured (memory-mode runs).
 async fn save_snapshot_static(
     state: SharedRdsState,
@@ -795,6 +824,13 @@ impl RdsService {
         logical_db: String,
         tags: Vec<RdsTag>,
         dump: Option<Vec<u8>>,
+        // When `Some(source_id)`, the task live-dumps that source instance
+        // (slow mysqldump/pg_dump) inside the spawn instead of the caller
+        // awaiting it inline — keeps the create/restore/replica response off
+        // the ~60s client read timeout. Mutually exclusive with `dump`
+        // (which carries an already-in-memory dump, e.g. from a snapshot or
+        // S3 backup).
+        dump_source_id: Option<String>,
         created_event: (&'static str, &'static str),
     ) {
         let state_handle = self.state.clone();
@@ -841,6 +877,40 @@ impl RdsService {
             );
         }
         tokio::spawn(async move {
+            // Live-dump the source instance inside the task when requested so
+            // the slow mysqldump/pg_dump never blocks the request handler. On
+            // failure the placeholder row is torn down like any other finalize
+            // error, mirroring the inline path's `cancel_instance_creation`.
+            let dump = match dump_source_id {
+                Some(source_id) => match runtime
+                    .dump_database(
+                        &source_id,
+                        &engine,
+                        &master_username,
+                        &master_user_password,
+                        &logical_db,
+                    )
+                    .await
+                {
+                    Ok(data) => Some(data),
+                    Err(error) => {
+                        fail(
+                            &state_handle,
+                            snapshot_store,
+                            snapshot_lock,
+                            delivery_bus.as_ref(),
+                            &runtime,
+                            &account_id,
+                            &id,
+                            &arn,
+                            &error.to_string(),
+                        )
+                        .await;
+                        return;
+                    }
+                },
+                None => dump,
+            };
             let running = match runtime
                 .ensure_postgres(
                     &id,
@@ -934,6 +1004,158 @@ impl RdsService {
                 &["creation"],
                 event_message,
             );
+            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+        });
+    }
+
+    /// Background the slow database dump for a pure-snapshot op
+    /// (CreateDBSnapshot / final snapshot on DeleteDBInstance). The caller
+    /// inserts the snapshot row synchronously with status `creating` and
+    /// returns immediately; this task runs mysqldump/pg_dump (unbounded in
+    /// dataset size, easily past the ~60s client read timeout) and only then
+    /// flips the row to `available` with the captured dump. `teardown_source`
+    /// is set for the final-snapshot path so the source instance's container
+    /// and data volume are reaped *after* the dump completes rather than
+    /// before it (DeleteDBInstance can't stop the container until the snapshot
+    /// has read from it).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_finalize_snapshot(
+        &self,
+        runtime: Arc<RdsRuntime>,
+        account_id: String,
+        snapshot_id: String,
+        source_id: String,
+        engine: String,
+        username: String,
+        password: String,
+        db_name: String,
+        teardown_source: bool,
+    ) {
+        let state_handle = self.state.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let result = runtime
+                .dump_database(&source_id, &engine, &username, &password, &db_name)
+                .await;
+            apply_snapshot_dump_result(&state_handle, &account_id, &snapshot_id, result);
+            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+            if teardown_source {
+                // Final-snapshot path owns the deferred teardown: the source
+                // container had to stay up for the dump above.
+                runtime.stop_container(&source_id).await;
+                runtime.remove_data_volume(&account_id, &source_id).await;
+            }
+        });
+    }
+
+    /// Background the writer dump for CreateDBClusterSnapshot. The caller
+    /// records the `cluster_snapshots` entry synchronously as `creating` and
+    /// returns; this flips it to `available` once the dump lands (storing the
+    /// base64 dump for a later RestoreDBClusterFromSnapshot). A dump failure
+    /// degrades to the metadata-only snapshot (still `available`, no data),
+    /// matching the historical inline fallback.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_finalize_cluster_snapshot(
+        &self,
+        runtime: Arc<RdsRuntime>,
+        account_id: String,
+        snapshot_id: String,
+        writer_id: String,
+        engine: String,
+        username: String,
+        password: String,
+        db_name: String,
+    ) {
+        let state_handle = self.state.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let dump_b64 = match runtime
+                .dump_database(&writer_id, &engine, &username, &password, &db_name)
+                .await
+            {
+                Ok(data) => Some(BASE64.encode(&data)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        snapshot = %snapshot_id,
+                        writer = %writer_id,
+                        "cluster snapshot dump failed; settling as metadata-only snapshot"
+                    );
+                    None
+                }
+            };
+            {
+                let mut accounts = state_handle.write();
+                let state = accounts.get_or_create(&account_id);
+                if let Some(entry) = state
+                    .extras
+                    .get_mut("cluster_snapshots")
+                    .and_then(|m| m.get_mut(&snapshot_id))
+                {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("Status".to_string(), serde_json::json!("available"));
+                        if let Some(b64) = dump_b64 {
+                            obj.insert("DumpDataB64".to_string(), serde_json::json!(b64));
+                        }
+                    }
+                }
+            }
+            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+        });
+    }
+
+    /// Background the writer dump for RestoreDBClusterToPointInTime. The
+    /// restored cluster is `available` synchronously; this stages the fresh
+    /// dump as `PendingRestoreDumpB64` on the new cluster entry once it lands,
+    /// so a later CreateDBInstance attached to the cluster replays it. A dump
+    /// failure degrades to a metadata-only restore (no staged data), matching
+    /// the historical inline fallback.
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_stage_cluster_restore_dump(
+        &self,
+        runtime: Arc<RdsRuntime>,
+        account_id: String,
+        target_cluster_id: String,
+        writer_id: String,
+        engine: String,
+        username: String,
+        password: String,
+        db_name: String,
+    ) {
+        let state_handle = self.state.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let dump_b64 = match runtime
+                .dump_database(&writer_id, &engine, &username, &password, &db_name)
+                .await
+            {
+                Ok(data) => Some(BASE64.encode(&data)),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        cluster = %target_cluster_id,
+                        writer = %writer_id,
+                        "cluster PIT dump failed; settling as metadata-only restore"
+                    );
+                    None
+                }
+            };
+            if let Some(b64) = dump_b64 {
+                let mut accounts = state_handle.write();
+                let state = accounts.get_or_create(&account_id);
+                if let Some(entry) = state
+                    .extras
+                    .get_mut("clusters")
+                    .and_then(|m| m.get_mut(&target_cluster_id))
+                {
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("PendingRestoreDumpB64".to_string(), serde_json::json!(b64));
+                    }
+                }
+            }
             save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
         });
     }
