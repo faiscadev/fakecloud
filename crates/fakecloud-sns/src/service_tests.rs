@@ -743,6 +743,53 @@ fn publish_subject_length_counts_characters_not_bytes() {
 }
 
 #[test]
+fn publish_rejects_subject_with_control_chars_or_leading_whitespace() {
+    // AWS requires the Subject to begin with a letter, number, or punctuation
+    // mark and to contain no line breaks or control characters.
+    let (svc, _state) = make_sns();
+    assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "ctrl-topic")])));
+    let topic_arn = "arn:aws:sns:us-east-1:123456789012:ctrl-topic";
+
+    // A normal subject is accepted.
+    assert_ok(&svc.publish(&sns_request(
+        "Publish",
+        vec![
+            ("TopicArn", topic_arn),
+            ("Message", "hi"),
+            ("Subject", "All good 1."),
+        ],
+    )));
+
+    // A newline in the subject is rejected.
+    let err = svc
+        .publish(&sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Message", "hi"),
+                ("Subject", "line one\nline two"),
+            ],
+        ))
+        .err()
+        .expect("newline subject must be rejected");
+    assert_eq!(err.code(), "InvalidParameter");
+
+    // Leading whitespace is rejected.
+    let err = svc
+        .publish(&sns_request(
+            "Publish",
+            vec![
+                ("TopicArn", topic_arn),
+                ("Message", "hi"),
+                ("Subject", " leading space"),
+            ],
+        ))
+        .err()
+        .expect("leading-whitespace subject must be rejected");
+    assert_eq!(err.code(), "InvalidParameter");
+}
+
+#[test]
 fn publish_to_topic_stores_message() {
     let (svc, state) = make_sns();
     assert_ok(&svc.create_topic(&sns_request("CreateTopic", vec![("Name", "pub-topic")])));

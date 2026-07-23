@@ -537,9 +537,12 @@ impl RedshiftService {
             c.aqua_configuration_status = v;
         }
         let status = xml_escape(&c.aqua_configuration_status);
+        // AquaStatus reflects the requested/stored configuration status rather
+        // than a hardcoded literal (AQUA is deprecated by AWS, but the echo must
+        // still mirror the input).
         Ok(xml_resp(
             "ModifyAquaConfiguration",
-            format!("<AquaConfiguration><AquaStatus>disabled</AquaStatus><AquaConfigurationStatus>{status}</AquaConfigurationStatus></AquaConfiguration>"),
+            format!("<AquaConfiguration><AquaStatus>{status}</AquaStatus><AquaConfigurationStatus>{status}</AquaConfigurationStatus></AquaConfiguration>"),
             &req.request_id,
         ))
     }

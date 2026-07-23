@@ -777,3 +777,96 @@ fn modify_cluster_persists_encryption_kms_and_port() {
     assert!(listed
         .contains("<AvailabilityZoneRelocationStatus>enabled</AvailabilityZoneRelocationStatus>"));
 }
+
+#[test]
+fn modify_aqua_configuration_echoes_requested_status() {
+    let svc = service();
+    ok(
+        &svc,
+        "CreateCluster",
+        &[
+            ("ClusterIdentifier", "aq"),
+            ("NodeType", "ra3.xlplus"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "Passw0rd123"),
+            ("ClusterType", "single-node"),
+        ],
+    );
+
+    // AquaStatus must reflect the requested/stored status, not a hardcoded
+    // `disabled` literal.
+    let out = ok(
+        &svc,
+        "ModifyAquaConfiguration",
+        &[
+            ("ClusterIdentifier", "aq"),
+            ("AquaConfigurationStatus", "enabled"),
+        ],
+    );
+    assert!(
+        out.contains("<AquaStatus>enabled</AquaStatus>"),
+        "AquaStatus should echo the requested status: {out}"
+    );
+    assert!(out.contains("<AquaConfigurationStatus>enabled</AquaConfigurationStatus>"));
+}
+
+#[test]
+fn update_partner_status_unknown_partner_faults() {
+    let svc = service();
+    // No partner registered: UpdatePartnerStatus must fault instead of a silent
+    // 200 that pretends the update succeeded.
+    assert_eq!(
+        err_code(
+            &svc,
+            "UpdatePartnerStatus",
+            &[
+                ("AccountId", "123456789012"),
+                ("ClusterIdentifier", "c1"),
+                ("DatabaseName", "db1"),
+                ("PartnerName", "ghost"),
+                ("Status", "Active"),
+            ],
+        ),
+        "PartnerNotFound"
+    );
+}
+
+#[test]
+fn update_partner_status_existing_partner_persists() {
+    let svc = service();
+    ok(
+        &svc,
+        "AddPartner",
+        &[
+            ("AccountId", "123456789012"),
+            ("ClusterIdentifier", "c1"),
+            ("DatabaseName", "db1"),
+            ("PartnerName", "datashare"),
+        ],
+    );
+    ok(
+        &svc,
+        "UpdatePartnerStatus",
+        &[
+            ("AccountId", "123456789012"),
+            ("ClusterIdentifier", "c1"),
+            ("DatabaseName", "db1"),
+            ("PartnerName", "datashare"),
+            ("Status", "Inactive"),
+            ("StatusMessage", "paused"),
+        ],
+    );
+    let listed = ok(
+        &svc,
+        "DescribePartners",
+        &[
+            ("AccountId", "123456789012"),
+            ("ClusterIdentifier", "c1"),
+            ("DatabaseName", "db1"),
+        ],
+    );
+    assert!(
+        listed.contains("<Status>Inactive</Status>"),
+        "DescribePartners should reflect the updated status: {listed}"
+    );
+}

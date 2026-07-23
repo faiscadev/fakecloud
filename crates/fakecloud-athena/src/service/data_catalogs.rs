@@ -151,13 +151,18 @@ impl AthenaService {
         }
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
-        if account.data_catalogs.remove(&name).is_none() {
-            return Err(invalid_request(format!("DataCatalog {name} not found")));
-        }
+        // AWS echoes the deleted catalog's real identity (Name + Type), so capture
+        // them before removing the entry rather than returning empty strings.
+        let cat_type = account
+            .data_catalogs
+            .get(&name)
+            .map(|c| c.cat_type.clone())
+            .ok_or_else(|| invalid_request(format!("DataCatalog {name} not found")))?;
+        account.data_catalogs.remove(&name);
         Ok(AwsResponse::ok_json(json!({
             "DataCatalog": {
-                "Name": "",
-                "Type": "",
+                "Name": name,
+                "Type": cat_type,
                 "Status": "DELETE_COMPLETE",
             }
         })))

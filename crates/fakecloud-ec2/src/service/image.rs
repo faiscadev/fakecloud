@@ -7,7 +7,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{
-    gen_id, indexed_list, parse_filters, require, validate_enum, validate_length,
+    gen_id, indexed_list, paginate, parse_filters, require, validate_enum, validate_length,
     validate_max_results, Filter,
 };
 use crate::state::{Ec2State, Image, Tag};
@@ -233,6 +233,7 @@ pub(crate) fn describe_images(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    validate_max_results(&req.query_params, 1, 1000)?;
     let filters = parse_filters(&req.query_params);
     let wanted = indexed_list(&req.query_params, "ImageId");
     // A `disabled` image is hidden from a default DescribeImages; it is only
@@ -281,10 +282,25 @@ pub(crate) fn describe_images(
         .map(|i| image_xml(i, state.tags_for(&i.image_id), &owner))
         .collect();
     items.sort();
+    // MaxResults/NextToken pagination, matching the other EC2 Describe ops. The
+    // owner/filter/NotFound logic above is unchanged; only the returned page is
+    // bounded, with a NextToken cursor that round-trips into the next call.
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("imagesSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond(
         "DescribeImages",
         &req.request_id,
-        &ec2_list("imagesSet", &items),
+        &body,
     ))
 }
 
@@ -1266,6 +1282,66 @@ mod tests {
             &req("DescribeImages", &[("ImageId.1", "ami-missing")]),
         ));
         assert_eq!(err.code(), "InvalidAMIID.NotFound");
+    }
+
+    #[test]
+    fn describe_images_paginates_with_max_results() {
+        use crate::test_support::ec2_request as req;
+        let svc = crate::service::Ec2Service::new();
+        seed_image(&svc, "ami-a");
+        seed_image(&svc, "ami-b");
+        seed_image(&svc, "ami-c");
+
+        // First page: MaxResults caps the result at 2 and returns a cursor.
+        // Scope to `self` so only the three seeded images count (the default
+        // account also carries a public AMI catalogue owned by other accounts).
+        let page1 = String::from_utf8(
+            super::describe_images(
+                &svc,
+                &req(
+                    "DescribeImages",
+                    &[("MaxResults", "2"), ("Owner.1", "self")],
+                ),
+            )
+            .unwrap()
+            .body
+            .expect_bytes()
+            .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(page1.matches("<imageId>").count(), 2, "{page1}");
+        let token_start = page1
+            .find("<nextToken>")
+            .expect("page 1 should carry a nextToken");
+        let content_start = token_start + "<nextToken>".len();
+        let token_end = page1[content_start..].find("</nextToken>").unwrap() + content_start;
+        let token = page1[content_start..token_end].to_string();
+
+        // The cursor round-trips into the next call, yielding the last image and
+        // no further token.
+        let page2 = String::from_utf8(
+            super::describe_images(
+                &svc,
+                &req(
+                    "DescribeImages",
+                    &[
+                        ("MaxResults", "2"),
+                        ("NextToken", &token),
+                        ("Owner.1", "self"),
+                    ],
+                ),
+            )
+            .unwrap()
+            .body
+            .expect_bytes()
+            .to_vec(),
+        )
+        .unwrap();
+        assert_eq!(page2.matches("<imageId>").count(), 1, "{page2}");
+        assert!(
+            !page2.contains("<nextToken>"),
+            "final page must not carry a nextToken: {page2}"
+        );
     }
 
     #[test]

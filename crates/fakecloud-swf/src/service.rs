@@ -1009,6 +1009,14 @@ impl SwfService {
                     "Unknown execution: {workflow_id}"
                 )));
             };
+            // Signal/RequestCancel/Terminate only apply to a running (OPEN)
+            // execution. AWS returns UnknownResourceFault when the resolved
+            // execution is already CLOSED, so do not mutate a closed run.
+            if exec.status != "OPEN" {
+                return Err(unknown_resource(format!(
+                    "Unknown execution: {workflow_id}"
+                )));
+            }
             let mut attrs = Map::new();
             attrs.insert("signalName".into(), json!(signal_name));
             if let Some(i) = &input {
@@ -1044,6 +1052,14 @@ impl SwfService {
                     "Unknown execution: {workflow_id}"
                 )));
             };
+            // Signal/RequestCancel/Terminate only apply to a running (OPEN)
+            // execution. AWS returns UnknownResourceFault when the resolved
+            // execution is already CLOSED, so do not mutate a closed run.
+            if exec.status != "OPEN" {
+                return Err(unknown_resource(format!(
+                    "Unknown execution: {workflow_id}"
+                )));
+            }
             exec.cancel_requested = true;
             push_event(
                 exec,
@@ -1078,6 +1094,14 @@ impl SwfService {
                     "Unknown execution: {workflow_id}"
                 )));
             };
+            // Signal/RequestCancel/Terminate only apply to a running (OPEN)
+            // execution. AWS returns UnknownResourceFault when the resolved
+            // execution is already CLOSED, so do not mutate a closed run.
+            if exec.status != "OPEN" {
+                return Err(unknown_resource(format!(
+                    "Unknown execution: {workflow_id}"
+                )));
+            }
             let mut attrs = Map::new();
             if let Some(r) = &reason {
                 attrs.insert("reason".into(), json!(r));
@@ -2825,5 +2849,60 @@ mod tests {
             child_desc["executionInfo"]["execution"]["workflowId"],
             "w-child"
         );
+    }
+
+    #[test]
+    fn signal_and_terminate_reject_closed_execution() {
+        let svc = service();
+        call(
+            &svc,
+            "RegisterDomain",
+            json!({ "name": "d", "workflowExecutionRetentionPeriodInDays": "1" }),
+        )
+        .unwrap();
+        register_wf(&svc, "wf");
+        let (_run, _dtoken) = start_and_poll(&svc, "w1", "wf");
+
+        // Signalling a running (OPEN) execution still works.
+        call(
+            &svc,
+            "SignalWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w1", "signalName": "go" }),
+        )
+        .unwrap();
+
+        // Terminate closes the execution.
+        call(
+            &svc,
+            "TerminateWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w1" }),
+        )
+        .unwrap();
+
+        // Now the execution is CLOSED: signal/cancel/terminate must fault rather
+        // than mutate the closed run.
+        let sig_err = call(
+            &svc,
+            "SignalWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w1", "signalName": "go" }),
+        )
+        .unwrap_err();
+        assert_eq!(sig_err, "UnknownResourceFault");
+
+        let cancel_err = call(
+            &svc,
+            "RequestCancelWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w1" }),
+        )
+        .unwrap_err();
+        assert_eq!(cancel_err, "UnknownResourceFault");
+
+        let term_err = call(
+            &svc,
+            "TerminateWorkflowExecution",
+            json!({ "domain": "d", "workflowId": "w1" }),
+        )
+        .unwrap_err();
+        assert_eq!(term_err, "UnknownResourceFault");
     }
 }

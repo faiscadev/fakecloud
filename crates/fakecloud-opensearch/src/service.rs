@@ -1117,10 +1117,7 @@ impl OpenSearchService {
             "RollbackServiceSoftwareUpdate" => self.service_software_update(req, "IN_PROGRESS"),
             // ---- Maintenance ----
             "StartDomainMaintenance" => self.start_domain_maintenance(l, req),
-            "GetDomainMaintenanceStatus" => Ok(ok(json!({
-                "Status": "COMPLETED",
-                "StatusMessage": "Maintenance completed"
-            }))),
+            "GetDomainMaintenanceStatus" => self.get_domain_maintenance_status(l, req),
             "ListDomainMaintenances" => self.list_domain_maintenances(l, req),
             "ListScheduledActions" => self.list_scheduled_actions(l, req),
             "UpdateScheduledAction" => self.update_scheduled_action(l, req),
@@ -3029,6 +3026,48 @@ impl OpenSearchService {
             }),
         );
         Ok(ok(json!({ "MaintenanceId": mid })))
+    }
+
+    fn get_domain_maintenance_status(
+        &self,
+        l: &Labels,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let dom = label(l.domain.as_deref())?;
+        let mid = req
+            .query_params
+            .get("maintenanceId")
+            .cloned()
+            .unwrap_or_default();
+        let accounts = self.state.read();
+        let stored = accounts
+            .get(&req.account_id)
+            .and_then(|st| st.domains.get(&dom))
+            .and_then(|d| d.maintenances.get(&mid));
+        if let Some(m) = stored {
+            // Reflect the stored maintenance keyed by MaintenanceId instead of a
+            // hardcoded constant, so the status/action tracks what Start recorded.
+            let status = m
+                .get("Status")
+                .and_then(Value::as_str)
+                .unwrap_or("COMPLETED");
+            let action = m
+                .get("Action")
+                .cloned()
+                .unwrap_or_else(|| json!("REBOOT_NODE"));
+            return Ok(ok(json!({
+                "Status": status,
+                "StatusMessage": "Maintenance completed",
+                "Action": action,
+            })));
+        }
+        // No stored maintenance for this id (unknown domain or id): fall back to
+        // the default terminal status rather than erroring, so a minimal probe
+        // without prior StartDomainMaintenance still succeeds.
+        Ok(ok(json!({
+            "Status": "COMPLETED",
+            "StatusMessage": "Maintenance completed",
+        })))
     }
 
     fn list_domain_maintenances(

@@ -49,8 +49,9 @@ impl AthenaService {
         let account = account_mut(&mut state, &req.account_id);
         let cr = account
             .capacity_reservations
-            .get(&name)
+            .get_mut(&name)
             .ok_or_else(|| invalid_request(format!("CapacityReservation {name} not found")))?;
+        settle_capacity_reservation(cr);
         Ok(AwsResponse::ok_json(json!({
             "CapacityReservation": capacity_reservation_json(cr),
         })))
@@ -70,6 +71,9 @@ impl AthenaService {
             .map(str::to_owned);
         let mut state = self.state.write();
         let account = account_mut(&mut state, &req.account_id);
+        for cr in account.capacity_reservations.values_mut() {
+            settle_capacity_reservation(cr);
+        }
         let mut all: Vec<CapacityReservation> =
             account.capacity_reservations.values().cloned().collect();
         all.sort_by(|a, b| a.name.cmp(&b.name));
@@ -121,7 +125,12 @@ impl AthenaService {
             .capacity_reservations
             .get_mut(&name)
             .ok_or_else(|| invalid_request(format!("CapacityReservation {name} not found")))?;
-        cr.status = "CANCELLING".to_string();
+        // Cancel begins in CANCELLING; the reservation settles to CANCELLED on a
+        // subsequent Get/List read (see settle_capacity_reservation). An already
+        // cancelled/cancelling reservation stays where it is.
+        if cr.status != "CANCELLED" {
+            cr.status = "CANCELLING".to_string();
+        }
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -188,5 +197,16 @@ impl AthenaService {
                 "CapacityAssignments": cfg.capacity_assignments,
             }
         })))
+    }
+}
+
+/// Settle a cancelled capacity reservation on read: `CancelCapacityReservation`
+/// leaves the reservation in `CANCELLING`, and AWS transitions it to `CANCELLED`
+/// shortly after. Mirroring the settle-on-read pattern used elsewhere, the next
+/// Get/List read completes the transition so callers eventually observe
+/// `CANCELLED` instead of a permanently stuck `CANCELLING`.
+fn settle_capacity_reservation(cr: &mut CapacityReservation) {
+    if cr.status == "CANCELLING" {
+        cr.status = "CANCELLED".to_string();
     }
 }

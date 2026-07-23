@@ -46,6 +46,19 @@ impl SnsService {
                     "Subject must be less than 100 characters",
                 ));
             }
+            // AWS also requires the Subject to begin with a letter, number, or
+            // punctuation mark and to contain no line breaks or control
+            // characters. Reject leading whitespace and any control char while
+            // leaving the existing (byte-multibyte) length handling untouched.
+            let starts_with_whitespace = subj.chars().next().is_some_and(char::is_whitespace);
+            let has_control_char = subj.chars().any(char::is_control);
+            if starts_with_whitespace || has_control_char {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameter",
+                    "Invalid parameter: Subject must be ASCII text that begins with a letter, number, or punctuation mark, and must not contain line breaks or control characters",
+                ));
+            }
         }
 
         // Parse MessageAttributes from query params
