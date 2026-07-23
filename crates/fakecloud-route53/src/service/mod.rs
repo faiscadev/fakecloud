@@ -1952,4 +1952,118 @@ mod tests {
             data[0]
         );
     }
+
+    // ─── ChangeResourceRecordSets error-code + alias DELETE match tests ───
+
+    fn change_rrset_req(zone_id: &str, body_xml: &str) -> AwsRequest {
+        let raw_path = format!("/2013-04-01/hostedzone/{zone_id}/rrset");
+        let segs: Vec<String> = raw_path
+            .trim_start_matches('/')
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        AwsRequest {
+            service: "route53".to_string(),
+            action: "ChangeResourceRecordSets".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: DEFAULT_ACCOUNT.to_string(),
+            request_id: "test".to_string(),
+            headers: HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: Bytes::from(body_xml.to_string()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: segs,
+            raw_path,
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn alias_rrset(evaluate_target_health: bool) -> crate::model::ResourceRecordSet {
+        crate::model::ResourceRecordSet {
+            name: "alias.example.com.".to_string(),
+            record_type: "A".to_string(),
+            ttl: None,
+            resource_records: None,
+            alias_target: Some(crate::model::AliasTarget {
+                hosted_zone_id: "Z2FDTNDATAQYW2".to_string(),
+                dns_name: "target.example.com.".to_string(),
+                evaluate_target_health,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn alias_delete_body(evaluate_target_health: bool) -> String {
+        format!(
+            "<?xml version=\"1.0\"?><ChangeResourceRecordSetsRequest xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\">\
+             <ChangeBatch><Changes><Change><Action>DELETE</Action>\
+             <ResourceRecordSet><Name>alias.example.com.</Name><Type>A</Type>\
+             <AliasTarget><HostedZoneId>Z2FDTNDATAQYW2</HostedZoneId>\
+             <DNSName>target.example.com.</DNSName>\
+             <EvaluateTargetHealth>{evaluate_target_health}</EvaluateTargetHealth>\
+             </AliasTarget></ResourceRecordSet></Change></Changes></ChangeBatch>\
+             </ChangeResourceRecordSetsRequest>"
+        )
+    }
+
+    #[tokio::test]
+    async fn change_rrsets_empty_batch_returns_invalid_change_batch() {
+        // AWS models `ChangeBatch.Changes` as a list with `@length(min:1)` and
+        // surfaces an empty batch as `InvalidChangeBatch`, not `InvalidInput`.
+        let (svc, zid) = svc_with_zone(vec![]);
+        let body = "<?xml version=\"1.0\"?><ChangeResourceRecordSetsRequest \
+                    xmlns=\"https://route53.amazonaws.com/doc/2013-04-01/\">\
+                    <ChangeBatch><Changes></Changes></ChangeBatch>\
+                    </ChangeResourceRecordSetsRequest>";
+        let resp = svc.handle(change_rrset_req(&zid, body)).await.unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let out = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            out.contains("<Code>InvalidChangeBatch</Code>"),
+            "expected InvalidChangeBatch, got {out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn alias_delete_with_flipped_evaluate_target_health_is_rejected() {
+        // Seed an alias record with EvaluateTargetHealth=false; a DELETE that
+        // submits true does not match the current values and must be rejected.
+        let (svc, zid) = svc_with_zone(vec![alias_rrset(false)]);
+        let resp = svc
+            .handle(change_rrset_req(&zid, &alias_delete_body(true)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::BAD_REQUEST);
+        let out = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+        assert!(
+            out.contains("<Code>InvalidChangeBatch</Code>"),
+            "expected InvalidChangeBatch, got {out}"
+        );
+        // The record is still present (DELETE did not apply).
+        let st = svc.state.read();
+        let zone = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().hosted_zones[&zid];
+        assert_eq!(zone.resource_record_sets.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn alias_delete_with_matching_evaluate_target_health_succeeds() {
+        // The same DELETE with the correct EvaluateTargetHealth flag applies.
+        let (svc, zid) = svc_with_zone(vec![alias_rrset(false)]);
+        let resp = svc
+            .handle(change_rrset_req(&zid, &alias_delete_body(false)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::OK, "expected DELETE to succeed");
+        let st = svc.state.read();
+        let zone = &st.accounts.get(DEFAULT_ACCOUNT).unwrap().hosted_zones[&zid];
+        assert!(
+            zone.resource_record_sets.is_empty(),
+            "alias record should have been deleted"
+        );
+    }
 }

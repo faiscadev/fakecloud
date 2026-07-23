@@ -1028,6 +1028,68 @@ async fn get_metric_statistics_json_roundtrip() {
 }
 
 #[tokio::test]
+async fn get_metric_statistics_rejects_start_ge_end() {
+    // AWS rejects StartTime >= EndTime with InvalidParameterValue.
+    let svc = service();
+    let err = call_err(
+        &svc,
+        "GetMetricStatistics",
+        &[
+            ("Namespace", "MyApp"),
+            ("MetricName", "Latency"),
+            ("StartTime", "2020-06-01T12:00:00Z"),
+            ("EndTime", "2020-06-01T12:00:00Z"),
+            ("Period", "60"),
+            ("Statistics.member.1", "Average"),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
+
+#[tokio::test]
+async fn get_metric_statistics_rejects_non_multiple_of_60_period() {
+    // Period must be 1/5/10/30 or a positive multiple of 60; 7 is invalid.
+    let svc = service();
+    let err = call_err(
+        &svc,
+        "GetMetricStatistics",
+        &[
+            ("Namespace", "MyApp"),
+            ("MetricName", "Latency"),
+            ("StartTime", "2020-06-01T12:00:00Z"),
+            ("EndTime", "2020-06-01T13:00:00Z"),
+            ("Period", "7"),
+            ("Statistics.member.1", "Average"),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
+
+#[tokio::test]
+async fn get_metric_statistics_accepts_valid_range_and_period() {
+    // A valid StartTime<EndTime with a 60s Period (and a high-resolution 10s
+    // value) succeeds.
+    let svc = service();
+    for period in ["60", "10"] {
+        call(
+            &svc,
+            "GetMetricStatistics",
+            &[
+                ("Namespace", "MyApp"),
+                ("MetricName", "Latency"),
+                ("StartTime", "2020-06-01T12:00:00Z"),
+                ("EndTime", "2020-06-01T13:00:00Z"),
+                ("Period", period),
+                ("Statistics.member.1", "Average"),
+            ],
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
 async fn put_metric_alarm_json_roundtrip() {
     let svc = service();
     let resp = call_json(

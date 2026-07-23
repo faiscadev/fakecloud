@@ -487,7 +487,10 @@ impl DynamoDbService {
         // (within the window) must be applied at most once and replay the
         // original result. Reusing a token with a different body is rejected.
         // The hash covers the whole request body, so the token field itself is
-        // part of the identity — only an identical retry replays.
+        // part of the identity — only an identical retry replays. The actual
+        // check-and-reserve happens under the state write lock below so that a
+        // concurrent same-token retry serializes with (and replays) the apply
+        // instead of double-applying across the lock gap.
         let client_token = body["ClientRequestToken"].as_str().map(str::to_string);
         let request_hash = {
             use std::hash::{Hash, Hasher};
@@ -495,13 +498,6 @@ impl DynamoDbService {
             req.body.hash(&mut h);
             h.finish()
         };
-        if let Some(token) = client_token.as_deref() {
-            if let Some(cached) =
-                self.transact_idempotency_lookup(&req.account_id, token, request_hash)?
-            {
-                return Ok(cached);
-            }
-        }
 
         validate_optional_enum_value(
             "returnConsumedCapacity",
@@ -583,6 +579,21 @@ impl DynamoDbService {
         }
 
         let mut accounts = self.state.write();
+
+        // Idempotency check-and-reserve under the same write lock that guards
+        // the apply below. Doing the lookup here (rather than before taking the
+        // lock) means two concurrent retries carrying the same token serialize
+        // on this lock: the first applies and stores its result while holding
+        // the lock, so the second observes the cached outcome and replays it
+        // instead of applying the transaction a second time.
+        if let Some(token) = client_token.as_deref() {
+            if let Some(cached) =
+                self.transact_idempotency_lookup(&req.account_id, token, request_hash)?
+            {
+                return Ok(cached);
+            }
+        }
+
         let state = accounts.get_or_create(&req.account_id);
 
         // Validate every referenced table exists up-front. Without this
@@ -1063,6 +1074,13 @@ impl DynamoDbService {
             result["ItemCollectionMetrics"] = json!(icm);
         }
 
+        // Cache the committed outcome while still holding the state write lock
+        // so the store is atomic with the apply: an identical retry with the
+        // same ClientRequestToken replays this result rather than re-applying.
+        if let Some(token) = client_token.as_deref() {
+            self.transact_idempotency_store(&req.account_id, token, request_hash, &result);
+        }
+
         // Drop the write lock before firing kinesis deliveries so the
         // delivery bus (which may take a read lock to look up the target
         // stream) doesn't deadlock against us.
@@ -1075,12 +1093,6 @@ impl DynamoDbService {
                 old_image.as_ref(),
                 new_image.as_ref(),
             );
-        }
-
-        // Cache the committed outcome so an identical retry with the same
-        // ClientRequestToken replays this result instead of re-applying.
-        if let Some(token) = client_token.as_deref() {
-            self.transact_idempotency_store(&req.account_id, token, request_hash, &result);
         }
 
         Self::ok_json(result)
@@ -1315,12 +1327,34 @@ impl DynamoDbService {
             )
         })?;
 
+        // Idempotency: like TransactWriteItems, a retried ExecuteTransaction
+        // carrying the same ClientRequestToken (within the window) is applied
+        // at most once and replays the original result. The check-and-reserve
+        // and the store both happen under the state write lock below so a
+        // concurrent same-token retry serializes with the apply.
+        let client_token = body["ClientRequestToken"].as_str().map(str::to_string);
+        let request_hash = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            req.body.hash(&mut h);
+            h.finish()
+        };
+
         // Acquire the write lock once for the whole batch — DDB
         // ExecuteTransaction is all-or-nothing so we cannot release
         // the lock between phases or another writer could observe
         // partial state. Use the caller's account_id so cross-account
         // STS callers don't accidentally write to the default account.
         let mut accounts = self.state.write();
+
+        if let Some(token) = client_token.as_deref() {
+            if let Some(cached) =
+                self.transact_idempotency_lookup(&req.account_id, token, request_hash)?
+            {
+                return Ok(cached);
+            }
+        }
+
         let state = accounts.get_or_create(&req.account_id);
 
         let region = req.region.clone();
@@ -1488,6 +1522,15 @@ impl DynamoDbService {
             }
         }
 
+        let result = json!({ "Responses": applied_responses });
+
+        // Cache the committed outcome while still holding the write lock so the
+        // store is atomic with the apply: an identical retry with the same
+        // ClientRequestToken replays this result rather than re-applying.
+        if let Some(token) = client_token.as_deref() {
+            self.transact_idempotency_store(&req.account_id, token, request_hash, &result);
+        }
+
         // Drop the write lock before firing kinesis deliveries so
         // the delivery bus (which may take a read lock to look up
         // the target stream) doesn't deadlock against us.
@@ -1502,7 +1545,7 @@ impl DynamoDbService {
             );
         }
 
-        Self::ok_json(json!({ "Responses": applied_responses }))
+        Self::ok_json(result)
     }
 }
 
@@ -1994,6 +2037,124 @@ mod tests {
         let records = table.stream_records.read();
         assert_eq!(records.len(), 2, "one stream record per Put");
         assert!(records.iter().all(|r| r.event_name == "INSERT"));
+    }
+
+    #[tokio::test]
+    async fn transact_write_same_client_token_applies_once() {
+        // A retried TransactWriteItems carrying the same ClientRequestToken must
+        // be applied at most once (idempotent replay), not double-applied. An
+        // ADD that increments a counter must move it by exactly 1 across two
+        // identical calls, and the second call must still return success.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let body = json!({
+            "ClientRequestToken": "tok-fixed-1",
+            "TransactItems": [
+                {"Update": {
+                    "TableName": "Widgets",
+                    "Key": {"pk": {"S": "counter"}},
+                    "UpdateExpression": "ADD #c :inc",
+                    "ExpressionAttributeNames": {"#c": "count"},
+                    "ExpressionAttributeValues": {":inc": {"N": "1"}}
+                }}
+            ]
+        });
+
+        svc.transact_write_items(&req_for("TransactWriteItems", body.clone()))
+            .unwrap();
+        // Second call with the same token + body: replays, does not re-apply.
+        let resp = svc
+            .transact_write_items(&req_for("TransactWriteItems", body))
+            .unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        let item = table
+            .items
+            .iter()
+            .find(|i| i["pk"]["S"] == json!("counter"))
+            .expect("counter item");
+        assert_eq!(
+            item["count"]["N"],
+            json!("1"),
+            "counter must be incremented exactly once for a replayed token"
+        );
+    }
+
+    #[tokio::test]
+    async fn transact_write_distinct_tokens_apply_each_time() {
+        // Control for the idempotency test: two calls with DIFFERENT tokens are
+        // two separate transactions, so the ADD increments the counter twice.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        for tok in ["tok-a", "tok-b"] {
+            let body = json!({
+                "ClientRequestToken": tok,
+                "TransactItems": [
+                    {"Update": {
+                        "TableName": "Widgets",
+                        "Key": {"pk": {"S": "counter"}},
+                        "UpdateExpression": "ADD #c :inc",
+                        "ExpressionAttributeNames": {"#c": "count"},
+                        "ExpressionAttributeValues": {":inc": {"N": "1"}}
+                    }}
+                ]
+            });
+            svc.transact_write_items(&req_for("TransactWriteItems", body))
+                .unwrap();
+        }
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        let item = table
+            .items
+            .iter()
+            .find(|i| i["pk"]["S"] == json!("counter"))
+            .expect("counter item");
+        assert_eq!(item["count"]["N"], json!("2"));
+    }
+
+    #[tokio::test]
+    async fn execute_transaction_same_client_token_applies_once() {
+        // ExecuteTransaction shares the same idempotency machinery: a retried
+        // INSERT with the same ClientRequestToken replays success instead of
+        // re-applying (which would otherwise cancel with a DuplicateItem).
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state.clone());
+
+        let body = json!({
+            "ClientRequestToken": "tok-exec-1",
+            "TransactStatements": [
+                {"Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}"},
+            ]
+        });
+
+        let resp = svc
+            .execute_transaction(&req_for("ExecuteTransaction", body.clone()))
+            .unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+        // Replay: same token + body must succeed and not insert a duplicate.
+        let resp = svc
+            .execute_transaction(&req_for("ExecuteTransaction", body))
+            .unwrap();
+        assert_eq!(resp.status, http::StatusCode::OK);
+
+        let accts = state.read();
+        let s = accts.get("123456789012").unwrap();
+        let table = s.tables.get("Widgets").unwrap();
+        assert_eq!(
+            table.items.len(),
+            1,
+            "a replayed ExecuteTransaction must not apply the INSERT twice"
+        );
     }
 
     #[tokio::test]
