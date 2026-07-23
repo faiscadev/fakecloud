@@ -595,7 +595,7 @@ impl Wafv2Service {
         fakecloud_core::validation::validate_string_length("Id", &id, 1, 36)?;
         let lock_token = require_str(&body, "LockToken")?;
         fakecloud_core::validation::validate_string_length("LockToken", &lock_token, 1, 36)?;
-        let _scope = require_scope(&body)?;
+        let scope = require_scope(&body)?;
         let version_to_expire = require_str(&body, "VersionToExpire")?;
         fakecloud_core::validation::validate_string_length(
             "VersionToExpire",
@@ -607,10 +607,38 @@ impl Wafv2Service {
             .get("ExpiryTimestamp")
             .and_then(Value::as_f64)
             .ok_or_else(|| invalid_param("ExpiryTimestamp is required"))?;
+
+        // When the managed rule set (scope, name, matching Id) and the named
+        // published version exist, persist the expiry onto that version so a
+        // later GetManagedRuleSet surfaces it (previously this validated and
+        // returned Ok without writing anything). A request against a set/version
+        // that was never created still returns success, matching AWS's smoke
+        // response for the op rather than adding a hard dependency on prior
+        // state.
+        let next_lock_token = synth_uuid();
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        if let Some(set) = account
+            .managed_rule_sets
+            .get_mut(&(scope, name.clone()))
+            .filter(|s| s.id == id)
+        {
+            if set.published_versions.contains(&version_to_expire) {
+                let detail = set
+                    .published_version_details
+                    .entry(version_to_expire.clone())
+                    .or_insert_with(|| json!({ "Capacity": 50 }));
+                if let Some(obj) = detail.as_object_mut() {
+                    obj.insert("ExpiryTimestamp".to_string(), json!(expiry_timestamp));
+                }
+            }
+            set.lock_token = next_lock_token.clone();
+        }
+
         Ok(AwsResponse::ok_json(json!({
             "ExpiringVersion": version_to_expire,
             "ExpiryTimestamp": expiry_timestamp,
-            "NextLockToken": synth_uuid(),
+            "NextLockToken": next_lock_token,
         })))
     }
 

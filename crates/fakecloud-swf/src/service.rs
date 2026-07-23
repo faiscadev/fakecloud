@@ -1481,11 +1481,18 @@ impl SwfService {
             if let Some(ctx) = execution_context {
                 exec.latest_execution_context = Some(ctx);
             }
+            // ContinueAsNew / StartChildWorkflowExecution spawn brand-new
+            // executions. They cannot be inserted while `exec` is borrowed, so
+            // apply_decision returns them and we insert once the borrow ends.
+            let mut spawned: Vec<Execution> = Vec::new();
             for decision in &decisions {
                 if exec.status != "OPEN" {
                     break;
                 }
-                apply_decision(exec, decision, dtc_id);
+                spawned.append(&mut apply_decision(exec, decision, dtc_id));
+            }
+            for e in spawned {
+                data.executions.insert(e.run_id.clone(), e);
             }
             empty_ok()
         })
@@ -1589,11 +1596,16 @@ impl SwfService {
 /// Apply a single decision from `RespondDecisionTaskCompleted`, appending the
 /// history events it produces. `dtc_id` is the `DecisionTaskCompleted` event id
 /// the produced events reference.
-fn apply_decision(exec: &mut Execution, decision: &Value, dtc_id: i64) {
+///
+/// Returns any brand-new executions the decision spawns (a ContinueAsNew
+/// continuation or a StartChildWorkflowExecution child). The caller inserts
+/// them into the execution map once its `&mut Execution` borrow ends.
+fn apply_decision(exec: &mut Execution, decision: &Value, dtc_id: i64) -> Vec<Execution> {
     let decision_type = decision
         .get("decisionType")
         .and_then(Value::as_str)
         .unwrap_or_default();
+    let mut spawned: Vec<Execution> = Vec::new();
     match decision_type {
         "ScheduleActivityTask" => {
             let attrs = decision
@@ -1700,13 +1712,22 @@ fn apply_decision(exec: &mut Execution, decision: &Value, dtc_id: i64) {
             close_execution(exec, "CANCELED");
         }
         "ContinueAsNewWorkflowExecution" => {
+            let attrs = decision
+                .get("continueAsNewWorkflowExecutionDecisionAttributes")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let new_run = new_run_id();
+            // Build the continuation now so its runId matches the one we
+            // advertise, then create + seed it so it is Describe/Poll-able.
+            let continuation = build_continuation(exec, &attrs, new_run.clone());
             push_event(
                 exec,
                 "WorkflowExecutionContinuedAsNew",
                 "workflowExecutionContinuedAsNewEventAttributes",
-                json!({ "decisionTaskCompletedEventId": dtc_id, "newExecutionRunId": new_run_id() }),
+                json!({ "decisionTaskCompletedEventId": dtc_id, "newExecutionRunId": new_run }),
             );
             close_execution(exec, "CONTINUED_AS_NEW");
+            spawned.push(continuation);
         }
         "RecordMarker" => {
             let attrs = decision
@@ -1829,19 +1850,45 @@ fn apply_decision(exec: &mut Execution, decision: &Value, dtc_id: i64) {
             let workflow_id = attrs
                 .get("workflowId")
                 .and_then(Value::as_str)
-                .unwrap_or_default();
-            push_event(
+                .unwrap_or_default()
+                .to_string();
+            let child_task_list =
+                task_list_name(attrs.get("taskList")).unwrap_or_else(|| exec.task_list.clone());
+            let child_policy = attrs
+                .get("childPolicy")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| exec.child_policy.clone());
+            let initiated_id = push_event(
                 exec,
                 "StartChildWorkflowExecutionInitiated",
                 "startChildWorkflowExecutionInitiatedEventAttributes",
                 json!({
                     "workflowId": workflow_id,
                     "workflowType": { "name": name, "version": version },
-                    "taskList": { "name": exec.task_list },
-                    "childPolicy": exec.child_policy,
+                    "taskList": { "name": child_task_list },
+                    "childPolicy": child_policy,
                     "decisionTaskCompletedEventId": dtc_id,
                 }),
             );
+            // Create the real child execution so it is Describe/Poll-able, and
+            // record its start on the PARENT history so the open-child count
+            // reflects a child that actually exists. (Modeling the child's own
+            // completion -> ChildWorkflowExecutionCompleted on the parent is not
+            // done here; the child runs its own lifecycle independently.)
+            let child_run = new_run_id();
+            let child = build_child(exec, &attrs, workflow_id.clone(), child_run.clone());
+            push_event(
+                exec,
+                "ChildWorkflowExecutionStarted",
+                "childWorkflowExecutionStartedEventAttributes",
+                json!({
+                    "workflowExecution": { "workflowId": workflow_id, "runId": child_run },
+                    "workflowType": { "name": name, "version": version },
+                    "initiatedEventId": initiated_id,
+                }),
+            );
+            spawned.push(child);
         }
         "ScheduleLambdaFunction" => {
             let attrs = decision
@@ -1866,6 +1913,181 @@ fn apply_decision(exec: &mut Execution, decision: &Value, dtc_id: i64) {
         }
         _ => {}
     }
+    spawned
+}
+
+/// Build the OPEN continuation execution for a `ContinueAsNewWorkflowExecution`
+/// decision: same workflowId as `old`, a fresh runId, and each field taken from
+/// the decision attributes when present, else carried over from `old`.
+fn build_continuation(old: &Execution, attrs: &Value, run_id: String) -> Execution {
+    let str_attr = |k: &str| attrs.get(k).and_then(Value::as_str).map(str::to_string);
+    let version =
+        str_attr("workflowTypeVersion").unwrap_or_else(|| old.workflow_type_version.clone());
+    let task_list = task_list_name(attrs.get("taskList")).unwrap_or_else(|| old.task_list.clone());
+    let child_policy = str_attr("childPolicy").unwrap_or_else(|| old.child_policy.clone());
+    let exec_timeout = str_attr("executionStartToCloseTimeout")
+        .unwrap_or_else(|| old.execution_start_to_close_timeout.clone());
+    let task_timeout = str_attr("taskStartToCloseTimeout")
+        .unwrap_or_else(|| old.task_start_to_close_timeout.clone());
+    let tag_list = attrs
+        .get("tagList")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_else(|| old.tag_list.clone());
+    let mut exec = blank_open_execution(
+        old.domain.clone(),
+        old.workflow_id.clone(),
+        run_id,
+        old.workflow_type_name.clone(),
+        version,
+        task_list,
+        str_attr("taskPriority").or_else(|| old.task_priority.clone()),
+        tag_list,
+        str_attr("input"),
+        child_policy,
+        task_timeout,
+        exec_timeout,
+        str_attr("lambdaRole").or_else(|| old.lambda_role.clone()),
+    );
+    seed_started_history(&mut exec, Some(&old.run_id));
+    exec
+}
+
+/// Build the OPEN child execution for a `StartChildWorkflowExecution` decision.
+fn build_child(
+    parent: &Execution,
+    attrs: &Value,
+    workflow_id: String,
+    run_id: String,
+) -> Execution {
+    let str_attr = |k: &str| attrs.get(k).and_then(Value::as_str).map(str::to_string);
+    let (name, version) = type_name_version(attrs.get("workflowType")).unwrap_or_default();
+    let task_list =
+        task_list_name(attrs.get("taskList")).unwrap_or_else(|| parent.task_list.clone());
+    let child_policy = str_attr("childPolicy").unwrap_or_else(|| parent.child_policy.clone());
+    let exec_timeout = str_attr("executionStartToCloseTimeout")
+        .unwrap_or_else(|| parent.execution_start_to_close_timeout.clone());
+    let task_timeout = str_attr("taskStartToCloseTimeout")
+        .unwrap_or_else(|| parent.task_start_to_close_timeout.clone());
+    let tag_list = attrs
+        .get("tagList")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut exec = blank_open_execution(
+        parent.domain.clone(),
+        workflow_id,
+        run_id,
+        name,
+        version,
+        task_list,
+        str_attr("taskPriority"),
+        tag_list,
+        str_attr("input"),
+        child_policy,
+        task_timeout,
+        exec_timeout,
+        str_attr("lambdaRole"),
+    );
+    seed_started_history(&mut exec, None);
+    exec
+}
+
+/// Construct a fresh OPEN execution with the state-machine fields defaulted and
+/// no history yet (seed it with [`seed_started_history`]).
+#[allow(clippy::too_many_arguments)]
+fn blank_open_execution(
+    domain: String,
+    workflow_id: String,
+    run_id: String,
+    workflow_type_name: String,
+    workflow_type_version: String,
+    task_list: String,
+    task_priority: Option<String>,
+    tag_list: Vec<String>,
+    input: Option<String>,
+    child_policy: String,
+    task_start_to_close_timeout: String,
+    execution_start_to_close_timeout: String,
+    lambda_role: Option<String>,
+) -> Execution {
+    Execution {
+        domain,
+        workflow_id,
+        run_id,
+        workflow_type_name,
+        workflow_type_version,
+        task_list,
+        task_priority,
+        status: "OPEN".to_string(),
+        close_status: None,
+        start_timestamp: now_epoch(),
+        close_timestamp: None,
+        tag_list,
+        input,
+        child_policy,
+        task_start_to_close_timeout,
+        execution_start_to_close_timeout,
+        lambda_role,
+        cancel_requested: false,
+        latest_execution_context: None,
+        events: Vec::new(),
+        next_event_id: 1,
+        decision_scheduled: false,
+        decision_scheduled_event_id: None,
+        decision_started_event_id: None,
+        previous_started_event_id: 0,
+        decision_task_token: None,
+        activities: Vec::new(),
+    }
+}
+
+/// Seed a new execution's history with `WorkflowExecutionStarted` followed by
+/// the first `DecisionTaskScheduled`, so a decider's first poll has work.
+/// `continued_run_id` is the prior run for a ContinueAsNew continuation.
+fn seed_started_history(exec: &mut Execution, continued_run_id: Option<&str>) {
+    let mut a = Map::new();
+    a.insert(
+        "workflowType".into(),
+        json!({ "name": exec.workflow_type_name, "version": exec.workflow_type_version }),
+    );
+    a.insert("taskList".into(), json!({ "name": exec.task_list }));
+    a.insert("childPolicy".into(), json!(exec.child_policy));
+    a.insert(
+        "executionStartToCloseTimeout".into(),
+        json!(exec.execution_start_to_close_timeout),
+    );
+    a.insert(
+        "taskStartToCloseTimeout".into(),
+        json!(exec.task_start_to_close_timeout),
+    );
+    if let Some(i) = &exec.input {
+        a.insert("input".into(), json!(i));
+    }
+    if !exec.tag_list.is_empty() {
+        a.insert("tagList".into(), json!(exec.tag_list));
+    }
+    if let Some(lr) = &exec.lambda_role {
+        a.insert("lambdaRole".into(), json!(lr));
+    }
+    if let Some(c) = continued_run_id {
+        a.insert("continuedExecutionRunId".into(), json!(c));
+    }
+    push_event(
+        exec,
+        "WorkflowExecutionStarted",
+        "workflowExecutionStartedEventAttributes",
+        Value::Object(a),
+    );
+    schedule_decision_task(exec);
 }
 
 fn signal_external_attrs(decision: &Value, dtc_id: i64) -> Value {
@@ -2425,5 +2647,183 @@ mod tests {
         assert_eq!(oc["openTimers"], 1);
         assert_eq!(oc["openChildWorkflowExecutions"], 1);
         assert_eq!(oc["openLambdaFunctions"], 1);
+    }
+
+    /// Register a domain + workflow type with full defaults, start `workflow_id`,
+    /// and return `(run_id, decision_task_token)` for the first decision.
+    fn start_and_poll(svc: &SwfService, workflow_id: &str, wf: &str) -> (String, String) {
+        let start = call(
+            svc,
+            "StartWorkflowExecution",
+            json!({ "domain": "d", "workflowId": workflow_id, "workflowType": { "name": wf, "version": "1" } }),
+        )
+        .unwrap();
+        let run_id = start["runId"].as_str().unwrap().to_string();
+        let dt = call(
+            svc,
+            "PollForDecisionTask",
+            json!({ "domain": "d", "taskList": { "name": "dtl" } }),
+        )
+        .unwrap();
+        (run_id, dt["taskToken"].as_str().unwrap().to_string())
+    }
+
+    fn register_wf(svc: &SwfService, name: &str) {
+        call(
+            svc,
+            "RegisterWorkflowType",
+            json!({
+                "domain": "d", "name": name, "version": "1",
+                "defaultTaskList": { "name": "dtl" },
+                "defaultChildPolicy": "TERMINATE",
+                "defaultExecutionStartToCloseTimeout": "3600",
+                "defaultTaskStartToCloseTimeout": "60"
+            }),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn continue_as_new_creates_the_continuation() {
+        // ContinueAsNew advertised a newExecutionRunId but never created that
+        // execution, so Describe/Poll on it 404'd (bug-hunt).
+        let svc = service();
+        call(
+            &svc,
+            "RegisterDomain",
+            json!({ "name": "d", "workflowExecutionRetentionPeriodInDays": "1" }),
+        )
+        .unwrap();
+        register_wf(&svc, "wf");
+        let (old_run, dtoken) = start_and_poll(&svc, "w1", "wf");
+
+        call(
+            &svc,
+            "RespondDecisionTaskCompleted",
+            json!({
+                "taskToken": dtoken,
+                "decisions": [{
+                    "decisionType": "ContinueAsNewWorkflowExecution",
+                    "continueAsNewWorkflowExecutionDecisionAttributes": { "input": "round2" }
+                }]
+            }),
+        )
+        .unwrap();
+
+        // Old run is CLOSED / CONTINUED_AS_NEW.
+        let old_desc = call(
+            &svc,
+            "DescribeWorkflowExecution",
+            json!({ "domain": "d", "execution": { "workflowId": "w1", "runId": old_run } }),
+        )
+        .unwrap();
+        assert_eq!(old_desc["executionInfo"]["executionStatus"], "CLOSED");
+        assert_eq!(old_desc["executionInfo"]["closeStatus"], "CONTINUED_AS_NEW");
+
+        // The advertised newExecutionRunId is a real OPEN execution.
+        let hist = call(
+            &svc,
+            "GetWorkflowExecutionHistory",
+            json!({ "domain": "d", "execution": { "workflowId": "w1", "runId": old_run } }),
+        )
+        .unwrap();
+        let new_run = hist["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["eventType"] == "WorkflowExecutionContinuedAsNew")
+            .and_then(|e| {
+                e["workflowExecutionContinuedAsNewEventAttributes"]["newExecutionRunId"].as_str()
+            })
+            .unwrap()
+            .to_string();
+        let new_desc = call(
+            &svc,
+            "DescribeWorkflowExecution",
+            json!({ "domain": "d", "execution": { "workflowId": "w1", "runId": new_run } }),
+        )
+        .unwrap();
+        assert_eq!(new_desc["executionInfo"]["executionStatus"], "OPEN");
+
+        // The continuation is pollable (its seeded history is decider-visible).
+        let dt = call(
+            &svc,
+            "PollForDecisionTask",
+            json!({ "domain": "d", "taskList": { "name": "dtl" } }),
+        )
+        .unwrap();
+        assert!(!dt["taskToken"].as_str().unwrap().is_empty());
+        assert_eq!(dt["workflowExecution"]["runId"], new_run);
+    }
+
+    #[test]
+    fn start_child_workflow_creates_the_child() {
+        // StartChildWorkflowExecution recorded initiation but never created the
+        // child, so nothing was Describable and the open-child count was stuck
+        // at 1 for a nonexistent child (bug-hunt).
+        let svc = service();
+        call(
+            &svc,
+            "RegisterDomain",
+            json!({ "name": "d", "workflowExecutionRetentionPeriodInDays": "1" }),
+        )
+        .unwrap();
+        register_wf(&svc, "parent");
+        register_wf(&svc, "child");
+        let (parent_run, dtoken) = start_and_poll(&svc, "w-parent", "parent");
+
+        call(
+            &svc,
+            "RespondDecisionTaskCompleted",
+            json!({
+                "taskToken": dtoken,
+                "decisions": [{
+                    "decisionType": "StartChildWorkflowExecution",
+                    "startChildWorkflowExecutionDecisionAttributes": {
+                        "workflowId": "w-child",
+                        "workflowType": { "name": "child", "version": "1" }
+                    }
+                }]
+            }),
+        )
+        .unwrap();
+
+        // Parent history has both StartChildWorkflowExecutionInitiated and
+        // ChildWorkflowExecutionStarted.
+        let hist = call(
+            &svc,
+            "GetWorkflowExecutionHistory",
+            json!({ "domain": "d", "execution": { "workflowId": "w-parent", "runId": parent_run } }),
+        )
+        .unwrap();
+        let started = hist["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["eventType"] == "ChildWorkflowExecutionStarted")
+            .expect("ChildWorkflowExecutionStarted present");
+        assert!(hist["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e["eventType"] == "StartChildWorkflowExecutionInitiated"));
+        let child_run = started["childWorkflowExecutionStartedEventAttributes"]
+            ["workflowExecution"]["runId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The child execution is Describable and OPEN.
+        let child_desc = call(
+            &svc,
+            "DescribeWorkflowExecution",
+            json!({ "domain": "d", "execution": { "workflowId": "w-child", "runId": child_run } }),
+        )
+        .unwrap();
+        assert_eq!(child_desc["executionInfo"]["executionStatus"], "OPEN");
+        assert_eq!(
+            child_desc["executionInfo"]["execution"]["workflowId"],
+            "w-child"
+        );
     }
 }
