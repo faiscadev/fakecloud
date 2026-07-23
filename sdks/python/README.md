@@ -18,6 +18,7 @@ pip install fakecloud
 import asyncio
 from fakecloud import FakeCloud
 
+
 async def main():
     async with FakeCloud("http://localhost:4566") as fc:
         # Check server health
@@ -41,6 +42,7 @@ async def main():
 
         # Reset all state between tests
         await fc.reset()
+
 
 asyncio.run(main())
 ```
@@ -389,7 +391,7 @@ def test_classifier_branches_on_spam_vs_ham():
         ],
     )
 
-    classify("hello friend")           # user code that calls Bedrock
+    classify("hello friend")  # user code that calls Bedrock
     classify("buy now cheap pills")
 
     invocations = fc.bedrock.get_invocations().invocations
@@ -436,12 +438,14 @@ except FakeCloudError as e:
 import pytest
 from fakecloud import FakeCloudSync
 
+
 @pytest.fixture(autouse=True)
 def reset_fakecloud():
     fc = FakeCloudSync()
     fc.reset()
     yield fc
     fc.close()
+
 
 def test_email_sent(reset_fakecloud):
     # ... your code that sends an email via SES ...
