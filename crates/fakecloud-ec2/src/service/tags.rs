@@ -8,7 +8,9 @@ use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
-use crate::service_helpers::{indexed_list, parse_filters, parse_tag_pairs, Filter};
+use crate::service_helpers::{
+    indexed_list, paginate, parse_filters, parse_tag_pairs, validate_max_results, Filter,
+};
 use crate::state::{Ec2State, Tag};
 
 /// Render a `<tagSet>` from a resource's stored tags (lowerCamel wire shape).
@@ -192,6 +194,8 @@ pub(crate) fn describe_tags(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    // DescribeTags caps MaxResults at [5, 1000] like the other paginated ops.
+    validate_max_results(&req.query_params, 5, 1000)?;
     let filters = parse_filters(&req.query_params);
 
     let accounts = svc.state.read();
@@ -216,7 +220,19 @@ pub(crate) fn describe_tags(
     // Stable ordering so responses are deterministic.
     items.sort();
 
-    let body = ec2_list("tagSet", &items);
+    // DescribeTags is `paginated`; honor MaxResults + NextToken.
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = paginate(&items, next_token, max_results);
+    let body = format!(
+        "{}{}",
+        ec2_list("tagSet", &page),
+        token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
+    );
     Ok(Ec2Service::respond("DescribeTags", &req.request_id, &body))
 }
 

@@ -1294,6 +1294,21 @@ pub(crate) fn describe_instances(
         }
     }
 
+    // Resolve group id -> name up front so both the `group-name` filter and the
+    // response rendering can use it. Build the per-instance block-device
+    // mappings (from attached volumes) so `block-device-mapping.*` filters work.
+    let sg_names = sg_name_map(state);
+    let mut bdm_by_instance: HashMap<String, Vec<&crate::state::VolumeAttachment>> = HashMap::new();
+    for vol in state.volumes.values() {
+        for att in &vol.attachments {
+            bdm_by_instance
+                .entry(att.instance_id.clone())
+                .or_default()
+                .push(att);
+        }
+    }
+    let no_bdm: Vec<&crate::state::VolumeAttachment> = Vec::new();
+
     // Flatten matching instances into a stable order (by reservation, then id),
     // then paginate over the flat instance list — AWS counts instances, not
     // reservations, against MaxResults.
@@ -1307,6 +1322,8 @@ pub(crate) fn describe_instances(
                 state.tags_for(&i.instance_id),
                 &filters,
                 &arch_for(state, &i.image_id),
+                &sg_names,
+                bdm_by_instance.get(&i.instance_id).unwrap_or(&no_bdm),
             )
         })
         .collect();
@@ -1318,7 +1335,6 @@ pub(crate) fn describe_instances(
     let (page, token) = crate::service_helpers::paginate(&matching, next_token, max_results);
 
     // Group the page back into reservations, preserving the sorted order.
-    let sg_names = sg_name_map(state);
     let mut by_res: HashMap<String, Vec<String>> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     for i in page {
@@ -1365,7 +1381,14 @@ fn parse_max_results(params: &HashMap<String, String>) -> Option<usize> {
         .and_then(|v| v.parse::<usize>().ok())
 }
 
-fn inst_match(i: &Instance, tags: &[Tag], filters: &[Filter], architecture: &str) -> bool {
+fn inst_match(
+    i: &Instance,
+    tags: &[Tag],
+    filters: &[Filter],
+    architecture: &str,
+    sg_names: &HashMap<String, String>,
+    block_devices: &[&crate::state::VolumeAttachment],
+) -> bool {
     use crate::service_helpers::filter_value_matches;
     filters.iter().all(|f| {
         let candidates: Vec<String> = match f.name.as_str() {
@@ -1381,6 +1404,53 @@ fn inst_match(i: &Instance, tags: &[Tag], filters: &[Filter], architecture: &str
             "ip-address" => i.public_ip.clone().into_iter().collect(),
             "key-name" => i.key_name.clone().into_iter().collect(),
             "architecture" => vec![architecture.to_string()],
+            "launch-time" => vec![i.launch_time.clone()],
+            // The instance's security groups. AWS exposes them under `group-id`
+            // (default-VPC form), `instance.group-id`, and `group-name`; the
+            // primary ENI mirrors them for `network-interface.group-id`.
+            "group-id" | "instance.group-id" | "network-interface.group-id" => {
+                i.security_group_ids.clone()
+            }
+            "group-name" | "instance.group-name" => i
+                .security_group_ids
+                .iter()
+                .map(|g| sg_names.get(g).cloned().unwrap_or_else(|| g.clone()))
+                .collect(),
+            // Public DNS name derived from the public IP (see `instance_xml`).
+            "dns-name" => i
+                .public_ip
+                .as_ref()
+                .map(|ip| {
+                    vec![format!(
+                        "ec2-{}.compute.amazonaws.com",
+                        ip.replace('.', "-")
+                    )]
+                })
+                .unwrap_or_default(),
+            "private-dns-name" => {
+                vec![format!(
+                    "ip-{}.ec2.internal",
+                    i.private_ip.replace('.', "-")
+                )]
+            }
+            // The primary network interface mirrors the instance's placement.
+            "network-interface.subnet-id" => i.subnet_id.clone().into_iter().collect(),
+            "network-interface.vpc-id" => i.vpc_id.clone().into_iter().collect(),
+            "network-interface.availability-zone" => vec![i.az.clone()],
+            "network-interface.addresses.private-ip-address" => vec![i.private_ip.clone()],
+            "block-device-mapping.volume-id" => {
+                block_devices.iter().map(|a| a.volume_id.clone()).collect()
+            }
+            "block-device-mapping.device-name" => {
+                block_devices.iter().map(|a| a.device.clone()).collect()
+            }
+            "block-device-mapping.status" => {
+                block_devices.iter().map(|a| a.status.clone()).collect()
+            }
+            "block-device-mapping.delete-on-termination" => block_devices
+                .iter()
+                .map(|a| a.delete_on_termination.to_string())
+                .collect(),
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
@@ -1420,6 +1490,17 @@ pub(crate) fn describe_instance_status(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let sg_names = sg_name_map(state);
+    let mut bdm_by_instance: HashMap<String, Vec<&crate::state::VolumeAttachment>> = HashMap::new();
+    for vol in state.volumes.values() {
+        for att in &vol.attachments {
+            bdm_by_instance
+                .entry(att.instance_id.clone())
+                .or_default()
+                .push(att);
+        }
+    }
+    let no_bdm: Vec<&crate::state::VolumeAttachment> = Vec::new();
     let mut matching: Vec<&Instance> = state
         .instances
         .values()
@@ -1431,6 +1512,8 @@ pub(crate) fn describe_instance_status(
                 state.tags_for(&i.instance_id),
                 &filters,
                 &arch_for(state, &i.image_id),
+                &sg_names,
+                bdm_by_instance.get(&i.instance_id).unwrap_or(&no_bdm),
             )
         })
         .collect();
@@ -2517,6 +2600,80 @@ mod modify_tests {
                 .unwrap(),
         );
         assert!(out.contains("<instanceId>i-1</instanceId>"), "got: {out}");
+    }
+
+    #[test]
+    fn describe_instances_group_and_attachment_filters() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.instances.get_mut("i-1").unwrap().security_group_ids = vec!["sg-web".into()];
+            // A security group so `group-name` can resolve.
+            state.security_groups.insert(
+                "sg-web".into(),
+                crate::state::SecurityGroup {
+                    group_id: "sg-web".into(),
+                    group_name: "web".into(),
+                    description: "d".into(),
+                    vpc_id: "vpc-1".into(),
+                    rules: vec![],
+                },
+            );
+            // A volume attached to the instance for block-device-mapping filters.
+            state.volumes.insert(
+                "vol-1".into(),
+                crate::state::Volume {
+                    volume_id: "vol-1".into(),
+                    size: 8,
+                    snapshot_id: None,
+                    availability_zone: "us-east-1a".into(),
+                    state: "in-use".into(),
+                    volume_type: "gp3".into(),
+                    iops: None,
+                    throughput: None,
+                    encrypted: false,
+                    kms_key_id: None,
+                    multi_attach_enabled: false,
+                    auto_enable_io: false,
+                    attachments: vec![crate::state::VolumeAttachment {
+                        volume_id: "vol-1".into(),
+                        instance_id: "i-1".into(),
+                        device: "/dev/sdf".into(),
+                        status: "attached".into(),
+                        delete_on_termination: true,
+                    }],
+                    in_recycle_bin: false,
+                    modification: None,
+                },
+            );
+        }
+        let matches = |name: &str, value: &str| -> bool {
+            body(
+                describe_instances(
+                    &svc,
+                    &req(
+                        "DescribeInstances",
+                        &[("Filter.1.Name", name), ("Filter.1.Value.1", value)],
+                    ),
+                )
+                .unwrap(),
+            )
+            .contains("<instanceId>i-1</instanceId>")
+        };
+        assert!(matches("instance.group-id", "sg-web"));
+        assert!(matches("group-id", "sg-web"));
+        assert!(matches("group-name", "web"));
+        assert!(matches("network-interface.group-id", "sg-web"));
+        assert!(matches("launch-time", "2024-01-01T00:00:00.000Z"));
+        assert!(matches("network-interface.subnet-id", "subnet-1"));
+        assert!(matches("block-device-mapping.volume-id", "vol-1"));
+        assert!(matches("block-device-mapping.device-name", "/dev/sdf"));
+        // A group that the instance is not in does not match.
+        assert!(!matches("instance.group-id", "sg-other"));
+        // A genuinely-unknown filter still matches nothing.
+        assert!(!matches("bogus-filter-name", "sg-web"));
     }
 
     #[test]

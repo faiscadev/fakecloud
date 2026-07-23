@@ -561,6 +561,21 @@ pub(crate) fn build_envelope_attrs(
     envelope_attrs
 }
 
+/// Size (in bytes) a set of message attributes contributes toward the 256 KiB
+/// Publish/PublishBatch limit: the name, the data type, and the value bytes of
+/// each attribute. AWS counts attributes against the same limit as the body.
+pub(crate) fn message_attributes_size(attrs: &BTreeMap<String, MessageAttribute>) -> usize {
+    attrs
+        .iter()
+        .map(|(name, attr)| {
+            name.len()
+                + attr.data_type.len()
+                + attr.string_value.as_ref().map_or(0, |s| s.len())
+                + attr.binary_value.as_ref().map_or(0, |b| b.len())
+        })
+        .sum()
+}
+
 pub(crate) fn parse_message_attributes(req: &AwsRequest) -> BTreeMap<String, MessageAttribute> {
     let mut attrs = BTreeMap::new();
     for n in 1..=10 {

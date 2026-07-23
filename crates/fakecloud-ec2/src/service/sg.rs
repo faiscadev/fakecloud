@@ -502,7 +502,7 @@ pub(crate) fn describe_security_groups(
         .values()
         .filter(|g| wanted_ids.is_empty() || wanted_ids.contains(&g.group_id))
         .filter(|g| wanted_names.is_empty() || wanted_names.contains(&g.group_name))
-        .filter(|g| sg_matches(g, state.tags_for(&g.group_id), &filters))
+        .filter(|g| sg_matches(g, state.tags_for(&g.group_id), &filters, &owner))
         .map(|g| sg_xml(g, state.tags_for(&g.group_id), &owner, &region))
         .collect();
     items.sort();
@@ -525,13 +525,25 @@ pub(crate) fn describe_security_groups(
     ))
 }
 
-fn sg_matches(g: &SecurityGroup, tags: &[Tag], filters: &[Filter]) -> bool {
+fn sg_matches(g: &SecurityGroup, tags: &[Tag], filters: &[Filter], owner: &str) -> bool {
+    // `ip-permission.*` filters match against the group's ingress rules on AWS
+    // (egress rules are matched by the separate `egress.ip-permission.*` family).
+    let ingress = || g.rules.iter().filter(|r| !r.is_egress);
     filters.iter().all(|f| {
         let candidates: Vec<String> = match f.name.as_str() {
             "group-id" => vec![g.group_id.clone()],
             "group-name" => vec![g.group_name.clone()],
             "vpc-id" => vec![g.vpc_id.clone()],
             "description" => vec![g.description.clone()],
+            "owner-id" => vec![owner.to_string()],
+            "ip-permission.cidr" => ingress().filter_map(|r| r.cidr_ipv4.clone()).collect(),
+            "ip-permission.ipv6-cidr" => ingress().filter_map(|r| r.cidr_ipv6.clone()).collect(),
+            "ip-permission.protocol" => ingress().map(|r| r.ip_protocol.clone()).collect(),
+            "ip-permission.from-port" => ingress().map(|r| r.from_port.to_string()).collect(),
+            "ip-permission.to-port" => ingress().map(|r| r.to_port.to_string()).collect(),
+            "ip-permission.group-id" => ingress()
+                .filter_map(|r| r.referenced_group_id.clone())
+                .collect(),
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             "tag-value" => tags.iter().map(|t| t.value.clone()).collect(),
             name => {
@@ -1649,5 +1661,89 @@ mod modify_tests {
         .unwrap();
         let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
         assert!(body.contains("<groupId>sg-1</groupId>"), "{body}");
+    }
+
+    fn sg_describe_body(svc: &Ec2Service, query: &[(&str, &str)]) -> String {
+        let resp = describe_security_groups(svc, &req("DescribeSecurityGroups", query)).unwrap();
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn describe_security_groups_owner_id_filter() {
+        let svc = Ec2Service::new();
+        seed_group(&svc, base_rule());
+        // owner-id matches the requesting account.
+        assert!(sg_describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "owner-id"),
+                ("Filter.1.Value.1", "000000000000")
+            ],
+        )
+        .contains("<groupId>sg-1</groupId>"));
+        // A different account filters it out.
+        assert!(!sg_describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "owner-id"),
+                ("Filter.1.Value.1", "999999999999")
+            ],
+        )
+        .contains("<groupId>sg-1</groupId>"));
+    }
+
+    #[test]
+    fn describe_security_groups_ip_permission_filters() {
+        let svc = Ec2Service::new();
+        // Ingress tcp/22 from 10.0.0.0/8, plus a referenced-group rule.
+        let mut ref_rule = ingress_rule("sgr-ref", 443, "0.0.0.0/0");
+        ref_rule.cidr_ipv4 = None;
+        ref_rule.referenced_group_id = Some("sg-peer".into());
+        seed_group_rules(
+            &svc,
+            vec![ingress_rule("sgr-a", 22, "10.0.0.0/8"), ref_rule],
+        );
+
+        assert!(sg_describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "ip-permission.cidr"),
+                ("Filter.1.Value.1", "10.0.0.0/8"),
+            ],
+        )
+        .contains("<groupId>sg-1</groupId>"));
+        assert!(sg_describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "ip-permission.from-port"),
+                ("Filter.1.Value.1", "22"),
+            ],
+        )
+        .contains("<groupId>sg-1</groupId>"));
+        assert!(sg_describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "ip-permission.protocol"),
+                ("Filter.1.Value.1", "tcp"),
+            ],
+        )
+        .contains("<groupId>sg-1</groupId>"));
+        assert!(sg_describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "ip-permission.group-id"),
+                ("Filter.1.Value.1", "sg-peer"),
+            ],
+        )
+        .contains("<groupId>sg-1</groupId>"));
+        // A CIDR not present in any rule filters the group out.
+        assert!(!sg_describe_body(
+            &svc,
+            &[
+                ("Filter.1.Name", "ip-permission.cidr"),
+                ("Filter.1.Value.1", "192.168.0.0/16"),
+            ],
+        )
+        .contains("<groupId>sg-1</groupId>"));
     }
 }

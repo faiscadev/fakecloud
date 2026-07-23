@@ -200,11 +200,21 @@ pub(crate) fn describe_network_interfaces(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+    // An explicitly-requested NetworkInterfaceId that does not exist is a hard
+    // error on AWS (InvalidNetworkInterfaceID.NotFound), not a silently-empty
+    // result. Matches the sibling Describe ops (subnets/volumes/instances/...).
+    for id in &wanted {
+        if !state.network_interfaces.contains_key(id) {
+            return Err(eni_not_found(id));
+        }
+    }
+
     let mut items: Vec<String> = state
         .network_interfaces
         .values()
         .filter(|n| wanted.is_empty() || wanted.contains(&n.network_interface_id))
-        .filter(|n| eni_match(n, state.tags_for(&n.network_interface_id), &filters))
+        .filter(|n| eni_match(n, state.tags_for(&n.network_interface_id), &filters, &owner))
         .map(|n| eni_xml(n, state.tags_for(&n.network_interface_id), &owner))
         .collect();
     items.sort();
@@ -227,7 +237,7 @@ pub(crate) fn describe_network_interfaces(
     ))
 }
 
-fn eni_match(n: &NetworkInterface, tags: &[Tag], filters: &[Filter]) -> bool {
+fn eni_match(n: &NetworkInterface, tags: &[Tag], filters: &[Filter], owner: &str) -> bool {
     filters.iter().all(|f| {
         let candidates: Vec<String> = match f.name.as_str() {
             "network-interface-id" => vec![n.network_interface_id.clone()],
@@ -235,8 +245,44 @@ fn eni_match(n: &NetworkInterface, tags: &[Tag], filters: &[Filter]) -> bool {
             "vpc-id" => vec![n.vpc_id.clone()],
             "status" => vec![n.status.clone()],
             "mac-address" => vec![n.mac_address.clone()],
-            "private-ip-address" => vec![n.private_ip_address.clone()],
+            "private-ip-address" => {
+                // Match the primary private IP plus any secondary addresses.
+                let mut ips = vec![n.private_ip_address.clone()];
+                ips.extend(n.private_ips.iter().cloned());
+                ips
+            }
+            "addresses.private-ip-address" => {
+                let mut ips = vec![n.private_ip_address.clone()];
+                ips.extend(n.private_ips.iter().cloned());
+                ips
+            }
             "interface-type" => vec![n.interface_type.clone()],
+            "availability-zone" => vec![n.availability_zone.clone()],
+            "description" => vec![n.description.clone()],
+            "owner-id" => vec![owner.to_string()],
+            // AWS accepts both `group-id` and `groups.group-id` for the ENI's
+            // attached security groups (Terraform data sources use `group-id`).
+            "group-id" | "groups.group-id" => n.group_ids.clone(),
+            "attachment.instance-id" => n
+                .attachment
+                .as_ref()
+                .map(|a| vec![a.instance_id.clone()])
+                .unwrap_or_default(),
+            "attachment.attachment-id" => n
+                .attachment
+                .as_ref()
+                .map(|a| vec![a.attachment_id.clone()])
+                .unwrap_or_default(),
+            "attachment.status" => n
+                .attachment
+                .as_ref()
+                .map(|a| vec![a.status.clone()])
+                .unwrap_or_default(),
+            "attachment.device-index" => n
+                .attachment
+                .as_ref()
+                .map(|a| vec![a.device_index.to_string()])
+                .unwrap_or_default(),
             "tag-key" => tags.iter().map(|t| t.key.clone()).collect(),
             name => {
                 if let Some(key) = name.strip_prefix("tag:") {
@@ -915,6 +961,119 @@ mod tests {
         let accounts = svc.state.read();
         assert!(
             accounts.get("000000000000").unwrap().network_interfaces["eni-1"].source_dest_check
+        );
+    }
+
+    fn describe_enis(svc: &Ec2Service, query: &[(&str, &str)]) -> AwsResponse {
+        describe_network_interfaces(svc, &req(query)).unwrap()
+    }
+
+    #[test]
+    fn describe_network_interfaces_unknown_id_errors() {
+        let svc = Ec2Service::new();
+        seed_eni(&svc);
+        let err = crate::test_support::err_of(describe_network_interfaces(
+            &svc,
+            &req(&[("NetworkInterfaceId.1", "eni-doesnotexist000000000")]),
+        ));
+        assert_eq!(err.code(), "InvalidNetworkInterfaceID.NotFound");
+    }
+
+    #[test]
+    fn describe_network_interfaces_known_id_ok() {
+        let svc = Ec2Service::new();
+        seed_eni(&svc);
+        let resp = describe_enis(&svc, &[("NetworkInterfaceId.1", "eni-1")]);
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(
+            body.contains("<networkInterfaceId>eni-1</networkInterfaceId>"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn describe_network_interfaces_group_id_filter() {
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.network_interfaces.insert(
+                "eni-1".to_string(),
+                NetworkInterface {
+                    network_interface_id: "eni-1".into(),
+                    subnet_id: "subnet-1".into(),
+                    vpc_id: "vpc-1".into(),
+                    availability_zone: "us-east-1a".into(),
+                    description: "primary".into(),
+                    mac_address: "02:00:00:00:00:01".into(),
+                    private_ip_address: "10.0.0.5".into(),
+                    status: "in-use".into(),
+                    interface_type: "interface".into(),
+                    source_dest_check: true,
+                    group_ids: vec!["sg-web".into()],
+                    private_ips: vec![],
+                    ipv6_addresses: vec![],
+                    attachment: Some(crate::state::EniAttachment {
+                        attachment_id: "eni-attach-1".into(),
+                        instance_id: "i-123".into(),
+                        device_index: 0,
+                        status: "attached".into(),
+                    }),
+                    public_ip_dns_hostname_type: None,
+                },
+            );
+        }
+        let body = String::from_utf8_lossy(
+            describe_enis(
+                &svc,
+                &[
+                    ("Filter.1.Name", "group-id"),
+                    ("Filter.1.Value.1", "sg-web"),
+                ],
+            )
+            .body
+            .expect_bytes(),
+        )
+        .to_string();
+        assert!(
+            body.contains("<networkInterfaceId>eni-1</networkInterfaceId>"),
+            "{body}"
+        );
+
+        // attachment.instance-id also resolves the ENI.
+        let body = String::from_utf8_lossy(
+            describe_enis(
+                &svc,
+                &[
+                    ("Filter.1.Name", "attachment.instance-id"),
+                    ("Filter.1.Value.1", "i-123"),
+                ],
+            )
+            .body
+            .expect_bytes(),
+        )
+        .to_string();
+        assert!(
+            body.contains("<networkInterfaceId>eni-1</networkInterfaceId>"),
+            "{body}"
+        );
+
+        // A genuinely-unknown filter still matches nothing.
+        let body = String::from_utf8_lossy(
+            describe_enis(
+                &svc,
+                &[
+                    ("Filter.1.Name", "group-id"),
+                    ("Filter.1.Value.1", "sg-absent"),
+                ],
+            )
+            .body
+            .expect_bytes(),
+        )
+        .to_string();
+        assert!(
+            !body.contains("<networkInterfaceId>eni-1</networkInterfaceId>"),
+            "{body}"
         );
     }
 }
