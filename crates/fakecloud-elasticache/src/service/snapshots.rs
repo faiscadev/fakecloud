@@ -56,9 +56,12 @@ impl ElastiCacheService {
                 )
             })?;
 
+        // ARN carries the request's credential-scope region (req.region).
         let arn = format!(
             "arn:aws:elasticache:{}:{}:serverlesssnapshot:{}",
-            state.region, state.account_id, serverless_cache_snapshot_name
+            request.region.as_str(),
+            state.account_id,
+            serverless_cache_snapshot_name
         );
         let snapshot = ServerlessCacheSnapshot {
             serverless_cache_snapshot_name: serverless_cache_snapshot_name.clone(),
@@ -286,7 +289,9 @@ impl ElastiCacheService {
 
             let arn = format!(
                 "arn:aws:elasticache:{}:{}:snapshot:{}",
-                state.region, state.account_id, snapshot_name
+                request.region.as_str(),
+                state.account_id,
+                snapshot_name
             );
 
             let snapshot = CacheSnapshot {
@@ -475,7 +480,9 @@ impl ElastiCacheService {
         snap.snapshot_name = target.clone();
         snap.arn = format!(
             "arn:aws:elasticache:{}:{}:snapshot:{}",
-            state.region, state.account_id, target
+            request.region.as_str(),
+            state.account_id,
+            target
         );
         snap.snapshot_status = "creating".to_string();
         snap.snapshot_source = "manual".to_string();
@@ -521,7 +528,9 @@ impl ElastiCacheService {
         snap.serverless_cache_snapshot_name = target.clone();
         snap.arn = format!(
             "arn:aws:elasticache:{}:{}:serverlesssnapshot:{}",
-            state.region, state.account_id, target
+            request.region.as_str(),
+            state.account_id,
+            target
         );
         snap.status = "creating".to_string();
         let xml = serverless_cache_snapshot_xml(&snap);

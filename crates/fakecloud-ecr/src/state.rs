@@ -100,10 +100,12 @@ impl EcrState {
         self.signing_configuration = None;
     }
 
-    pub fn repository_arn(&self, repository_name: &str) -> String {
+    // ARN carries the request's credential-scope region (req.region), not the
+    // frozen server default. Repositories are keyed by name, so keying is unchanged.
+    pub fn repository_arn(&self, region: &str, repository_name: &str) -> String {
         format!(
             "arn:aws:ecr:{}:{}:repository/{}",
-            self.region, self.account_id, repository_name
+            region, self.account_id, repository_name
         )
     }
 

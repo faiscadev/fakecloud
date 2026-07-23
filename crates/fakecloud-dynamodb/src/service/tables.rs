@@ -196,14 +196,18 @@ impl DynamoDbService {
         }
 
         let now = Utc::now();
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
         let arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}",
-            state.region, state.account_id, table_name
+            req.region.as_str(),
+            state.account_id,
+            table_name
         );
         let stream_arn = if stream_enabled {
             Some(format!(
                 "arn:aws:dynamodb:{}:{}:table/{}/stream/{}",
-                state.region,
+                req.region.as_str(),
                 state.account_id,
                 table_name,
                 now.format("%Y-%m-%dT%H:%M:%S.%3f")
@@ -376,8 +380,9 @@ impl DynamoDbService {
         let state = accounts.get_or_create(&req.account_id);
         // Snapshot region + account before taking a mutable borrow of
         // `state.tables` — we need them to mint a new stream ARN when the
-        // caller flips stream_enabled from false to true mid-update.
-        let region = state.region.clone();
+        // caller flips stream_enabled from false to true mid-update. The stream
+        // ARN carries the request's credential-scope region (req.region).
+        let region = req.region.clone();
         let account_id = state.account_id.clone();
         let table = state.tables.get_mut(table_name).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -818,7 +823,7 @@ impl DynamoDbService {
         // plus a short unique suffix so every backup gets a distinct ARN.
         let backup_arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}/backup/{:013}-{}",
-            state.region,
+            req.region.as_str(),
             state.account_id,
             table_name,
             now.timestamp_millis(),
@@ -1090,7 +1095,9 @@ impl DynamoDbService {
         let now = Utc::now();
         let arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}",
-            state.region, state.account_id, target_table_name
+            req.region.as_str(),
+            state.account_id,
+            target_table_name
         );
 
         // Re-mint the stream ARN against the target table name so it
@@ -1196,7 +1203,9 @@ impl DynamoDbService {
         let now = Utc::now();
         let arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}",
-            state.region, state.account_id, target_table_name
+            req.region.as_str(),
+            state.account_id,
+            target_table_name
         );
 
         let stream_arn = if source.stream_enabled {
@@ -1359,7 +1368,7 @@ impl DynamoDbService {
         let now = Utc::now();
         let export_arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}/export/{}",
-            state.region,
+            req.region.as_str(),
             state.account_id,
             table_arn.rsplit('/').next().unwrap_or("unknown"),
             uuid::Uuid::new_v4()
@@ -1717,11 +1726,13 @@ impl DynamoDbService {
         let now = Utc::now();
         let table_arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}",
-            state.region, state.account_id, table_name
+            req.region.as_str(),
+            state.account_id,
+            table_name
         );
         let import_arn = format!(
             "arn:aws:dynamodb:{}:{}:table/{}/import/{}",
-            state.region,
+            req.region.as_str(),
             state.account_id,
             table_name,
             uuid::Uuid::new_v4()

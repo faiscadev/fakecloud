@@ -853,7 +853,7 @@ fn add_tags_to_subnet_group_arn_persists() {
     let arn = {
         let mut __a = svc.state.write();
         let state = __a.default_mut();
-        let arn = state.db_subnet_group_arn("sg1");
+        let arn = state.db_subnet_group_arn(&state.region, "sg1");
         state.subnet_groups.insert(
             "sg1".to_string(),
             crate::state::DbSubnetGroup {
@@ -1798,7 +1798,7 @@ fn modify_db_instance_cloudwatch_disable_log_types_removes_existing() {
 fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
     let mut __a = svc.state.write();
     let state = __a.default_mut();
-    let arn = state.db_snapshot_arn(snapshot_id);
+    let arn = state.db_snapshot_arn(&state.region, snapshot_id);
     state.snapshots.insert(
         snapshot_id.to_string(),
         crate::state::DbSnapshot {

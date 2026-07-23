@@ -135,10 +135,12 @@ impl KinesisState {
             .map(|name| name.to_string())
     }
 
-    pub fn stream_arn(&self, stream_name: &str) -> String {
+    // ARN carries the request's credential-scope region (req.region), not the
+    // frozen server default. Streams are keyed by name, so keying is unchanged.
+    pub fn stream_arn(&self, region: &str, stream_name: &str) -> String {
         format!(
             "arn:aws:kinesis:{}:{}:stream/{}",
-            self.region, self.account_id, stream_name
+            region, self.account_id, stream_name
         )
     }
 
@@ -280,7 +282,7 @@ mod tests {
     fn stream_arn_format() {
         let state = KinesisState::new("123456789012", "us-east-1");
         assert_eq!(
-            state.stream_arn("my-stream"),
+            state.stream_arn(&state.region, "my-stream"),
             "arn:aws:kinesis:us-east-1:123456789012:stream/my-stream"
         );
     }
@@ -330,7 +332,7 @@ mod tests {
         let shard_id = "shardId-000000000000".to_string();
         let stream = KinesisStream {
             stream_name: "s".to_string(),
-            stream_arn: state.stream_arn("s"),
+            stream_arn: state.stream_arn(&state.region, "s"),
             stream_status: "ACTIVE".to_string(),
             stream_creation_timestamp: Utc::now(),
             retention_period_hours: 24,

@@ -713,7 +713,7 @@ impl ElastiCacheService {
         let migration = state.migrations.get_mut(&id).expect("checked above");
         migration.status = "complete".to_string();
         let group = state.replication_groups.get(&id).expect("checked above");
-        let region = state.region.clone();
+        let region = request.region.clone();
         let xml = replication_group_xml(group, &region);
         Ok(AwsResponse::xml(
             StatusCode::OK,
@@ -760,7 +760,7 @@ impl ElastiCacheService {
                 format!("ReplicationGroup {id} not found."),
             )
         })?;
-        let region = state.region.clone();
+        let region = request.region.clone();
         let xml = replication_group_xml(group, &region);
         state.migrations.insert(
             id.clone(),

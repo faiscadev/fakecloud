@@ -93,10 +93,16 @@ impl CognitoService {
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let pool_id = generate_pool_id(&state.region);
+        // The pool id bakes in the request's credential-scope region
+        // (`{region}_{rand}`) so it becomes the single source of truth for the
+        // pool's region; the ARN and every issuer/discovery derivation read the
+        // region back out of the pool id. Storage is keyed by pool id, unchanged.
+        let pool_id = generate_pool_id(req.region.as_str());
         let arn = format!(
             "arn:aws:cognito-idp:{}:{}:userpool/{}",
-            state.region, state.account_id, pool_id
+            req.region.as_str(),
+            state.account_id,
+            pool_id
         );
 
         let now = Utc::now();
@@ -432,10 +438,13 @@ impl CognitoService {
         // Remove associated domains
         state.domains.retain(|_, d| d.user_pool_id != pool_id);
 
-        // Remove associated tags (match by pool ARN)
+        // Remove associated tags (match by pool ARN). Derive the region from the
+        // pool id prefix so it matches the ARN minted at CreateUserPool time,
+        // regardless of the current server default region.
+        let arn_region = pool_id.split('_').next().unwrap_or(&state.region);
         let arn_prefix = format!(
             "arn:aws:cognito-idp:{}:{}:userpool/{}",
-            state.region, state.account_id, pool_id
+            arn_region, state.account_id, pool_id
         );
         state.tags.remove(&arn_prefix);
 

@@ -62,7 +62,9 @@ impl ElastiCacheService {
 
             let arn = format!(
                 "arn:aws:elasticache:{}:{}:serverlesscache:{}",
-                state.region, state.account_id, serverless_cache_name
+                request.region.as_str(),
+                state.account_id,
+                serverless_cache_name
             );
             (arn, "127.0.0.1".to_string())
         };

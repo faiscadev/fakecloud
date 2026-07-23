@@ -43,7 +43,9 @@ impl EcsService {
         let account = request.account_id.clone();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
-        let arn = state.cluster_arn(&cluster_name);
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
+        let arn = state.cluster_arn(request.region.as_str(), &cluster_name);
         let mut cluster = Cluster::new(&cluster_name, arn);
         cluster.tags = tags;
         cluster.settings = settings;
@@ -85,7 +87,7 @@ impl EcsService {
                 match state.clusters.get(name) {
                     Some(c) => found.push(cluster_to_json(c)),
                     None => failures.push(json!({
-                        "arn": state.cluster_arn(name),
+                        "arn": state.cluster_arn(request.region.as_str(), name),
                         "reason": "MISSING",
                     })),
                 }
@@ -95,7 +97,7 @@ impl EcsService {
                 failures.push(json!({
                     "arn": format!(
                         "arn:aws:ecs:{}:{}:cluster/{}",
-                        accounts.region(),
+                        request.region.as_str(),
                         account,
                         name
                     ),

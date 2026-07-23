@@ -259,14 +259,14 @@ mod tests {
 
     fn make_state() -> EcsState {
         let mut s = EcsState::new("000000000000", "us-east-1");
-        let arn = s.cluster_arn("default");
+        let arn = s.cluster_arn("us-east-1", "default");
         s.clusters
             .insert("default".into(), Cluster::new("default", arn));
         s
     }
 
     fn add_instance(state: &mut EcsState, id: &str, attrs: Vec<(&str, &str)>) {
-        let ci_arn = state.container_instance_arn("default", id);
+        let ci_arn = state.container_instance_arn("us-east-1", "default", id);
         let key = format!("default/{}", id);
         let attributes = attrs
             .into_iter()
@@ -281,7 +281,7 @@ mod tests {
             container_instance_arn: ci_arn.clone(),
             ec2_instance_id: Some(id.to_string()),
             cluster_name: "default".into(),
-            cluster_arn: state.cluster_arn("default"),
+            cluster_arn: state.cluster_arn("us-east-1", "default"),
             status: "ACTIVE".into(),
             version: 1,
             version_info: None,
@@ -358,12 +358,16 @@ mod tests {
             Task {
                 task_arn: "a".into(),
                 task_id: "t1".into(),
-                cluster_arn: s.cluster_arn("default"),
+                cluster_arn: s.cluster_arn("us-east-1", "default"),
                 cluster_name: "default".into(),
                 task_definition_arn: "td".into(),
                 family: "f".into(),
                 revision: 1,
-                container_instance_arn: Some(s.container_instance_arn("default", "i-1")),
+                container_instance_arn: Some(s.container_instance_arn(
+                    "us-east-1",
+                    "default",
+                    "i-1",
+                )),
                 capacity_provider_name: None,
                 last_status: "RUNNING".into(),
                 desired_status: "RUNNING".into(),
@@ -416,12 +420,16 @@ mod tests {
             Task {
                 task_arn: "a".into(),
                 task_id: "t1".into(),
-                cluster_arn: s.cluster_arn("default"),
+                cluster_arn: s.cluster_arn("us-east-1", "default"),
                 cluster_name: "default".into(),
                 task_definition_arn: "td".into(),
                 family: "f".into(),
                 revision: 1,
-                container_instance_arn: Some(s.container_instance_arn("default", "i-1")),
+                container_instance_arn: Some(s.container_instance_arn(
+                    "us-east-1",
+                    "default",
+                    "i-1",
+                )),
                 capacity_provider_name: None,
                 last_status: "RUNNING".into(),
                 desired_status: "RUNNING".into(),
@@ -459,7 +467,10 @@ mod tests {
         let strat = vec![json!({"type": "spread", "field": "attribute:ecs.availability-zone"})];
         let arn = select_container_instance(&s, "default", &[], &strat, None, "td", "EC2");
         // Should pick i-3 because zone 1b has fewer tasks.
-        assert_eq!(arn, Some(s.container_instance_arn("default", "i-3")));
+        assert_eq!(
+            arn,
+            Some(s.container_instance_arn("us-east-1", "default", "i-3"))
+        );
     }
 
     #[test]
@@ -472,12 +483,16 @@ mod tests {
             Task {
                 task_arn: "a".into(),
                 task_id: "t1".into(),
-                cluster_arn: s.cluster_arn("default"),
+                cluster_arn: s.cluster_arn("us-east-1", "default"),
                 cluster_name: "default".into(),
                 task_definition_arn: "td".into(),
                 family: "f".into(),
                 revision: 1,
-                container_instance_arn: Some(s.container_instance_arn("default", "i-1")),
+                container_instance_arn: Some(s.container_instance_arn(
+                    "us-east-1",
+                    "default",
+                    "i-1",
+                )),
                 capacity_provider_name: None,
                 last_status: "RUNNING".into(),
                 desired_status: "RUNNING".into(),
@@ -514,7 +529,10 @@ mod tests {
         );
         let strat = vec![json!({"type": "binpack", "field": "instanceId"})];
         let arn = select_container_instance(&s, "default", &[], &strat, None, "td", "EC2");
-        assert_eq!(arn, Some(s.container_instance_arn("default", "i-1")));
+        assert_eq!(
+            arn,
+            Some(s.container_instance_arn("us-east-1", "default", "i-1"))
+        );
     }
 
     #[test]
@@ -523,6 +541,9 @@ mod tests {
         add_instance(&mut s, "i-1", vec![]);
         let strat = vec![json!({"type": "random"})];
         let arn = select_container_instance(&s, "default", &[], &strat, None, "td", "EC2");
-        assert_eq!(arn, Some(s.container_instance_arn("default", "i-1")));
+        assert_eq!(
+            arn,
+            Some(s.container_instance_arn("us-east-1", "default", "i-1"))
+        );
     }
 }

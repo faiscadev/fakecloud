@@ -627,40 +627,42 @@ impl RdsState {
         self.events.push(event);
     }
 
-    pub fn db_instance_arn(&self, db_instance_identifier: &str) -> String {
+    // ARN carries the request's credential-scope region (req.region), not the
+    // frozen server default. Storage keying is by account/identifier, unchanged.
+    pub fn db_instance_arn(&self, region: &str, db_instance_identifier: &str) -> String {
         Arn::new(
             "rds",
-            &self.region,
+            region,
             &self.account_id,
             &format!("db:{db_instance_identifier}"),
         )
         .to_string()
     }
 
-    pub fn db_snapshot_arn(&self, db_snapshot_identifier: &str) -> String {
+    pub fn db_snapshot_arn(&self, region: &str, db_snapshot_identifier: &str) -> String {
         Arn::new(
             "rds",
-            &self.region,
+            region,
             &self.account_id,
             &format!("snapshot:{db_snapshot_identifier}"),
         )
         .to_string()
     }
 
-    pub fn db_subnet_group_arn(&self, db_subnet_group_name: &str) -> String {
+    pub fn db_subnet_group_arn(&self, region: &str, db_subnet_group_name: &str) -> String {
         Arn::new(
             "rds",
-            &self.region,
+            region,
             &self.account_id,
             &format!("subgrp:{db_subnet_group_name}"),
         )
         .to_string()
     }
 
-    pub fn db_parameter_group_arn(&self, db_parameter_group_name: &str) -> String {
+    pub fn db_parameter_group_arn(&self, region: &str, db_parameter_group_name: &str) -> String {
         Arn::new(
             "rds",
-            &self.region,
+            region,
             &self.account_id,
             &format!("pg:{db_parameter_group_name}"),
         )
@@ -1069,10 +1071,18 @@ mod tests {
     #[test]
     fn arn_helpers_format_correctly() {
         let state = RdsState::new("123456789012", "eu-west-1");
-        assert!(state.db_instance_arn("mydb").contains(":db:mydb"));
-        assert!(state.db_snapshot_arn("snap1").contains(":snapshot:snap1"));
-        assert!(state.db_subnet_group_arn("sng").contains("sng"));
-        assert!(state.db_parameter_group_arn("pg").contains("pg"));
+        assert!(state
+            .db_instance_arn(&state.region, "mydb")
+            .contains(":db:mydb"));
+        assert!(state
+            .db_snapshot_arn(&state.region, "snap1")
+            .contains(":snapshot:snap1"));
+        assert!(state
+            .db_subnet_group_arn(&state.region, "sng")
+            .contains("sng"));
+        assert!(state
+            .db_parameter_group_arn(&state.region, "pg")
+            .contains("pg"));
     }
 
     #[test]
@@ -1209,10 +1219,10 @@ mod tests {
     #[test]
     fn arn_helpers_include_region_and_account() {
         let state = RdsState::new("111122223333", "ap-southeast-2");
-        let arn = state.db_instance_arn("my-db");
+        let arn = state.db_instance_arn(&state.region, "my-db");
         assert!(arn.contains("111122223333"));
         assert!(arn.contains("ap-southeast-2"));
-        let snap = state.db_snapshot_arn("snap");
+        let snap = state.db_snapshot_arn(&state.region, "snap");
         assert!(snap.contains("snapshot:snap"));
     }
 

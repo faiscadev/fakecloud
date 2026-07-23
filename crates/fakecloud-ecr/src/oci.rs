@@ -1283,7 +1283,7 @@ mod immutability_tests {
         let mut mas: MultiAccountState<crate::state::EcrState> =
             MultiAccountState::new(ACCT, "us-east-1", "http://fakecloud:4566");
         let s = mas.get_or_create(ACCT);
-        let arn = s.repository_arn("app");
+        let arn = s.repository_arn("us-east-1", "app");
         let mut repo = Repository::new("app", arn, ACCT, "fakecloud:4566");
         repo.image_tag_mutability = mutability.to_string();
         s.repositories.insert("app".to_string(), repo);

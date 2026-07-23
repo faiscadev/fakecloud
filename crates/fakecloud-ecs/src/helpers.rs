@@ -803,6 +803,10 @@ pub(crate) fn service_not_active(name: &str) -> AwsServiceError {
 /// releasing the state write lock.
 pub(crate) fn spawn_service_tasks(
     state: &mut EcsState,
+    // ARN carries the request's credential-scope region (req.region), not the
+    // frozen server default. Background callers derive it from the service's
+    // stored cluster ARN so re-spawned tasks stay in the service's region.
+    region: &str,
     service: &Service,
     count: i32,
     principal_arn: &str,
@@ -842,13 +846,13 @@ pub(crate) fn spawn_service_tasks(
     let mut ids = Vec::with_capacity(count as usize);
     for _ in 0..count {
         let task_id = uuid::Uuid::new_v4().to_string().replace('-', "");
-        let task_arn = state.task_arn(&cluster_name, &task_id);
+        let task_arn = state.task_arn(region, &cluster_name, &task_id);
         let containers: Vec<Container> = container_defs
             .iter()
             .map(|def| Container {
                 container_arn: format!(
                     "arn:aws:ecs:{}:{}:container/{}/{}/{}",
-                    state.region,
+                    region,
                     state.account_id,
                     cluster_name,
                     task_id,
@@ -908,7 +912,7 @@ pub(crate) fn spawn_service_tasks(
                 region: opts
                     .get("awslogs-region")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(&state.region)
+                    .unwrap_or(region)
                     .to_string(),
                 container_name: name,
             })
@@ -991,6 +995,8 @@ pub(crate) fn spawn_service_tasks(
 /// to `EcsRuntime::run_task` after releasing the state write lock.
 pub(crate) fn spawn_daemon_tasks(
     state: &mut EcsState,
+    // ARN carries the request's credential-scope region (req.region).
+    region: &str,
     daemon: &crate::state::Daemon,
     principal_arn: &str,
     launch_type: &str,
@@ -1030,13 +1036,13 @@ pub(crate) fn spawn_daemon_tasks(
             .map(|(_, n)| n.to_string())
             .unwrap_or_else(|| cap_arn.clone());
         let task_id = uuid::Uuid::new_v4().to_string().replace('-', "");
-        let task_arn = state.task_arn(&cluster_name, &task_id);
+        let task_arn = state.task_arn(region, &cluster_name, &task_id);
         let containers: Vec<Container> = container_defs
             .iter()
             .map(|def| Container {
                 container_arn: format!(
                     "arn:aws:ecs:{}:{}:container/{}/{}/{}",
-                    state.region,
+                    region,
                     state.account_id,
                     cluster_name,
                     task_id,
@@ -1096,7 +1102,7 @@ pub(crate) fn spawn_daemon_tasks(
                 region: opts
                     .get("awslogs-region")
                     .and_then(|v| v.as_str())
-                    .unwrap_or(&state.region)
+                    .unwrap_or(region)
                     .to_string(),
                 container_name: name,
             })

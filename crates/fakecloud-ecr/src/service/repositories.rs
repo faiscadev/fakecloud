@@ -46,7 +46,7 @@ impl EcrService {
         if state.repositories.contains_key(&name) {
             return Err(repository_already_exists(&name));
         }
-        let arn = state.repository_arn(&name);
+        let arn = state.repository_arn(request.region.as_str(), &name);
         let mut repo = Repository::new(&name, arn, state.registry_id(), &endpoint);
         repo.image_tag_mutability = image_tag_mutability;
         repo.image_scanning_configuration = ImageScanningConfiguration { scan_on_push };

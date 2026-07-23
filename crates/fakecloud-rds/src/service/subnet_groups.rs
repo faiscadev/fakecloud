@@ -62,7 +62,8 @@ impl RdsService {
             ));
         }
 
-        let db_subnet_group_arn = state.db_subnet_group_arn(&db_subnet_group_name);
+        let db_subnet_group_arn =
+            state.db_subnet_group_arn(request.region.as_str(), &db_subnet_group_name);
         let tags = parse_tags(request)?;
 
         let subnet_group = DbSubnetGroup {

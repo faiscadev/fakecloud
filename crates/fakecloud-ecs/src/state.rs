@@ -194,45 +194,53 @@ impl EcsState {
         format!("{}/{}", cluster_name, service_name)
     }
 
-    pub fn service_arn(&self, cluster_name: &str, service_name: &str) -> String {
+    // ARN carries the request's credential-scope region (req.region), not the
+    // frozen server default. The `region` argument is the request region;
+    // storage keying is unchanged (keyed by account/name).
+    pub fn service_arn(&self, region: &str, cluster_name: &str, service_name: &str) -> String {
         if self.arn_format_disabled("serviceLongArnFormat") {
             // Pre-Nov-2018 short form: no cluster segment.
             format!(
                 "arn:aws:ecs:{}:{}:service/{}",
-                self.region, self.account_id, service_name
+                region, self.account_id, service_name
             )
         } else {
             format!(
                 "arn:aws:ecs:{}:{}:service/{}/{}",
-                self.region, self.account_id, cluster_name, service_name
+                region, self.account_id, cluster_name, service_name
             )
         }
     }
 
-    pub fn task_arn(&self, cluster_name: &str, task_id: &str) -> String {
+    pub fn task_arn(&self, region: &str, cluster_name: &str, task_id: &str) -> String {
         if self.arn_format_disabled("taskLongArnFormat") {
             format!(
                 "arn:aws:ecs:{}:{}:task/{}",
-                self.region, self.account_id, task_id
+                region, self.account_id, task_id
             )
         } else {
             format!(
                 "arn:aws:ecs:{}:{}:task/{}/{}",
-                self.region, self.account_id, cluster_name, task_id
+                region, self.account_id, cluster_name, task_id
             )
         }
     }
 
-    pub fn container_instance_arn(&self, cluster_name: &str, instance_id: &str) -> String {
+    pub fn container_instance_arn(
+        &self,
+        region: &str,
+        cluster_name: &str,
+        instance_id: &str,
+    ) -> String {
         if self.arn_format_disabled("containerInstanceLongArnFormat") {
             format!(
                 "arn:aws:ecs:{}:{}:container-instance/{}",
-                self.region, self.account_id, instance_id
+                region, self.account_id, instance_id
             )
         } else {
             format!(
                 "arn:aws:ecs:{}:{}:container-instance/{}/{}",
-                self.region, self.account_id, cluster_name, instance_id
+                region, self.account_id, cluster_name, instance_id
             )
         }
     }
@@ -277,17 +285,17 @@ impl EcsState {
         self.events.push(event);
     }
 
-    pub fn cluster_arn(&self, cluster_name: &str) -> String {
+    pub fn cluster_arn(&self, region: &str, cluster_name: &str) -> String {
         format!(
             "arn:aws:ecs:{}:{}:cluster/{}",
-            self.region, self.account_id, cluster_name
+            region, self.account_id, cluster_name
         )
     }
 
-    pub fn task_definition_arn(&self, family: &str, revision: i32) -> String {
+    pub fn task_definition_arn(&self, region: &str, family: &str, revision: i32) -> String {
         format!(
             "arn:aws:ecs:{}:{}:task-definition/{}:{}",
-            self.region, self.account_id, family, revision
+            region, self.account_id, family, revision
         )
     }
 
@@ -882,11 +890,12 @@ impl EcsState {
         *entry
     }
 
-    /// Build a daemon ARN for a (cluster, name) pair under this account/region.
-    pub fn daemon_arn(&self, cluster: &str, name: &str) -> String {
+    /// Build a daemon ARN for a (cluster, name) pair under this account.
+    /// `region` is the request's credential-scope region (req.region).
+    pub fn daemon_arn(&self, region: &str, cluster: &str, name: &str) -> String {
         fakecloud_aws::arn::Arn::new(
             "ecs",
-            &self.region,
+            region,
             &self.account_id,
             &format!("daemon/{}/{}", cluster, name),
         )
@@ -894,10 +903,10 @@ impl EcsState {
     }
 
     /// Build an express-gateway service ARN.
-    pub fn express_gateway_arn(&self, cluster: &str, name: &str) -> String {
+    pub fn express_gateway_arn(&self, region: &str, cluster: &str, name: &str) -> String {
         fakecloud_aws::arn::Arn::new(
             "ecs",
-            &self.region,
+            region,
             &self.account_id,
             &format!("express-gateway-service/{}/{}", cluster, name),
         )
@@ -905,10 +914,10 @@ impl EcsState {
     }
 
     /// Build a daemon task definition ARN for a `family:revision` pair.
-    pub fn daemon_task_definition_arn(&self, family: &str, revision: i32) -> String {
+    pub fn daemon_task_definition_arn(&self, region: &str, family: &str, revision: i32) -> String {
         fakecloud_aws::arn::Arn::new(
             "ecs",
-            &self.region,
+            region,
             &self.account_id,
             &format!("daemon-task-definition/{}:{}", family, revision),
         )
@@ -916,10 +925,15 @@ impl EcsState {
     }
 
     /// Build a daemon deployment ARN.
-    pub fn daemon_deployment_arn(&self, daemon_name: &str, deployment_id: &str) -> String {
+    pub fn daemon_deployment_arn(
+        &self,
+        region: &str,
+        daemon_name: &str,
+        deployment_id: &str,
+    ) -> String {
         fakecloud_aws::arn::Arn::new(
             "ecs",
-            &self.region,
+            region,
             &self.account_id,
             &format!("daemon-deployment/{}/{}", daemon_name, deployment_id),
         )
@@ -964,7 +978,7 @@ mod tests {
     fn cluster_arn_format() {
         let s = EcsState::new("111122223333", "us-east-1");
         assert_eq!(
-            s.cluster_arn("prod"),
+            s.cluster_arn("us-east-1", "prod"),
             "arn:aws:ecs:us-east-1:111122223333:cluster/prod"
         );
     }
@@ -973,7 +987,7 @@ mod tests {
     fn task_definition_arn_format() {
         let s = EcsState::new("111122223333", "us-east-1");
         assert_eq!(
-            s.task_definition_arn("web", 3),
+            s.task_definition_arn("us-east-1", "web", 3),
             "arn:aws:ecs:us-east-1:111122223333:task-definition/web:3"
         );
     }
@@ -982,7 +996,7 @@ mod tests {
     fn task_arn_long_format_default() {
         let s = EcsState::new("111122223333", "us-east-1");
         assert_eq!(
-            s.task_arn("prod", "abc123"),
+            s.task_arn("us-east-1", "prod", "abc123"),
             "arn:aws:ecs:us-east-1:111122223333:task/prod/abc123"
         );
     }
@@ -993,7 +1007,7 @@ mod tests {
         s.account_setting_defaults
             .insert("taskLongArnFormat".into(), "disabled".into());
         assert_eq!(
-            s.task_arn("prod", "abc123"),
+            s.task_arn("us-east-1", "prod", "abc123"),
             "arn:aws:ecs:us-east-1:111122223333:task/abc123"
         );
     }
@@ -1004,7 +1018,7 @@ mod tests {
         s.account_setting_defaults
             .insert("serviceLongArnFormat".into(), "disabled".into());
         assert_eq!(
-            s.service_arn("prod", "web"),
+            s.service_arn("us-east-1", "prod", "web"),
             "arn:aws:ecs:us-east-1:111122223333:service/web"
         );
     }
@@ -1015,7 +1029,7 @@ mod tests {
         s.account_setting_defaults
             .insert("containerInstanceLongArnFormat".into(), "disabled".into());
         assert_eq!(
-            s.container_instance_arn("prod", "i-abc"),
+            s.container_instance_arn("us-east-1", "prod", "i-abc"),
             "arn:aws:ecs:us-east-1:111122223333:container-instance/i-abc"
         );
     }
@@ -1047,7 +1061,7 @@ mod tests {
         let mut s = EcsState::new("111122223333", "us-east-1");
         s.clusters.insert(
             "prod".to_string(),
-            Cluster::new("prod", s.cluster_arn("prod")),
+            Cluster::new("prod", s.cluster_arn("us-east-1", "prod")),
         );
         s.allocate_revision("web");
         s.account_setting_defaults

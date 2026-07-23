@@ -81,7 +81,7 @@ impl ResourceProvisioner {
         if state.repositories.contains_key(&repository_name) {
             return Err(format!("Repository {repository_name} already exists"));
         }
-        let arn = state.repository_arn(&repository_name);
+        let arn = state.repository_arn(&self.region, &repository_name);
         let registry_id = state.account_id.clone();
         let mut repo = Repository::new(&repository_name, arn.clone(), &registry_id, &endpoint);
         repo.image_tag_mutability = image_tag_mutability;

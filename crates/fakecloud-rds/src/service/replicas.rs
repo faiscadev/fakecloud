@@ -89,7 +89,7 @@ impl RdsService {
             let s = accounts.get(&request.account_id).unwrap_or(&empty);
             (
                 s.next_dbi_resource_id(),
-                s.db_instance_arn(&db_instance_identifier),
+                s.db_instance_arn(request.region.as_str(), &db_instance_identifier),
             )
         };
         let created_at = Utc::now();

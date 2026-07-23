@@ -77,7 +77,7 @@ impl RdsService {
             ));
         }
 
-        let snapshot_arn = state.db_snapshot_arn(snapshot_id);
+        let snapshot_arn = state.db_snapshot_arn(region, snapshot_id);
 
         let snapshot = DbSnapshot {
             db_snapshot_identifier: snapshot_id.to_string(),
@@ -194,7 +194,8 @@ impl RdsService {
 
         let snapshot = DbSnapshot {
             db_snapshot_identifier: db_snapshot_identifier.clone(),
-            db_snapshot_arn: state.db_snapshot_arn(&db_snapshot_identifier),
+            db_snapshot_arn: state
+                .db_snapshot_arn(request.region.as_str(), &db_snapshot_identifier),
             db_instance_identifier: instance.db_instance_identifier.clone(),
             snapshot_create_time: Utc::now(),
             engine: instance.engine.clone(),
@@ -416,7 +417,8 @@ impl RdsService {
             };
 
             let dbi_resource_id = state.next_dbi_resource_id();
-            let db_instance_arn = state.db_instance_arn(&db_instance_identifier);
+            let db_instance_arn =
+                state.db_instance_arn(request.region.as_str(), &db_instance_identifier);
             let created_at = Utc::now();
 
             (snapshot, dbi_resource_id, db_instance_arn, created_at)

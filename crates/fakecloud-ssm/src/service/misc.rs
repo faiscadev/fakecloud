@@ -124,7 +124,7 @@ impl SsmService {
                     "SettingValue": setting.setting_value,
                     "LastModifiedDate": setting.last_modified_date.timestamp_millis() as f64 / 1000.0,
                     "LastModifiedUser": setting.last_modified_user,
-                    "ARN": Arn::new("ssm", &state.region, &state.account_id, &format!("servicesetting/{}", setting.setting_id)).to_string(),
+                    "ARN": Arn::new("ssm", req.region.as_str(), &state.account_id, &format!("servicesetting/{}", setting.setting_id)).to_string(),
                     "Status": setting.status,
                 }
             })))
@@ -136,7 +136,7 @@ impl SsmService {
                     "SettingValue": get_default_service_setting(setting_id),
                     "LastModifiedDate": Utc::now().timestamp_millis() as f64 / 1000.0,
                     "LastModifiedUser": "System",
-                    "ARN": Arn::new("ssm", &state.region, &state.account_id, &format!("servicesetting/{setting_id}")).to_string(),
+                    "ARN": Arn::new("ssm", req.region.as_str(), &state.account_id, &format!("servicesetting/{setting_id}")).to_string(),
                     "Status": "Default",
                 }
             })))
@@ -164,7 +164,7 @@ impl SsmService {
                 "SettingValue": default_value,
                 "LastModifiedDate": Utc::now().timestamp_millis() as f64 / 1000.0,
                 "LastModifiedUser": "System",
-                "ARN": Arn::new("ssm", &state.region, &state.account_id, &format!("servicesetting/{setting_id}")).to_string(),
+                "ARN": Arn::new("ssm", req.region.as_str(), &state.account_id, &format!("servicesetting/{setting_id}")).to_string(),
                 "Status": "Default",
             }
         })))

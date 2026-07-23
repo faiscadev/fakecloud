@@ -193,9 +193,17 @@ impl TestServer {
 
     /// Create a shared AWS SDK config pointing at this test server.
     pub async fn aws_config(&self) -> aws_config::SdkConfig {
+        self.aws_config_in("us-east-1").await
+    }
+
+    /// Like [`Self::aws_config`] but signs requests for an arbitrary region.
+    /// The SigV4 credential-scope region is what handlers see as
+    /// `req.region`, so this lets tests assert region-scoped ARNs/ids are
+    /// stamped from the request region rather than the server default.
+    pub async fn aws_config_in(&self, region: &str) -> aws_config::SdkConfig {
         aws_config::defaults(BehaviorVersion::latest())
             .endpoint_url(self.endpoint())
-            .region(Region::new("us-east-1"))
+            .region(Region::new(region.to_string()))
             .credentials_provider(Credentials::new(
                 "AKIAIOSFODNN7EXAMPLE",
                 "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",

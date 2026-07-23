@@ -29,13 +29,15 @@ impl EcsService {
         let account = request.account_id.clone();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&account);
+        // ARN carries the request's credential-scope region (req.region), not the
+        // frozen server default.
         let cluster_arn = state
             .clusters
             .get(&cluster_name)
             .map(|c| c.cluster_arn.clone())
-            .unwrap_or_else(|| state.cluster_arn(&cluster_name));
+            .unwrap_or_else(|| state.cluster_arn(request.region.as_str(), &cluster_name));
         let uuid = uuid::Uuid::new_v4().to_string();
-        let ci_arn = state.container_instance_arn(&cluster_name, &uuid);
+        let ci_arn = state.container_instance_arn(request.region.as_str(), &cluster_name, &uuid);
         let key = format!("{}/{}", cluster_name, uuid);
         let ci = ContainerInstance {
             container_instance_arn: ci_arn.clone(),
@@ -447,7 +449,9 @@ impl EcsService {
         }
         let arn = format!(
             "arn:aws:ecs:{}:{}:capacity-provider/{}",
-            state.region, state.account_id, name
+            request.region.as_str(),
+            state.account_id,
+            name
         );
         let cp = CapacityProvider {
             name: name.clone(),
@@ -681,7 +685,11 @@ impl EcsService {
             task_set_id: ts_id.clone(),
             task_set_arn: format!(
                 "arn:aws:ecs:{}:{}:task-set/{}/{}/{}",
-                state.region, state.account_id, cluster_name, service_name, ts_id
+                request.region.as_str(),
+                state.account_id,
+                cluster_name,
+                service_name,
+                ts_id
             ),
             service_arn: svc.service_arn.clone(),
             cluster_arn: svc.cluster_arn.clone(),
@@ -1015,13 +1023,13 @@ impl EcsService {
 
     pub(super) fn discover_poll_endpoint(
         &self,
-        _request: &AwsRequest,
+        request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         // ECS agents use this to discover the long-poll + telemetry
         // endpoints. Point both at fakecloud's local listener; real
-        // agent polling isn't wired, but the shape is correct.
-        let accounts = self.state.read();
-        let endpoint = format!("https://ecs.{}.amazonaws.com/", accounts.region());
+        // agent polling isn't wired, but the shape is correct. The endpoint
+        // host carries the request's credential-scope region (req.region).
+        let endpoint = format!("https://ecs.{}.amazonaws.com/", request.region.as_str());
         Ok(AwsResponse::ok_json(json!({
             "endpoint": endpoint,
             "telemetryEndpoint": endpoint,

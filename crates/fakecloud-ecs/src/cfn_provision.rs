@@ -48,8 +48,17 @@ pub async fn cfn_launch_service_tasks(
             .unwrap_or_else(|| format!("arn:aws:iam::{account_id}:root"));
         let launch_type = service.launch_type.clone();
         let desired = service.desired_count;
+        // No request region on the CFN drain path; keep the new tasks in the
+        // region the service's stored ARN already carries.
+        let svc_region = service
+            .cluster_arn
+            .split(':')
+            .nth(3)
+            .map(str::to_string)
+            .unwrap_or_else(|| st.region.clone());
         crate::service::spawn_service_tasks(
             st,
+            &svc_region,
             &service,
             desired,
             &principal_arn,

@@ -140,7 +140,8 @@ impl RdsService {
             let state = accounts.get_or_create(&request.account_id);
             let placeholder = DbInstance {
                 db_instance_identifier: db_instance_identifier.clone(),
-                db_instance_arn: state.db_instance_arn(&db_instance_identifier),
+                db_instance_arn: state
+                    .db_instance_arn(request.region.as_str(), &db_instance_identifier),
                 db_instance_class: db_instance_class.clone(),
                 engine: engine.clone(),
                 engine_version: engine_version.clone(),
@@ -992,7 +993,7 @@ impl RdsService {
                         format!("DBInstance {new_id} already exists."),
                     ));
                 }
-                let new_arn = state.db_instance_arn(new_id);
+                let new_arn = state.db_instance_arn(request.region.as_str(), new_id);
                 let mut moved = state
                     .instances
                     .remove(&db_instance_identifier)

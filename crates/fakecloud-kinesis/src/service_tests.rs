@@ -545,7 +545,7 @@ fn delete_stream_removes_entry_and_consumers() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
     // Register a consumer on the stream.
-    let stream_arn = state.read().default_ref().stream_arn("orders");
+    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -946,7 +946,7 @@ fn enable_and_disable_enhanced_monitoring() {
 fn update_stream_mode_writes_new_mode() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("orders");
+    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
     svc.update_stream_mode(&request(
         "UpdateStreamMode",
         json!({
@@ -973,7 +973,7 @@ fn update_stream_mode_writes_new_mode() {
 fn register_describe_deregister_consumer() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("orders");
+    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1001,7 +1001,7 @@ fn register_describe_deregister_consumer() {
 fn register_consumer_duplicate_errors() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("orders");
+    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1020,7 +1020,7 @@ fn register_consumer_duplicate_errors() {
 fn list_stream_consumers_returns_registered_consumer() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("orders");
+    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1044,7 +1044,7 @@ fn list_stream_consumers_returns_registered_consumer() {
 fn put_get_delete_resource_policy() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("orders");
+    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
     let policy_body = json!({"Version":"2012-10-17","Statement":[]}).to_string();
 
     svc.put_resource_policy(&request(
