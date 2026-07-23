@@ -93,7 +93,13 @@ fn rrset_value_key(r: &ResourceRecordSet) -> Vec<String> {
         .map(|rr| rr.resource_record.iter().map(|x| x.value.clone()).collect())
         .unwrap_or_default();
     if let Some(at) = &r.alias_target {
-        vals.push(format!("ALIAS {}:{}", at.hosted_zone_id, at.dns_name));
+        // The alias `EvaluateTargetHealth` flag is part of the record set's
+        // current values: a DELETE must submit it exactly, so include it in the
+        // value key rather than matching on hosted-zone-id + dns-name alone.
+        vals.push(format!(
+            "ALIAS {}:{}:{}",
+            at.hosted_zone_id, at.dns_name, at.evaluate_target_health
+        ));
     }
     vals.sort();
     vals

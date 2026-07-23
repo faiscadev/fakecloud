@@ -1073,10 +1073,22 @@ impl CloudWatchService {
         if period <= 0 {
             return Err(invalid_param("Period must be positive"));
         }
+        // AWS requires Period to be 1, 5, 10, 30, or any positive multiple of
+        // 60 (high-resolution values below one minute plus per-minute buckets).
+        if !matches!(period, 1 | 5 | 10 | 30) && period % 60 != 0 {
+            return Err(invalid_param(
+                "The parameter Period must be a positive multiple of 60, or one of 1, 5, 10, 30.",
+            ));
+        }
         let start_ts = parse_input_timestamp(&start)
             .ok_or_else(|| invalid_param("StartTime must be ISO 8601 or epoch seconds"))?;
         let end_ts = parse_input_timestamp(&end)
             .ok_or_else(|| invalid_param("EndTime must be ISO 8601 or epoch seconds"))?;
+        if start_ts >= end_ts {
+            return Err(invalid_param(
+                "The parameter StartTime must be less than the parameter EndTime.",
+            ));
+        }
 
         let mut statistics: Vec<String> = Vec::new();
         let mut extended_statistics: Vec<String> = Vec::new();

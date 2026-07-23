@@ -3143,10 +3143,15 @@ fn encrypt_rsa_key_uses_real_oaep_and_roundtrips() {
         "RSA key must use the RSA envelope, got {env}"
     );
 
+    // AWS requires the caller to supply EncryptionAlgorithm when decrypting
+    // ciphertext produced by an asymmetric KMS key.
     let resp = svc
         .decrypt(&make_request(
             "Decrypt",
-            json!({ "CiphertextBlob": ciphertext }),
+            json!({
+                "CiphertextBlob": ciphertext,
+                "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
         ))
         .unwrap();
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
@@ -3155,6 +3160,70 @@ fn encrypt_rsa_key_uses_real_oaep_and_roundtrips() {
         .decode(body["Plaintext"].as_str().unwrap())
         .unwrap();
     assert_eq!(decrypted, plaintext);
+}
+
+#[test]
+fn asymmetric_decrypt_wrong_algorithm_is_rejected() {
+    // Ciphertext produced by an RSA ENCRYPT_DECRYPT key records the algorithm
+    // used (RSAES_OAEP_SHA_256). AWS rejects a Decrypt that supplies a
+    // different EncryptionAlgorithm with InvalidCiphertextException, and
+    // requires the algorithm to be present for asymmetric ciphertext (an
+    // omitted algorithm defaults to SYMMETRIC_DEFAULT, which never matches).
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({ "KeyUsage": "ENCRYPT_DECRYPT", "KeySpec": "RSA_2048" }),
+    );
+    let pt_b64 = base64::engine::general_purpose::STANDARD.encode(b"asymmetric hello");
+    let resp = svc
+        .encrypt(&make_request(
+            "Encrypt",
+            json!({
+                "KeyId": key_id,
+                "Plaintext": pt_b64,
+                "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let ciphertext = body["CiphertextBlob"].as_str().unwrap().to_string();
+
+    // Wrong algorithm -> rejected.
+    match svc.decrypt(&make_request(
+        "Decrypt",
+        json!({
+            "CiphertextBlob": ciphertext.clone(),
+            "EncryptionAlgorithm": "RSAES_OAEP_SHA_1",
+        }),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidCiphertextException"),
+        Ok(_) => panic!("a wrong EncryptionAlgorithm must be rejected"),
+    }
+
+    // Omitted algorithm (defaults to SYMMETRIC_DEFAULT) -> also rejected.
+    match svc.decrypt(&make_request(
+        "Decrypt",
+        json!({ "CiphertextBlob": ciphertext.clone() }),
+    )) {
+        Err(e) => assert_eq!(e.code(), "InvalidCiphertextException"),
+        Ok(_) => panic!("an omitted EncryptionAlgorithm must be rejected for asymmetric"),
+    }
+
+    // Correct algorithm -> succeeds.
+    let resp = svc
+        .decrypt(&make_request(
+            "Decrypt",
+            json!({
+                "CiphertextBlob": ciphertext,
+                "EncryptionAlgorithm": "RSAES_OAEP_SHA_256",
+            }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let decrypted = base64::engine::general_purpose::STANDARD
+        .decode(body["Plaintext"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decrypted, b"asymmetric hello");
 }
 
 #[test]

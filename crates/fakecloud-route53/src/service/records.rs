@@ -15,7 +15,10 @@ impl Route53Service {
                 invalid_argument(format!("invalid ChangeResourceRecordSetsRequest XML: {e}"))
             })?;
         if cfg.change_batch.changes.change.is_empty() {
-            return Err(invalid_argument("ChangeBatch.Changes is empty"));
+            // AWS models `ChangeBatch.Changes` as a list with `@length(min:1)`
+            // and surfaces an empty batch as `InvalidChangeBatch`, not the
+            // generic `InvalidInput`.
+            return Err(invalid_change_batch("ChangeBatch.Changes is empty"));
         }
         let mut state = self.state.write();
         let account = state

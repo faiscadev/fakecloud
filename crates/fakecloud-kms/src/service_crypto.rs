@@ -164,6 +164,25 @@ impl KmsService {
         let ec_aad = canonical_encryption_context(&body["EncryptionContext"])?;
         let decoded = decode_ciphertext_envelope(state, ciphertext_b64, &ec_aad)?;
 
+        // For ciphertext produced by an asymmetric (RSA) KMS key, AWS requires
+        // the caller to supply the EncryptionAlgorithm and it must match the
+        // algorithm recorded in the ciphertext envelope. An omitted algorithm
+        // defaults to SYMMETRIC_DEFAULT, which never matches an RSA envelope,
+        // so both an omitted and a mismatched algorithm surface as
+        // InvalidCiphertextException. Symmetric decrypt is unaffected.
+        if decoded.encryption_algorithm != "SYMMETRIC_DEFAULT" {
+            let requested = body["EncryptionAlgorithm"]
+                .as_str()
+                .unwrap_or("SYMMETRIC_DEFAULT");
+            if requested != decoded.encryption_algorithm {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidCiphertextException",
+                    "The specified EncryptionAlgorithm does not match the algorithm used to produce the ciphertext.",
+                ));
+            }
+        }
+
         // When the caller supplies KeyId for a symmetric decrypt, AWS
         // validates it identifies the same CMK that produced the blob and
         // returns IncorrectKeyException otherwise (1.5). For symmetric keys
