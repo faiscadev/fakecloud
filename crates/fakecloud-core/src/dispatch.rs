@@ -826,6 +826,30 @@ pub async fn dispatch(
                         }
                         // Soft mode: audit log emitted; fall through to the handler.
                     }
+                } else {
+                    // Anonymous request to an iam_enforceable service whose
+                    // operation has no IamAction mapping. Mirror the signed
+                    // branch above: an operation we cannot map to an IAM action
+                    // cannot be authorized, so serving it would be a fail-open
+                    // bypass of `--iam strict`. Deny by default under strict;
+                    // soft mode warns and falls through.
+                    tracing::warn!(
+                        target: "fakecloud::iam::audit",
+                        service = %detected.service,
+                        action = %aws_request.action,
+                        mode = %config.iam_mode,
+                        request_id = %request_id,
+                        "anonymous request to iam_enforceable service has no IamAction mapping; denying under strict, allowing under soft"
+                    );
+                    if config.iam_mode.is_strict() {
+                        return build_error_response(
+                            StatusCode::FORBIDDEN,
+                            "AccessDenied",
+                            "Access Denied",
+                            &request_id,
+                            detected.protocol,
+                        );
+                    }
                 }
             }
         }
