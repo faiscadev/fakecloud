@@ -15,15 +15,89 @@ impl fakecloud_core::multi_account::AccountState for RdsState {
     }
 }
 
-/// Supported DB instance classes — single source of truth.
+/// Representative catalog of current DB instance classes used to
+/// enumerate `DescribeOrderableDBInstanceOptions`. This is NOT an
+/// allowlist — `CreateDBInstance`/`ModifyDBInstance` accept ANY
+/// well-formed AWS instance class (see
+/// `service_helpers::validate_db_instance_class`), because the class is
+/// stored purely as metadata and never reaches the container runtime.
+/// The list below just gives `DescribeOrderableDBInstanceOptions` a
+/// realistic, non-empty set of common current-generation classes to
+/// return across the burstable (t*), general-purpose (m*), and
+/// memory-optimized (r*) families.
 pub const SUPPORTED_INSTANCE_CLASSES: &[&str] = &[
+    // Burstable — t2 / t3 / t4g
+    "db.t2.micro",
+    "db.t2.small",
+    "db.t2.medium",
+    "db.t2.large",
     "db.t3.micro",
     "db.t3.small",
     "db.t3.medium",
     "db.t3.large",
+    "db.t3.xlarge",
+    "db.t3.2xlarge",
     "db.t4g.micro",
     "db.t4g.small",
+    "db.t4g.medium",
+    "db.t4g.large",
+    "db.t4g.xlarge",
+    "db.t4g.2xlarge",
+    // General purpose — m5 / m6i / m6g / m7g
     "db.m5.large",
+    "db.m5.xlarge",
+    "db.m5.2xlarge",
+    "db.m5.4xlarge",
+    "db.m5.8xlarge",
+    "db.m5.12xlarge",
+    "db.m5.16xlarge",
+    "db.m5.24xlarge",
+    "db.m6i.large",
+    "db.m6i.xlarge",
+    "db.m6i.2xlarge",
+    "db.m6i.4xlarge",
+    "db.m6i.8xlarge",
+    "db.m6i.12xlarge",
+    "db.m6i.16xlarge",
+    "db.m6i.24xlarge",
+    "db.m6i.32xlarge",
+    "db.m6g.large",
+    "db.m6g.xlarge",
+    "db.m6g.2xlarge",
+    "db.m6g.4xlarge",
+    "db.m6g.8xlarge",
+    "db.m6g.12xlarge",
+    "db.m6g.16xlarge",
+    "db.m7g.large",
+    "db.m7g.xlarge",
+    "db.m7g.2xlarge",
+    "db.m7g.4xlarge",
+    "db.m7g.8xlarge",
+    "db.m7g.12xlarge",
+    "db.m7g.16xlarge",
+    // Memory optimized — r5 / r6g / r7g
+    "db.r5.large",
+    "db.r5.xlarge",
+    "db.r5.2xlarge",
+    "db.r5.4xlarge",
+    "db.r5.8xlarge",
+    "db.r5.12xlarge",
+    "db.r5.16xlarge",
+    "db.r5.24xlarge",
+    "db.r6g.large",
+    "db.r6g.xlarge",
+    "db.r6g.2xlarge",
+    "db.r6g.4xlarge",
+    "db.r6g.8xlarge",
+    "db.r6g.12xlarge",
+    "db.r6g.16xlarge",
+    "db.r7g.large",
+    "db.r7g.xlarge",
+    "db.r7g.2xlarge",
+    "db.r7g.4xlarge",
+    "db.r7g.8xlarge",
+    "db.r7g.12xlarge",
+    "db.r7g.16xlarge",
 ];
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -939,7 +1013,7 @@ mod tests {
 
     use super::{
         default_engine_versions, default_orderable_options, default_parameter_groups, Arn,
-        DbInstance, RdsState,
+        DbInstance, RdsState, SUPPORTED_INSTANCE_CLASSES,
     };
 
     #[test]
@@ -1048,8 +1122,9 @@ mod tests {
         let versions = default_engine_versions();
         let options = default_orderable_options();
 
-        assert_eq!(options.len(), 77); // 11 versions * 7 instance classes
-                                       // Verify all engines and versions have orderable options
+        // 11 engine versions * every representative instance class.
+        assert_eq!(options.len(), 11 * SUPPORTED_INSTANCE_CLASSES.len());
+        // Verify all engines and versions have orderable options
         for version in &versions {
             assert!(options.iter().any(|opt| {
                 opt.engine == version.engine && opt.engine_version == version.engine_version
