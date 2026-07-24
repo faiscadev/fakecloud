@@ -415,7 +415,18 @@ pub(crate) fn validate_create_request(
         _ => vec![],
     };
 
-    if !supported_versions.contains(&engine_version) {
+    // Accept any version whose major (or major.minor) prefix is supported: the
+    // runtime resolves the prebuilt image by MAJOR version
+    // (`ensure_postgres_image(engine_version.split('.').next())`, and the
+    // equivalent for mysql/mariadb), so every minor/patch of a supported major
+    // runs the same container. Enumerating every AWS minor in the allowlist is
+    // futile and rots the moment AWS ships a new one (e.g. rejecting the valid
+    // `postgres 17.9`, issue #2391). Matching on a `<prefix>.`/exact boundary
+    // means `17` accepts `17`, `17.4`, `17.9` but never `170.x` or `16.*`.
+    let version_supported = supported_versions
+        .iter()
+        .any(|v| engine_version == *v || engine_version.starts_with(&format!("{v}.")));
+    if !version_supported {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "InsufficientDBInstanceCapacity",
@@ -2217,6 +2228,45 @@ pub(crate) fn default_parameter_group(engine: &str, engine_version: &str) -> Str
             format!("default.{engine}-{major}.{minor}")
         }
         _ => "default.postgres16".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod engine_version_tests {
+    use super::*;
+
+    fn create(engine: &str, version: &str) -> Result<(), AwsServiceError> {
+        validate_create_request("db-1", 20, "db.t3.micro", engine, version, 5432)
+    }
+
+    #[test]
+    fn accepts_any_minor_of_a_supported_major() {
+        // Regression for #2391: postgres 17.9 is a valid AWS minor whose major
+        // (17) is image-backed, but the old exact-minor allowlist rejected it.
+        for v in ["17", "17.4", "17.9", "16.5", "15.8", "14.13", "13.16"] {
+            assert!(
+                create("postgres", v).is_ok(),
+                "postgres {v} should be accepted"
+            );
+        }
+        // Other engines' minors of a supported major also pass.
+        assert!(create("mysql", "8.0.40").is_ok());
+        assert!(create("mariadb", "10.11.9").is_ok());
+    }
+
+    #[test]
+    fn rejects_unsupported_major() {
+        // A major with no image mapping is still rejected (not a prefix of any
+        // supported version), and prefix matching respects the dot boundary so
+        // `17` never accepts `170.x` or a different major.
+        assert!(create("postgres", "9.6").is_err());
+        assert!(create("postgres", "170.1").is_err());
+        assert!(create("postgres", "18.0").is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_engine() {
+        assert!(create("cockroachdb", "1.0").is_err());
     }
 }
 
