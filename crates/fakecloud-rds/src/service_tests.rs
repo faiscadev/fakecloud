@@ -8,10 +8,11 @@ use parking_lot::RwLock;
 use uuid::Uuid;
 
 use super::{
-    build_restored_instance, db_instance_xml, default_db_name, default_parameter_group,
-    default_port_for_engine, filter_engine_versions, filter_orderable_options,
-    license_model_for_engine, merge_tags, optional_i32_param, parse_tag_keys, parse_tags,
-    save_snapshot_static, validate_create_request, RdsService, RdsSourceType,
+    apply_snapshot_dump_result, build_restored_instance, db_instance_xml, default_db_name,
+    default_parameter_group, default_port_for_engine, filter_engine_versions,
+    filter_orderable_options, license_model_for_engine, merge_tags, optional_i32_param,
+    parse_tag_keys, parse_tags, save_snapshot_static, validate_create_request, RdsService,
+    RdsSourceType,
 };
 use crate::state::{
     default_engine_versions, default_orderable_options, DbInstance, RdsSnapshot, RdsTag,
@@ -3026,6 +3027,144 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
         "post-bg-task save must overwrite the `creating` placeholder",
     );
     assert_eq!(s.instances["db-1"].host_port, 15432);
+}
+
+/// CreateDBSnapshot must NOT block on the (unbounded, possibly-minutes)
+/// mysqldump/pg_dump: it records the snapshot as `creating` and returns
+/// immediately, so the response and an instant DescribeDBSnapshots both show
+/// `creating`. The dump runs in a detached task (bug-hunt: sync long op in the
+/// async request path). Uses a stub runtime so `require_runtime` returns `Some`
+/// without needing Docker; the background dump fails harmlessly.
+#[tokio::test]
+async fn create_db_snapshot_returns_creating_without_blocking_on_dump() {
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "db1");
+
+    let req = request(
+        "CreateDBSnapshot",
+        &[
+            ("DBSnapshotIdentifier", "snap-1"),
+            ("DBInstanceIdentifier", "db1"),
+        ],
+    );
+    let body = body_of(svc.create_db_snapshot(&req).await.unwrap());
+    // The synchronous response reflects the in-progress call.
+    assert!(
+        body.contains("<Status>creating</Status>"),
+        "CreateDBSnapshot must return `creating`, got: {body}"
+    );
+
+    // DescribeDBSnapshots immediately after create sees the row as `creating`
+    // (the record insert is synchronous; only the dump is backgrounded).
+    let desc = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", "snap-1")]);
+    let desc_body = body_of(svc.describe_db_snapshots(&desc).unwrap());
+    assert!(
+        desc_body.contains("<DBSnapshotIdentifier>snap-1</DBSnapshotIdentifier>"),
+        "snapshot must be visible immediately: {desc_body}"
+    );
+    assert!(
+        desc_body.contains("<Status>creating</Status>"),
+        "snapshot must be `creating` right after create: {desc_body}"
+    );
+}
+
+/// CreateDBSnapshot with no runtime wired keeps the historical fast-fail: the
+/// snapshot never enters `creating` because there is no container to dump.
+#[tokio::test]
+async fn create_db_snapshot_requires_runtime() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request(
+        "CreateDBSnapshot",
+        &[
+            ("DBSnapshotIdentifier", "snap-x"),
+            ("DBInstanceIdentifier", "db1"),
+        ],
+    );
+    assert!(svc.create_db_snapshot(&req).await.is_err());
+    // Nothing was recorded.
+    let desc = request("DescribeDBSnapshots", &[]);
+    let desc_body = body_of(svc.describe_db_snapshots(&desc).unwrap());
+    assert!(!desc_body.contains("snap-x"));
+}
+
+/// The backgrounded finalizer's state transition, exercised directly (no
+/// container runtime): a successful dump flips `creating` -> `available` with
+/// the captured bytes and full progress; a failed dump flips to `failed`.
+#[test]
+fn apply_snapshot_dump_result_transitions_status() {
+    fn seed_creating(state: &SharedRdsState, id: &str) {
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        s.snapshots.insert(
+            id.to_string(),
+            crate::state::DbSnapshot {
+                db_snapshot_identifier: id.to_string(),
+                db_snapshot_arn: format!("arn:aws:rds:us-east-1:123456789012:snapshot:{id}"),
+                db_instance_identifier: "src".to_string(),
+                snapshot_create_time: Utc::now(),
+                engine: "postgres".to_string(),
+                engine_version: "16.3".to_string(),
+                allocated_storage: 20,
+                status: "creating".to_string(),
+                port: 5432,
+                master_username: "admin".to_string(),
+                db_name: Some("appdb".to_string()),
+                dbi_resource_id: "db-rid".to_string(),
+                snapshot_type: "manual".to_string(),
+                master_user_password: "secret".to_string(),
+                tags: Vec::new(),
+                dump_data: Vec::new(),
+                availability_zone: None,
+                vpc_id: None,
+                instance_create_time: Some(Utc::now()),
+                license_model: None,
+                iops: None,
+                option_group_name: None,
+                percent_progress: Some(0),
+                storage_type: None,
+                encrypted: false,
+                kms_key_id: None,
+                iam_database_authentication_enabled: false,
+                timezone: None,
+                storage_throughput: None,
+                snapshot_attributes: std::collections::BTreeMap::new(),
+            },
+        );
+    }
+
+    let state: SharedRdsState = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+
+    // Success path.
+    seed_creating(&state, "ok");
+    apply_snapshot_dump_result(&state, "123456789012", "ok", Ok(b"DUMP-BYTES".to_vec()));
+    {
+        let accounts = state.read();
+        let snap = &accounts.get("123456789012").unwrap().snapshots["ok"];
+        assert_eq!(snap.status, "available");
+        assert_eq!(snap.dump_data, b"DUMP-BYTES");
+        assert_eq!(snap.percent_progress, Some(100));
+    }
+
+    // Failure path.
+    seed_creating(&state, "bad");
+    apply_snapshot_dump_result(
+        &state,
+        "123456789012",
+        "bad",
+        Err(crate::runtime::RuntimeError::Unavailable),
+    );
+    {
+        let accounts = state.read();
+        let snap = &accounts.get("123456789012").unwrap().snapshots["bad"];
+        assert_eq!(snap.status, "failed");
+        assert!(snap.dump_data.is_empty());
+    }
+
+    // A snapshot deleted mid-dump is a no-op, not a panic.
+    apply_snapshot_dump_result(&state, "123456789012", "ghost", Ok(vec![1, 2, 3]));
 }
 
 /// Memory mode: no store wired, save is a no-op. Guards against

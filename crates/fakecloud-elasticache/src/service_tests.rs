@@ -2383,6 +2383,76 @@ async fn create_snapshot_returns_snapshot_xml() {
     assert!(body.contains("<CreateSnapshotResponse"));
 }
 
+/// With a runtime wired, CreateSnapshot must NOT block on the RDB dump
+/// (redis SAVE, unbounded and easily past the ~60s client read timeout): it
+/// records the snapshot as `creating` and returns immediately, and the
+/// snapshot is visible in DescribeSnapshots right away. The dump runs in a
+/// detached task. Stub runtime keeps this Docker-free.
+#[tokio::test]
+async fn create_snapshot_returns_creating_without_blocking_on_dump() {
+    let service = service_with_replication_group("bg-rg", 1).with_runtime(std::sync::Arc::new(
+        crate::runtime::ElastiCacheRuntime::new_stub(),
+    ));
+    let req = request(
+        "CreateSnapshot",
+        &[("SnapshotName", "bg-snap"), ("ReplicationGroupId", "bg-rg")],
+    );
+    let resp = service.create_snapshot(&req).await.unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    assert!(
+        body.contains("<SnapshotStatus>creating</SnapshotStatus>"),
+        "CreateSnapshot must return `creating`: {body}"
+    );
+
+    // Synchronously recorded: visible immediately as `creating`.
+    let desc = request("DescribeSnapshots", &[("SnapshotName", "bg-snap")]);
+    let desc_body = String::from_utf8(
+        service
+            .describe_snapshots(&desc)
+            .unwrap()
+            .body
+            .expect_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        desc_body.contains("<SnapshotName>bg-snap</SnapshotName>"),
+        "snapshot must be visible immediately: {desc_body}"
+    );
+    assert!(
+        desc_body.contains("<SnapshotStatus>creating</SnapshotStatus>"),
+        "snapshot must be `creating` right after create: {desc_body}"
+    );
+}
+
+/// No runtime wired: metadata-only fast path stays `available` immediately
+/// (nothing to dump), unchanged by the backgrounding.
+#[tokio::test]
+async fn create_snapshot_without_runtime_is_available_immediately() {
+    let service = service_with_replication_group("meta-rg", 1);
+    let req = request(
+        "CreateSnapshot",
+        &[
+            ("SnapshotName", "meta-snap"),
+            ("ReplicationGroupId", "meta-rg"),
+        ],
+    );
+    let body = String::from_utf8(
+        service
+            .create_snapshot(&req)
+            .await
+            .unwrap()
+            .body
+            .expect_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("<SnapshotStatus>available</SnapshotStatus>"),
+        "{body}"
+    );
+}
+
 #[tokio::test]
 async fn create_snapshot_via_cache_cluster_id() {
     let service = service_with_replication_group("cc-rg", 2);

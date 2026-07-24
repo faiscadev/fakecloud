@@ -472,14 +472,19 @@ impl RdsService {
             instance
         };
 
-        if let Some(runtime) = &self.runtime {
-            runtime.stop_container(&db_instance_identifier).await;
-            // Drop the persisted data volume so a future instance reusing this
-            // identifier starts clean instead of inheriting deleted data
-            // (bug-audit 2026-06-20, 4.2).
-            runtime
-                .remove_data_volume(&request.account_id, &db_instance_identifier)
-                .await;
+        // When a final snapshot was requested, its backgrounded finalizer owns
+        // the teardown: the source container must stay up until the async dump
+        // has read from it, so stopping it here would race the dump to empty.
+        if final_db_snapshot_identifier.is_none() {
+            if let Some(runtime) = &self.runtime {
+                runtime.stop_container(&db_instance_identifier).await;
+                // Drop the persisted data volume so a future instance reusing this
+                // identifier starts clean instead of inheriting deleted data
+                // (bug-audit 2026-06-20, 4.2).
+                runtime
+                    .remove_data_volume(&request.account_id, &db_instance_identifier)
+                    .await;
+            }
         }
 
         self.emit_event(

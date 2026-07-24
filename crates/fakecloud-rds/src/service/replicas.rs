@@ -63,26 +63,6 @@ impl RdsService {
             )
         })?;
 
-        let dump_data = match runtime
-            .dump_database(
-                &source_db_instance_identifier,
-                &source_instance.engine,
-                &source_instance.master_username,
-                &source_instance.master_user_password,
-                &db_name,
-            )
-            .await
-        {
-            Ok(data) => data,
-            Err(e) => {
-                self.state
-                    .write()
-                    .get_or_create(&request.account_id)
-                    .cancel_instance_creation(&db_instance_identifier);
-                return Err(runtime_error_to_service_error(e));
-            }
-        };
-
         let (dbi_resource_id, db_instance_arn) = {
             let accounts = self.state.read();
             let empty = RdsState::new(&request.account_id, &request.region);
@@ -149,7 +129,10 @@ impl RdsService {
             db_name,
             // A read replica inherits the source instance's Pod scheduling tags.
             source_instance.tags.clone(),
-            Some(dump_data),
+            None,
+            // Live-dump the source inside the finalizer so the slow dump never
+            // blocks this response (mirrors the container-start backgrounding).
+            Some(source_db_instance_identifier.clone()),
             ("RDS-EVENT-0005", "Read replica DB instance created"),
         );
 

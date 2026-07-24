@@ -27,9 +27,8 @@ impl RdsService {
         })?;
 
         let (instance_for_snapshot, db_name) = {
-            let accounts = self.state.read();
-            let empty = RdsState::new(account_id, region);
-            let state = accounts.get(account_id).unwrap_or(&empty);
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(account_id);
 
             if state.snapshots.contains_key(snapshot_id) {
                 return Err(AwsServiceError::aws_error(
@@ -52,71 +51,63 @@ impl RdsService {
                 .unwrap_or(default_db)
                 .to_string();
 
+            // Record the snapshot synchronously as `creating` so
+            // DescribeDBSnapshots reflects it immediately (AWS-faithful for
+            // the in-progress call); the backgrounded dump flips it to
+            // `available` on completion.
+            let snapshot_arn = state.db_snapshot_arn(region, snapshot_id);
+            let snapshot = DbSnapshot {
+                db_snapshot_identifier: snapshot_id.to_string(),
+                db_snapshot_arn: snapshot_arn,
+                db_instance_identifier: db_instance_identifier.to_string(),
+                snapshot_create_time: Utc::now(),
+                engine: instance.engine.clone(),
+                engine_version: instance.engine_version.clone(),
+                allocated_storage: instance.allocated_storage,
+                status: "creating".to_string(),
+                port: instance.port,
+                master_username: instance.master_username.clone(),
+                db_name: instance.db_name.clone(),
+                dbi_resource_id: instance.dbi_resource_id.clone(),
+                snapshot_type: "automated".to_string(),
+                master_user_password: instance.master_user_password.clone(),
+                tags: Vec::new(),
+                dump_data: Vec::new(),
+                availability_zone: instance.availability_zone.clone(),
+                vpc_id: None,
+                instance_create_time: Some(instance.created_at),
+                license_model: Some(
+                    service_helpers::license_model_for_engine(&instance.engine).to_string(),
+                ),
+                iops: instance.iops,
+                option_group_name: instance.option_group_name.clone(),
+                percent_progress: Some(0),
+                storage_type: instance.storage_type.clone(),
+                encrypted: instance.storage_encrypted,
+                kms_key_id: instance.kms_key_id.clone(),
+                iam_database_authentication_enabled: instance.iam_database_authentication_enabled,
+                timezone: None,
+                storage_throughput: None,
+                snapshot_attributes: std::collections::BTreeMap::new(),
+            };
+            state.snapshots.insert(snapshot_id.to_string(), snapshot);
+
             (instance, db_name)
         };
 
-        let dump_data = runtime
-            .dump_database(
-                db_instance_identifier,
-                &instance_for_snapshot.engine,
-                &instance_for_snapshot.master_username,
-                &instance_for_snapshot.master_user_password,
-                &db_name,
-            )
-            .await
-            .map_err(runtime_error_to_service_error)?;
-
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-
-        if state.snapshots.contains_key(snapshot_id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
-                "DBSnapshotAlreadyExists",
-                format!("DBSnapshot {snapshot_id} already exists."),
-            ));
-        }
-
-        let snapshot_arn = state.db_snapshot_arn(region, snapshot_id);
-
-        let snapshot = DbSnapshot {
-            db_snapshot_identifier: snapshot_id.to_string(),
-            db_snapshot_arn: snapshot_arn,
-            db_instance_identifier: db_instance_identifier.to_string(),
-            snapshot_create_time: Utc::now(),
-            engine: instance_for_snapshot.engine.clone(),
-            engine_version: instance_for_snapshot.engine_version.clone(),
-            allocated_storage: instance_for_snapshot.allocated_storage,
-            status: "available".to_string(),
-            port: instance_for_snapshot.port,
-            master_username: instance_for_snapshot.master_username.clone(),
-            db_name: instance_for_snapshot.db_name.clone(),
-            dbi_resource_id: instance_for_snapshot.dbi_resource_id.clone(),
-            snapshot_type: "automated".to_string(),
-            master_user_password: instance_for_snapshot.master_user_password.clone(),
-            tags: Vec::new(),
-            dump_data,
-            availability_zone: instance_for_snapshot.availability_zone.clone(),
-            vpc_id: None,
-            instance_create_time: Some(instance_for_snapshot.created_at),
-            license_model: Some(
-                service_helpers::license_model_for_engine(&instance_for_snapshot.engine)
-                    .to_string(),
-            ),
-            iops: instance_for_snapshot.iops,
-            option_group_name: instance_for_snapshot.option_group_name.clone(),
-            percent_progress: Some(100),
-            storage_type: instance_for_snapshot.storage_type.clone(),
-            encrypted: instance_for_snapshot.storage_encrypted,
-            kms_key_id: instance_for_snapshot.kms_key_id.clone(),
-            iam_database_authentication_enabled: instance_for_snapshot
-                .iam_database_authentication_enabled,
-            timezone: None,
-            storage_throughput: None,
-            snapshot_attributes: std::collections::BTreeMap::new(),
-        };
-
-        state.snapshots.insert(snapshot_id.to_string(), snapshot);
+        // Background the dump AND the source container teardown: DeleteDBInstance
+        // must not stop the container until the final snapshot has read from it.
+        self.spawn_finalize_snapshot(
+            runtime.clone(),
+            account_id.to_string(),
+            snapshot_id.to_string(),
+            db_instance_identifier.to_string(),
+            instance_for_snapshot.engine.clone(),
+            instance_for_snapshot.master_username.clone(),
+            instance_for_snapshot.master_user_password.clone(),
+            db_name,
+            true,
+        );
         Ok(())
     }
 
@@ -170,69 +161,77 @@ impl RdsService {
             )
         })?;
 
-        let dump_data = runtime
-            .dump_database(
-                &db_instance_identifier,
-                &instance.engine,
-                &instance.master_username,
-                &instance.master_user_password,
-                &db_name,
-            )
-            .await
-            .map_err(runtime_error_to_service_error)?;
+        // Record the snapshot synchronously as `creating` and return right
+        // away; the slow mysqldump/pg_dump runs in a detached task that flips
+        // the row to `available` on completion. AWS returns `creating` for the
+        // in-progress CreateDBSnapshot call, so DescribeDBSnapshots right after
+        // create sees `creating`, then `available` once the dump lands.
+        let snapshot = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&request.account_id);
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&request.account_id);
+            if state.snapshots.contains_key(&db_snapshot_identifier) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBSnapshotAlreadyExists",
+                    format!("DBSnapshot {db_snapshot_identifier} already exists."),
+                ));
+            }
 
-        if state.snapshots.contains_key(&db_snapshot_identifier) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
-                "DBSnapshotAlreadyExists",
-                format!("DBSnapshot {db_snapshot_identifier} already exists."),
-            ));
-        }
+            let snapshot = DbSnapshot {
+                db_snapshot_identifier: db_snapshot_identifier.clone(),
+                db_snapshot_arn: state
+                    .db_snapshot_arn(request.region.as_str(), &db_snapshot_identifier),
+                db_instance_identifier: instance.db_instance_identifier.clone(),
+                snapshot_create_time: Utc::now(),
+                engine: instance.engine.clone(),
+                engine_version: instance.engine_version.clone(),
+                allocated_storage: instance.allocated_storage,
+                status: "creating".to_string(),
+                port: instance.port,
+                master_username: instance.master_username.clone(),
+                db_name: instance.db_name.clone(),
+                dbi_resource_id: instance.dbi_resource_id.clone(),
+                snapshot_type: "manual".to_string(),
+                master_user_password: instance.master_user_password.clone(),
+                tags: Vec::new(),
+                dump_data: Vec::new(),
+                availability_zone: instance.availability_zone.clone(),
+                vpc_id: None,
+                instance_create_time: Some(instance.created_at),
+                license_model: Some(
+                    service_helpers::license_model_for_engine(&instance.engine).to_string(),
+                ),
+                iops: instance.iops,
+                option_group_name: instance.option_group_name.clone(),
+                percent_progress: Some(0),
+                storage_type: instance.storage_type.clone(),
+                encrypted: instance.storage_encrypted,
+                kms_key_id: instance.kms_key_id.clone(),
+                iam_database_authentication_enabled: instance.iam_database_authentication_enabled,
+                timezone: None,
+                storage_throughput: None,
+                snapshot_attributes: std::collections::BTreeMap::new(),
+            };
 
-        let snapshot = DbSnapshot {
-            db_snapshot_identifier: db_snapshot_identifier.clone(),
-            db_snapshot_arn: state
-                .db_snapshot_arn(request.region.as_str(), &db_snapshot_identifier),
-            db_instance_identifier: instance.db_instance_identifier.clone(),
-            snapshot_create_time: Utc::now(),
-            engine: instance.engine.clone(),
-            engine_version: instance.engine_version.clone(),
-            allocated_storage: instance.allocated_storage,
-            status: "available".to_string(),
-            port: instance.port,
-            master_username: instance.master_username.clone(),
-            db_name: instance.db_name.clone(),
-            dbi_resource_id: instance.dbi_resource_id.clone(),
-            snapshot_type: "manual".to_string(),
-            master_user_password: instance.master_user_password.clone(),
-            tags: Vec::new(),
-            dump_data,
-            availability_zone: instance.availability_zone.clone(),
-            vpc_id: None,
-            instance_create_time: Some(instance.created_at),
-            license_model: Some(
-                service_helpers::license_model_for_engine(&instance.engine).to_string(),
-            ),
-            iops: instance.iops,
-            option_group_name: instance.option_group_name.clone(),
-            percent_progress: Some(100),
-            storage_type: instance.storage_type.clone(),
-            encrypted: instance.storage_encrypted,
-            kms_key_id: instance.kms_key_id.clone(),
-            iam_database_authentication_enabled: instance.iam_database_authentication_enabled,
-            timezone: None,
-            storage_throughput: None,
-            snapshot_attributes: std::collections::BTreeMap::new(),
+            state
+                .snapshots
+                .insert(db_snapshot_identifier.clone(), snapshot.clone());
+            snapshot
         };
-
-        state
-            .snapshots
-            .insert(db_snapshot_identifier.clone(), snapshot.clone());
         let snapshot_arn = snapshot.db_snapshot_arn.clone();
-        drop(accounts);
+
+        self.spawn_finalize_snapshot(
+            runtime.clone(),
+            request.account_id.clone(),
+            db_snapshot_identifier.clone(),
+            db_instance_identifier.clone(),
+            instance.engine.clone(),
+            instance.master_username.clone(),
+            instance.master_user_password.clone(),
+            db_name,
+            false,
+        );
 
         self.emit_event(
             RdsSourceType::DbSnapshot,
@@ -480,6 +479,8 @@ impl RdsService {
             db_name,
             tags,
             Some(snapshot.dump_data.clone()),
+            // In-memory dump from the snapshot; no live source to dump.
+            None,
             ("RDS-EVENT-0043", "DB instance restored from snapshot"),
         );
 

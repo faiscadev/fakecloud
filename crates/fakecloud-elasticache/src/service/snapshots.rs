@@ -233,7 +233,7 @@ impl ElastiCacheService {
             ));
         }
 
-        let (mut snapshot, arn, group_id) = {
+        let (snapshot, arn, group_id) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
 
@@ -294,11 +294,19 @@ impl ElastiCacheService {
                 snapshot_name
             );
 
+            // `creating` when a runtime is wired (the redis RDB dump runs in the
+            // background and flips this to `available`); `available` right away
+            // in metadata-only mode where there's nothing to dump.
+            let snapshot_status = if self.runtime.is_some() {
+                "creating"
+            } else {
+                "available"
+            };
             let snapshot = CacheSnapshot {
                 snapshot_name: snapshot_name.clone(),
                 replication_group_id: group.replication_group_id.clone(),
                 replication_group_description: group.description.clone(),
-                snapshot_status: "available".to_string(),
+                snapshot_status: snapshot_status.to_string(),
                 cache_node_type: group.cache_node_type.clone(),
                 engine: group.engine.clone(),
                 engine_version: group.engine_version.clone(),
@@ -311,26 +319,14 @@ impl ElastiCacheService {
             (snapshot, arn, group_id)
         };
 
-        if let Some(ref runtime) = self.runtime {
-            let tmp_path = snapshot_rdb_temp_path(&request.account_id, &snapshot_name);
-            match runtime.dump_rdb(&group_id, &tmp_path).await {
-                Ok(()) => {
-                    snapshot.rdb_path = Some(tmp_path);
-                }
-                Err(err) => {
-                    tracing::warn!("Failed to dump RDB for snapshot {}: {}", snapshot_name, err);
-                }
-            }
-        }
-
+        // Insert synchronously so DescribeSnapshots reflects the snapshot
+        // immediately; only the unbounded RDB dump (redis SAVE, easily past the
+        // ~60s client read timeout) is backgrounded.
         let xml = snapshot_xml(&snapshot);
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
             if state.snapshots.contains_key(&snapshot_name) {
-                if let Some(ref path) = snapshot.rdb_path {
-                    let _ = std::fs::remove_file(path);
-                }
                 return Err(AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "SnapshotAlreadyExistsFault",
@@ -338,7 +334,47 @@ impl ElastiCacheService {
                 ));
             }
             state.tags.insert(arn, Vec::new());
-            state.snapshots.insert(snapshot_name, snapshot);
+            state.snapshots.insert(snapshot_name.clone(), snapshot);
+        }
+
+        if let Some(runtime) = self.runtime.clone() {
+            let state_handle = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let account_id = request.account_id.clone();
+            let snapshot_name = snapshot_name.clone();
+            let tmp_path = snapshot_rdb_temp_path(&account_id, &snapshot_name);
+            tokio::spawn(async move {
+                let rdb_path = match runtime.dump_rdb(&group_id, &tmp_path).await {
+                    Ok(()) => Some(tmp_path),
+                    Err(err) => {
+                        tracing::warn!(
+                            "Failed to dump RDB for snapshot {}: {}",
+                            snapshot_name,
+                            err
+                        );
+                        None
+                    }
+                };
+                {
+                    let mut accounts = state_handle.write();
+                    let state = accounts.get_or_create(&account_id);
+                    match state.snapshots.get_mut(&snapshot_name) {
+                        Some(snap) => {
+                            snap.rdb_path = rdb_path;
+                            snap.snapshot_status = "available".to_string();
+                        }
+                        None => {
+                            // Deleted while the dump was in flight: reap the
+                            // orphaned RDB file rather than leaking it.
+                            if let Some(path) = rdb_path {
+                                let _ = std::fs::remove_file(path);
+                            }
+                        }
+                    }
+                }
+                save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+            });
         }
 
         Ok(AwsResponse::xml(

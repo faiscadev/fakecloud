@@ -2513,9 +2513,21 @@ pub(crate) fn db_cluster_xml(id: &str, arn: &str) -> String {
 }
 
 pub(crate) fn cluster_snapshot_xml(id: &str, arn: &str, cluster: &str) -> String {
+    cluster_snapshot_status_xml(id, arn, cluster, "available")
+}
+
+/// Same as `cluster_snapshot_xml` but with an explicit status, so the
+/// CreateDBClusterSnapshot response can report `creating` while the writer
+/// dump runs in the background.
+pub(crate) fn cluster_snapshot_status_xml(
+    id: &str,
+    arn: &str,
+    cluster: &str,
+    status: &str,
+) -> String {
     format!(
-        "    <DBClusterSnapshot>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <Status>available</Status>\n    </DBClusterSnapshot>",
-        xml_escape(id), xml_escape(arn), xml_escape(cluster),
+        "    <DBClusterSnapshot>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <Status>{}</Status>\n    </DBClusterSnapshot>",
+        xml_escape(id), xml_escape(arn), xml_escape(cluster), xml_escape(status),
     )
 }
 
