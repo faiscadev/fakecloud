@@ -1642,6 +1642,29 @@ async fn rds_restore_db_cluster_from_snapshot_recovers_data() {
         .await
         .expect("snapshot cluster");
 
+    // The cluster-snapshot dump runs in the background (client-timeout fix).
+    // Wait for the snapshot to be `available` before dropping the source writer,
+    // otherwise the dump would read from an already-deleted container and lose
+    // the data.
+    let snap_ready = helpers::wait_until(std::time::Duration::from_secs(180), || {
+        let client = client.clone();
+        async move {
+            let out = client
+                .describe_db_cluster_snapshots()
+                .db_cluster_snapshot_identifier("m7-cluster-snap")
+                .send()
+                .await
+                .ok()?;
+            let snaps = out.db_cluster_snapshots();
+            (snaps.len() == 1 && snaps[0].status() == Some("available")).then_some(())
+        }
+    })
+    .await;
+    assert!(
+        snap_ready.is_some(),
+        "cluster snapshot never became available before writer drop"
+    );
+
     // 4. Drop the source writer so the data only survives in the snapshot.
     client
         .delete_db_instance()
