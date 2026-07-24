@@ -2220,7 +2220,6 @@ pub(crate) fn default_parameter_group(engine: &str, engine_version: &str) -> Str
     }
 }
 
-
 #[cfg(test)]
 mod instance_class_tests {
     use super::*;
