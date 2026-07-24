@@ -52,16 +52,29 @@ impl RdsService {
             })
         };
 
-        // Background the writer dump only when there's a live writer AND a
-        // container runtime; otherwise it's a metadata-only snapshot that is
-        // `available` immediately (the historical fast path). The pg_dump/
-        // mysqldump is unbounded and easily past the ~60s client read timeout,
-        // so it must not run inline in the request handler.
-        let dump_source = writer_info
-            .as_ref()
-            .and_then(|w| self.runtime_ref().cloned().map(|rt| (rt, w.clone())));
-        let creating = dump_source.is_some();
-        let status = if creating { "creating" } else { "available" };
+        let dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
+            if let Some(runtime) = self.runtime_ref() {
+                match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
+                    Ok(data) => {
+                        use base64::Engine;
+                        Some(base64::engine::general_purpose::STANDARD.encode(&data))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            cluster = %cluster_id,
+                            writer = %wid,
+                            "cluster snapshot dump failed; falling back to metadata-only snapshot"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         {
             let mut accounts = self.state.write();
@@ -85,11 +98,11 @@ impl RdsService {
                 );
                 obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
                 obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
-                obj.insert("Status".to_string(), json!(status));
+                obj.insert("Status".to_string(), json!("available"));
                 obj.insert("SnapshotType".to_string(), json!("manual"));
-                // Any stale dump copied from the source cluster entry must not
-                // masquerade as this snapshot's data until the fresh dump lands.
-                obj.remove("DumpDataB64");
+                if let Some(b64) = dump_b64.as_ref() {
+                    obj.insert("DumpDataB64".to_string(), json!(b64));
+                }
             }
             state
                 .extras
@@ -107,30 +120,12 @@ impl RdsService {
             "DB cluster snapshot created",
         );
 
-        if let Some((runtime, (wid, eng, user, pass, db))) = dump_source {
-            self.spawn_finalize_cluster_snapshot(
-                runtime,
-                request.account_id.clone(),
-                snapshot_id.clone(),
-                wid,
-                eng,
-                user,
-                pass,
-                db,
-            );
-        }
-
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
                 "CreateDBClusterSnapshot",
                 RDS_NS,
-                &crate::extras::cluster_snapshot_status_xml(
-                    &snapshot_id,
-                    &arn,
-                    &cluster_id,
-                    status,
-                ),
+                &crate::extras::cluster_snapshot_xml(&snapshot_id, &arn, &cluster_id),
                 &request.request_id,
             ),
         ))
@@ -318,12 +313,29 @@ impl RdsService {
             })
         };
 
-        // Background the writer dump: it's staged onto the restored cluster as
-        // `PendingRestoreDumpB64` for a later CreateDBInstance to replay, and
-        // the dump itself is unbounded/slow, so it must not block this response.
-        let dump_source = writer_info
-            .as_ref()
-            .and_then(|w| self.runtime_ref().cloned().map(|rt| (rt, w.clone())));
+        let pending_dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
+            if let Some(runtime) = self.runtime_ref() {
+                match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
+                    Ok(data) => {
+                        use base64::Engine;
+                        Some(base64::engine::general_purpose::STANDARD.encode(&data))
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            cluster = %source,
+                            writer = %wid,
+                            "cluster PIT dump failed; falling back to metadata-only restore"
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -365,10 +377,9 @@ impl RdsService {
             if let Some(latest) = optional_query_param(request, "UseLatestRestorableTime") {
                 obj.insert("UseLatestRestorableTime".to_string(), json!(latest));
             }
-            // The fresh writer dump is staged asynchronously below; drop any
-            // stale value carried over from the source entry so nothing replays
-            // wrong data before the background dump lands.
-            obj.remove("PendingRestoreDumpB64");
+            if let Some(b64) = pending_dump_b64 {
+                obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
+            }
         }
         state
             .extras
@@ -385,19 +396,6 @@ impl RdsService {
             &["creation"],
             "DB cluster restored to point in time",
         );
-
-        if let Some((runtime, (wid, eng, user, pass, db))) = dump_source {
-            self.spawn_stage_cluster_restore_dump(
-                runtime,
-                request.account_id.clone(),
-                target.clone(),
-                wid,
-                eng,
-                user,
-                pass,
-                db,
-            );
-        }
 
         Ok(AwsResponse::xml(
             StatusCode::OK,
