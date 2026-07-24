@@ -602,6 +602,29 @@ async fn rds_restore_from_snapshot() {
         .await
         .unwrap();
 
+    // CreateDBSnapshot now returns `creating` and dumps the source database in
+    // the background (client-timeout fix). A real client waits for the snapshot
+    // to be `available` before restoring from it — restoring from a still-
+    // creating snapshot would miss the data. Poll until the dump completes.
+    let snap_ready = helpers::wait_until(std::time::Duration::from_secs(180), || {
+        let client = client.clone();
+        async move {
+            let out = client
+                .describe_db_snapshots()
+                .db_snapshot_identifier("restore-test-snapshot")
+                .send()
+                .await
+                .ok()?;
+            let status = out.db_snapshots().first()?.status()?;
+            (status == "available").then_some(())
+        }
+    })
+    .await;
+    assert!(
+        snap_ready.is_some(),
+        "snapshot never became available before restore"
+    );
+
     let restore_response = client
         .restore_db_instance_from_db_snapshot()
         .db_instance_identifier("orders-restored-db")
