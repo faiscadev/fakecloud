@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>FakeCloud</RootNamespace>
+    <AssemblyName>FakeCloud</AssemblyName>
+
+    <PackageId>FakeCloud</PackageId>
+    <Version>0.44.1</Version>
+    <Authors>fakecloud contributors</Authors>
+    <Description>C#/.NET client SDK for fakecloud, a local AWS cloud emulator. Provides typed access to the fakecloud introspection and simulation API for test assertions.</Description>
+    <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
+    <PackageProjectUrl>https://fakecloud.dev</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/faiscadev/fakecloud</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>fakecloud;aws;emulator;testing;localstack</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="/" />
+    <InternalsVisibleTo Include="FakeCloud.Tests" />
+  </ItemGroup>
+
+</Project>

@@ -1,10 +1,10 @@
 +++
 title = "SDK setup"
-description = "Install the first-party fakecloud SDK in TypeScript, Python, Go, PHP, Java, or Rust."
+description = "Install the first-party fakecloud SDK in TypeScript, Python, Go, PHP, Java, Rust, or C#/.NET."
 weight = 3
 +++
 
-fakecloud ships first-party SDKs for test assertions in six languages. They wrap the `/_fakecloud/*` introspection and configuration endpoints into ergonomic helpers.
+fakecloud ships first-party SDKs for test assertions in seven languages. They wrap the `/_fakecloud/*` introspection and configuration endpoints into ergonomic helpers.
 
 These SDKs are **not** the AWS SDK. Your application code still uses the normal AWS SDK (boto3, aws-sdk-js, etc.) to talk to fakecloud over the standard AWS wire protocol. The fakecloud SDK is what your tests use to assert on what happened and configure simulation behavior.
 
@@ -106,9 +106,23 @@ fc.reset().await?;
 let invocations = fc.bedrock().get_invocations().await?;
 ```
 
+## C# / .NET
+
+```sh
+dotnet add package FakeCloud
+```
+
+```csharp
+using FakeCloud;
+
+var fc = new FakeCloudClient(); // defaults to http://localhost:4566
+await fc.ResetAsync();
+var emails = (await fc.Ses.GetEmailsAsync()).Emails;
+```
+
 ## What each SDK covers
 
-All six SDKs wrap the same core surface:
+All seven SDKs wrap the same core surface:
 
 - **Reset:** `reset()` / `reset(service)` — clear state between tests
 - **Per-service introspection:** getters for recorded messages, emails, invocations, etc.
