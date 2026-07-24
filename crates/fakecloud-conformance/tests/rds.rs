@@ -39,10 +39,24 @@ async fn rds_describe_orderable_db_instance_options() {
         .unwrap();
 
     let options = response.orderable_db_instance_options();
-    assert_eq!(options.len(), 7); // 7 instance classes per engine/version
-    assert_eq!(options[0].engine(), Some("postgres"));
-    assert_eq!(options[0].engine_version(), Some("16.3"));
-    assert_eq!(options[0].db_instance_class(), Some("db.t3.micro"));
+    // One option per instance class in the orderable catalog for this
+    // engine/version. The catalog is a realistic set of current-generation
+    // classes (not a fixed handful), so assert on its contents rather than an
+    // exact count/order.
+    assert!(
+        options.len() >= 7,
+        "expected a realistic orderable catalog, got {}",
+        options.len()
+    );
+    assert!(options
+        .iter()
+        .all(|o| o.engine() == Some("postgres") && o.engine_version() == Some("16.3")));
+    assert!(options
+        .iter()
+        .any(|o| o.db_instance_class() == Some("db.t3.micro")));
+    assert!(options
+        .iter()
+        .any(|o| o.db_instance_class() == Some("db.m6i.large")));
 }
 
 #[test_action("rds", "CreateDBInstance", checksum = "66cdd119")]

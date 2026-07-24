@@ -426,15 +426,56 @@ pub(crate) fn validate_create_request(
     Ok(())
 }
 
+/// Known AWS instance-size suffixes. The `<n>xlarge` sizes are matched
+/// structurally (any positive integer prefix) rather than enumerated, so
+/// future large sizes validate without a code change.
+const INSTANCE_SIZE_SUFFIXES: &[&str] = &["micro", "small", "medium", "large", "xlarge", "metal"];
+
+/// Returns true when `class` has the shape `db.<family>.<size>` that AWS
+/// uses for every DB instance class:
+///   * starts with `db.`
+///   * exactly three dot-separated, non-empty segments
+///   * family segment is alphanumeric (e.g. `t3`, `m6i`, `r6gd`)
+///   * size segment is a known suffix (`micro`/`small`/`medium`/`large`/
+///     `xlarge`/`metal`) or an `<n>xlarge` form (`2xlarge`, `24xlarge`, ...)
+///
+/// This mirrors what AWS actually accepts: it only rejects genuinely
+/// malformed values with `InvalidParameterValue`, not merely-uncommon
+/// (but well-formed) classes. The class is stored as metadata only and
+/// never influences the container runtime, so there is no need to gate on
+/// a fixed allowlist.
+pub(crate) fn is_valid_db_instance_class(class: &str) -> bool {
+    let Some(rest) = class.strip_prefix("db.") else {
+        return false;
+    };
+    let mut segments = rest.split('.');
+    let (Some(family), Some(size), None) = (segments.next(), segments.next(), segments.next())
+    else {
+        return false;
+    };
+    if family.is_empty() || !family.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return false;
+    }
+    is_valid_instance_size(size)
+}
+
+fn is_valid_instance_size(size: &str) -> bool {
+    if INSTANCE_SIZE_SUFFIXES.contains(&size) {
+        return true;
+    }
+    // `<n>xlarge` where <n> is a positive integer (2xlarge, 24xlarge, ...).
+    if let Some(prefix) = size.strip_suffix("xlarge") {
+        return !prefix.is_empty() && prefix.chars().all(|c| c.is_ascii_digit());
+    }
+    false
+}
+
 pub(crate) fn validate_db_instance_class(db_instance_class: &str) -> Result<(), AwsServiceError> {
-    if !crate::state::SUPPORTED_INSTANCE_CLASSES.contains(&db_instance_class) {
+    if !is_valid_db_instance_class(db_instance_class) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "InsufficientDBInstanceCapacity",
-            format!(
-                "DBInstanceClass '{}' is not available in the requested Availability Zone.",
-                db_instance_class
-            ),
+            "InvalidParameterValue",
+            format!("Invalid DB Instance class: {db_instance_class}"),
         ));
     }
     Ok(())
@@ -2198,5 +2239,92 @@ pub(crate) fn runtime_error_to_service_error(error: RuntimeError) -> AwsServiceE
             "InternalFailure",
             message,
         ),
+    }
+}
+
+#[cfg(test)]
+mod instance_class_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_common_current_generation_classes() {
+        // Classes the old 7-entry allowlist rejected but AWS accepts.
+        for class in [
+            "db.t4g.medium",
+            "db.t3.xlarge",
+            "db.t3.2xlarge",
+            "db.m6i.large",
+            "db.m6g.large",
+            "db.r6g.large",
+            "db.r5.large",
+            "db.m5.xlarge",
+            "db.t2.micro",
+            "db.r7g.16xlarge",
+            "db.m7g.48xlarge",
+            "db.x2idn.metal",
+        ] {
+            assert!(
+                is_valid_db_instance_class(class),
+                "expected {class} to be accepted"
+            );
+            assert!(
+                validate_db_instance_class(class).is_ok(),
+                "expected validate_db_instance_class to accept {class}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_classes_with_invalid_parameter_value() {
+        for class in [
+            "notaclass",         // no `db.` prefix, no segments
+            "db.foo",            // only two segments
+            "db.t3",             // missing size
+            "db.t3.",            // empty size
+            "db..large",         // empty family
+            "t3.micro",          // missing `db.` prefix
+            "db.t3.gigantic",    // unknown size suffix
+            "db.t3.micro.extra", // too many segments
+            "db.t-3.large",      // non-alphanumeric family
+            "",
+        ] {
+            assert!(
+                !is_valid_db_instance_class(class),
+                "expected {class:?} to be rejected"
+            );
+            let err = validate_db_instance_class(class).unwrap_err();
+            assert_eq!(err.code(), "InvalidParameterValue", "for {class:?}");
+        }
+    }
+
+    #[test]
+    fn orderable_catalog_is_realistic_and_non_empty() {
+        let options = crate::state::default_orderable_options();
+        assert!(
+            options.len() >= 100,
+            "orderable options should be a realistic catalog, got {}",
+            options.len()
+        );
+        // Every enumerated class must itself validate.
+        for opt in &options {
+            assert!(
+                is_valid_db_instance_class(&opt.db_instance_class),
+                "catalog class {} should validate",
+                opt.db_instance_class
+            );
+        }
+        // The seed catalog exposes the burstable/general/memory families.
+        let classes: std::collections::HashSet<&str> = crate::state::SUPPORTED_INSTANCE_CLASSES
+            .iter()
+            .copied()
+            .collect();
+        for expected in [
+            "db.t4g.medium",
+            "db.m6i.large",
+            "db.r6g.large",
+            "db.t3.2xlarge",
+        ] {
+            assert!(classes.contains(expected), "catalog missing {expected}");
+        }
     }
 }
