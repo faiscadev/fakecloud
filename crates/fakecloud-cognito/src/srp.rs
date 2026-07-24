@@ -93,10 +93,11 @@ fn from_hex(s: &str) -> Option<BigUint> {
     BigUint::parse_bytes(s.as_bytes(), 16)
 }
 
-/// `k = H(N | PAD(g))`.
+/// `k = H(PAD(N) | PAD(g))`.
 fn k_factor(n: &BigUint) -> BigUint {
     let g = BigUint::from(2u8);
-    BigUint::from_bytes_be(&sha256(&[&n.to_bytes_be(), &pad_bytes(&g)]))
+    let padded_n = pad_bytes(n);
+    BigUint::from_bytes_be(&sha256(&[&padded_n, &pad_bytes(&g)]))
 }
 
 /// Derive the SRP verifier `v = g^x mod N` from the user's password, where
@@ -277,6 +278,17 @@ pub(crate) fn test_client_signature(
 mod tests {
     use super::*;
     use base64::Engine;
+
+    #[test]
+    fn k_factor_uses_cognito_signed_magnitude_encoding() {
+        let expected = BigUint::parse_bytes(
+            b"538282c4354742d7cbbde2359fcf67f9f5b3a6b08791e5011b43b8a5b66d9ee6",
+            16,
+        )
+        .expect("valid Cognito SRP multiplier");
+
+        assert_eq!(k_factor(&modulus()), expected);
+    }
 
     /// Full client+server SRP exchange following the amazon-cognito-identity-js
     /// client algorithm, proving the server accepts a faithful client proof.
