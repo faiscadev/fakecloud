@@ -508,9 +508,17 @@ async fn rds_create_describe_delete_snapshot() {
         Some("orders-snapshot-test-db")
     );
     assert_eq!(snapshot.engine(), Some("postgres"));
-    assert_eq!(snapshot.status(), Some("available"));
+    // CreateDBSnapshot returns `creating` while the dump runs in the background
+    // (percent_progress 0), then flips to `available`/100. A no-runtime build
+    // settles `available` immediately. Accept either so the assertion doesn't
+    // depend on dump timing.
+    assert!(
+        matches!(snapshot.status(), Some("creating") | Some("available")),
+        "unexpected snapshot status: {:?}",
+        snapshot.status()
+    );
     assert_eq!(snapshot.master_username(), Some("admin"));
-    assert_eq!(snapshot.percent_progress(), Some(100));
+    assert!(matches!(snapshot.percent_progress(), Some(0) | Some(100)));
     assert_eq!(snapshot.license_model(), Some("postgresql-license"));
     assert!(snapshot.instance_create_time().is_some());
     assert!(!snapshot.encrypted().unwrap_or(true));
@@ -986,15 +994,28 @@ async fn final_snapshot_on_delete() {
         .await
         .unwrap();
 
-    // Verify snapshot exists
-    let snapshots = client
-        .describe_db_snapshots()
-        .db_snapshot_identifier("e2e-final-snap")
-        .send()
-        .await
-        .unwrap();
-
-    assert_eq!(snapshots.db_snapshots().len(), 1);
+    // The final-snapshot dump runs in the background; a real client waits for
+    // the snapshot to be `available` before restoring from it (restoring from a
+    // still-creating snapshot would miss the data). Poll until it completes,
+    // which also verifies the snapshot exists.
+    let snap_ready = helpers::wait_until(std::time::Duration::from_secs(180), || {
+        let client = client.clone();
+        async move {
+            let out = client
+                .describe_db_snapshots()
+                .db_snapshot_identifier("e2e-final-snap")
+                .send()
+                .await
+                .ok()?;
+            let snaps = out.db_snapshots();
+            (snaps.len() == 1 && snaps[0].status() == Some("available")).then_some(())
+        }
+    })
+    .await;
+    assert!(
+        snap_ready.is_some(),
+        "final snapshot never became available before restore"
+    );
 
     // Restore from snapshot and verify data
     let response = client
