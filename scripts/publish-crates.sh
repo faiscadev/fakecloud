@@ -418,8 +418,14 @@ publish_crate() {
     # Retry a flaky registry, but only a few times: the pattern below is broad
     # enough to catch a genuine failure whose text happens to mention a
     # connection, and burning 40 backoffs on that would hide it for an hour.
+    #
+    # "failed to select a version" is in here because the sparse index is
+    # CDN-cached: a dependency we published seconds ago can still be invisible to
+    # the next crate's resolver. Retrying rides that out. When the cause is a
+    # genuine ordering bug instead, this costs MAX_TRANSIENT backoffs before the
+    # error surfaces — acceptable, since --check catches that class pre-merge.
     if [ "$transient" -lt "$MAX_TRANSIENT" ] &&
-      printf '%s' "$out" | grep -qEi 'status 5[0-9][0-9]|timed out|timeout|spurious network|connection|reset by peer|gateway|temporarily unavailable|handshake|SSL'; then
+      printf '%s' "$out" | grep -qEi 'status 5[0-9][0-9]|timed out|timeout|spurious network|connection|reset by peer|gateway|temporarily unavailable|handshake|SSL|failed to select a version|no matching package named'; then
       transient=$((transient + 1))
       if [ "$transient" -gt 5 ]; then wait=300; else wait=$((15 * 2 ** (transient - 1))); fi
       log "transient registry error publishing $name (transient $transient/$MAX_TRANSIENT):"

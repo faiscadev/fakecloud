@@ -90,6 +90,11 @@ if [ "$n" -gt "${STUB_FAIL_SKIP:-0}" ] &&
       echo "Caused by: the remote server responded with an error (status 503 Service Unavailable)"
       exit 1
       ;;
+    stale-index)
+      echo "error: failed to prepare local package for uploading"
+      echo "Caused by: failed to select a version for the requirement \`fakecloud-core = \"^$STUB_VERSION\"\`"
+      exit 1
+      ;;
     fatal)
       echo "error: failed to verify package tarball"
       echo "Caused by: mismatched types: expected struct Foo"
@@ -179,6 +184,12 @@ check G "503 retried to success" \
 code=$(run 'fakecloud@EXISTS' START_AT=fakecloud STUB_FAIL_TIMES=99 STUB_FAIL_MODE=503 MAX_TRANSIENT=2)
 check H "persistent transient error gives up at MAX_TRANSIENT" \
   "$([ "$code" = 1 ] && saw '::error::failed to publish fakecloud' && [ "$(cat "$STUB_COUNT")" = 3 ] && echo 0 || echo 1)"
+
+# A dependency the CDN-cached index has not caught up on yet is retried, not
+# treated as a release-ending ordering bug.
+code=$(run 'fakecloud@EXISTS' START_AT=fakecloud STUB_FAIL_TIMES=1 STUB_FAIL_MODE=stale-index)
+check I2 "stale index read on a just-published dep is retried" \
+  "$([ "$code" = 0 ] && saw 'failed to select a version' && saw 'published fakecloud' && echo 0 || echo 1)"
 
 # A real failure is never retried or swallowed.
 code=$(run 'fakecloud@EXISTS' START_AT=fakecloud STUB_FAIL_TIMES=1 STUB_FAIL_MODE=fatal)
