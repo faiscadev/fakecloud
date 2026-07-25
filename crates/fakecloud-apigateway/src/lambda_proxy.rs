@@ -198,7 +198,51 @@ pub async fn invoke_lambda(
     parse_lambda_response(resp_json)
 }
 
+/// True when a proxied Lambda response is actually a **function-error**
+/// envelope rather than a proxy response. A handler that throws makes the
+/// Lambda runtime reply HTTP 200 with a body shaped like
+/// `{"errorMessage": "...", "errorType": "...", "stackTrace": [...]}` and
+/// no `statusCode`.
+///
+/// The guard requires BOTH `errorType` AND `errorMessage` as strings AND
+/// the absence of `statusCode` — exactly the check the Lambda `Invoke`
+/// handler and StepFunctions interpreter use. That avoids over-rejecting a
+/// SUCCESSFUL Lambda whose 200 body legitimately carries an `errorMessage`
+/// field: such a response either sets `statusCode` (a proxy response) or is
+/// a plain object, so it will not trip all three conditions.
+fn is_function_error_envelope(response: &serde_json::Value) -> bool {
+    let Some(obj) = response.as_object() else {
+        return false;
+    };
+    obj.get("errorType").and_then(|v| v.as_str()).is_some()
+        && obj.get("errorMessage").and_then(|v| v.as_str()).is_some()
+        && !obj.contains_key("statusCode")
+}
+
+/// AWS's response for a malformed proxy response or a Lambda function
+/// error: HTTP 502 with `{"message":"Internal server error"}` and
+/// `Content-Type: application/json`. Real API Gateway also logs
+/// "Execution failed ... malformed Lambda proxy response".
+fn malformed_proxy_response() -> AwsResponse {
+    AwsResponse {
+        status: StatusCode::BAD_GATEWAY,
+        content_type: "application/json".to_string(),
+        headers: HeaderMap::new(),
+        body: Bytes::from_static(br#"{"message":"Internal server error"}"#).into(),
+    }
+}
+
 fn parse_lambda_response(response: serde_json::Value) -> Result<AwsResponse, AwsServiceError> {
+    // A thrown handler surfaces as a 200 error envelope with no statusCode.
+    // AWS maps a Lambda function error to HTTP 502. A REST (v1) proxy
+    // integration also REQUIRES statusCode on every response, so any
+    // response lacking it — function error or otherwise malformed — is a
+    // 502. (v2 payload format 2.0's statusCode-less "simple response" is
+    // handled separately in the apigatewayv2 parser.)
+    if is_function_error_envelope(&response) || response.get("statusCode").is_none() {
+        return Ok(malformed_proxy_response());
+    }
+
     let status_code = response
         .get("statusCode")
         .and_then(|v| v.as_i64())
@@ -352,6 +396,44 @@ mod tests {
         .unwrap();
         assert_eq!(r.status, StatusCode::CREATED);
         assert_eq!(r.body.expect_bytes(), b"ok".as_slice());
+    }
+
+    #[test]
+    fn parse_lambda_response_function_error_is_502() {
+        // A thrown handler: 200 body with errorType+errorMessage, no
+        // statusCode. REST maps it to 502 {"message":"Internal server error"}.
+        let r = parse_lambda_response(json!({
+            "errorMessage": "boom",
+            "errorType": "RuntimeError",
+            "stackTrace": ["line 1"],
+        }))
+        .unwrap();
+        assert_eq!(r.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(r.content_type, "application/json");
+        assert_eq!(
+            r.body.expect_bytes(),
+            br#"{"message":"Internal server error"}"#.as_slice()
+        );
+    }
+
+    #[test]
+    fn parse_lambda_response_no_status_code_is_502() {
+        // A proxy response missing statusCode is malformed -> 502.
+        let r = parse_lambda_response(json!({"body": "ok"})).unwrap();
+        assert_eq!(r.status, StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn parse_lambda_response_success_with_error_message_in_body_not_502() {
+        // A legit success whose body string mentions errorMessage but which
+        // sets statusCode must NOT be turned into a 502.
+        let r = parse_lambda_response(json!({
+            "statusCode": 200,
+            "body": r#"{"errorMessage":"x"}"#,
+        }))
+        .unwrap();
+        assert_eq!(r.status, StatusCode::OK);
+        assert_eq!(r.body.expect_bytes(), br#"{"errorMessage":"x"}"#.as_slice());
     }
 
     #[test]

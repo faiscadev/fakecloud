@@ -1218,6 +1218,160 @@ exports.handler = async (event) => {
     assert_eq!(body["queryParams"]["greeting"], "hi");
 }
 
+/// Zip a single-file `index.js` Node handler for Lambda create_function.
+fn zip_node_handler(source: &str) -> Vec<u8> {
+    use std::io::Write;
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let options = zip::write::SimpleFileOptions::default();
+    writer.start_file("index.js", options).unwrap();
+    writer.write_all(source.as_bytes()).unwrap();
+    writer.finish().unwrap().into_inner()
+}
+
+/// Stand up an HTTP API (v2) whose `GET /hello` route proxies to a Lambda
+/// created from `handler_source`, returning `(server, invoke_url)`.
+async fn provision_v2_lambda_api(
+    server: &TestServer,
+    fn_name: &str,
+    handler_source: &str,
+    payload_format_version: &str,
+) -> String {
+    use aws_sdk_lambda::primitives::Blob;
+    let lambda_client = server.lambda_client().await;
+    let apigw_client = server.apigatewayv2_client().await;
+
+    lambda_client
+        .create_function()
+        .function_name(fn_name)
+        .runtime(aws_sdk_lambda::types::Runtime::Nodejs20x)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(zip_node_handler(handler_source)))
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let api = apigw_client
+        .create_api()
+        .name(format!("{fn_name}-api"))
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap();
+    let api_id = api.api_id().unwrap();
+
+    let integration = apigw_client
+        .create_integration()
+        .api_id(api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::AwsProxy)
+        .integration_uri(format!(
+            "arn:aws:lambda:us-east-1:123456789012:function:{fn_name}"
+        ))
+        .payload_format_version(payload_format_version)
+        .send()
+        .await
+        .unwrap();
+    let integration_id = integration.integration_id().unwrap();
+
+    apigw_client
+        .create_route()
+        .api_id(api_id)
+        .route_key("GET /hello")
+        .target(format!("integrations/{}", integration_id))
+        .send()
+        .await
+        .unwrap();
+
+    apigw_client
+        .create_stage()
+        .api_id(api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .unwrap();
+
+    format!("{}/prod/hello", server.endpoint())
+}
+
+/// A Lambda handler that throws must surface as HTTP 502
+/// `{"message":"Internal server error"}`, not a 200 echoing the raw
+/// error envelope.
+#[tokio::test]
+async fn v2_lambda_function_error_returns_502() {
+    if !require_docker_or_skip("v2_lambda_function_error_returns_502") {
+        return;
+    }
+    let server = TestServer::start().await;
+    let url = provision_v2_lambda_api(
+        &server,
+        "v2-throwing-fn",
+        "exports.handler = async () => { throw new Error('boom'); };",
+        "2.0",
+    )
+    .await;
+
+    let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 502);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["message"], "Internal server error");
+}
+
+/// Payload format 2.0 "simple response": a plain object with no statusCode
+/// -> HTTP 200 with the whole return value serialized as the JSON body.
+#[tokio::test]
+async fn v2_simple_response_serializes_whole_value() {
+    if !require_docker_or_skip("v2_simple_response_serializes_whole_value") {
+        return;
+    }
+    let server = TestServer::start().await;
+    let url = provision_v2_lambda_api(
+        &server,
+        "v2-simple-fn",
+        "exports.handler = async () => ({ message: 'hi' });",
+        "2.0",
+    )
+    .await;
+
+    let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .map(|v| v.to_str().unwrap().to_string()),
+        Some("application/json".to_string())
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["message"], "hi");
+}
+
+/// Regression: a normal proxy response (statusCode + body) still passes
+/// through, AND a success whose body string merely mentions `errorMessage`
+/// (but sets statusCode) is NOT mistaken for a function error.
+#[tokio::test]
+async fn v2_success_with_error_message_in_body_not_502() {
+    if !require_docker_or_skip("v2_success_with_error_message_in_body_not_502") {
+        return;
+    }
+    let server = TestServer::start().await;
+    let url = provision_v2_lambda_api(
+        &server,
+        "v2-legit-fn",
+        r#"exports.handler = async () => ({ statusCode: 200, body: JSON.stringify({ errorMessage: 'x' }) });"#,
+        "2.0",
+    )
+    .await;
+
+    let resp = reqwest::Client::new().get(&url).send().await.unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["errorMessage"], "x");
+}
+
 #[tokio::test]
 async fn test_cors_actual_request() {
     let server = TestServer::start().await;

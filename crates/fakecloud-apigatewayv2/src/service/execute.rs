@@ -516,12 +516,12 @@ impl ApiGatewayV2Service {
                         // Honour the integration's payloadFormatVersion:
                         // "1.0" sends the REST-shaped envelope, "2.0" (the
                         // default) sends the HTTP-API envelope.
-                        let event = if integration
+                        let is_v1 = integration
                             .payload_format_version
                             .as_deref()
                             .map(|v| v == "1.0")
-                            .unwrap_or(false)
-                        {
+                            .unwrap_or(false);
+                        let event = if is_v1 {
                             lambda_proxy::construct_event_v1(
                                 &req,
                                 &route_match.route.route_key,
@@ -538,7 +538,11 @@ impl ApiGatewayV2Service {
                                 authorizer_info,
                             )
                         };
-                        lambda_proxy::invoke_lambda(delivery, integration_uri, event).await?
+                        // payload_v2 controls simple-response handling: 2.0
+                        // (the default, !is_v1) serializes a statusCode-less
+                        // return value as the body; 1.0 requires statusCode.
+                        lambda_proxy::invoke_lambda(delivery, integration_uri, event, !is_v1)
+                            .await?
                     } else {
                         dispatch_aws_service_integration(delivery, integration_uri, &req)?
                     }
