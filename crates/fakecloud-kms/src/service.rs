@@ -789,14 +789,17 @@ impl KmsService {
             })
             .collect();
 
-        let start = if let Some(m) = marker {
-            all_keys
+        // Resume at the first key whose KeyId is strictly greater than the
+        // marker. all_keys is in KeyId order (BTreeMap-backed) and the marker is
+        // the last KeyId of the previous page, so if that key was deleted between
+        // pages we still advance to the next one instead of falling back to 0 and
+        // restarting the listing (which an exact-match lookup did).
+        let start = match marker {
+            Some(m) => all_keys
                 .iter()
-                .position(|k| k["KeyId"].as_str() == Some(m))
-                .map(|pos| pos + 1)
-                .unwrap_or(0)
-        } else {
-            0
+                .position(|k| k["KeyId"].as_str() > Some(m))
+                .unwrap_or(all_keys.len()),
+            None => 0,
         };
 
         let page = &all_keys[start..all_keys.len().min(start + limit)];

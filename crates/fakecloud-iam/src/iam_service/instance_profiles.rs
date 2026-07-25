@@ -470,9 +470,17 @@ where
     F: Fn(&T) -> &str,
 {
     let marker = req.query_params.get("Marker").cloned();
+    // Resume at the first item whose name is strictly greater than the marker (the
+    // last name of the previous page). items is already sorted by name, so a
+    // deleted marker still advances instead of falling back to 0 and restarting.
     let start = marker
         .as_ref()
-        .and_then(|m| items.iter().position(|it| name_of(it) == m).map(|p| p + 1))
+        .map(|m| {
+            items
+                .iter()
+                .position(|it| name_of(it) > m.as_str())
+                .unwrap_or(items.len())
+        })
         .unwrap_or(0)
         .min(items.len());
     let rest = &items[start..];

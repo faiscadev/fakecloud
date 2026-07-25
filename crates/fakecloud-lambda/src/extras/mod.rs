@@ -754,12 +754,27 @@ impl LambdaService {
             // Pagination: skip past Marker if supplied (Marker is the
             // Version string of the entry to start *after*), then take
             // up to MaxItems. Emit a NextMarker when truncated.
+            //
+            // Resume at the first entry strictly after the marker in the list's
+            // ($LATEST-first, then ascending-numeric) order. A version can be
+            // deleted between pages, so an exact-match lookup would fall back to 0
+            // and re-emit $LATEST; comparing on the decoded (is-numbered, number)
+            // rank advances correctly instead. Lexical string order is wrong here
+            // ("10" < "2"), so we must decode the numeric version.
+            let version_rank = |v: &str| -> (u8, u64) {
+                if v == "$LATEST" {
+                    (0, 0)
+                } else {
+                    (1, v.parse::<u64>().unwrap_or(u64::MAX))
+                }
+            };
             let start = match marker.as_deref() {
-                Some(m) => all
-                    .iter()
-                    .position(|v| v["Version"].as_str() == Some(m))
-                    .map(|i| i + 1)
-                    .unwrap_or(0),
+                Some(m) => {
+                    let mr = version_rank(m);
+                    all.iter()
+                        .position(|v| version_rank(v["Version"].as_str().unwrap_or("")) > mr)
+                        .unwrap_or(all.len())
+                }
                 None => 0,
             };
             let end = (start + max_items).min(all.len());
