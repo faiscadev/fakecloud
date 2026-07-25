@@ -67,6 +67,9 @@ pub(super) fn dispatch(
             Ok(Some(disassociate_trial_component(svc, ctx, meta, body)))
         }
         "ListTrialComponents" => Ok(list_trial_components(svc, ctx, meta, body)),
+        "ListClusterNodes" => Ok(Some(list_cluster_nodes(svc, ctx, meta, body))),
+        "ListPipelineExecutionSteps" => Ok(list_pipeline_execution_steps(svc, ctx, meta, body)),
+        "ListPipelineExecutions" => Ok(list_pipeline_executions(svc, ctx, meta, body)),
         "SendPipelineExecutionStepSuccess" => Ok(Some(send_pipeline_execution_step(
             svc, ctx, meta, body, true,
         ))),
@@ -727,6 +730,33 @@ fn batch_replace_cluster_nodes(
     (engine::action(ctx, meta, &aug), mutated)
 }
 
+/// Scoped `ListClusterNodes`: the operation carries a **required** `ClusterName`,
+/// but the generic list engine ignores it and would return every account node
+/// across all clusters. Filter the `ClusterNode` family to the requested
+/// cluster (reusing the `node_in_cluster` scoping the batch mutators apply),
+/// then project via the shared list response builder for shape parity.
+fn list_cluster_nodes(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> (AwsResponse, bool) {
+    let cluster = str_member(body, "ClusterName");
+    let g = svc.state.read();
+    let entries = g
+        .get(&ctx.account)
+        .map(|d| d.list_resource_entries(CLUSTER_NODE_FAMILY))
+        .unwrap_or_default();
+    let filtered: Vec<(String, Value)> = entries
+        .into_iter()
+        .filter(|(_k, rec)| node_in_cluster(rec, &cluster))
+        .collect();
+    (
+        engine::list_entries_response(ctx, meta, body, filtered),
+        false,
+    )
+}
+
 // ── Trial ⇄ trial-component association ───────────────────────────────────
 //
 // `AssociateTrialComponent` / `DisassociateTrialComponent` are Action verbs the
@@ -845,6 +875,15 @@ fn send_pipeline_execution_step(
     success: bool,
 ) -> (AwsResponse, bool) {
     let token = str_member(body, "CallbackToken");
+    // The callback token is the only handle the caller holds (the execution arn
+    // is embedded in it on real AWS); with no minted-token registry we derive a
+    // stable execution arn from the token. It is stored on the step record so
+    // `ListPipelineExecutionSteps(PipelineExecutionArn=…)` can scope to it, and
+    // echoed in the response's required `PipelineExecutionArn`.
+    let exec_arn = format!(
+        "arn:aws:sagemaker:{}:{}:pipeline/callback/execution/{}",
+        ctx.region, ctx.account, token
+    );
     {
         let mut g = svc.state.write();
         let data = g.get_or_create(&ctx.account);
@@ -860,6 +899,12 @@ fn send_pipeline_execution_step(
             "StepStatus".to_string(),
             Value::String(if success { "Succeeded" } else { "Failed" }.to_string()),
         );
+        // `PipelineExecutionArn` is an internal scoping member (not a
+        // `PipelineExecutionStep` output field, so the list projection drops it).
+        record.insert(
+            "PipelineExecutionArn".to_string(),
+            Value::String(exec_arn.clone()),
+        );
         if success {
             record.remove("FailureReason");
         } else if let Some(reason) = body.get("FailureReason") {
@@ -867,19 +912,75 @@ fn send_pipeline_execution_step(
         }
         data.put_resource(PIPELINE_STEP_FAMILY, &token, Value::Object(record));
     }
-    // Echo the execution the callback belongs to. The callback token is the
-    // only handle the caller holds (the execution arn is embedded in it on real
-    // AWS); with no minted-token registry we derive a stable execution arn from
-    // the token so the required-shape `PipelineExecutionArn` is populated.
     let mut aug = body.clone();
-    aug.insert(
-        "PipelineExecutionArn".to_string(),
-        Value::String(format!(
-            "arn:aws:sagemaker:{}:{}:pipeline/callback/execution/{}",
-            ctx.region, ctx.account, token
-        )),
-    );
+    aug.insert("PipelineExecutionArn".to_string(), Value::String(exec_arn));
     (engine::action(ctx, meta, &aug), true)
+}
+
+/// Scoped `ListPipelineExecutionSteps`: when the request carries a
+/// `PipelineExecutionArn`, return only the callback steps stored for that
+/// execution (the internal `PipelineExecutionArn` member
+/// `send_pipeline_execution_step` records). Returns `None` when the filter is
+/// absent so the caller falls through to the generic, unscoped list engine
+/// (unchanged behaviour).
+fn list_pipeline_execution_steps(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Option<(AwsResponse, bool)> {
+    let arn = body.get("PipelineExecutionArn").and_then(Value::as_str)?;
+    let g = svc.state.read();
+    let entries = g
+        .get(&ctx.account)
+        .map(|d| d.list_resource_entries(PIPELINE_STEP_FAMILY))
+        .unwrap_or_default();
+    let filtered: Vec<(String, Value)> = entries
+        .into_iter()
+        .filter(|(_k, rec)| {
+            rec.as_object()
+                .and_then(|o| o.get("PipelineExecutionArn"))
+                .and_then(Value::as_str)
+                == Some(arn)
+        })
+        .collect();
+    Some((
+        engine::list_entries_response(ctx, meta, body, filtered),
+        false,
+    ))
+}
+
+/// Scoped `ListPipelineExecutions`: the operation carries a **required**
+/// `PipelineName`, but the generic list engine ignores it and would return
+/// every execution across all pipelines. Filter the `PipelineExecution` family
+/// to the stored `PipelineName` (`StartPipelineExecution` records it). Returns
+/// `None` when the filter is absent so the caller falls through to the generic
+/// list engine (unchanged behaviour).
+fn list_pipeline_executions(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Option<(AwsResponse, bool)> {
+    let name = body.get("PipelineName").and_then(Value::as_str)?;
+    let g = svc.state.read();
+    let entries = g
+        .get(&ctx.account)
+        .map(|d| d.list_resource_entries("PipelineExecution"))
+        .unwrap_or_default();
+    let filtered: Vec<(String, Value)> = entries
+        .into_iter()
+        .filter(|(_k, rec)| {
+            rec.as_object()
+                .and_then(|o| o.get("PipelineName"))
+                .and_then(Value::as_str)
+                == Some(name)
+        })
+        .collect();
+    Some((
+        engine::list_entries_response(ctx, meta, body, filtered),
+        false,
+    ))
 }
 
 fn tags_to_array(tags: &std::collections::BTreeMap<String, String>) -> Value {
