@@ -1822,6 +1822,12 @@ impl ResourceProvisioner {
             "AWS::DocDB::DBCluster" => Some(self.update_docdb_cluster(existing, new_def)?),
             "AWS::Neptune::DBCluster" => Some(self.update_neptune_cluster(existing, new_def)?),
             "AWS::EC2::Instance" => Some(self.update_ec2_instance(existing, new_def)?),
+            // Stateful catalog/timeseries types: an in-place update preserves
+            // the contained data (Glue tables/partitions, Timestream records)
+            // that a reprovision (delete+create) would silently wipe.
+            "AWS::Glue::Database" => Some(self.update_glue_database(existing, new_def)?),
+            "AWS::Glue::Table" => Some(self.update_glue_table(existing, new_def)?),
+            "AWS::Timestream::Table" => Some(self.update_timestream_table(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
