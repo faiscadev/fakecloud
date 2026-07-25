@@ -1431,10 +1431,19 @@ async fn elasticache_describe_cache_engine_versions_filter_by_engine() {
         .unwrap();
 
     let versions = response.cache_engine_versions();
-    assert_eq!(versions.len(), 1);
-    assert_eq!(versions[0].engine(), Some("valkey"));
-    assert_eq!(versions[0].engine_version(), Some("8.0"));
-    assert_eq!(versions[0].cache_parameter_group_family(), Some("valkey8"));
+    // Valkey ships both 8.0 (family valkey8) and 7.2 (family valkey7).
+    assert_eq!(versions.len(), 2);
+    assert!(versions.iter().all(|v| v.engine() == Some("valkey")));
+    let v8 = versions
+        .iter()
+        .find(|v| v.engine_version() == Some("8.0"))
+        .expect("valkey 8.0 present");
+    assert_eq!(v8.cache_parameter_group_family(), Some("valkey8"));
+    let v7 = versions
+        .iter()
+        .find(|v| v.engine_version() == Some("7.2"))
+        .expect("valkey 7.2 present");
+    assert_eq!(v7.cache_parameter_group_family(), Some("valkey7"));
 }
 
 #[tokio::test]
