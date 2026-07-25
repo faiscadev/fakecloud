@@ -655,13 +655,10 @@ pub(crate) fn parse_tags(req: &AwsRequest, prefix: &str) -> BTreeMap<String, Str
     out
 }
 
-pub(crate) fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
+/// Re-export the canonical XML escaper, which also encodes C0 control chars
+/// as numeric character references so a poisoned field cannot make a whole
+/// list-response document unparseable by a strict XML SDK.
+pub(crate) use fakecloud_aws::xml::xml_escape;
 
 /// Encode a pagination offset into an opaque base64 NextToken.
 pub(crate) fn encode_offset_token(offset: usize) -> String {
@@ -2273,4 +2270,32 @@ fn push_action_list(s: &mut String, name: &str, actions: &[String]) {
         s.push_str(&format!("<member>{}</member>", xml_escape(action)));
     }
     s.push_str(&format!("</{name}>"));
+}
+
+#[cfg(test)]
+mod xml_escape_tests {
+    use super::xml_escape;
+
+    #[test]
+    fn escapes_c0_control_chars_as_numeric_references() {
+        // A raw C0 control byte (here a vertical tab, U+000B) is not a legal
+        // XML 1.0 character. If it were passed through verbatim, a single
+        // poisoned field would make the whole list-response document
+        // unparseable by a strict SDK XML parser. The canonical escaper the
+        // crate now uses must emit a numeric character reference instead.
+        let out = xml_escape("a\u{0b}b");
+        assert!(
+            !out.contains('\u{0b}'),
+            "raw control byte leaked into XML output: {out:?}"
+        );
+        assert_eq!(out, "a&#xB;b");
+    }
+
+    #[test]
+    fn still_escapes_the_five_standard_entities() {
+        assert_eq!(
+            xml_escape("a&b<c>d\"e'f"),
+            "a&amp;b&lt;c&gt;d&quot;e&apos;f"
+        );
+    }
 }

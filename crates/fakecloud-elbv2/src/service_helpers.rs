@@ -14,20 +14,10 @@ pub(crate) fn xml_metadata_only(action: &str, request_id: &str) -> AwsResponse {
     AwsResponse::xml(StatusCode::OK, xml)
 }
 
-pub(crate) fn xml_escape(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    for c in s.chars() {
-        match c {
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '&' => out.push_str("&amp;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&apos;"),
-            _ => out.push(c),
-        }
-    }
-    out
-}
+/// Re-export the canonical XML escaper, which also encodes C0 control chars
+/// as numeric character references so a poisoned field cannot make a whole
+/// list-response document unparseable by a strict XML SDK.
+pub(crate) use fakecloud_aws::xml::xml_escape;
 
 pub(crate) fn parse_member_list(req: &AwsRequest, prefix: &str) -> Vec<String> {
     let mut out = Vec::new();
