@@ -13,11 +13,11 @@ const IP_TYPES: &[&str] = &["ipv4", "dualstack", "ipv6"];
 
 // ---- instance connect endpoints ----
 
-fn ice_xml(e: &InstanceConnectEndpoint, tags: &[Tag], owner: &str) -> String {
+fn ice_xml(e: &InstanceConnectEndpoint, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
         "{}{}{}<state>create-complete</state>{}<createdAt>{}</createdAt><preserveClientIp>true</preserveClientIp>{}",
         ec2_elem("instanceConnectEndpointId", &e.id),
-        ec2_elem("instanceConnectEndpointArn", &format!("arn:aws:ec2:us-east-1:{owner}:instance-connect-endpoint/{}", e.id)),
+        ec2_elem("instanceConnectEndpointArn", &format!("arn:aws:ec2:{region}:{owner}:instance-connect-endpoint/{}", e.id)),
         ec2_elem("ownerId", owner),
         ec2_elem("subnetId", &e.subnet_id),
         FIXED_TIME,
@@ -62,7 +62,7 @@ pub(crate) fn create_instance_connect_endpoint(
         &req.request_id,
         &format!(
             "<instanceConnectEndpoint>{}</instanceConnectEndpoint>{}",
-            ice_xml(&e, &tags, &owner),
+            ice_xml(&e, &tags, &owner, &req.region),
             ec2_elem("clientToken", &token)
         ),
     ))
@@ -90,7 +90,7 @@ pub(crate) fn delete_instance_connect_endpoint(
         &req.request_id,
         &format!(
             "<instanceConnectEndpoint>{}</instanceConnectEndpoint>",
-            ice_xml(&e, &tags, &owner)
+            ice_xml(&e, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -107,7 +107,7 @@ pub(crate) fn describe_instance_connect_endpoints(
     let mut items: Vec<String> = state
         .instance_connect_endpoints
         .values()
-        .map(|e| ice_xml(e, state.tags_for(&e.id), &owner))
+        .map(|e| ice_xml(e, state.tags_for(&e.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(

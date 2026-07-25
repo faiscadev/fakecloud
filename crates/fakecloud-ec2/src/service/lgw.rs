@@ -15,8 +15,8 @@ fn mr(req: &AwsRequest) -> Result<(), AwsServiceError> {
     validate_max_results(&req.query_params, 5, 1000)
 }
 
-fn owner_arn(owner: &str, kind: &str, id: &str) -> String {
-    format!("arn:aws:ec2:us-east-1:{owner}:{kind}/{id}")
+fn owner_arn(region: &str, owner: &str, kind: &str, id: &str) -> String {
+    format!("arn:aws:ec2:{region}:{owner}:{kind}/{id}")
 }
 
 // ---- carrier gateways ----
@@ -121,7 +121,13 @@ fn ins(
 
 // ---- CoIP pools + CIDRs ----
 
-fn coip_pool_xml(p: &CoipPool, cidrs: &[String], tags: &[Tag], owner: &str) -> String {
+fn coip_pool_xml(
+    p: &CoipPool,
+    cidrs: &[String],
+    tags: &[Tag],
+    owner: &str,
+    region: &str,
+) -> String {
     format!(
         "{}{}{}{}",
         ec2_elem("poolId", &p.id),
@@ -133,7 +139,7 @@ fn coip_pool_xml(p: &CoipPool, cidrs: &[String], tags: &[Tag], owner: &str) -> S
                 .collect::<Vec<_>>()
         ),
         ec2_elem("localGatewayRouteTableId", &p.route_table_id)
-            + &ec2_elem("poolArn", &owner_arn(owner, "coip-pool", &p.id)),
+            + &ec2_elem("poolArn", &owner_arn(region, owner, "coip-pool", &p.id)),
         super::tags::tag_set_xml(tags),
     )
 }
@@ -157,7 +163,7 @@ pub(crate) fn create_coip_pool(
         &req.request_id,
         &format!(
             "<coipPool>{}</coipPool>",
-            coip_pool_xml(&p, &[], &tags, &owner)
+            coip_pool_xml(&p, &[], &tags, &owner, &req.region)
         ),
     ))
 }
@@ -182,7 +188,7 @@ pub(crate) fn delete_coip_pool(
         &req.request_id,
         &format!(
             "<coipPool>{}</coipPool>",
-            coip_pool_xml(&p, &cidrs, &tags, &owner)
+            coip_pool_xml(&p, &cidrs, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -205,7 +211,7 @@ pub(crate) fn describe_coip_pools(
                 .get(&p.id)
                 .cloned()
                 .unwrap_or_default();
-            coip_pool_xml(p, &cidrs, state.tags_for(&p.id), &owner)
+            coip_pool_xml(p, &cidrs, state.tags_for(&p.id), &owner, &req.region)
         })
         .collect();
     items.sort();
@@ -297,11 +303,11 @@ pub(crate) fn get_coip_pool_usage(
 
 // ---- local gateway route tables ----
 
-fn lgrt_xml(rt: &LocalGatewayRouteTable, tags: &[Tag], owner: &str) -> String {
+fn lgrt_xml(rt: &LocalGatewayRouteTable, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
-        "{}{}{}<outpostArn>arn:aws:outposts:us-east-1:{owner}:outpost/op-0</outpostArn>{}<state>available</state><mode>{}</mode>{}",
+        "{}{}{}<outpostArn>arn:aws:outposts:{region}:{owner}:outpost/op-0</outpostArn>{}<state>available</state><mode>{}</mode>{}",
         ec2_elem("localGatewayRouteTableId", &rt.id),
-        ec2_elem("localGatewayRouteTableArn", &owner_arn(owner, "local-gateway-route-table", &rt.id)),
+        ec2_elem("localGatewayRouteTableArn", &owner_arn(region, owner, "local-gateway-route-table", &rt.id)),
         ec2_elem("localGatewayId", &rt.local_gateway_id),
         ec2_elem("ownerId", owner),
         rt.mode,
@@ -334,7 +340,7 @@ pub(crate) fn create_local_gateway_route_table(
         &req.request_id,
         &format!(
             "<localGatewayRouteTable>{}</localGatewayRouteTable>",
-            lgrt_xml(&rt, &tags, &owner)
+            lgrt_xml(&rt, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -363,7 +369,7 @@ pub(crate) fn delete_local_gateway_route_table(
         &req.request_id,
         &format!(
             "<localGatewayRouteTable>{}</localGatewayRouteTable>",
-            lgrt_xml(&rt, &tags, &owner)
+            lgrt_xml(&rt, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -380,7 +386,7 @@ pub(crate) fn describe_local_gateway_route_tables(
     let mut items: Vec<String> = state
         .lg_route_tables
         .values()
-        .map(|rt| lgrt_xml(rt, state.tags_for(&rt.id), &owner))
+        .map(|rt| lgrt_xml(rt, state.tags_for(&rt.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -392,14 +398,14 @@ pub(crate) fn describe_local_gateway_route_tables(
 
 // ---- local gateway routes ----
 
-fn route_xml(cidr: &str, rt: &str, owner: &str) -> String {
+fn route_xml(cidr: &str, rt: &str, owner: &str, region: &str) -> String {
     format!(
         "{}<type>static</type><state>active</state>{}{}{}",
         ec2_elem("destinationCidrBlock", cidr),
         ec2_elem("localGatewayRouteTableId", rt),
         ec2_elem(
             "localGatewayRouteTableArn",
-            &owner_arn(owner, "local-gateway-route-table", rt)
+            &owner_arn(region, owner, "local-gateway-route-table", rt)
         ),
         ec2_elem("ownerId", owner),
     )
@@ -427,7 +433,10 @@ pub(crate) fn create_local_gateway_route(
     Ok(Ec2Service::respond(
         "CreateLocalGatewayRoute",
         &req.request_id,
-        &format!("<route>{}</route>", route_xml(&cidr, &rt, &req.account_id)),
+        &format!(
+            "<route>{}</route>",
+            route_xml(&cidr, &rt, &req.account_id, &req.region)
+        ),
     ))
 }
 
@@ -454,7 +463,10 @@ pub(crate) fn delete_local_gateway_route(
     Ok(Ec2Service::respond(
         "DeleteLocalGatewayRoute",
         &req.request_id,
-        &format!("<route>{}</route>", route_xml(&cidr, &rt, &req.account_id)),
+        &format!(
+            "<route>{}</route>",
+            route_xml(&cidr, &rt, &req.account_id, &req.region)
+        ),
     ))
 }
 
@@ -471,7 +483,10 @@ pub(crate) fn modify_local_gateway_route(
     Ok(Ec2Service::respond(
         "ModifyLocalGatewayRoute",
         &req.request_id,
-        &format!("<route>{}</route>", route_xml(&cidr, &rt, &req.account_id)),
+        &format!(
+            "<route>{}</route>",
+            route_xml(&cidr, &rt, &req.account_id, &req.region)
+        ),
     ))
 }
 
@@ -485,7 +500,11 @@ pub(crate) fn search_local_gateway_routes(
     let items: Vec<String> = accounts
         .get(&req.account_id)
         .and_then(|s| s.lg_routes.get(&rt))
-        .map(|rs| rs.iter().map(|c| route_xml(c, &rt, &owner)).collect())
+        .map(|rs| {
+            rs.iter()
+                .map(|c| route_xml(c, &rt, &owner, &req.region))
+                .collect()
+        })
         .unwrap_or_default();
     Ok(Ec2Service::respond(
         "SearchLocalGatewayRoutes",

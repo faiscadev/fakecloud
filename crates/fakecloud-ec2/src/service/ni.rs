@@ -21,14 +21,14 @@ fn mr(req: &AwsRequest) -> Result<(), AwsServiceError> {
 
 // ---- paths ----
 
-fn path_xml(p: &NetworkInsightsPath, tags: &[Tag], owner: &str) -> String {
+fn path_xml(p: &NetworkInsightsPath, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
         "{}{}<createdDate>{}</createdDate>{}{}<protocol>{}</protocol>{}",
         ec2_elem("networkInsightsPathId", &p.id),
         ec2_elem(
             "networkInsightsPathArn",
             &format!(
-                "arn:aws:ec2:us-east-1:{owner}:network-insights-path/{}",
+                "arn:aws:ec2:{region}:{owner}:network-insights-path/{}",
                 p.id
             )
         ),
@@ -85,7 +85,7 @@ pub(crate) fn create_network_insights_path(
         &req.request_id,
         &format!(
             "<networkInsightsPath>{}</networkInsightsPath>",
-            path_xml(&p, &tags, &owner)
+            path_xml(&p, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -120,7 +120,7 @@ pub(crate) fn describe_network_insights_paths(
     let mut items: Vec<String> = state
         .ni_paths
         .values()
-        .map(|p| path_xml(p, state.tags_for(&p.id), &owner))
+        .map(|p| path_xml(p, state.tags_for(&p.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -132,11 +132,11 @@ pub(crate) fn describe_network_insights_paths(
 
 // ---- analyses ----
 
-fn analysis_xml(a: &NetworkInsightsAnalysis, tags: &[Tag], owner: &str) -> String {
+fn analysis_xml(a: &NetworkInsightsAnalysis, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
         "{}{}{}<startDate>{}</startDate><status>succeeded</status><networkPathFound>true</networkPathFound>{}",
         ec2_elem("networkInsightsAnalysisId", &a.id),
-        ec2_elem("networkInsightsAnalysisArn", &format!("arn:aws:ec2:us-east-1:{owner}:network-insights-analysis/{}", a.id)),
+        ec2_elem("networkInsightsAnalysisArn", &format!("arn:aws:ec2:{region}:{owner}:network-insights-analysis/{}", a.id)),
         ec2_elem("networkInsightsPathId", &a.path_id),
         FIXED_TIME,
         super::tags::tag_set_xml(tags),
@@ -173,7 +173,7 @@ pub(crate) fn start_network_insights_analysis(
         &req.request_id,
         &format!(
             "<networkInsightsAnalysis>{}</networkInsightsAnalysis>",
-            analysis_xml(&a, &tags, &owner)
+            analysis_xml(&a, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -208,7 +208,7 @@ pub(crate) fn describe_network_insights_analyses(
     let mut items: Vec<String> = state
         .ni_analyses
         .values()
-        .map(|a| analysis_xml(a, state.tags_for(&a.id), &owner))
+        .map(|a| analysis_xml(a, state.tags_for(&a.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -220,14 +220,14 @@ pub(crate) fn describe_network_insights_analyses(
 
 // ---- access scopes ----
 
-fn scope_xml(sc: &NetworkInsightsAccessScope, tags: &[Tag], owner: &str) -> String {
+fn scope_xml(sc: &NetworkInsightsAccessScope, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
         "{}{}<createdDate>{}</createdDate>{}",
         ec2_elem("networkInsightsAccessScopeId", &sc.id),
         ec2_elem(
             "networkInsightsAccessScopeArn",
             &format!(
-                "arn:aws:ec2:us-east-1:{owner}:network-insights-access-scope/{}",
+                "arn:aws:ec2:{region}:{owner}:network-insights-access-scope/{}",
                 sc.id
             )
         ),
@@ -269,7 +269,7 @@ pub(crate) fn create_network_insights_access_scope(
         &req.request_id,
         &format!(
             "<networkInsightsAccessScope>{}</networkInsightsAccessScope>{}",
-            scope_xml(&sc, &tags, &owner),
+            scope_xml(&sc, &tags, &owner, &req.region),
             scope_content_xml(&id)
         ),
     ))
@@ -305,7 +305,7 @@ pub(crate) fn describe_network_insights_access_scopes(
     let mut items: Vec<String> = state
         .ni_access_scopes
         .values()
-        .map(|sc| scope_xml(sc, state.tags_for(&sc.id), &owner))
+        .map(|sc| scope_xml(sc, state.tags_for(&sc.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -329,11 +329,16 @@ pub(crate) fn get_network_insights_access_scope_content(
 
 // ---- scope analyses ----
 
-fn scope_analysis_xml(a: &NetworkInsightsAccessScopeAnalysis, tags: &[Tag], owner: &str) -> String {
+fn scope_analysis_xml(
+    a: &NetworkInsightsAccessScopeAnalysis,
+    tags: &[Tag],
+    owner: &str,
+    region: &str,
+) -> String {
     format!(
         "{}{}{}<status>succeeded</status><startDate>{}</startDate><findingsFound>true</findingsFound><analyzedEniCount>0</analyzedEniCount>{}",
         ec2_elem("networkInsightsAccessScopeAnalysisId", &a.id),
-        ec2_elem("networkInsightsAccessScopeAnalysisArn", &format!("arn:aws:ec2:us-east-1:{owner}:network-insights-access-scope-analysis/{}", a.id)),
+        ec2_elem("networkInsightsAccessScopeAnalysisArn", &format!("arn:aws:ec2:{region}:{owner}:network-insights-access-scope-analysis/{}", a.id)),
         ec2_elem("networkInsightsAccessScopeId", &a.scope_id),
         FIXED_TIME,
         super::tags::tag_set_xml(tags),
@@ -370,7 +375,7 @@ pub(crate) fn start_network_insights_access_scope_analysis(
         &req.request_id,
         &format!(
             "<networkInsightsAccessScopeAnalysis>{}</networkInsightsAccessScopeAnalysis>",
-            scope_analysis_xml(&a, &tags, &owner)
+            scope_analysis_xml(&a, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -405,7 +410,7 @@ pub(crate) fn describe_network_insights_access_scope_analyses(
     let mut items: Vec<String> = state
         .ni_scope_analyses
         .values()
-        .map(|a| scope_analysis_xml(a, state.tags_for(&a.id), &owner))
+        .map(|a| scope_analysis_xml(a, state.tags_for(&a.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(

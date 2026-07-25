@@ -16,7 +16,7 @@ fn mr(req: &AwsRequest) -> Result<(), AwsServiceError> {
 
 // ---- transit gateways ----
 
-fn tgw_xml(t: &TransitGateway, tags: &[Tag], owner: &str) -> String {
+fn tgw_xml(t: &TransitGateway, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
         "{}{}{}{}{}{}<options><amazonSideAsn>64512</amazonSideAsn>\
          <autoAcceptSharedAttachments>disable</autoAcceptSharedAttachments>\
@@ -27,7 +27,7 @@ fn tgw_xml(t: &TransitGateway, tags: &[Tag], owner: &str) -> String {
         ec2_elem("state", &t.state),
         ec2_elem(
             "transitGatewayArn",
-            &format!("arn:aws:ec2:us-east-1:{owner}:transit-gateway/{}", t.id)
+            &format!("arn:aws:ec2:{region}:{owner}:transit-gateway/{}", t.id)
         ),
         ec2_elem("ownerId", owner),
         ec2_elem("description", &t.description),
@@ -69,7 +69,7 @@ pub(crate) fn create_transit_gateway(
         &req.request_id,
         &format!(
             "<transitGateway>{}</transitGateway>",
-            tgw_xml(&t, &tags, &owner)
+            tgw_xml(&t, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -97,7 +97,7 @@ pub(crate) fn delete_transit_gateway(
         &req.request_id,
         &format!(
             "<transitGateway>{}</transitGateway>",
-            tgw_xml(&t, &tags, &owner)
+            tgw_xml(&t, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -116,7 +116,7 @@ pub(crate) fn describe_transit_gateways(
         .transit_gateways
         .values()
         .filter(|t| wanted.is_empty() || wanted.contains(&t.id))
-        .map(|t| tgw_xml(t, state.tags_for(&t.id), &owner))
+        .map(|t| tgw_xml(t, state.tags_for(&t.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -154,7 +154,7 @@ pub(crate) fn modify_transit_gateway(
         &req.request_id,
         &format!(
             "<transitGateway>{}</transitGateway>",
-            tgw_xml(&t, &tags, &owner)
+            tgw_xml(&t, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -982,5 +982,22 @@ mod modify_tests {
         let accounts = svc.state.read();
         let a = &accounts.get("000000000000").unwrap().tgw_attachments["tgw-attach-1"];
         assert_eq!(a.subnet_ids, vec!["subnet-b".to_string()]);
+    }
+
+    #[test]
+    fn transit_gateway_arn_uses_request_region() {
+        let t = TransitGateway {
+            id: "tgw-abc123".into(),
+            description: String::new(),
+            state: "available".into(),
+        };
+        let xml = tgw_xml(&t, &[], "000000000000", "eu-central-1");
+        assert!(
+            xml.contains(
+                "<transitGatewayArn>arn:aws:ec2:eu-central-1:000000000000:transit-gateway/tgw-abc123</transitGatewayArn>"
+            ),
+            "{xml}"
+        );
+        assert!(!xml.contains("us-east-1"), "{xml}");
     }
 }
