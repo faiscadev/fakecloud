@@ -500,7 +500,7 @@ public sealed record TokenInfo(
     string? Username,
     string? PoolId,
     string? ClientId,
-    long IssuedAt);
+    double IssuedAt);
 
 public sealed record TokensResponse(IReadOnlyList<TokenInfo>? Tokens);
 
@@ -513,7 +513,7 @@ public sealed record AuthEvent(
     string? Username,
     string? UserPoolId,
     string? ClientId,
-    long Timestamp,
+    double Timestamp,
     bool Success);
 
 public sealed record AuthEventsResponse(IReadOnlyList<AuthEvent>? Events);

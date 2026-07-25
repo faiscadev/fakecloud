@@ -151,6 +151,31 @@ public sealed class FakeServerTests : IDisposable
     }
 
     [Fact]
+    public async Task FractionalEpochTimestampsDeserializeAsDouble()
+    {
+        // The server emits these epoch-seconds fields as f64, so serde_json
+        // writes a trailing ".0" for whole values (e.g. 1735689600.0).
+        // System.Text.Json in strict mode refuses to read a fractional number
+        // into an integer CLR type, so IssuedAt/Timestamp must be double.
+        _routes["GET /_fakecloud/cognito/tokens"] = (200, """
+            {"tokens":[{"type":"access","username":"alice","poolId":"pool-1",
+              "clientId":"c-1","issuedAt":1735689600.0}]}
+            """);
+        _routes["GET /_fakecloud/cognito/auth-events"] = (200, """
+            {"events":[{"eventType":"SignIn","username":"alice","userPoolId":"pool-1",
+              "clientId":"c-1","timestamp":1735689600.0,"success":true}]}
+            """);
+        var fc = new FakeCloudClient(_baseUrl);
+
+        var token = Assert.Single((await fc.Cognito.GetTokensAsync()).Tokens!);
+        Assert.Equal(1735689600.0, token.IssuedAt);
+
+        var evt = Assert.Single((await fc.Cognito.GetAuthEventsAsync()).Events!);
+        Assert.Equal(1735689600.0, evt.Timestamp);
+        Assert.True(evt.Success);
+    }
+
+    [Fact]
     public async Task SnakeCaseWireFieldsMapViaAttributes()
     {
         _routes["GET /_fakecloud/dns/resolve?name=db.internal&type=A"] = (200, """

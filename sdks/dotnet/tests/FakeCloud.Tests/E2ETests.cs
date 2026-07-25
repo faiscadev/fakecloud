@@ -3,46 +3,27 @@ using Xunit;
 namespace FakeCloud.Tests;
 
 /// <summary>
-/// E2E tests that require a running fakecloud server.
-///
-/// Start the server before running:
-///   cargo run -- --port 4566
-///
-/// Then run:
-///   dotnet test
-///
-/// Set FAKECLOUD_ENDPOINT to override the base URL (default:
-/// http://localhost:4566). Each test returns early (passing vacuously) when
-/// no server is reachable, mirroring the skip behavior of the sibling SDKs.
+/// E2E tests against a real fakecloud server. The <see cref="FakeCloudServer"/>
+/// collection fixture spawns the binary (or reuses one at
+/// <c>FAKECLOUD_ENDPOINT</c>) and fails loudly if it cannot be reached, so
+/// these tests always run for real and never pass vacuously.
 /// </summary>
-public sealed class E2ETests : IAsyncLifetime
+[Collection(FakeCloudServerCollection.Name)]
+public sealed class E2ETests : IDisposable
 {
-    private readonly string _endpoint =
-        Environment.GetEnvironmentVariable("FAKECLOUD_ENDPOINT") ?? "http://localhost:4566";
+    private readonly FakeCloudClient _fc;
 
-    private FakeCloudClient? _fc;
-
-    public async Task InitializeAsync()
+    public E2ETests(FakeCloudServer server)
     {
-        var probe = new FakeCloudClient(_endpoint);
-        try
-        {
-            await probe.HealthAsync();
-        }
-        catch (FakeCloudException)
-        {
-            return; // server not reachable — tests below no-op
-        }
-        _fc = probe;
-        await _fc.ResetAsync();
+        _fc = new FakeCloudClient(server.Endpoint);
+        _fc.ResetAsync().GetAwaiter().GetResult();
     }
 
-    public Task DisposeAsync() => Task.CompletedTask;
+    public void Dispose() => _fc.Dispose();
 
     [Fact]
     public async Task HealthReturnsServerStatus()
     {
-        if (_fc is null) return;
         var health = await _fc.HealthAsync();
         Assert.Equal("ok", health.Status);
         Assert.False(string.IsNullOrEmpty(health.Version));
@@ -52,7 +33,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task ResetClearsState()
     {
-        if (_fc is null) return;
         var reset = await _fc.ResetAsync();
         Assert.Equal("ok", reset.Status);
         var queues = await _fc.Sqs.GetMessagesAsync();
@@ -62,7 +42,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task ResetServiceClearsOneService()
     {
-        if (_fc is null) return;
         var result = await _fc.ResetServiceAsync("sqs");
         Assert.Equal("sqs", result.Reset);
     }
@@ -70,7 +49,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task SesEmailsStartsEmpty()
     {
-        if (_fc is null) return;
         var emails = await _fc.Ses.GetEmailsAsync();
         Assert.True(emails.Emails is null || emails.Emails.Count == 0);
     }
@@ -78,7 +56,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task SnsCertPemIsPemEncoded()
     {
-        if (_fc is null) return;
         var pem = await _fc.Sns.GetCertPemAsync();
         Assert.Contains("BEGIN CERTIFICATE", pem);
     }
@@ -86,7 +63,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task BedrockResponseRulesRoundTrip()
     {
-        if (_fc is null) return;
         const string modelId = "anthropic.claude-3-haiku-20240307-v1:0";
         var set = await _fc.Bedrock.SetResponseRulesAsync(modelId, new[]
         {
@@ -101,7 +77,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task BedrockFaultQueueRoundTrip()
     {
-        if (_fc is null) return;
         await _fc.Bedrock.QueueFaultAsync(new BedrockFaultRule("throttling"));
         var faults = await _fc.Bedrock.GetFaultsAsync();
         Assert.NotEmpty(faults.Faults!);
@@ -113,7 +88,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task ConfirmUnknownCognitoUserThrows404()
     {
-        if (_fc is null) return;
         var err = await Assert.ThrowsAsync<FakeCloudException>(
             () => _fc.Cognito.ConfirmUserAsync(new ConfirmUserRequest("pool-missing", "nobody")));
         Assert.Equal(404, err.Status);
@@ -122,7 +96,6 @@ public sealed class E2ETests : IAsyncLifetime
     [Fact]
     public async Task TickProcessorsReturnCounts()
     {
-        if (_fc is null) return;
         var ttl = await _fc.DynamoDb.TickTtlAsync();
         Assert.True(ttl.ExpiredItems >= 0);
         var lifecycle = await _fc.S3.TickLifecycleAsync();

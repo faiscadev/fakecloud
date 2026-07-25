@@ -4,7 +4,7 @@ C#/.NET client SDK for [fakecloud](https://github.com/faiscadev/fakecloud) — a
 
 Provides typed access to the fakecloud introspection and simulation API (`/_fakecloud/*` endpoints), letting you inspect emulator state and trigger time-based processors in tests.
 
-Requires **.NET 10+**. Uses `HttpClient` and `System.Text.Json` — no third-party dependencies.
+Requires **.NET 8 or later** (targets `net8.0` and `net10.0`). Uses `HttpClient` and `System.Text.Json`, with no third-party dependencies.
 
 ## Installation
 

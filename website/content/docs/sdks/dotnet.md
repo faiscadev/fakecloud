@@ -18,7 +18,7 @@ Or in your test project file:
 </ItemGroup>
 ```
 
-Requires .NET 10+. Uses `HttpClient` and `System.Text.Json` — no third-party dependencies.
+Requires .NET 8 or later (targets `net8.0` and `net10.0`). Uses `HttpClient` and `System.Text.Json`, with no third-party dependencies.
 
 ## Initialize
 

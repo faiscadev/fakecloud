@@ -10,7 +10,7 @@ namespace FakeCloud;
 /// var emails = (await fc.Ses.GetEmailsAsync()).Emails;
 /// </code>
 /// </summary>
-public sealed class FakeCloudClient
+public sealed class FakeCloudClient : IDisposable
 {
     private const string DefaultBaseUrl = "http://localhost:4566";
 
@@ -61,6 +61,14 @@ public sealed class FakeCloudClient
     {
         return url.TrimEnd('/');
     }
+
+    /// <summary>
+    /// Releases the underlying <see cref="System.Net.Http.HttpClient"/> and its
+    /// connection pool. Call this when a client is created per-test or
+    /// per-scope; a single long-lived client shared across a suite does not
+    /// need explicit disposal.
+    /// </summary>
+    public void Dispose() => _http.Dispose();
 
     public string BaseUrl => _http.BaseUrl;
 

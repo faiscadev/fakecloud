@@ -270,14 +270,10 @@ jobs:
         working-directory: .
       - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
         with:
-          dotnet-version: "10.0.x"
+          dotnet-version: |
+            8.0.x
+            10.0.x
       - name: Run unit + E2E tests
-        run: |
-          ../../target/release/fakecloud &
-          for _ in $(seq 1 30); do
-            if curl -sf http://localhost:4566/_fakecloud/health > /dev/null 2>&1; then
-              break
-            fi
-            sleep 1
-          done
-          dotnet test
+        # The E2E collection fixture spawns the downloaded binary itself from
+        # target/release (fail-loud if missing), so no manual boot is needed.
+        run: dotnet test --configuration Release

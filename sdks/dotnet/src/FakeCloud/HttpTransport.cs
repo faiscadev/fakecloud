@@ -9,7 +9,7 @@ namespace FakeCloud;
 /// Internal on purpose: users talk to <see cref="FakeCloudClient"/> and its
 /// sub-clients, not to the transport layer.
 /// </summary>
-internal sealed class HttpTransport
+internal sealed class HttpTransport : IDisposable
 {
     internal static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -27,6 +27,8 @@ internal sealed class HttpTransport
     }
 
     internal string BaseUrl { get; }
+
+    public void Dispose() => _http.Dispose();
 
     internal static string EncodePath(string segment) => Uri.EscapeDataString(segment);
 
