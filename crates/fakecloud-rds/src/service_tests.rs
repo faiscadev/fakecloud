@@ -1991,6 +1991,153 @@ async fn restore_db_cluster_to_point_in_time_returns_promptly() {
     );
 }
 
+#[tokio::test]
+async fn create_db_cluster_snapshot_returns_promptly_metadata_only() {
+    // #2398 sibling (bug-hunt 2026-07-25 Tier-3): the writer dump is
+    // backgrounded so CreateDBClusterSnapshot returns without blocking on the
+    // (unbounded) mysqldump/pg_dump. Docker-free: with no runtime wired there's
+    // nothing to dump, so the snapshot lands as a metadata-only `available`
+    // entry synchronously and the create response reports `creating`
+    // (AWS-faithful).
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(
+                "src-cluster".to_string(),
+                serde_json::json!({
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "aurora-postgresql",
+                    "WriterDBInstanceIdentifier": "writer-1",
+                }),
+            );
+    }
+    seed_instance(&svc, "writer-1");
+
+    let req = request(
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "csnap-1"),
+            ("DBClusterIdentifier", "src-cluster"),
+        ],
+    );
+    let resp = svc
+        .create_db_cluster_snapshot(&req)
+        .await
+        .expect("create should return promptly");
+    let body = body_of(resp);
+    assert!(body.contains("csnap-1"), "body: {body}");
+    assert!(
+        body.contains("<Status>creating</Status>"),
+        "create response reports creating: {body}"
+    );
+
+    // No runtime -> metadata-only snapshot recorded synchronously as available,
+    // proving the handler did not block on a dump.
+    let accounts = svc.state.read();
+    let snap = accounts
+        .default_ref()
+        .extras
+        .get("cluster_snapshots")
+        .unwrap()
+        .get("csnap-1")
+        .expect("snapshot recorded synchronously");
+    assert_eq!(
+        snap.get("Status").and_then(|v| v.as_str()),
+        Some("available")
+    );
+    assert!(
+        snap.get("DumpDataB64").is_none(),
+        "no dump staged without a runtime"
+    );
+}
+
+/// Seed a `cluster_snapshots` extras entry in the `creating` state so the
+/// finalizer's JSON-entry update can be exercised directly.
+fn seed_cluster_snapshot_creating(svc: &RdsService, snapshot_id: &str) {
+    let mut accounts = svc.state.write();
+    accounts
+        .default_mut()
+        .extras
+        .entry("cluster_snapshots".to_string())
+        .or_default()
+        .insert(
+            snapshot_id.to_string(),
+            serde_json::json!({
+                "DBClusterSnapshotIdentifier": snapshot_id,
+                "DBClusterIdentifier": "src-cluster",
+                "Status": "creating",
+                "SnapshotType": "manual",
+            }),
+        );
+}
+
+#[test]
+fn apply_cluster_snapshot_dump_result_stages_dump_on_success() {
+    // The backgrounded finalizer flips the extras-JSON `cluster_snapshots`
+    // entry to `available` and stages the base64 STANDARD dump.
+    let svc = make_service();
+    seed_cluster_snapshot_creating(&svc, "csnap-1");
+    crate::service::cluster_snapshots::apply_cluster_snapshot_dump_result(
+        &svc.state,
+        "123456789012",
+        "csnap-1",
+        Ok(b"DUMP-BYTES".to_vec()),
+    );
+    let accounts = svc.state.read();
+    let snap = accounts
+        .default_ref()
+        .extras
+        .get("cluster_snapshots")
+        .unwrap()
+        .get("csnap-1")
+        .unwrap();
+    assert_eq!(
+        snap.get("Status").and_then(|v| v.as_str()),
+        Some("available")
+    );
+    use base64::Engine;
+    let expected = base64::engine::general_purpose::STANDARD.encode(b"DUMP-BYTES");
+    assert_eq!(
+        snap.get("DumpDataB64").and_then(|v| v.as_str()),
+        Some(expected.as_str())
+    );
+}
+
+#[test]
+fn apply_cluster_snapshot_dump_result_metadata_only_on_error() {
+    // A dump failure must not wedge the snapshot in `creating` forever; it
+    // settles to a metadata-only `available` snapshot (no dump).
+    let svc = make_service();
+    seed_cluster_snapshot_creating(&svc, "csnap-1");
+    crate::service::cluster_snapshots::apply_cluster_snapshot_dump_result(
+        &svc.state,
+        "123456789012",
+        "csnap-1",
+        Err(crate::runtime::RuntimeError::Unavailable),
+    );
+    let accounts = svc.state.read();
+    let snap = accounts
+        .default_ref()
+        .extras
+        .get("cluster_snapshots")
+        .unwrap()
+        .get("csnap-1")
+        .unwrap();
+    assert_eq!(
+        snap.get("Status").and_then(|v| v.as_str()),
+        Some("available")
+    );
+    assert!(
+        snap.get("DumpDataB64").is_none(),
+        "no dump staged on dump failure"
+    );
+}
+
 #[test]
 fn describe_db_snapshots_accepts_both_filters() {
     // Both snapshot id + instance id is tolerated: the snapshot id

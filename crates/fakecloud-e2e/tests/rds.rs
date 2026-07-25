@@ -1633,7 +1633,10 @@ async fn rds_restore_db_cluster_from_snapshot_recovers_data() {
         .await
         .expect("insert row");
 
-    // 3. Snapshot the cluster (dumps writer into snapshot).
+    // 3. Snapshot the cluster. CreateDBClusterSnapshot returns immediately with
+    //    the snapshot in `creating` and backgrounds the writer dump, so wait for
+    //    it to reach `available` before dropping the writer — otherwise the
+    //    teardown races the background dump and the snapshot loses the data.
     client
         .create_db_cluster_snapshot()
         .db_cluster_snapshot_identifier("m7-cluster-snap")
@@ -1641,6 +1644,7 @@ async fn rds_restore_db_cluster_from_snapshot_recovers_data() {
         .send()
         .await
         .expect("snapshot cluster");
+    helpers::wait_for_db_cluster_snapshot_available(&client, "m7-cluster-snap", 180).await;
 
     // 4. Drop the source writer so the data only survives in the snapshot.
     client

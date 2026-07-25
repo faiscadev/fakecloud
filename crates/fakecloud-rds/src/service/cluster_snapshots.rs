@@ -3,10 +3,20 @@
 use super::*;
 
 impl RdsService {
-    /// Real CreateDBClusterSnapshot: locates the cluster's writer
-    /// member, dumps its database synchronously via the runtime, and
-    /// stores the dump alongside the snapshot's metadata so a later
-    /// RestoreDBClusterFromSnapshot can replay the exact state.
+    /// Real CreateDBClusterSnapshot: locates the cluster's writer member,
+    /// records the snapshot synchronously as `creating`, and backgrounds the
+    /// writer's database dump so the (unbounded mysqldump/pg_dump) never blocks
+    /// the request handler past the ~60s client read timeout (bug-hunt
+    /// 2026-07-25 Tier-3, #2398 sibling). The detached finalizer flips the
+    /// stored `cluster_snapshots` JSON entry to `available` and inserts the
+    /// base64 dump so a later RestoreDBClusterFromSnapshot can replay the exact
+    /// state.
+    ///
+    /// This redoes a previously-reverted backgrounding (commit `f5cc5ddc2`)
+    /// with a *correct* finalizer: cluster snapshots live as JSON in
+    /// `state.extras["cluster_snapshots"]`, so the finalizer updates that entry
+    /// directly rather than the typed `state.snapshots` store the
+    /// single-instance path uses.
     pub(super) async fn create_db_cluster_snapshot(
         &self,
         request: &AwsRequest,
@@ -52,29 +62,11 @@ impl RdsService {
             })
         };
 
-        let dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
-            if let Some(runtime) = self.runtime_ref() {
-                match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
-                    Ok(data) => {
-                        use base64::Engine;
-                        Some(base64::engine::general_purpose::STANDARD.encode(&data))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            cluster = %cluster_id,
-                            writer = %wid,
-                            "cluster snapshot dump failed; falling back to metadata-only snapshot"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
+        // Will we background a live dump? Only when we found a writer AND a
+        // container runtime is wired. Otherwise there's nothing to dump, so the
+        // snapshot is metadata-only and lands as `available` synchronously.
+        let will_dump = writer_info.is_some() && self.runtime_ref().is_some();
+        let initial_status = if will_dump { "creating" } else { "available" };
 
         {
             let mut accounts = self.state.write();
@@ -98,17 +90,36 @@ impl RdsService {
                 );
                 obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
                 obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
-                obj.insert("Status".to_string(), json!("available"));
+                obj.insert("Status".to_string(), json!(initial_status));
                 obj.insert("SnapshotType".to_string(), json!("manual"));
-                if let Some(b64) = dump_b64.as_ref() {
-                    obj.insert("DumpDataB64".to_string(), json!(b64));
-                }
+                // No dump inserted yet — the background finalizer stages
+                // `DumpDataB64` on completion (or leaves it absent on a
+                // metadata-only snapshot).
             }
             state
                 .extras
                 .entry("cluster_snapshots".to_string())
                 .or_default()
                 .insert(snapshot_id.clone(), entry);
+        }
+
+        // Background the slow writer dump so the request returns promptly. The
+        // finalizer flips the stored `cluster_snapshots` entry to `available`
+        // and stages the base64 dump; on dump failure it leaves the snapshot
+        // metadata-only `available` (matching the previous inline fallback).
+        if let (Some((wid, eng, user, pass, db)), Some(runtime)) =
+            (writer_info, self.runtime_ref().cloned())
+        {
+            self.spawn_finalize_cluster_snapshot(
+                runtime,
+                request.account_id.clone(),
+                snapshot_id.clone(),
+                wid,
+                eng,
+                user,
+                pass,
+                db,
+            );
         }
 
         self.emit_event(
@@ -120,15 +131,56 @@ impl RdsService {
             "DB cluster snapshot created",
         );
 
+        // AWS returns the snapshot in `creating` from CreateDBClusterSnapshot;
+        // the backgrounded dump flips it to `available` (visible via
+        // DescribeDBClusterSnapshots) once complete.
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
                 "CreateDBClusterSnapshot",
                 RDS_NS,
-                &crate::extras::cluster_snapshot_xml(&snapshot_id, &arn, &cluster_id),
+                &crate::extras::cluster_snapshot_status_xml(
+                    &snapshot_id,
+                    &arn,
+                    &cluster_id,
+                    "creating",
+                ),
                 &request.request_id,
             ),
         ))
+    }
+
+    /// Background the slow writer dump for a cluster snapshot. The caller
+    /// records the `cluster_snapshots` JSON entry synchronously with status
+    /// `creating` and returns immediately; this task runs mysqldump/pg_dump
+    /// (unbounded in dataset size, easily past the ~60s client read timeout)
+    /// and only then updates that same extras-JSON entry — setting `Status` to
+    /// `available` and inserting the base64 `DumpDataB64` on success, or
+    /// leaving a metadata-only `available` snapshot on dump failure. Mirrors
+    /// `spawn_finalize_snapshot` but writes the extras-JSON entry rather than
+    /// the typed `state.snapshots` store (cluster snapshots don't live there).
+    #[allow(clippy::too_many_arguments)]
+    fn spawn_finalize_cluster_snapshot(
+        &self,
+        runtime: Arc<RdsRuntime>,
+        account_id: String,
+        snapshot_id: String,
+        writer_id: String,
+        engine: String,
+        username: String,
+        password: String,
+        db_name: String,
+    ) {
+        let state_handle = self.state.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        tokio::spawn(async move {
+            let result = runtime
+                .dump_database(&writer_id, &engine, &username, &password, &db_name)
+                .await;
+            apply_cluster_snapshot_dump_result(&state_handle, &account_id, &snapshot_id, result);
+            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+        });
     }
 
     /// Real RestoreDBClusterFromSnapshot: clones the source cluster's
@@ -432,5 +484,51 @@ impl RdsService {
                 &request.request_id,
             ),
         ))
+    }
+}
+
+/// Apply the outcome of a backgrounded cluster-snapshot dump to the stored
+/// `extras["cluster_snapshots"]` JSON entry. Split out from
+/// `spawn_finalize_cluster_snapshot` so the state transition (`creating` ->
+/// `available`, with the base64 dump staged) is unit-testable without a
+/// container runtime.
+///
+/// On success the entry's `Status` flips to `available` and `DumpDataB64`
+/// carries the base64 STANDARD dump. On dump failure the entry is left as a
+/// metadata-only `available` snapshot (no dump) — matching the previous inline
+/// fallback. A snapshot deleted while the dump was in flight is left untouched
+/// (the lookup misses).
+pub(super) fn apply_cluster_snapshot_dump_result(
+    state: &SharedRdsState,
+    account_id: &str,
+    snapshot_id: &str,
+    result: Result<Vec<u8>, RuntimeError>,
+) {
+    use serde_json::json;
+    let mut accounts = state.write();
+    let s = accounts.get_or_create(account_id);
+    let Some(obj) = s
+        .extras
+        .get_mut("cluster_snapshots")
+        .and_then(|m| m.get_mut(snapshot_id))
+        .and_then(|e| e.as_object_mut())
+    else {
+        return;
+    };
+    match result {
+        Ok(data) => {
+            use base64::Engine;
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+            obj.insert("Status".to_string(), json!("available"));
+            obj.insert("DumpDataB64".to_string(), json!(b64));
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                snapshot = %snapshot_id,
+                "cluster snapshot dump failed; leaving metadata-only available snapshot"
+            );
+            obj.insert("Status".to_string(), json!("available"));
+        }
     }
 }

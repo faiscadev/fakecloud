@@ -106,6 +106,38 @@ pub async fn wait_for_db_available(
     );
 }
 
+/// Poll DescribeDBClusterSnapshots until the snapshot reports
+/// `status = "available"`. CreateDBClusterSnapshot returns the snapshot in
+/// `creating` immediately and backgrounds the (unbounded) writer dump, so a
+/// test that then drops the source writer must first wait for the dump to land
+/// or the background dump races the container teardown.
+pub async fn wait_for_db_cluster_snapshot_available(
+    rds: &aws_sdk_rds::Client,
+    db_cluster_snapshot_identifier: &str,
+    max_secs: u64,
+) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(max_secs);
+    while std::time::Instant::now() < deadline {
+        if let Ok(resp) = rds
+            .describe_db_cluster_snapshots()
+            .db_cluster_snapshot_identifier(db_cluster_snapshot_identifier)
+            .send()
+            .await
+        {
+            for snap in resp.db_cluster_snapshots() {
+                if snap.status() == Some("available") {
+                    return;
+                }
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    }
+    panic!(
+        "DB cluster snapshot {} did not reach 'available' within {}s",
+        db_cluster_snapshot_identifier, max_secs
+    );
+}
+
 /// Poll DescribeCacheClusters until the cluster reaches "available" and return
 /// it. CreateCacheCluster now returns "creating" and starts the backing
 /// container in the background (bug-audit 3.2), so tests that read the endpoint
