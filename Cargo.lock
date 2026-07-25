@@ -6717,6 +6717,7 @@ dependencies = [
  "http 1.4.0",
  "parking_lot",
  "percent-encoding",
+ "quick-xml",
  "rand 0.8.5",
  "rsa",
  "serde",

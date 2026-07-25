@@ -1850,12 +1850,17 @@ pub(crate) fn send_bounce(
             .unwrap_or_else(|| "smtp; 550 5.1.1 user unknown".to_string());
         recipient_xml.push_str(&format!(
             "<member>\
-             <Recipient>{recipient}</Recipient>\
-             <StatusCode>{status}</StatusCode>\
-             <Action>{action}</Action>\
-             <DiagnosticCode>{diagnostic}</DiagnosticCode>\
-             <BounceType>{bounce_type}</BounceType>\
-             </member>"
+             <Recipient>{}</Recipient>\
+             <StatusCode>{}</StatusCode>\
+             <Action>{}</Action>\
+             <DiagnosticCode>{}</DiagnosticCode>\
+             <BounceType>{}</BounceType>\
+             </member>",
+            xml_escape(&recipient),
+            xml_escape(&status),
+            xml_escape(&action),
+            xml_escape(&diagnostic),
+            xml_escape(&bounce_type),
         ));
         recipient_info.push(crate::state::BouncedRecipientInfo {
             recipient: recipient.clone(),
