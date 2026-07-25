@@ -1342,7 +1342,15 @@ impl Route53Service {
                     min: 0,
                     max: 64,
                 },
-                MAX_ITEMS_CONSTRAINT,
+                // AWS still rejects a non-integer / non-positive MaxItems, but
+                // it does NOT error when MaxItems exceeds 100 — it silently
+                // clamps to 100 (handled below). So validate the shape without
+                // the upper bound that `MAX_ITEMS_CONSTRAINT` would enforce.
+                QueryConstraint::IntRange {
+                    key: "maxitems",
+                    min: 1,
+                    max: i64::MAX,
+                },
             ],
         )?;
         let state = self.state.read();
@@ -1356,19 +1364,25 @@ impl Route53Service {
 
         // Paginate on `marker` (the next delegation set id) + `maxitems`,
         // mirroring the other route53 List operations.
+        // AWS caps MaxItems at 100 and echoes the capped value back, so clamp
+        // any larger request rather than honoring it verbatim.
         let max_items = req
             .query_params
             .get("maxitems")
             .and_then(|v| v.parse::<usize>().ok())
             .filter(|n| *n > 0)
-            .unwrap_or(100);
+            .unwrap_or(100)
+            .min(100);
         let marker = req.query_params.get("marker").cloned().unwrap_or_default();
+        // Resume from the first set whose id is >= the marker (the insertion
+        // point in the id-sorted list), not an exact id match. If the marker's
+        // set was deleted between pages, an exact `position` lookup would miss
+        // and fall back to `sets.len()`, silently dropping every remaining set;
+        // the insertion point lands on the next surviving set instead.
         let start_idx = if marker.is_empty() {
             0
         } else {
-            sets.iter()
-                .position(|d| d.id == marker)
-                .unwrap_or(sets.len())
+            sets.partition_point(|d| d.id < marker)
         };
         let page: Vec<&StoredReusableDelegationSet> =
             sets.iter().skip(start_idx).take(max_items).collect();
@@ -2442,5 +2456,133 @@ mod hardening_tests {
             .map(|r| r.value)
             .collect();
         assert_eq!(vals, vec!["1.1.1.1".to_string(), "2.2.2.2".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod list_reusable_delegation_sets_tests {
+    use super::*;
+    use crate::state::{AccountState, Route53Accounts, StoredReusableDelegationSet};
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    fn svc_with_sets(ids: &[&str]) -> Route53Service {
+        let mut account = AccountState::default();
+        for id in ids {
+            account.reusable_delegation_sets.insert(
+                id.to_string(),
+                StoredReusableDelegationSet {
+                    id: id.to_string(),
+                    caller_reference: format!("ref-{id}"),
+                    name_servers: vec!["ns-1.example.com".to_string()],
+                },
+            );
+        }
+        let mut accounts = Route53Accounts::default();
+        accounts
+            .accounts
+            .insert(DEFAULT_ACCOUNT.to_string(), account);
+        Route53Service::new(Arc::new(parking_lot::RwLock::new(accounts)))
+    }
+
+    fn list_req(params: &[(&str, &str)]) -> AwsRequest {
+        let mut query_params: HashMap<String, String> = HashMap::new();
+        for (k, v) in params {
+            query_params.insert((*k).to_string(), (*v).to_string());
+        }
+        AwsRequest {
+            service: "route53".to_string(),
+            action: "ListReusableDelegationSets".to_string(),
+            region: "us-east-1".to_string(),
+            account_id: DEFAULT_ACCOUNT.to_string(),
+            request_id: "test".to_string(),
+            headers: HeaderMap::new(),
+            query_params,
+            body: Bytes::new(),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec!["2013-04-01".into(), "delegationset".into()],
+            raw_path: "/2013-04-01/delegationset".to_string(),
+            raw_query: String::new(),
+            method: http::Method::GET,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_of(resp: AwsResponse) -> String {
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    fn set_ids(body: &str) -> Vec<String> {
+        body.match_indices("<Id>")
+            .map(|(i, _)| {
+                let rest = &body[i + 4..];
+                let end = rest.find("</Id>").unwrap();
+                rest[..end].to_string()
+            })
+            .collect()
+    }
+
+    // MaxItems is capped at 100: a request for 500 returns at most 100 sets and
+    // the echoed <MaxItems> is the capped 100, not the verbatim 500.
+    #[test]
+    fn maxitems_over_100_is_clamped_and_echoed() {
+        let ids: Vec<String> = (0..150).map(|i| format!("N{i:04}")).collect();
+        let refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let svc = svc_with_sets(&refs);
+        let resp = svc
+            .list_reusable_delegation_sets(&list_req(&[("maxitems", "500")]))
+            .unwrap();
+        let body = body_of(resp);
+        assert!(body.contains("<MaxItems>100</MaxItems>"), "body: {body}");
+        assert_eq!(set_ids(&body).len(), 100, "page must be capped at 100");
+        assert!(body.contains("<IsTruncated>true</IsTruncated>"));
+    }
+
+    // When the set named by the marker was deleted between pages, paging must
+    // resume from the next surviving set (the insertion point in the sorted
+    // list), never drop the remaining sets by falling off the end.
+    #[test]
+    fn resumes_after_deleted_marker() {
+        // Sorted ids: S1 S2 S3 S4 S5. Simulate S3 deleted after page 1 handed
+        // out NextMarker=S3 by simply not inserting S3.
+        let svc = svc_with_sets(&["S1", "S2", "S4", "S5"]);
+        let resp = svc
+            .list_reusable_delegation_sets(&list_req(&[("marker", "S3"), ("maxitems", "10")]))
+            .unwrap();
+        let body = body_of(resp);
+        assert_eq!(
+            set_ids(&body),
+            vec!["S4".to_string(), "S5".to_string()],
+            "deleted marker must resume at next surviving set, not drop the tail"
+        );
+        assert!(body.contains("<IsTruncated>false</IsTruncated>"));
+    }
+
+    // A live marker still resumes exactly at that set (regression guard for the
+    // insertion-point change).
+    #[test]
+    fn resumes_at_live_marker() {
+        let svc = svc_with_sets(&["S1", "S2", "S3", "S4"]);
+        let resp = svc
+            .list_reusable_delegation_sets(&list_req(&[("marker", "S3"), ("maxitems", "10")]))
+            .unwrap();
+        let body = body_of(resp);
+        assert_eq!(set_ids(&body), vec!["S3".to_string(), "S4".to_string()]);
+    }
+
+    // Truncation + NextMarker are preserved for an in-range MaxItems.
+    #[test]
+    fn truncates_and_sets_next_marker() {
+        let svc = svc_with_sets(&["S1", "S2", "S3", "S4"]);
+        let resp = svc
+            .list_reusable_delegation_sets(&list_req(&[("maxitems", "2")]))
+            .unwrap();
+        let body = body_of(resp);
+        assert_eq!(set_ids(&body), vec!["S1".to_string(), "S2".to_string()]);
+        assert!(body.contains("<IsTruncated>true</IsTruncated>"));
+        assert!(body.contains("<NextMarker>S3</NextMarker>"));
+        assert!(body.contains("<MaxItems>2</MaxItems>"));
     }
 }

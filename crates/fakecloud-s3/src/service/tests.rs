@@ -3526,6 +3526,39 @@ async fn get_object_range_open_ended() {
     assert_eq!(resp.body.expect_bytes(), b"789");
 }
 
+// A large object read (the case the spawn_blocking / block_in_place offload
+// targets) must still return the exact bytes for both a full GET and a ranged
+// GET. Behavior is unchanged; this guards the run_blocking_io wrapping.
+#[tokio::test]
+async fn get_object_large_full_and_range_returns_exact_bytes() {
+    let svc = make_service();
+    seed_bucket(&svc, "big");
+    // ~1 MiB of a repeating, position-dependent pattern so a wrong offset or a
+    // truncated read is detectable.
+    let data: Vec<u8> = (0..1_048_576u32).map(|i| (i % 251) as u8).collect();
+    let req = make_request(Method::PUT, "/big/obj", &[], &data);
+    svc.put_object("123456789012", &req, "big", "obj")
+        .await
+        .unwrap();
+
+    // Full GET returns every byte.
+    let req = make_request(Method::GET, "/big/obj", &[], b"");
+    let resp = svc.get_object("123456789012", &req, "big", "obj").unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    assert_eq!(resp.body.expect_bytes(), Bytes::from(data.clone()));
+
+    // Ranged GET slices the correct window.
+    let mut req = make_request(Method::GET, "/big/obj", &[], b"");
+    req.headers
+        .insert("range", "bytes=1000-1999".parse().unwrap());
+    let resp = svc.get_object("123456789012", &req, "big", "obj").unwrap();
+    assert_eq!(resp.status, StatusCode::PARTIAL_CONTENT);
+    assert_eq!(
+        resp.body.expect_bytes(),
+        Bytes::copy_from_slice(&data[1000..=1999])
+    );
+}
+
 #[tokio::test]
 async fn get_object_range_invalid_format() {
     let svc = make_service();
