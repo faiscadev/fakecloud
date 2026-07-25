@@ -444,6 +444,78 @@ impl ResourceProvisioner {
         Ok(result)
     }
 
+    /// In-place stack update for `AWS::EC2::Instance`. An instance is stateful
+    /// (a real backing container / attached EBS with data), so a benign
+    /// property or tag change must NOT terminate + relaunch it the way the
+    /// reprovision fallback would -- that destroys the container and its data.
+    /// This applies the mutable-without-replacement attributes through the REAL
+    /// `ModifyInstanceAttribute` handler (instance type, EBS-optimized flag,
+    /// user data, security groups) and re-applies tags through `CreateTags`,
+    /// keeping the instance id and its backing container intact. Properties that
+    /// genuinely force replacement in real AWS (AMI, subnet, AZ) are left to the
+    /// instance's existing value here; an in-place update never replaces it.
+    pub(super) fn update_ec2_instance(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let instance_id = existing.physical_id.clone();
+
+        // Mutable attributes via ModifyInstanceAttribute (convenience form).
+        let mut attr_params: HashMap<String, String> = HashMap::new();
+        attr_params.insert("InstanceId".to_string(), instance_id.clone());
+        let mut has_attr_change = false;
+        if let Some(v) = prop_str(props, "InstanceType") {
+            attr_params.insert("InstanceType.Value".to_string(), v.to_string());
+            has_attr_change = true;
+        }
+        if let Some(v) = prop_bool(props, "EbsOptimized") {
+            attr_params.insert("EbsOptimized.Value".to_string(), v.to_string());
+            has_attr_change = true;
+        }
+        if let Some(v) = prop_str(props, "UserData") {
+            attr_params.insert("UserData.Value".to_string(), v.to_string());
+            has_attr_change = true;
+        }
+        if let Some(sgs) = props.get("SecurityGroupIds").and_then(|v| v.as_array()) {
+            for (i, sg) in sgs.iter().enumerate() {
+                if let Some(s) = sg.as_str() {
+                    let n = i + 1;
+                    attr_params.insert(format!("GroupId.{n}"), s.to_string());
+                    has_attr_change = true;
+                }
+            }
+        }
+        if has_attr_change {
+            self.ec2_dispatch("ModifyInstanceAttribute", attr_params)?;
+        }
+
+        // Re-apply the template's Tags in place (mirrors a direct CreateTags),
+        // so an added / changed tag never triggers replacement.
+        if let Some(tags) = props.get("Tags").and_then(|v| v.as_array()) {
+            if !tags.is_empty() {
+                let mut params = HashMap::new();
+                params.insert("ResourceId.1".to_string(), instance_id.clone());
+                for (i, t) in tags.iter().enumerate() {
+                    if let (Some(k), Some(v)) = (
+                        t.get("Key").and_then(|v| v.as_str()),
+                        t.get("Value").and_then(|v| v.as_str()),
+                    ) {
+                        let n = i + 1;
+                        params.insert(format!("Tag.{n}.Key"), k.to_string());
+                        params.insert(format!("Tag.{n}.Value"), v.to_string());
+                    }
+                }
+                self.ec2_dispatch("CreateTags", params)?;
+            }
+        }
+
+        // The identity attributes (private ip, AZ, public ip) do not change on
+        // an in-place modify; carry the ones captured at create time forward.
+        Ok(ProvisionResult::new(instance_id).merge_attributes(existing.attributes.clone()))
+    }
+
     /// Delete an EC2 resource by its physical id, routing through the real
     /// handler so dependent default resources are cleaned up correctly.
     pub(super) fn delete_ec2_resource(

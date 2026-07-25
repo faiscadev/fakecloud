@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 use fakecloud_opensearch::state::{domain_arn, Domain};
 
 impl ResourceProvisioner {
@@ -100,6 +100,87 @@ impl ResourceProvisioner {
             return Err(format!("Domain {name} already exists"));
         }
         st.domains.insert(name.clone(), domain);
+
+        Ok(ProvisionResult::new(name)
+            .with("Arn", arn.clone())
+            .with("DomainArn", arn)
+            .with("Id", domain_id)
+            .with("DomainEndpoint", endpoint.clone())
+            .with("DomainEndpointV2", format!("{endpoint}.v2")))
+    }
+
+    pub(super) fn update_opensearch_domain(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        self.update_opensearch_domain_inner(existing, resource, false)
+    }
+
+    pub(super) fn update_elasticsearch_domain(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        self.update_opensearch_domain_inner(existing, resource, true)
+    }
+
+    /// In-place stack update for an OpenSearch / Elasticsearch domain. A domain
+    /// is stateful (it holds indices/documents and can be container-backed), so
+    /// a benign config or tag change must NOT delete+recreate it -- that would
+    /// wipe every index. This mirrors `UpdateDomainConfig`: it re-projects the
+    /// mutable configuration and tags from the new template onto the EXISTING
+    /// stored domain, preserving its name, arn, endpoint, id, indices, data
+    /// sources, and create time (the data survives).
+    fn update_opensearch_domain_inner(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+        es: bool,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+        let engine_version = canonical_engine_version(props, es);
+
+        let mut config: BTreeMap<String, Value> = BTreeMap::new();
+        if let Some(obj) = props.as_object() {
+            for (k, v) in obj {
+                if matches!(k.as_str(), "DomainName" | "Tags" | "TagList") {
+                    continue;
+                }
+                config.insert(k.clone(), v.clone());
+            }
+        }
+
+        let mut tags: BTreeMap<String, String> = BTreeMap::new();
+        if let Some(arr) = props.get("Tags").and_then(Value::as_array) {
+            for t in arr {
+                if let (Some(k), Some(val)) = (
+                    t.get("Key").and_then(Value::as_str),
+                    t.get("Value").and_then(Value::as_str),
+                ) {
+                    tags.insert(k.to_string(), val.to_string());
+                }
+            }
+        }
+
+        let mut guard = self.opensearch_state.write();
+        let st = guard.get_or_create(&self.account_id);
+        let domain = st
+            .domains
+            .get_mut(&name)
+            .ok_or_else(|| format!("Domain {name} not yet provisioned"))?;
+
+        // Apply the new config/version/tags in place. Everything else on the
+        // record -- indices, data_sources, endpoint, arn, created_at -- is left
+        // untouched so the data behind the domain survives the update.
+        domain.engine_version = engine_version;
+        domain.config = config;
+        domain.tags = tags;
+
+        let arn = domain.arn.clone();
+        let domain_id = domain.domain_id.clone();
+        let endpoint = domain.endpoint.clone();
 
         Ok(ProvisionResult::new(name)
             .with("Arn", arn.clone())

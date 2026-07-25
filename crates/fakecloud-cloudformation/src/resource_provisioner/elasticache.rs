@@ -478,6 +478,95 @@ impl ResourceProvisioner {
             .with("ConfigurationEndpoint.Port", port.to_string()))
     }
 
+    /// In-place stack update for `AWS::ElastiCache::CacheCluster`. A cache
+    /// cluster is stateful (container-backed Redis/Memcached holding real
+    /// keys), so a benign property or tag change must NOT delete+recreate it the
+    /// way the reprovision fallback would -- that would stop the container and
+    /// wipe the cache. This mirrors `ModifyCacheCluster`: it mutates the stored
+    /// record's modifiable fields in place while preserving the id, arn,
+    /// endpoint, backing container id/port, and create time (the data survives).
+    pub(crate) fn update_ec_cache_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cluster = state
+            .cache_clusters
+            .get_mut(&id)
+            .ok_or_else(|| format!("Cache cluster {id} not yet provisioned"))?;
+
+        if let Some(v) = props.get("CacheNodeType").and_then(|v| v.as_str()) {
+            cluster.cache_node_type = v.to_string();
+        }
+        if let Some(v) = props.get("EngineVersion").and_then(|v| v.as_str()) {
+            cluster.engine_version = v.to_string();
+        }
+        if let Some(v) = props.get("NumCacheNodes").and_then(|v| v.as_i64()) {
+            cluster.num_cache_nodes = v as i32;
+        }
+        if let Some(v) = props
+            .get("AutoMinorVersionUpgrade")
+            .and_then(|v| v.as_bool())
+        {
+            cluster.auto_minor_version_upgrade = v;
+        }
+        if let Some(v) = props
+            .get("PreferredMaintenanceWindow")
+            .and_then(|v| v.as_str())
+        {
+            cluster.preferred_maintenance_window = Some(v.to_string());
+        }
+        if let Some(v) = props
+            .get("CacheParameterGroupName")
+            .and_then(|v| v.as_str())
+        {
+            cluster.cache_parameter_group_name = Some(v.to_string());
+        }
+        if let Some(v) = props.get("NotificationTopicArn").and_then(|v| v.as_str()) {
+            cluster.notification_topic_arn = Some(v.to_string());
+        }
+        if let Some(v) = props.get("SnapshotRetentionLimit").and_then(|v| v.as_i64()) {
+            cluster.snapshot_retention_limit = v as i32;
+        }
+        if let Some(v) = props.get("SnapshotWindow").and_then(|v| v.as_str()) {
+            cluster.snapshot_window = Some(v.to_string());
+        }
+        if let Some(v) = props.get("AZMode").and_then(|v| v.as_str()) {
+            cluster.az_mode = Some(v.to_string());
+        }
+        if let Some(arr) = props.get("VpcSecurityGroupIds").and_then(|v| v.as_array()) {
+            cluster.security_group_ids = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(arr) = props
+            .get("CacheSecurityGroupNames")
+            .and_then(|v| v.as_array())
+        {
+            cluster.cache_security_group_names = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+
+        let arn = cluster.arn.clone();
+        let endpoint = cluster.endpoint_address.clone();
+        let port = cluster.port;
+
+        Ok(ProvisionResult::new(id)
+            .with("Arn", arn)
+            .with("RedisEndpoint.Address", endpoint.clone())
+            .with("RedisEndpoint.Port", port.to_string())
+            .with("ConfigurationEndpoint.Address", endpoint)
+            .with("ConfigurationEndpoint.Port", port.to_string()))
+    }
+
     pub(crate) fn delete_ec_cache_cluster(&self, physical_id: &str) -> Result<(), String> {
         {
             let mut accounts = self.elasticache_state.write();
@@ -739,6 +828,107 @@ impl ResourceProvisioner {
             .with("PrimaryEndPoint.Address", endpoint_address.clone())
             .with("PrimaryEndPoint.Port", port.to_string())
             .with("ReadEndPoint.Addresses", endpoint_address.clone())
+            .with("ReadEndPoint.Ports", port.to_string());
+        if let Some(cfg) = configuration_endpoint {
+            result = result
+                .with("ConfigurationEndPoint.Address", cfg)
+                .with("ConfigurationEndPoint.Port", port.to_string());
+        }
+        Ok(result)
+    }
+
+    /// In-place stack update for `AWS::ElastiCache::ReplicationGroup`. Like a
+    /// cache cluster, a replication group is stateful and container-backed, so a
+    /// benign property or tag change must NOT delete+recreate it. This mirrors
+    /// `ModifyReplicationGroup`: it mutates the stored record's modifiable
+    /// fields in place while preserving the id, arn, endpoints, member clusters,
+    /// backing container id/port, and create time (the data survives).
+    pub(crate) fn update_ec_replication_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let group = state
+            .replication_groups
+            .get_mut(&id)
+            .ok_or_else(|| format!("Replication group {id} not yet provisioned"))?;
+
+        if let Some(v) = props
+            .get("ReplicationGroupDescription")
+            .and_then(|v| v.as_str())
+        {
+            group.description = v.to_string();
+        }
+        if let Some(v) = props.get("CacheNodeType").and_then(|v| v.as_str()) {
+            group.cache_node_type = v.to_string();
+        }
+        if let Some(v) = props.get("EngineVersion").and_then(|v| v.as_str()) {
+            group.engine_version = v.to_string();
+        }
+        if let Some(v) = props
+            .get("AutomaticFailoverEnabled")
+            .and_then(|v| v.as_bool())
+        {
+            group.automatic_failover_enabled = v;
+        }
+        if let Some(v) = props.get("MultiAZEnabled").and_then(|v| v.as_bool()) {
+            group.multi_az_enabled = v;
+        }
+        if let Some(v) = props.get("SnapshotRetentionLimit").and_then(|v| v.as_i64()) {
+            group.snapshot_retention_limit = v as i32;
+        }
+        if let Some(v) = props.get("SnapshotWindow").and_then(|v| v.as_str()) {
+            group.snapshot_window = v.to_string();
+        }
+        if let Some(v) = props
+            .get("PreferredMaintenanceWindow")
+            .and_then(|v| v.as_str())
+        {
+            group.preferred_maintenance_window = Some(v.to_string());
+        }
+        if let Some(v) = props.get("NotificationTopicArn").and_then(|v| v.as_str()) {
+            group.notification_topic_arn = Some(v.to_string());
+        }
+        if let Some(v) = props
+            .get("CacheParameterGroupName")
+            .and_then(|v| v.as_str())
+        {
+            group.cache_parameter_group_name = Some(v.to_string());
+        }
+        if let Some(v) = props
+            .get("AutoMinorVersionUpgrade")
+            .and_then(|v| v.as_bool())
+        {
+            group.auto_minor_version_upgrade = v;
+        }
+        if let Some(arr) = props.get("UserGroupIds").and_then(|v| v.as_array()) {
+            group.user_group_ids = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(arr) = props.get("SecurityGroupIds").and_then(|v| v.as_array()) {
+            group.security_group_ids = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+
+        let arn = group.arn.clone();
+        let endpoint = group.endpoint_address.clone();
+        let port = group.port;
+        let configuration_endpoint = group.configuration_endpoint_address.clone();
+
+        let mut result = ProvisionResult::new(id)
+            .with("Arn", arn)
+            .with("PrimaryEndPoint.Address", endpoint.clone())
+            .with("PrimaryEndPoint.Port", port.to_string())
+            .with("ReadEndPoint.Addresses", endpoint.clone())
             .with("ReadEndPoint.Ports", port.to_string());
         if let Some(cfg) = configuration_endpoint {
             result = result

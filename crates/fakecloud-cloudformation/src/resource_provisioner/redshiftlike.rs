@@ -14,7 +14,7 @@ use fakecloud_core::service::AwsRequest;
 use http::{HeaderMap, Method};
 use serde_json::Value;
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 
 /// Build a Query-protocol `AwsRequest` for a control-plane action.
 fn cluster_request(
@@ -124,6 +124,46 @@ impl ResourceProvisioner {
             .with("Endpoint.Port", port.to_string()))
     }
 
+    /// In-place stack update for `AWS::Redshift::Cluster`. Routes the changed
+    /// properties through the REAL `ModifyCluster` handler so the backing
+    /// cluster (and any data behind it) is preserved instead of being
+    /// delete+recreated by the reprovision fallback. `ModifyCluster` reads only
+    /// the properties it can mutate without replacement and ignores the rest,
+    /// so a benign tag/property tweak never destroys the cluster. The physical
+    /// id (ClusterIdentifier) is held stable -- the CFN template never carries a
+    /// `NewClusterIdentifier`, so no rename occurs.
+    pub(super) fn update_redshift_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let id = existing.physical_id.clone();
+        let mut params = props_to_query(&resource.properties);
+        params.insert("ClusterIdentifier".to_string(), id.clone());
+        // Never let a changed `ClusterIdentifier` property drive a rename here;
+        // CloudFormation treats that as replacement, which the reprovision path
+        // owns. An in-place update keeps the existing physical id.
+        params.remove("NewClusterIdentifier");
+
+        let svc = fakecloud_redshift::RedshiftService::new(self.redshift_state.clone());
+        let req = cluster_request(self, "redshift", "ModifyCluster", params);
+        svc.provision_sync(&req)
+            .map_err(|e| format!("Redshift ModifyCluster failed: {}", e.message()))?;
+
+        let (endpoint, port) = {
+            let mut guard = self.redshift_state.write();
+            let acct = guard.account(&self.account_id);
+            match acct.clusters.get(&id) {
+                Some(c) => (c.endpoint_address.clone(), c.endpoint_port),
+                None => (String::new(), 5439),
+            }
+        };
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("Endpoint.Address", endpoint)
+            .with("Endpoint.Port", port.to_string()))
+    }
+
     pub(super) fn delete_redshift_cluster(&self, physical_id: &str) -> Result<(), String> {
         let svc = fakecloud_redshift::RedshiftService::new(self.redshift_state.clone());
         let mut params = HashMap::new();
@@ -188,6 +228,43 @@ impl ResourceProvisioner {
         Ok(result)
     }
 
+    /// In-place stack update for `AWS::DocDB::DBCluster`. Routes through the
+    /// REAL `ModifyDBCluster` handler, preserving the backing cluster and its
+    /// data rather than delete+recreating it. Mutable properties (engine
+    /// version, backup retention, maintenance window, deletion protection,
+    /// security groups, log exports, ...) are applied in place; the physical id
+    /// (DBClusterIdentifier) is held stable.
+    pub(super) fn update_docdb_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let id = existing.physical_id.clone();
+        let mut params = props_to_query(&resource.properties);
+        params.insert("DBClusterIdentifier".to_string(), id.clone());
+        params.remove("NewDBClusterIdentifier");
+
+        let svc = fakecloud_docdb::DocDbService::new(self.docdb_state.clone());
+        let req = cluster_request(self, "docdb", "ModifyDBCluster", params);
+        svc.provision_sync(&req)
+            .map_err(|e| format!("DocDB ModifyDBCluster failed: {}", e.message()))?;
+
+        let result = {
+            let mut guard = self.docdb_state.write();
+            let st = guard.get_or_create(&self.account_id);
+            let mut r = ProvisionResult::new(id.clone());
+            if let Some(c) = st.clusters.get(&id) {
+                r = r
+                    .with("Endpoint", c.endpoint.clone())
+                    .with("ReadEndpoint", c.reader_endpoint.clone())
+                    .with("Port", c.port.to_string())
+                    .with("ClusterResourceId", c.db_cluster_resource_id.clone());
+            }
+            r
+        };
+        Ok(result)
+    }
+
     pub(super) fn delete_docdb_cluster(&self, physical_id: &str) -> Result<(), String> {
         let svc = fakecloud_docdb::DocDbService::new(self.docdb_state.clone());
         let mut params = HashMap::new();
@@ -235,6 +312,41 @@ impl ResourceProvisioner {
         let req = cluster_request(self, "neptune", "CreateDBCluster", params);
         svc.provision_sync(&req)
             .map_err(|e| format!("Neptune CreateDBCluster failed: {}", e.message()))?;
+
+        let result = {
+            let mut guard = self.neptune_state.write();
+            let st = guard.get_or_create(&self.account_id);
+            let mut r = ProvisionResult::new(id.clone());
+            if let Some(c) = st.clusters.get(&id) {
+                r = r
+                    .with("Endpoint", c.endpoint.clone())
+                    .with("ReadEndpoint", c.reader_endpoint.clone())
+                    .with("Port", c.port.to_string())
+                    .with("ClusterResourceId", c.db_cluster_resource_id.clone());
+            }
+            r
+        };
+        Ok(result)
+    }
+
+    /// In-place stack update for `AWS::Neptune::DBCluster`. Routes through the
+    /// REAL `ModifyDBCluster` handler, preserving the backing cluster and its
+    /// data rather than delete+recreating it. Mutable properties are applied in
+    /// place; the physical id (DBClusterIdentifier) is held stable.
+    pub(super) fn update_neptune_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let id = existing.physical_id.clone();
+        let mut params = props_to_query(&resource.properties);
+        params.insert("DBClusterIdentifier".to_string(), id.clone());
+        params.remove("NewDBClusterIdentifier");
+
+        let svc = fakecloud_neptune::NeptuneService::new(self.neptune_state.clone());
+        let req = cluster_request(self, "neptune", "ModifyDBCluster", params);
+        svc.provision_sync(&req)
+            .map_err(|e| format!("Neptune ModifyDBCluster failed: {}", e.message()))?;
 
         let result = {
             let mut guard = self.neptune_state.write();
