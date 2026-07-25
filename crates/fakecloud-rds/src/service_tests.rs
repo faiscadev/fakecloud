@@ -114,7 +114,7 @@ fn filter_engine_versions_matches_requested_engine() {
 
     let filtered = filter_engine_versions(&versions, &Some("postgres".to_string()), &None, &None);
 
-    assert_eq!(filtered.len(), 5); // All postgres versions
+    assert_eq!(filtered.len(), 6); // All postgres versions
     assert!(filtered.iter().all(|v| v.engine == "postgres"));
 }
 

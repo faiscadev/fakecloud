@@ -243,9 +243,13 @@ impl RdsRuntime {
                 // 5.7 was dropped after Oracle community support ended
                 // (Oct 2023) — the image base no longer ships the build
                 // deps we need for the UDF. Any 5.7.* engine version
-                // resolves to 8.0.
-                let _ = engine_version;
-                let major_version = "8.0";
+                // resolves to 8.0. 8.4 (LTS) has its own upstream
+                // `mysql:8.4` image and resolves to a distinct major.
+                let major_version = if engine_version.starts_with("8.4") {
+                    "8.4"
+                } else {
+                    "8.0"
+                };
                 let image = self.ensure_mysql_image(major_version).await?;
                 let env_vars = vec![
                     format!("MYSQL_ROOT_PASSWORD={password}"),

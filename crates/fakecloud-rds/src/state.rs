@@ -778,6 +778,14 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
         // PostgreSQL versions
         EngineVersionInfo {
             engine: "postgres".to_string(),
+            engine_version: "18.0".to_string(),
+            db_parameter_group_family: "postgres18".to_string(),
+            db_engine_description: "PostgreSQL".to_string(),
+            db_engine_version_description: "PostgreSQL 18.0".to_string(),
+            status: "available".to_string(),
+        },
+        EngineVersionInfo {
+            engine: "postgres".to_string(),
             engine_version: "17.4".to_string(),
             db_parameter_group_family: "postgres17".to_string(),
             db_engine_description: "PostgreSQL".to_string(),
@@ -817,6 +825,14 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
             status: "available".to_string(),
         },
         // MySQL versions
+        EngineVersionInfo {
+            engine: "mysql".to_string(),
+            engine_version: "8.4.0".to_string(),
+            db_parameter_group_family: "mysql8.4".to_string(),
+            db_engine_description: "MySQL Community Edition".to_string(),
+            db_engine_version_description: "MySQL 8.4.0".to_string(),
+            status: "available".to_string(),
+        },
         EngineVersionInfo {
             engine: "mysql".to_string(),
             engine_version: "8.0.35".to_string(),
@@ -872,11 +888,13 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
 pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
     let mut options = Vec::new();
     let engines_and_versions = vec![
+        ("postgres", "18.0", "postgresql-license"),
         ("postgres", "17.4", "postgresql-license"),
         ("postgres", "16.3", "postgresql-license"),
         ("postgres", "15.5", "postgresql-license"),
         ("postgres", "14.10", "postgresql-license"),
         ("postgres", "13.13", "postgresql-license"),
+        ("mysql", "8.4.0", "general-public-license"),
         ("mysql", "8.0.35", "general-public-license"),
         ("mysql", "8.0.28", "general-public-license"),
         ("mysql", "5.7.44", "general-public-license"),
@@ -909,11 +927,13 @@ pub fn default_parameter_groups(
     let mut groups = BTreeMap::new();
 
     let families = vec![
+        ("postgres18", "Default parameter group for postgres18"),
         ("postgres17", "Default parameter group for postgres17"),
         ("postgres16", "Default parameter group for postgres16"),
         ("postgres15", "Default parameter group for postgres15"),
         ("postgres14", "Default parameter group for postgres14"),
         ("postgres13", "Default parameter group for postgres13"),
+        ("mysql8.4", "Default parameter group for mysql8.4"),
         ("mysql8.0", "Default parameter group for mysql8.0"),
         ("mysql5.7", "Default parameter group for mysql5.7"),
         ("mariadb11.4", "Default parameter group for mariadb11.4"),
@@ -1110,11 +1130,11 @@ mod tests {
     fn default_engine_versions_are_postgres_metadata() {
         let versions = default_engine_versions();
 
-        assert_eq!(versions.len(), 11); // 5 postgres + 3 mysql + 3 mariadb
+        assert_eq!(versions.len(), 13); // 6 postgres + 4 mysql + 3 mariadb
                                         // Check first (newest) postgres version
         assert_eq!(versions[0].engine, "postgres");
-        assert_eq!(versions[0].engine_version, "17.4");
-        assert_eq!(versions[0].db_parameter_group_family, "postgres17");
+        assert_eq!(versions[0].engine_version, "18.0");
+        assert_eq!(versions[0].db_parameter_group_family, "postgres18");
     }
 
     #[test]
@@ -1122,8 +1142,8 @@ mod tests {
         let versions = default_engine_versions();
         let options = default_orderable_options();
 
-        // 11 engine versions * every representative instance class.
-        assert_eq!(options.len(), 11 * SUPPORTED_INSTANCE_CLASSES.len());
+        // 13 engine versions * every representative instance class.
+        assert_eq!(options.len(), 13 * SUPPORTED_INSTANCE_CLASSES.len());
         // Verify all engines and versions have orderable options
         for version in &versions {
             assert!(options.iter().any(|opt| {
