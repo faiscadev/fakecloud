@@ -18,13 +18,13 @@ fn mr(req: &AwsRequest) -> Result<(), AwsServiceError> {
 
 // ---- multicast domains ----
 
-fn mcast_xml(d: &TgwMulticastDomain, owner: &str) -> String {
+fn mcast_xml(d: &TgwMulticastDomain, owner: &str, region: &str) -> String {
     format!(
         "{}{}{}{}<state>available</state><options><igmpv2Support>disable</igmpv2Support>\
          <staticSourcesSupport>disable</staticSourcesSupport><autoAcceptSharedAssociations>disable</autoAcceptSharedAssociations></options>{}",
         ec2_elem("transitGatewayMulticastDomainId", &d.id),
         ec2_elem("transitGatewayId", &d.tgw_id),
-        ec2_elem("transitGatewayMulticastDomainArn", &format!("arn:aws:ec2:us-east-1:{owner}:transit-gateway-multicast-domain/{}", d.id)),
+        ec2_elem("transitGatewayMulticastDomainArn", &format!("arn:aws:ec2:{region}:{owner}:transit-gateway-multicast-domain/{}", d.id)),
         ec2_elem("ownerId", owner),
         ec2_elem("creationTime", FIXED_TIME),
     )
@@ -52,7 +52,7 @@ pub(crate) fn create_transit_gateway_multicast_domain(
         &req.request_id,
         &format!(
             "<transitGatewayMulticastDomain>{}</transitGatewayMulticastDomain>",
-            mcast_xml(&d, &req.account_id)
+            mcast_xml(&d, &req.account_id, &req.region)
         ),
     ))
 }
@@ -78,7 +78,7 @@ pub(crate) fn delete_transit_gateway_multicast_domain(
         &req.request_id,
         &format!(
             "<transitGatewayMulticastDomain>{}</transitGatewayMulticastDomain>",
-            mcast_xml(&d, &req.account_id)
+            mcast_xml(&d, &req.account_id, &req.region)
         ),
     ))
 }
@@ -95,7 +95,7 @@ pub(crate) fn describe_transit_gateway_multicast_domains(
     let mut items: Vec<String> = state
         .tgw_multicast_domains
         .values()
-        .map(|d| mcast_xml(d, &owner))
+        .map(|d| mcast_xml(d, &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(

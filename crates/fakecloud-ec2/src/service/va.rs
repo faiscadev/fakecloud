@@ -382,7 +382,7 @@ fn attach_detach(
 
 // ---- groups ----
 
-fn group_xml(g: &VerifiedAccessGroup, tags: &[Tag], owner: &str) -> String {
+fn group_xml(g: &VerifiedAccessGroup, tags: &[Tag], owner: &str, region: &str) -> String {
     format!(
         "{}{}{}{}<owner>{}</owner><creationTime>{}</creationTime>{}",
         ec2_elem("verifiedAccessGroupId", &g.id),
@@ -391,7 +391,7 @@ fn group_xml(g: &VerifiedAccessGroup, tags: &[Tag], owner: &str) -> String {
         ec2_elem(
             "verifiedAccessGroupArn",
             &format!(
-                "arn:aws:ec2:us-east-1:{owner}:verified-access-group/{}",
+                "arn:aws:ec2:{region}:{owner}:verified-access-group/{}",
                 g.id
             )
         ),
@@ -438,7 +438,7 @@ pub(crate) fn create_verified_access_group(
         &req.request_id,
         &format!(
             "<verifiedAccessGroup>{}</verifiedAccessGroup>",
-            group_xml(&g, &tags, &owner)
+            group_xml(&g, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -464,7 +464,7 @@ pub(crate) fn delete_verified_access_group(
         &req.request_id,
         &format!(
             "<verifiedAccessGroup>{}</verifiedAccessGroup>",
-            group_xml(&g, &tags, &owner)
+            group_xml(&g, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -481,7 +481,7 @@ pub(crate) fn describe_verified_access_groups(
     let mut items: Vec<String> = state
         .va_groups
         .values()
-        .map(|g| group_xml(g, state.tags_for(&g.id), &owner))
+        .map(|g| group_xml(g, state.tags_for(&g.id), &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -525,7 +525,7 @@ pub(crate) fn modify_verified_access_group(
         &req.request_id,
         &format!(
             "<verifiedAccessGroup>{}</verifiedAccessGroup>",
-            group_xml(&g, &tags, &owner)
+            group_xml(&g, &tags, &owner, &req.region)
         ),
     ))
 }
@@ -898,8 +898,9 @@ pub(crate) fn export_verified_access_instance_client_configuration(
 ) -> Result<AwsResponse, AwsServiceError> {
     let inst = require(&req.query_params, "VerifiedAccessInstanceId")?;
     let body = format!(
-        "<version>1</version>{}<region>us-east-1</region>{}",
+        "<version>1</version>{}<region>{}</region>{}",
         ec2_elem("verifiedAccessInstanceId", &inst),
+        req.region,
         ec2_list("openVpnConfigurationSet", &[]),
     );
     Ok(Ec2Service::respond(
