@@ -856,6 +856,110 @@ impl ResourceProvisioner {
             .with("DBClusterResourceId", cluster_resource_id))
     }
 
+    /// In-place stack update for `AWS::RDS::DBCluster`. Aurora clusters are
+    /// stateful (they can be container-backed and hold real data), so a benign
+    /// property or tag change must NOT delete+recreate the cluster the way the
+    /// reprovision fallback would -- that would wipe the data. This mutates the
+    /// stored cluster record in place for the properties `ModifyDBCluster`
+    /// applies without replacement (engine version, backup retention, port,
+    /// deletion protection, security groups, storage, log exports, ...) while
+    /// preserving the identifier, ARN, endpoints, resource id, and create time.
+    pub(super) fn update_rds_db_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let identifier = existing.physical_id.clone();
+
+        let mut accounts = self.rds_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let body = state
+            .extras
+            .get_mut("clusters")
+            .and_then(|m| m.get_mut(&identifier))
+            .ok_or_else(|| format!("DB cluster {identifier} not yet provisioned"))?;
+        let obj = body
+            .as_object_mut()
+            .ok_or_else(|| format!("DB cluster {identifier} record is malformed"))?;
+
+        // Mutable-without-replacement properties. Immutable ones (identifier,
+        // ARN, endpoints, resource id, create time) are deliberately left
+        // untouched so the cluster -- and its backing data -- survives.
+        if let Some(v) = props.get("EngineVersion").filter(|v| !v.is_null()) {
+            obj.insert("EngineVersion".to_string(), v.clone());
+        }
+        if let Some(v) = props.get("BackupRetentionPeriod").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        }) {
+            obj.insert("BackupRetentionPeriod".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = props.get("Port").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        }) {
+            obj.insert("Port".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = props.get("DeletionProtection").and_then(|v| v.as_bool()) {
+            obj.insert("DeletionProtection".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = props.get("StorageEncrypted").and_then(|v| v.as_bool()) {
+            obj.insert("StorageEncrypted".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = props.get("AllocatedStorage").and_then(|v| v.as_i64()) {
+            obj.insert("AllocatedStorage".to_string(), serde_json::json!(v));
+        }
+        if let Some(v) = props.get("VpcSecurityGroupIds").filter(|v| v.is_array()) {
+            obj.insert("VpcSecurityGroupIds".to_string(), v.clone());
+        }
+        if let Some(v) = props
+            .get("EnableCloudwatchLogsExports")
+            .filter(|v| v.is_array())
+        {
+            obj.insert("EnabledCloudwatchLogsExports".to_string(), v.clone());
+        }
+        if let Some(v) = props.get("PreferredBackupWindow").filter(|v| !v.is_null()) {
+            obj.insert("PreferredBackupWindow".to_string(), v.clone());
+        }
+        if let Some(v) = props
+            .get("PreferredMaintenanceWindow")
+            .filter(|v| !v.is_null())
+        {
+            obj.insert("PreferredMaintenanceWindow".to_string(), v.clone());
+        }
+
+        // Read back the (unchanged) identity attributes for Ref/GetAtt.
+        let arn = obj
+            .get("DBClusterArn")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let endpoint = obj
+            .get("Endpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let reader_endpoint = obj
+            .get("ReaderEndpoint")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let port = obj.get("Port").and_then(|v| v.as_i64()).unwrap_or(5432);
+        let resource_id = obj
+            .get("DbClusterResourceId")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+
+        Ok(ProvisionResult::new(identifier)
+            .with("DBClusterArn", arn)
+            .with("Endpoint.Address", endpoint)
+            .with("ReadEndpoint.Address", reader_endpoint)
+            .with("Endpoint.Port", port.to_string())
+            .with("DBClusterResourceId", resource_id))
+    }
+
     pub(super) fn delete_rds_db_cluster(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.rds_state.write();
         let state = accounts.get_or_create(&self.account_id);

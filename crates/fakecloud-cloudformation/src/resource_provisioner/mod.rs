@@ -1799,6 +1799,29 @@ impl ResourceProvisioner {
             "AWS::ElasticBeanstalk::ConfigurationTemplate" => {
                 Some(self.update_eb_configuration_template(existing, new_def)?)
             }
+            // Stateful / container-backed types. These MUST update in place:
+            // the reprovision fallback (delete + create) would tear down the
+            // backing Redis/Aurora/Redshift/OpenSearch/DocDB/Neptune/EC2
+            // resource and wipe its data on an otherwise-benign property or tag
+            // change. Each arm applies the mutable properties through the
+            // owning service's real modify path and preserves the physical id.
+            "AWS::ElastiCache::CacheCluster" => {
+                Some(self.update_ec_cache_cluster(existing, new_def)?)
+            }
+            "AWS::ElastiCache::ReplicationGroup" => {
+                Some(self.update_ec_replication_group(existing, new_def)?)
+            }
+            "AWS::RDS::DBCluster" => Some(self.update_rds_db_cluster(existing, new_def)?),
+            "AWS::Redshift::Cluster" => Some(self.update_redshift_cluster(existing, new_def)?),
+            "AWS::OpenSearchService::Domain" => {
+                Some(self.update_opensearch_domain(existing, new_def)?)
+            }
+            "AWS::Elasticsearch::Domain" => {
+                Some(self.update_elasticsearch_domain(existing, new_def)?)
+            }
+            "AWS::DocDB::DBCluster" => Some(self.update_docdb_cluster(existing, new_def)?),
+            "AWS::Neptune::DBCluster" => Some(self.update_neptune_cluster(existing, new_def)?),
+            "AWS::EC2::Instance" => Some(self.update_ec2_instance(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
