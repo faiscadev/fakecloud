@@ -6,22 +6,88 @@ use md5::{Digest, Md5};
 
 use super::*;
 
-/// Per-snapshot RDB dump path. Roots under the platform temp dir rather than a
-/// hardcoded `/tmp` (absent on Windows, sometimes non-writable in containers).
+/// Per-snapshot RDB dump path.
+///
+/// When a durable `data_dir` is configured (persistent mode) the RDB is written
+/// under `<data_dir>/snapshots/` so it survives a restart — the path is stored
+/// in the durable snapshot record, and rooting it in temp meant reboot cleared
+/// the file, leaving `RestoreFromSnapshot` reading a missing RDB and silently
+/// yielding an empty cache. In memory mode (`data_dir == None`) nothing is
+/// persisted across a restart anyway, so the RDB falls back to the platform
+/// temp dir (portable across Windows / containers, unlike a hardcoded `/tmp`).
 /// The PID keeps concurrent servers from colliding on the same file.
-fn snapshot_rdb_temp_path(account_id: &str, snapshot_name: &str) -> String {
-    std::env::temp_dir()
-        .join(format!(
-            "fakecloud-ec-{}-{}-{}.rdb",
-            account_id,
-            snapshot_name,
-            std::process::id()
-        ))
-        .to_string_lossy()
-        .into_owned()
+fn snapshot_rdb_path(
+    data_dir: Option<&std::path::Path>,
+    account_id: &str,
+    snapshot_name: &str,
+) -> String {
+    let base = match data_dir {
+        Some(dir) => dir.join("snapshots"),
+        None => std::env::temp_dir(),
+    };
+    // Best-effort: create the directory so the runtime's `docker cp` target
+    // exists. Failures surface later when the dump write fails.
+    let _ = std::fs::create_dir_all(&base);
+    base.join(format!(
+        "fakecloud-ec-{}-{}-{}.rdb",
+        account_id,
+        snapshot_name,
+        std::process::id()
+    ))
+    .to_string_lossy()
+    .into_owned()
 }
 
 impl ElastiCacheService {
+    /// Background the redis RDB dump for a `creating` snapshot: run `SAVE` +
+    /// copy the RDB out to a durable path, then flip the snapshot to
+    /// `available` with `rdb_path` set. Shared by `CreateSnapshot` and by
+    /// restart recovery (`reconcile_inflight_snapshots`), which re-arms a
+    /// snapshot persisted mid-dump. A snapshot deleted while the dump was in
+    /// flight has its orphaned RDB file reaped.
+    pub(crate) fn spawn_snapshot_dump(
+        &self,
+        runtime: Arc<ElastiCacheRuntime>,
+        account_id: String,
+        snapshot_name: String,
+        group_id: String,
+    ) {
+        let state_handle = self.state.clone();
+        let snapshot_store = self.snapshot_store.clone();
+        let snapshot_lock = self.snapshot_lock.clone();
+        let tmp_path = snapshot_rdb_path(self.data_dir.as_deref(), &account_id, &snapshot_name);
+        tokio::spawn(async move {
+            let rdb_path = match runtime.dump_rdb(&group_id, &tmp_path).await {
+                Ok(()) => Some(tmp_path),
+                Err(err) => {
+                    tracing::warn!("Failed to dump RDB for snapshot {}: {}", snapshot_name, err);
+                    None
+                }
+            };
+            {
+                let mut accounts = state_handle.write();
+                let state = accounts.get_or_create(&account_id);
+                match state.snapshots.get_mut(&snapshot_name) {
+                    Some(snap) => {
+                        // A dump failure falls back to a metadata-only snapshot
+                        // (rdb_path stays None) rather than blocking the row; the
+                        // established convention flips to `available` either way.
+                        snap.rdb_path = rdb_path;
+                        snap.snapshot_status = "available".to_string();
+                    }
+                    None => {
+                        // Deleted while the dump was in flight: reap the
+                        // orphaned RDB file rather than leaking it.
+                        if let Some(path) = rdb_path {
+                            let _ = std::fs::remove_file(path);
+                        }
+                    }
+                }
+            }
+            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
+        });
+    }
+
     pub(super) fn create_serverless_cache_snapshot(
         &self,
         request: &AwsRequest,
@@ -338,43 +404,12 @@ impl ElastiCacheService {
         }
 
         if let Some(runtime) = self.runtime.clone() {
-            let state_handle = self.state.clone();
-            let snapshot_store = self.snapshot_store.clone();
-            let snapshot_lock = self.snapshot_lock.clone();
-            let account_id = request.account_id.clone();
-            let snapshot_name = snapshot_name.clone();
-            let tmp_path = snapshot_rdb_temp_path(&account_id, &snapshot_name);
-            tokio::spawn(async move {
-                let rdb_path = match runtime.dump_rdb(&group_id, &tmp_path).await {
-                    Ok(()) => Some(tmp_path),
-                    Err(err) => {
-                        tracing::warn!(
-                            "Failed to dump RDB for snapshot {}: {}",
-                            snapshot_name,
-                            err
-                        );
-                        None
-                    }
-                };
-                {
-                    let mut accounts = state_handle.write();
-                    let state = accounts.get_or_create(&account_id);
-                    match state.snapshots.get_mut(&snapshot_name) {
-                        Some(snap) => {
-                            snap.rdb_path = rdb_path;
-                            snap.snapshot_status = "available".to_string();
-                        }
-                        None => {
-                            // Deleted while the dump was in flight: reap the
-                            // orphaned RDB file rather than leaking it.
-                            if let Some(path) = rdb_path {
-                                let _ = std::fs::remove_file(path);
-                            }
-                        }
-                    }
-                }
-                save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
-            });
+            self.spawn_snapshot_dump(
+                runtime,
+                request.account_id.clone(),
+                snapshot_name.clone(),
+                group_id,
+            );
         }
 
         Ok(AwsResponse::xml(
@@ -680,20 +715,36 @@ impl ElastiCacheService {
 
 #[cfg(test)]
 mod snapshot_path_tests {
-    use super::snapshot_rdb_temp_path;
+    use super::snapshot_rdb_path;
+    use std::path::Path;
 
     #[test]
-    fn rdb_temp_path_roots_under_platform_temp_dir() {
-        // Portability (4.4): the RDB dump must live under the platform temp
-        // dir, not a hardcoded `/tmp` that is absent on Windows / some
-        // containers.
-        let path = snapshot_rdb_temp_path("123456789012", "nightly");
+    fn rdb_path_roots_under_platform_temp_dir_in_memory_mode() {
+        // Portability (4.4): with no durable data dir the RDB dump lives under
+        // the platform temp dir, not a hardcoded `/tmp` absent on Windows /
+        // some containers.
+        let path = snapshot_rdb_path(None, "123456789012", "nightly");
         let temp = std::env::temp_dir();
         assert!(
-            std::path::Path::new(&path).starts_with(&temp),
+            Path::new(&path).starts_with(&temp),
             "{path} must root under {}",
             temp.display()
         );
         assert!(path.contains("nightly") && path.ends_with(".rdb"));
+    }
+
+    #[test]
+    fn rdb_path_roots_under_data_dir_when_persistent() {
+        // 4.1: in persistent mode the RDB must live under the durable data dir
+        // (so it survives a reboot), NOT the platform temp dir which reboot
+        // clears — the path is stored in the persisted snapshot record.
+        let data_dir = std::env::temp_dir().join("fakecloud-ec-datadir-test-4-1");
+        let path = snapshot_rdb_path(Some(&data_dir), "123456789012", "nightly");
+        assert!(
+            Path::new(&path).starts_with(data_dir.join("snapshots")),
+            "{path} must root under the data dir's snapshots/ subdir"
+        );
+        assert!(path.contains("nightly") && path.ends_with(".rdb"));
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 }

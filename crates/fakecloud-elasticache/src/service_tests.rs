@@ -5363,3 +5363,92 @@ fn recovery_predicate_redrives_transient_states() {
     assert!(!is_recoverable_status("deleting"));
     assert!(!is_recoverable_status("deleted"));
 }
+
+// ── 0.1: reconcile snapshots persisted mid-dump on restart ──────────
+
+fn insert_creating_snapshot(svc: &ElastiCacheService, name: &str, group_id: &str) {
+    let mut a = svc.state.write();
+    let state = a.default_mut();
+    state.snapshots.insert(
+        name.to_string(),
+        crate::state::CacheSnapshot {
+            snapshot_name: name.to_string(),
+            replication_group_id: group_id.to_string(),
+            replication_group_description: "desc".to_string(),
+            snapshot_status: "creating".to_string(),
+            cache_node_type: "cache.t3.micro".to_string(),
+            engine: "redis".to_string(),
+            engine_version: "7.1".to_string(),
+            num_cache_clusters: 1,
+            arn: format!("arn:aws:elasticache:us-east-1:123456789012:snapshot:{name}"),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            snapshot_source: "manual".to_string(),
+            rdb_path: None,
+        },
+    );
+}
+
+fn ec_snapshot_status(svc: &ElastiCacheService, name: &str) -> String {
+    svc.state
+        .read()
+        .default_ref()
+        .snapshots
+        .get(name)
+        .unwrap()
+        .snapshot_status
+        .clone()
+}
+
+#[test]
+fn reconcile_rearms_creating_snapshot_when_group_present() {
+    // A `creating` snapshot whose source replication group still exists is
+    // re-armed (its RDB dump re-run), not lost or marked terminal.
+    let svc = service_with_replication_group("rg-1", 1);
+    insert_creating_snapshot(&svc, "snap1", "rg-1");
+    // has_runtime=true exercises the re-arm branch without Docker.
+    let rearm = svc.plan_snapshot_recovery(true);
+    assert_eq!(rearm.len(), 1);
+    assert_eq!(rearm[0].snapshot_name, "snap1");
+    assert_eq!(rearm[0].group_id, "rg-1");
+    // Left `creating`; the re-armed dump flips it to `available`.
+    assert_eq!(ec_snapshot_status(&svc, "snap1"), "creating");
+}
+
+#[test]
+fn reconcile_fails_creating_snapshot_when_group_gone() {
+    // Source replication group missing: mark the snapshot terminal `failed`
+    // so its name is reusable and Describe shows a terminal state.
+    let svc = service_with_replication_group("rg-1", 1);
+    insert_creating_snapshot(&svc, "orphan", "rg-missing");
+    let rearm = svc.plan_snapshot_recovery(true);
+    assert!(rearm.is_empty());
+    assert_eq!(ec_snapshot_status(&svc, "orphan"), "failed");
+}
+
+#[test]
+fn reconcile_fails_creating_snapshot_without_runtime() {
+    // No runtime on restart: the RDB dump can never complete, so a
+    // source-present `creating` snapshot is failed rather than left stuck.
+    let svc = service_with_replication_group("rg-1", 1);
+    insert_creating_snapshot(&svc, "snap1", "rg-1");
+    let rearm = svc.plan_snapshot_recovery(false);
+    assert!(rearm.is_empty());
+    assert_eq!(ec_snapshot_status(&svc, "snap1"), "failed");
+}
+
+#[test]
+fn reconcile_ignores_available_snapshots() {
+    // Only `creating` rows are reconciled; a completed snapshot is untouched.
+    let svc = service_with_replication_group("rg-1", 1);
+    insert_creating_snapshot(&svc, "snap1", "rg-1");
+    svc.state
+        .write()
+        .default_mut()
+        .snapshots
+        .get_mut("snap1")
+        .unwrap()
+        .snapshot_status = "available".to_string();
+    let rearm = svc.plan_snapshot_recovery(true);
+    assert!(rearm.is_empty());
+    assert_eq!(ec_snapshot_status(&svc, "snap1"), "available");
+}

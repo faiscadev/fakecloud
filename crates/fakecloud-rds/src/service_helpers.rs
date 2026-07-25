@@ -425,7 +425,7 @@ pub(crate) fn validate_create_request(
     // means `17` accepts `17`, `17.4`, `17.9` but never `170.x` or `16.*`.
     let version_supported = supported_versions
         .iter()
-        .any(|v| engine_version == *v || engine_version.starts_with(&format!("{v}.")));
+        .any(|v| version_matches_supported(engine_version, v));
     if !version_supported {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
@@ -435,6 +435,29 @@ pub(crate) fn validate_create_request(
     }
     validate_db_instance_class(db_instance_class)?;
     Ok(())
+}
+
+/// True when `engine_version` is `supported` exactly, or extends it as
+/// `supported.<rest>` where every remaining `.`-separated segment is a
+/// non-empty run of ASCII digits. So a supported major of `17` accepts
+/// `17`, `17.4`, `17.9`, `17.9.1` but rejects `17.foo`, `17.` (trailing
+/// dot), `17.9.garbage`, `17..3` (empty segment), and `170` (not a
+/// boundary match). This tightens the previous bare `starts_with("{v}.")`
+/// prefix test, which over-accepted junk suffixes like `17.foo`.
+fn version_matches_supported(engine_version: &str, supported: &str) -> bool {
+    if engine_version == supported {
+        return true;
+    }
+    let Some(rest) = engine_version
+        .strip_prefix(supported)
+        .and_then(|r| r.strip_prefix('.'))
+    else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
 }
 
 /// Known AWS instance-size suffixes. The `<n>xlarge` sizes are matched
@@ -456,6 +479,12 @@ const INSTANCE_SIZE_SUFFIXES: &[&str] = &["micro", "small", "medium", "large", "
 /// never influences the container runtime, so there is no need to gate on
 /// a fixed allowlist.
 pub(crate) fn is_valid_db_instance_class(class: &str) -> bool {
+    // Aurora Serverless v2 uses the single-token class `db.serverless`, which
+    // has no `<family>.<size>` shape. Accept it explicitly before the format
+    // check (issue: `db_instance_class="db.serverless"` was rejected).
+    if class == "db.serverless" {
+        return true;
+    }
     let Some(rest) = class.strip_prefix("db.") else {
         return false;
     };
@@ -2268,6 +2297,39 @@ mod engine_version_tests {
     fn rejects_unknown_engine() {
         assert!(create("cockroachdb", "1.0").is_err());
     }
+
+    #[test]
+    fn accepts_dotted_numeric_minor_and_patch() {
+        // 0.5: a supported major must accept dotted-numeric extensions.
+        for v in ["17", "17.4", "17.9", "17.9.1"] {
+            assert!(create("postgres", v).is_ok(), "postgres {v} should pass");
+        }
+    }
+
+    #[test]
+    fn rejects_non_numeric_or_malformed_version_suffix() {
+        // 0.5: the old bare `starts_with("17.")` over-accepted junk suffixes.
+        for v in ["17.foo", "17.", "17.9.garbage", "17..3"] {
+            assert!(
+                create("postgres", v).is_err(),
+                "postgres {v} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn version_matches_supported_boundary_and_numeric() {
+        // Exact + dotted-numeric suffix accepted.
+        assert!(version_matches_supported("17", "17"));
+        assert!(version_matches_supported("17.4", "17"));
+        assert!(version_matches_supported("17.9.1", "17"));
+        // Non-numeric / empty-segment / trailing-dot / non-boundary rejected.
+        assert!(!version_matches_supported("17.foo", "17"));
+        assert!(!version_matches_supported("17.", "17"));
+        assert!(!version_matches_supported("17.9.garbage", "17"));
+        assert!(!version_matches_supported("17..3", "17"));
+        assert!(!version_matches_supported("170", "17"));
+    }
 }
 
 #[cfg(test)]
@@ -2290,6 +2352,8 @@ mod instance_class_tests {
             "db.r7g.16xlarge",
             "db.m7g.48xlarge",
             "db.x2idn.metal",
+            // 0.4: Aurora Serverless v2 single-token class.
+            "db.serverless",
         ] {
             assert!(
                 is_valid_db_instance_class(class),
@@ -2305,15 +2369,16 @@ mod instance_class_tests {
     #[test]
     fn rejects_malformed_classes_with_invalid_parameter_value() {
         for class in [
-            "notaclass",         // no `db.` prefix, no segments
-            "db.foo",            // only two segments
-            "db.t3",             // missing size
-            "db.t3.",            // empty size
-            "db..large",         // empty family
-            "t3.micro",          // missing `db.` prefix
-            "db.t3.gigantic",    // unknown size suffix
-            "db.t3.micro.extra", // too many segments
-            "db.t-3.large",      // non-alphanumeric family
+            "notaclass",          // no `db.` prefix, no segments
+            "db.foo",             // only two segments
+            "db.t3",              // missing size
+            "db.t3.",             // empty size
+            "db..large",          // empty family
+            "t3.micro",           // missing `db.` prefix
+            "db.t3.gigantic",     // unknown size suffix
+            "db.t3.micro.extra",  // too many segments
+            "db.t-3.large",       // non-alphanumeric family
+            "db.serverless-typo", // 0.4: only exact `db.serverless` is special
             "",
         ] {
             assert!(
