@@ -222,7 +222,10 @@ impl SesV2Service {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-        let region = state.region.clone();
+        // Use the request region (not the frozen state.region) so the
+        // MAIL FROM MX host matches this response's identity ARN below,
+        // which is also derived from req.region.
+        let region = req.region.clone();
         let identity = match state.identities.get_mut(identity_name) {
             Some(id) => id,
             None => {

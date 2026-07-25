@@ -42,6 +42,7 @@ pub fn resolve_route_key(expression: &str, body: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 fn construct_event(
     api_id: &str,
+    region: &str,
     stage: &str,
     connection_id: &str,
     route_key: &str,
@@ -77,7 +78,7 @@ fn construct_event(
     request_context.insert("connectionId".to_string(), json!(connection_id));
     request_context.insert(
         "domainName".to_string(),
-        json!(format!("{api_id}.execute-api.us-east-1.amazonaws.com")),
+        json!(format!("{api_id}.execute-api.{region}.amazonaws.com")),
     );
     request_context.insert("eventType".to_string(), json!(event_type));
     request_context.insert("extendedRequestId".to_string(), json!(extended_request_id));
@@ -208,6 +209,7 @@ pub async fn dispatch_websocket_event(
 
     let event = construct_event(
         api_id,
+        region,
         stage,
         connection_id,
         &matched_route_key,
@@ -286,6 +288,7 @@ mod tests {
     fn construct_connect_event_has_null_body() {
         let event = construct_event(
             "api-1",
+            "eu-west-1",
             "dev",
             "conn-id=",
             "$connect",
@@ -309,12 +312,19 @@ mod tests {
         assert_eq!(event["isBase64Encoded"], false);
         assert_eq!(event["headers"]["X-Custom"], "val");
         assert_eq!(event["queryStringParameters"]["token"], "abc");
+        // The proxy event's domainName carries the request region, not a
+        // hardcoded us-east-1, so the Lambda sees a region-consistent host.
+        assert_eq!(
+            event["requestContext"]["domainName"],
+            "api-1.execute-api.eu-west-1.amazonaws.com"
+        );
     }
 
     #[test]
     fn construct_message_event_has_message_id() {
         let event = construct_event(
             "api-1",
+            "us-east-1",
             "dev",
             "conn-id=",
             "$default",

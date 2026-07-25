@@ -810,8 +810,8 @@ impl ApiGatewayV2Service {
                 let entry = json!({
                     "RoutingRuleId": id,
                     "RoutingRuleArn": format!(
-                        "arn:aws:apigateway:us-east-1::/domainnames/{}/routingrules/{}",
-                        domain, id
+                        "arn:aws:apigateway:{}::/domainnames/{}/routingrules/{}",
+                        req.region, domain, id
                     ),
                     "Priority": priority,
                     "Conditions": conditions,
@@ -843,8 +843,8 @@ impl ApiGatewayV2Service {
                 let entry = json!({
                     "RoutingRuleId": id,
                     "RoutingRuleArn": format!(
-                        "arn:aws:apigateway:us-east-1::/domainnames/{}/routingrules/{}",
-                        domain, id
+                        "arn:aws:apigateway:{}::/domainnames/{}/routingrules/{}",
+                        req.region, domain, id
                     ),
                     "Priority": priority,
                     "Conditions": conditions,
@@ -2003,8 +2003,8 @@ impl ApiGatewayV2Service {
                 json!({
                     "ProductPageId": id,
                     "ProductPageArn": format!(
-                        "arn:aws:apigateway:us-east-1::/portalproducts/{}/productpages/{}",
-                        parent, id
+                        "arn:aws:apigateway:{}::/portalproducts/{}/productpages/{}",
+                        req.region, parent, id
                     ),
                     // Internal-only: the summary shape requires pageTitle
                     // but Create/Update responses don't carry it. We
@@ -2045,8 +2045,8 @@ impl ApiGatewayV2Service {
                 json!({
                     "ProductRestEndpointPageId": id,
                     "ProductRestEndpointPageArn": format!(
-                        "arn:aws:apigateway:us-east-1::/portalproducts/{}/productrestendpointpages/{}",
-                        parent, id
+                        "arn:aws:apigateway:{}::/portalproducts/{}/productrestendpointpages/{}",
+                        req.region, parent, id
                     ),
                     // Internal-only: summary shape requires endpoint at
                     // root but Create/Update responses don't carry it.
@@ -2288,6 +2288,41 @@ mod tests {
         resource_id: Option<&str>,
     ) {
         run(&svc(), action, body, segs, api_id, resource_id);
+    }
+
+    #[test]
+    fn routing_rule_arn_uses_request_region() {
+        let s = svc();
+        let mut r = req(
+            "CreateRoutingRule",
+            r#"{"Priority":10,"Actions":[],"Conditions":[]}"#,
+            &["v2", "domainnames", "example.com", "routingrules"],
+        );
+        // The client's request targets eu-west-1; the stored + returned ARN
+        // must carry that region, not a hardcoded us-east-1, or the next
+        // GetRoutingRule call round-trips the wrong region.
+        r.region = "eu-west-1".to_string();
+        let resp = s
+            .handle_extra_action("CreateRoutingRule", &r, None, Some("example.com"))
+            .expect("CreateRoutingRule");
+        let created: serde_json::Value =
+            serde_json::from_slice(resp.body.expect_bytes()).expect("json response");
+        // Responses are camelCased on the way out (to_camel).
+        let arn = created["routingRuleArn"].as_str().unwrap();
+        assert!(
+            arn.starts_with("arn:aws:apigateway:eu-west-1::/domainnames/example.com/routingrules/"),
+            "unexpected ARN: {arn}"
+        );
+        assert!(!arn.contains("us-east-1"), "ARN leaked us-east-1: {arn}");
+
+        // GetRoutingRule reads back the stored ARN, which must match.
+        let rule_id = created["routingRuleId"].as_str().unwrap();
+        let get = s
+            .handle_extra_action("GetRoutingRule", &r, Some(rule_id), Some("example.com"))
+            .expect("GetRoutingRule");
+        let fetched: serde_json::Value =
+            serde_json::from_slice(get.body.expect_bytes()).expect("json response");
+        assert_eq!(fetched["routingRuleArn"], created["routingRuleArn"]);
     }
 
     #[test]

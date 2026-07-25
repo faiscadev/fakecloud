@@ -2453,6 +2453,51 @@ async fn test_mail_from_status_lifecycle() {
 }
 
 #[tokio::test]
+async fn test_mail_from_mx_uses_request_region() {
+    let state = make_state();
+    let svc = SesV2Service::new(state.clone());
+
+    // Client operates in eu-west-1; the MAIL FROM MX host must carry that
+    // region (feedback-smtp.eu-west-1.amazonses.com), matching the identity
+    // ARN in the same response — not the frozen state region (us-east-1).
+    let with_region = |method: Method, path: &str, body: &str| {
+        let mut r = make_request(method, path, body);
+        r.region = "eu-west-1".to_string();
+        r
+    };
+
+    svc.handle(with_region(
+        Method::POST,
+        "/v2/email/identities",
+        r#"{"EmailIdentity": "example.com"}"#,
+    ))
+    .await
+    .unwrap();
+    svc.handle(with_region(
+        Method::PUT,
+        "/v2/email/identities/example.com/mail-from",
+        r#"{"MailFromDomain": "mail.example.com", "BehaviorOnMxFailure": "USE_DEFAULT_VALUE"}"#,
+    ))
+    .await
+    .unwrap();
+
+    let resp = svc
+        .handle(with_region(
+            Method::GET,
+            "/v2/email/identities/example.com",
+            "",
+        ))
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let dns = &body["MailFromAttributes"]["MailFromDomainDnsRecords"];
+    assert_eq!(
+        dns[0]["Value"], "10 feedback-smtp.eu-west-1.amazonses.com",
+        "MX host must use the request region, not us-east-1"
+    );
+}
+
+#[tokio::test]
 async fn test_put_email_identity_configuration_set_attributes() {
     let state = make_state();
     let svc = SesV2Service::new(state.clone());

@@ -507,7 +507,7 @@ impl AwsService for ConfigService {
             "DescribeConformancePacks" => self.describe_conformance_packs(&account, &body),
             "DeleteConformancePack" => self.delete_conformance_pack(&account, &body),
             "DescribeConformancePackStatus" => {
-                self.describe_conformance_pack_status(&account, &body)
+                self.describe_conformance_pack_status(&account, &region, &body)
             }
             "DescribeConformancePackCompliance" => {
                 self.ensure_evaluated(&account);
@@ -1670,7 +1670,7 @@ impl ConfigService {
     async fn start_config_rules_evaluation(
         &self,
         account: &str,
-        _region: &str,
+        region: &str,
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         self.ensure_evaluated(account);
@@ -1702,6 +1702,7 @@ impl ConfigService {
         for (rule_name, lambda_arn, input_parameters) in custom_rules {
             self.invoke_custom_rule(
                 account,
+                region,
                 &rule_name,
                 &lambda_arn,
                 input_parameters.as_deref(),
@@ -1718,6 +1719,7 @@ impl ConfigService {
     async fn invoke_custom_rule(
         &self,
         account: &str,
+        region: &str,
         rule_name: &str,
         lambda_arn: &str,
         input_parameters: Option<&str>,
@@ -1733,7 +1735,7 @@ impl ConfigService {
             .unwrap_or(lambda_arn)
             .to_string();
         let result_token = format!("{rule_name}#{}", Uuid::new_v4());
-        let event = custom_rule_event(account, rule_name, input_parameters, &result_token);
+        let event = custom_rule_event(account, region, rule_name, input_parameters, &result_token);
         // Resolve the Lambda in the rule's own account (not just the default
         // account) so a custom rule in a non-default account finds its function.
         let resolved = {
@@ -2776,6 +2778,7 @@ impl ConfigService {
     fn describe_conformance_pack_status(
         &self,
         account: &str,
+        region: &str,
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let names = string_list(body, "ConformancePackNames");
@@ -2793,7 +2796,7 @@ impl ConfigService {
                             "ConformancePackId": p.id,
                             "ConformancePackArn": p.arn,
                             "ConformancePackState": "CREATE_COMPLETE",
-                            "StackArn": format!("arn:aws:cloudformation:us-east-1:{account}:stack/awsconfigconforms-{}/{}", p.name, short_id()),
+                            "StackArn": format!("arn:aws:cloudformation:{region}:{account}:stack/awsconfigconforms-{}/{}", p.name, short_id()),
                             "LastUpdateRequestedTime": now,
                             "LastUpdateCompletedTime": now,
                         })
@@ -4375,6 +4378,7 @@ fn paged_response(field: &str, items: Vec<Value>, body: &Value, token_field: &st
 /// declared none — a custom rule that reads its parameters must see them.
 fn custom_rule_event(
     account: &str,
+    region: &str,
     rule_name: &str,
     input_parameters: Option<&str>,
     result_token: &str,
@@ -4394,7 +4398,7 @@ fn custom_rule_event(
         "invokingEvent": invoking_event,
         "ruleParameters": rule_parameters,
         "resultToken": result_token,
-        "configRuleArn": format!("arn:aws:config:us-east-1:{account}:config-rule/{rule_name}"),
+        "configRuleArn": format!("arn:aws:config:{region}:{account}:config-rule/{rule_name}"),
         "configRuleName": rule_name,
         "accountId": account,
     })
@@ -4424,20 +4428,32 @@ mod unit_tests {
     #[test]
     fn custom_rule_event_passes_stored_input_parameters() {
         let params = r#"{"maxAccessKeyAge":"90"}"#;
-        let event = custom_rule_event("111122223333", "my-rule", Some(params), "my-rule#tok");
+        let event = custom_rule_event(
+            "111122223333",
+            "eu-west-1",
+            "my-rule",
+            Some(params),
+            "my-rule#tok",
+        );
         // ruleParameters must carry the rule's stored InputParameters verbatim,
         // not a hardcoded "{}".
         assert_eq!(event["ruleParameters"], json!(params));
         assert_eq!(event["configRuleName"], json!("my-rule"));
         assert_eq!(event["accountId"], json!("111122223333"));
         assert_eq!(event["resultToken"], json!("my-rule#tok"));
+        // The event's configRuleArn must carry the rule's region so it matches
+        // the ARN DescribeConfigRules returns, not a hardcoded us-east-1.
+        assert_eq!(
+            event["configRuleArn"],
+            json!("arn:aws:config:eu-west-1:111122223333:config-rule/my-rule")
+        );
     }
 
     #[test]
     fn custom_rule_event_defaults_empty_parameters_to_empty_object() {
-        let none = custom_rule_event("111122223333", "r", None, "r#t");
+        let none = custom_rule_event("111122223333", "us-west-2", "r", None, "r#t");
         assert_eq!(none["ruleParameters"], json!("{}"));
-        let empty = custom_rule_event("111122223333", "r", Some(""), "r#t");
+        let empty = custom_rule_event("111122223333", "us-west-2", "r", Some(""), "r#t");
         assert_eq!(empty["ruleParameters"], json!("{}"));
     }
 
