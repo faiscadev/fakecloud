@@ -684,13 +684,10 @@ pub(crate) fn receipt_action_xml(action: &ReceiptAction) -> String {
     xml
 }
 
-pub(crate) fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
+/// Re-export the canonical XML escaper, which also encodes C0 control chars
+/// as numeric character references so a poisoned field cannot make a whole
+/// list-response document unparseable by a strict XML SDK.
+pub(crate) use fakecloud_aws::xml::xml_escape;
 
 pub(crate) fn verify_email_identity(
     state: &SharedSesState,

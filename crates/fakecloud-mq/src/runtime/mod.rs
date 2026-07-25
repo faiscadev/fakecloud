@@ -1056,14 +1056,10 @@ fn rabbit_hostname(broker_id: &str) -> String {
     label
 }
 
-/// XML-escape a value for an attribute.
-fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&apos;")
-}
+/// XML-escape a value for an attribute. The canonical helper also encodes C0
+/// control chars as numeric character references, keeping the generated broker
+/// config a valid XML 1.0 document.
+use fakecloud_aws::xml::xml_escape;
 
 /// Build the `activemq.xml` that configures an ActiveMQ container.
 ///
