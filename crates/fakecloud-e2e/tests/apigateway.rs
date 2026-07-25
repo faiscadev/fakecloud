@@ -1087,3 +1087,120 @@ async fn apigw_generate_client_certificate_returns_real_pem() {
         .expect("PEM body is valid base64 DER");
     assert!(der.len() > 100, "decoded certificate is non-trivial");
 }
+
+fn docker_available() -> bool {
+    std::process::Command::new("docker")
+        .arg("info")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+fn require_docker_or_skip(test: &str) -> bool {
+    if docker_available() {
+        return true;
+    }
+    if std::env::var("CI").is_ok() {
+        panic!("docker is required for {test} in CI");
+    }
+    eprintln!("skipping {test}: docker is not available");
+    false
+}
+
+/// A REST (v1) AWS_PROXY Lambda that throws surfaces as HTTP 502
+/// `{"message":"Internal server error"}`, matching real API Gateway, rather
+/// than a 200 echoing the raw `{errorMessage,errorType}` envelope.
+#[tokio::test]
+async fn data_plane_lambda_function_error_returns_502() {
+    if !require_docker_or_skip("data_plane_lambda_function_error_returns_502") {
+        return;
+    }
+    use aws_sdk_lambda::primitives::Blob;
+    use std::io::Write;
+
+    let server = TestServer::start().await;
+    let apigw = server.apigateway_client().await;
+    let lambda = server.lambda_client().await;
+
+    // Package a throwing handler.
+    let cursor = std::io::Cursor::new(Vec::new());
+    let mut writer = zip::ZipWriter::new(cursor);
+    let opts = zip::write::SimpleFileOptions::default();
+    writer.start_file("index.js", opts).unwrap();
+    writer
+        .write_all(b"exports.handler = async () => { throw new Error('boom'); };")
+        .unwrap();
+    let zip_bytes = writer.finish().unwrap().into_inner();
+
+    lambda
+        .create_function()
+        .function_name("v1-throwing-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Nodejs20x)
+        .role("arn:aws:iam::123456789012:role/lambda-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(Blob::new(zip_bytes))
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create_function");
+
+    let api = apigw
+        .create_rest_api()
+        .name("v1-error-api")
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+    let resource = apigw
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("boom")
+        .send()
+        .await
+        .expect("create_resource");
+    let res_id = resource.id().unwrap().to_string();
+    apigw
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .authorization_type("NONE")
+        .send()
+        .await
+        .expect("put_method");
+    apigw
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .r#type(aws_sdk_apigateway::types::IntegrationType::AwsProxy)
+        .integration_http_method("POST")
+        .uri("arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:123456789012:function:v1-throwing-fn/invocations")
+        .send()
+        .await
+        .expect("put_integration");
+    apigw
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .expect("create_deployment");
+
+    let resp = reqwest::Client::new()
+        .get(format!("{}/prod/boom", server.endpoint()))
+        .header("host", execute_api_host(&api_id))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 502);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["message"], "Internal server error");
+}
