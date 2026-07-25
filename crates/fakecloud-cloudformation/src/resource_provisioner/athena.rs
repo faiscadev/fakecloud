@@ -59,6 +59,53 @@ impl ResourceProvisioner {
             .with("Name", name))
     }
 
+    /// In-place `UpdateStack` for an `AWS::Athena::WorkGroup`. Mutates the stored
+    /// `WorkGroup` in place (matching `UpdateWorkGroup`) instead of the
+    /// reprovision fallback's delete+recreate, preserving `creation_time` and the
+    /// named queries / prepared statements that reference this workgroup.
+    pub(super) fn update_athena_work_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+        let arn = format!(
+            "arn:aws:athena:{}:{}:workgroup/{}",
+            self.region, self.account_id, name
+        );
+        let tags = Self::parse_athena_tags(props.get("Tags"));
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let wg = account
+            .work_groups
+            .get_mut(&name)
+            .ok_or_else(|| format!("WorkGroup {name} not yet provisioned"))?;
+        if let Some(v) = props.get("Description").and_then(|v| v.as_str()) {
+            wg.description = Some(v.to_string());
+        }
+        if props.get("Configuration").is_some() {
+            wg.configuration = props.get("Configuration").cloned();
+        }
+        if let Some(v) = props.get("State").and_then(|v| v.as_str()) {
+            wg.state = v.to_string();
+        }
+        if props.get("Tags").is_some() {
+            if tags.is_empty() {
+                account.tags.remove(&arn);
+            } else {
+                account.tags.insert(arn.clone(), tags);
+            }
+        }
+        Ok(ProvisionResult::new(name.clone())
+            .with("Arn", arn)
+            .with("Name", name))
+    }
+
     pub(super) fn delete_athena_work_group(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.athena_state.write();
         let account = accounts
@@ -155,6 +202,55 @@ impl ResourceProvisioner {
             .with("Name", name))
     }
 
+    /// In-place `UpdateStack` for an `AWS::Athena::DataCatalog` (matching
+    /// `UpdateDataCatalog`). Mutates the stored record in place instead of the
+    /// reprovision fallback's delete+recreate.
+    pub(super) fn update_athena_data_catalog(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+        let arn = format!(
+            "arn:aws:athena:{}:{}:datacatalog/{}",
+            self.region, self.account_id, name
+        );
+        let tags = Self::parse_athena_tags(props.get("Tags"));
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let cat = account
+            .data_catalogs
+            .get_mut(&name)
+            .ok_or_else(|| format!("DataCatalog {name} not yet provisioned"))?;
+        if let Some(v) = props.get("Description").and_then(|v| v.as_str()) {
+            cat.description = Some(v.to_string());
+        }
+        if let Some(obj) = props.get("Parameters").and_then(|v| v.as_object()) {
+            cat.parameters = obj
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+        }
+        if let Some(v) = props.get("ConnectionType").and_then(|v| v.as_str()) {
+            cat.connection_type = Some(v.to_string());
+        }
+        if props.get("Tags").is_some() {
+            if tags.is_empty() {
+                account.tags.remove(&arn);
+            } else {
+                account.tags.insert(arn.clone(), tags);
+            }
+        }
+        Ok(ProvisionResult::new(name.clone())
+            .with("Arn", arn)
+            .with("Name", name))
+    }
+
     pub(super) fn delete_athena_data_catalog(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.athena_state.write();
         let account = accounts
@@ -239,6 +335,42 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(id.clone()).with("NamedQueryId", id))
     }
 
+    /// In-place `UpdateStack` for an `AWS::Athena::NamedQuery`. Mutates the
+    /// stored record in place, preserving its server-minted `named_query_id`
+    /// (`Ref`), instead of the reprovision fallback's delete+recreate (which
+    /// would mint a new id).
+    pub(super) fn update_athena_named_query(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let nq = account
+            .named_queries
+            .get_mut(&id)
+            .ok_or_else(|| format!("NamedQuery {id} not yet provisioned"))?;
+        if let Some(v) = props.get("Name").and_then(|v| v.as_str()) {
+            nq.name = v.to_string();
+        }
+        if let Some(v) = props.get("Description").and_then(|v| v.as_str()) {
+            nq.description = Some(v.to_string());
+        }
+        if let Some(v) = props.get("Database").and_then(|v| v.as_str()) {
+            nq.database = v.to_string();
+        }
+        if let Some(v) = props.get("QueryString").and_then(|v| v.as_str()) {
+            nq.query_string = v.to_string();
+        }
+        Ok(ProvisionResult::new(id.clone()).with("NamedQueryId", id))
+    }
+
     pub(super) fn delete_athena_named_query(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.athena_state.write();
         let account = accounts
@@ -315,6 +447,43 @@ impl ResourceProvisioner {
         };
         let physical_id = format!("{work_group_name}|{statement_name}");
         account.prepared_statements.insert(key, ps);
+        Ok(ProvisionResult::new(physical_id))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::Athena::PreparedStatement` (matching
+    /// `UpdatePreparedStatement`). Mutates the stored record in place instead of
+    /// the reprovision fallback's delete+recreate.
+    pub(super) fn update_athena_prepared_statement(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let parts: Vec<&str> = physical_id.split('|').collect();
+        if parts.len() != 2 {
+            return Err(format!(
+                "Invalid PreparedStatement physical id: {physical_id}"
+            ));
+        }
+        let key = (parts[0].to_string(), parts[1].to_string());
+
+        let mut accounts = self.athena_state.write();
+        let account = accounts
+            .accounts
+            .entry(self.account_id.clone())
+            .or_default();
+        let ps = account
+            .prepared_statements
+            .get_mut(&key)
+            .ok_or_else(|| format!("PreparedStatement {physical_id} not yet provisioned"))?;
+        if let Some(v) = props.get("QueryStatement").and_then(|v| v.as_str()) {
+            ps.query_statement = v.to_string();
+        }
+        if let Some(v) = props.get("Description").and_then(|v| v.as_str()) {
+            ps.description = Some(v.to_string());
+        }
+        ps.last_modified_time = Utc::now();
         Ok(ProvisionResult::new(physical_id))
     }
 

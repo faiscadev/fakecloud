@@ -931,6 +931,10 @@ impl TestServer {
         aws_sdk_athena::Client::new(&self.aws_config().await)
     }
 
+    pub async fn backup_client(&self) -> aws_sdk_backup::Client {
+        aws_sdk_backup::Client::new(&self.aws_config().await)
+    }
+
     pub async fn glue_client(&self) -> aws_sdk_glue::Client {
         aws_sdk_glue::Client::new(&self.aws_config().await)
     }

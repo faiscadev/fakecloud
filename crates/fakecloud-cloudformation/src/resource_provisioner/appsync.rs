@@ -11,7 +11,9 @@
 
 use serde_json::{json, Value};
 
-use super::{cfn_props_to_camel, ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{
+    cfn_props_to_camel, ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource,
+};
 
 impl ResourceProvisioner {
     // ---------------------------------------------------------- GraphQLApi
@@ -62,6 +64,75 @@ impl ResourceProvisioner {
             data.tags.insert(arn.clone(), tags);
         }
         data.graphql_apis.insert(api_id.clone(), Value::Object(api));
+
+        Ok(ProvisionResult::new(api_id.clone())
+            .with("ApiId", api_id)
+            .with("Arn", arn)
+            .with("GraphQLUrl", graphql_url)
+            .with("GraphQLDns", graphql_dns)
+            .with("RealtimeUrl", realtime_url)
+            .with("RealtimeDns", realtime_dns))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::AppSync::GraphQLApi` (matching
+    /// `UpdateGraphqlApi`). Merges the mutable camelCase members over the stored
+    /// api object instead of the reprovision fallback's delete+recreate (which
+    /// would mint a new `apiId` and orphan the api's data sources / resolvers).
+    /// Identity members (`apiId`, `arn`, `owner`, `uris`, `dns`) are preserved.
+    pub(super) fn update_appsync_graphql_api(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let api_id = existing.physical_id.clone();
+
+        let incoming = match cfn_props_to_camel(props, &[]) {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        let tags = string_tag_map(props.get("Tags"));
+
+        let mut guard = self.appsync_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let api = data
+            .graphql_apis
+            .get_mut(&api_id)
+            .ok_or_else(|| format!("GraphQL API {api_id} not yet provisioned"))?;
+        let obj = api
+            .as_object_mut()
+            .ok_or_else(|| format!("GraphQL API {api_id} record is malformed"))?;
+        const PRESERVED: &[&str] = &["apiId", "arn", "owner", "uris", "dns"];
+        for (k, v) in incoming {
+            if PRESERVED.contains(&k.as_str()) || k == "tags" {
+                continue;
+            }
+            obj.insert(k, v);
+        }
+        let arn = obj
+            .get("arn")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let sub = |group: &str, key: &str| -> String {
+            obj.get(group)
+                .and_then(|g| g.get(key))
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let graphql_url = sub("uris", "GRAPHQL");
+        let graphql_dns = sub("dns", "GRAPHQL");
+        let realtime_url = sub("uris", "REALTIME");
+        let realtime_dns = sub("dns", "REALTIME");
+
+        if tags.is_empty() {
+            data.tags.remove(&api_id);
+            data.tags.remove(&arn);
+        } else {
+            data.tags.insert(api_id.clone(), tags.clone());
+            data.tags.insert(arn.clone(), tags);
+        }
 
         Ok(ProvisionResult::new(api_id.clone())
             .with("ApiId", api_id)
@@ -145,6 +216,54 @@ impl ResourceProvisioner {
             .insert(name.clone(), Value::Object(ds));
 
         Ok(ProvisionResult::new(format!("{api_id}|{name}"))
+            .with("DataSourceArn", arn)
+            .with("Name", name))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::AppSync::DataSource` (matching
+    /// `UpdateDataSource`). Merges the mutable camelCase members over the stored
+    /// data-source object instead of the reprovision fallback's delete+recreate.
+    /// `name` and `dataSourceArn` are preserved.
+    pub(super) fn update_appsync_data_source(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let (api_id, name) = physical_id
+            .split_once('|')
+            .map(|(a, n)| (a.to_string(), n.to_string()))
+            .ok_or_else(|| format!("Invalid DataSource physical id: {physical_id}"))?;
+
+        let incoming = match cfn_props_to_camel(props, &[]) {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+
+        let mut guard = self.appsync_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let ds = data
+            .data_sources
+            .get_mut(&api_id)
+            .and_then(|m| m.get_mut(&name))
+            .ok_or_else(|| format!("DataSource {name} not yet provisioned"))?;
+        let obj = ds
+            .as_object_mut()
+            .ok_or_else(|| format!("DataSource {name} record is malformed"))?;
+        const PRESERVED: &[&str] = &["name", "dataSourceArn", "apiId"];
+        for (k, v) in incoming {
+            if PRESERVED.contains(&k.as_str()) {
+                continue;
+            }
+            obj.insert(k, v);
+        }
+        let arn = obj
+            .get("dataSourceArn")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Ok(ProvisionResult::new(physical_id)
             .with("DataSourceArn", arn)
             .with("Name", name))
     }
@@ -235,6 +354,57 @@ impl ResourceProvisioner {
                 .with("TypeName", type_name)
                 .with("FieldName", field),
         )
+    }
+
+    /// In-place `UpdateStack` for an `AWS::AppSync::Resolver` (matching
+    /// `UpdateResolver`). Merges the mutable camelCase members over the stored
+    /// resolver object instead of the reprovision fallback's delete+recreate.
+    /// `typeName`, `fieldName` and `resolverArn` are preserved.
+    pub(super) fn update_appsync_resolver(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let parts: Vec<String> = physical_id.split('|').map(String::from).collect();
+        if parts.len() != 3 {
+            return Err(format!("Invalid Resolver physical id: {physical_id}"));
+        }
+        let (api_id, type_name, field) = (parts[0].clone(), parts[1].clone(), parts[2].clone());
+
+        let incoming = match cfn_props_to_camel(props, &[]) {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+
+        let mut guard = self.appsync_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let key = format!("{type_name}::{field}");
+        let r = data
+            .resolvers
+            .get_mut(&api_id)
+            .and_then(|m| m.get_mut(&key))
+            .ok_or_else(|| format!("Resolver {type_name}.{field} not yet provisioned"))?;
+        let obj = r
+            .as_object_mut()
+            .ok_or_else(|| format!("Resolver {type_name}.{field} record is malformed"))?;
+        const PRESERVED: &[&str] = &["typeName", "fieldName", "resolverArn", "apiId"];
+        for (k, v) in incoming {
+            if PRESERVED.contains(&k.as_str()) {
+                continue;
+            }
+            obj.insert(k, v);
+        }
+        let arn = obj
+            .get("resolverArn")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        Ok(ProvisionResult::new(physical_id)
+            .with("ResolverArn", arn)
+            .with("TypeName", type_name)
+            .with("FieldName", field))
     }
 
     pub(super) fn delete_appsync_resolver(&self, physical_id: &str) -> Result<(), String> {

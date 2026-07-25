@@ -17,7 +17,7 @@ use fakecloud_eks::{
     IdentityProviderConfig, Nodegroup, PodIdentityAssociation, TagMap, DEFAULT_K8S_VERSION,
 };
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 
 /// Parse an EKS `Tags` property. EKS uses a JSON *map* (`{"k":"v"}`) for Tags in
 /// CloudFormation, not the `[{Key,Value}]` list other services use.
@@ -913,6 +913,311 @@ impl ResourceProvisioner {
             "AssociationId" => Some(assoc.association_id.clone()),
             _ => None,
         }
+    }
+
+    // --- In-place UpdateStack arms ---
+    //
+    // Each mutates the owning EKS record in place (applying the mutable
+    // properties, preserving the physical id / ARN / created_at) instead of the
+    // reprovision fallback's delete+recreate. A recreate would mint new ARNs and,
+    // for a Cluster, orphan every nodegroup/addon/profile keyed under its name.
+
+    pub(super) fn update_eks_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+
+        let mut accounts = self.eks_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let cluster = state
+            .clusters
+            .get_mut(&name)
+            .ok_or_else(|| format!("No cluster found for name: {name}"))?;
+
+        if let Some(v) = props.get("Version").and_then(|v| v.as_str()) {
+            cluster.version = v.to_string();
+        }
+        if props.get("Logging").is_some() {
+            // Echo the CFN logging block as-is; the direct service also stores
+            // whatever `UpdateClusterConfig` sends.
+            cluster.logging = props.get("Logging").cloned().unwrap_or(json!({}));
+        }
+        if let Some(mode) = props
+            .get("AccessConfig")
+            .and_then(|v| v.get("AuthenticationMode"))
+            .and_then(|v| v.as_str())
+        {
+            cluster.access_config = json!({ "authenticationMode": mode });
+        }
+        if let Some(st) = props
+            .get("UpgradePolicy")
+            .and_then(|v| v.get("SupportType"))
+            .and_then(|v| v.as_str())
+        {
+            cluster.upgrade_policy = json!({ "supportType": st });
+        }
+        if let Some(v) = props.get("DeletionProtection").and_then(|v| v.as_bool()) {
+            cluster.deletion_protection = Some(v);
+        }
+        // Endpoint public/private access are mutable via UpdateClusterConfig.
+        if let Some(vpc) = props.get("ResourcesVpcConfig") {
+            if let Some(obj) = cluster.resources_vpc_config.as_object_mut() {
+                if let Some(v) = vpc.get("EndpointPublicAccess").and_then(|v| v.as_bool()) {
+                    obj.insert("endpointPublicAccess".to_string(), json!(v));
+                }
+                if let Some(v) = vpc.get("EndpointPrivateAccess").and_then(|v| v.as_bool()) {
+                    obj.insert("endpointPrivateAccess".to_string(), json!(v));
+                }
+                if let Some(v) = vpc.get("PublicAccessCidrs") {
+                    obj.insert("publicAccessCidrs".to_string(), v.clone());
+                }
+            }
+        }
+        if props.get("Tags").is_some() {
+            cluster.tags = parse_eks_tags(props.get("Tags"));
+        }
+
+        let arn = cluster.arn.clone();
+        let endpoint = cluster.endpoint.clone();
+        let ca_data = cluster.certificate_authority_data.clone();
+        let cluster_security_group_id = cluster.resources_vpc_config["clusterSecurityGroupId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let key_arn = cluster
+            .encryption_config
+            .as_ref()
+            .and_then(|v| v.as_array())
+            .and_then(|a| a.first())
+            .and_then(|e| e.get("provider"))
+            .and_then(|p| p.get("keyArn"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let id = cluster_id_from_endpoint(&endpoint);
+        let oidc = format!("https://oidc.eks.amazonaws.com/id/{}", id.to_uppercase());
+        let mut result = ProvisionResult::new(name)
+            .with("Arn", arn)
+            .with("Endpoint", endpoint)
+            .with("CertificateAuthorityData", ca_data)
+            .with("ClusterSecurityGroupId", cluster_security_group_id)
+            .with("OpenIdConnectIssuerUrl", oidc)
+            .with("Id", id);
+        if let Some(k) = key_arn {
+            result = result.with("EncryptionConfigKeyArn", k);
+        }
+        Ok(result)
+    }
+
+    pub(super) fn update_eks_nodegroup(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let (cluster_name, name) = physical_id
+            .split_once('/')
+            .map(|(c, n)| (c.to_string(), n.to_string()))
+            .ok_or_else(|| format!("Invalid Nodegroup physical id: {physical_id}"))?;
+
+        let mut accounts = self.eks_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let ng = state
+            .nodegroups
+            .get_mut(&cluster_name)
+            .and_then(|m| m.get_mut(&name))
+            .ok_or_else(|| format!("No nodegroup found: {physical_id}"))?;
+
+        if let Some(v) = props.get("ScalingConfig") {
+            ng.scaling_config = cfn_scaling_config(v);
+        }
+        if let Some(v) = props.get("UpdateConfig") {
+            ng.update_config = cfn_update_config(v);
+        }
+        if let Some(v) = props.get("Labels") {
+            ng.labels = v.clone();
+        }
+        if let Some(v) = props.get("Taints") {
+            ng.taints = v.clone();
+        }
+        if let Some(v) = props.get("Version").and_then(|v| v.as_str()) {
+            ng.version = v.to_string();
+        }
+        if let Some(v) = props.get("ReleaseVersion").and_then(|v| v.as_str()) {
+            ng.release_version = v.to_string();
+        }
+        if props.get("Tags").is_some() {
+            ng.tags = parse_eks_tags(props.get("Tags"));
+        }
+        ng.modified_at = Utc::now();
+
+        let arn = ng.arn.clone();
+        Ok(ProvisionResult::new(physical_id.clone())
+            .with("Arn", arn)
+            .with("Id", physical_id)
+            .with("ClusterName", cluster_name)
+            .with("NodegroupName", name))
+    }
+
+    pub(super) fn update_eks_fargate_profile(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let (cluster_name, name) = physical_id
+            .split_once('|')
+            .ok_or_else(|| format!("Invalid FargateProfile physical id: {physical_id}"))?;
+
+        let mut accounts = self.eks_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let profile = state
+            .fargate_profiles
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(|| format!("No fargate profile found: {physical_id}"))?;
+        // Fargate profiles are immutable except for their tags.
+        if props.get("Tags").is_some() {
+            profile.tags = parse_eks_tags(props.get("Tags"));
+        }
+        Ok(ProvisionResult::new(physical_id).with("Arn", profile.arn.clone()))
+    }
+
+    pub(super) fn update_eks_addon(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let (cluster_name, name) = physical_id
+            .split_once('|')
+            .ok_or_else(|| format!("Invalid Addon physical id: {physical_id}"))?;
+
+        let mut accounts = self.eks_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let addon = state
+            .addons
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(|| format!("No addon found: {physical_id}"))?;
+        if let Some(v) = props.get("AddonVersion").and_then(|v| v.as_str()) {
+            addon.addon_version = v.to_string();
+        }
+        if let Some(v) = props.get("ConfigurationValues").and_then(|v| v.as_str()) {
+            addon.configuration_values = Some(v.to_string());
+        }
+        if let Some(v) = props.get("ServiceAccountRoleArn").and_then(|v| v.as_str()) {
+            addon.service_account_role_arn = Some(v.to_string());
+        }
+        if props.get("Tags").is_some() {
+            addon.tags = parse_eks_tags(props.get("Tags"));
+        }
+        addon.modified_at = Utc::now();
+        let arn = addon.arn.clone();
+        Ok(ProvisionResult::new(physical_id)
+            .with("Arn", arn.clone())
+            .with("AddonArn", arn))
+    }
+
+    pub(super) fn update_eks_access_entry(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let (cluster_name, principal_arn) = physical_id
+            .split_once('|')
+            .ok_or_else(|| format!("Invalid AccessEntry physical id: {physical_id}"))?;
+
+        let mut accounts = self.eks_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let entry = state
+            .access_entries
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(principal_arn))
+            .ok_or_else(|| format!("No access entry found: {physical_id}"))?;
+        if let Some(v) = props.get("KubernetesGroups").and_then(|v| v.as_array()) {
+            entry.kubernetes_groups = v
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+        }
+        if let Some(v) = props.get("Username").and_then(|v| v.as_str()) {
+            entry.username = v.to_string();
+        }
+        if props.get("Tags").is_some() {
+            entry.tags = parse_eks_tags(props.get("Tags"));
+        }
+        entry.modified_at = Utc::now();
+        Ok(ProvisionResult::new(physical_id).with("AccessEntryArn", entry.arn.clone()))
+    }
+
+    pub(super) fn update_eks_identity_provider_config(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let (cluster_name, name) = physical_id
+            .split_once('|')
+            .ok_or_else(|| format!("Invalid IdentityProviderConfig physical id: {physical_id}"))?;
+
+        let mut accounts = self.eks_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let config = state
+            .identity_provider_configs
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(name))
+            .ok_or_else(|| format!("No identity provider config found: {physical_id}"))?;
+        // OIDC config is immutable except for its tags; re-reading (no delete) is
+        // still correct -- it stops the destructive reprovision.
+        if props.get("Tags").is_some() {
+            config.tags = parse_eks_tags(props.get("Tags"));
+        }
+        Ok(ProvisionResult::new(physical_id).with("IdentityProviderConfigArn", config.arn.clone()))
+    }
+
+    pub(super) fn update_eks_pod_identity_association(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let physical_id = existing.physical_id.clone();
+        let (cluster_name, association_id) = physical_id
+            .split_once('|')
+            .ok_or_else(|| format!("Invalid PodIdentityAssociation physical id: {physical_id}"))?;
+
+        let mut accounts = self.eks_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let assoc = state
+            .pod_identity_associations
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(association_id))
+            .ok_or_else(|| format!("No pod identity association found: {physical_id}"))?;
+        if let Some(v) = props.get("RoleArn").and_then(|v| v.as_str()) {
+            assoc.role_arn = v.to_string();
+        }
+        if let Some(v) = props.get("DisableSessionTags").and_then(|v| v.as_bool()) {
+            assoc.disable_session_tags = v;
+        }
+        if let Some(v) = props.get("TargetRoleArn").and_then(|v| v.as_str()) {
+            assoc.target_role_arn = Some(v.to_string());
+        }
+        if props.get("Tags").is_some() {
+            assoc.tags = parse_eks_tags(props.get("Tags"));
+        }
+        assoc.modified_at = Utc::now();
+        Ok(ProvisionResult::new(physical_id)
+            .with("AssociationArn", assoc.association_arn.clone())
+            .with("AssociationId", assoc.association_id.clone()))
     }
 }
 
