@@ -998,6 +998,13 @@ pub fn default_engine_versions() -> Vec<CacheEngineVersion> {
             cache_engine_version_description: "Valkey 8.0".to_string(),
         },
         CacheEngineVersion {
+            engine: "valkey".to_string(),
+            engine_version: "7.2".to_string(),
+            cache_parameter_group_family: "valkey7".to_string(),
+            cache_engine_description: "Valkey".to_string(),
+            cache_engine_version_description: "Valkey 7.2".to_string(),
+        },
+        CacheEngineVersion {
             engine: "memcached".to_string(),
             engine_version: "1.6.22".to_string(),
             cache_parameter_group_family: "memcached1.6".to_string(),
@@ -1032,6 +1039,19 @@ fn default_parameter_groups(account_id: &str, region: &str) -> Vec<CacheParamete
                 region,
                 account_id,
                 "parametergroup:default.valkey8",
+            )
+            .to_string(),
+        },
+        CacheParameterGroup {
+            cache_parameter_group_name: "default.valkey7".to_string(),
+            cache_parameter_group_family: "valkey7".to_string(),
+            description: "Default parameter group for valkey7".to_string(),
+            is_global: false,
+            arn: Arn::new(
+                "elasticache",
+                region,
+                account_id,
+                "parametergroup:default.valkey7",
             )
             .to_string(),
         },
@@ -1098,7 +1118,7 @@ pub fn default_parameters_for_family(family: &str) -> Vec<EngineDefaultParameter
                 minimum_engine_version: "7.0.0".to_string(),
             },
         ],
-        "valkey8" => vec![
+        "valkey8" | "valkey7" => vec![
             EngineDefaultParameter {
                 parameter_name: "maxmemory-policy".to_string(),
                 parameter_value: "volatile-lru".to_string(),
@@ -1194,19 +1214,21 @@ mod tests {
     #[test]
     fn default_engine_versions_contains_redis_valkey_memcached() {
         let versions = default_engine_versions();
-        assert_eq!(versions.len(), 3);
+        assert_eq!(versions.len(), 4);
         assert_eq!(versions[0].engine, "redis");
         assert_eq!(versions[0].engine_version, "7.1");
         assert_eq!(versions[1].engine, "valkey");
         assert_eq!(versions[1].engine_version, "8.0");
-        assert_eq!(versions[2].engine, "memcached");
-        assert_eq!(versions[2].engine_version, "1.6.22");
+        assert_eq!(versions[2].engine, "valkey");
+        assert_eq!(versions[2].engine_version, "7.2");
+        assert_eq!(versions[3].engine, "memcached");
+        assert_eq!(versions[3].engine_version, "1.6.22");
     }
 
     #[test]
     fn state_new_creates_default_parameter_groups() {
         let state = ElastiCacheState::new("123456789012", "us-east-1");
-        assert_eq!(state.parameter_groups.len(), 3);
+        assert_eq!(state.parameter_groups.len(), 4);
         assert_eq!(
             state.parameter_groups[0].cache_parameter_group_name,
             "default.redis7"
@@ -1217,6 +1239,10 @@ mod tests {
         );
         assert_eq!(
             state.parameter_groups[2].cache_parameter_group_name,
+            "default.valkey7"
+        );
+        assert_eq!(
+            state.parameter_groups[3].cache_parameter_group_name,
             "default.memcached1.6"
         );
     }
@@ -1242,7 +1268,7 @@ mod tests {
         state.parameter_groups.clear();
         assert!(state.parameter_groups.is_empty());
         state.reset();
-        assert_eq!(state.parameter_groups.len(), 3);
+        assert_eq!(state.parameter_groups.len(), 4);
     }
 
     #[test]

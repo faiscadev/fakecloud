@@ -862,6 +862,29 @@ async fn create_serverless_cache_rejects_memcached() {
 }
 
 #[tokio::test]
+async fn create_serverless_cache_accepts_valkey_7() {
+    // AWS supports Valkey 7.2 (and 8.x) for serverless; the MajorEngineVersion
+    // gate previously rejected 7 as "not supported for engine valkey".
+    let shared = std::sync::Arc::new(parking_lot::RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let service = ElastiCacheService::new(shared);
+
+    let req = request(
+        "CreateServerlessCache",
+        &[
+            ("ServerlessCacheName", "sc-vk7"),
+            ("Engine", "valkey"),
+            ("MajorEngineVersion", "7"),
+        ],
+    );
+    assert!(
+        service.create_serverless_cache(&req).await.is_ok(),
+        "Valkey MajorEngineVersion 7 must be accepted for a serverless cache"
+    );
+}
+
+#[tokio::test]
 async fn create_cache_cluster_without_runtime_falls_back_to_metadata_only() {
     // No container runtime is configured. The Smithy model has no
     // "Docker missing" error shape, so refusing the call would emit an
