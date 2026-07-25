@@ -1853,6 +1853,144 @@ fn delete_db_snapshot_unknown_errors() {
     assert_code(svc.delete_db_snapshot(&req), "DBSnapshotNotFound");
 }
 
+/// Force a seeded snapshot's status to `creating` (persisted mid-dump).
+fn set_snapshot_creating(svc: &RdsService, snapshot_id: &str) {
+    svc.state
+        .write()
+        .default_mut()
+        .snapshots
+        .get_mut(snapshot_id)
+        .unwrap()
+        .status = "creating".to_string();
+}
+
+fn snapshot_status(svc: &RdsService, snapshot_id: &str) -> String {
+    svc.state
+        .read()
+        .default_ref()
+        .snapshots
+        .get(snapshot_id)
+        .unwrap()
+        .status
+        .clone()
+}
+
+#[test]
+fn reconcile_rearms_creating_snapshot_when_source_present() {
+    // 0.1: a `creating` snapshot present at load whose source instance still
+    // exists is re-armed (not lost, not marked terminal).
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_snapshot(&svc, "snap1", "db1");
+    set_snapshot_creating(&svc, "snap1");
+    // has_runtime=true exercises the re-arm branch without Docker.
+    let (rearm, reap) = svc.plan_snapshot_recovery(true);
+    assert_eq!(rearm.len(), 1);
+    assert_eq!(rearm[0].snapshot_id, "snap1");
+    assert_eq!(rearm[0].source_id, "db1");
+    assert_eq!(rearm[0].db_name, "appdb");
+    assert!(reap.is_empty());
+    // Left `creating`; the re-armed dump flips it to `available`.
+    assert_eq!(snapshot_status(&svc, "snap1"), "creating");
+}
+
+#[test]
+fn reconcile_fails_and_reaps_creating_snapshot_when_source_gone() {
+    // 0.1: a final-snapshot orphan (source instance row removed synchronously
+    // by DeleteDBInstance) is marked `failed` so the id is reusable, and its
+    // leaked source container/volume is queued for reaping.
+    let svc = make_service();
+    seed_snapshot(&svc, "final-snap", "db-gone"); // no instance seeded
+    set_snapshot_creating(&svc, "final-snap");
+    let (rearm, reap) = svc.plan_snapshot_recovery(true);
+    assert!(rearm.is_empty());
+    assert_eq!(reap.len(), 1);
+    assert_eq!(reap[0].source_id, "db-gone");
+    assert_eq!(snapshot_status(&svc, "final-snap"), "failed");
+}
+
+#[test]
+fn reconcile_fails_creating_snapshot_without_runtime() {
+    // 0.1: no runtime on restart means the dump can never complete, so a
+    // source-present `creating` snapshot is marked terminal `failed` rather
+    // than left stuck `creating`. No reap (the source instance is present).
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_snapshot(&svc, "snap1", "db1");
+    set_snapshot_creating(&svc, "snap1");
+    let (rearm, reap) = svc.plan_snapshot_recovery(false);
+    assert!(rearm.is_empty());
+    assert!(reap.is_empty());
+    assert_eq!(snapshot_status(&svc, "snap1"), "failed");
+}
+
+#[test]
+fn reconcile_ignores_available_snapshots() {
+    // 0.1: only `creating` rows are reconciled; a completed snapshot is left
+    // untouched.
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_snapshot(&svc, "snap1", "db1"); // status `available` by default
+    let (rearm, reap) = svc.plan_snapshot_recovery(true);
+    assert!(rearm.is_empty());
+    assert!(reap.is_empty());
+    assert_eq!(snapshot_status(&svc, "snap1"), "available");
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_returns_promptly() {
+    // 1.1: the source-writer dump is backgrounded, so PITR returns without
+    // blocking on the (unbounded) mysqldump/pg_dump. Docker-free: with no
+    // runtime wired the handler records the restored-cluster placeholder
+    // synchronously and returns Ok immediately.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(
+                "src-cluster".to_string(),
+                serde_json::json!({
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "postgres",
+                    "WriterDBInstanceIdentifier": "writer-1",
+                }),
+            );
+    }
+    seed_instance(&svc, "writer-1");
+
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    let resp = svc
+        .restore_db_cluster_to_point_in_time(&req)
+        .await
+        .expect("PITR should return promptly");
+    let body = body_of(resp);
+    assert!(body.contains("restored-cluster"), "body: {body}");
+
+    // The target cluster placeholder was recorded synchronously, and with no
+    // runtime no dump is staged (metadata-only) — proving the handler did not
+    // block on a dump.
+    let accounts = svc.state.read();
+    let clusters = accounts.default_ref().extras.get("clusters").unwrap();
+    let target = clusters
+        .get("restored-cluster")
+        .expect("restored cluster recorded synchronously");
+    assert!(
+        target.get("PendingRestoreDumpB64").is_none(),
+        "no dump should be staged inline without a runtime"
+    );
+}
+
 #[test]
 fn describe_db_snapshots_accepts_both_filters() {
     // Both snapshot id + instance id is tolerated: the snapshot id

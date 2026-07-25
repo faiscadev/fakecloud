@@ -168,6 +168,15 @@ pub(crate) fn is_recoverable_status(status: &str) -> bool {
     !matches!(status, "deleting" | "deleted")
 }
 
+/// A `creating` cache snapshot whose backing replication group still exists,
+/// so its RDB dump can be re-run on restart. Produced by
+/// `plan_snapshot_recovery`, driven by `reconcile_inflight_snapshots`.
+pub(crate) struct SnapshotRearm {
+    pub(crate) account_id: String,
+    pub(crate) snapshot_name: String,
+    pub(crate) group_id: String,
+}
+
 pub struct ElastiCacheService {
     state: SharedElastiCacheState,
     runtime: Option<Arc<ElastiCacheRuntime>>,
@@ -177,6 +186,11 @@ pub struct ElastiCacheService {
     /// exported artifact into the target bucket, matching AWS. `None` in
     /// unit tests / when S3 isn't wired.
     s3: Option<SharedS3State>,
+    /// Durable data directory (the `<data-path>/elasticache` root) under which
+    /// snapshot RDB artifacts are written so they survive a restart. `None` in
+    /// memory mode / unit tests, where the RDB falls back to the platform temp
+    /// dir (nothing is persisted across a restart in that mode anyway).
+    data_dir: Option<std::path::PathBuf>,
 }
 
 mod clusters;
@@ -197,11 +211,21 @@ impl ElastiCacheService {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             s3: None,
+            data_dir: None,
         }
     }
 
     pub fn with_runtime(mut self, runtime: Arc<ElastiCacheRuntime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+
+    /// Wire the durable data directory (`<data-path>/elasticache`) so snapshot
+    /// RDB artifacts are written under it and survive a restart, rather than
+    /// under the platform temp dir which reboot clears (bug: a persisted
+    /// snapshot pointing into temp restores an empty cache after reboot).
+    pub fn with_data_dir(mut self, data_dir: std::path::PathBuf) -> Self {
+        self.data_dir = Some(data_dir);
         self
     }
 
@@ -504,6 +528,65 @@ impl ElastiCacheService {
                 }
             });
         }
+    }
+
+    /// Reconcile cache snapshots persisted mid-dump (`creating`) after a
+    /// restart. The RDB dump runs in a detached task that flips the row to
+    /// `available`; a crash mid-dump leaves the snapshot `creating` forever
+    /// (never usable, name blocked). The dispatch-level auto-save can persist
+    /// that `creating` row, so on load we reconcile it: if the source
+    /// replication group still exists (and a runtime is wired) re-arm the dump
+    /// finalizer; otherwise mark the snapshot `failed` so the name is reusable
+    /// and Describe shows a terminal state. Mirrors how RDS re-arms in-flight
+    /// snapshots on load.
+    pub async fn reconcile_inflight_snapshots(&self) {
+        let rearm = self.plan_snapshot_recovery(self.runtime.is_some());
+        // Persist any `failed` transitions the planner applied to disk.
+        self.save_snapshot().await;
+        if let Some(runtime) = self.runtime.clone() {
+            for r in rearm {
+                self.spawn_snapshot_dump(
+                    runtime.clone(),
+                    r.account_id,
+                    r.snapshot_name,
+                    r.group_id,
+                );
+            }
+        }
+    }
+
+    /// Pure state reconcile for `creating` snapshots: marks the un-recoverable
+    /// ones `failed` and returns the set to re-arm via the dump finalizer.
+    /// Split out for Docker-free unit testing. A snapshot is re-armed only when
+    /// its replication group still exists AND a runtime is wired
+    /// (`has_runtime`); otherwise it transitions to the terminal `failed`.
+    /// `has_runtime` is passed in so the re-arm branch is exercisable in
+    /// Docker-free unit tests.
+    pub(crate) fn plan_snapshot_recovery(&self, has_runtime: bool) -> Vec<SnapshotRearm> {
+        let mut rearm = Vec::new();
+        let mut accounts = self.state.write();
+        for (_, state) in accounts.iter_mut() {
+            let account_id = state.account_id.clone();
+            // Snapshot the present group ids so the immutable borrow ends
+            // before we mutate `state.snapshots` below.
+            let groups: std::collections::HashSet<String> =
+                state.replication_groups.keys().cloned().collect();
+            for (name, snap) in state.snapshots.iter_mut() {
+                if snap.snapshot_status != "creating" {
+                    continue;
+                }
+                if has_runtime && groups.contains(&snap.replication_group_id) {
+                    rearm.push(SnapshotRearm {
+                        account_id: account_id.clone(),
+                        snapshot_name: name.clone(),
+                        group_id: snap.replication_group_id.clone(),
+                    });
+                } else {
+                    snap.snapshot_status = "failed".to_string();
+                }
+            }
+        }
+        rearm
     }
 }
 

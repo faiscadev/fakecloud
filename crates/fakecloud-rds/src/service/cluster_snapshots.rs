@@ -313,30 +313,14 @@ impl RdsService {
             })
         };
 
-        let pending_dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
-            if let Some(runtime) = self.runtime_ref() {
-                match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
-                    Ok(data) => {
-                        use base64::Engine;
-                        Some(base64::engine::general_purpose::STANDARD.encode(&data))
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            cluster = %source,
-                            writer = %wid,
-                            "cluster PIT dump failed; falling back to metadata-only restore"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            }
-        } else {
-            None
-        };
-
+        // The source writer's dump is unbounded (mysqldump/pg_dump) and easily
+        // past the ~60s client read timeout, so it must NOT run inline in the
+        // request handler (bug: PITR blocked the client). Record the restored
+        // cluster placeholder synchronously below and return promptly; a
+        // detached task (spawned after the response is built) live-dumps the
+        // source writer and stages it as `PendingRestoreDumpB64` on the target
+        // cluster, which the first attached CreateDBInstance replays. Mirrors
+        // the instance-restore path's `spawn_finalize_restored_instance`.
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let mut entry = state
@@ -377,9 +361,6 @@ impl RdsService {
             if let Some(latest) = optional_query_param(request, "UseLatestRestorableTime") {
                 obj.insert("UseLatestRestorableTime".to_string(), json!(latest));
             }
-            if let Some(b64) = pending_dump_b64 {
-                obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
-            }
         }
         state
             .extras
@@ -387,6 +368,51 @@ impl RdsService {
             .or_default()
             .insert(target.clone(), entry);
         drop(accounts);
+
+        // Background the source-writer dump so the request returns promptly.
+        // On success the dump is staged as `PendingRestoreDumpB64` on the
+        // target cluster entry; on failure we fall back to a metadata-only
+        // restore (matching the previous inline behaviour).
+        if let (Some((wid, eng, user, pass, db)), Some(runtime)) =
+            (writer_info, self.runtime_ref().cloned())
+        {
+            let state_handle = self.state.clone();
+            let snapshot_store = self.snapshot_store.clone();
+            let snapshot_lock = self.snapshot_lock.clone();
+            let account_id = request.account_id.clone();
+            let target = target.clone();
+            let source = source.clone();
+            tokio::spawn(async move {
+                match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
+                    Ok(data) => {
+                        use base64::Engine;
+                        let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
+                        {
+                            let mut accounts = state_handle.write();
+                            let state = accounts.get_or_create(&account_id);
+                            if let Some(entry) = state
+                                .extras
+                                .get_mut("clusters")
+                                .and_then(|m| m.get_mut(&target))
+                                .and_then(|e| e.as_object_mut())
+                            {
+                                entry.insert("PendingRestoreDumpB64".to_string(), json!(b64));
+                            }
+                        }
+                        save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock)
+                            .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            cluster = %source,
+                            writer = %wid,
+                            "cluster PIT dump failed; falling back to metadata-only restore"
+                        );
+                    }
+                }
+            });
+        }
 
         self.emit_event(
             RdsSourceType::DbCluster,

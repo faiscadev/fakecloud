@@ -489,6 +489,118 @@ impl RdsService {
         }
     }
 
+    /// Reconcile DB snapshots persisted mid-dump (`creating`) after a restart.
+    ///
+    /// `CreateDBSnapshot` and the final-snapshot-on-delete path insert a
+    /// `creating` row synchronously, then a detached task runs the (unbounded)
+    /// dump and flips it to `available`. The dispatch-level auto-save can
+    /// persist the `creating` row, so a crash mid-dump leaves the snapshot
+    /// `creating` forever — never usable, id blocked, data lost. On load we
+    /// reconcile each such row:
+    ///   * source instance still present -> re-arm the dump finalizer
+    ///     (re-run the dump -> `available`);
+    ///   * source gone (the final-snapshot path removed the instance row
+    ///     synchronously before deferring teardown) -> mark the snapshot
+    ///     `failed` so the id is reusable and Describe shows a terminal state,
+    ///     and reap the orphaned source container + data volume the
+    ///     interrupted finalizer would have torn down (otherwise leaked).
+    ///
+    /// Mirrors how ACM/CloudFront re-arm their in-flight pending states on
+    /// load. The `failed`-marking is applied synchronously (persisted here);
+    /// the runtime-driven dump/reap run in detached tasks like the primary
+    /// recovery path.
+    pub async fn reconcile_inflight_snapshots(&self) {
+        let (rearm, reap) = self.plan_snapshot_recovery(self.runtime.is_some());
+        if rearm.is_empty() && reap.is_empty() {
+            return;
+        }
+        // Persist the `failed` transitions the planner applied.
+        self.save_snapshot().await;
+        let Some(runtime) = self.runtime.clone() else {
+            return;
+        };
+        for r in rearm {
+            self.spawn_finalize_snapshot(
+                runtime.clone(),
+                r.account_id,
+                r.snapshot_id,
+                r.source_id,
+                r.engine,
+                r.username,
+                r.password,
+                r.db_name,
+                // Source instance is present (a regular in-flight snapshot);
+                // no deferred teardown to run.
+                false,
+            );
+        }
+        for r in reap {
+            // Complete the deferred final-snapshot teardown the crash
+            // interrupted: reap the orphaned source container + data volume.
+            // Idempotent — a no-op if the runtime already reaped them.
+            let runtime = runtime.clone();
+            tokio::spawn(async move {
+                runtime.stop_container(&r.source_id).await;
+                runtime
+                    .remove_data_volume(&r.account_id, &r.source_id)
+                    .await;
+            });
+        }
+    }
+
+    /// Pure state reconcile for `creating` snapshots: marks the un-recoverable
+    /// ones `failed` and returns the set to re-arm plus the orphaned
+    /// final-snapshot sources to reap. Split out for Docker-free unit testing.
+    /// A snapshot is re-armed only when its source instance still exists AND a
+    /// runtime is wired (`has_runtime`); otherwise it transitions to the
+    /// terminal `failed`. `has_runtime` is passed in so the re-arm branch is
+    /// exercisable in Docker-free unit tests.
+    pub(crate) fn plan_snapshot_recovery(
+        &self,
+        has_runtime: bool,
+    ) -> (Vec<SnapshotRearm>, Vec<SnapshotReap>) {
+        let mut rearm = Vec::new();
+        let mut reap = Vec::new();
+        let mut accounts = self.state.write();
+        for (_, state) in accounts.iter_mut() {
+            let account_id = state.account_id.clone();
+            // Snapshot the present instance ids so the immutable borrow ends
+            // before we mutate `state.snapshots`.
+            let instances: std::collections::HashSet<String> =
+                state.instances.keys().cloned().collect();
+            for (id, snap) in state.snapshots.iter_mut() {
+                if snap.status != "creating" {
+                    continue;
+                }
+                let source_present = instances.contains(&snap.db_instance_identifier);
+                if source_present && has_runtime {
+                    let db_name = snap
+                        .db_name
+                        .clone()
+                        .unwrap_or_else(|| default_db_name(&snap.engine).to_string());
+                    rearm.push(SnapshotRearm {
+                        account_id: account_id.clone(),
+                        snapshot_id: id.clone(),
+                        source_id: snap.db_instance_identifier.clone(),
+                        engine: snap.engine.clone(),
+                        username: snap.master_username.clone(),
+                        password: snap.master_user_password.clone(),
+                        db_name,
+                    });
+                } else {
+                    snap.status = "failed".to_string();
+                    if !source_present {
+                        reap.push(SnapshotReap {
+                            account_id: account_id.clone(),
+                            source_id: snap.db_instance_identifier.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        (rearm, reap)
+    }
+
     /// Stop the backing container for `db_instance_identifier` and mark
     /// the row `stopped`. Synchronous wrt the runtime so callers see a
     /// real `stopped` status by the time the response goes back; mirrors
@@ -746,6 +858,26 @@ fn apply_snapshot_dump_result(
             snapshot.status = "failed".to_string();
         }
     }
+}
+
+/// A `creating` DB snapshot whose source instance still exists, so its dump
+/// can be re-run on restart. Produced by `plan_snapshot_recovery`.
+pub(crate) struct SnapshotRearm {
+    pub(crate) account_id: String,
+    pub(crate) snapshot_id: String,
+    pub(crate) source_id: String,
+    pub(crate) engine: String,
+    pub(crate) username: String,
+    pub(crate) password: String,
+    pub(crate) db_name: String,
+}
+
+/// A final-snapshot source whose instance row was removed synchronously by
+/// `DeleteDBInstance` but whose backing container + data volume were left for
+/// the (interrupted) finalizer to reap. Reaped on restart to avoid a leak.
+pub(crate) struct SnapshotReap {
+    pub(crate) account_id: String,
+    pub(crate) source_id: String,
 }
 
 /// no store is configured (memory-mode runs).

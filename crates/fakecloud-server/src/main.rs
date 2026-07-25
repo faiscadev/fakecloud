@@ -3097,6 +3097,10 @@ async fn main() {
     // spawns one task per instance and returns immediately, so a slow
     // postgres bring-up doesn't block server startup. (Issue #1338.)
     rds_service.recover_persisted_containers().await;
+    // Reconcile DB snapshots persisted mid-dump: re-arm those whose source
+    // instance still exists, mark the rest `failed`, and reap any orphaned
+    // final-snapshot source container/volume the interrupted finalizer left.
+    rds_service.reconcile_inflight_snapshots().await;
     if let Some(h) = rds_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("rds", h);
     }
@@ -3284,6 +3288,13 @@ async fn main() {
     if let Some(ref rt) = elasticache_runtime {
         elasticache_service = elasticache_service.with_runtime(rt.clone());
     }
+    // In persistent mode, root snapshot RDB artifacts under the durable data
+    // dir so they survive a restart (4.1); memory mode leaves them in temp.
+    if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
+        if let Some(ref data_path) = persistence_config.data_path {
+            elasticache_service = elasticache_service.with_data_dir(data_path.join("elasticache"));
+        }
+    }
     if let Some(store) = elasticache_snapshot_store {
         elasticache_service = elasticache_service.with_snapshot_store(store);
     }
@@ -3292,6 +3303,9 @@ async fn main() {
     // their Docker containers don't, so respawn them on startup. See
     // RDS #1338 for the original bug class.
     elasticache_service.recover_persisted_containers().await;
+    // Reconcile snapshots persisted mid-dump: re-arm those whose source group
+    // still exists, mark the rest `failed` so they aren't stuck `creating`.
+    elasticache_service.reconcile_inflight_snapshots().await;
     if let Some(h) = elasticache_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("elasticache", h);
     }
