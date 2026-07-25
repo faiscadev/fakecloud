@@ -12,7 +12,7 @@ requires-python = ">=3.9"
 dependencies = ["httpx>=0.24"]
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-asyncio>=0.21", "boto3>=1.28", "ruff>=0.4,<0.17", "mypy>=1.10"]
+dev = ["pytest>=7,<9", "pytest-asyncio>=0.21,<0.25", "boto3>=1.28", "ruff>=0.4,<0.17", "mypy>=1.10,<1.19"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fakecloud"]

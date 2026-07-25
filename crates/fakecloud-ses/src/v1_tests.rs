@@ -2102,6 +2102,53 @@ fn test_send_bounce_v1_custom_dsn_fields() {
 }
 
 #[test]
+fn test_send_bounce_v1_xml_escapes_user_fields() {
+    // BouncedRecipientInfoList fields are user-controlled and were interpolated
+    // into the response XML unescaped. A DiagnosticCode containing `<`, `>` and
+    // `&` (as real SMTP diagnostics carry, e.g. the rejected recipient in angle
+    // brackets) would break the SDK XML deserializer. They must be escaped.
+    let state = make_state();
+    let req = make_v1_request(
+        "SendBounce",
+        vec![
+            ("BounceSender", "postmaster@example.com"),
+            ("OriginalMessageId", "abc-def"),
+            (
+                "BouncedRecipientInfoList.member.1.Recipient",
+                "user@example.com",
+            ),
+            (
+                "BouncedRecipientInfoList.member.1.RecipientDsnFields.DiagnosticCode",
+                "smtp; 550 5.1.1 <bob@example.com>: rejected & dropped",
+            ),
+        ],
+    );
+    let resp = handle_v1_action(&state, &req).unwrap();
+    let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+
+    // The raw injected `<...>` / `&` must not appear verbatim inside the body.
+    assert!(
+        !body.contains("<bob@example.com>"),
+        "raw angle brackets leaked into XML: {body}"
+    );
+    // The escaped form must be present.
+    assert!(
+        body.contains("&lt;bob@example.com&gt;: rejected &amp; dropped"),
+        "diagnostic code not escaped: {body}"
+    );
+
+    // And the response must still parse as well-formed XML.
+    let mut reader = quick_xml::Reader::from_str(&body);
+    loop {
+        match reader.read_event() {
+            Ok(quick_xml::events::Event::Eof) => break,
+            Ok(_) => {}
+            Err(e) => panic!("response is not well-formed XML: {e}\n{body}"),
+        }
+    }
+}
+
+#[test]
 fn test_send_bounce_v1_missing_recipient() {
     let state = make_state();
     let req = make_v1_request(

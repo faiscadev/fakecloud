@@ -304,11 +304,11 @@ impl EventBridgeState {
         self.log_deliveries.clear();
         self.step_function_executions.clear();
         // Re-create default bus. NOTE: the default bus is seeded here (and at
-        // init) before any request exists, so its ARN carries the frozen server
-        // region rather than the request's credential-scope region. Custom buses
-        // created via CreateEventBus already use req.region; a matching fix for
-        // the default bus would need a read-time restamp in DescribeEventBus/
-        // ListEventBuses and is intentionally left as an init-time limitation.
+        // init) before any request exists, so this stored ARN carries the frozen
+        // server region rather than the request's credential-scope region. This
+        // seed remains the storage key/existence record; handlers that RETURN the
+        // default-bus ARN (DescribeEventBus / ListEventBuses / etc.) restamp the
+        // region from req.region at read time via `arn_with_request_region`.
         let default_bus_arn = format!(
             "arn:aws:events:{}:{}:event-bus/default",
             self.region, self.account_id
