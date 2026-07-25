@@ -683,9 +683,25 @@ impl AcmService {
         // requested direction (AWS defaults to ASCENDING). Otherwise fall back to
         // the stable ARN ordering.
         if sort_by == Some("CREATED_AT") {
-            all.sort_by_key(|c| c.created_at);
+            // Break `created_at` ties on the ARN so the order is total and
+            // deterministic. `certificates` is a HashMap, so equal-timestamp
+            // certs would otherwise land in a non-deterministic order and the
+            // numeric-offset NextToken could skip or duplicate them across
+            // pages. For DESCENDING, invert only the timestamp (reverse the
+            // whole vec would also flip the tie-break, reintroducing the
+            // instability).
             if sort_order == Some("DESCENDING") {
-                all.reverse();
+                all.sort_by(|a, b| {
+                    b.created_at
+                        .cmp(&a.created_at)
+                        .then_with(|| a.arn.cmp(&b.arn))
+                });
+            } else {
+                all.sort_by(|a, b| {
+                    a.created_at
+                        .cmp(&b.created_at)
+                        .then_with(|| a.arn.cmp(&b.arn))
+                });
             }
         } else {
             all.sort_by(|a, b| a.arn.cmp(&b.arn));
@@ -2969,6 +2985,179 @@ mod tests {
                 arn["b.example.com"].clone(),
                 arn["c.example.com"].clone(),
             ]
+        );
+    }
+
+    // With equal `created_at`, the sort must still be total (tie-broken on the
+    // ARN) so offset-based pagination never skips or duplicates a certificate
+    // across pages, and the order is deterministic despite the HashMap source.
+    #[tokio::test]
+    async fn list_certificates_equal_created_at_stable_pagination() {
+        let svc = AcmService::default();
+        let mut created_arns = Vec::new();
+        for d in [
+            "a.example.com",
+            "b.example.com",
+            "c.example.com",
+            "d.example.com",
+        ] {
+            let resp = svc
+                .handle(make_req("RequestCertificate", json!({ "DomainName": d })))
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            created_arns.push(body["CertificateArn"].as_str().unwrap().to_string());
+        }
+        // Force every certificate to the SAME creation timestamp so every
+        // comparison is a tie.
+        {
+            let mut state = svc.state.write();
+            let certs = &mut state.accounts.get_mut("123456789012").unwrap().certificates;
+            let now = chrono::Utc::now();
+            for c in certs.values_mut() {
+                c.created_at = now;
+            }
+        }
+
+        let arns = |body: &Value| -> Vec<String> {
+            body["CertificateSummaryList"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["CertificateArn"].as_str().unwrap().to_string())
+                .collect()
+        };
+
+        // Walk the whole list one item per page (MaxItems=1) and collect.
+        let mut walked = Vec::new();
+        let mut token: Option<String> = None;
+        loop {
+            let mut req =
+                json!({ "SortBy": "CREATED_AT", "SortOrder": "ASCENDING", "MaxItems": 1 });
+            if let Some(t) = &token {
+                req.as_object_mut()
+                    .unwrap()
+                    .insert("NextToken".to_string(), Value::String(t.clone()));
+            }
+            let resp = svc.handle(make_req("ListCertificates", req)).await.unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            walked.extend(arns(&body));
+            match body.get("NextToken").and_then(Value::as_str) {
+                Some(t) => token = Some(t.to_string()),
+                None => break,
+            }
+        }
+
+        // No skips, no duplicates: the paged walk visits exactly the full set.
+        let mut expected = created_arns.clone();
+        expected.sort();
+        let mut walked_sorted = walked.clone();
+        walked_sorted.sort();
+        assert_eq!(
+            walked_sorted, expected,
+            "paged walk must cover every cert once"
+        );
+        assert_eq!(
+            walked.len(),
+            created_arns.len(),
+            "no duplicates across pages"
+        );
+
+        // The tie-break is deterministic: full ASCENDING order == ARN-ascending.
+        let full = |order: &'static str| {
+            let svc = &svc;
+            async move {
+                let resp = svc
+                    .handle(make_req(
+                        "ListCertificates",
+                        json!({ "SortBy": "CREATED_AT", "SortOrder": order, "MaxItems": 100 }),
+                    ))
+                    .await
+                    .unwrap();
+                let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+                body["CertificateSummaryList"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["CertificateArn"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>()
+            }
+        };
+        let asc = full("ASCENDING").await;
+        assert_eq!(
+            asc, expected,
+            "equal-timestamp order is deterministic ARN order"
+        );
+        // Stable across repeated calls (HashMap iteration doesn't leak through).
+        assert_eq!(full("ASCENDING").await, asc);
+        // With all timestamps equal, DESCENDING must NOT reverse the ARN ties —
+        // the tie order is stable, so DESCENDING equals ASCENDING here.
+        assert_eq!(
+            full("DESCENDING").await,
+            asc,
+            "ties must not flip on DESCENDING"
+        );
+    }
+
+    // DESCENDING is the exact inverse of ASCENDING on the primary key when
+    // timestamps are distinct (guards the (Reverse(created_at), arn) ordering).
+    #[tokio::test]
+    async fn list_certificates_descending_is_inverse_for_distinct_timestamps() {
+        let svc = AcmService::default();
+        let mut arn: std::collections::HashMap<&str, String> = std::collections::HashMap::new();
+        for d in ["a.example.com", "b.example.com", "c.example.com"] {
+            let resp = svc
+                .handle(make_req("RequestCertificate", json!({ "DomainName": d })))
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+            arn.insert(d, body["CertificateArn"].as_str().unwrap().to_string());
+        }
+        {
+            let mut state = svc.state.write();
+            let certs = &mut state.accounts.get_mut("123456789012").unwrap().certificates;
+            let now = chrono::Utc::now();
+            for c in certs.values_mut() {
+                match c.domain_name.as_str() {
+                    "a.example.com" => c.created_at = now - chrono::Duration::hours(2),
+                    "b.example.com" => c.created_at = now - chrono::Duration::hours(1),
+                    _ => c.created_at = now,
+                }
+            }
+        }
+        let arns = |body: &Value| -> Vec<String> {
+            body["CertificateSummaryList"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|r| r["CertificateArn"].as_str().unwrap().to_string())
+                .collect()
+        };
+        let asc = {
+            let resp = svc
+                .handle(make_req(
+                    "ListCertificates",
+                    json!({ "SortBy": "CREATED_AT", "SortOrder": "ASCENDING" }),
+                ))
+                .await
+                .unwrap();
+            arns(&serde_json::from_slice(resp.body.expect_bytes()).unwrap())
+        };
+        let desc = {
+            let resp = svc
+                .handle(make_req(
+                    "ListCertificates",
+                    json!({ "SortBy": "CREATED_AT", "SortOrder": "DESCENDING" }),
+                ))
+                .await
+                .unwrap();
+            arns(&serde_json::from_slice(resp.body.expect_bytes()).unwrap())
+        };
+        let mut asc_rev = asc.clone();
+        asc_rev.reverse();
+        assert_eq!(
+            desc, asc_rev,
+            "distinct timestamps: DESCENDING == reverse(ASCENDING)"
         );
     }
 

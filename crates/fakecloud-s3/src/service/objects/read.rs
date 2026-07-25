@@ -97,8 +97,11 @@ impl S3Service {
         // instead of returning the raw envelope to the caller.
         let decrypted_body: Option<Bytes> =
             if obj.sse_algorithm.as_deref() == Some("aws:kms") && self.kms_hook.is_some() {
-                let raw = state
-                    .read_body(&obj.body)
+                // Offload the (potentially multi-GB) full-object disk read
+                // onto a blocking thread so it doesn't stall the tokio worker
+                // while we decrypt the envelope, mirroring the multipart
+                // assembly path.
+                let raw = run_blocking_io(|| state.read_body(&obj.body))
                     .map_err(crate::service::io_to_aws)?;
                 Some(self.decrypt_object_body(account_id, bucket, &raw)?)
             } else {
@@ -228,8 +231,9 @@ impl S3Service {
                             let e = (start + len as usize).min(plain.len());
                             plain.slice(s..e).into()
                         } else {
-                            state
-                                .read_body_range(&obj.body, start as u64, len)
+                            // Seek+read on a blocking thread so a large ranged
+                            // read doesn't starve the tokio worker.
+                            run_blocking_io(|| state.read_body_range(&obj.body, start as u64, len))
                                 .map_err(crate::service::io_to_aws)?
                                 .into()
                         };
@@ -308,10 +312,13 @@ impl S3Service {
                     let e = (part_start + part_size).min(plain.len());
                     plain.slice(s..e).into()
                 } else {
-                    state
-                        .read_body_range(&obj.body, part_start as u64, part_size as u64)
-                        .map_err(crate::service::io_to_aws)?
-                        .into()
+                    // Seek+read on a blocking thread so a large part read
+                    // doesn't starve the tokio worker.
+                    run_blocking_io(|| {
+                        state.read_body_range(&obj.body, part_start as u64, part_size as u64)
+                    })
+                    .map_err(crate::service::io_to_aws)?
+                    .into()
                 };
                 response_status = StatusCode::PARTIAL_CONTENT;
             } else {
