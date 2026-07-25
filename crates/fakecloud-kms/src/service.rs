@@ -45,6 +45,9 @@ const VALID_KEY_SPECS: &[&str] = &[
     "HMAC_256",
     "HMAC_384",
     "HMAC_512",
+    "ML_DSA_44",
+    "ML_DSA_65",
+    "ML_DSA_87",
     "RSA_2048",
     "RSA_3072",
     "RSA_4096",
@@ -62,6 +65,7 @@ const VALID_SIGNING_ALGORITHMS: &[&str] = &[
     "ECDSA_SHA_256",
     "ECDSA_SHA_384",
     "ECDSA_SHA_512",
+    "ML_DSA_SHAKE_256",
 ];
 
 /// Single source of truth for supported KMS actions. Referenced by both

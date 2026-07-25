@@ -315,6 +315,8 @@ pub(crate) fn signing_algorithms_for_key_spec(key_spec: &str) -> Option<Vec<Stri
         "ECC_NIST_P256" | "ECC_SECG_P256K1" => Some(vec!["ECDSA_SHA_256".into()]),
         "ECC_NIST_P384" => Some(vec!["ECDSA_SHA_384".into()]),
         "ECC_NIST_P521" => Some(vec!["ECDSA_SHA_512".into()]),
+        // ML-DSA post-quantum specs share a single SHAKE-256 signing algorithm.
+        "ML_DSA_44" | "ML_DSA_65" | "ML_DSA_87" => Some(vec!["ML_DSA_SHAKE_256".into()]),
         _ => None,
     }
 }
@@ -553,6 +555,8 @@ fn allowed_usages_for_key_spec(key_spec: &str) -> &'static [&'static str] {
         "ECC_SECG_P256K1" => &["SIGN_VERIFY"],
         // SM2 (China regions) supports all three.
         "SM2" => &["SIGN_VERIFY", "ENCRYPT_DECRYPT", "KEY_AGREEMENT"],
+        // ML-DSA post-quantum specs are signing-only.
+        s if s.starts_with("ML_DSA_") => &["SIGN_VERIFY"],
         _ => &[],
     }
 }

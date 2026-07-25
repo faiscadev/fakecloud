@@ -76,6 +76,9 @@ pub const VALID_KEY_SPECS: &[&str] = &[
     "HMAC_384",
     "HMAC_512",
     "SM2",
+    "ML_DSA_44",
+    "ML_DSA_65",
+    "ML_DSA_87",
 ];
 
 /// AWS KMS key usages accepted across `CreateKey` / CFN.
@@ -102,6 +105,8 @@ pub fn validate_key_usage_for_spec(key_usage: &str, key_spec: &str) -> Result<()
     let is_rsa = key_spec.starts_with("RSA_");
     let is_ecc = key_spec.starts_with("ECC_");
     let is_sm2 = key_spec == "SM2";
+    // ML-DSA post-quantum specs are signing-only, like ECC secp256k1.
+    let is_ml_dsa = key_spec.starts_with("ML_DSA_");
     match key_usage {
         "ENCRYPT_DECRYPT" => {
             if !(is_symmetric || is_rsa || is_sm2) {
@@ -111,7 +116,7 @@ pub fn validate_key_usage_for_spec(key_usage: &str, key_spec: &str) -> Result<()
             }
         }
         "SIGN_VERIFY" => {
-            if !(is_rsa || is_ecc || is_sm2) {
+            if !(is_rsa || is_ecc || is_sm2 || is_ml_dsa) {
                 return Err(format!(
                     "KeySpec {key_spec} does not support KeyUsage SIGN_VERIFY"
                 ));
@@ -227,12 +232,12 @@ pub fn build_kms_key(
 pub fn provision_key(
     state: &SharedKmsState,
     account_id: &str,
+    region: &str,
     input: &KeyCreationInput,
 ) -> Result<(String, String), String> {
     let mut accounts = state.write();
     let s = accounts.get_or_create(account_id);
-    let region = s.region.clone();
-    let key = build_kms_key(&region, account_id, input)?;
+    let key = build_kms_key(region, account_id, input)?;
     let key_id = key.key_id.clone();
     let arn = key.arn.clone();
     s.keys.insert(key_id.clone(), key);
@@ -245,9 +250,11 @@ pub fn provision_key(
 /// single-region so colliding IDs would overwrite the primary), and
 /// inserts the replica with `primary_region` set so `DescribeKey`
 /// reports `MultiRegionKeyType=REPLICA`.
+#[allow(clippy::too_many_arguments)]
 pub fn provision_replica_key(
     state: &SharedKmsState,
     account_id: &str,
+    region: &str,
     primary_arn: &str,
     description: Option<String>,
     enabled: bool,
@@ -266,7 +273,6 @@ pub fn provision_replica_key(
 
     let mut accounts = state.write();
     let s = accounts.get_or_create(account_id);
-    let region = s.region.clone();
     // Source must be a multi-region key in the primary account; look
     // it up either by raw key_id (when the primary lives in this
     // state's region) or via the region-keyed slot.
@@ -283,7 +289,7 @@ pub fn provision_replica_key(
 
     let replica_key_id = format!("mrk-replica-{}", Uuid::new_v4().as_simple());
     let replica_arn =
-        Arn::new("kms", &region, account_id, &format!("key/{replica_key_id}")).to_string();
+        Arn::new("kms", region, account_id, &format!("key/{replica_key_id}")).to_string();
     let mut replica = source;
     replica.key_id = replica_key_id.clone();
     replica.arn = replica_arn.clone();
@@ -321,6 +327,7 @@ pub fn provision_replica_key(
 pub fn provision_alias(
     state: &SharedKmsState,
     account_id: &str,
+    region: &str,
     alias_name: &str,
     target_input: &str,
 ) -> Result<String, String> {
@@ -345,7 +352,7 @@ pub fn provision_alias(
     } else {
         return Err(format!("KMS key '{target_input}' does not exist"));
     };
-    let alias_arn = Arn::new("kms", &s.region, &s.account_id, alias_name).to_string();
+    let alias_arn = Arn::new("kms", region, &s.account_id, alias_name).to_string();
     let alias = KmsAlias {
         alias_name: alias_name.to_string(),
         alias_arn,
@@ -438,4 +445,103 @@ pub fn update_alias_target(
         .ok_or_else(|| format!("Alias '{alias_name}' does not exist"))?;
     alias.target_key_id = target_key_id;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
+
+    fn make_state() -> SharedKmsState {
+        Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                "123456789012",
+                "us-east-1",
+                "http://localhost:4566",
+            ),
+        ))
+    }
+
+    #[test]
+    fn provisioned_key_arn_carries_request_region_not_server_default() {
+        // The server-frozen region is us-east-1; a stack signed for
+        // eu-central-1 must mint an eu-central-1 key ARN.
+        let state = make_state();
+        let input = KeyCreationInput::default();
+        let (key_id, arn) = provision_key(&state, "123456789012", "eu-central-1", &input).unwrap();
+        assert_eq!(
+            arn,
+            format!("arn:aws:kms:eu-central-1:123456789012:key/{key_id}")
+        );
+    }
+
+    #[test]
+    fn provisioned_alias_arn_carries_request_region() {
+        let state = make_state();
+        let input = KeyCreationInput::default();
+        let (key_id, _) = provision_key(&state, "123456789012", "eu-central-1", &input).unwrap();
+        provision_alias(
+            &state,
+            "123456789012",
+            "eu-central-1",
+            "alias/region-test",
+            &key_id,
+        )
+        .unwrap();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        let alias = s.aliases.get("alias/region-test").unwrap();
+        assert_eq!(
+            alias.alias_arn,
+            "arn:aws:kms:eu-central-1:123456789012:alias/region-test"
+        );
+    }
+
+    #[test]
+    fn provisioned_replica_key_arn_carries_request_region() {
+        let state = make_state();
+        let input = KeyCreationInput {
+            multi_region: true,
+            ..Default::default()
+        };
+        let (_, primary_arn) = provision_key(&state, "123456789012", "us-east-1", &input).unwrap();
+        let (_, replica_arn) = provision_replica_key(
+            &state,
+            "123456789012",
+            "eu-central-1",
+            &primary_arn,
+            None,
+            true,
+            None,
+            BTreeMap::new(),
+        )
+        .unwrap();
+        assert!(
+            replica_arn.starts_with("arn:aws:kms:eu-central-1:123456789012:key/"),
+            "replica ARN must carry the request region, got {replica_arn}"
+        );
+    }
+
+    #[test]
+    fn build_kms_key_accepts_ml_dsa_sign_verify() {
+        let input = KeyCreationInput {
+            key_usage: "SIGN_VERIFY".to_string(),
+            key_spec: "ML_DSA_65".to_string(),
+            ..Default::default()
+        };
+        let key = build_kms_key("us-east-1", "123456789012", &input).unwrap();
+        assert_eq!(key.key_spec, "ML_DSA_65");
+        assert_eq!(key.key_usage, "SIGN_VERIFY");
+        assert_eq!(
+            key.signing_algorithms.as_deref(),
+            Some(&["ML_DSA_SHAKE_256".to_string()][..])
+        );
+    }
+
+    #[test]
+    fn validate_key_usage_rejects_ml_dsa_encrypt_decrypt() {
+        assert!(validate_key_usage_for_spec("SIGN_VERIFY", "ML_DSA_87").is_ok());
+        assert!(validate_key_usage_for_spec("ENCRYPT_DECRYPT", "ML_DSA_87").is_err());
+    }
 }
