@@ -24,8 +24,12 @@ impl ResourceProvisioner {
         resource: &ResourceDefinition,
     ) -> Result<ProvisionResult, String> {
         let input = parse_kms_key_input(&resource.properties);
-        let (key_id, arn) =
-            kms_provisioner::provision_key(&self.kms_state, &self.account_id, &input)?;
+        let (key_id, arn) = kms_provisioner::provision_key(
+            &self.kms_state,
+            &self.account_id,
+            &self.region,
+            &input,
+        )?;
         Ok(ProvisionResult::new(key_id.clone())
             .with("Arn", arn)
             .with("KeyId", key_id))
@@ -113,6 +117,7 @@ impl ResourceProvisioner {
         let (replica_key_id, replica_arn) = kms_provisioner::provision_replica_key(
             &self.kms_state,
             &self.account_id,
+            &self.region,
             &primary_arn,
             description,
             enabled,
@@ -219,6 +224,7 @@ impl ResourceProvisioner {
         let alias = kms_provisioner::provision_alias(
             &self.kms_state,
             &self.account_id,
+            &self.region,
             &alias_name,
             &target_input,
         )?;

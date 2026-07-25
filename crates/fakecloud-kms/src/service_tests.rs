@@ -1781,6 +1781,44 @@ fn describe_key_returns_metadata_for_new_key() {
 }
 
 #[test]
+fn create_key_accepts_ml_dsa_post_quantum_spec() {
+    // ML-DSA (post-quantum) signing keys must be accepted at CreateKey and
+    // echoed back verbatim by DescribeKey, even though the backend does not
+    // implement real ML-DSA signing crypto.
+    let svc = make_service();
+    let key_id = create_key_with_opts(
+        &svc,
+        json!({
+            "KeyUsage": "SIGN_VERIFY",
+            "KeySpec": "ML_DSA_65"
+        }),
+    );
+
+    let resp = svc
+        .describe_key(&make_request("DescribeKey", json!({ "KeyId": &key_id })))
+        .unwrap();
+    let body = body_json(resp);
+    assert_eq!(body["KeyMetadata"]["KeySpec"], json!("ML_DSA_65"));
+    assert_eq!(body["KeyMetadata"]["KeyUsage"], json!("SIGN_VERIFY"));
+    assert_eq!(
+        body["KeyMetadata"]["SigningAlgorithms"],
+        json!(["ML_DSA_SHAKE_256"])
+    );
+}
+
+#[test]
+fn create_key_rejects_ml_dsa_with_encrypt_decrypt() {
+    // ML-DSA is signing-only; ENCRYPT_DECRYPT must still be rejected.
+    let svc = make_service();
+    let req = make_request(
+        "CreateKey",
+        json!({ "KeyUsage": "ENCRYPT_DECRYPT", "KeySpec": "ML_DSA_65" }),
+    );
+    let err = svc.create_key(&req).err().expect("expected error");
+    assert_eq!(err.code(), "ValidationException");
+}
+
+#[test]
 fn describe_key_requires_key_id() {
     let svc = make_service();
     let err = svc
