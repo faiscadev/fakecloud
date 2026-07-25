@@ -76,6 +76,26 @@ pub(super) fn dispatch(
         "SendPipelineExecutionStepFailure" => Ok(Some(send_pipeline_execution_step(
             svc, ctx, meta, body, false,
         ))),
+        // Six modelled ops the generator names under a family slug taken from the
+        // op's own shape (`EndpointWeightsAndCapacities`, `ClusterSoftware`,
+        // `FeatureMetadata`, `InferenceComponentRuntimeConfig`, `MonitoringAlert`,
+        // `PipelineVersion`) that no `Create*` ever populates — so the generic
+        // engine's `resolve_key` always missed and hard-404'd against a resource
+        // that provably exists. Resolve each against the PARENT family its real
+        // `Create*` stores under (Endpoint / Cluster / FeatureGroup /
+        // InferenceComponent / MonitoringSchedule / Pipeline) and project the op's
+        // modelled output shape (bug-hunt 2026-07-25 Tier-1).
+        "UpdateEndpointWeightsAndCapacities" => {
+            Ok(Some(update_endpoint_weights(svc, ctx, meta, body)?))
+        }
+        "UpdateClusterSoftware" => Ok(Some(update_cluster_software(svc, ctx, meta, body)?)),
+        "DescribeFeatureMetadata" => Ok(Some(describe_feature_metadata(svc, ctx, meta, body)?)),
+        "UpdateFeatureMetadata" => Ok(Some(update_feature_metadata(svc, ctx, meta, body)?)),
+        "UpdateInferenceComponentRuntimeConfig" => Ok(Some(
+            update_inference_component_runtime_config(svc, ctx, meta, body)?,
+        )),
+        "UpdateMonitoringAlert" => Ok(Some(update_monitoring_alert(svc, ctx, meta, body)?)),
+        "UpdatePipelineVersion" => Ok(Some(update_pipeline_version(svc, ctx, meta, body)?)),
         op if is_lifecycle_transition(op) => Ok(lifecycle_transition(svc, ctx, meta, body)),
         _ => Ok(None),
     }
@@ -981,6 +1001,440 @@ fn list_pipeline_executions(
         engine::list_entries_response(ctx, meta, body, filtered),
         false,
     ))
+}
+
+// ── Ops mis-mapped to a synthetic child family (parent-scoped) ────────────
+//
+// See the dispatch note above: the generator derived each of these ops'
+// `family` slug from the op's own shape name, which no `Create*` populates, so
+// the generic engine 404'd. The handlers below resolve the real PARENT family
+// and project the op's own modelled output shape. When the parent is absent they
+// return `ResourceNotFound` — matching the live API, and a conformance PASS
+// (SageMaker's service-wide common error).
+
+/// Feature-level metadata (`Description` / `Parameters`) is stored on the parent
+/// `FeatureGroup` record under this internal member, keyed by feature name. It is
+/// not a modelled `FeatureGroup` output member, so every projection drops it.
+const FEATURE_META: &str = "__FeatureMetadata";
+/// Per-schedule monitoring alerts, keyed by alert name, on the parent
+/// `MonitoringSchedule` record (internal, dropped by projections).
+const MONITORING_ALERTS: &str = "__MonitoringAlerts";
+/// Per-pipeline version metadata, keyed by version id, on the parent `Pipeline`
+/// record (internal, dropped by projections).
+const PIPELINE_VERSIONS: &str = "__PipelineVersions";
+
+/// Resolve `parent_family` by the caller's `ident_member`, apply `mutate` to the
+/// existing parent record (bumping `LastModifiedTime`), and return the
+/// operation's modelled output projected from the record — overlaying any output
+/// member the request echoes that the parent record does not itself store (e.g.
+/// `PipelineVersionId`, `MonitoringAlertName`). Returns a 404 `ResourceNotFound`
+/// when the parent does not exist, matching the live API (these child-scoped ops
+/// reject a missing parent) and keeping the conformance probe a PASS.
+fn update_via_parent(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+    parent_family: &str,
+    ident_member: &str,
+    mutate: impl FnOnce(&mut Map<String, Value>),
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let ident = str_member(body, ident_member);
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(key) = data.resolve_key(parent_family, &ident) else {
+        return Err(super::not_found(format!(
+            "Resource '{ident}' does not exist."
+        )));
+    };
+    if let Some(obj) = data
+        .get_resource_mut(parent_family, &key)
+        .and_then(Value::as_object_mut)
+    {
+        mutate(obj);
+        obj.insert("LastModifiedTime".to_string(), now_epoch());
+    }
+    let mut record = data
+        .get_resource(parent_family, &key)
+        .cloned()
+        .unwrap_or(Value::Null);
+    if let Some(obj) = record.as_object_mut() {
+        for (wire, _kind) in meta.omembers {
+            if !obj.contains_key(*wire) {
+                if let Some(v) = body.get(*wire) {
+                    obj.insert((*wire).to_string(), v.clone());
+                }
+            }
+        }
+    }
+    let out = engine::build_output(ctx, meta, &key, &record);
+    Ok((ok_json(out), true))
+}
+
+/// `UpdateEndpointWeightsAndCapacities` — merge each requested
+/// `DesiredWeightsAndCapacities` entry into the parent `Endpoint` record's
+/// `ProductionVariants` summary list (keyed by `VariantName`) so a subsequent
+/// `DescribeEndpoint` reflects the new desired weight / instance count. Returns
+/// the endpoint's `EndpointArn`.
+fn update_endpoint_weights(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let desired = body
+        .get("DesiredWeightsAndCapacities")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    update_via_parent(
+        svc,
+        ctx,
+        meta,
+        body,
+        "Endpoint",
+        "EndpointName",
+        move |obj| {
+            let mut variants = obj
+                .get("ProductionVariants")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for spec in desired.iter().filter_map(Value::as_object) {
+                let vname = spec
+                    .get("VariantName")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let weight = spec.get("DesiredWeight").cloned();
+                let count = spec.get("DesiredInstanceCount").cloned();
+                let apply = |summary: &mut Map<String, Value>| {
+                    if let Some(w) = weight.clone() {
+                        summary.insert("CurrentWeight".to_string(), w.clone());
+                        summary.insert("DesiredWeight".to_string(), w);
+                    }
+                    if let Some(c) = count.clone() {
+                        summary.insert("CurrentInstanceCount".to_string(), c.clone());
+                        summary.insert("DesiredInstanceCount".to_string(), c);
+                    }
+                };
+                match variants.iter_mut().find(|v| {
+                    v.as_object()
+                        .and_then(|o| o.get("VariantName"))
+                        .and_then(Value::as_str)
+                        == Some(vname)
+                }) {
+                    Some(existing) => {
+                        if let Some(o) = existing.as_object_mut() {
+                            apply(o);
+                        }
+                    }
+                    None => {
+                        let mut summary = Map::new();
+                        summary.insert("VariantName".to_string(), Value::String(vname.to_string()));
+                        apply(&mut summary);
+                        variants.push(Value::Object(summary));
+                    }
+                }
+            }
+            obj.insert("ProductionVariants".to_string(), Value::Array(variants));
+        },
+    )
+}
+
+/// `UpdateClusterSoftware` — a control-plane software update on the parent
+/// `Cluster`. No queryable cluster attribute changes (the request carries only
+/// the image / instance groups to patch), so the effect is the bumped
+/// `LastModifiedTime`; returns the cluster's `ClusterArn`.
+fn update_cluster_software(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    update_via_parent(svc, ctx, meta, body, "Cluster", "ClusterName", |_obj| {})
+}
+
+/// `UpdateInferenceComponentRuntimeConfig` — apply the requested
+/// `DesiredRuntimeConfig.CopyCount` to the parent `InferenceComponent` record's
+/// `RuntimeConfig` so a subsequent `DescribeInferenceComponent` reflects it.
+/// Returns the component's `InferenceComponentArn`.
+fn update_inference_component_runtime_config(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let copies = body
+        .get("DesiredRuntimeConfig")
+        .and_then(Value::as_object)
+        .and_then(|o| o.get("CopyCount"))
+        .and_then(Value::as_i64);
+    update_via_parent(
+        svc,
+        ctx,
+        meta,
+        body,
+        "InferenceComponent",
+        "InferenceComponentName",
+        move |obj| {
+            if let Some(c) = copies {
+                let mut rc = obj
+                    .get("RuntimeConfig")
+                    .and_then(Value::as_object)
+                    .cloned()
+                    .unwrap_or_default();
+                rc.insert("DesiredCopyCount".to_string(), Value::from(c));
+                rc.insert("CurrentCopyCount".to_string(), Value::from(c));
+                obj.insert("RuntimeConfig".to_string(), Value::Object(rc));
+            }
+        },
+    )
+}
+
+/// `UpdateMonitoringAlert` — upsert the named alert's `DatapointsToAlert` /
+/// `EvaluationPeriod` onto the parent `MonitoringSchedule` record. Returns the
+/// schedule's `MonitoringScheduleArn` plus the echoed `MonitoringAlertName`.
+fn update_monitoring_alert(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let alert_name = str_member(body, "MonitoringAlertName");
+    let datapoints = body.get("DatapointsToAlert").cloned();
+    let period = body.get("EvaluationPeriod").cloned();
+    update_via_parent(
+        svc,
+        ctx,
+        meta,
+        body,
+        "MonitoringSchedule",
+        "MonitoringScheduleName",
+        move |obj| {
+            let mut alerts = obj
+                .get(MONITORING_ALERTS)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let mut alert = alerts
+                .get(&alert_name)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(d) = datapoints {
+                alert.insert("DatapointsToAlert".to_string(), d);
+            }
+            if let Some(p) = period {
+                alert.insert("EvaluationPeriod".to_string(), p);
+            }
+            alerts.insert(alert_name.clone(), Value::Object(alert));
+            obj.insert(MONITORING_ALERTS.to_string(), Value::Object(alerts));
+        },
+    )
+}
+
+/// `UpdatePipelineVersion` — upsert the version's display name / description onto
+/// the parent `Pipeline` record (resolved by `PipelineArn`), keyed by
+/// `PipelineVersionId`. Returns the echoed `PipelineArn` + `PipelineVersionId`.
+fn update_pipeline_version(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let version_key = body
+        .get("PipelineVersionId")
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let display = body.get("PipelineVersionDisplayName").cloned();
+    let description = body.get("PipelineVersionDescription").cloned();
+    update_via_parent(
+        svc,
+        ctx,
+        meta,
+        body,
+        "Pipeline",
+        "PipelineArn",
+        move |obj| {
+            let mut versions = obj
+                .get(PIPELINE_VERSIONS)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            let mut version = versions
+                .get(&version_key)
+                .and_then(Value::as_object)
+                .cloned()
+                .unwrap_or_default();
+            if let Some(d) = display {
+                version.insert("PipelineVersionDisplayName".to_string(), d);
+            }
+            if let Some(d) = description {
+                version.insert("PipelineVersionDescription".to_string(), d);
+            }
+            versions.insert(version_key.clone(), Value::Object(version));
+            obj.insert(PIPELINE_VERSIONS.to_string(), Value::Object(versions));
+        },
+    )
+}
+
+/// The `FeatureType` a feature carries in its parent group's `FeatureDefinitions`.
+fn feature_type_of(group: Option<&Map<String, Value>>, feature_name: &str) -> Option<String> {
+    group?
+        .get("FeatureDefinitions")?
+        .as_array()?
+        .iter()
+        .find_map(|d| {
+            let o = d.as_object()?;
+            if o.get("FeatureName").and_then(Value::as_str) == Some(feature_name) {
+                o.get("FeatureType")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            } else {
+                None
+            }
+        })
+}
+
+/// `UpdateFeatureMetadata` — set a feature's `Description` and apply its
+/// `ParameterAdditions` / `ParameterRemovals` on the parent `FeatureGroup`
+/// record, so `DescribeFeatureMetadata` round-trips them. Output shape is empty.
+fn update_feature_metadata(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    _meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let group_name = str_member(body, "FeatureGroupName");
+    let feature_name = str_member(body, "FeatureName");
+    let description = body.get("Description").cloned();
+    let additions = body
+        .get("ParameterAdditions")
+        .and_then(Value::as_array)
+        .cloned();
+    let removals = body
+        .get("ParameterRemovals")
+        .and_then(Value::as_array)
+        .cloned();
+
+    let mut g = svc.state.write();
+    let data = g.get_or_create(&ctx.account);
+    let Some(key) = data.resolve_key("FeatureGroup", &group_name) else {
+        return Err(super::not_found(format!(
+            "Resource '{group_name}' does not exist."
+        )));
+    };
+    if let Some(obj) = data
+        .get_resource_mut("FeatureGroup", &key)
+        .and_then(Value::as_object_mut)
+    {
+        let mut all = obj
+            .get(FEATURE_META)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let mut fm = all
+            .get(&feature_name)
+            .and_then(Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(d) = description {
+            fm.insert("Description".to_string(), d);
+        }
+        let mut params = fm
+            .get("Parameters")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        // A key helper: a stored `{Key,Value}` parameter's key.
+        let param_key = |p: &Value| -> Option<String> {
+            p.as_object()
+                .and_then(|o| o.get("Key"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        };
+        for add in additions.into_iter().flatten() {
+            let Some(k) = param_key(&add) else { continue };
+            params.retain(|p| param_key(p).as_deref() != Some(k.as_str()));
+            params.push(add);
+        }
+        // `ParameterRemovals` is modelled as a list of parameter keys (strings);
+        // tolerate a `{Key}` object form too.
+        for rem in removals.into_iter().flatten() {
+            let k = rem.as_str().map(str::to_string).or_else(|| param_key(&rem));
+            if let Some(k) = k {
+                params.retain(|p| param_key(p).as_deref() != Some(k.as_str()));
+            }
+        }
+        fm.insert("Parameters".to_string(), Value::Array(params));
+        all.insert(feature_name, Value::Object(fm));
+        obj.insert(FEATURE_META.to_string(), Value::Object(all));
+    }
+    Ok((ok_json(Value::Object(Map::new())), true))
+}
+
+/// `DescribeFeatureMetadata` — read a feature's metadata back off the parent
+/// `FeatureGroup` record: its `FeatureType` (from the group's
+/// `FeatureDefinitions`) plus any `Description` / `Parameters`
+/// `UpdateFeatureMetadata` stored, projected onto the op's output shape.
+fn describe_feature_metadata(
+    svc: &SageMakerService,
+    ctx: &Ctx,
+    meta: &OpMeta,
+    body: &Map<String, Value>,
+) -> Result<(AwsResponse, bool), AwsServiceError> {
+    let group_name = str_member(body, "FeatureGroupName");
+    let feature_name = str_member(body, "FeatureName");
+    let g = svc.state.read();
+    let group = g
+        .get(&ctx.account)
+        .and_then(|d| d.resolve_key("FeatureGroup", &group_name).map(|k| (d, k)));
+    let Some((data, key)) = group else {
+        return Err(super::not_found(format!(
+            "Resource '{group_name}' does not exist."
+        )));
+    };
+    let record = data
+        .get_resource("FeatureGroup", &key)
+        .cloned()
+        .unwrap_or(Value::Null);
+    let gobj = record.as_object();
+
+    let mut out = Map::new();
+    if let Some(arn) = gobj.and_then(|o| o.get("FeatureGroupArn")).cloned() {
+        out.insert("FeatureGroupArn".to_string(), arn);
+    }
+    out.insert(
+        "FeatureGroupName".to_string(),
+        Value::String(group_name.clone()),
+    );
+    out.insert(
+        "FeatureName".to_string(),
+        Value::String(feature_name.clone()),
+    );
+    if let Some(ft) = feature_type_of(gobj, &feature_name) {
+        out.insert("FeatureType".to_string(), Value::String(ft));
+    }
+    if let Some(ct) = gobj.and_then(|o| o.get("CreationTime")).cloned() {
+        out.insert("CreationTime".to_string(), ct);
+    }
+    if let Some(fm) = gobj
+        .and_then(|o| o.get(FEATURE_META))
+        .and_then(Value::as_object)
+        .and_then(|m| m.get(&feature_name))
+        .and_then(Value::as_object)
+    {
+        if let Some(d) = fm.get("Description") {
+            out.insert("Description".to_string(), d.clone());
+        }
+        if let Some(p) = fm.get("Parameters") {
+            out.insert("Parameters".to_string(), p.clone());
+        }
+    }
+    // Complete any still-missing required output member (FeatureType default,
+    // LastModifiedTime, ...) so the response is shape-valid.
+    let out = engine::build_output(ctx, meta, &feature_name, &Value::Object(out));
+    Ok((ok_json(out), false))
 }
 
 fn tags_to_array(tags: &std::collections::BTreeMap<String, String>) -> Value {

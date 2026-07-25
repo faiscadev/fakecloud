@@ -1100,3 +1100,278 @@ fn send_pipeline_execution_step_advances_callback() {
         assert_eq!(rec["FailureReason"], "boom");
     }
 }
+
+// ── Ops mis-mapped to a synthetic child family resolve against their parent ──
+//
+// Each of these six ops was auto-generated under a `family` slug taken from its
+// own shape name, which no `Create*` populates, so the generic engine always
+// 404'd even against an existing parent. They now resolve the real parent family
+// and project the modelled output shape (bug-hunt 2026-07-25 Tier-1).
+
+// UpdateEndpointWeightsAndCapacities updates the parent endpoint's production
+// variant weights and is visible on DescribeEndpoint.
+#[test]
+fn update_endpoint_weights_resolves_endpoint_and_round_trips() {
+    let s = svc();
+    // Absent endpoint -> 404 ResourceNotFound (a conformance common-error PASS).
+    match expect_err(run(
+        &s,
+        "UpdateEndpointWeightsAndCapacities",
+        json!({
+            "EndpointName": "ep1",
+            "DesiredWeightsAndCapacities": [{"VariantName": "v1", "DesiredWeight": 2.0}]
+        }),
+    )) {
+        AwsServiceError::AwsError { code, status, .. } => {
+            assert_eq!(code, "ResourceNotFound");
+            assert_eq!(status.as_u16(), 404);
+        }
+        other => panic!("expected AwsError, got {other:?}"),
+    }
+
+    run(
+        &s,
+        "CreateEndpoint",
+        json!({"EndpointName": "ep1", "EndpointConfigName": "cfg1"}),
+    )
+    .unwrap();
+
+    let updated = resp_json(
+        &run(
+            &s,
+            "UpdateEndpointWeightsAndCapacities",
+            json!({
+                "EndpointName": "ep1",
+                "DesiredWeightsAndCapacities": [
+                    {"VariantName": "v1", "DesiredWeight": 5.0, "DesiredInstanceCount": 3}
+                ]
+            }),
+        )
+        .unwrap(),
+    );
+    // Modelled output shape: { EndpointArn }.
+    assert!(updated["EndpointArn"]
+        .as_str()
+        .unwrap()
+        .contains("endpoint/"));
+
+    // The new desired weight/capacity is visible on DescribeEndpoint.
+    let described =
+        resp_json(&run(&s, "DescribeEndpoint", json!({"EndpointName": "ep1"})).unwrap());
+    let variants = described["ProductionVariants"].as_array().unwrap();
+    let v1 = variants
+        .iter()
+        .find(|v| v["VariantName"] == "v1")
+        .expect("v1 variant present");
+    assert_eq!(v1["DesiredWeight"], 5.0);
+    assert_eq!(v1["DesiredInstanceCount"], 3);
+}
+
+// UpdateFeatureMetadata writes description/parameters; DescribeFeatureMetadata
+// reads them back, both scoped to the parent FeatureGroup.
+#[test]
+fn feature_metadata_round_trips_against_feature_group() {
+    let s = svc();
+    // Absent feature group -> 404 on both Describe and Update.
+    for op in ["DescribeFeatureMetadata", "UpdateFeatureMetadata"] {
+        match expect_err(run(
+            &s,
+            op,
+            json!({"FeatureGroupName": "fg1", "FeatureName": "age"}),
+        )) {
+            AwsServiceError::AwsError { code, status, .. } => {
+                assert_eq!(code, "ResourceNotFound", "{op}");
+                assert_eq!(status.as_u16(), 404, "{op}");
+            }
+            other => panic!("{op}: expected AwsError, got {other:?}"),
+        }
+    }
+
+    run(
+        &s,
+        "CreateFeatureGroup",
+        json!({
+            "FeatureGroupName": "fg1",
+            "RecordIdentifierFeatureName": "id",
+            "EventTimeFeatureName": "ts",
+            "FeatureDefinitions": [
+                {"FeatureName": "age", "FeatureType": "Integral"},
+                {"FeatureName": "id", "FeatureType": "String"}
+            ]
+        }),
+    )
+    .unwrap();
+
+    // Describe before any update: FeatureType comes from the group definitions.
+    let before = resp_json(
+        &run(
+            &s,
+            "DescribeFeatureMetadata",
+            json!({"FeatureGroupName": "fg1", "FeatureName": "age"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(before["FeatureName"], "age");
+    assert_eq!(before["FeatureType"], "Integral");
+    assert!(before["FeatureGroupArn"]
+        .as_str()
+        .unwrap()
+        .contains("feature-group/"));
+
+    // Update: set a description and add a parameter (empty modelled output shape).
+    let updated = resp_json(
+        &run(
+            &s,
+            "UpdateFeatureMetadata",
+            json!({
+                "FeatureGroupName": "fg1",
+                "FeatureName": "age",
+                "Description": "years old",
+                "ParameterAdditions": [{"Key": "unit", "Value": "year"}]
+            }),
+        )
+        .unwrap(),
+    );
+    assert_eq!(updated, json!({}));
+
+    // Describe reflects the written metadata.
+    let after = resp_json(
+        &run(
+            &s,
+            "DescribeFeatureMetadata",
+            json!({"FeatureGroupName": "fg1", "FeatureName": "age"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(after["Description"], "years old");
+    let params = after["Parameters"].as_array().unwrap();
+    assert!(params
+        .iter()
+        .any(|p| p["Key"] == "unit" && p["Value"] == "year"));
+
+    // A removal drops the parameter again.
+    run(
+        &s,
+        "UpdateFeatureMetadata",
+        json!({
+            "FeatureGroupName": "fg1",
+            "FeatureName": "age",
+            "ParameterRemovals": ["unit"]
+        }),
+    )
+    .unwrap();
+    let after2 = resp_json(
+        &run(
+            &s,
+            "DescribeFeatureMetadata",
+            json!({"FeatureGroupName": "fg1", "FeatureName": "age"}),
+        )
+        .unwrap(),
+    );
+    assert!(after2["Parameters"].as_array().unwrap().is_empty());
+}
+
+// The remaining four ops resolve their parent and return the modelled output.
+#[test]
+fn cluster_software_inference_runtime_alert_and_pipeline_version_resolve_parent() {
+    let s = svc();
+
+    // UpdateClusterSoftware -> Cluster (ClusterArn).
+    run(
+        &s,
+        "CreateCluster",
+        json!({"ClusterName": "c1", "InstanceGroups": []}),
+    )
+    .unwrap();
+    let cs = resp_json(&run(&s, "UpdateClusterSoftware", json!({"ClusterName": "c1"})).unwrap());
+    assert!(cs["ClusterArn"].as_str().unwrap().contains("cluster/"));
+
+    // UpdateInferenceComponentRuntimeConfig -> InferenceComponent.
+    run(
+        &s,
+        "CreateInferenceComponent",
+        json!({
+            "InferenceComponentName": "ic1",
+            "EndpointName": "ep",
+            "VariantName": "v",
+            "Specification": {}
+        }),
+    )
+    .unwrap();
+    let ic = resp_json(
+        &run(
+            &s,
+            "UpdateInferenceComponentRuntimeConfig",
+            json!({"InferenceComponentName": "ic1", "DesiredRuntimeConfig": {"CopyCount": 4}}),
+        )
+        .unwrap(),
+    );
+    assert!(ic["InferenceComponentArn"]
+        .as_str()
+        .unwrap()
+        .contains("inference-component/"));
+    let ic_desc = resp_json(
+        &run(
+            &s,
+            "DescribeInferenceComponent",
+            json!({"InferenceComponentName": "ic1"}),
+        )
+        .unwrap(),
+    );
+    assert_eq!(ic_desc["RuntimeConfig"]["DesiredCopyCount"], 4);
+
+    // UpdateMonitoringAlert -> MonitoringSchedule (arn + echoed alert name).
+    run(
+        &s,
+        "CreateMonitoringSchedule",
+        json!({"MonitoringScheduleName": "ms1", "MonitoringScheduleConfig": {}}),
+    )
+    .unwrap();
+    let ma = resp_json(
+        &run(
+            &s,
+            "UpdateMonitoringAlert",
+            json!({
+                "MonitoringScheduleName": "ms1",
+                "MonitoringAlertName": "a1",
+                "DatapointsToAlert": 2,
+                "EvaluationPeriod": 5
+            }),
+        )
+        .unwrap(),
+    );
+    assert!(ma["MonitoringScheduleArn"]
+        .as_str()
+        .unwrap()
+        .contains("monitoring-schedule/"));
+    assert_eq!(ma["MonitoringAlertName"], "a1");
+
+    // UpdatePipelineVersion -> Pipeline, resolved by the minted PipelineArn.
+    let pipeline = resp_json(
+        &run(
+            &s,
+            "CreatePipeline",
+            json!({
+                "PipelineName": "p1",
+                "RoleArn": "arn:aws:iam::0:role/r",
+                "ClientRequestToken": "0123456789abcdef0123456789abcdef"
+            }),
+        )
+        .unwrap(),
+    );
+    let pipeline_arn = pipeline["PipelineArn"].as_str().unwrap().to_string();
+    let pv = resp_json(
+        &run(
+            &s,
+            "UpdatePipelineVersion",
+            json!({
+                "PipelineArn": pipeline_arn,
+                "PipelineVersionId": 1,
+                "PipelineVersionDisplayName": "v1"
+            }),
+        )
+        .unwrap(),
+    );
+    assert_eq!(pv["PipelineVersionId"], 1);
+    assert!(pv["PipelineArn"].as_str().unwrap().contains("pipeline/"));
+}
