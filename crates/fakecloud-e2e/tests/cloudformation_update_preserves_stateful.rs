@@ -241,3 +241,256 @@ async fn cfn_update_rds_db_cluster_is_in_place() {
         "resource id must be stable across an in-place update; a delete+recreate would mint a new one"
     );
 }
+
+// --- AWS::Glue::Database / AWS::Glue::Table -------------------------------
+// A benign Description change on a Glue Database/Table used to reprovision
+// (delete+create), dropping every contained table/partition. These assert the
+// out-of-band catalog data survives an in-place update.
+
+const GLUE_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Db": {
+      "Type": "AWS::Glue::Database",
+      "Properties": {
+        "CatalogId": "000000000000",
+        "DatabaseInput": { "Name": "cfn_glue_preserve", "Description": "v1" }
+      }
+    },
+    "Tbl": {
+      "Type": "AWS::Glue::Table",
+      "Properties": {
+        "CatalogId": "000000000000",
+        "DatabaseName": "cfn_glue_preserve",
+        "TableInput": { "Name": "events", "Description": "t-v1" }
+      }
+    }
+  }
+}"#;
+
+// Identical except both Descriptions bumped (mutable, in-place changes).
+const GLUE_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Db": {
+      "Type": "AWS::Glue::Database",
+      "Properties": {
+        "CatalogId": "000000000000",
+        "DatabaseInput": { "Name": "cfn_glue_preserve", "Description": "v2" }
+      }
+    },
+    "Tbl": {
+      "Type": "AWS::Glue::Table",
+      "Properties": {
+        "CatalogId": "000000000000",
+        "DatabaseName": "cfn_glue_preserve",
+        "TableInput": { "Name": "events", "Description": "t-v2" }
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_update_glue_database_and_table_preserve_contents() {
+    use aws_sdk_glue::types::{Column, PartitionInput, StorageDescriptor};
+
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let glue = server.glue_client().await;
+
+    cfn.create_stack()
+        .stack_name("glue-preserve")
+        .template_body(GLUE_TEMPLATE_V1)
+        .send()
+        .await
+        .expect("create_stack");
+    wait_for_status(&server, "glue-preserve", "CREATE_COMPLETE").await;
+
+    // Out-of-band: add a partition to the CFN-created table. A delete+recreate
+    // of the table (or its database) would drop this partition.
+    glue.create_partition()
+        .database_name("cfn_glue_preserve")
+        .table_name("events")
+        .partition_input(
+            PartitionInput::builder()
+                .values("2026-01-01")
+                .storage_descriptor(
+                    StorageDescriptor::builder()
+                        .location("s3://bucket/events/2026-01-01/")
+                        .columns(
+                            Column::builder()
+                                .name("id")
+                                .r#type("string")
+                                .build()
+                                .expect("column"),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create_partition");
+
+    // Change a mutable property on BOTH the database and the table.
+    cfn.update_stack()
+        .stack_name("glue-preserve")
+        .template_body(GLUE_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+    wait_for_status(&server, "glue-preserve", "UPDATE_COMPLETE").await;
+
+    // The description changes were applied in place...
+    let db = glue
+        .get_database()
+        .name("cfn_glue_preserve")
+        .send()
+        .await
+        .expect("get_database")
+        .database
+        .expect("database present");
+    assert_eq!(db.description(), Some("v2"));
+
+    let tbl = glue
+        .get_table()
+        .database_name("cfn_glue_preserve")
+        .name("events")
+        .send()
+        .await
+        .expect("get_table")
+        .table
+        .expect("table present");
+    assert_eq!(tbl.description(), Some("t-v2"));
+
+    // ...and the out-of-band partition survived -> in-place, not reprovision.
+    let parts = glue
+        .get_partitions()
+        .database_name("cfn_glue_preserve")
+        .table_name("events")
+        .send()
+        .await
+        .expect("get_partitions")
+        .partitions
+        .unwrap_or_default();
+    assert_eq!(
+        parts.len(),
+        1,
+        "the out-of-band partition must survive an in-place Glue update; a reprovision would have dropped it"
+    );
+}
+
+// --- AWS::Timestream::Table ----------------------------------------------
+// A RetentionProperties change on a Timestream table used to reprovision,
+// deleting every ingested record. This asserts the records survive.
+
+const TS_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Db": {
+      "Type": "AWS::Timestream::Database",
+      "Properties": { "DatabaseName": "cfn_ts_preserve" }
+    },
+    "Tbl": {
+      "Type": "AWS::Timestream::Table",
+      "Properties": {
+        "DatabaseName": "cfn_ts_preserve",
+        "TableName": "cpu",
+        "RetentionProperties": {
+          "MemoryStoreRetentionPeriodInHours": "24",
+          "MagneticStoreRetentionPeriodInDays": "7"
+        }
+      }
+    }
+  }
+}"#;
+
+// Identical except MagneticStoreRetentionPeriodInDays 7 -> 30 (mutable).
+const TS_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Db": {
+      "Type": "AWS::Timestream::Database",
+      "Properties": { "DatabaseName": "cfn_ts_preserve" }
+    },
+    "Tbl": {
+      "Type": "AWS::Timestream::Table",
+      "Properties": {
+        "DatabaseName": "cfn_ts_preserve",
+        "TableName": "cpu",
+        "RetentionProperties": {
+          "MemoryStoreRetentionPeriodInHours": "24",
+          "MagneticStoreRetentionPeriodInDays": "30"
+        }
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_update_timestream_table_preserves_records() {
+    use aws_sdk_timestreamwrite::types::{Dimension, MeasureValueType, Record, TimeUnit};
+
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let write = server.timestream_write_client().await;
+    let query = server.timestream_query_client().await;
+
+    cfn.create_stack()
+        .stack_name("ts-preserve")
+        .template_body(TS_TEMPLATE_V1)
+        .send()
+        .await
+        .expect("create_stack");
+    wait_for_status(&server, "ts-preserve", "CREATE_COMPLETE").await;
+
+    // Out-of-band: ingest records into the CFN-created table.
+    let rec = |host: &str, value: &str, t: &str| {
+        Record::builder()
+            .dimensions(
+                Dimension::builder()
+                    .name("host")
+                    .value(host)
+                    .build()
+                    .expect("dimension"),
+            )
+            .measure_name("cpu")
+            .measure_value(value)
+            .measure_value_type(MeasureValueType::Double)
+            .time(t)
+            .time_unit(TimeUnit::Milliseconds)
+            .build()
+    };
+    write
+        .write_records()
+        .database_name("cfn_ts_preserve")
+        .table_name("cpu")
+        .records(rec("host-a", "42.5", "1700000000000"))
+        .records(rec("host-b", "13.25", "1700000001000"))
+        .send()
+        .await
+        .expect("write_records");
+
+    // Change a mutable retention property. Pre-fix this delete+recreated the
+    // table, wiping every ingested record.
+    cfn.update_stack()
+        .stack_name("ts-preserve")
+        .template_body(TS_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+    wait_for_status(&server, "ts-preserve", "UPDATE_COMPLETE").await;
+
+    // The ingested records survived -> in-place, not reprovision.
+    let count = query
+        .query()
+        .query_string(r#"SELECT COUNT(*) FROM "cfn_ts_preserve"."cpu""#)
+        .send()
+        .await
+        .expect("query count");
+    assert_eq!(
+        count.rows()[0].data()[0].scalar_value(),
+        Some("2"),
+        "ingested records must survive an in-place Timestream table update; a reprovision would have wiped them"
+    );
+}

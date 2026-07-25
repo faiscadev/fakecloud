@@ -73,6 +73,59 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    /// In-place `UpdateDatabase`: mutate the database's editable properties
+    /// while preserving every contained table and partition. Real AWS
+    /// `UpdateDatabase` is a "No interruption" update; the previous
+    /// reprovision (delete+create) fallback dropped the whole catalog subtree
+    /// on a benign `Description`/`Parameters`/`LocationUri` change.
+    pub(super) fn update_glue_database(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let input = props
+            .get("DatabaseInput")
+            .ok_or("DatabaseInput is required")?;
+        // A changed `Name` is a replacement in CloudFormation; an in-place
+        // update keeps the existing physical id.
+        let name = existing.physical_id.clone();
+
+        let mut accounts = self.glue_state.write();
+        let state = accounts.get_or_create(&self.account_id, &self.region);
+        let dbs = state.dbs_in_mut(&self.region);
+        let db = dbs
+            .get_mut(&name)
+            .ok_or_else(|| format!("Database {name} not found"))?;
+        db.description = input
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        db.location_uri = input
+            .get("LocationUri")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        db.parameters = input
+            .get("Parameters")
+            .and_then(|v| v.as_object())
+            .map(|m| {
+                m.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default();
+        db.target_database = input
+            .get("TargetDatabase")
+            .filter(|v| !v.is_null())
+            .cloned();
+        db.federated_database = input
+            .get("FederatedDatabase")
+            .filter(|v| !v.is_null())
+            .cloned();
+        // db.tables intentionally left untouched.
+        Ok(ProvisionResult::new(name))
+    }
+
     pub(super) fn create_glue_table(
         &self,
         resource: &ResourceDefinition,
@@ -153,6 +206,62 @@ impl ResourceProvisioner {
             .ok_or_else(|| format!("Database {} not found", parts[0]))?;
         db.tables.remove(parts[1]);
         Ok(())
+    }
+
+    /// In-place `UpdateTable`: mutate the table's editable properties while
+    /// preserving every partition and the stored data location. Real AWS
+    /// `UpdateTable` is a "No interruption" update; the previous reprovision
+    /// fallback dropped all partitions on a benign property change.
+    pub(super) fn update_glue_table(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let input = props.get("TableInput").ok_or("TableInput is required")?;
+        // Physical id is `{db}|{table}`; a changed DatabaseName/Name is a
+        // replacement (owned by the reprovision path), not an in-place update.
+        let physical_id = existing.physical_id.clone();
+        let parts: Vec<&str> = physical_id.split('|').collect();
+        if parts.len() != 2 {
+            return Err(format!("Invalid Glue table physical id: {physical_id}"));
+        }
+        let (db_name, table_name) = (parts[0].to_string(), parts[1].to_string());
+
+        let mut accounts = self.glue_state.write();
+        let state = accounts.get_or_create(&self.account_id, &self.region);
+        let dbs = state.dbs_in_mut(&self.region);
+        let db = dbs
+            .get_mut(&db_name)
+            .ok_or_else(|| format!("Database {db_name} not found"))?;
+        let table = db
+            .tables
+            .get_mut(&table_name)
+            .ok_or_else(|| format!("Table {table_name} not found"))?;
+        table.description = input
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        table.owner = input
+            .get("Owner")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        table.retention = input.get("Retention").and_then(|v| v.as_i64()).unwrap_or(0);
+        table.view_original_text = input
+            .get("ViewOriginalText")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        table.view_expanded_text = input
+            .get("ViewExpandedText")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        table.table_type = input
+            .get("TableType")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        table.update_time = Utc::now();
+        // table.partitions and storage_descriptor location intentionally kept.
+        Ok(ProvisionResult::new(physical_id))
     }
 
     pub(super) fn create_glue_partition(

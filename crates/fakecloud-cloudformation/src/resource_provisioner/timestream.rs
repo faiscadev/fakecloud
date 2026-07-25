@@ -11,7 +11,7 @@
 
 use serde_json::{json, Value};
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 use fakecloud_timestream::shared::{database_arn, now_epoch, table_arn, table_key};
 use fakecloud_timestream::state::{Database, Table};
 
@@ -171,6 +171,60 @@ impl ResourceProvisioner {
             }
         }
         Ok(())
+    }
+
+    /// In-place `UpdateTable`: mutate the table's editable properties while
+    /// preserving every ingested record. Real AWS `UpdateTable`
+    /// (RetentionProperties / MagneticStoreWriteProperties / Schema / Tags) is
+    /// applied in place; the previous reprovision fallback deleted the table's
+    /// entire `records` set on a benign retention/tag change.
+    pub(super) fn update_timestream_table(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        // A changed DatabaseName/TableName is a replacement (reprovision path);
+        // an in-place update keeps the existing physical id and its records.
+        let physical_id = existing.physical_id.clone();
+        let Some((database, table)) = physical_id.split_once('|') else {
+            return Err(format!(
+                "Invalid Timestream table physical id: {physical_id}"
+            ));
+        };
+        let key = table_key(database, table);
+
+        let mut guard = self.timestream_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let arn = {
+            let record = data
+                .tables
+                .get_mut(&key)
+                .ok_or_else(|| format!("Table {table} not found"))?;
+            if let Some(rp) = props.get("RetentionProperties").filter(|v| !v.is_null()) {
+                record.retention_properties = rp.clone();
+            }
+            record.magnetic_store_write_properties = props
+                .get("MagneticStoreWriteProperties")
+                .filter(|v| !v.is_null())
+                .cloned();
+            if let Some(schema) = props.get("Schema").filter(|v| !v.is_null()) {
+                record.schema = schema.clone();
+            }
+            record.last_updated_time = now_epoch();
+            record.arn.clone()
+        };
+        // Tags are replaced wholesale on update, matching CFN tag semantics.
+        let tags = string_tag_map(props.get("Tags"));
+        if tags.is_empty() {
+            data.tags.remove(&arn);
+        } else {
+            data.tags.insert(arn.clone(), tags);
+        }
+        // data.records[key] intentionally left untouched.
+        Ok(ProvisionResult::new(physical_id.clone())
+            .with("Arn", arn)
+            .with("Name", table.to_string()))
     }
 
     pub(super) fn get_att_timestream_table(
