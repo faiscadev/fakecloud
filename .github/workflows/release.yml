@@ -518,3 +518,58 @@ jobs:
           echo "Created tag ${GO_TAG}"
         env:
           GH_TOKEN: ${{ github.token }}
+
+  publish-nuget:
+    name: Publish NuGet
+    if: github.event_name == 'push'
+    needs: check
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    # Trusted Publishing (OIDC): NuGet/login exchanges the GitHub OIDC token
+    # for a short-lived API key, so no NUGET_API_KEY secret is stored.
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4.3.1
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Verify tag matches FakeCloud.csproj version
+        working-directory: sdks/dotnet
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' src/FakeCloud/FakeCloud.csproj | head -1)
+          if [ "$TAG" != "$VERSION" ]; then
+            echo "::error::Tag v${TAG} does not match FakeCloud.csproj version ${VERSION}"
+            exit 1
+          fi
+          echo "Tag v${TAG} matches FakeCloud.csproj version ${VERSION}"
+
+      - name: Pack
+        working-directory: sdks/dotnet
+        run: dotnet pack src/FakeCloud/FakeCloud.csproj --configuration Release --output artifacts
+
+      - name: NuGet login (OIDC)
+        id: nuget-login
+        uses: NuGet/login@8d196754b4036150537f80ac539e15c2f1028841 # v1
+        with:
+          # nuget.org account username (member of the faiscadev package-owner
+          # org); the trusted-publishing policy scopes the temporary key.
+          user: vieiralucas
+
+      - name: Publish to NuGet
+        working-directory: sdks/dotnet
+        # --skip-duplicate makes a re-run of an already-published version a
+        # no-op instead of a hard failure (mirrors the other SDK publish jobs).
+        run: |
+          dotnet nuget push "artifacts/*.nupkg" \
+            --api-key "${NUGET_API_KEY}" \
+            --source https://api.nuget.org/v3/index.json \
+            --skip-duplicate
+        env:
+          NUGET_API_KEY: ${{ steps.nuget-login.outputs.NUGET_API_KEY }}

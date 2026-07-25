@@ -1,13 +1,13 @@
 +++
 title = "SDK reference"
-description = "First-party fakecloud SDKs for TypeScript, Python, Go, PHP, Java, and Rust."
+description = "First-party fakecloud SDKs for TypeScript, Python, Go, PHP, Java, Rust, and .NET."
 sort_by = "weight"
 weight = 6
 template = "docs.html"
 page_template = "docs-page.html"
 +++
 
-fakecloud ships first-party SDKs in six languages for test assertions and simulation control. Each SDK wraps the `/_fakecloud/*` introspection and configuration endpoints into ergonomic helpers that fit the language's testing idioms.
+fakecloud ships first-party SDKs in seven languages for test assertions and simulation control. Each SDK wraps the `/_fakecloud/*` introspection and configuration endpoints into ergonomic helpers that fit the language's testing idioms.
 
 These SDKs are **not** the AWS SDK. Your application code still talks to fakecloud through the normal AWS SDK (boto3, aws-sdk-js, aws-sdk-rust, etc.) — the fakecloud SDK is what your tests use to assert on what happened.
 
@@ -21,10 +21,11 @@ These SDKs are **not** the AWS SDK. Your application code still talks to fakeclo
 | PHP        | `composer require fakecloud/fakecloud`          | [PHP SDK](/docs/sdks/php/) |
 | Java       | `dev.fakecloud:fakecloud:0.15.0`                 | [Java SDK](/docs/sdks/java/) |
 | Rust       | `cargo add fakecloud-sdk`                       | [Rust SDK](/docs/sdks/rust/) |
+| C# / .NET  | `dotnet add package FakeCloud`                  | [.NET SDK](/docs/sdks/dotnet/) |
 
 ## Common surface
 
-All six SDKs cover the same core surface:
+All seven SDKs cover the same core surface:
 
 - **Reset:** `reset()` and `resetService(service)` to clear state between tests
 - **Health:** verify fakecloud is reachable
@@ -40,4 +41,4 @@ All six SDKs cover the same core surface:
 - **API Gateway v2:** recorded HTTP requests, WebSocket connections, mTLS info, ws:// URL builder
 - **RDS bridge:** aws_lambda invoke, aws_s3 import/export
 
-The method names differ across languages to match each language's idiom (camelCase for TS/JS, Java, and PHP, snake_case for Python, PascalCase for Go, snake_case for Rust), but the behavior is the same.
+The method names differ across languages to match each language's idiom (camelCase for TS/JS, Java, and PHP, snake_case for Python and Rust, PascalCase for Go and C#), but the behavior is the same.

@@ -98,6 +98,7 @@ Normal AWS SDKs handle your application code. fakecloud's own SDKs let your test
 | PHP        | `composer require fakecloud/fakecloud`          |
 | Java       | `dev.fakecloud:fakecloud` (Maven Central)       |
 | Rust       | `cargo add fakecloud-sdk`                       |
+| C# / .NET  | `dotnet add package FakeCloud` (NuGet)          |
 
 ```ts
 import { FakeCloud } from "fakecloud";
@@ -112,7 +113,7 @@ expect(emails).toHaveLength(1);
 await fc.reset();
 ```
 
-Full SDK reference for all six languages: [fakecloud.dev/docs/sdks](https://fakecloud.dev/docs/sdks).
+Full SDK reference for all seven languages: [fakecloud.dev/docs/sdks](https://fakecloud.dev/docs/sdks).
 
 ## Use with AI coding tools
 
