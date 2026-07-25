@@ -9,10 +9,27 @@
 
 mod helpers;
 
+use aws_credential_types::Credentials;
 use aws_sdk_s3::types::ObjectCannedAcl;
 use helpers::TestServer;
 
 const PUBLIC_READ_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"}]}"#;
+
+/// An S3 client signing with root-bypass `test` creds — always passes SigV4
+/// verification, so it can seed bucket/object/policy state even when the server
+/// runs with `--verify-sigv4`.
+async fn root_bypass_s3_client(server: &TestServer) -> aws_sdk_s3::Client {
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new("test", "test", None, None, "root-bypass"))
+        .load()
+        .await;
+    let s3_config = aws_sdk_s3::config::Builder::from(&config)
+        .force_path_style(true)
+        .build();
+    aws_sdk_s3::Client::from_conf(s3_config)
+}
 
 /// Default mode: an anonymous GET serves the object (fakecloud is permissive
 /// by default), both before and after a public-read bucket policy. The bug was
@@ -189,6 +206,75 @@ async fn anonymous_get_object_iam_strict_public_acl() {
         .await
         .unwrap();
     assert_eq!(resp.status(), 403, "private object must stay denied");
+}
+
+/// SigV4 verification ON + IAM strict: a fully anonymous (unsigned) request
+/// must NOT be hard-rejected with `IncompleteSignature` before authorization
+/// runs. AWS treats an unsigned request as the anonymous principal and lets a
+/// public-read policy/ACL authorize it. A public-read object is served (200);
+/// a private object is denied by the anonymous-authorization path with
+/// `AccessDenied` (403) — NOT a pre-auth `IncompleteSignature`.
+#[tokio::test]
+async fn anonymous_get_reaches_public_read_under_verify_sigv4() {
+    let server = TestServer::start_with_env(&[
+        ("FAKECLOUD_IAM", "strict"),
+        ("FAKECLOUD_VERIFY_SIGV4", "true"),
+    ])
+    .await;
+    // Seed S3 state with root-bypass creds (always pass verification).
+    let s3 = root_bypass_s3_client(&server).await;
+
+    s3.create_bucket().bucket("probe").send().await.unwrap();
+    s3.put_object()
+        .bucket("probe")
+        .key("public.txt")
+        .body(b"world".to_vec().into())
+        .acl(ObjectCannedAcl::PublicRead)
+        .send()
+        .await
+        .unwrap();
+    s3.put_object()
+        .bucket("probe")
+        .key("private.txt")
+        .body(b"secret".to_vec().into())
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+
+    // Public-read object: the anonymous GET is authorized (200), proving the
+    // request reached the anonymous-authorization path rather than being
+    // hard-403'd for lacking a signature.
+    let resp = http
+        .get(format!("{}/probe/public.txt", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.status(),
+        200,
+        "public-read object must be served to an anonymous caller under --verify-sigv4"
+    );
+    assert_eq!(resp.bytes().await.unwrap().as_ref(), b"world");
+
+    // Private object: denied by authorization, not by a pre-auth signature
+    // check. The error must be AccessDenied, never IncompleteSignature.
+    let resp = http
+        .get(format!("{}/probe/private.txt", server.endpoint()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 403);
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("AccessDenied"),
+        "expected AccessDenied for a private object, got {body}"
+    );
+    assert!(
+        !body.contains("IncompleteSignature"),
+        "anonymous request must not be pre-auth rejected under --verify-sigv4: {body}"
+    );
 }
 
 /// IAM strict mode: an explicit `Deny` in the bucket policy overrides a
