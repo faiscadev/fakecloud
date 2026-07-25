@@ -241,10 +241,18 @@ fn list_elements_carry_required_fields() {
             continue;
         }
         let s = svc();
+        // Seed the record carrying the operation's required request members, so
+        // resource-scoped list handlers (e.g. ListClusterNodes filtered by the
+        // required ClusterName, ListPipelineExecutions by PipelineName) still
+        // resolve the seeded record instead of filtering it out.
+        let seed = match build_success_body(meta) {
+            Value::Object(m) => Value::Object(m),
+            _ => Value::Object(Map::new()),
+        };
         {
             let mut g = s.state.write();
             let data = g.get_or_create("000000000000");
-            data.put_resource(meta.family, "seed", Value::Object(Map::new()));
+            data.put_resource(meta.family, "seed", seed);
         }
         let listed = resp_json(&run(&s, meta.op, build_success_body(meta)).unwrap());
         let field = meta
@@ -923,6 +931,114 @@ fn list_trial_components_unscoped_returns_all() {
     .unwrap();
     let all = resp_json(&run(&s, "ListTrialComponents", Value::Null).unwrap());
     assert_eq!(all["TrialComponentSummaries"].as_array().unwrap().len(), 2);
+}
+
+// ListClusterNodes must scope to the request's required ClusterName: nodes added
+// to cluster A must not leak into a ListClusterNodes(B) call (regression 0.2).
+#[test]
+fn list_cluster_nodes_scoped_by_cluster_name() {
+    let s = svc();
+    run(
+        &s,
+        "BatchAddClusterNodes",
+        json!({"ClusterName": "cluster-a", "NodesToAdd": [{"InstanceGroupName": "g", "IncrementTargetCountBy": 2}]}),
+    )
+    .unwrap();
+    run(
+        &s,
+        "BatchAddClusterNodes",
+        json!({"ClusterName": "cluster-b", "NodesToAdd": [{"InstanceGroupName": "g", "IncrementTargetCountBy": 3}]}),
+    )
+    .unwrap();
+
+    let a = resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "cluster-a"})).unwrap());
+    assert_eq!(
+        a["ClusterNodeSummaries"].as_array().unwrap().len(),
+        2,
+        "cluster-a sees only its own nodes: {a}"
+    );
+    let b = resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "cluster-b"})).unwrap());
+    assert_eq!(
+        b["ClusterNodeSummaries"].as_array().unwrap().len(),
+        3,
+        "cluster-b sees only its own nodes: {b}"
+    );
+    // An unknown cluster sees nothing.
+    let none =
+        resp_json(&run(&s, "ListClusterNodes", json!({"ClusterName": "cluster-x"})).unwrap());
+    assert!(none["ClusterNodeSummaries"].as_array().unwrap().is_empty());
+}
+
+// ListPipelineExecutionSteps must scope to the request's PipelineExecutionArn:
+// callback steps sent for execution X must not leak into a query for Y (0.3).
+#[test]
+fn list_pipeline_execution_steps_scoped_by_execution_arn() {
+    let s = svc();
+    // Two distinct callback tokens -> two distinct derived execution arns.
+    let sent_x = resp_json(
+        &run(
+            &s,
+            "SendPipelineExecutionStepSuccess",
+            json!({"CallbackToken": "tokenaaaa1"}),
+        )
+        .unwrap(),
+    );
+    let arn_x = sent_x["PipelineExecutionArn"].as_str().unwrap().to_string();
+    run(
+        &s,
+        "SendPipelineExecutionStepSuccess",
+        json!({"CallbackToken": "tokenaaaa2"}),
+    )
+    .unwrap();
+
+    // Scoped to X returns exactly the one step for X.
+    let scoped = resp_json(
+        &run(
+            &s,
+            "ListPipelineExecutionSteps",
+            json!({"PipelineExecutionArn": arn_x}),
+        )
+        .unwrap(),
+    );
+    let steps = scoped["PipelineExecutionSteps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1, "only X's step: {scoped}");
+    assert_eq!(steps[0]["StepStatus"], "Succeeded");
+    // The internal scoping member is not projected onto the summary.
+    assert!(steps[0].get("PipelineExecutionArn").is_none());
+
+    // Unscoped (no filter) keeps the generic behaviour: both steps.
+    let all = resp_json(&run(&s, "ListPipelineExecutionSteps", json!({})).unwrap());
+    assert_eq!(all["PipelineExecutionSteps"].as_array().unwrap().len(), 2);
+}
+
+// ListPipelineExecutions must scope to the request's required PipelineName:
+// executions of pipeline p1 must not leak into a query for p2 (0.3 LOW).
+#[test]
+fn list_pipeline_executions_scoped_by_pipeline_name() {
+    let s = svc();
+    for (name, count) in [("p1", 2), ("p2", 1)] {
+        for i in 0..count {
+            run(
+                &s,
+                "StartPipelineExecution",
+                json!({"PipelineName": name, "ClientRequestToken": format!("{name}-{i}-{}", "a".repeat(32))}),
+            )
+            .unwrap();
+        }
+    }
+    let p1 = resp_json(&run(&s, "ListPipelineExecutions", json!({"PipelineName": "p1"})).unwrap());
+    let sums = p1["PipelineExecutionSummaries"].as_array().unwrap();
+    assert_eq!(sums.len(), 2, "p1 sees only its own executions: {p1}");
+    assert!(sums
+        .iter()
+        .all(|x| x["PipelineExecutionArn"].as_str().unwrap().contains("/p1/")));
+
+    let p2 = resp_json(&run(&s, "ListPipelineExecutions", json!({"PipelineName": "p2"})).unwrap());
+    assert_eq!(
+        p2["PipelineExecutionSummaries"].as_array().unwrap().len(),
+        1,
+        "p2 sees only its own executions: {p2}"
+    );
 }
 
 // SendPipelineExecutionStepSuccess advances a waiting callback step to Succeeded;
