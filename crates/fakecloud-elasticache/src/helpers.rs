@@ -98,8 +98,12 @@ pub(crate) fn default_full_engine_version(
         ));
     }
 
+    // Valkey serverless/self-designed supports both 7.2 and 8.x on AWS; the
+    // gate previously accepted only 8.x and rejected a valid MajorEngineVersion
+    // of 7 / 7.2.
     if (engine == ENGINE_REDIS && !major_engine_version.starts_with('7'))
-        || (engine == ENGINE_VALKEY && !major_engine_version.starts_with('8'))
+        || (engine == ENGINE_VALKEY
+            && !(major_engine_version.starts_with('7') || major_engine_version.starts_with('8')))
     {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
