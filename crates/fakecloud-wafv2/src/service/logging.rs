@@ -103,13 +103,19 @@ impl Wafv2Service {
             let b_arn = b.get("ResourceArn").and_then(Value::as_str).unwrap_or("");
             a_arn.cmp(b_arn)
         });
+        // Configs are sorted by ResourceArn and the marker is the last
+        // ResourceArn of the previous page, so resume at the first config
+        // strictly greater than the marker. A strict `>` keeps the pager moving
+        // forward even when the marked config was deleted between pages (a plain
+        // "find marker, start after" would restart at page 1).
         let start = if next_marker.is_empty() {
             0
         } else {
             all.iter()
-                .position(|c| c.get("ResourceArn").and_then(Value::as_str) == Some(next_marker))
-                .map(|p| p + 1)
-                .unwrap_or(0)
+                .position(|c| {
+                    c.get("ResourceArn").and_then(Value::as_str).unwrap_or("") > next_marker
+                })
+                .unwrap_or(all.len())
         };
         let page: Vec<Value> = all.iter().skip(start).take(limit).cloned().collect();
         let next = if start + page.len() < all.len() {

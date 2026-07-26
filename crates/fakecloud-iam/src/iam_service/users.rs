@@ -745,12 +745,15 @@ impl IamService {
             .unwrap_or_default();
         keys.sort_by(|a, b| a.access_key_id.cmp(&b.access_key_id));
 
-        // Apply marker-based pagination (start after the marker item)
+        // Apply marker-based pagination. Keys are sorted by access_key_id and
+        // the marker is the last access_key_id of the previous page, so resume
+        // at the first key strictly greater than the marker. A strict `>` keeps
+        // the pager moving forward even when the marked key was deleted between
+        // pages (a plain "find marker, start after" would restart at page 1).
         let start_idx = if let Some(ref m) = marker {
             keys.iter()
-                .position(|k| k.access_key_id == *m)
-                .map(|pos| pos + 1)
-                .unwrap_or(0)
+                .position(|k| k.access_key_id > *m)
+                .unwrap_or(keys.len())
         } else {
             0
         };

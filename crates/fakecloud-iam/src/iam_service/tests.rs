@@ -92,6 +92,67 @@ fn list_roles_rejects_non_numeric_max_items() {
 }
 
 #[test]
+fn list_roles_resumes_past_deleted_marker() {
+    // bug-hunt 2026-07-26 Family P: a delete-as-you-go pager must keep moving
+    // forward when the marker role is deleted between pages. Resuming with a
+    // strict `role_name > marker` (rather than "find the marker, start after
+    // it, else restart at 0") guarantees no page-1 repeat.
+    let svc = make_service();
+    let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
+    // Put the roles under a dedicated path so PathPrefix isolates them from the
+    // pre-seeded service-linked roles.
+    for i in 0..5 {
+        svc.create_role(&make_request(
+            "CreateRole",
+            vec![
+                ("RoleName", &format!("role-{i}")),
+                ("Path", "/testp/"),
+                ("AssumeRolePolicyDocument", trust),
+            ],
+        ))
+        .unwrap();
+    }
+
+    // Page 1: MaxItems=2 -> role-0, role-1; marker = role-1.
+    let resp = svc
+        .list_roles(&make_request(
+            "ListRoles",
+            vec![("PathPrefix", "/testp/"), ("MaxItems", "2")],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(body.contains("<RoleName>role-0</RoleName>"));
+    assert!(body.contains("<RoleName>role-1</RoleName>"));
+    assert!(body.contains("<IsTruncated>true</IsTruncated>"));
+    let marker = extract_xml_value(&body, "Marker");
+    assert_eq!(marker, "role-1");
+
+    // Delete the marker role between pages.
+    svc.delete_role(&make_request("DeleteRole", vec![("RoleName", "role-1")]))
+        .unwrap();
+
+    // Page 2: resume from the (now-deleted) marker. Must advance to role-2,
+    // role-3 -- never restart at role-0.
+    let resp = svc
+        .list_roles(&make_request(
+            "ListRoles",
+            vec![
+                ("PathPrefix", "/testp/"),
+                ("MaxItems", "2"),
+                ("Marker", &marker),
+            ],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    assert!(
+        !body.contains("<RoleName>role-0</RoleName>"),
+        "page 2 must not repeat page 1 after the marker was deleted, got: {body}"
+    );
+    assert!(body.contains("<RoleName>role-2</RoleName>"));
+    assert!(body.contains("<RoleName>role-3</RoleName>"));
+}
+
+#[test]
 fn list_policies_rejects_non_numeric_max_items() {
     let svc = make_service();
     let req = make_request("ListPolicies", vec![("MaxItems", "notanumber")]);

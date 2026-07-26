@@ -449,12 +449,17 @@ impl KmsService {
             }
         }
 
+        // Stores are sorted by custom_key_store_id and the marker is the last
+        // id of the previous page, so resume at the first store strictly
+        // greater than the marker. A strict `>` keeps the pager moving forward
+        // even when the marked store was deleted between pages (a plain "find
+        // marker, start after" would restart at page 1).
         let start = marker
-            .and_then(|m| {
+            .map(|m| {
                 stores
                     .iter()
-                    .position(|s| s.custom_key_store_id == m)
-                    .map(|p| p + 1)
+                    .position(|s| s.custom_key_store_id.as_str() > m)
+                    .unwrap_or(stores.len())
             })
             .unwrap_or(0);
 
