@@ -175,9 +175,20 @@ impl RdsService {
         let snapshot_store = self.snapshot_store.clone();
         let snapshot_lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
-            let result = runtime
-                .dump_database(&writer_id, &engine, &username, &password, &db_name)
-                .await;
+            // Bound the (unbounded) mysqldump/pg_dump so the finalizer ALWAYS
+            // resolves. Without this cap a stalled dump under CI runner
+            // congestion never returns, leaving the snapshot wedged in
+            // `creating` forever (the failure that reverted the prior
+            // backgrounding attempt, commit f5cc5ddc2, and reddened the e2e's
+            // 180s wait). A timeout collapses to the metadata-only path, so all
+            // three outcomes — success, dump error, timeout — settle the
+            // snapshot to `available`.
+            let dump = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                runtime.dump_database(&writer_id, &engine, &username, &password, &db_name),
+            )
+            .await;
+            let result = cluster_snapshot_dump_result_from_timeout(&snapshot_id, dump);
             apply_cluster_snapshot_dump_result(&state_handle, &account_id, &snapshot_id, result);
             save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
         });
@@ -529,6 +540,33 @@ pub(super) fn apply_cluster_snapshot_dump_result(
                 "cluster snapshot dump failed; leaving metadata-only available snapshot"
             );
             obj.insert("Status".to_string(), json!("available"));
+        }
+    }
+}
+
+/// Collapse a bounded-dump outcome into the `Result` the finalizer applies.
+///
+/// The dump future is wrapped in `tokio::time::timeout`, yielding
+/// `Result<Result<Vec<u8>, RuntimeError>, Elapsed>`:
+///   - `Ok(inner)` passes the dump's own success/error straight through, so the
+///     finalizer stages the dump on success and settles metadata-only on error.
+///   - `Err(_elapsed)` (the dump stalled past the cap) maps to the metadata-only
+///     path — same terminal state as a dump error — after logging a distinct
+///     timeout warning. This is what guarantees the snapshot can never wedge in
+///     `creating`: every arm feeds `apply_cluster_snapshot_dump_result` a
+///     `Result`, and both `Err` shapes flip `Status` to `available`.
+pub(super) fn cluster_snapshot_dump_result_from_timeout(
+    snapshot_id: &str,
+    dump: Result<Result<Vec<u8>, RuntimeError>, tokio::time::error::Elapsed>,
+) -> Result<Vec<u8>, RuntimeError> {
+    match dump {
+        Ok(inner) => inner,
+        Err(_elapsed) => {
+            tracing::warn!(
+                snapshot = %snapshot_id,
+                "cluster snapshot dump timed out; available metadata-only"
+            );
+            Err(RuntimeError::Unavailable)
         }
     }
 }

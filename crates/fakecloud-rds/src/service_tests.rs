@@ -2138,6 +2138,57 @@ fn apply_cluster_snapshot_dump_result_metadata_only_on_error() {
     );
 }
 
+#[tokio::test]
+async fn apply_cluster_snapshot_dump_result_metadata_only_on_timeout() {
+    // A dump that stalls past the finalizer's bound must not wedge the snapshot
+    // in `creating` forever: the timeout collapses to the metadata-only path,
+    // settling the snapshot to `available` (no dump). This exercises the real
+    // `tokio::time::timeout` -> `Result` mapping the finalizer feeds the helper.
+    let svc = make_service();
+    seed_cluster_snapshot_creating(&svc, "csnap-1");
+
+    // A zero-duration timeout over a never-resolving dump yields `Err(Elapsed)`,
+    // the exact shape a stalled pg_dump/mysqldump produces under CI congestion.
+    let dump = tokio::time::timeout(
+        std::time::Duration::from_millis(0),
+        std::future::pending::<Result<Vec<u8>, crate::runtime::RuntimeError>>(),
+    )
+    .await;
+    assert!(dump.is_err(), "zero-duration timeout must elapse");
+
+    let result = crate::service::cluster_snapshots::cluster_snapshot_dump_result_from_timeout(
+        "csnap-1", dump,
+    );
+    assert!(
+        result.is_err(),
+        "timeout must map to the metadata-only (Err) path"
+    );
+    crate::service::cluster_snapshots::apply_cluster_snapshot_dump_result(
+        &svc.state,
+        "123456789012",
+        "csnap-1",
+        result,
+    );
+
+    let accounts = svc.state.read();
+    let snap = accounts
+        .default_ref()
+        .extras
+        .get("cluster_snapshots")
+        .unwrap()
+        .get("csnap-1")
+        .unwrap();
+    assert_eq!(
+        snap.get("Status").and_then(|v| v.as_str()),
+        Some("available"),
+        "timed-out dump must still settle the snapshot to available"
+    );
+    assert!(
+        snap.get("DumpDataB64").is_none(),
+        "no dump staged on dump timeout"
+    );
+}
+
 #[test]
 fn describe_db_snapshots_accepts_both_filters() {
     // Both snapshot id + instance id is tolerated: the snapshot id

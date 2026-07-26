@@ -1644,7 +1644,12 @@ async fn rds_restore_db_cluster_from_snapshot_recovers_data() {
         .send()
         .await
         .expect("snapshot cluster");
-    helpers::wait_for_db_cluster_snapshot_available(&client, "m7-cluster-snap", 180).await;
+    // The finalizer bounds the writer dump at 120s (crates/fakecloud-rds
+    // cluster_snapshots.rs), after which the snapshot always settles to
+    // `available`; wait 240s to give that cap plus finalize headroom under CI
+    // runner congestion (the prior 180s wait went red when a stalled dump
+    // never returned).
+    helpers::wait_for_db_cluster_snapshot_available(&client, "m7-cluster-snap", 240).await;
 
     // 4. Drop the source writer so the data only survives in the snapshot.
     client
