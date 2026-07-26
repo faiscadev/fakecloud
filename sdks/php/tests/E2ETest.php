@@ -14,36 +14,181 @@ use PHPUnit\Framework\TestCase;
 /**
  * E2E tests that require a running fakecloud server.
  *
- * Start the server before running:
- *   cargo run -- --port 4566
+ * The harness spawns the `fakecloud` binary itself (release build, debug
+ * fallback) on an ephemeral port, waits for `/_fakecloud/health`, and tears
+ * it down afterwards, mirroring the Java/Python/Go SDK harnesses. Build the
+ * binary first:
+ *   cargo build --release
  *
  * Then run:
- *   vendor/bin/phpunit tests/E2ETest.php
+ *   vendor/bin/phpunit --testsuite e2e
  *
- * Set FAKECLOUD_ENDPOINT to override the base URL (default: http://localhost:4566).
+ * Overrides:
+ *   FAKECLOUD_ENDPOINT: run against an already-running server (no spawn).
+ *   FAKECLOUD_BIN:      path to the fakecloud binary to spawn.
+ *
+ * The suite FAILS LOUD (it does not skip) when the binary is missing or the
+ * server never becomes ready (a skipped E2E suite is a silent false-pass).
  */
 final class E2ETest extends TestCase
 {
+    /** @var resource|null */
+    private static $serverProcess = null;
+    /** @var array<int, resource> */
+    private static array $serverPipes = [];
+    private static string $serverEndpoint = '';
+
     private FakeCloud $fc;
     private string $endpoint;
 
-    protected function setUp(): void
+    public static function setUpBeforeClass(): void
     {
-        $this->endpoint = getenv('FAKECLOUD_ENDPOINT') ?: 'http://localhost:4566';
-
-        // Quick health check — skip if server not reachable
-        $ch = curl_init($this->endpoint . '/_fakecloud/health');
-        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
-        $result = curl_exec($ch);
-        $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
-        curl_close($ch);
-        if ($result === false || $code !== 200) {
-            $this->markTestSkipped('fakecloud server not reachable at ' . $this->endpoint);
+        // Run against an externally-managed server if asked.
+        $external = getenv('FAKECLOUD_ENDPOINT');
+        if ($external !== false && $external !== '') {
+            self::$serverEndpoint = rtrim($external, '/');
+            self::waitForReady(self::$serverEndpoint, 15.0);
+            return;
         }
 
+        $binary = self::locateBinary();
+        $port = self::freePort();
+        $endpoint = 'http://127.0.0.1:' . $port;
+
+        $descriptors = [
+            0 => ['file', '/dev/null', 'r'],
+            1 => ['file', '/dev/null', 'w'],
+            2 => ['file', '/dev/null', 'w'],
+        ];
+        $process = proc_open(
+            [$binary, '--addr', '127.0.0.1:' . $port, '--log-level', 'warn'],
+            $descriptors,
+            self::$serverPipes
+        );
+        if (!is_resource($process)) {
+            throw new \RuntimeException('failed to spawn fakecloud binary: ' . $binary);
+        }
+        self::$serverProcess = $process;
+
+        try {
+            self::waitForReady($endpoint, 30.0);
+        } catch (\RuntimeException $e) {
+            self::stopServer();
+            throw $e;
+        }
+        self::$serverEndpoint = $endpoint;
+    }
+
+    public static function tearDownAfterClass(): void
+    {
+        self::stopServer();
+        self::$serverEndpoint = '';
+    }
+
+    protected function setUp(): void
+    {
+        $this->endpoint = self::$serverEndpoint;
         $this->fc = new FakeCloud($this->endpoint);
         $this->fc->reset();
+    }
+
+    /** Locate the fakecloud binary: FAKECLOUD_BIN, then release, then debug. */
+    private static function locateBinary(): string
+    {
+        $override = getenv('FAKECLOUD_BIN');
+        if ($override !== false && $override !== '') {
+            if (!is_file($override) || !is_executable($override)) {
+                throw new \RuntimeException(
+                    'FAKECLOUD_BIN is set but not an executable file: ' . $override
+                );
+            }
+            return $override;
+        }
+
+        $repoRoot = self::locateRepoRoot();
+        $candidates = [
+            $repoRoot . '/target/release/fakecloud',
+            $repoRoot . '/target/debug/fakecloud',
+        ];
+        foreach ($candidates as $bin) {
+            if (is_file($bin) && is_executable($bin)) {
+                return $bin;
+            }
+        }
+        throw new \RuntimeException(
+            "fakecloud binary not found. Build it first with: cargo build --release\n"
+            . "  Looked for:\n    " . implode("\n    ", $candidates)
+        );
+    }
+
+    /** Walk up from this file to the workspace root (Cargo.toml + crates/). */
+    private static function locateRepoRoot(): string
+    {
+        $dir = __DIR__;
+        for ($i = 0; $i < 8; $i++) {
+            if (is_file($dir . '/Cargo.toml') && is_dir($dir . '/crates')) {
+                return $dir;
+            }
+            $parent = dirname($dir);
+            if ($parent === $dir) {
+                break;
+            }
+            $dir = $parent;
+        }
+        throw new \RuntimeException('could not locate fakecloud repo root from ' . __DIR__);
+    }
+
+    /** Bind :0 to grab a free ephemeral port, then release it. */
+    private static function freePort(): int
+    {
+        $sock = @stream_socket_server('tcp://127.0.0.1:0', $errno, $errstr);
+        if ($sock === false) {
+            throw new \RuntimeException("could not allocate a free port: {$errstr} ({$errno})");
+        }
+        $name = stream_socket_get_name($sock, false);
+        fclose($sock);
+        $port = (int) substr((string) $name, strrpos((string) $name, ':') + 1);
+        if ($port <= 0) {
+            throw new \RuntimeException('could not determine a free port');
+        }
+        return $port;
+    }
+
+    /** Poll /_fakecloud/health until ready; fail loud on timeout. */
+    private static function waitForReady(string $endpoint, float $timeout): void
+    {
+        $deadline = microtime(true) + $timeout;
+        while (microtime(true) < $deadline) {
+            $ch = curl_init($endpoint . '/_fakecloud/health');
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            curl_setopt($ch, CURLOPT_CONNECTTIMEOUT, 2);
+            curl_setopt($ch, CURLOPT_TIMEOUT, 2);
+            $result = curl_exec($ch);
+            $code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+            curl_close($ch);
+            if ($result !== false && $code === 200) {
+                return;
+            }
+            usleep(100_000);
+        }
+        throw new \RuntimeException(
+            "fakecloud did not become ready at {$endpoint} within {$timeout}s"
+        );
+    }
+
+    private static function stopServer(): void
+    {
+        if (is_resource(self::$serverProcess)) {
+            proc_terminate(self::$serverProcess);
+            proc_close(self::$serverProcess);
+        }
+        self::$serverProcess = null;
+        foreach (self::$serverPipes as $pipe) {
+            if (is_resource($pipe)) {
+                fclose($pipe);
+            }
+        }
+        self::$serverPipes = [];
     }
 
     // ── Health ─────────────────────────────────────────────────────
