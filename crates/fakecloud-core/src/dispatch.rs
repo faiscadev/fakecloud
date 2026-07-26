@@ -324,7 +324,25 @@ pub async fn dispatch(
     // handler so a failing signature never reaches business logic. The
     // reserved `test*` root identity short-circuits verification to keep
     // local-dev workflows frictionless.
-    if config.verify_sigv4 && !is_root_bypass(caller_akid) && config.credential_resolver.is_some() {
+    //
+    // A fully anonymous request — no `Authorization` header AND no presigned
+    // credential (SigV4 `X-Amz-Credential` or SigV2 `AWSAccessKeyId`) — carries
+    // no signature to verify, so it must NOT be hard-403'd here even under
+    // `--verify-sigv4`. AWS treats an unsigned request as the anonymous
+    // principal and lets a resource policy / public-read ACL authorize it
+    // (e.g. a public S3 object GET). Let it fall through to the
+    // anonymous-authorization path below, which allows a public resource and
+    // otherwise denies. A request that DID present a credential but failed to
+    // parse is NOT anonymous (`Authorization` non-empty or a presign query
+    // present) and still returns the malformed-signature error below.
+    let is_fully_anonymous = auth_header.is_empty()
+        && !query_params.contains_key("X-Amz-Credential")
+        && sigv2_presigned_access_key(&query_params).is_none();
+    if config.verify_sigv4
+        && !is_fully_anonymous
+        && !is_root_bypass(caller_akid)
+        && config.credential_resolver.is_some()
+    {
         let amz_date = parts
             .headers
             .get("x-amz-date")
@@ -370,7 +388,41 @@ pub async fn dispatch(
             &resolved_for_verify.secret_access_key,
             chrono::Utc::now(),
         ) {
-            Ok(()) => {}
+            Ok(()) => {
+                // Bind the buffered request body to the signed
+                // `x-amz-content-sha256`. The sigv4 canonical builder uses that
+                // header value verbatim (it is a signed header) and deliberately
+                // does NOT re-hash the body: for streaming / aws-chunked routes
+                // `body_bytes` is empty at that layer, so re-hashing there would
+                // reject legitimate signed requests (see the
+                // `feedback_sigv4_body_hash_wrong_layer` caveat). S3 rebinds the
+                // body hash in its own write path (`XAmzContentSHA256Mismatch`);
+                // every other service is bound HERE, where the full buffered body
+                // is available. Only a genuine 64-char lowercase-hex digest is
+                // checked — `UNSIGNED-PAYLOAD`, `STREAMING-*`, and presigned
+                // (UNSIGNED-PAYLOAD) requests are skipped, so correct clients are
+                // unaffected. A mismatch means the body was altered after signing;
+                // AWS would then compute a different canonical request, so return
+                // `SignatureDoesNotMatch`.
+                if !parsed.is_presigned && detected.service != "s3" {
+                    if let Some(signed_hash) = parts
+                        .headers
+                        .get("x-amz-content-sha256")
+                        .and_then(|v| v.to_str().ok())
+                        .filter(|h| is_hex_sha256(h))
+                    {
+                        if sha256_hex_lower(&body_bytes) != signed_hash {
+                            return build_error_response(
+                                StatusCode::FORBIDDEN,
+                                "SignatureDoesNotMatch",
+                                "The request signature we calculated does not match the signature you provided",
+                                &request_id,
+                                detected.protocol,
+                            );
+                        }
+                    }
+                }
+            }
             Err(fakecloud_aws::sigv4::SigV4Error::RequestTimeTooSkewed { .. }) => {
                 return build_error_response(
                     StatusCode::FORBIDDEN,
@@ -1311,6 +1363,29 @@ fn sigv2_presigned_access_key(query_params: &HashMap<String, String>) -> Option<
     }
 }
 
+/// True when `s` is a 64-character lowercase-hex SHA-256 digest — the form a
+/// signed `x-amz-content-sha256` payload hash takes. Distinguishes a real body
+/// hash from the `UNSIGNED-PAYLOAD` / `STREAMING-*` markers (shorter and
+/// containing non-hex characters), so only genuine hashes are re-bound to the
+/// buffered body.
+fn is_hex_sha256(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Lowercase-hex SHA-256 of `bytes`, used to re-bind a signed
+/// `x-amz-content-sha256` to the buffered request body for non-S3 services.
+fn sha256_hex_lower(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(bytes);
+    const HEX: &[u8] = b"0123456789abcdef";
+    let mut out = String::with_capacity(64);
+    for b in digest {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
 fn anonymous_s3_bucket(uri: &http::Uri, config: &DispatchConfig) -> Option<String> {
     let provider = config.resource_policy_provider.as_ref()?;
     let segment = uri.path().split('/').find(|s| !s.is_empty())?.to_string();
@@ -1446,6 +1521,38 @@ mod tests {
     #[test]
     fn sigv2_presigned_access_key_none_for_unsigned_request() {
         assert_eq!(sigv2_presigned_access_key(&HashMap::new()), None);
+    }
+
+    #[test]
+    fn is_hex_sha256_accepts_real_digest_rejects_markers() {
+        // A genuine 64-char lowercase-hex digest is a bindable body hash.
+        assert!(is_hex_sha256(&sha256_hex_lower(b"hello")));
+        assert!(is_hex_sha256(
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        ));
+        // The SigV4 payload markers are NOT hashes and must be skipped.
+        assert!(!is_hex_sha256("UNSIGNED-PAYLOAD"));
+        assert!(!is_hex_sha256("STREAMING-AWS4-HMAC-SHA256-PAYLOAD"));
+        assert!(!is_hex_sha256("STREAMING-UNSIGNED-PAYLOAD-TRAILER"));
+        // Wrong length or non-lowercase-hex characters are rejected.
+        assert!(!is_hex_sha256("abc123"));
+        assert!(!is_hex_sha256(
+            "E3B0C44298FC1C149AFBF4C8996FB92427AE41E4649B934CA495991B7852B855"
+        ));
+    }
+
+    #[test]
+    fn sha256_hex_lower_matches_known_vectors() {
+        // Empty input -> the well-known SHA-256 of "".
+        assert_eq!(
+            sha256_hex_lower(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            sha256_hex_lower(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(sha256_hex_lower(b"abc").len(), 64);
     }
 
     #[test]
