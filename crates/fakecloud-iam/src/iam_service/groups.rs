@@ -125,13 +125,19 @@ impl IamService {
             .iter()
             .filter_map(|uname| state.users.get(uname))
             .collect();
+        // Members are held in membership (insertion) order, not sorted by
+        // user_name, so the cursor is not a sortable total order — resume by
+        // finding the marker's position in the current order and starting
+        // after it. A deleted marker falls back to `resolved.len()` (terminate)
+        // rather than 0, so the pager never restarts at page 1.
         let start_idx = marker
             .as_ref()
-            .and_then(|m| {
+            .map(|m| {
                 resolved
                     .iter()
                     .position(|u| u.user_name == *m)
                     .map(|p| p + 1)
+                    .unwrap_or(resolved.len())
             })
             .unwrap_or(0);
         let rest = resolved.get(start_idx..).unwrap_or(&[]);
@@ -256,14 +262,18 @@ impl IamService {
         }
         groups.sort_by(|a, b| a.group_name.cmp(&b.group_name));
 
-        // Marker-based pagination: resume after the marked item.
+        // Marker-based pagination. The list is sorted by group_name and the
+        // marker is the last group_name of the previous page, so resume at the
+        // first group strictly greater than the marker. A strict `>` keeps the
+        // pager moving forward even when the marked group was deleted between
+        // pages (a plain "find marker, start after" would restart at page 1).
         let start_idx = marker
             .as_ref()
-            .and_then(|m| {
+            .map(|m| {
                 groups
                     .iter()
-                    .position(|g| g.group_name == *m)
-                    .map(|p| p + 1)
+                    .position(|g| g.group_name > *m)
+                    .unwrap_or(groups.len())
             })
             .unwrap_or(0);
         let page = groups.get(start_idx..).unwrap_or(&[]);

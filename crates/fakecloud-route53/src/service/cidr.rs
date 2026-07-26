@@ -198,14 +198,17 @@ impl Route53Service {
             .get("nexttoken")
             .cloned()
             .unwrap_or_default();
+        // Collections are sorted by id and the token is the last id of the
+        // previous page, so resume at the first collection strictly greater
+        // than the token. A strict `>` keeps the pager moving forward even when
+        // the token's collection was deleted between pages.
         let start = if nexttoken.is_empty() {
             0
         } else {
             colls
                 .iter()
-                .position(|c| c.id == nexttoken)
-                .map(|p| p + 1)
-                .unwrap_or(0)
+                .position(|c| c.id > nexttoken)
+                .unwrap_or(colls.len())
         };
         let slice: Vec<&StoredCidrCollection> = colls.iter().skip(start).take(max_items).collect();
         let next = if start + slice.len() < colls.len() {
@@ -260,14 +263,17 @@ impl Route53Service {
             .get("nexttoken")
             .cloned()
             .unwrap_or_default();
+        // Location names are sorted and the token is the last name of the
+        // previous page, so resume at the first name strictly greater than the
+        // token. A strict `>` keeps the pager moving forward even when the
+        // token's location was deleted between pages.
         let start = if nexttoken.is_empty() {
             0
         } else {
             names
                 .iter()
-                .position(|n| n == &nexttoken)
-                .map(|p| p + 1)
-                .unwrap_or(0)
+                .position(|n| n > &nexttoken)
+                .unwrap_or(names.len())
         };
         let slice: Vec<&String> = names.iter().skip(start).take(max_items).collect();
         let next = if start + slice.len() < names.len() {
@@ -338,6 +344,11 @@ impl Route53Service {
             let cidr = after.strip_prefix(':')?;
             Some((loc, cidr))
         }
+        // The cursor here is a compound (location, cidr) token, not a single
+        // sortable key, so resume by finding the marker's position in the
+        // current order and starting after it. A missing marker (its block was
+        // deleted between pages) falls back to `blocks.len()` (terminate)
+        // rather than 0, so the pager never restarts at page 1.
         let start = if nexttoken.is_empty() {
             0
         } else if let Some((loc, cidr)) = decode_token(&nexttoken) {
@@ -345,13 +356,13 @@ impl Route53Service {
                 .iter()
                 .position(|(n, b)| n == loc && b == cidr)
                 .map(|p| p + 1)
-                .unwrap_or(0)
+                .unwrap_or(blocks.len())
         } else {
             blocks
                 .iter()
                 .position(|(_, b)| b == &nexttoken)
                 .map(|p| p + 1)
-                .unwrap_or(0)
+                .unwrap_or(blocks.len())
         };
         let slice: Vec<&(String, String)> = blocks.iter().skip(start).take(max_items).collect();
         let next = if start + slice.len() < blocks.len() {

@@ -249,13 +249,17 @@ impl IamService {
         }
         roles.sort_by(|a, b| a.role_name.cmp(&b.role_name));
 
-        // Apply marker-based pagination (start after the marker item)
+        // Apply marker-based pagination. The list is sorted by role_name and
+        // the marker is the last role_name of the previous page, so resume at
+        // the first role strictly greater than the marker. Using a strict `>`
+        // (rather than "find the marker, start after it") means a marker whose
+        // role was deleted between pages still resumes forward instead of
+        // restarting at page 1.
         let start_idx = if let Some(ref m) = marker {
             roles
                 .iter()
-                .position(|r| r.role_name == *m)
-                .map(|pos| pos + 1)
-                .unwrap_or(0)
+                .position(|r| r.role_name > *m)
+                .unwrap_or(roles.len())
         } else {
             0
         };

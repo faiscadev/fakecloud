@@ -170,12 +170,18 @@ pub(crate) fn list_async_invokes(
         .collect();
     items.sort_by_key(|i| std::cmp::Reverse(i.submit_time));
 
+    // The list is sorted by Reverse(submit_time) but the cursor is an
+    // invocation_arn, so it is not a sortable total order — resume by finding
+    // the marker's position in the current order and starting after it. A
+    // missing marker (its invocation was deleted between pages) falls back to
+    // `items.len()` (terminate) rather than 0, so the pager never restarts at
+    // page 1.
     let start = if let Some(token) = next_token {
         items
             .iter()
             .position(|inv| inv.invocation_arn.as_str() == token.as_str())
             .map(|p| p + 1)
-            .unwrap_or(0)
+            .unwrap_or(items.len())
     } else {
         0
     };
