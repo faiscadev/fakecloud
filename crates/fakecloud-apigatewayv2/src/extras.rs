@@ -1266,7 +1266,7 @@ impl ApiGatewayV2Service {
                 let spec = parse_openapi_spec(&spec_raw)?;
                 let new_api_id = generate_id("api");
                 let (api, routes, integrations) =
-                    build_api_from_spec(&spec, new_api_id.clone(), &region);
+                    build_api_from_spec(&spec, new_api_id.clone(), &req.region);
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 state.apis.insert(new_api_id.clone(), api.clone());
@@ -2975,6 +2975,31 @@ mod tests {
             &["v2", "apis", "a1", "stages", "prod", "cache", "authorizers"],
             Some("a1"),
             Some("prod"),
+        );
+    }
+
+    #[test]
+    fn import_api_endpoint_uses_request_region() {
+        // ImportApi must stamp the request region into the synthesized
+        // ApiEndpoint, mirroring CreateApi. A frozen us-east-1 would leak the
+        // wrong host into every client that imported against another region.
+        let s = svc();
+        let spec = r#"{"openapi":"3.0.1","info":{"title":"t","version":"1"},"paths":{"/p":{"get":{"responses":{"200":{"description":"ok"}}}}}}"#;
+        let import_body = serde_json::json!({ "Body": spec }).to_string();
+        let mut r = req("ImportApi", &import_body, &["v2", "apis"]);
+        r.region = "eu-west-1".to_string();
+        let resp = s
+            .handle_extra_action("ImportApi", &r, None, None)
+            .expect("ImportApi");
+        let b: serde_json::Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let endpoint = b["apiEndpoint"].as_str().unwrap();
+        assert!(
+            endpoint.contains("eu-west-1"),
+            "ApiEndpoint missing request region: {endpoint}"
+        );
+        assert!(
+            !endpoint.contains("us-east-1"),
+            "ApiEndpoint leaked us-east-1: {endpoint}"
         );
     }
 

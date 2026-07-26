@@ -105,7 +105,7 @@ pub(crate) fn get_inference_profile(
         "inferenceProfileId": profile_id_from_arn(&profile.inference_profile_arn),
         "inferenceProfileName": profile.inference_profile_name,
         "description": profile.description,
-        "models": profile_models(&profile.model_source),
+        "models": profile_models(&profile.model_source, &req.region),
         "status": profile.status,
         "type": profile.inference_profile_type,
         "createdAt": profile.created_at.to_rfc3339(),
@@ -160,7 +160,7 @@ pub(crate) fn list_inference_profiles(
                 "inferenceProfileId": profile_id_from_arn(&p.inference_profile_arn),
                 "inferenceProfileName": p.inference_profile_name,
                 "description": p.description,
-                "models": profile_models(&p.model_source),
+                "models": profile_models(&p.model_source, &req.region),
                 "status": p.status,
                 "type": p.inference_profile_type,
                 "createdAt": p.created_at.to_rfc3339(),
@@ -294,12 +294,12 @@ fn system_profiles(req: &AwsRequest) -> Vec<Value> {
 /// from the user-supplied `modelSource`, otherwise emit one synthesized entry
 /// pointing at a real foundation-model ARN so the response satisfies the
 /// `min: 1` length constraint on `InferenceProfileModels`.
-fn profile_models(model_source: &Value) -> Value {
+fn profile_models(model_source: &Value, region: &str) -> Value {
     if let Some(copy_from) = model_source.get("copyFrom").and_then(Value::as_str) {
         return json!([{ "modelArn": copy_from }]);
     }
     json!([{
-        "modelArn": "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-text-express-v1"
+        "modelArn": format!("arn:aws:bedrock:{region}::foundation-model/amazon.titan-text-express-v1")
     }])
 }
 
@@ -436,6 +436,25 @@ mod tests {
             serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
         assert_eq!(v["inferenceProfileSummaries"].as_array().unwrap().len(), 2);
         assert!(v["nextToken"].is_string());
+    }
+
+    #[test]
+    fn fallback_model_arn_uses_request_region() {
+        // A profile created without a copyFrom modelSource synthesizes a
+        // foundation-model ARN. It must carry the request region, not a frozen
+        // us-east-1, so cross-region clients see a consistent ARN.
+        let s = shared();
+        create(&s, "p-region", false);
+        let mut r = req();
+        r.region = "eu-west-1".to_string();
+        let resp = get_inference_profile(&s, &r, "p-region").unwrap();
+        let v: Value =
+            serde_json::from_str(std::str::from_utf8(resp.body.expect_bytes()).unwrap()).unwrap();
+        let model_arn = v["models"][0]["modelArn"].as_str().unwrap();
+        assert_eq!(
+            model_arn, "arn:aws:bedrock:eu-west-1::foundation-model/amazon.titan-text-express-v1",
+            "fallback modelArn not request-scoped: {model_arn}"
+        );
     }
 
     #[test]
