@@ -12,7 +12,7 @@ Gradle (Kotlin DSL):
 
 ```kotlin
 dependencies {
-    testImplementation("dev.fakecloud:fakecloud:0.44.3")
+    testImplementation("dev.fakecloud:fakecloud:0.44.4")
 }
 ```
 
@@ -22,7 +22,7 @@ Maven:
 <dependency>
     <groupId>dev.fakecloud</groupId>
     <artifactId>fakecloud</artifactId>
-    <version>0.44.3</version>
+    <version>0.44.4</version>
     <scope>test</scope>
 </dependency>
 ```
@@ -394,7 +394,7 @@ import dev.fakecloud.Types.BedrockResponseRule;
 import java.util.List;
 
 FakeCloud fc = new FakeCloud();
-String modelId = "anthropic.claude-3-haiku-20.44.37-v1:0";
+String modelId = "anthropic.claude-3-haiku-20.44.47-v1:0";
 
 // beforeEach
 fc.reset();
