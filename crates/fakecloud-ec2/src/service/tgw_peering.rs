@@ -16,9 +16,9 @@ fn mr(req: &AwsRequest) -> Result<(), AwsServiceError> {
 
 // ---- peering attachments ----
 
-fn peering_xml(p: &TgwPeering, owner: &str) -> String {
+fn peering_xml(p: &TgwPeering, owner: &str, region: &str) -> String {
     format!(
-        "{}<requesterTgwInfo>{}{}<region>us-east-1</region></requesterTgwInfo>\
+        "{}<requesterTgwInfo>{}{}<region>{region}</region></requesterTgwInfo>\
          <accepterTgwInfo>{}{}<region>{}</region></accepterTgwInfo>\
          <status><code>available</code></status><state>{}</state>{}",
         ec2_elem("transitGatewayAttachmentId", &p.id),
@@ -61,7 +61,7 @@ pub(crate) fn create_transit_gateway_peering_attachment(
         &req.request_id,
         &format!(
             "<transitGatewayPeeringAttachment>{}</transitGatewayPeeringAttachment>",
-            peering_xml(&p, &req.account_id)
+            peering_xml(&p, &req.account_id, &req.region)
         ),
     ))
 }
@@ -106,7 +106,7 @@ fn peering_state_change(
         &req.request_id,
         &format!(
             "<transitGatewayPeeringAttachment>{}</transitGatewayPeeringAttachment>",
-            peering_xml(&p, &req.account_id)
+            peering_xml(&p, &req.account_id, &req.region)
         ),
     ))
 }
@@ -157,7 +157,7 @@ pub(crate) fn describe_transit_gateway_peering_attachments(
     let mut items: Vec<String> = state
         .tgw_peerings
         .values()
-        .map(|p| peering_xml(p, &owner))
+        .map(|p| peering_xml(p, &owner, &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -613,4 +613,53 @@ pub(crate) fn describe_transit_gateway_route_table_announcements(
         &req.request_id,
         &ec2_list("transitGatewayRouteTableAnnouncements", &items),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::ec2_request;
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn requester_tgw_info_uses_request_region() {
+        let svc = Ec2Service::new();
+        // Client operates in eu-west-1; the requester side of the peering must
+        // reflect that region, not a hardcoded us-east-1.
+        let mut r = ec2_request(
+            "CreateTransitGatewayPeeringAttachment",
+            &[
+                ("TransitGatewayId", "tgw-req"),
+                ("PeerTransitGatewayId", "tgw-peer"),
+                ("PeerAccountId", "999999999999"),
+                ("PeerRegion", "ap-south-1"),
+            ],
+        );
+        r.region = "eu-west-1".to_string();
+        let created = body(create_transit_gateway_peering_attachment(&svc, &r).unwrap());
+        assert!(
+            created.contains(
+                "<requesterTgwInfo><transitGatewayId>tgw-req</transitGatewayId>\
+                 <ownerId>000000000000</ownerId><region>eu-west-1</region></requesterTgwInfo>"
+            ),
+            "requester region not request-scoped: {created}"
+        );
+        // Accepter side keeps the explicit peer region.
+        assert!(
+            created.contains("<region>ap-south-1</region></accepterTgwInfo>"),
+            "accepter region wrong: {created}"
+        );
+
+        // Describe round-trips the same request region.
+        let mut d = ec2_request("DescribeTransitGatewayPeeringAttachments", &[]);
+        d.region = "eu-west-1".to_string();
+        let desc = body(describe_transit_gateway_peering_attachments(&svc, &d).unwrap());
+        assert!(
+            desc.contains("<region>eu-west-1</region></requesterTgwInfo>"),
+            "describe requester region not request-scoped: {desc}"
+        );
+    }
 }

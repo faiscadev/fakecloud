@@ -18,7 +18,7 @@ fn status_xml(tag: &str, code: &str) -> String {
     format!("<{tag}><code>{code}</code></{tag}>")
 }
 
-fn endpoint_xml(e: &ClientVpnEndpoint, tags: &[Tag]) -> String {
+fn endpoint_xml(e: &ClientVpnEndpoint, tags: &[Tag], region: &str) -> String {
     format!(
         "{}{}{}{}{}{}<transportProtocol>{}</transportProtocol><vpnPort>443</vpnPort>{}{}",
         ec2_elem("clientVpnEndpointId", &e.id),
@@ -27,7 +27,7 @@ fn endpoint_xml(e: &ClientVpnEndpoint, tags: &[Tag]) -> String {
         ec2_elem("creationTime", FIXED_TIME),
         ec2_elem(
             "dnsName",
-            &format!("*.{}.clientvpn.us-east-1.amazonaws.com", e.id)
+            &format!("*.{}.clientvpn.{region}.amazonaws.com", e.id)
         ),
         ec2_elem("clientCidrBlock", &e.client_cidr),
         e.transport_protocol,
@@ -98,7 +98,7 @@ pub(crate) fn create_client_vpn_endpoint(
         status_xml("status", "pending-associate"),
         ec2_elem(
             "dnsName",
-            &format!("*.{id}.clientvpn.us-east-1.amazonaws.com")
+            &format!("*.{id}.clientvpn.{}.amazonaws.com", req.region)
         )
     );
     Ok(Ec2Service::respond(
@@ -139,7 +139,7 @@ pub(crate) fn describe_client_vpn_endpoints(
         .client_vpn_endpoints
         .values()
         .filter(|e| wanted.is_empty() || wanted.contains(&e.id))
-        .map(|e| endpoint_xml(e, state.tags_for(&e.id)))
+        .map(|e| endpoint_xml(e, state.tags_for(&e.id), &req.region))
         .collect();
     items.sort();
     Ok(Ec2Service::respond(
@@ -517,4 +517,51 @@ pub(crate) fn import_client_vpn_client_certificate_revocation_list(
         &req.request_id,
         &ec2_return(true),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::ec2_request;
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn dns_name_uses_request_region() {
+        let svc = Ec2Service::new();
+        // Client is in eu-west-1; the returned Client VPN DNS name host must
+        // carry that region, not a hardcoded us-east-1.
+        let mut r = ec2_request(
+            "CreateClientVpnEndpoint",
+            &[
+                (
+                    "ServerCertificateArn",
+                    "arn:aws:acm:eu-west-1:0:certificate/c",
+                ),
+                ("TransportProtocol", "udp"),
+                ("ClientCidrBlock", "10.0.0.0/22"),
+            ],
+        );
+        r.region = "eu-west-1".to_string();
+        let created = body(create_client_vpn_endpoint(&svc, &r).unwrap());
+        assert!(
+            created.contains(".clientvpn.eu-west-1.amazonaws.com"),
+            "create dnsName not request-scoped: {created}"
+        );
+        assert!(
+            !created.contains("us-east-1"),
+            "create dnsName leaked us-east-1: {created}"
+        );
+
+        // Describe emits the same regional host from endpoint_xml.
+        let mut d = ec2_request("DescribeClientVpnEndpoints", &[]);
+        d.region = "eu-west-1".to_string();
+        let desc = body(describe_client_vpn_endpoints(&svc, &d).unwrap());
+        assert!(
+            desc.contains(".clientvpn.eu-west-1.amazonaws.com"),
+            "describe dnsName not request-scoped: {desc}"
+        );
+    }
 }
