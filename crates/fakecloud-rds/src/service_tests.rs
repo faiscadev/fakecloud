@@ -1993,12 +1993,11 @@ async fn restore_db_cluster_to_point_in_time_returns_promptly() {
 
 #[tokio::test]
 async fn create_db_cluster_snapshot_returns_promptly_metadata_only() {
-    // #2398 sibling (bug-hunt 2026-07-25 Tier-3): the writer dump is
-    // backgrounded so CreateDBClusterSnapshot returns without blocking on the
-    // (unbounded) mysqldump/pg_dump. Docker-free: with no runtime wired there's
-    // nothing to dump, so the snapshot lands as a metadata-only `available`
-    // entry synchronously and the create response reports `creating`
-    // (AWS-faithful).
+    // #2398 sibling (bug-hunt 2026-07-25 Tier-3): the snapshot is recorded
+    // `available` up front and the writer dump runs inline bounded by 120s.
+    // Docker-free: with no runtime wired there's nothing to dump, so the
+    // snapshot lands as a metadata-only `available` entry and the create
+    // response reports `available` (no dump to wait on).
     let svc = make_service();
     {
         let mut accounts = svc.state.write();
@@ -2032,12 +2031,11 @@ async fn create_db_cluster_snapshot_returns_promptly_metadata_only() {
     let body = body_of(resp);
     assert!(body.contains("csnap-1"), "body: {body}");
     assert!(
-        body.contains("<Status>creating</Status>"),
-        "create response reports creating: {body}"
+        body.contains("<Status>available</Status>"),
+        "create response reports available: {body}"
     );
 
-    // No runtime -> metadata-only snapshot recorded synchronously as available,
-    // proving the handler did not block on a dump.
+    // No runtime -> metadata-only snapshot recorded synchronously as available.
     let accounts = svc.state.read();
     let snap = accounts
         .default_ref()
@@ -2056,9 +2054,10 @@ async fn create_db_cluster_snapshot_returns_promptly_metadata_only() {
     );
 }
 
-/// Seed a `cluster_snapshots` extras entry in the `creating` state so the
-/// finalizer's JSON-entry update can be exercised directly.
-fn seed_cluster_snapshot_creating(svc: &RdsService, snapshot_id: &str) {
+/// Seed a `cluster_snapshots` extras entry in the `available` state (the model
+/// the create handler records up front) so the dump-staging helper can be
+/// exercised directly.
+fn seed_cluster_snapshot_available(svc: &RdsService, snapshot_id: &str) {
     let mut accounts = svc.state.write();
     accounts
         .default_mut()
@@ -2070,7 +2069,7 @@ fn seed_cluster_snapshot_creating(svc: &RdsService, snapshot_id: &str) {
             serde_json::json!({
                 "DBClusterSnapshotIdentifier": snapshot_id,
                 "DBClusterIdentifier": "src-cluster",
-                "Status": "creating",
+                "Status": "available",
                 "SnapshotType": "manual",
             }),
         );
@@ -2078,10 +2077,10 @@ fn seed_cluster_snapshot_creating(svc: &RdsService, snapshot_id: &str) {
 
 #[test]
 fn apply_cluster_snapshot_dump_result_stages_dump_on_success() {
-    // The backgrounded finalizer flips the extras-JSON `cluster_snapshots`
-    // entry to `available` and stages the base64 STANDARD dump.
+    // The snapshot is already `available`; a successful dump only *adds* the
+    // base64 STANDARD `DumpDataB64`, leaving `Status` untouched.
     let svc = make_service();
-    seed_cluster_snapshot_creating(&svc, "csnap-1");
+    seed_cluster_snapshot_available(&svc, "csnap-1");
     crate::service::cluster_snapshots::apply_cluster_snapshot_dump_result(
         &svc.state,
         "123456789012",
@@ -2110,10 +2109,10 @@ fn apply_cluster_snapshot_dump_result_stages_dump_on_success() {
 
 #[test]
 fn apply_cluster_snapshot_dump_result_metadata_only_on_error() {
-    // A dump failure must not wedge the snapshot in `creating` forever; it
-    // settles to a metadata-only `available` snapshot (no dump).
+    // A dump failure leaves the (already `available`) snapshot as a
+    // metadata-only entry with no dump — `Status` untouched.
     let svc = make_service();
-    seed_cluster_snapshot_creating(&svc, "csnap-1");
+    seed_cluster_snapshot_available(&svc, "csnap-1");
     crate::service::cluster_snapshots::apply_cluster_snapshot_dump_result(
         &svc.state,
         "123456789012",
@@ -2140,12 +2139,12 @@ fn apply_cluster_snapshot_dump_result_metadata_only_on_error() {
 
 #[tokio::test]
 async fn apply_cluster_snapshot_dump_result_metadata_only_on_timeout() {
-    // A dump that stalls past the finalizer's bound must not wedge the snapshot
-    // in `creating` forever: the timeout collapses to the metadata-only path,
-    // settling the snapshot to `available` (no dump). This exercises the real
-    // `tokio::time::timeout` -> `Result` mapping the finalizer feeds the helper.
+    // A dump that stalls past the 120s bound collapses to the metadata-only
+    // path: the snapshot (already `available`) ends up with no dump, and
+    // `Status` is never touched. This exercises the real
+    // `tokio::time::timeout` -> `Result` mapping the handler feeds the helper.
     let svc = make_service();
-    seed_cluster_snapshot_creating(&svc, "csnap-1");
+    seed_cluster_snapshot_available(&svc, "csnap-1");
 
     // A zero-duration timeout over a never-resolving dump yields `Err(Elapsed)`,
     // the exact shape a stalled pg_dump/mysqldump produces under CI congestion.

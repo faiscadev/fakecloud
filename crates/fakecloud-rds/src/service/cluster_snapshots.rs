@@ -4,19 +4,21 @@ use super::*;
 
 impl RdsService {
     /// Real CreateDBClusterSnapshot: locates the cluster's writer member,
-    /// records the snapshot synchronously as `creating`, and backgrounds the
-    /// writer's database dump so the (unbounded mysqldump/pg_dump) never blocks
-    /// the request handler past the ~60s client read timeout (bug-hunt
-    /// 2026-07-25 Tier-3, #2398 sibling). The detached finalizer flips the
-    /// stored `cluster_snapshots` JSON entry to `available` and inserts the
-    /// base64 dump so a later RestoreDBClusterFromSnapshot can replay the exact
-    /// state.
+    /// records the snapshot as `available` immediately, then dumps the
+    /// writer's database synchronously (bounded by a hard timeout so an
+    /// unbounded mysqldump/pg_dump can never hang the request forever) and
+    /// stages the base64 dump on that same entry so a later
+    /// RestoreDBClusterFromSnapshot can replay the exact state.
     ///
-    /// This redoes a previously-reverted backgrounding (commit `f5cc5ddc2`)
-    /// with a *correct* finalizer: cluster snapshots live as JSON in
-    /// `state.extras["cluster_snapshots"]`, so the finalizer updates that entry
-    /// directly rather than the typed `state.snapshots` store the
-    /// single-instance path uses.
+    /// The dump is kept ON the request path deliberately: the e2e drops the
+    /// source writer the instant the snapshot reports `available`, so the dump
+    /// MUST be staged before this returns — any backgrounding races that
+    /// teardown and loses the data. Two backgrounding attempts (commits
+    /// `f5cc5ddc2` and this branch's earlier finalizer) also wedged the
+    /// snapshot in `creating` because the detached status flip never became
+    /// visible to DescribeDBClusterSnapshots. Recording `available` up front and
+    /// dumping inline eliminates both the stuck-`creating` state and the restore
+    /// race; the 120s cap keeps the handler from ever blocking indefinitely.
     pub(super) async fn create_db_cluster_snapshot(
         &self,
         request: &AwsRequest,
@@ -62,12 +64,10 @@ impl RdsService {
             })
         };
 
-        // Will we background a live dump? Only when we found a writer AND a
-        // container runtime is wired. Otherwise there's nothing to dump, so the
-        // snapshot is metadata-only and lands as `available` synchronously.
-        let will_dump = writer_info.is_some() && self.runtime_ref().is_some();
-        let initial_status = if will_dump { "creating" } else { "available" };
-
+        // Record the snapshot entry `available` up front — no `creating`
+        // branch. DescribeDBClusterSnapshots sees `available` immediately and
+        // the inline dump below only *adds* `DumpDataB64`, never touching
+        // `Status`, so the snapshot can never wedge mid-flight.
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
@@ -90,10 +90,10 @@ impl RdsService {
                 );
                 obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
                 obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
-                obj.insert("Status".to_string(), json!(initial_status));
+                obj.insert("Status".to_string(), json!("available"));
                 obj.insert("SnapshotType".to_string(), json!("manual"));
-                // No dump inserted yet — the background finalizer stages
-                // `DumpDataB64` on completion (or leaves it absent on a
+                // No dump inserted yet — the inline dump below stages
+                // `DumpDataB64` on success (or leaves it absent on a
                 // metadata-only snapshot).
             }
             state
@@ -103,23 +103,33 @@ impl RdsService {
                 .insert(snapshot_id.clone(), entry);
         }
 
-        // Background the slow writer dump so the request returns promptly. The
-        // finalizer flips the stored `cluster_snapshots` entry to `available`
-        // and stages the base64 dump; on dump failure it leaves the snapshot
-        // metadata-only `available` (matching the previous inline fallback).
+        // Dump the writer synchronously and stage it on the (already
+        // `available`) snapshot. Bound the (unbounded) mysqldump/pg_dump with a
+        // hard 120s cap so a stalled dump under CI runner congestion can't hang
+        // the handler forever: timeout and dump-error both collapse to the
+        // metadata-only path (no `DumpDataB64`), while success stages the base64
+        // dump. Either way the snapshot stays `available`.
         if let (Some((wid, eng, user, pass, db)), Some(runtime)) =
             (writer_info, self.runtime_ref().cloned())
         {
-            self.spawn_finalize_cluster_snapshot(
-                runtime,
-                request.account_id.clone(),
-                snapshot_id.clone(),
-                wid,
-                eng,
-                user,
-                pass,
-                db,
+            let dump = tokio::time::timeout(
+                std::time::Duration::from_secs(120),
+                runtime.dump_database(&wid, &eng, &user, &pass, &db),
+            )
+            .await;
+            let result = cluster_snapshot_dump_result_from_timeout(&snapshot_id, dump);
+            apply_cluster_snapshot_dump_result(
+                &self.state,
+                &request.account_id,
+                &snapshot_id,
+                result,
             );
+            save_snapshot_static(
+                self.state.clone(),
+                self.snapshot_store.clone(),
+                self.snapshot_lock.clone(),
+            )
+            .await;
         }
 
         self.emit_event(
@@ -131,9 +141,9 @@ impl RdsService {
             "DB cluster snapshot created",
         );
 
-        // AWS returns the snapshot in `creating` from CreateDBClusterSnapshot;
-        // the backgrounded dump flips it to `available` (visible via
-        // DescribeDBClusterSnapshots) once complete.
+        // The snapshot is genuinely `available` on return (dump staged inline),
+        // so report `available` — matching the pre-backgrounding synchronous
+        // behaviour and what DescribeDBClusterSnapshots now shows.
         Ok(AwsResponse::xml(
             StatusCode::OK,
             query_response_xml(
@@ -143,55 +153,11 @@ impl RdsService {
                     &snapshot_id,
                     &arn,
                     &cluster_id,
-                    "creating",
+                    "available",
                 ),
                 &request.request_id,
             ),
         ))
-    }
-
-    /// Background the slow writer dump for a cluster snapshot. The caller
-    /// records the `cluster_snapshots` JSON entry synchronously with status
-    /// `creating` and returns immediately; this task runs mysqldump/pg_dump
-    /// (unbounded in dataset size, easily past the ~60s client read timeout)
-    /// and only then updates that same extras-JSON entry — setting `Status` to
-    /// `available` and inserting the base64 `DumpDataB64` on success, or
-    /// leaving a metadata-only `available` snapshot on dump failure. Mirrors
-    /// `spawn_finalize_snapshot` but writes the extras-JSON entry rather than
-    /// the typed `state.snapshots` store (cluster snapshots don't live there).
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_finalize_cluster_snapshot(
-        &self,
-        runtime: Arc<RdsRuntime>,
-        account_id: String,
-        snapshot_id: String,
-        writer_id: String,
-        engine: String,
-        username: String,
-        password: String,
-        db_name: String,
-    ) {
-        let state_handle = self.state.clone();
-        let snapshot_store = self.snapshot_store.clone();
-        let snapshot_lock = self.snapshot_lock.clone();
-        tokio::spawn(async move {
-            // Bound the (unbounded) mysqldump/pg_dump so the finalizer ALWAYS
-            // resolves. Without this cap a stalled dump under CI runner
-            // congestion never returns, leaving the snapshot wedged in
-            // `creating` forever (the failure that reverted the prior
-            // backgrounding attempt, commit f5cc5ddc2, and reddened the e2e's
-            // 180s wait). A timeout collapses to the metadata-only path, so all
-            // three outcomes — success, dump error, timeout — settle the
-            // snapshot to `available`.
-            let dump = tokio::time::timeout(
-                std::time::Duration::from_secs(120),
-                runtime.dump_database(&writer_id, &engine, &username, &password, &db_name),
-            )
-            .await;
-            let result = cluster_snapshot_dump_result_from_timeout(&snapshot_id, dump);
-            apply_cluster_snapshot_dump_result(&state_handle, &account_id, &snapshot_id, result);
-            save_snapshot_static(state_handle.clone(), snapshot_store, snapshot_lock).await;
-        });
     }
 
     /// Real RestoreDBClusterFromSnapshot: clones the source cluster's
@@ -498,16 +464,15 @@ impl RdsService {
     }
 }
 
-/// Apply the outcome of a backgrounded cluster-snapshot dump to the stored
+/// Stage the outcome of a cluster-snapshot dump onto the stored
 /// `extras["cluster_snapshots"]` JSON entry. Split out from
-/// `spawn_finalize_cluster_snapshot` so the state transition (`creating` ->
-/// `available`, with the base64 dump staged) is unit-testable without a
+/// `create_db_cluster_snapshot` so the dump-staging is unit-testable without a
 /// container runtime.
 ///
-/// On success the entry's `Status` flips to `available` and `DumpDataB64`
-/// carries the base64 STANDARD dump. On dump failure the entry is left as a
-/// metadata-only `available` snapshot (no dump) — matching the previous inline
-/// fallback. A snapshot deleted while the dump was in flight is left untouched
+/// The snapshot entry is recorded `available` up front and this NEVER touches
+/// `Status`: on success it only inserts the base64 STANDARD `DumpDataB64`; on
+/// dump failure/timeout it does nothing, leaving a metadata-only `available`
+/// snapshot. A snapshot deleted while the dump was in flight is left untouched
 /// (the lookup misses).
 pub(super) fn apply_cluster_snapshot_dump_result(
     state: &SharedRdsState,
@@ -530,7 +495,6 @@ pub(super) fn apply_cluster_snapshot_dump_result(
         Ok(data) => {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-            obj.insert("Status".to_string(), json!("available"));
             obj.insert("DumpDataB64".to_string(), json!(b64));
         }
         Err(error) => {
@@ -539,7 +503,6 @@ pub(super) fn apply_cluster_snapshot_dump_result(
                 snapshot = %snapshot_id,
                 "cluster snapshot dump failed; leaving metadata-only available snapshot"
             );
-            obj.insert("Status".to_string(), json!("available"));
         }
     }
 }
@@ -549,12 +512,13 @@ pub(super) fn apply_cluster_snapshot_dump_result(
 /// The dump future is wrapped in `tokio::time::timeout`, yielding
 /// `Result<Result<Vec<u8>, RuntimeError>, Elapsed>`:
 ///   - `Ok(inner)` passes the dump's own success/error straight through, so the
-///     finalizer stages the dump on success and settles metadata-only on error.
+///     caller stages the dump on success and settles metadata-only on error.
 ///   - `Err(_elapsed)` (the dump stalled past the cap) maps to the metadata-only
 ///     path — same terminal state as a dump error — after logging a distinct
-///     timeout warning. This is what guarantees the snapshot can never wedge in
-///     `creating`: every arm feeds `apply_cluster_snapshot_dump_result` a
-///     `Result`, and both `Err` shapes flip `Status` to `available`.
+///     timeout warning. This is what keeps the handler from ever blocking
+///     indefinitely: every arm feeds `apply_cluster_snapshot_dump_result` a
+///     `Result`, and the snapshot (already `available`) simply ends up with or
+///     without `DumpDataB64`.
 pub(super) fn cluster_snapshot_dump_result_from_timeout(
     snapshot_id: &str,
     dump: Result<Result<Vec<u8>, RuntimeError>, tokio::time::error::Elapsed>,
