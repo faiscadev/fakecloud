@@ -1625,6 +1625,12 @@ impl ResourceProvisioner {
             "AWS::IAM::Role" => Some(self.update_iam_role(existing, new_def)?),
             "AWS::IAM::Policy" => Some(self.update_iam_policy(existing, new_def)?),
             "AWS::IAM::ManagedPolicy" => Some(self.update_iam_policy(existing, new_def)?),
+            // In-place update: the reprovision fallback (delete + create) would
+            // wipe the user's access keys / churn the user id (User) or drop
+            // out-of-band group memberships (Group). See `update_iam_user` /
+            // `update_iam_group`.
+            "AWS::IAM::User" => Some(self.update_iam_user(existing, new_def)?),
+            "AWS::IAM::Group" => Some(self.update_iam_group(existing, new_def)?),
             "AWS::ApiGateway::RestApi" => Some(self.update_apigw_rest_api(existing, new_def)?),
             "AWS::ApiGateway::Resource" => Some(self.update_apigw_resource(existing, new_def)?),
             "AWS::ApiGateway::Method" => Some(self.update_apigw_method(existing, new_def)?),
@@ -1743,6 +1749,11 @@ impl ResourceProvisioner {
             "AWS::Cognito::UserPoolClient" => {
                 Some(self.update_cognito_user_pool_client(existing, new_def)?)
             }
+            // In-place update: reprovision would mint a new `<region>:<uuid>`
+            // pool id and cascade-drop the pool's role attachment.
+            "AWS::Cognito::IdentityPool" => {
+                Some(self.update_cognito_identity_pool(existing, new_def)?)
+            }
             "AWS::RDS::DBInstance" => Some(self.update_rds_db_instance(existing, new_def)?),
             "AWS::S3::Bucket" => Some(self.update_s3_bucket(existing, new_def)?),
             "AWS::S3::BucketPolicy" => Some(self.update_s3_bucket_policy(existing, new_def)?),
@@ -1827,6 +1838,9 @@ impl ResourceProvisioner {
             // that a reprovision (delete+create) would silently wipe.
             "AWS::Glue::Database" => Some(self.update_glue_database(existing, new_def)?),
             "AWS::Glue::Table" => Some(self.update_glue_table(existing, new_def)?),
+            "AWS::Timestream::Database" => {
+                Some(self.update_timestream_database(existing, new_def)?)
+            }
             "AWS::Timestream::Table" => Some(self.update_timestream_table(existing, new_def)?),
             // Auto Scaling Group: mutate the stored group in place and reconcile
             // instances BY DELTA (see `update_autoscaling_group`) so a benign
@@ -1876,6 +1890,9 @@ impl ResourceProvisioner {
                 Some(self.update_firehose_delivery_stream(existing, new_def)?)
             }
             "AWS::Backup::BackupVault" => Some(self.update_backup_vault(existing, new_def)?),
+            // In-place update: reprovision would mint a new BackupPlanId and
+            // drop the plan's version history + selections.
+            "AWS::Backup::BackupPlan" => Some(self.update_backup_plan(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing

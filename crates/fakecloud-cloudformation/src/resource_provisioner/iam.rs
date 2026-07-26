@@ -450,6 +450,86 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    /// Apply a CFN property update to an existing IAM user in place. Without a
+    /// dedicated arm the reprovision fallback would `delete_iam_user` +
+    /// re-create, which mints a new `user_id`, WIPES every `access_key` the user
+    /// held, and strips the user from every group. This mutates the stored user
+    /// in place — refreshing tags, permissions boundary, inline `Policies` and
+    /// attached `ManagedPolicyArns` (the template is authoritative for the
+    /// policy sets), and additively applying any `Groups` — while preserving the
+    /// physical id (user name), `user_id`, `arn`, the user's `access_keys`, and
+    /// pre-existing (externally-added) group memberships. A changed `UserName`
+    /// is a replacement handled by the reprovision path, not here.
+    pub(super) fn update_iam_user(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let user_name = existing.physical_id.clone();
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+
+        let arn = {
+            let user = state
+                .users
+                .get_mut(&user_name)
+                .ok_or_else(|| format!("IAM user {user_name} not yet provisioned"))?;
+            if props.get("Tags").is_some() {
+                user.tags = parse_iam_tags(props.get("Tags"));
+            }
+            if let Some(pb) = props.get("PermissionsBoundary").and_then(|v| v.as_str()) {
+                user.permissions_boundary = Some(pb.to_string());
+            }
+            user.arn.clone()
+        };
+
+        // Inline policies — replace the whole set with the template's.
+        if let Some(policies) = props.get("Policies").and_then(|v| v.as_array()) {
+            let inline = state
+                .user_inline_policies
+                .entry(user_name.clone())
+                .or_default();
+            inline.clear();
+            for p in policies {
+                if let (Some(n), Some(doc)) = (
+                    p.get("PolicyName").and_then(|v| v.as_str()),
+                    p.get("PolicyDocument"),
+                ) {
+                    let document = if doc.is_string() {
+                        doc.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string(doc).unwrap_or_default()
+                    };
+                    inline.insert(n.to_string(), document);
+                }
+            }
+        }
+        // Attached managed policies — replace the set with the template's.
+        if let Some(arns) = props.get("ManagedPolicyArns").and_then(|v| v.as_array()) {
+            let attached: Vec<String> = arns
+                .iter()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect();
+            state.user_policies.insert(user_name.clone(), attached);
+        }
+        // Group memberships — additive, so externally-managed memberships (a
+        // direct AddUserToGroup / UserToGroupAddition resource) survive.
+        if let Some(groups) = props.get("Groups").and_then(|v| v.as_array()) {
+            for g in groups {
+                if let Some(g_name) = g.as_str() {
+                    if let Some(group) = state.groups.get_mut(g_name) {
+                        if !group.members.iter().any(|m| m == &user_name) {
+                            group.members.push(user_name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(ProvisionResult::new(user_name).with("Arn", arn))
+    }
+
     pub(super) fn create_iam_group(
         &self,
         resource: &ResourceDefinition,
@@ -517,6 +597,58 @@ impl ResourceProvisioner {
             },
         );
 
+        Ok(ProvisionResult::new(group_name).with("Arn", arn))
+    }
+
+    /// Apply a CFN property update to an existing IAM group in place. Without a
+    /// dedicated arm the reprovision fallback would `delete_iam_group` +
+    /// re-create, dropping every membership added out-of-band (a direct
+    /// AddUserToGroup / `AWS::IAM::UserToGroupAddition` resource) and churning
+    /// the `group_id`. This refreshes the inline `Policies` and attached
+    /// `ManagedPolicyArns` (the template is authoritative for the policy sets)
+    /// while preserving the physical id (group name), `group_id`, `arn`, and the
+    /// group's `members`. A changed `GroupName` is a replacement handled by the
+    /// reprovision path, not here.
+    pub(super) fn update_iam_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let group_name = existing.physical_id.clone();
+        let mut accounts = self.iam_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let group = state
+            .groups
+            .get_mut(&group_name)
+            .ok_or_else(|| format!("IAM group {group_name} not yet provisioned"))?;
+
+        // Inline policies — replace the whole set with the template's.
+        if let Some(policies) = props.get("Policies").and_then(|v| v.as_array()) {
+            group.inline_policies.clear();
+            for p in policies {
+                if let (Some(n), Some(doc)) = (
+                    p.get("PolicyName").and_then(|v| v.as_str()),
+                    p.get("PolicyDocument"),
+                ) {
+                    let document = if doc.is_string() {
+                        doc.as_str().unwrap_or("").to_string()
+                    } else {
+                        serde_json::to_string(doc).unwrap_or_default()
+                    };
+                    group.inline_policies.insert(n.to_string(), document);
+                }
+            }
+        }
+        // Attached managed policies — replace the set with the template's.
+        if let Some(arns) = props.get("ManagedPolicyArns").and_then(|v| v.as_array()) {
+            group.attached_policies = arns
+                .iter()
+                .filter_map(|a| a.as_str().map(String::from))
+                .collect();
+        }
+
+        let arn = group.arn.clone();
         Ok(ProvisionResult::new(group_name).with("Arn", arn))
     }
 

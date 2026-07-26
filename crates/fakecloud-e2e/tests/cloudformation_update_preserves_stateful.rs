@@ -22,6 +22,7 @@
 
 mod helpers;
 
+use aws_sdk_cloudformation::types::Capability;
 use helpers::TestServer;
 
 async fn wait_for_status(server: &TestServer, stack: &str, want: &str) {
@@ -722,5 +723,293 @@ async fn cfn_update_backup_vault_is_in_place() {
         tags.tags().and_then(|t| t.get("env")).map(String::as_str),
         Some("prod"),
         "the mutable tag change should have been applied in place"
+    );
+}
+
+// --- AWS::IAM::User -------------------------------------------------------
+//
+// Without an in-place arm the reprovision fallback would `delete_iam_user` +
+// re-create on a benign tag change: that WIPES every access key the user held
+// and mints a new `user_id`. This asserts an out-of-band access key and the
+// stable `user_id` both survive a tag-only `UpdateStack`.
+
+const USER_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Worker": {
+      "Type": "AWS::IAM::User",
+      "Properties": {
+        "UserName": "cfn-preserve-worker",
+        "Tags": [{"Key": "env", "Value": "staging"}]
+      }
+    }
+  }
+}"#;
+
+// Identical except the tag value staging -> prod (a mutable, in-place change).
+const USER_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Worker": {
+      "Type": "AWS::IAM::User",
+      "Properties": {
+        "UserName": "cfn-preserve-worker",
+        "Tags": [{"Key": "env", "Value": "prod"}]
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_update_iam_user_preserves_access_keys() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let iam = server.iam_client().await;
+
+    cfn.create_stack()
+        .stack_name("user-preserve")
+        .template_body(USER_TEMPLATE_V1)
+        .capabilities(Capability::CapabilityNamedIam)
+        .send()
+        .await
+        .expect("create_stack");
+    wait_for_status(&server, "user-preserve", "CREATE_COMPLETE").await;
+
+    // The server-minted user id is the user's stable identity; a delete+recreate
+    // would mint a new one.
+    let before = iam
+        .get_user()
+        .user_name("cfn-preserve-worker")
+        .send()
+        .await
+        .expect("get_user before");
+    let user_id_before = before.user().expect("user").user_id().to_string();
+
+    // Out-of-band: mint an access key the template never carries. A
+    // delete+recreate would wipe it.
+    let key = iam
+        .create_access_key()
+        .user_name("cfn-preserve-worker")
+        .send()
+        .await
+        .expect("create_access_key");
+    let access_key_id = key
+        .access_key()
+        .expect("access key")
+        .access_key_id()
+        .to_string();
+
+    // Change a mutable property (a tag value). Pre-fix this delete+recreated the
+    // user, wiping the access key and minting a new user id.
+    cfn.update_stack()
+        .stack_name("user-preserve")
+        .template_body(USER_TEMPLATE_V2)
+        .capabilities(Capability::CapabilityNamedIam)
+        .send()
+        .await
+        .expect("update_stack");
+    wait_for_status(&server, "user-preserve", "UPDATE_COMPLETE").await;
+
+    // The user id is unchanged -> in-place, not a destructive recreate.
+    let after = iam
+        .get_user()
+        .user_name("cfn-preserve-worker")
+        .send()
+        .await
+        .expect("get_user after");
+    assert_eq!(
+        after.user().expect("user").user_id(),
+        user_id_before,
+        "user id must be stable across an in-place update; a recreate would mint a new one"
+    );
+
+    // The out-of-band access key survived the update.
+    let keys = iam
+        .list_access_keys()
+        .user_name("cfn-preserve-worker")
+        .send()
+        .await
+        .expect("list_access_keys");
+    assert!(
+        keys.access_key_metadata()
+            .iter()
+            .any(|k| k.access_key_id() == Some(access_key_id.as_str())),
+        "the out-of-band access key must survive an in-place IAM user update; a reprovision would have wiped it"
+    );
+
+    // ...and the tag change was actually applied.
+    let tags = iam
+        .list_user_tags()
+        .user_name("cfn-preserve-worker")
+        .send()
+        .await
+        .expect("list_user_tags");
+    assert_eq!(
+        tags.tags()
+            .iter()
+            .find(|t| t.key() == "env")
+            .map(|t| t.value()),
+        Some("prod"),
+        "the mutable tag change should have been applied in place"
+    );
+}
+
+// --- AWS::Cognito::IdentityPool -------------------------------------------
+//
+// Without an in-place arm the reprovision fallback would
+// `delete_cognito_identity_pool` + re-create on a benign name change: that
+// mints a brand-new `<region>:<uuid>` pool id AND cascade-drops the pool's
+// separately-managed role attachment. This asserts the pool id stays stable and
+// an out-of-band role attachment survives a name-only `UpdateStack`.
+
+const POOL_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Pool": {
+      "Type": "AWS::Cognito::IdentityPool",
+      "Properties": {
+        "IdentityPoolName": "cfn_preserve_pool_v1",
+        "AllowUnauthenticatedIdentities": true
+      }
+    }
+  },
+  "Outputs": {
+    "PoolId": {"Value": {"Ref": "Pool"}}
+  }
+}"#;
+
+// Identical except the pool name is bumped (a mutable, in-place change).
+const POOL_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Pool": {
+      "Type": "AWS::Cognito::IdentityPool",
+      "Properties": {
+        "IdentityPoolName": "cfn_preserve_pool_v2",
+        "AllowUnauthenticatedIdentities": true
+      }
+    }
+  },
+  "Outputs": {
+    "PoolId": {"Value": {"Ref": "Pool"}}
+  }
+}"#;
+
+async fn stack_output(server: &TestServer, stack: &str, key: &str) -> String {
+    let cfn = server.cloudformation_client().await;
+    let out = cfn
+        .describe_stacks()
+        .stack_name(stack)
+        .send()
+        .await
+        .expect("describe_stacks");
+    out.stacks()
+        .first()
+        .expect("stack")
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some(key))
+        .and_then(|o| o.output_value())
+        .unwrap_or_else(|| panic!("output {key} not found"))
+        .to_string()
+}
+
+#[tokio::test]
+async fn cfn_update_cognito_identity_pool_preserves_role_attachment() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cognito_identity = server.cognito_identity_client().await;
+    let iam = server.iam_client().await;
+
+    // A role to attach to the pool out-of-band.
+    let trust_doc = r#"{
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": {"Federated": "cognito-identity.amazonaws.com"},
+            "Action": "sts:AssumeRoleWithWebIdentity"
+        }]
+    }"#;
+    let role = iam
+        .create_role()
+        .role_name("CfnPreservePoolUnauthRole")
+        .assume_role_policy_document(trust_doc)
+        .send()
+        .await
+        .expect("create unauth role");
+    let role_arn = role.role().unwrap().arn().to_string();
+
+    cfn.create_stack()
+        .stack_name("pool-preserve")
+        .template_body(POOL_TEMPLATE_V1)
+        .send()
+        .await
+        .expect("create_stack");
+    wait_for_status(&server, "pool-preserve", "CREATE_COMPLETE").await;
+
+    let pool_id = stack_output(&server, "pool-preserve", "PoolId").await;
+    assert!(
+        pool_id.contains(':'),
+        "identity pool id should be `<region>:<uuid>`: {pool_id}"
+    );
+
+    // Out-of-band: attach roles to the pool (a separate SetIdentityPoolRoles
+    // record). A delete+recreate would cascade-drop this attachment.
+    use std::collections::HashMap;
+    let mut roles = HashMap::new();
+    roles.insert("authenticated".to_string(), role_arn.clone());
+    roles.insert("unauthenticated".to_string(), role_arn.clone());
+    cognito_identity
+        .set_identity_pool_roles()
+        .identity_pool_id(&pool_id)
+        .set_roles(Some(roles))
+        .send()
+        .await
+        .expect("set identity pool roles");
+
+    // Change a mutable property (the pool name). Pre-fix this delete+recreated
+    // the pool, minting a new id and dropping the role attachment.
+    cfn.update_stack()
+        .stack_name("pool-preserve")
+        .template_body(POOL_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+    wait_for_status(&server, "pool-preserve", "UPDATE_COMPLETE").await;
+
+    // The pool id is unchanged -> in-place, not a destructive recreate.
+    let pool_id_after = stack_output(&server, "pool-preserve", "PoolId").await;
+    assert_eq!(
+        pool_id_after, pool_id,
+        "identity pool id must be stable across an in-place update; a recreate would mint a new `<region>:<uuid>`"
+    );
+
+    // The name change was actually applied.
+    let described = cognito_identity
+        .describe_identity_pool()
+        .identity_pool_id(&pool_id)
+        .send()
+        .await
+        .expect("describe identity pool");
+    assert_eq!(
+        described.identity_pool_name(),
+        "cfn_preserve_pool_v2",
+        "the mutable name change should have been applied in place"
+    );
+
+    // The out-of-band role attachment survived the update.
+    let got_roles = cognito_identity
+        .get_identity_pool_roles()
+        .identity_pool_id(&pool_id)
+        .send()
+        .await
+        .expect("get identity pool roles");
+    assert_eq!(
+        got_roles
+            .roles()
+            .and_then(|m| m.get("unauthenticated"))
+            .map(String::as_str),
+        Some(role_arn.as_str()),
+        "the out-of-band role attachment must survive an in-place identity pool update; a reprovision would have cascade-dropped it"
     );
 }
