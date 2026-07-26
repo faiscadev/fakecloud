@@ -775,7 +775,11 @@ impl RdsState {
 
 pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
     vec![
-        // PostgreSQL versions
+        // PostgreSQL versions. The first entry per engine is what
+        // `DescribeDBEngineVersions` with `DefaultOnly=true` returns (and what
+        // Terraform's `aws_rds_engine_version` data source resolves to), so the
+        // established GA default (17.x / 8.0.x) stays first; newer majors that
+        // AWS also accepts (18, 8.4) are appended as non-default options.
         EngineVersionInfo {
             engine: "postgres".to_string(),
             engine_version: "17.4".to_string(),
@@ -816,6 +820,14 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
             db_engine_version_description: "PostgreSQL 13.13".to_string(),
             status: "available".to_string(),
         },
+        EngineVersionInfo {
+            engine: "postgres".to_string(),
+            engine_version: "18.0".to_string(),
+            db_parameter_group_family: "postgres18".to_string(),
+            db_engine_description: "PostgreSQL".to_string(),
+            db_engine_version_description: "PostgreSQL 18.0".to_string(),
+            status: "available".to_string(),
+        },
         // MySQL versions
         EngineVersionInfo {
             engine: "mysql".to_string(),
@@ -839,6 +851,14 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
             db_parameter_group_family: "mysql5.7".to_string(),
             db_engine_description: "MySQL Community Edition".to_string(),
             db_engine_version_description: "MySQL 5.7.44".to_string(),
+            status: "available".to_string(),
+        },
+        EngineVersionInfo {
+            engine: "mysql".to_string(),
+            engine_version: "8.4.0".to_string(),
+            db_parameter_group_family: "mysql8.4".to_string(),
+            db_engine_description: "MySQL Community Edition".to_string(),
+            db_engine_version_description: "MySQL 8.4.0".to_string(),
             status: "available".to_string(),
         },
         // MariaDB versions
@@ -871,15 +891,20 @@ pub fn default_engine_versions() -> Vec<EngineVersionInfo> {
 
 pub fn default_orderable_options() -> Vec<OrderableDbInstanceOption> {
     let mut options = Vec::new();
+    // Default (first-per-engine) versions stay the established GA release so
+    // `DefaultOnly`/`aws_rds_engine_version` resolves to them; the newer majors
+    // AWS also accepts (18, 8.4) are appended as non-default options.
     let engines_and_versions = vec![
         ("postgres", "17.4", "postgresql-license"),
         ("postgres", "16.3", "postgresql-license"),
         ("postgres", "15.5", "postgresql-license"),
         ("postgres", "14.10", "postgresql-license"),
         ("postgres", "13.13", "postgresql-license"),
+        ("postgres", "18.0", "postgresql-license"),
         ("mysql", "8.0.35", "general-public-license"),
         ("mysql", "8.0.28", "general-public-license"),
         ("mysql", "5.7.44", "general-public-license"),
+        ("mysql", "8.4.0", "general-public-license"),
         ("mariadb", "11.4.5", "general-public-license"),
         ("mariadb", "10.11.6", "general-public-license"),
         ("mariadb", "10.6.16", "general-public-license"),
@@ -909,11 +934,13 @@ pub fn default_parameter_groups(
     let mut groups = BTreeMap::new();
 
     let families = vec![
+        ("postgres18", "Default parameter group for postgres18"),
         ("postgres17", "Default parameter group for postgres17"),
         ("postgres16", "Default parameter group for postgres16"),
         ("postgres15", "Default parameter group for postgres15"),
         ("postgres14", "Default parameter group for postgres14"),
         ("postgres13", "Default parameter group for postgres13"),
+        ("mysql8.4", "Default parameter group for mysql8.4"),
         ("mysql8.0", "Default parameter group for mysql8.0"),
         ("mysql5.7", "Default parameter group for mysql5.7"),
         ("mariadb11.4", "Default parameter group for mariadb11.4"),
@@ -1110,11 +1137,21 @@ mod tests {
     fn default_engine_versions_are_postgres_metadata() {
         let versions = default_engine_versions();
 
-        assert_eq!(versions.len(), 11); // 5 postgres + 3 mysql + 3 mariadb
-                                        // Check first (newest) postgres version
+        assert_eq!(versions.len(), 13); // 6 postgres + 4 mysql + 3 mariadb
+                                        // The first postgres entry is the DefaultOnly/default version (17.4);
+                                        // 18.0 is present but appended as a non-default option.
         assert_eq!(versions[0].engine, "postgres");
         assert_eq!(versions[0].engine_version, "17.4");
         assert_eq!(versions[0].db_parameter_group_family, "postgres17");
+        assert!(versions
+            .iter()
+            .any(|v| v.engine == "postgres" && v.engine_version == "18.0"));
+        // The first mysql entry is the default (8.0.35); 8.4.0 is appended.
+        let first_mysql = versions.iter().find(|v| v.engine == "mysql").unwrap();
+        assert_eq!(first_mysql.engine_version, "8.0.35");
+        assert!(versions
+            .iter()
+            .any(|v| v.engine == "mysql" && v.engine_version == "8.4.0"));
     }
 
     #[test]
@@ -1122,8 +1159,8 @@ mod tests {
         let versions = default_engine_versions();
         let options = default_orderable_options();
 
-        // 11 engine versions * every representative instance class.
-        assert_eq!(options.len(), 11 * SUPPORTED_INSTANCE_CLASSES.len());
+        // 13 engine versions * every representative instance class.
+        assert_eq!(options.len(), 13 * SUPPORTED_INSTANCE_CLASSES.len());
         // Verify all engines and versions have orderable options
         for version in &versions {
             assert!(options.iter().any(|opt| {

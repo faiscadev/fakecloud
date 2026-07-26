@@ -401,9 +401,9 @@ pub(crate) fn validate_create_request(
     // forms and the runtime resolves the matching prebuilt image regardless.
     let supported_versions = match engine {
         "postgres" => vec![
-            "17", "16", "15", "14", "13", "17.4", "16.3", "15.5", "14.10", "13.13",
+            "18", "17", "16", "15", "14", "13", "17.4", "16.3", "15.5", "14.10", "13.13",
         ],
-        "mysql" => vec!["8.0", "8.0.35", "8.0.28", "5.7.44"],
+        "mysql" => vec!["8.4", "8.0", "8.0.35", "8.0.28", "5.7.44"],
         "mariadb" => vec!["10.6", "10.11", "11.4", "11.4.5", "10.11.6", "10.6.16"],
         "oracle-ee" | "oracle-se2" | "oracle-ee-cdb" | "oracle-se2-cdb" => {
             vec!["23.0.0", "21.0.0", "19.0.0"]
@@ -2290,7 +2290,27 @@ mod engine_version_tests {
         // `17` never accepts `170.x` or a different major.
         assert!(create("postgres", "9.6").is_err());
         assert!(create("postgres", "170.1").is_err());
-        assert!(create("postgres", "18.0").is_err());
+        // 19 is not yet a GA major (no image mapping), so it stays rejected
+        // even though the adjacent 18 was added.
+        assert!(create("postgres", "19.0").is_err());
+    }
+
+    #[test]
+    fn accepts_current_ga_majors() {
+        // Regression for the stale major-version allowlist (bug-hunt
+        // 2026-07-25 Tier-1): RDS MySQL 8.4 LTS and PostgreSQL 18 are GA on
+        // AWS. #2392 fixed minor matching but left the backing major list
+        // hardcoded and lagging, so these were wrongly rejected — wedging
+        // Terraform state through destroy (issue #2107 shape).
+        for v in ["18", "18.0", "18.1"] {
+            assert!(
+                create("postgres", v).is_ok(),
+                "postgres {v} should be accepted"
+            );
+        }
+        for v in ["8.4", "8.4.0", "8.4.2"] {
+            assert!(create("mysql", v).is_ok(), "mysql {v} should be accepted");
+        }
     }
 
     #[test]
