@@ -51,6 +51,19 @@ jobs:
             exit 1
           fi
 
+  release-tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+      # A crate missing from (or misplaced in) the publish list only shows up as
+      # a half-published release, so gate it here instead.
+      - name: release publish list covers the workspace
+        run: bash scripts/publish-crates.sh --check
+      - name: crates.io rate-limit handling
+        run: bash scripts/tests/publish-crates-test.sh
+
   clippy:
     runs-on: ubuntu-latest
     timeout-minutes: 75

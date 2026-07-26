@@ -5,17 +5,29 @@ on:
     tags: ["v*"]
   # Manual escape hatch — re-run an existing tag's publish flow. Used
   # to backfill v0.15.1 to npm after the original push-triggered run
-  # failed at publish-npm (expired NPM_TOKEN; OIDC ships post-merge).
-  # On workflow_dispatch only the publish-npm job runs; binary build,
-  # GitHub Release, crates.io, PyPI, Maven, Packagist, Go are all
-  # push-only because they either can't be re-published (Maven Central)
-  # or the existing artifact is already there (everything else).
+  # failed at publish-npm (expired NPM_TOKEN; OIDC ships post-merge),
+  # and to resume a crates.io publish that ran out of wall clock (the
+  # crate loop skips everything already in the index, so a resume costs
+  # nothing for the crates already up). Binary build, GitHub Release,
+  # PyPI, Maven, Packagist and Go stay push-only because they either
+  # can't be re-published (Maven Central) or the existing artifact is
+  # already there.
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing tag to backfill to npm (e.g. v0.15.1).'
+        description: 'Existing tag to re-publish from (e.g. v0.15.1).'
         required: true
         type: string
+      npm:
+        description: 'Publish the npm package.'
+        required: false
+        default: true
+        type: boolean
+      crates:
+        description: 'Resume the crates.io publish (skips crates already indexed).'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -113,200 +125,62 @@ jobs:
 
   publish-crates:
     name: Publish Crates
-    if: github.event_name == 'push'
     needs: check
+    # Runs on push (release flow) and on workflow_dispatch with
+    # crates=true (resume a publish that a rate-limit wait pushed past
+    # the job's wall clock). On dispatch `check` is skipped because that
+    # job is itself gated on push, so allow the skipped result.
+    if: |
+      always()
+      && (needs.check.result == 'success' || needs.check.result == 'skipped')
+      && (github.event_name == 'push' || inputs.crates)
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    # crates.io hands out publish tokens on a refill schedule, so the
+    # tail of a ~110-crate release is spent waiting, not uploading (see
+    # scripts/publish-crates.sh). Budget for that; the script's own
+    # DEADLINE_MINUTES bails out with a resume hint before GitHub's
+    # hard 6h job ceiling kills the step mid-crate.
+    timeout-minutes: 350
+    # Two releases publishing at once would drain the same rate-limit
+    # buckets and 429 each other. Queue them instead of racing.
+    concurrency:
+      group: publish-crates
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # On push the default ref is the tag; on a dispatched resume,
+          # whatever tag the operator supplied.
+          ref: ${{ inputs.tag || github.ref }}
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Verify tag matches Cargo.toml version
+      - name: Resolve release version
         run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
+          if [ -n "${{ inputs.tag }}" ]; then
+            TAG="${{ inputs.tag }}"
+            TAG="${TAG#v}"
+          else
+            TAG="${GITHUB_REF#refs/tags/v}"
+          fi
           VERSION=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           if [ "$TAG" != "$VERSION" ]; then
             echo "::error::Tag v${TAG} does not match Cargo.toml version ${VERSION}"
             exit 1
           fi
           echo "Tag v${TAG} matches Cargo.toml version ${VERSION}"
+          echo "VERSION=${VERSION}" >> "$GITHUB_ENV"
+
+      - name: Verify publish list covers the workspace
+        run: |
+          if [ ! -f scripts/publish-crates.sh ]; then
+            echo "::error::this tag predates scripts/publish-crates.sh — publish it by hand from a detached checkout of the tag (cargo publish -p <crate>)"
+            exit 1
+          fi
+          bash scripts/publish-crates.sh --check
 
       - name: Publish all crates
-        run: |
-          TAG="${GITHUB_REF#refs/tags/v}"
-
-          wait_for_crate() {
-            # Check the sparse index (what cargo actually uses to resolve deps)
-            local name="$1"
-            local prefix
-            case ${#name} in
-              1) prefix="1" ;;
-              2) prefix="2" ;;
-              3) prefix="3/${name:0:1}" ;;
-              *) prefix="${name:0:2}/${name:2:2}" ;;
-            esac
-            local url="https://index.crates.io/${prefix}/${name}"
-            echo "Waiting for $name@$TAG in sparse index..."
-            for i in $(seq 1 60); do
-              if curl -sf "$url" 2>/dev/null | grep -q "\"vers\":\"$TAG\""; then
-                echo "$name@$TAG indexed after $((i * 5))s"
-                return 0
-              fi
-              sleep 5
-            done
-            echo "WARNING: timed out waiting for $name@$TAG, continuing anyway"
-          }
-
-          publish() {
-            echo "Publishing $1..."
-            OUTPUT=$(cargo publish -p "$1" 2>&1) && {
-              echo "Successfully published $1"
-            } || {
-              if echo "$OUTPUT" | grep -qE "already uploaded|already exists"; then
-                echo "Skipping $1: already published"
-                return 0
-              else
-                echo "ERROR publishing $1:"
-                echo "$OUTPUT"
-                exit 1
-              fi
-            }
-            wait_for_crate "$1"
-          }
-
-          # Layer 1: no internal deps
-          publish fakecloud-aws
-          publish fakecloud-sdk
-          publish fakecloud-persistence
-          publish fakecloud-k8s   # only external deps (kube/k8s-openapi); dependents: lambda/elasticache/rds/ecs/server
-
-          # Layer 2: depends on fakecloud-aws
-          publish fakecloud-core
-
-          # Layer 3a: depend on aws + core + persistence only
-          publish fakecloud-sqs
-          publish fakecloud-iam
-          publish fakecloud-organizations
-          publish fakecloud-ec2            # depends on aws + core only
-          publish fakecloud-lambda
-          publish fakecloud-logs
-          publish fakecloud-kms
-          publish fakecloud-ses
-          publish fakecloud-rds
-          publish fakecloud-rds-data        # depends on rds
-          publish fakecloud-dsql
-          publish fakecloud-resource-groups  # only core/persistence/aws deps
-          publish fakecloud-resource-groups-tagging  # only core/persistence/aws deps
-          publish fakecloud-elasticbeanstalk # only core/persistence/aws deps
-          publish fakecloud-memorydb         # only core/persistence/aws deps
-          publish fakecloud-kinesisanalyticsv2 # only core/persistence/aws deps
-          publish fakecloud-eks              # only core/persistence/aws deps
-          publish fakecloud-efs              # depends on ec2 (subnet AZ/VPC resolution)
-          publish fakecloud-mq               # only core/persistence/aws deps
-          publish fakecloud-kafka            # only core/persistence deps
-          publish fakecloud-mwaa             # only core/persistence deps
-          publish fakecloud-fis              # only core/persistence deps
-          publish fakecloud-xray             # only core/persistence deps
-          publish fakecloud-appsync          # only core/persistence deps
-          publish fakecloud-amplify          # only core/persistence deps
-          publish fakecloud-mediaconvert     # only core/persistence deps
-          publish fakecloud-serverlessrepo   # only core/persistence deps
-          publish fakecloud-iotdata          # only core/persistence deps
-          publish fakecloud-pinpoint         # only core/persistence deps
-          publish fakecloud-iot              # only core/persistence deps
-          publish fakecloud-iotwireless      # only core/persistence deps
-          publish fakecloud-sagemaker        # only core/persistence deps
-          publish fakecloud-managedblockchain # only core/persistence/aws deps
-          publish fakecloud-servicediscovery # only core/persistence/aws deps
-          publish fakecloud-account          # only core/persistence/aws deps
-          publish fakecloud-identitystore    # only core/persistence/aws deps
-          publish fakecloud-ssoadmin         # only core/persistence/aws deps
-          publish fakecloud-verifiedpermissions # core/persistence/aws + cedar-policy
-          publish fakecloud-redshift         # only core/persistence/aws deps
-          publish fakecloud-dms              # only core/persistence/aws deps
-          publish fakecloud-docdb            # only core/persistence/aws deps
-          publish fakecloud-neptune          # only core/persistence/aws deps
-          publish fakecloud-opensearch       # only core/persistence/aws deps (ES + OpenSearch)
-          publish fakecloud-backup           # only core/persistence/aws deps
-          publish fakecloud-glacier          # only core/persistence/aws deps
-          publish fakecloud-transfer         # only core/persistence/aws deps
-          publish fakecloud-appconfig        # only core/persistence/aws deps
-          publish fakecloud-cloudtrail       # only core/persistence/aws deps
-          publish fakecloud-ram               # only core/persistence/aws deps
-          publish fakecloud-ce                # only core/persistence/aws deps
-          publish fakecloud-s3tables          # only core/persistence/aws deps
-          publish fakecloud-lakeformation     # only core/persistence/aws deps
-          publish fakecloud-codeconnections   # only core/persistence/aws deps
-          publish fakecloud-codecommit        # only core/persistence/aws deps
-          publish fakecloud-codedeploy        # only core/persistence/aws deps
-          publish fakecloud-codepipeline      # only core/persistence/aws deps
-          publish fakecloud-codeartifact      # only core/persistence/aws deps
-          publish fakecloud-emr               # only core/persistence/aws deps
-          publish fakecloud-textract          # only core/persistence/aws deps
-          publish fakecloud-transcribe          # only core/persistence/aws deps
-          publish fakecloud-translate           # only core/persistence/aws deps
-          publish fakecloud-shield              # only core/persistence/aws deps
-          publish fakecloud-comprehend             # only core/persistence/aws deps
-          publish fakecloud-swf                    # only core/persistence/aws deps
-          publish fakecloud-timestream             # only core/persistence/aws deps
-          publish fakecloud-support             # only core/persistence/aws deps
-          publish fakecloud-kinesis
-          publish fakecloud-scheduler
-          publish fakecloud-bedrock
-          publish fakecloud-cloudfront
-          publish fakecloud-acm
-          publish fakecloud-application-autoscaling
-          publish fakecloud-autoscaling
-          publish fakecloud-wafv2
-          publish fakecloud-cloudwatch
-          publish fakecloud-glue
-          publish fakecloud-bedrock-agent
-
-          # Layer 3b: depend on layer 3a
-          publish fakecloud-sns            # depends on ses
-          publish fakecloud-secretsmanager # depends on iam
-          publish fakecloud-cognito        # depends on iam
-          publish fakecloud-elbv2          # depends on wafv2
-          publish fakecloud-apigatewayv2   # depends on wafv2
-          publish fakecloud-bedrock-agent-runtime  # depends on bedrock-agent
-          publish fakecloud-eventbridge    # depends on iam, lambda, logs
-
-          # Layer 4: depend on layer 3a/3b crates
-          publish fakecloud-s3             # depends on kms
-          publish fakecloud-elasticache    # depends on s3
-          publish fakecloud-route53resolver  # depends on ec2, s3 (ImportFirewallDomains)
-          publish fakecloud-acmpca         # depends on s3 (audit-report delivery), acm, kms
-          publish fakecloud-ecr            # depends on iam, kms
-          publish fakecloud-ssm            # depends on secretsmanager
-          publish fakecloud-codebuild      # depends on secretsmanager, ssm, logs (real buildspec exec)
-          publish fakecloud-apigateway     # depends on elbv2, wafv2
-
-          # Layer 5: depend on layer 4
-          publish fakecloud-dynamodb       # depends on s3
-          publish fakecloud-firehose       # depends on s3
-          publish fakecloud-athena         # depends on glue, s3
-          publish fakecloud-route53        # depends on cloudfront, elbv2, logs, s3
-          publish fakecloud-ecs            # depends on logs, secretsmanager, ssm
-          publish fakecloud-batch          # depends on ecs (drives ECS for real job execution)
-          publish fakecloud-config         # depends on s3, iam, ec2, lambda (records cross-service state)
-
-          # Layer 6: depends on layer 5
-          publish fakecloud-stepfunctions  # depends on dynamodb
-
-          # EventBridge Pipes: control plane depends only on core/aws/persistence,
-          # but cloudformation provisions AWS::Pipes::Pipe, so publish it before
-          # cloudformation.
-          publish fakecloud-pipes
-
-          # Layer 7: depends on all services
-          publish fakecloud-cloudformation
-
-          # Layer 8: depends on cloudformation (drives its resource provisioners)
-          publish fakecloud-cloudcontrol
-
-          # Layer 9: the binary
-          publish fakecloud
+        run: bash scripts/publish-crates.sh "$VERSION"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -317,7 +191,11 @@ jobs:
     # backfill of an existing tag whose original publish-npm failed).
     # When dispatched manually `needs: check` is skipped because the
     # check job itself is gated on push; allow that via the if guard.
-    if: always() && (needs.check.result == 'success' || needs.check.result == 'skipped')
+    # npm=false lets a dispatch resume only the crates.io publish.
+    if: |
+      always()
+      && (needs.check.result == 'success' || needs.check.result == 'skipped')
+      && (github.event_name == 'push' || inputs.npm)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     # OIDC auth via npm Trusted Publishing (configured at

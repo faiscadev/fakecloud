@@ -53,6 +53,11 @@ cargo fmt --check                        # format check
 - Do not ship stub responses; implement the behavior or return an appropriate error.
 - Do not leave small follow-up correctness issues unresolved when they are part of the task at hand.
 
+### Releasing
+
+- A new publishable crate must be added to the `CRATES` list in `scripts/publish-crates.sh`, positioned after every workspace crate it depends on. CI (`release-tooling`) fails otherwise.
+- That script owns the crates.io publish: it backs off on rate-limit 429s and skips versions already in the index, so a failed release is resumed by re-running it, never by publishing the tail by hand.
+
 ### Source And Naming
 
 - Avoid referencing Moto in Rust source or user-facing implementation details. Existing protocol paths like `/moto-api/reset` are fine where already established.
