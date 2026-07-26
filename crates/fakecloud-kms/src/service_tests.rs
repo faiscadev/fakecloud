@@ -3784,6 +3784,78 @@ fn re_encrypt_to_rsa_destination_round_trips() {
 /// L5: a non-string EncryptionContext value is rejected, not silently
 /// dropped (which would change the AAD bound at encrypt time).
 #[test]
+fn list_keys_resumes_past_a_deleted_marker_without_restarting() {
+    // Regression: resolving the ListKeys marker by exact match with a
+    // `.unwrap_or(0)` fallback restarted the listing from the first key whenever
+    // the key named by the marker was deleted between pages, so a delete-as-you-go
+    // loop re-emitted page 1 forever. The marker must advance past a missing key.
+    let svc = make_service();
+
+    // Create enough keys to force a second page at Limit=2.
+    for _ in 0..5 {
+        create_key(&svc);
+    }
+
+    let page1_resp = svc
+        .list_keys(&make_request("ListKeys", json!({ "Limit": 2 })))
+        .unwrap();
+    let page1: Value = serde_json::from_slice(page1_resp.body.expect_bytes()).unwrap();
+    assert_eq!(
+        page1["Truncated"],
+        json!(true),
+        "first page must be truncated"
+    );
+    let page1_ids: Vec<String> = page1["Keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["KeyId"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(page1_ids.len(), 2);
+    let marker = page1["NextMarker"].as_str().unwrap().to_string();
+    assert_eq!(marker, page1_ids[1], "marker is the last KeyId of the page");
+
+    // Delete the key the marker names, simulating a delete between pages.
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("123456789012");
+        assert!(state.keys.remove(&marker).is_some(), "marker key existed");
+    }
+
+    let page2_resp = svc
+        .list_keys(&make_request(
+            "ListKeys",
+            json!({ "Limit": 2, "Marker": marker }),
+        ))
+        .unwrap();
+    let page2: Value = serde_json::from_slice(page2_resp.body.expect_bytes()).unwrap();
+    let page2_ids: Vec<String> = page2["Keys"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|k| k["KeyId"].as_str().unwrap().to_string())
+        .collect();
+
+    assert!(
+        !page2_ids.is_empty(),
+        "second page must make forward progress"
+    );
+    // No restart: the first key of page 1 must not reappear on page 2.
+    assert!(
+        !page2_ids.contains(&page1_ids[0]),
+        "page 2 restarted at page 1 (got {page2_ids:?}, page1 started with {})",
+        page1_ids[0]
+    );
+    // Every returned key sorts strictly after the (now deleted) marker.
+    for id in &page2_ids {
+        assert!(
+            id.as_str() > marker.as_str(),
+            "page 2 key {id} is not past the marker {marker}"
+        );
+    }
+}
+
+#[test]
 fn encrypt_rejects_non_string_encryption_context_value() {
     use base64::Engine;
     let svc = make_service();

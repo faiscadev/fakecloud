@@ -240,13 +240,22 @@ impl IamService {
             });
         }
 
-        policies.sort_by(|a, b| a.policy_name.cmp(&b.policy_name));
+        // Sort by ARN, the stable cursor AWS uses for ListPolicies, so the marker
+        // and the iteration order agree.
+        policies.sort_by(|a, b| a.arn.cmp(&b.arn));
 
-        // Marker-based pagination: resume after the marked item (by ARN, the
-        // stable cursor AWS uses for ListPolicies).
+        // Marker-based pagination: the marker is the ARN of the last item on the
+        // previous page. Resume at the first policy whose ARN is strictly greater
+        // than the marker, so a marker whose policy was deleted between pages still
+        // advances instead of restarting at the first policy.
         let start_idx = marker
             .as_ref()
-            .and_then(|m| policies.iter().position(|p| p.arn == *m).map(|p| p + 1))
+            .map(|m| {
+                policies
+                    .iter()
+                    .position(|p| p.arn.as_str() > m.as_str())
+                    .unwrap_or(policies.len())
+            })
             .unwrap_or(0);
         let page = policies.get(start_idx..).unwrap_or(&[]);
         let is_truncated = page.len() > max_items;
@@ -774,6 +783,13 @@ impl IamService {
             }
         }
 
+        let rank = |k: Kind| -> u8 {
+            match k {
+                Kind::Role => 0,
+                Kind::User => 1,
+                Kind::Group => 2,
+            }
+        };
         let cursor = |k: Kind, name: &str| {
             let prefix = match k {
                 Kind::Role => "role",
@@ -783,19 +799,7 @@ impl IamService {
             format!("{prefix}:{name}")
         };
         // Stable order: by kind (role, user, group) then name.
-        entities.sort_by(|a, b| {
-            let ka = match a.0 {
-                Kind::Role => 0,
-                Kind::User => 1,
-                Kind::Group => 2,
-            };
-            let kb = match b.0 {
-                Kind::Role => 0,
-                Kind::User => 1,
-                Kind::Group => 2,
-            };
-            ka.cmp(&kb).then_with(|| a.1.cmp(&b.1))
-        });
+        entities.sort_by(|a, b| rank(a.0).cmp(&rank(b.0)).then_with(|| a.1.cmp(&b.1)));
 
         let max_items: usize = req
             .query_params
@@ -803,13 +807,29 @@ impl IamService {
             .and_then(|v| v.parse().ok())
             .unwrap_or(100);
         let marker = req.query_params.get("Marker").cloned();
+        // Decode a marker cursor ("<kind>:<name>") back into the same
+        // (kind-rank, name) order the list is sorted by. The cursor string's own
+        // lexical order does NOT match the kind order (e.g. "group" < "role"), so
+        // resume must compare on the decoded tuple, not the raw string.
+        fn marker_order(m: &str) -> (u8, &str) {
+            match m.split_once(':') {
+                Some(("role", name)) => (0, name),
+                Some(("user", name)) => (1, name),
+                Some(("group", name)) => (2, name),
+                _ => (u8::MAX, m),
+            }
+        }
+        // Resume at the first entity strictly after the marker, so a marker whose
+        // entity was detached/deleted between pages still advances instead of
+        // restarting at the first entity.
         let start_idx = marker
             .as_ref()
-            .and_then(|m| {
+            .map(|m| {
+                let mk = marker_order(m);
                 entities
                     .iter()
-                    .position(|(k, name, _)| cursor(*k, name) == *m)
-                    .map(|p| p + 1)
+                    .position(|(k, name, _)| (rank(*k), name.as_str()) > mk)
+                    .unwrap_or(entities.len())
             })
             .unwrap_or(0);
         let rest = entities.get(start_idx..).unwrap_or(&[]);

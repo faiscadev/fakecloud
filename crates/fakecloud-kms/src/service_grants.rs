@@ -147,7 +147,7 @@ impl KmsService {
         let accounts = self.state.read();
         let empty = KmsState::new(&req.account_id, &req.region);
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let all_grants: Vec<Value> = state
+        let mut all_grants: Vec<Value> = state
             .grants
             .iter()
             .filter(|g| {
@@ -157,15 +157,21 @@ impl KmsService {
             })
             .map(|g| grant_to_json(g, &req.account_id))
             .collect();
+        // Sort by GrantId so the marker (the GrantId of the last item on the
+        // previous page) is a stable total-ordering key. Grants are stored in an
+        // insertion-order Vec, so without this the marker could not be resolved
+        // by comparison.
+        all_grants.sort_by(|a, b| a["GrantId"].as_str().cmp(&b["GrantId"].as_str()));
 
-        let start = if let Some(m) = marker {
-            all_grants
+        // Resume at the first grant whose GrantId is strictly greater than the
+        // marker, so a marker whose grant was retired/revoked between pages still
+        // advances instead of falling back to 0 and restarting the listing.
+        let start = match marker {
+            Some(m) => all_grants
                 .iter()
-                .position(|g| g["GrantId"].as_str() == Some(m))
-                .map(|pos| pos + 1)
-                .unwrap_or(0)
-        } else {
-            0
+                .position(|g| g["GrantId"].as_str() > Some(m))
+                .unwrap_or(all_grants.len()),
+            None => 0,
         };
 
         let page = &all_grants[start..all_grants.len().min(start + limit)];

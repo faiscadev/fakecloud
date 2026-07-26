@@ -318,11 +318,16 @@ impl SesV2Service {
         templates.sort_by(|a, b| a.template_name.cmp(&b.template_name));
 
         let next_token = req.query_params.get("NextToken");
+        // The token is the TemplateName of the FIRST item on the next page (an
+        // inclusive cursor), and templates is sorted by name, so resume at the
+        // first template whose name is >= the token. If the template named by the
+        // token was deleted between pages the listing still advances instead of
+        // falling back to 0 and restarting from the first template.
         let start_idx = if let Some(token) = next_token {
             templates
                 .iter()
-                .position(|t| t.template_name == *token)
-                .unwrap_or(0)
+                .position(|t| t.template_name.as_str() >= token.as_str())
+                .unwrap_or(templates.len())
         } else {
             0
         };

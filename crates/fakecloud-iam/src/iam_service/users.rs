@@ -379,10 +379,19 @@ impl IamService {
         }
         users.sort_by(|a, b| a.user_name.cmp(&b.user_name));
 
-        // Marker-based pagination: resume after the marked item.
+        // Marker-based pagination: the marker is the user name of the last item
+        // on the previous page. users is sorted by user_name, so resume at the
+        // first user strictly greater than the marker; that way a marker whose
+        // user was deleted between pages still advances instead of restarting at
+        // the first user (which an exact-match lookup did).
         let start_idx = marker
             .as_ref()
-            .and_then(|m| users.iter().position(|u| u.user_name == *m).map(|p| p + 1))
+            .map(|m| {
+                users
+                    .iter()
+                    .position(|u| u.user_name.as_str() > m.as_str())
+                    .unwrap_or(users.len())
+            })
             .unwrap_or(0);
         let page = users.get(start_idx..).unwrap_or(&[]);
         let is_truncated = page.len() > max_items;

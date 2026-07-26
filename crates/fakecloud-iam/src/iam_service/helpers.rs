@@ -813,9 +813,17 @@ pub(crate) fn paginate_policy_names(
         .unwrap_or(100);
     let marker = req.query_params.get("Marker").cloned();
     names.sort();
+    // Resume at the first name strictly greater than the marker (the last name of
+    // the previous page). A deleted marker then still advances instead of falling
+    // back to 0 and restarting the listing.
     let start = marker
         .as_ref()
-        .and_then(|m| names.iter().position(|n| n == m).map(|p| p + 1))
+        .map(|m| {
+            names
+                .iter()
+                .position(|n| n.as_str() > m.as_str())
+                .unwrap_or(names.len())
+        })
         .unwrap_or(0);
     let rest: Vec<String> = names.into_iter().skip(start).collect();
     let is_truncated = rest.len() > max_items;
@@ -876,9 +884,17 @@ pub(crate) fn paginate_attached_policies(
         .collect();
     items.sort_by(|a, b| a.1.cmp(&b.1));
 
+    // Resume at the first ARN strictly greater than the marker (the last ARN of
+    // the previous page). A deleted marker then still advances instead of falling
+    // back to 0 and restarting the listing.
     let start = marker
         .as_ref()
-        .and_then(|m| items.iter().position(|(_, a)| a == m).map(|p| p + 1))
+        .map(|m| {
+            items
+                .iter()
+                .position(|(_, a)| a.as_str() > m.as_str())
+                .unwrap_or(items.len())
+        })
         .unwrap_or(0);
     let rest: Vec<(String, String)> = items.into_iter().skip(start).collect();
     let is_truncated = rest.len() > max_items;

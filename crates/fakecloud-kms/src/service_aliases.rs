@@ -211,17 +211,17 @@ impl KmsService {
             })
             .collect();
 
-        // Real Limit/Marker pagination (mirrors ListGrants): the marker
-        // is the AliasName of the last item on the previous page; resume
-        // after it.
-        let start = if let Some(m) = marker {
-            all_aliases
+        // Real Limit/Marker pagination (mirrors ListGrants): the marker is the
+        // AliasName of the last item on the previous page. all_aliases is in
+        // AliasName order (BTreeMap-backed), so resume at the first alias strictly
+        // greater than the marker; that way a marker whose alias was deleted
+        // between pages still advances instead of restarting from 0.
+        let start = match marker {
+            Some(m) => all_aliases
                 .iter()
-                .position(|a| a["AliasName"].as_str() == Some(m))
-                .map(|pos| pos + 1)
-                .unwrap_or(0)
-        } else {
-            0
+                .position(|a| a["AliasName"].as_str() > Some(m))
+                .unwrap_or(all_aliases.len()),
+            None => 0,
         };
 
         let page = &all_aliases[start..all_aliases.len().min(start + limit)];
