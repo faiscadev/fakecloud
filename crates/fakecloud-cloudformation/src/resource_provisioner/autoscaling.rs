@@ -11,7 +11,7 @@ use fakecloud_autoscaling::state::{
 use serde_json::Value;
 use uuid::Uuid;
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 
 /// Parse a CFN `LaunchTemplate` / `LaunchTemplateSpecification` block
 /// (`{LaunchTemplateId|LaunchTemplateName, Version}`) into a [`LaunchTemplateSpec`].
@@ -192,6 +192,121 @@ impl ResourceProvisioner {
             .get_or_create(&self.account_id)
             .groups
             .insert(name.clone(), group);
+        self.pending_container_spawns
+            .lock()
+            .push(super::ContainerSpawnIntent::AsgInstances {
+                group_name: name.clone(),
+            });
+        Ok(ProvisionResult::new(name).with("Arn", arn))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::AutoScaling::AutoScalingGroup`.
+    ///
+    /// The reprovision fallback would call `delete_autoscaling` (which queues an
+    /// `AsgInstances` teardown for EVERY running instance) then
+    /// `create_autoscaling_group` (which re-queues a full `AsgInstances` spawn) —
+    /// so a benign `DesiredCapacity`/`MinSize`/`Cooldown`/`HealthCheck*`/`Tags`/
+    /// `TargetGroupARNs` change would TERMINATE every instance and launch a brand
+    /// new set, churning instance ids/IPs and breaking ELB target registrations.
+    /// AWS applies all of these in place with no interruption.
+    ///
+    /// This mutates the stored group record in place (applying only the mutable
+    /// properties, preserving `arn`/`created_time`/`instances` and thus the
+    /// existing instances' ids) and then queues the SAME `AsgInstances` spawn
+    /// intent `create` uses. The drain routes it through the owning
+    /// autoscaling service's `reconcile_group`/`apply_capacity`, which
+    /// reconciles the instance set to the (possibly-new) desired capacity BY THE
+    /// DELTA: scale-up launches only the shortfall, scale-down terminates only
+    /// the excess (the newest ids), and an unchanged capacity touches no
+    /// instances. Existing instance ids are preserved.
+    pub(super) fn update_autoscaling_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+
+        let arn = {
+            let mut st = self.autoscaling_state.write();
+            let acct = st.get_or_create(&self.account_id);
+            let group = acct
+                .groups
+                .get_mut(&name)
+                .ok_or_else(|| format!("Auto Scaling group {name} not yet provisioned"))?;
+
+            // Mutable-without-replacement properties. Immutable identity (arn,
+            // name, created_time) and the live `instances` list are deliberately
+            // left untouched so the group -- and its running instances' ids --
+            // survive; the instance set is reconciled by delta below.
+            if let Some(v) = prop_i64(props, "MinSize") {
+                group.min_size = v;
+            }
+            if let Some(v) = prop_i64(props, "MaxSize") {
+                group.max_size = v;
+            }
+            if let Some(v) = prop_i64(props, "DesiredCapacity") {
+                group.desired_capacity = v;
+            }
+            if let Some(v) = prop_i64(props, "Cooldown") {
+                group.default_cooldown = v;
+            }
+            if let Some(v) = prop_str(props, "HealthCheckType") {
+                group.health_check_type = v.to_string();
+            }
+            if let Some(v) = prop_i64(props, "HealthCheckGracePeriod") {
+                group.health_check_grace_period = v;
+            }
+            if props.get("TargetGroupARNs").is_some() {
+                group.target_group_arns = str_list(props, "TargetGroupARNs");
+            }
+            if props.get("LoadBalancerNames").is_some() {
+                group.load_balancer_names = str_list(props, "LoadBalancerNames");
+            }
+            if let Some(v) = props
+                .get("NewInstancesProtectedFromScaleIn")
+                .and_then(|v| v.as_bool())
+            {
+                group.new_instances_protected_from_scale_in = v;
+            }
+            if props.get("AvailabilityZones").is_some() {
+                let azs = str_list(props, "AvailabilityZones");
+                if !azs.is_empty() {
+                    group.availability_zones = azs;
+                }
+            }
+            if let Some(vzi) = props
+                .get("VPCZoneIdentifier")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .or_else(|| prop_str(props, "VPCZoneIdentifier").map(String::from))
+            {
+                group.vpc_zone_identifier = Some(vzi);
+            }
+            if props.get("LaunchConfigurationName").is_some() {
+                group.launch_configuration_name =
+                    prop_str(props, "LaunchConfigurationName").map(String::from);
+            }
+            if let Some(lt) = parse_cfn_launch_template(props.get("LaunchTemplate")).or_else(|| {
+                props
+                    .get("MixedInstancesPolicy")
+                    .and_then(|m| m.get("LaunchTemplate"))
+                    .and_then(|lt| lt.get("LaunchTemplateSpecification"))
+                    .and_then(|spec| parse_cfn_launch_template(Some(spec)))
+            }) {
+                group.launch_template = Some(lt);
+            }
+            group.arn.clone()
+        };
+
+        // Reconcile the instance set to the (possibly-new) desired capacity BY
+        // DELTA through the owning service, exactly as `create` does. Preserves
+        // existing instance ids; only the delta is spawned/torn down.
         self.pending_container_spawns
             .lock()
             .push(super::ContainerSpawnIntent::AsgInstances {

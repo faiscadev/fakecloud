@@ -12,7 +12,7 @@
 
 use serde_json::{json, Value};
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 use fakecloud_amplify::shared::{app_arn, default_domain, new_app_id, now_epoch};
 use fakecloud_amplify::state::AppRecord;
 
@@ -110,6 +110,88 @@ impl ResourceProvisioner {
             },
         );
 
+        Ok(ProvisionResult::new(app_id.clone())
+            .with("AppId", app_id)
+            .with("AppName", name)
+            .with("Arn", arn)
+            .with("DefaultDomain", domain))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::Amplify::App`. Mutates the stored
+    /// `App` wire object in place instead of the reprovision fallback's
+    /// delete+recreate (which would mint a new `appId` and drop the app's
+    /// branches/domains). Applies the mutable app properties and preserves the
+    /// identity (`appId`, `appArn`, `defaultDomain`, `createTime`) and any
+    /// nested state on the `AppRecord`.
+    pub(super) fn update_amplify_app(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let app_id = existing.physical_id.clone();
+
+        let mut guard = self.amplify_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let record = data
+            .apps
+            .get_mut(&app_id)
+            .ok_or_else(|| format!("Amplify app {app_id} not yet provisioned"))?;
+        let app = record
+            .app
+            .as_object_mut()
+            .ok_or_else(|| format!("Amplify app {app_id} record is malformed"))?;
+
+        if let Some(v) = props.get("Name").and_then(Value::as_str) {
+            app.insert("name".to_string(), json!(v));
+        }
+        if let Some(v) = props.get("Description").and_then(Value::as_str) {
+            app.insert("description".to_string(), json!(v));
+        }
+        if let Some(v) = props.get("Repository").and_then(Value::as_str) {
+            app.insert("repository".to_string(), json!(v));
+        }
+        if let Some(v) = props.get("Platform").and_then(Value::as_str) {
+            app.insert("platform".to_string(), json!(v));
+        }
+        if let Some(v) = props.get("EnableBranchAutoBuild").and_then(Value::as_bool) {
+            app.insert("enableBranchAutoBuild".to_string(), json!(v));
+        }
+        if let Some(v) = props.get("EnableBasicAuth").and_then(Value::as_bool) {
+            app.insert("enableBasicAuth".to_string(), json!(v));
+        }
+        if props.get("EnvironmentVariables").is_some() {
+            app.insert(
+                "environmentVariables".to_string(),
+                env_var_map(props.get("EnvironmentVariables")),
+            );
+        }
+        if let Some(bs) = props.get("BuildSpec").and_then(Value::as_str) {
+            app.insert("buildSpec".to_string(), json!(bs));
+        }
+        if let Some(role) = props.get("IAMServiceRole").and_then(Value::as_str) {
+            app.insert("iamServiceRoleArn".to_string(), json!(role));
+        }
+        if props.get("Tags").is_some() {
+            app.insert("tags".to_string(), key_value_map(props.get("Tags")));
+        }
+        app.insert("updateTime".to_string(), json!(now_epoch()));
+
+        let name = app
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let arn = app
+            .get("appArn")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let domain = app
+            .get("defaultDomain")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         Ok(ProvisionResult::new(app_id.clone())
             .with("AppId", app_id)
             .with("AppName", name)

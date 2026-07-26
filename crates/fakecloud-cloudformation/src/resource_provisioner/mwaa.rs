@@ -9,7 +9,7 @@
 
 use serde_json::{json, Value};
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 use fakecloud_mwaa::shared::{
     celery_executor_queue, environment_arn, now_epoch, service_role_arn, webserver_url,
 };
@@ -62,6 +62,65 @@ impl ResourceProvisioner {
         }
         data.environments.insert(name.clone(), Value::Object(env));
 
+        Ok(ProvisionResult::new(name)
+            .with("Arn", arn)
+            .with("WebserverUrl", webserver))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::MWAA::Environment`. Mutates the stored
+    /// `Environment` JSON in place instead of the reprovision fallback's
+    /// delete+recreate. Applies the mutable, non-null CFN members over the stored
+    /// object (matching `UpdateEnvironment`) and preserves the server-minted
+    /// identity (`Name`, `Arn`, `CreatedAt`, `WebserverUrl`, `ServiceRoleArn`,
+    /// `CeleryExecutorQueue`).
+    pub(super) fn update_mwaa_environment(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+
+        let mut guard = self.mwaa_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let env = data
+            .environments
+            .get_mut(&name)
+            .ok_or_else(|| format!("Environment {name} not yet provisioned"))?;
+        let obj = env
+            .as_object_mut()
+            .ok_or_else(|| format!("Environment {name} record is malformed"))?;
+
+        // Members minted by the service that must NOT be overwritten from the
+        // template on update.
+        const PRESERVED: &[&str] = &[
+            "Name",
+            "Arn",
+            "Status",
+            "CreatedAt",
+            "WebserverUrl",
+            "ServiceRoleArn",
+            "CeleryExecutorQueue",
+        ];
+        if let Value::Object(new_props) = props {
+            for (k, v) in new_props {
+                if PRESERVED.contains(&k.as_str()) || v.is_null() {
+                    continue;
+                }
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+
+        let arn = obj
+            .get("Arn")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let webserver = obj
+            .get("WebserverUrl")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         Ok(ProvisionResult::new(name)
             .with("Arn", arn)
             .with("WebserverUrl", webserver))

@@ -494,3 +494,233 @@ async fn cfn_update_timestream_table_preserves_records() {
         "ingested records must survive an in-place Timestream table update; a reprovision would have wiped them"
     );
 }
+
+// --- AWS::AutoScaling::AutoScalingGroup -----------------------------------
+//
+// The reprovision fallback would delete the group (terminating EVERY running
+// instance) and recreate it (launching a brand-new set) on a benign capacity
+// change -- churning every instance id/IP and breaking ELB target
+// registrations. AWS applies the change in place, reconciling instances by the
+// DELTA. This asserts the ORIGINAL instance ids survive a `DesiredCapacity`
+// bump (only the added instance is new); a delete+recreate would replace all.
+
+const ASG_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "LC": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": { "ImageId": "ami-0a1b2c3d4e5f60001", "InstanceType": "t3.micro" }
+    },
+    "ASG": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "AutoScalingGroupName": "cfn-asg-preserve",
+        "MinSize": "1", "MaxSize": "5", "DesiredCapacity": "2",
+        "LaunchConfigurationName": { "Ref": "LC" },
+        "AvailabilityZones": ["us-east-1a"]
+      }
+    }
+  }
+}"#;
+
+// Identical except DesiredCapacity 2 -> 3 (a mutable, in-place change).
+const ASG_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "LC": {
+      "Type": "AWS::AutoScaling::LaunchConfiguration",
+      "Properties": { "ImageId": "ami-0a1b2c3d4e5f60001", "InstanceType": "t3.micro" }
+    },
+    "ASG": {
+      "Type": "AWS::AutoScaling::AutoScalingGroup",
+      "Properties": {
+        "AutoScalingGroupName": "cfn-asg-preserve",
+        "MinSize": "1", "MaxSize": "5", "DesiredCapacity": "3",
+        "LaunchConfigurationName": { "Ref": "LC" },
+        "AvailabilityZones": ["us-east-1a"]
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_update_autoscaling_group_reconciles_by_delta() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let asg = aws_sdk_autoscaling::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("asg-preserve")
+        .template_body(ASG_TEMPLATE_V1)
+        .send()
+        .await
+        .expect("create_stack");
+    wait_for_status(&server, "asg-preserve", "CREATE_COMPLETE").await;
+
+    // Reconciliation to desired capacity runs in a detached task; poll until the
+    // group reports its 2 instances and capture their ids -- these are the
+    // instances a delete+recreate would terminate.
+    let ids_before = helpers::wait_until(std::time::Duration::from_secs(10), || {
+        let asg = asg.clone();
+        async move {
+            let out = asg
+                .describe_auto_scaling_groups()
+                .auto_scaling_group_names("cfn-asg-preserve")
+                .send()
+                .await
+                .ok()?;
+            let g = out.auto_scaling_groups().first()?;
+            (g.instances().len() == 2).then(|| {
+                g.instances()
+                    .iter()
+                    .filter_map(|i| i.instance_id().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+        }
+    })
+    .await
+    .expect("ASG reconciled to 2 instances");
+
+    // Bump DesiredCapacity 2 -> 3. Pre-fix this delete+recreated the whole group,
+    // churning every instance id.
+    cfn.update_stack()
+        .stack_name("asg-preserve")
+        .template_body(ASG_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+    wait_for_status(&server, "asg-preserve", "UPDATE_COMPLETE").await;
+
+    // The group reconciles to 3 instances BY DELTA: the 2 original ids survive
+    // and exactly one new instance is added.
+    let ids_after = helpers::wait_until(std::time::Duration::from_secs(10), || {
+        let asg = asg.clone();
+        async move {
+            let out = asg
+                .describe_auto_scaling_groups()
+                .auto_scaling_group_names("cfn-asg-preserve")
+                .send()
+                .await
+                .ok()?;
+            let g = out.auto_scaling_groups().first()?;
+            (g.desired_capacity() == Some(3) && g.instances().len() == 3).then(|| {
+                g.instances()
+                    .iter()
+                    .filter_map(|i| i.instance_id().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+        }
+    })
+    .await
+    .expect("ASG reconciled to 3 instances after in-place update");
+
+    for id in &ids_before {
+        assert!(
+            ids_after.contains(id),
+            "original instance {id} must survive an in-place DesiredCapacity update; \
+             a delete+recreate would have churned every id. before={ids_before:?} after={ids_after:?}"
+        );
+    }
+    assert_eq!(
+        ids_after.len(),
+        3,
+        "delta reconcile should add exactly one instance, not replace the set"
+    );
+}
+
+// --- AWS::Backup::BackupVault ---------------------------------------------
+//
+// `delete_backup_vault` removes the vault AND its `recovery_points`, so the
+// reprovision fallback (delete + recreate) would wipe every stored recovery
+// point AND mint a fresh `creation_date` on a benign tag change. The in-place
+// arm mutates the stored record, preserving the server-minted `creation_date`
+// (and, by construction on the untouched record, the `recovery_points`).
+
+const VAULT_TEMPLATE_V1: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Vault": {
+      "Type": "AWS::Backup::BackupVault",
+      "Properties": {
+        "BackupVaultName": "cfn-vault-preserve",
+        "BackupVaultTags": { "env": "staging" }
+      }
+    }
+  }
+}"#;
+
+// Identical except the tag value staging -> prod (a mutable, in-place change).
+const VAULT_TEMPLATE_V2: &str = r#"{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Vault": {
+      "Type": "AWS::Backup::BackupVault",
+      "Properties": {
+        "BackupVaultName": "cfn-vault-preserve",
+        "BackupVaultTags": { "env": "prod" }
+      }
+    }
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_update_backup_vault_is_in_place() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let backup = server.backup_client().await;
+
+    cfn.create_stack()
+        .stack_name("vault-preserve")
+        .template_body(VAULT_TEMPLATE_V1)
+        .send()
+        .await
+        .expect("create_stack");
+    wait_for_status(&server, "vault-preserve", "CREATE_COMPLETE").await;
+
+    // Record the server-minted creation date -- the vault's stable identity. A
+    // delete+recreate would mint a new one (and drop any recovery points).
+    let before = backup
+        .describe_backup_vault()
+        .backup_vault_name("cfn-vault-preserve")
+        .send()
+        .await
+        .expect("describe before");
+    let creation_before = before.creation_date().expect("creation date present");
+
+    // Change a mutable property (a tag value). Pre-fix this delete+recreated the
+    // vault, wiping its recovery points and minting a new creation date.
+    cfn.update_stack()
+        .stack_name("vault-preserve")
+        .template_body(VAULT_TEMPLATE_V2)
+        .send()
+        .await
+        .expect("update_stack");
+    wait_for_status(&server, "vault-preserve", "UPDATE_COMPLETE").await;
+
+    let after = backup
+        .describe_backup_vault()
+        .backup_vault_name("cfn-vault-preserve")
+        .send()
+        .await
+        .expect("describe after");
+    // The vault still exists and its stable creation date is unchanged -> the
+    // update was in place, not a destructive delete+recreate.
+    assert_eq!(
+        after.creation_date(),
+        Some(creation_before),
+        "creation date must be stable across an in-place update; a delete+recreate would mint a new one (and drop recovery points)"
+    );
+
+    // ...and the tag change was actually applied.
+    let tags = backup
+        .list_tags()
+        .resource_arn(after.backup_vault_arn().expect("vault arn"))
+        .send()
+        .await
+        .expect("list_tags");
+    assert_eq!(
+        tags.tags().and_then(|t| t.get("env")).map(String::as_str),
+        Some("prod"),
+        "the mutable tag change should have been applied in place"
+    );
+}

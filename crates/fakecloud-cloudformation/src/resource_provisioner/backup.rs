@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use serde_json::Value;
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 use fakecloud_backup::state::{plan_arn, vault_arn, PlanRecord, PlanVersion, VaultRecord};
 
 impl ResourceProvisioner {
@@ -63,6 +63,52 @@ impl ResourceProvisioner {
         st.vaults.insert(name.clone(), record);
         let tags = tag_map(props.get("BackupVaultTags"));
         if !tags.is_empty() {
+            st.tags.insert(arn.clone(), tags);
+        }
+
+        Ok(ProvisionResult::new(name.clone())
+            .with("BackupVaultArn", arn)
+            .with("BackupVaultName", name))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::Backup::BackupVault`. Mutates the
+    /// stored `VaultRecord` in place instead of the reprovision fallback's
+    /// delete+recreate. `delete_backup_vault` removes the vault (and with it its
+    /// `recovery_points`), so a benign `AccessPolicy` / `Notifications` / tag
+    /// change would silently WIPE every stored recovery point. This applies the
+    /// mutable properties and preserves the vault's identity (`arn`,
+    /// `creation_date`) and, critically, its `recovery_points` -- which live on
+    /// the untouched record.
+    pub(super) fn update_backup_vault(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+
+        let mut guard = self.backup_state.write();
+        let st = guard.get_or_create(&self.account_id);
+        let arn = {
+            let record = st
+                .vaults
+                .get_mut(&name)
+                .ok_or_else(|| format!("Backup vault {name} not yet provisioned"))?;
+
+            // Mutable properties. `recovery_points`, `arn`, `creation_date`,
+            // `vault_type`, `vault_state` and any lock config are preserved.
+            if props.get("AccessPolicy").is_some() {
+                record.access_policy = props.get("AccessPolicy").map(policy_to_string);
+            }
+            if let Some(v) = props.get("Notifications").filter(|v| !v.is_null()) {
+                record.notifications = Some(v.clone());
+            }
+            record.arn.clone()
+        };
+        let tags = tag_map(props.get("BackupVaultTags"));
+        if tags.is_empty() {
+            st.tags.remove(&arn);
+        } else {
             st.tags.insert(arn.clone(), tags);
         }
 

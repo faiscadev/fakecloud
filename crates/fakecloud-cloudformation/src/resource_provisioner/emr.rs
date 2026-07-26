@@ -10,7 +10,7 @@
 
 use serde_json::{json, Value};
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 
 impl ResourceProvisioner {
     pub(super) fn create_emr_cluster(
@@ -99,6 +99,72 @@ impl ResourceProvisioner {
         st.clusters.insert(id.clone(), Value::Object(cluster));
         st.cluster_order.push(id.clone());
 
+        Ok(ProvisionResult::new(id).with("MasterPublicDNS", master_dns))
+    }
+
+    /// In-place `UpdateStack` for an `AWS::EMR::Cluster`. Mutates the stored
+    /// `Cluster` JSON in place instead of the destructive delete+recreate the
+    /// reprovision fallback would do (which would mint a new `j-...` cluster id
+    /// and drop the running steps / normalized-instance-hours the record
+    /// carries). Applies the properties EMR lets you change on a live cluster
+    /// (concurrency, visibility, termination protection, tags, and the scalar
+    /// echo members) and preserves the immutable identity (`Id`, `ClusterArn`,
+    /// `MasterPublicDnsName`, `Status`).
+    pub(super) fn update_emr_cluster(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        let mut guard = self.emr_state.write();
+        let st = guard.get_or_create(&self.account_id);
+        let cluster = st
+            .clusters
+            .get_mut(&id)
+            .ok_or_else(|| format!("EMR cluster {id} not yet provisioned"))?;
+        let obj = cluster
+            .as_object_mut()
+            .ok_or_else(|| format!("EMR cluster {id} record is malformed"))?;
+
+        if let Some(v) = props.get("StepConcurrencyLevel").and_then(Value::as_i64) {
+            obj.insert("StepConcurrencyLevel".to_string(), json!(v));
+        }
+        if let Some(v) = props.get("VisibleToAllUsers").and_then(Value::as_bool) {
+            obj.insert("VisibleToAllUsers".to_string(), json!(v));
+        }
+        if let Some(v) = props.get("TerminationProtected").and_then(Value::as_bool) {
+            obj.insert("TerminationProtected".to_string(), json!(v));
+        }
+        // Scalar / array echo members EMR re-reads verbatim.
+        for key in [
+            "ReleaseLabel",
+            "LogUri",
+            "LogEncryptionKmsKeyId",
+            "ServiceRole",
+            "AutoScalingRole",
+            "ScaleDownBehavior",
+            "CustomAmiId",
+            "EbsRootVolumeSize",
+            "SecurityConfiguration",
+            "Applications",
+            "Tags",
+            "Configurations",
+            "PlacementGroupConfigs",
+            "EbsRootVolumeIops",
+            "EbsRootVolumeThroughput",
+        ] {
+            if let Some(v) = props.get(key).filter(|v| !v.is_null()) {
+                obj.insert(key.to_string(), v.clone());
+            }
+        }
+
+        let master_dns = obj
+            .get("MasterPublicDnsName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
         Ok(ProvisionResult::new(id).with("MasterPublicDNS", master_dns))
     }
 

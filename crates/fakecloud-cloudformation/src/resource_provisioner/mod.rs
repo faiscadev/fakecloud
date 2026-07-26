@@ -1828,6 +1828,54 @@ impl ResourceProvisioner {
             "AWS::Glue::Database" => Some(self.update_glue_database(existing, new_def)?),
             "AWS::Glue::Table" => Some(self.update_glue_table(existing, new_def)?),
             "AWS::Timestream::Table" => Some(self.update_timestream_table(existing, new_def)?),
+            // Auto Scaling Group: mutate the stored group in place and reconcile
+            // instances BY DELTA (see `update_autoscaling_group`) so a benign
+            // capacity/tag/health-check change does not terminate + relaunch
+            // every instance (churning ids/IPs, breaking ELB registrations).
+            "AWS::AutoScaling::AutoScalingGroup" => {
+                Some(self.update_autoscaling_group(existing, new_def)?)
+            }
+            // Control-plane records. The reprovision fallback (delete + create)
+            // would mint a new physical id / ARN and, for the container-scoped
+            // deletes, drop contained state (Backup vault recovery points, an
+            // EMR cluster's steps, an Amplify app's branches). Each arm mutates
+            // the owning service's stored record in place and keeps the physical
+            // id + contained data.
+            "AWS::EMR::Cluster" => Some(self.update_emr_cluster(existing, new_def)?),
+            "AWS::EKS::Cluster" => Some(self.update_eks_cluster(existing, new_def)?),
+            "AWS::EKS::Nodegroup" => Some(self.update_eks_nodegroup(existing, new_def)?),
+            "AWS::EKS::FargateProfile" => Some(self.update_eks_fargate_profile(existing, new_def)?),
+            "AWS::EKS::Addon" => Some(self.update_eks_addon(existing, new_def)?),
+            "AWS::EKS::AccessEntry" => Some(self.update_eks_access_entry(existing, new_def)?),
+            "AWS::EKS::IdentityProviderConfig" => {
+                Some(self.update_eks_identity_provider_config(existing, new_def)?)
+            }
+            "AWS::EKS::PodIdentityAssociation" => {
+                Some(self.update_eks_pod_identity_association(existing, new_def)?)
+            }
+            "AWS::SageMaker::Model" => Some(self.update_sagemaker_model(existing, new_def)?),
+            "AWS::SageMaker::EndpointConfig" => {
+                Some(self.update_sagemaker_endpoint_config(existing, new_def)?)
+            }
+            "AWS::SageMaker::Endpoint" => Some(self.update_sagemaker_endpoint(existing, new_def)?),
+            "AWS::SageMaker::NotebookInstance" => {
+                Some(self.update_sagemaker_notebook_instance(existing, new_def)?)
+            }
+            "AWS::AppSync::GraphQLApi" => Some(self.update_appsync_graphql_api(existing, new_def)?),
+            "AWS::AppSync::DataSource" => Some(self.update_appsync_data_source(existing, new_def)?),
+            "AWS::AppSync::Resolver" => Some(self.update_appsync_resolver(existing, new_def)?),
+            "AWS::Athena::DataCatalog" => Some(self.update_athena_data_catalog(existing, new_def)?),
+            "AWS::Athena::NamedQuery" => Some(self.update_athena_named_query(existing, new_def)?),
+            "AWS::Athena::WorkGroup" => Some(self.update_athena_work_group(existing, new_def)?),
+            "AWS::Athena::PreparedStatement" => {
+                Some(self.update_athena_prepared_statement(existing, new_def)?)
+            }
+            "AWS::MWAA::Environment" => Some(self.update_mwaa_environment(existing, new_def)?),
+            "AWS::Amplify::App" => Some(self.update_amplify_app(existing, new_def)?),
+            "AWS::KinesisFirehose::DeliveryStream" => {
+                Some(self.update_firehose_delivery_stream(existing, new_def)?)
+            }
+            "AWS::Backup::BackupVault" => Some(self.update_backup_vault(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing

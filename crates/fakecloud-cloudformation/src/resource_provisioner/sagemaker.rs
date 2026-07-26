@@ -13,7 +13,7 @@
 
 use serde_json::{json, Value};
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 
 impl ResourceProvisioner {
     pub(super) fn create_sagemaker_model(
@@ -90,6 +90,90 @@ impl ResourceProvisioner {
             return Err(format!("{family} {name} already exists"));
         }
         data.put_resource(family, &name, Value::Object(record));
+
+        Ok(ProvisionResult::new(name.clone())
+            .with(&arn_member, arn)
+            .with("Id", name))
+    }
+
+    pub(super) fn update_sagemaker_model(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        self.update_sagemaker_resource(existing, resource, "Model")
+    }
+
+    pub(super) fn update_sagemaker_endpoint_config(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        self.update_sagemaker_resource(existing, resource, "EndpointConfig")
+    }
+
+    pub(super) fn update_sagemaker_endpoint(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        self.update_sagemaker_resource(existing, resource, "Endpoint")
+    }
+
+    pub(super) fn update_sagemaker_notebook_instance(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        self.update_sagemaker_resource(existing, resource, "NotebookInstance")
+    }
+
+    /// In-place `UpdateStack` for a CFN-provisioned SageMaker resource. Merges
+    /// the mutable (non-null) properties over the stored record and bumps
+    /// `LastModifiedTime`, instead of the reprovision fallback's delete+recreate.
+    /// The record key (physical id), the minted `{Family}Arn` and `CreationTime`
+    /// are preserved.
+    fn update_sagemaker_resource(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+        family: &str,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+        let arn_member = format!("{family}Arn");
+
+        let mut guard = self.sagemaker_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let rec = data
+            .get_resource(family, &name)
+            .ok_or_else(|| format!("{family} {name} not yet provisioned"))?;
+        let mut obj = match rec {
+            Value::Object(m) => m.clone(),
+            _ => return Err(format!("{family} {name} record is malformed")),
+        };
+        // Members minted at create time that must survive the update.
+        let arn = obj
+            .get(&arn_member)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let creation_time = obj.get("CreationTime").cloned();
+
+        if let Value::Object(new_props) = props {
+            for (k, v) in new_props {
+                if v.is_null() || k == &arn_member || k == "CreationTime" {
+                    continue;
+                }
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        obj.insert(arn_member.clone(), json!(arn.clone()));
+        if let Some(ct) = creation_time {
+            obj.insert("CreationTime".to_string(), ct);
+        }
+        obj.insert("LastModifiedTime".to_string(), json!(sagemaker_now()));
+        data.put_resource(family, &name, Value::Object(obj));
 
         Ok(ProvisionResult::new(name.clone())
             .with(&arn_member, arn)
