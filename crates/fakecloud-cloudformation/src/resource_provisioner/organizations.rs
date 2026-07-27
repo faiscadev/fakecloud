@@ -352,4 +352,181 @@ impl ResourceProvisioner {
         }
         Ok(())
     }
+
+    // -------------------------------------------------- In-place updates
+    //
+    // Reprovision (delete + create) on an Organizations resource churns its
+    // random id (breaking every `Ref`/attachment that stored it) and, for
+    // Account, mints an entirely new 12-digit member account while closing the
+    // old one -- catastrophic. AWS updates all of these in place. These arms
+    // mutate the stored record, preserving the id and attachments.
+
+    pub(crate) fn update_organization_unit(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+
+        let mut org_lock = self.organizations_state.write();
+        let org = org_lock
+            .as_mut()
+            .ok_or_else(|| "Organization not yet created".to_string())?;
+        let ou = org
+            .ous
+            .get_mut(&id)
+            .ok_or_else(|| format!("Organizational unit {id} not yet provisioned"))?;
+        // Name is the only in-place-mutable OU property; id/arn/parent_id and
+        // the OU's policy attachments are preserved.
+        ou.name = name.clone();
+        let arn = ou.arn.clone();
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("Arn", arn)
+            .with("Name", name))
+    }
+
+    pub(crate) fn update_organization_account(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let account_id = existing.physical_id.clone();
+        let parent_ids: Vec<String> = props
+            .get("ParentIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tags: Vec<(String, String)> = props
+            .get("Tags")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| {
+                        let k = t.get("Key").and_then(|v| v.as_str())?;
+                        let val = t.get("Value").and_then(|v| v.as_str()).unwrap_or("");
+                        Some((k.to_string(), val.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut org_lock = self.organizations_state.write();
+        let org = org_lock
+            .as_mut()
+            .ok_or_else(|| "Organization not yet created".to_string())?;
+        // AccountName/Email are immutable; do NOT mint a new account. Move to a
+        // new parent if ParentIds changed and refresh tags in place.
+        if !org.accounts.contains_key(&account_id) {
+            return Err(format!("Account {account_id} not yet provisioned"));
+        }
+        if let Some(parent) = parent_ids.first() {
+            let source = org
+                .accounts
+                .get(&account_id)
+                .map(|a| a.parent_id.clone())
+                .unwrap_or_else(|| org.root_id.clone());
+            if parent != &source {
+                org.move_account(&account_id, &source, parent)
+                    .map_err(|e| format!("Failed to move account to parent {parent}: {e:?}"))?;
+            }
+        }
+        // Tags are replaced wholesale to match the desired CFN state.
+        org.set_resource_tags(&account_id, &tags);
+
+        let acct = org
+            .accounts
+            .get(&account_id)
+            .ok_or_else(|| format!("Account {account_id} vanished during update"))?;
+        Ok(ProvisionResult::new(account_id.clone())
+            .with("AccountId", account_id.clone())
+            .with("AccountName", acct.name.clone())
+            .with("Email", acct.email.clone())
+            .with("Arn", acct.arn.clone())
+            .with("JoinedMethod", acct.joined_method.clone())
+            .with("JoinedTimestamp", acct.joined_timestamp.to_rfc3339())
+            .with("Status", acct.status.clone()))
+    }
+
+    pub(crate) fn update_organization_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let content = props
+            .get("Content")
+            .map(|v| {
+                if v.is_string() {
+                    v.as_str().unwrap_or("").to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                }
+            })
+            .unwrap_or_default();
+        let target_ids: Vec<String> = props
+            .get("TargetIds")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut org_lock = self.organizations_state.write();
+        let org = org_lock
+            .as_mut()
+            .ok_or_else(|| "Organization not yet created".to_string())?;
+        let arn = {
+            let policy = org
+                .policies
+                .get_mut(&id)
+                .ok_or_else(|| format!("Policy {id} not yet provisioned"))?;
+            // Name/Description/Content update in place; id/arn/type preserved.
+            policy.name = name.clone();
+            policy.description = description;
+            policy.content = content;
+            policy.arn.clone()
+        };
+        // Reconcile attachments to the desired TargetIds: detach from all
+        // targets, then attach to the requested set (preserves the policy id).
+        for attachments in org.attachments.values_mut() {
+            attachments.remove(&id);
+        }
+        for target in target_ids {
+            org.attachments
+                .entry(target)
+                .or_default()
+                .insert(id.clone());
+        }
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("Id", id)
+            .with("Arn", arn)
+            .with("Name", name))
+    }
 }
