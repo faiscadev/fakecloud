@@ -1909,6 +1909,14 @@ impl ResourceProvisioner {
             // servers and wipe every record set stored inside the zone. Name is
             // immutable, so a name change still falls back to replacement.
             "AWS::Route53::HostedZone" => Some(self.update_route53_hosted_zone(existing, new_def)?),
+            // In-place updates: reprovision would churn the ns-/srv- id and drop
+            // a namespace's services / a service's registered instances.
+            "AWS::ServiceDiscovery::HttpNamespace"
+            | "AWS::ServiceDiscovery::PublicDnsNamespace"
+            | "AWS::ServiceDiscovery::PrivateDnsNamespace" => {
+                Some(self.update_sd_namespace(existing, new_def)?)
+            }
+            "AWS::ServiceDiscovery::Service" => Some(self.update_sd_service(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -4285,6 +4293,82 @@ mod tests {
         assert_ne!(
             after_name.physical_id, zid,
             "a Name change replaces the zone (new id)"
+        );
+    }
+
+    #[test]
+    fn servicediscovery_updates_preserve_instances_and_ids() {
+        // bug-audit 2026-07-27 (cycle 5): without update arms a namespace/service
+        // fell through to reprovision on a Description edit, churning the ns-/srv-
+        // id and dropping the namespace's services / the service's registered
+        // instances.
+        let prov = make_provisioner();
+        let ns = prov
+            .create_resource(&make_resource(
+                "AWS::ServiceDiscovery::HttpNamespace",
+                "NS",
+                serde_json::json!({"Name": "myns", "Description": "v1"}),
+            ))
+            .expect("namespace provisions");
+        let ns_id = ns.physical_id.clone();
+        let svc = prov
+            .create_resource(&make_resource(
+                "AWS::ServiceDiscovery::Service",
+                "Svc",
+                serde_json::json!({"Name": "mysvc", "NamespaceId": ns_id, "Description": "v1"}),
+            ))
+            .expect("service provisions");
+        let svc_id = svc.physical_id.clone();
+
+        // Simulate registered instances on the service.
+        {
+            let mut accounts = prov.servicediscovery_state.write();
+            let state = accounts.get_or_create("123456789012");
+            state.services.get_mut(&svc_id).unwrap().instance_count = 3;
+        }
+
+        let svc_up = prov
+            .update_resource(
+                &svc,
+                &make_resource(
+                    "AWS::ServiceDiscovery::Service",
+                    "Svc",
+                    serde_json::json!({"Name": "mysvc", "NamespaceId": ns_id, "Description": "v2"}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(svc_up.physical_id, svc_id, "service id preserved");
+
+        let ns_up = prov
+            .update_resource(
+                &ns,
+                &make_resource(
+                    "AWS::ServiceDiscovery::HttpNamespace",
+                    "NS",
+                    serde_json::json!({"Name": "myns", "Description": "v2"}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(ns_up.physical_id, ns_id, "namespace id preserved");
+
+        let accounts = prov.servicediscovery_state.read();
+        let state = accounts.get("123456789012").unwrap();
+        let s = state.services.get(&svc_id).expect("service still exists");
+        assert_eq!(s.description.as_deref(), Some("v2"));
+        assert_eq!(
+            s.instance_count, 3,
+            "registered instances preserved across the in-place update"
+        );
+        let n = state
+            .namespaces
+            .get(&ns_id)
+            .expect("namespace still exists");
+        assert_eq!(n.description.as_deref(), Some("v2"));
+        assert_eq!(
+            n.service_count, 1,
+            "service_count preserved (service not orphaned by reprovision)"
         );
     }
 
