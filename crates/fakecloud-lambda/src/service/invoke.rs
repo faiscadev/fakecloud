@@ -163,7 +163,7 @@ impl LambdaService {
             }
         };
 
-        if func.code_zip.is_none() {
+        if func.code_zip.is_none() && func.package_type != "Image" {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "InvalidParameterValueException",

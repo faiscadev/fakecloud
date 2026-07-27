@@ -165,7 +165,8 @@ impl HostNetworking {
     /// Resolve networking for `cli`, reading `FAKECLOUD_IN_CONTAINER` from
     /// the process environment.
     pub fn detect(cli: &str) -> Self {
-        let (host_alias, add_host_arg) = resolve_host_alias(cli);
+        let (host_alias, mut add_host_arg) = resolve_host_alias(cli);
+        add_host_arg = preserve_native_host_alias(add_host_arg, host_alias_resolves(&host_alias));
         let sibling_host =
             resolve_sibling_host(&host_alias, std::env::var("FAKECLOUD_IN_CONTAINER").ok());
         Self {
@@ -183,6 +184,23 @@ impl HostNetworking {
             argv.push("--add-host".to_string());
             argv.push(arg.clone());
         }
+    }
+}
+
+fn host_alias_resolves(host_alias: &str) -> bool {
+    std::net::ToSocketAddrs::to_socket_addrs(&(host_alias, 0)).is_ok()
+}
+
+fn preserve_native_host_alias(
+    add_host_arg: Option<String>,
+    host_alias_resolves: bool,
+) -> Option<String> {
+    if add_host_arg.is_some() && host_alias_resolves {
+        // Docker Desktop-style runtimes provide this alias natively.
+        // Passing --add-host would replace that working mapping.
+        None
+    } else {
+        add_host_arg
     }
 }
 
@@ -351,6 +369,33 @@ mod tests {
         // way docker must get an explicit --add-host.
         assert!(add_host.is_some());
         assert!(add_host.unwrap().starts_with("host.docker.internal:"));
+    }
+
+    #[test]
+    fn native_host_alias_prevents_docker_add_host_override() {
+        let add_host =
+            preserve_native_host_alias(Some("host.docker.internal:host-gateway".to_string()), true);
+
+        assert_eq!(add_host, None);
+    }
+
+    #[test]
+    fn unresolved_host_alias_keeps_docker_add_host() {
+        let add_host = preserve_native_host_alias(
+            Some("host.docker.internal:host-gateway".to_string()),
+            false,
+        );
+
+        assert_eq!(
+            add_host.as_deref(),
+            Some("host.docker.internal:host-gateway")
+        );
+    }
+
+    #[test]
+    fn absent_docker_add_host_remains_absent() {
+        assert_eq!(preserve_native_host_alias(None, true), None);
+        assert_eq!(preserve_native_host_alias(None, false), None);
     }
 
     #[test]
