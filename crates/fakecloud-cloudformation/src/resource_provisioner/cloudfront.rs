@@ -204,6 +204,116 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    /// In-place `UpdateDistribution`. Reprovision would mint a NEW distribution
+    /// id + `*.cloudfront.net` domain + ARN, breaking `Ref` (id), `GetAtt
+    /// DomainName` and any Route53 alias record pointing at the old domain --
+    /// the single most-referenced CloudFront attribute. AWS updates nearly the
+    /// entire DistributionConfig in place, so rebuild the config and swap it into
+    /// the stored distribution, preserving id/arn/domain and the (immutable)
+    /// caller reference, and bump the ETag.
+    pub(crate) fn update_cf_distribution(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("DistributionConfig")
+            .ok_or_else(|| "DistributionConfig is required".to_string())?;
+
+        let origin_entries: Vec<Origin> = cfg
+            .get("Origins")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| "DistributionConfig.Origins is required".to_string())?
+            .iter()
+            .map(|o| {
+                serde_json::from_value::<Origin>(o.clone())
+                    .map_err(|e| format!("Invalid Origin entry: {e}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if origin_entries.is_empty() {
+            return Err("DistributionConfig.Origins must contain at least one origin".to_string());
+        }
+        let origins = Origins {
+            quantity: origin_entries.len() as i32,
+            items: Some(OriginItems {
+                origin: origin_entries,
+            }),
+        };
+
+        let dcb_value = cfg
+            .get("DefaultCacheBehavior")
+            .ok_or_else(|| "DistributionConfig.DefaultCacheBehavior is required".to_string())?;
+        let default_cache_behavior: DefaultCacheBehavior =
+            serde_json::from_value(dcb_value.clone())
+                .map_err(|e| format!("Invalid DefaultCacheBehavior: {e}"))?;
+
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let enabled = cfg.get("Enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+        let viewer_certificate: Option<ViewerCertificate> = cfg
+            .get("ViewerCertificate")
+            .map(|v| serde_json::from_value(v.clone()))
+            .transpose()
+            .map_err(|e| format!("Invalid ViewerCertificate: {e}"))?;
+
+        let mut config = DistributionConfig {
+            caller_reference: String::new(), // preserved from the stored config below
+            comment,
+            enabled,
+            origins,
+            default_cache_behavior,
+            ..Default::default()
+        };
+        config.price_class = cfg
+            .get("PriceClass")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        config.http_version = cfg
+            .get("HttpVersion")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        config.is_ipv6_enabled = cfg.get("IPV6Enabled").and_then(|v| v.as_bool());
+        config.default_root_object = cfg
+            .get("DefaultRootObject")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        config.web_acl_id = cfg
+            .get("WebACLId")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        config.viewer_certificate = viewer_certificate;
+
+        let etag_suffix: String = Uuid::new_v4()
+            .simple()
+            .to_string()
+            .chars()
+            .take(7)
+            .collect::<String>()
+            .to_uppercase();
+
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let dist = state
+            .distributions
+            .get_mut(&existing.physical_id)
+            .ok_or_else(|| format!("Distribution {} not yet provisioned", existing.physical_id))?;
+        // CallerReference is immutable across an update; keep the stored one.
+        config.caller_reference = dist.config.caller_reference.clone();
+        dist.config = config;
+        dist.status = "InProgress".to_string();
+        dist.last_modified_time = Utc::now();
+        dist.etag = format!("E{etag_suffix}");
+
+        Ok(ProvisionResult::new(dist.id.clone())
+            .with("Id", dist.id.clone())
+            .with("DomainName", dist.domain_name.clone())
+            .with("Arn", dist.arn.clone()))
+    }
+
     pub(crate) fn create_cf_origin_access_control(
         &self,
         resource: &ResourceDefinition,
