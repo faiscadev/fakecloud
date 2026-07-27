@@ -389,6 +389,66 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(id.clone()).with("RouteTableId", id))
     }
 
+    /// In-place `AWS::EC2::SecurityGroup` update. Reprovision would churn the
+    /// sg id -- breaking every `Ref`/`SourceSecurityGroupId` that stored it and
+    /// dropping the group's rules -- and `GroupDescription`/`GroupName`/`VpcId`
+    /// are all immutable anyway, so replacement would fail on those. Preserve
+    /// the sg id and reconcile the inline ingress/egress rules in place.
+    pub(super) fn update_ec2_security_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        self.reconcile_sg_rules(&id, props, "SecurityGroupIngress", false)?;
+        self.reconcile_sg_rules(&id, props, "SecurityGroupEgress", true)?;
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("GroupId", id)
+            .with("VpcId", prop_str(props, "VpcId").unwrap_or("").to_string()))
+    }
+
+    /// Reconcile one rule direction to the template's desired set. A direction
+    /// is only touched when the template specifies it INLINE (revoke the
+    /// group's current rules in that direction, then authorize the template's)
+    /// -- when the property is absent the rules are left alone, since they may
+    /// be managed by separate `AWS::EC2::SecurityGroupIngress`/`Egress`
+    /// resources whose state must not be wiped by this update.
+    fn reconcile_sg_rules(
+        &self,
+        group_id: &str,
+        props: &Value,
+        prop_key: &str,
+        is_egress: bool,
+    ) -> Result<(), String> {
+        let Some(rules) = props.get(prop_key).and_then(|v| v.as_array()) else {
+            return Ok(());
+        };
+
+        // Revoke the group's current rules in this direction. The internal EC2
+        // provision dispatch has no Revoke action, so drop them directly in
+        // state (equivalent to a revoke-all for the direction the template
+        // manages inline), then authorize the desired set via the real handler.
+        {
+            let mut accounts = self.ec2_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            if let Some(sg) = state.security_groups.get_mut(group_id) {
+                sg.rules.retain(|r| r.is_egress != is_egress);
+            }
+        }
+        if !rules.is_empty() {
+            let action = if is_egress {
+                "AuthorizeSecurityGroupEgress"
+            } else {
+                "AuthorizeSecurityGroupIngress"
+            };
+            self.ec2_dispatch(action, sg_rule_params(group_id, rules))?;
+        }
+        Ok(())
+    }
+
     /// `AWS::EC2::Instance` — create a REAL control-plane instance synchronously
     /// (so `Ref` resolves to the `i-...` id and `Fn::GetAtt`
     /// PrivateIp/PublicIp/AvailabilityZone resolve during provisioning), then
