@@ -616,8 +616,14 @@ fn sanitize(s: &str) -> String {
         .unwrap_or("")
         .replace(|c: char| c.is_control(), " ");
     let line = line.trim();
-    if line.len() > 300 {
-        format!("{}...", &line[..300])
+    // Truncate by characters, not bytes: a byte slice `&line[..300]` panics
+    // ("byte index 300 is not a char boundary") when index 300 lands inside a
+    // multibyte UTF-8 char, which survives the control-char filter above. A
+    // backend/daemon error line echoing a submitted (multibyte) name/SQL could
+    // hit this and drop the request connection instead of returning an error.
+    if line.chars().count() > 300 {
+        let truncated: String = line.chars().take(300).collect();
+        format!("{truncated}...")
     } else {
         line.to_string()
     }
@@ -626,6 +632,17 @@ fn sanitize(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_truncates_multibyte_without_panicking() {
+        // bug-audit 2026-07-27 (cycle 5): a byte slice `&line[..300]` panicked
+        // when byte 300 landed mid-char. A long line of multibyte chars whose
+        // 300th byte is inside a char must truncate cleanly, not panic.
+        let line = "é".repeat(400); // 2 bytes each -> 800 bytes, 400 chars
+        let out = sanitize(&line);
+        assert!(out.ends_with("..."));
+        assert_eq!(out.chars().filter(|&c| c == 'é').count(), 300);
+    }
 
     #[test]
     fn alloc_free_port_returns_a_usable_port() {

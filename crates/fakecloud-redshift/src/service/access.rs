@@ -878,7 +878,13 @@ impl RedshiftService {
             integration_name: name,
             source_arn: param(req, "SourceArn").unwrap_or_default(),
             target_arn: param(req, "TargetArn").unwrap_or_default(),
-            status: "creating".to_string(),
+            // Terminal `active` at create: there is no backing zero-ETL data
+            // plane to settle, and DescribeIntegrations has no lazy transition,
+            // so leaving `creating` here would hang terraform's
+            // aws_redshift_integration create-waiter (polls for `active`) until a
+            // silent ~60m timeout. Matches how redshift clusters/event
+            // subscriptions are created in a terminal state.
+            status: "active".to_string(),
             create_time: Utc::now(),
             description: param(req, "Description"),
             kms_key_id: param(req, "KMSKeyId"),
