@@ -1842,6 +1842,17 @@ impl ResourceProvisioner {
                 Some(self.update_timestream_database(existing, new_def)?)
             }
             "AWS::Timestream::Table" => Some(self.update_timestream_table(existing, new_def)?),
+            // In-place updates: reprovision cascade-drops the app's deployment
+            // groups / churns the deploymentGroupId / resets the ElastiCache
+            // user membership + user-group back-references.
+            "AWS::CodeDeploy::Application" => {
+                Some(self.update_codedeploy_application(existing, new_def)?)
+            }
+            "AWS::CodeDeploy::DeploymentGroup" => {
+                Some(self.update_codedeploy_deployment_group(existing, new_def)?)
+            }
+            "AWS::ElastiCache::User" => Some(self.update_ec_user(existing, new_def)?),
+            "AWS::ElastiCache::UserGroup" => Some(self.update_ec_user_group(existing, new_def)?),
             // Auto Scaling Group: mutate the stored group in place and reconcile
             // instances BY DELTA (see `update_autoscaling_group`) so a benign
             // capacity/tag/health-check change does not terminate + relaunch
@@ -4642,6 +4653,160 @@ mod tests {
             .expect("distribution still exists");
         assert_eq!(d.config.comment, "v2", "config mutated in place");
         assert!(!d.config.enabled);
+    }
+
+    #[test]
+    fn codedeploy_updates_preserve_dg_id_and_deployment_groups() {
+        // bug-audit 2026-07-27 (cycle 5): reprovision on a CodeDeploy resource
+        // churned the DeploymentGroup id (GetAtt Id) and, for the Application,
+        // cascade-dropped every deployment group under it. Updates must be in
+        // place.
+        let prov = make_provisioner();
+        let app = prov
+            .create_resource(&make_resource(
+                "AWS::CodeDeploy::Application",
+                "App",
+                serde_json::json!({"ApplicationName": "myapp", "ComputePlatform": "Server"}),
+            ))
+            .expect("app provisions");
+        let dg = prov
+            .create_resource(&make_resource(
+                "AWS::CodeDeploy::DeploymentGroup",
+                "Dg",
+                serde_json::json!({
+                    "ApplicationName": "myapp", "DeploymentGroupName": "dg1",
+                    "ServiceRoleArn": "arn:aws:iam::123456789012:role/r1"
+                }),
+            ))
+            .expect("deployment group provisions");
+        let dg_id = prov.get_att(&dg, "Id").expect("dg id");
+
+        // Update the DG service role -> deploymentGroupId (GetAtt Id) preserved.
+        prov.update_resource(
+            &dg,
+            &make_resource(
+                "AWS::CodeDeploy::DeploymentGroup",
+                "Dg",
+                serde_json::json!({
+                    "ApplicationName": "myapp", "DeploymentGroupName": "dg1",
+                    "ServiceRoleArn": "arn:aws:iam::123456789012:role/r2"
+                }),
+            ),
+        )
+        .expect("update ok")
+        .expect("updatable");
+        assert_eq!(
+            prov.get_att(&dg, "Id"),
+            Some(dg_id),
+            "deploymentGroupId preserved across update"
+        );
+
+        // Update the application (tag edit) -> the deployment group is NOT
+        // cascade-dropped.
+        prov.update_resource(
+            &app,
+            &make_resource(
+                "AWS::CodeDeploy::Application",
+                "App",
+                serde_json::json!({
+                    "ApplicationName": "myapp", "ComputePlatform": "Server",
+                    "Tags": [{"Key": "env", "Value": "prod"}]
+                }),
+            ),
+        )
+        .expect("update ok")
+        .expect("updatable");
+        let mut guard = prov.codedeploy_state.write();
+        let st = guard.get_or_create("123456789012");
+        assert!(
+            st.deployment_groups
+                .get("myapp")
+                .and_then(|g| g.get("dg1"))
+                .is_some(),
+            "deployment group preserved across application update"
+        );
+    }
+
+    #[test]
+    fn elasticache_user_updates_preserve_backrefs() {
+        // bug-audit 2026-07-27 (cycle 5): reprovision reset an ElastiCache
+        // user's membership/password back-refs and a user group's
+        // replication-group back-ref. Updates must be in place.
+        let prov = make_provisioner();
+        let user = prov
+            .create_resource(&make_resource(
+                "AWS::ElastiCache::User",
+                "U",
+                serde_json::json!({
+                    "UserId": "u1", "UserName": "user1",
+                    "AccessString": "on ~* +@all", "Engine": "redis"
+                }),
+            ))
+            .expect("user provisions");
+        let ug = prov
+            .create_resource(&make_resource(
+                "AWS::ElastiCache::UserGroup",
+                "Ug",
+                serde_json::json!({"UserGroupId": "ug1", "Engine": "redis", "UserIds": ["u1"]}),
+            ))
+            .expect("user group provisions");
+
+        // Back-references a running replication group / group membership sets.
+        {
+            let mut accounts = prov.elasticache_state.write();
+            let st = accounts.get_or_create("123456789012");
+            let u = st.users.get_mut("u1").unwrap();
+            u.password_count = 2;
+            u.user_group_ids = vec!["ug1".to_string()];
+            st.user_groups.get_mut("ug1").unwrap().replication_groups = vec!["rg1".to_string()];
+        }
+
+        prov.update_resource(
+            &user,
+            &make_resource(
+                "AWS::ElastiCache::User",
+                "U",
+                serde_json::json!({
+                    "UserId": "u1", "UserName": "user1", "AccessString": "off", "Engine": "redis"
+                }),
+            ),
+        )
+        .expect("update ok")
+        .expect("updatable");
+        prov.update_resource(
+            &ug,
+            &make_resource(
+                "AWS::ElastiCache::UserGroup",
+                "Ug",
+                serde_json::json!({
+                    "UserGroupId": "ug1", "Engine": "redis", "UserIds": ["u1", "u2"]
+                }),
+            ),
+        )
+        .expect("update ok")
+        .expect("updatable");
+
+        let mut accounts = prov.elasticache_state.write();
+        let st = accounts.get_or_create("123456789012");
+        let u = st.users.get("u1").unwrap();
+        assert_eq!(u.access_string, "off", "AccessString updated in place");
+        assert_eq!(u.password_count, 2, "password_count preserved");
+        assert_eq!(
+            u.user_group_ids,
+            vec!["ug1".to_string()],
+            "membership preserved"
+        );
+        let g = st.user_groups.get("ug1").unwrap();
+        assert_eq!(
+            g.user_ids,
+            vec!["u1".to_string(), "u2".to_string()],
+            "UserIds updated"
+        );
+        assert_eq!(
+            g.replication_groups,
+            vec!["rg1".to_string()],
+            "replication_groups back-ref preserved"
+        );
     }
 
     #[test]

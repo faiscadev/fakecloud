@@ -202,6 +202,38 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    /// In-place `ModifyUser`: reprovision would reset the user's
+    /// `user_group_ids` (its membership back-references) and `password_count`.
+    /// AccessString/AuthenticationMode are the mutable properties; UserName/
+    /// Engine are immutable. Preserve arn/status/user_group_ids/password_count.
+    pub(crate) fn update_ec_user(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let user_id = existing.physical_id.clone();
+
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let user = state
+            .users
+            .get_mut(&user_id)
+            .ok_or_else(|| format!("User {user_id} not yet provisioned"))?;
+        if let Some(a) = props.get("AccessString").and_then(|v| v.as_str()) {
+            user.access_string = a.to_string();
+        }
+        if let Some(t) = props
+            .get("AuthenticationMode")
+            .and_then(|v| v.get("Type"))
+            .and_then(|v| v.as_str())
+        {
+            user.authentication_type = t.to_string();
+        }
+        // arn/status/user_group_ids/password_count preserved.
+        Ok(ProvisionResult::new(user_id).with("Arn", user.arn.clone()))
+    }
+
     pub(crate) fn create_ec_user_group(
         &self,
         resource: &ResourceDefinition,
@@ -251,6 +283,34 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.user_groups.remove(physical_id);
         Ok(())
+    }
+
+    /// In-place `ModifyUserGroup`: reprovision would reset the group's
+    /// `replication_groups` back-reference (the replication groups using it).
+    /// UserIds is the mutable property; Engine is immutable. Preserve
+    /// arn/status/replication_groups.
+    pub(crate) fn update_ec_user_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let user_group_id = existing.physical_id.clone();
+
+        let mut accounts = self.elasticache_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let group = state
+            .user_groups
+            .get_mut(&user_group_id)
+            .ok_or_else(|| format!("User group {user_group_id} not yet provisioned"))?;
+        if let Some(ids) = props.get("UserIds").and_then(|v| v.as_array()) {
+            group.user_ids = ids
+                .iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+        // arn/status/replication_groups preserved.
+        Ok(ProvisionResult::new(user_group_id).with("Arn", group.arn.clone()))
     }
 
     pub(crate) fn create_ec_cache_cluster(

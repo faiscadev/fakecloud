@@ -12,7 +12,9 @@
 
 use serde_json::{json, Value};
 
-use super::{cfn_props_to_camel, ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{
+    cfn_props_to_camel, ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource,
+};
 
 impl ResourceProvisioner {
     // ----------------------------------------------------------- Application
@@ -199,6 +201,124 @@ impl ResourceProvisioner {
             "Name" => Some(dg_name.to_string()),
             _ => None,
         }
+    }
+
+    // ------------------------------------------------------- In-place updates
+
+    /// `AWS::CodeDeploy::Application` is name-keyed (stable physical id), but its
+    /// delete cascade-drops every DeploymentGroup under the app. Reprovision on a
+    /// tag edit would therefore wipe all of them. `ComputePlatform` is immutable,
+    /// so the only in-place change is tags — apply them and leave the app record
+    /// and its deployment groups intact.
+    pub(super) fn update_codedeploy_application(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+        let region = &self.region;
+        let account = &self.account_id;
+
+        let mut guard = self.codedeploy_state.write();
+        let st = guard.get_or_create(account);
+        if !st.applications.contains_key(&name) {
+            return Err(format!("Application {name} not yet provisioned"));
+        }
+        let arn = format!("arn:aws:codedeploy:{region}:{account}:application:{name}");
+        let tags = cfn_tag_list_pascal(props);
+        if tags.is_empty() {
+            st.tags.remove(&arn);
+        } else {
+            st.tags.insert(arn, tags);
+        }
+        Ok(ProvisionResult::new(name))
+    }
+
+    /// `AWS::CodeDeploy::DeploymentGroup` mints a random `deploymentGroupId` at
+    /// create; reprovision churns it (breaking `GetAtt Id`). AWS
+    /// `UpdateDeploymentGroup` mutates the config in place. Rebuild the stored
+    /// group from the template but PRESERVE the existing `deploymentGroupId` and
+    /// `computePlatform`.
+    pub(super) fn update_codedeploy_deployment_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let (app, dg_name) = existing
+            .physical_id
+            .split_once('/')
+            .ok_or("AWS::CodeDeploy::DeploymentGroup physical id must be <app>/<name>")?;
+        let service_role = props
+            .get("ServiceRoleArn")
+            .and_then(Value::as_str)
+            .ok_or("AWS::CodeDeploy::DeploymentGroup requires ServiceRoleArn")?
+            .to_string();
+        let config = props
+            .get("DeploymentConfigName")
+            .and_then(Value::as_str)
+            .unwrap_or("CodeDeployDefault.OneAtATime")
+            .to_string();
+        let region = &self.region;
+        let account = &self.account_id;
+
+        let mut guard = self.codedeploy_state.write();
+        let st = guard.get_or_create(account);
+        let existing_group = st
+            .deployment_groups
+            .get(app)
+            .and_then(|g| g.get(dg_name))
+            .cloned()
+            .ok_or_else(|| format!("Deployment group {app}/{dg_name} not yet provisioned"))?;
+        let dg_id = existing_group
+            .get("deploymentGroupId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let compute = existing_group
+            .get("computePlatform")
+            .and_then(Value::as_str)
+            .unwrap_or("Server")
+            .to_string();
+
+        let mut group = match cfn_props_to_camel(props, &[]) {
+            Value::Object(m) => m,
+            _ => serde_json::Map::new(),
+        };
+        for k in [
+            "applicationName",
+            "deploymentGroupName",
+            "serviceRoleArn",
+            "deploymentConfigName",
+            "tags",
+        ] {
+            group.remove(k);
+        }
+        if let Some(v) = group.remove("eCSServices") {
+            group.insert("ecsServices".to_string(), v);
+        }
+        group.insert("applicationName".to_string(), json!(app));
+        group.insert("deploymentGroupId".to_string(), json!(dg_id.clone()));
+        group.insert("deploymentGroupName".to_string(), json!(dg_name));
+        group.insert("deploymentConfigName".to_string(), json!(config));
+        group.insert("computePlatform".to_string(), json!(compute));
+        group.insert("serviceRoleArn".to_string(), json!(service_role));
+
+        let groups = st.deployment_groups.entry(app.to_string()).or_default();
+        groups.insert(dg_name.to_string(), Value::Object(group));
+
+        let arn = format!("arn:aws:codedeploy:{region}:{account}:deploymentgroup:{app}/{dg_name}");
+        let tags = cfn_tag_list_pascal(props);
+        if tags.is_empty() {
+            st.tags.remove(&arn);
+        } else {
+            st.tags.insert(arn, tags);
+        }
+
+        Ok(ProvisionResult::new(format!("{app}/{dg_name}"))
+            .with("Id", dg_id)
+            .with("Name", dg_name))
     }
 }
 
