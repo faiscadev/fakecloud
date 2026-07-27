@@ -1948,6 +1948,7 @@ impl ResourceProvisioner {
             "AWS::EC2::VPC" => Some(self.update_ec2_vpc(existing, new_def)?),
             "AWS::EC2::Subnet" => Some(self.update_ec2_subnet(existing, new_def)?),
             "AWS::EC2::RouteTable" => Some(self.update_ec2_route_table(existing, new_def)?),
+            "AWS::EC2::SecurityGroup" => Some(self.update_ec2_security_group(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -5100,6 +5101,67 @@ mod tests {
         assert!(acct.vpcs.contains_key(&vpc_id));
         assert!(acct.subnets.contains_key(&subnet_id));
         assert!(acct.route_tables.contains_key(&rtb_id));
+    }
+
+    #[test]
+    fn ec2_security_group_update_reconciles_rules_in_place() {
+        // bug-audit 2026-07-27 (cycle 5): without an update arm a SecurityGroup
+        // fell through to reprovision on a rule edit, churning the sg id
+        // (breaking Ref/SourceSecurityGroupId references) and dropping rules.
+        // The update must keep the id and reconcile the inline rules in place.
+        let prov = make_provisioner();
+        let vpc = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::VPC",
+                "Vpc",
+                serde_json::json!({ "CidrBlock": "10.3.0.0/16" }),
+            ))
+            .expect("VPC provisions");
+        let sg = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::SecurityGroup",
+                "Sg",
+                serde_json::json!({
+                    "GroupDescription": "test", "VpcId": vpc.physical_id,
+                    "SecurityGroupIngress": [
+                        {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22, "CidrIp": "0.0.0.0/0"}
+                    ]
+                }),
+            ))
+            .expect("SG provisions");
+        let sg_id = sg.physical_id.clone();
+
+        // Replace the ingress rule (port 22 -> 443).
+        let up = prov
+            .update_resource(
+                &sg,
+                &make_resource(
+                    "AWS::EC2::SecurityGroup",
+                    "Sg",
+                    serde_json::json!({
+                        "GroupDescription": "test", "VpcId": vpc.physical_id,
+                        "SecurityGroupIngress": [
+                            {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "CidrIp": "0.0.0.0/0"}
+                        ]
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(up.physical_id, sg_id, "security group id preserved");
+
+        let ec2 = prov.ec2_state.read();
+        let acct = ec2.get("123456789012").unwrap();
+        let g = acct.security_groups.get(&sg_id).expect("SG still exists");
+        let ingress: Vec<_> = g.rules.iter().filter(|r| !r.is_egress).collect();
+        assert!(
+            ingress.iter().any(|r| r.from_port == 443),
+            "new rule authorized in place"
+        );
+        assert!(
+            !ingress.iter().any(|r| r.from_port == 22),
+            "old rule revoked in place"
+        );
     }
 
     #[test]
