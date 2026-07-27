@@ -1942,6 +1942,12 @@ impl ResourceProvisioner {
             "AWS::CloudFront::Distribution" => {
                 Some(self.update_cf_distribution(existing, new_def)?)
             }
+            // In-place updates: reprovision would churn the vpc-/subnet-/rtb- id
+            // and orphan every child/sibling that references it (subnets, SGs,
+            // route tables, routes, associations, instances, ENIs).
+            "AWS::EC2::VPC" => Some(self.update_ec2_vpc(existing, new_def)?),
+            "AWS::EC2::Subnet" => Some(self.update_ec2_subnet(existing, new_def)?),
+            "AWS::EC2::RouteTable" => Some(self.update_ec2_route_table(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -5004,6 +5010,96 @@ mod tests {
         // Delete routes through the real handler.
         prov.delete_resource(&subnet).expect("subnet deletes");
         prov.delete_resource(&vpc).expect("vpc deletes");
+    }
+
+    #[test]
+    fn ec2_networking_updates_preserve_ids() {
+        // bug-audit 2026-07-27 (cycle 5): without update arms a VPC/Subnet/
+        // RouteTable fell through to reprovision on a mutable-attribute or tag
+        // edit, churning the id and orphaning every child/sibling that
+        // referenced it. Updates must be in place (same id).
+        let prov = make_provisioner();
+        let vpc = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::VPC",
+                "Vpc",
+                serde_json::json!({ "CidrBlock": "10.2.0.0/16" }),
+            ))
+            .expect("VPC provisions");
+        let vpc_id = vpc.physical_id.clone();
+
+        let subnet = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::Subnet",
+                "Subnet",
+                serde_json::json!({ "VpcId": vpc_id, "CidrBlock": "10.2.1.0/24" }),
+            ))
+            .expect("subnet provisions");
+        let subnet_id = subnet.physical_id.clone();
+
+        let rtb = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::RouteTable",
+                "Rtb",
+                serde_json::json!({ "VpcId": vpc_id }),
+            ))
+            .expect("route table provisions");
+        let rtb_id = rtb.physical_id.clone();
+
+        // VPC: enable DNS hostnames in place -> same vpc id.
+        let vpc_up = prov
+            .update_resource(
+                &vpc,
+                &make_resource(
+                    "AWS::EC2::VPC",
+                    "Vpc",
+                    serde_json::json!({ "CidrBlock": "10.2.0.0/16", "EnableDnsHostnames": true }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(vpc_up.physical_id, vpc_id, "VPC id preserved");
+
+        // Subnet: flip MapPublicIpOnLaunch in place -> same subnet id.
+        let subnet_up = prov
+            .update_resource(
+                &subnet,
+                &make_resource(
+                    "AWS::EC2::Subnet",
+                    "Subnet",
+                    serde_json::json!({
+                        "VpcId": vpc_id, "CidrBlock": "10.2.1.0/24",
+                        "MapPublicIpOnLaunch": true
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(subnet_up.physical_id, subnet_id, "subnet id preserved");
+
+        // RouteTable: a tag edit must not reprovision (would orphan routes) ->
+        // same rtb id.
+        let rtb_up = prov
+            .update_resource(
+                &rtb,
+                &make_resource(
+                    "AWS::EC2::RouteTable",
+                    "Rtb",
+                    serde_json::json!({
+                        "VpcId": vpc_id, "Tags": [{"Key": "env", "Value": "prod"}]
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(rtb_up.physical_id, rtb_id, "route table id preserved");
+
+        // All three still exist under their original ids in EC2 state.
+        let ec2 = prov.ec2_state.read();
+        let acct = ec2.get("123456789012").unwrap();
+        assert!(acct.vpcs.contains_key(&vpc_id));
+        assert!(acct.subnets.contains_key(&subnet_id));
+        assert!(acct.route_tables.contains_key(&rtb_id));
     }
 
     #[test]
