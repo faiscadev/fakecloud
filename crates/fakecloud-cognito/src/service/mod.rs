@@ -345,6 +345,7 @@ fn is_mutating_action(action: &str) -> bool {
             | "ListWebAuthnCredentials"
             | "GetProvisionedLimit"
             | "AdminGetUser"
+            | "AdminGetUserAuthFactors"
             | "AdminGetDevice"
             | "AdminListDevices"
             | "AdminListGroupsForUser"
@@ -435,6 +436,7 @@ impl AwsService for CognitoService {
             "AssociateSoftwareToken" => self.associate_software_token(&req),
             "VerifySoftwareToken" => self.verify_software_token(&req),
             "GetUserAuthFactors" => self.get_user_auth_factors(&req),
+            "AdminGetUserAuthFactors" => self.admin_get_user_auth_factors(&req),
             "CreateIdentityProvider" => self.create_identity_provider(&req),
             "DescribeIdentityProvider" => self.describe_identity_provider(&req),
             "UpdateIdentityProvider" => self.update_identity_provider(&req),
@@ -578,6 +580,7 @@ impl AwsService for CognitoService {
             "AssociateSoftwareToken",
             "VerifySoftwareToken",
             "GetUserAuthFactors",
+            "AdminGetUserAuthFactors",
             "CreateIdentityProvider",
             "DescribeIdentityProvider",
             "UpdateIdentityProvider",

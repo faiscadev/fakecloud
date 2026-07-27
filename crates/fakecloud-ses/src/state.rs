@@ -290,6 +290,11 @@ pub struct AccountSettings {
     /// verified. Flipped via PutAccountDetails or the admin endpoint.
     #[serde(default)]
     pub production_access_enabled: bool,
+    /// Account pricing plan (NONE | ESSENTIALS | PRO | ENTERPRISE) set via
+    /// PutAccountPricingAttributes and reported by GetAccount's
+    /// PricingAttributes. `None` reads back as the `NONE` plan.
+    #[serde(default)]
+    pub pricing_plan: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -622,6 +627,7 @@ impl SesState {
                 vdm_attributes: None,
                 details: None,
                 production_access_enabled: true,
+                pricing_plan: None,
             },
             import_jobs: BTreeMap::new(),
             export_jobs: BTreeMap::new(),

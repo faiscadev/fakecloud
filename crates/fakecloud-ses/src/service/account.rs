@@ -59,6 +59,14 @@ impl SesV2Service {
         if let Some(ref vdm) = acct.vdm_attributes {
             response["VdmAttributes"] = vdm.clone();
         }
+        // PricingAttributes reports the plan set via PutAccountPricingAttributes.
+        // An unset plan reads back as NONE; the change applies immediately so
+        // CurrentPlan and NextPlan match.
+        let plan = acct.pricing_plan.as_deref().unwrap_or("NONE");
+        response["PricingAttributes"] = json!({
+            "CurrentPlan": plan,
+            "NextPlan": plan,
+        });
         Ok(AwsResponse::json(StatusCode::OK, response.to_string()))
     }
 
@@ -211,6 +219,37 @@ impl SesV2Service {
             .get_or_create(&req.account_id)
             .account_settings
             .vdm_attributes = Some(vdm);
+        Ok(AwsResponse::json(StatusCode::OK, "{}"))
+    }
+
+    pub(super) fn put_account_pricing_attributes(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = Self::parse_body(req)?;
+        let plan = match body["Plan"].as_str() {
+            Some(p) => p.to_string(),
+            None => {
+                return Ok(Self::json_error(
+                    StatusCode::BAD_REQUEST,
+                    "BadRequestException",
+                    "Plan is required",
+                ));
+            }
+        };
+        // PricingPlan enum: NONE | ESSENTIALS | PRO | ENTERPRISE.
+        if !matches!(plan.as_str(), "NONE" | "ESSENTIALS" | "PRO" | "ENTERPRISE") {
+            return Ok(Self::json_error(
+                StatusCode::BAD_REQUEST,
+                "BadRequestException",
+                "Plan must be one of NONE, ESSENTIALS, PRO, ENTERPRISE",
+            ));
+        }
+        self.state
+            .write()
+            .get_or_create(&req.account_id)
+            .account_settings
+            .pricing_plan = Some(plan);
         Ok(AwsResponse::json(StatusCode::OK, "{}"))
     }
 

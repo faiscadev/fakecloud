@@ -1167,6 +1167,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListTenants`
 - `PutAccountDedicatedIpWarmupAttributes`
 - `PutAccountDetails`
+- `PutAccountPricingAttributes`
 - `PutAccountSendingAttributes`
 - `PutAccountSuppressionAttributes`
 - `PutAccountVdmAttributes`
@@ -1218,6 +1219,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `AdminForgetDevice`
 - `AdminGetDevice`
 - `AdminGetUser`
+- `AdminGetUserAuthFactors`
 - `AdminInitiateAuth`
 - `AdminLinkProviderForUser`
 - `AdminListDevices`
