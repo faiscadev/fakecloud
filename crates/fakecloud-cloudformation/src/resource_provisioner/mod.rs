@@ -1893,6 +1893,22 @@ impl ResourceProvisioner {
             // In-place update: reprovision would mint a new BackupPlanId and
             // drop the plan's version history + selections.
             "AWS::Backup::BackupPlan" => Some(self.update_backup_plan(existing, new_def)?),
+            // In-place updates: reprovision would churn the random app/env/
+            // profile id and cascade-drop the nested environments, profiles,
+            // hosted configuration versions and deployment history.
+            "AWS::AppConfig::Application" => {
+                Some(self.update_appconfig_application(existing, new_def)?)
+            }
+            "AWS::AppConfig::Environment" => {
+                Some(self.update_appconfig_environment(existing, new_def)?)
+            }
+            "AWS::AppConfig::ConfigurationProfile" => {
+                Some(self.update_appconfig_configuration_profile(existing, new_def)?)
+            }
+            // In-place comment update: reprovision would churn the zone id + name
+            // servers and wipe every record set stored inside the zone. Name is
+            // immutable, so a name change still falls back to replacement.
+            "AWS::Route53::HostedZone" => Some(self.update_route53_hosted_zone(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -4149,6 +4165,126 @@ mod tests {
             alarm.threshold_metric_id.as_deref(),
             Some("ad2"),
             "ThresholdMetricId refreshed on update"
+        );
+    }
+
+    #[test]
+    fn appconfig_application_update_preserves_children_and_id() {
+        // bug-audit 2026-07-27 (cycle 5): without an in-place update arm an
+        // AppConfig application fell through to reprovision (delete + create) on
+        // any property or tag edit, churning the random app id and dropping the
+        // nested environments/profiles. The update arm must mutate in place.
+        let prov = make_provisioner();
+        let app = prov
+            .create_resource(&make_resource(
+                "AWS::AppConfig::Application",
+                "App",
+                serde_json::json!({
+                    "Name": "my-app",
+                    "Description": "v1",
+                    "Tags": [{"Key": "env", "Value": "dev"}]
+                }),
+            ))
+            .expect("app provisions");
+        let app_id = app.physical_id.clone();
+
+        let env = prov
+            .create_resource(&make_resource(
+                "AWS::AppConfig::Environment",
+                "Env",
+                serde_json::json!({"ApplicationId": app_id, "Name": "prod"}),
+            ))
+            .expect("env provisions");
+        assert!(env.physical_id.starts_with(&format!("{app_id}|")));
+
+        let updated = prov
+            .update_resource(
+                &app,
+                &make_resource(
+                    "AWS::AppConfig::Application",
+                    "App",
+                    serde_json::json!({
+                        "Name": "my-app",
+                        "Description": "v2",
+                        "Tags": [{"Key": "env", "Value": "prod"}]
+                    }),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("AWS::AppConfig::Application is updatable");
+        assert_eq!(
+            updated.physical_id, app_id,
+            "application id preserved (not churned by reprovision)"
+        );
+
+        let g = prov.appconfig_state.read();
+        let st = g.get("123456789012").unwrap();
+        let record = st
+            .applications
+            .get(&app_id)
+            .expect("application still exists under its original id");
+        assert_eq!(record.description.as_deref(), Some("v2"));
+        assert_eq!(
+            record.environments.len(),
+            1,
+            "child environment preserved across the in-place update"
+        );
+    }
+
+    #[test]
+    fn route53_hosted_zone_comment_update_is_in_place_but_name_change_replaces() {
+        // bug-audit 2026-07-27 (cycle 5): reprovision on a comment/tag edit would
+        // churn the zone id + name servers and wipe every record set. A comment
+        // change must be in-place (id preserved); a Name change (immutable) must
+        // still replace.
+        let prov = make_provisioner();
+        let zone = prov
+            .create_resource(&make_resource(
+                "AWS::Route53::HostedZone",
+                "Z",
+                serde_json::json!({"Name": "example.com", "HostedZoneConfig": {"Comment": "v1"}}),
+            ))
+            .expect("zone provisions");
+        let zid = zone.physical_id.clone();
+
+        // Comment-only change: in place, same id.
+        let after_comment = prov
+            .update_resource(
+                &zone,
+                &make_resource(
+                    "AWS::Route53::HostedZone",
+                    "Z",
+                    serde_json::json!({"Name": "example.com", "HostedZoneConfig": {"Comment": "v2"}}),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("updatable");
+        assert_eq!(
+            after_comment.physical_id, zid,
+            "comment update keeps zone id"
+        );
+        {
+            let accounts = prov.route53_state.read();
+            let state = accounts.get("000000000000").unwrap();
+            let z = state.hosted_zones.get(&zid).expect("zone preserved");
+            assert_eq!(z.comment.as_deref(), Some("v2"));
+        }
+
+        // Name change: immutable -> replacement mints a new id.
+        let after_name = prov
+            .update_resource(
+                &after_comment,
+                &make_resource(
+                    "AWS::Route53::HostedZone",
+                    "Z",
+                    serde_json::json!({"Name": "renamed.com", "HostedZoneConfig": {"Comment": "v2"}}),
+                ),
+            )
+            .expect("update succeeds")
+            .expect("updatable");
+        assert_ne!(
+            after_name.physical_id, zid,
+            "a Name change replaces the zone (new id)"
         );
     }
 

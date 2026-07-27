@@ -12,10 +12,10 @@
 
 use serde_json::Value;
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 use fakecloud_appconfig::state::{
-    application_arn, environment_arn, profile_arn, ApplicationRecord, EnvironmentRecord,
-    ProfileRecord,
+    application_arn, environment_arn, profile_arn, AppConfigState, ApplicationRecord,
+    EnvironmentRecord, ProfileRecord,
 };
 
 impl ResourceProvisioner {
@@ -228,10 +228,138 @@ impl ResourceProvisioner {
         }
         None
     }
+
+    // ---------------------------------------------------- In-place updates
+    //
+    // AppConfig applications/environments/profiles own nested state
+    // (environments, profiles, experiments, deployment history, hosted
+    // configuration versions) keyed inside the parent record, and their ids
+    // are randomly minted. Reprovisioning (delete + create) on an in-place
+    // property change (Name/Description/... or a tag edit) would drop all of
+    // that and churn the id, dangling every child CFN resource and `Ref`.
+    // These arms mutate the stored record in place, preserving the id and all
+    // contained state (matching AWS `Update*` semantics).
+
+    pub(super) fn update_appconfig_application(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let arn = application_arn(&self.region, &self.account_id, &id);
+
+        let mut guard = self.appconfig_state.write();
+        let st = guard.get_or_create(&self.account_id);
+        {
+            let record = st
+                .applications
+                .get_mut(&id)
+                .ok_or_else(|| format!("Application {id} not yet provisioned"))?;
+            if let Some(name) = props.get("Name").and_then(Value::as_str) {
+                record.name = name.to_string();
+            }
+            record.description = opt_str(props, "Description");
+            // environments / profiles / experiments preserved.
+        }
+        apply_tags(st, &arn, props.get("Tags"));
+
+        Ok(ProvisionResult::new(id.clone()).with("ApplicationId", id))
+    }
+
+    pub(super) fn update_appconfig_environment(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let (app_id, env_id) = existing
+            .physical_id
+            .split_once('|')
+            .ok_or("AWS::AppConfig::Environment physical id must be <appId>|<envId>")?;
+        let arn = environment_arn(&self.region, &self.account_id, app_id, env_id);
+
+        let mut guard = self.appconfig_state.write();
+        let st = guard.get_or_create(&self.account_id);
+        {
+            let app = st
+                .applications
+                .get_mut(app_id)
+                .ok_or_else(|| format!("Application {app_id} not yet provisioned"))?;
+            let record = app
+                .environments
+                .get_mut(env_id)
+                .ok_or_else(|| format!("Environment {env_id} not yet provisioned"))?;
+            if let Some(name) = props.get("Name").and_then(Value::as_str) {
+                record.name = name.to_string();
+            }
+            record.description = opt_str(props, "Description");
+            if let Some(monitors) = props.get("Monitors") {
+                record.monitors = monitors.clone();
+            }
+            // deployments / next_deployment_number / state preserved.
+        }
+        apply_tags(st, &arn, props.get("Tags"));
+
+        Ok(ProvisionResult::new(existing.physical_id.clone()).with("EnvironmentId", env_id))
+    }
+
+    pub(super) fn update_appconfig_configuration_profile(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let (app_id, profile_id) = existing.physical_id.split_once('|').ok_or(
+            "AWS::AppConfig::ConfigurationProfile physical id must be <appId>|<profileId>",
+        )?;
+        let arn = profile_arn(&self.region, &self.account_id, app_id, profile_id);
+
+        let mut guard = self.appconfig_state.write();
+        let st = guard.get_or_create(&self.account_id);
+        {
+            let app = st
+                .applications
+                .get_mut(app_id)
+                .ok_or_else(|| format!("Application {app_id} not yet provisioned"))?;
+            let record = app
+                .profiles
+                .get_mut(profile_id)
+                .ok_or_else(|| format!("ConfigurationProfile {profile_id} not yet provisioned"))?;
+            if let Some(name) = props.get("Name").and_then(Value::as_str) {
+                record.name = name.to_string();
+            }
+            record.description = opt_str(props, "Description");
+            if let Some(uri) = props.get("LocationUri").and_then(Value::as_str) {
+                record.location_uri = uri.to_string();
+            }
+            record.retrieval_role_arn = opt_str(props, "RetrievalRoleArn");
+            if let Some(validators) = props.get("Validators") {
+                record.validators = validators.clone();
+            }
+            record.kms_key_identifier = opt_str(props, "KmsKeyIdentifier");
+            // hosted_versions / next_version_number / type preserved.
+        }
+        apply_tags(st, &arn, props.get("Tags"));
+
+        Ok(ProvisionResult::new(existing.physical_id.clone())
+            .with("ConfigurationProfileId", profile_id))
+    }
 }
 
 fn opt_str(props: &Value, key: &str) -> Option<String> {
     props.get(key).and_then(Value::as_str).map(str::to_string)
+}
+
+/// Replace an ARN's tag set wholesale from CFN `Tags` (matching CFN tag update
+/// semantics): empty/absent clears the entry, otherwise it overwrites.
+fn apply_tags(st: &mut AppConfigState, arn: &str, tags_val: Option<&Value>) {
+    let tags = tag_map(tags_val);
+    if tags.is_empty() {
+        st.tags.remove(arn);
+    } else {
+        st.tags.insert(arn.to_string(), tags);
+    }
 }
 
 /// Convert CFN `Tags` (`[{Key,Value}]`) into the AppConfig `TagMap`.

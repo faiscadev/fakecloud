@@ -91,6 +91,63 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    /// In-place update for `AWS::Route53::HostedZone`. AWS only supports an
+    /// in-place mutation of the comment (`UpdateHostedZoneComment`); `Name` is
+    /// immutable and a change forces replacement. Reprovisioning on a comment
+    /// (or tag) edit would churn the zone id + 4 name servers AND wipe every
+    /// record set (both `AWS::Route53::RecordSet` children and runtime
+    /// `ChangeResourceRecordSets` records) stored inside the zone. So mutate the
+    /// comment in place when the name is unchanged, preserving the record sets;
+    /// fall back to replacement only when the (immutable) name actually changes.
+    pub(super) fn update_route53_hosted_zone(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let normalized_name = if name.ends_with('.') {
+            name.clone()
+        } else {
+            format!("{name}.")
+        };
+        let comment = props
+            .get("HostedZoneConfig")
+            .and_then(|v| v.get("Comment"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let in_place = {
+            let mut accounts = self.route53_state.write();
+            let state = accounts.entry("000000000000");
+            match state.hosted_zones.get_mut(&existing.physical_id) {
+                Some(z) if z.name == normalized_name => {
+                    z.comment = comment; // record sets / id / name servers preserved
+                    let id = z.id.clone();
+                    let name_servers = z.name_servers.clone();
+                    let mut result = ProvisionResult::new(id.clone()).with("Id", id);
+                    for (i, ns) in name_servers.iter().enumerate() {
+                        result = result.with(&format!("NameServers.{i}"), ns.clone());
+                    }
+                    result = result.with("NameServers", name_servers.join(","));
+                    Some(result)
+                }
+                _ => None,
+            }
+        };
+        match in_place {
+            Some(result) => Ok(result),
+            // Name changed (immutable) or zone missing: AWS replaces the zone.
+            None => self.reprovision_resource(existing, resource).map(|opt| {
+                opt.unwrap_or_else(|| ProvisionResult::new(existing.physical_id.clone()))
+            }),
+        }
+    }
+
     pub(super) fn create_route53_record_set(
         &self,
         resource: &ResourceDefinition,
