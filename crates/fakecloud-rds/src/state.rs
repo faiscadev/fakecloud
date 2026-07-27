@@ -133,6 +133,12 @@ pub struct DbInstance {
     pub option_group_name: Option<String>,
     pub multi_az: bool,
     pub pending_modified_values: Option<PendingModifiedValues>,
+    /// DB subnet group the instance was placed in. AWS echoes the whole
+    /// group under `<DBSubnetGroup>` in Describe/Create/Modify responses;
+    /// we keep the name here and resolve the group from `subnet_groups`
+    /// at render time so a later ModifyDBSubnetGroup is reflected.
+    #[serde(default)]
+    pub db_subnet_group_name: Option<String>,
     /// Read from input on Create/Modify; defaults preserve existing
     /// behaviour (non-encrypted, gp2, single AZ, no IAM auth).
     #[serde(default)]
@@ -1090,6 +1096,7 @@ mod tests {
                 option_group_name: None,
                 multi_az: false,
                 pending_modified_values: None,
+                db_subnet_group_name: None,
                 availability_zone: None,
                 storage_type: None,
                 storage_encrypted: false,
@@ -1256,6 +1263,7 @@ mod tests {
             option_group_name: None,
             multi_az: false,
             pending_modified_values: None,
+            db_subnet_group_name: None,
             availability_zone: None,
             storage_type: None,
             storage_encrypted: false,

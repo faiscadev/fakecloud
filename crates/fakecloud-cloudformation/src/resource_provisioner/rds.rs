@@ -494,6 +494,10 @@ impl ResourceProvisioner {
             allocated_storage,
             publicly_accessible,
             deletion_protection,
+            db_subnet_group_name: props
+                .get("DBSubnetGroupName")
+                .and_then(|v| v.as_str())
+                .map(str::to_string),
             created_at: Utc::now(),
             dbi_resource_id,
             master_user_password,

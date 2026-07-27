@@ -656,7 +656,12 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, Some("stopped"))
+                    db_instance_xml(
+                        &instance,
+                        Some("stopped"),
+                        self.subnet_group_of(&request.account_id, &instance)
+                            .as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),
@@ -796,7 +801,12 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, Some("starting"))
+                    db_instance_xml(
+                        &instance,
+                        Some("starting"),
+                        self.subnet_group_of(&request.account_id, &instance)
+                            .as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),
@@ -919,6 +929,16 @@ impl RdsService {
     /// calls `require_runtime` (Create/Modify/Restore* DB instance and
     /// Read Replica), and is the closest Smithy-modelled analogue for
     /// "fakecloud can't satisfy this DB request right now".
+    /// Look up the subnet group an instance sits in, for render paths
+    /// that hold a cloned `DbInstance` and no longer have the state lock
+    /// open. Callers that still hold the lock use
+    /// [`instance_subnet_group`] instead.
+    fn subnet_group_of(&self, account_id: &str, instance: &DbInstance) -> Option<DbSubnetGroup> {
+        let name = instance.db_subnet_group_name.as_ref()?;
+        let accounts = self.state.read();
+        accounts.get(account_id)?.subnet_groups.get(name).cloned()
+    }
+
     fn require_runtime(&self) -> Result<&Arc<RdsRuntime>, AwsServiceError> {
         self.runtime.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(

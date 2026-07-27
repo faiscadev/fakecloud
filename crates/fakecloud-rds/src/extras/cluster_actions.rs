@@ -808,6 +808,12 @@ pub(super) fn promote_read_replica_action(
             .instances
             .get(&id)
             .and_then(|i| i.read_replica_source_db_instance_identifier.clone());
+        // Resolve the subnet group before taking the mutable borrow below.
+        let subnet_group = state
+            .instances
+            .get(&id)
+            .and_then(|i| crate::service::instance_subnet_group(state, i))
+            .cloned();
         let instance = state.instances.get_mut(&id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::NOT_FOUND,
@@ -833,7 +839,8 @@ pub(super) fn promote_read_replica_action(
             instance.preferred_backup_window = window;
         }
         let arn = instance.db_instance_arn.clone();
-        let xml = crate::service::db_instance_xml(instance, Some("modifying"));
+        let xml =
+            crate::service::db_instance_xml(instance, Some("modifying"), subnet_group.as_ref());
         if let Some(source_id) = source_id {
             if let Some(src) = state.instances.get_mut(&source_id) {
                 src.read_replica_db_instance_identifiers
@@ -919,6 +926,11 @@ pub(super) fn switchover_read_replica_action(
         // Promote the replica: clear its source pointer, take over the
         // replica list. Take the ARN before we mutate the source.
         let (new_primary_xml, new_primary_arn) = {
+            let subnet_group = state
+                .instances
+                .get(&id)
+                .and_then(|i| crate::service::instance_subnet_group(state, i))
+                .cloned();
             let new_primary = state.instances.get_mut(&id).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
@@ -929,7 +941,11 @@ pub(super) fn switchover_read_replica_action(
             new_primary.read_replica_source_db_instance_identifier = None;
             new_primary.read_replica_db_instance_identifiers = new_primary_replicas;
             let arn = new_primary.db_instance_arn.clone();
-            let xml = crate::service::db_instance_xml(new_primary, Some("modifying"));
+            let xml = crate::service::db_instance_xml(
+                new_primary,
+                Some("modifying"),
+                subnet_group.as_ref(),
+            );
             (xml, arn)
         };
 

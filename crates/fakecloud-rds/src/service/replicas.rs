@@ -143,7 +143,11 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&replica, None)
+                    db_instance_xml(
+                        &replica,
+                        None,
+                        self.subnet_group_of(&request.account_id, &replica).as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),

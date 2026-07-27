@@ -186,6 +186,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
         option_group_name: None,
         multi_az: false,
         pending_modified_values: None,
+        db_subnet_group_name: None,
         availability_zone: None,
         storage_type: None,
         storage_encrypted: false,
@@ -222,7 +223,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
         activity_stream: None,
     };
 
-    let xml = db_instance_xml(&instance, Some("creating"));
+    let xml = db_instance_xml(&instance, Some("creating"), None);
 
     assert!(xml.contains("<DBInstanceIdentifier>test-db</DBInstanceIdentifier>"));
     assert!(xml.contains("<DBInstanceStatus>creating</DBInstanceStatus>"));
@@ -259,7 +260,7 @@ fn db_instance_xml_renders_dynamic_storage_and_kms() {
     instance.master_user_secret_kms_key_id =
         Some("arn:aws:kms:us-east-1:123:key/aws/secretsmanager".to_string());
 
-    let xml = db_instance_xml(&instance, None);
+    let xml = db_instance_xml(&instance, None, None);
 
     assert!(xml.contains("<AvailabilityZone>eu-west-1c</AvailabilityZone>"));
     assert!(xml.contains("<StorageType>gp3</StorageType>"));
@@ -370,6 +371,7 @@ fn make_instance_with_defaults(id: &str) -> DbInstance {
         option_group_name: None,
         multi_az: false,
         pending_modified_values: None,
+        db_subnet_group_name: None,
         availability_zone: None,
         storage_type: None,
         storage_encrypted: false,
@@ -649,6 +651,7 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
             option_group_name: None,
             multi_az: false,
             pending_modified_values: None,
+            db_subnet_group_name: None,
             availability_zone: None,
             storage_type: None,
             storage_encrypted: false,
@@ -1196,6 +1199,39 @@ fn create_db_subnet_group_rejects_duplicates() {
         svc.create_db_subnet_group(&req),
         "DBSubnetGroupAlreadyExists",
     );
+}
+
+#[test]
+fn describe_db_instances_echoes_the_subnet_group() {
+    // AWS returns the whole `DBSubnetGroup` on every DBInstance placed in
+    // one; graders and Terraform read `DBSubnetGroup.DBSubnetGroupName`
+    // off DescribeDBInstances to check where a DB landed.
+    let svc = make_service();
+    create_subnet_group(&svc, "private-subnets");
+    seed_instance(&svc, "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state.instances.get_mut("db1").unwrap().db_subnet_group_name =
+            Some("private-subnets".to_string());
+    }
+
+    let req = request("DescribeDBInstances", &[("DBInstanceIdentifier", "db1")]);
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBSubnetGroup><DBSubnetGroupName>private-subnets"));
+    assert!(body.contains("<SubnetIdentifier>subnet-aaa</SubnetIdentifier>"));
+    assert!(body.contains("<SubnetIdentifier>subnet-bbb</SubnetIdentifier>"));
+}
+
+#[test]
+fn db_instance_xml_omits_subnet_group_when_absent() {
+    // Instances outside a subnet group (EC2-Classic-style seeds, Aurora
+    // members created without one) must not grow an empty element.
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    let req = request("DescribeDBInstances", &[("DBInstanceIdentifier", "db1")]);
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(!body.contains("<DBSubnetGroup>"));
 }
 
 #[test]
@@ -3082,6 +3118,7 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
             option_group_name: None,
             multi_az: false,
             pending_modified_values: None,
+            db_subnet_group_name: None,
             availability_zone: None,
             storage_type: None,
             storage_encrypted: false,
@@ -3864,7 +3901,7 @@ fn activity_stream_start_stop_round_trips_instance_xml() {
             .instances
             .get("das-db")
             .expect("instance");
-        let xml = db_instance_xml(inst, None);
+        let xml = db_instance_xml(inst, None, None);
         assert!(
             xml.contains("<ActivityStreamStatus>started</ActivityStreamStatus>"),
             "{xml}"
@@ -3884,7 +3921,7 @@ fn activity_stream_start_stop_round_trips_instance_xml() {
             .get("das-db")
             .expect("instance");
         assert!(inst.activity_stream.is_none());
-        let xml = db_instance_xml(inst, None);
+        let xml = db_instance_xml(inst, None, None);
         assert!(
             xml.contains("<ActivityStreamStatus>stopped</ActivityStreamStatus>"),
             "{xml}"

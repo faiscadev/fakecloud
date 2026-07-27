@@ -631,6 +631,7 @@ pub(crate) fn build_restored_instance(
         option_group_name: None,
         multi_az: false,
         pending_modified_values: None,
+        db_subnet_group_name: None,
         availability_zone: None,
         storage_type: None,
         storage_encrypted: false,
@@ -716,6 +717,7 @@ pub(crate) fn build_s3_restored_instance(
         option_group_name: None,
         multi_az: false,
         pending_modified_values: None,
+        db_subnet_group_name: None,
         availability_zone: None,
         storage_type: None,
         storage_encrypted: false,
@@ -808,6 +810,7 @@ pub(crate) fn build_pit_restored_instance(
         option_group_name: source.option_group_name.clone(),
         multi_az: false,
         pending_modified_values: None,
+        db_subnet_group_name: None,
         availability_zone: source.availability_zone.clone(),
         storage_type: source.storage_type.clone(),
         storage_encrypted: source.storage_encrypted,
@@ -888,6 +891,7 @@ pub(crate) fn build_read_replica_instance(
         },
         option_group_name: source.option_group_name.clone(),
         multi_az: source.multi_az,
+        db_subnet_group_name: source.db_subnet_group_name.clone(),
         pending_modified_values: None,
         availability_zone: source.availability_zone.clone(),
         storage_type: source.storage_type.clone(),
@@ -1059,8 +1063,36 @@ pub(crate) fn emit_event_static_with_state(
     );
 }
 
-pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&str>) -> String {
+/// Resolve the subnet group an instance sits in, for callers that hold
+/// the state lock and are about to render that instance.
+pub(crate) fn instance_subnet_group<'a>(
+    state: &'a RdsState,
+    instance: &DbInstance,
+) -> Option<&'a DbSubnetGroup> {
+    instance
+        .db_subnet_group_name
+        .as_ref()
+        .and_then(|name| state.subnet_groups.get(name))
+}
+
+/// Render a `<DBInstance>` body. `subnet_group` is the group named by
+/// `instance.db_subnet_group_name`, resolved by the caller (which holds
+/// the state lock). `None` omits `<DBSubnetGroup>`, matching AWS for
+/// instances created without a subnet group.
+pub(crate) fn db_instance_xml(
+    instance: &DbInstance,
+    status_override: Option<&str>,
+    subnet_group: Option<&DbSubnetGroup>,
+) -> String {
     let status = status_override.unwrap_or(&instance.db_instance_status);
+    let db_subnet_group_xml = subnet_group
+        .map(|group| {
+            format!(
+                "<DBSubnetGroup>{}</DBSubnetGroup>",
+                db_subnet_group_xml(group)
+            )
+        })
+        .unwrap_or_default();
     let db_name_xml = instance
         .db_name
         .as_ref()
@@ -1541,6 +1573,7 @@ pub(crate) fn db_instance_xml(instance: &DbInstance, status_override: Option<&st
          {vpc_security_groups_xml}\
          {db_parameter_groups_xml}\
          <AvailabilityZone>{availability_zone}</AvailabilityZone>\
+         {db_subnet_group_xml}\
          {latest_restorable_time_xml}\
          {preferred_maintenance_window_xml}\
          <MultiAZ>{multi_az}</MultiAZ>\
