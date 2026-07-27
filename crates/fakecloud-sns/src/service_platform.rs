@@ -485,10 +485,15 @@ fn paginate_sns_members(
 ) -> (String, Option<String>) {
     use base64::Engine;
     items.sort_by(|a, b| a.0.cmp(&b.0));
+    // Resume at the first key >= the token key. `partition_point` (items are
+    // sorted by key) makes this robust to the token'd item having been deleted
+    // between pages: a plain `position(== key)` would return None and restart
+    // at page 1 (a non-terminating delete-drain loop). The token points at the
+    // first key of the next page, so the resume is inclusive.
     let start = next_token
         .and_then(|t| base64::engine::general_purpose::STANDARD.decode(t).ok())
         .and_then(|b| String::from_utf8(b).ok())
-        .and_then(|key| items.iter().position(|(k, _)| *k == key))
+        .map(|key| items.partition_point(|(k, _)| k.as_str() < key.as_str()))
         .unwrap_or(0);
     let end = (start + SNS_LIST_PAGE_SIZE).min(items.len());
     let next = if end < items.len() {
@@ -535,5 +540,28 @@ mod pagination_tests {
         let (page, tok) = paginate_sns_members(items(10), None);
         assert_eq!(page.matches("<member>").count(), 10);
         assert!(tok.is_none());
+    }
+
+    #[test]
+    fn resumes_past_a_deleted_marker_item() {
+        // bug-audit 2026-07-27 (cycle 5): the token points at the first key of
+        // the next page (item 100). If that item is deleted between pages, a
+        // `position(== key)` resume returned None and restarted at page 1 (a
+        // non-terminating delete-drain loop). The `partition_point` resume must
+        // advance to the next surviving key instead.
+        let (_page1, tok1) = paginate_sns_members(items(150), None);
+        let tok1 = tok1.expect("first page truncated");
+
+        // Drop the item the token points at (arn-0100) plus a few after it.
+        let mut remaining = items(150);
+        remaining.retain(|(k, _)| !matches!(k.as_str(), "arn-0100" | "arn-0101" | "arn-0102"));
+
+        let (page2, tok2) = paginate_sns_members(remaining, Some(&tok1));
+        // Must resume at the first surviving key >= arn-0100 (arn-0103), NOT
+        // restart at arn-0000.
+        assert!(page2.contains("<member>103</member>"));
+        assert!(!page2.contains("<member>0</member>"));
+        assert!(!page2.contains("<member>99</member>"));
+        assert!(tok2.is_none());
     }
 }
