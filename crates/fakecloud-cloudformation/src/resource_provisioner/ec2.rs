@@ -301,6 +301,94 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(id.clone()).with("RouteTableId", id))
     }
 
+    // --- In-place updates ---
+    //
+    // These VPC networking resources mint an id (`vpc-`/`subnet-`/`rtb-`) that
+    // every child and sibling references via `Ref` (subnets, security groups,
+    // route tables, routes, associations, instances, ENIs). Reprovision
+    // (delete + create) on a mutable-attribute or tag edit churns that id and
+    // orphans all of them. AWS applies these changes in place. The update arms
+    // re-dispatch the specific Modify* EC2 call against the EXISTING id and
+    // return it unchanged.
+
+    /// `EnableDnsSupport`/`EnableDnsHostnames` are in-place (ModifyVpcAttribute)
+    /// in AWS; `CidrBlock`/`InstanceTenancy` are immutable. Preserve the vpc id.
+    pub(super) fn update_ec2_vpc(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        let dns_support = prop_bool(props, "EnableDnsSupport");
+        let dns_hostnames = prop_bool(props, "EnableDnsHostnames");
+        if dns_support.is_some() || dns_hostnames.is_some() {
+            let mut mp = HashMap::new();
+            mp.insert("VpcId".to_string(), id.clone());
+            if let Some(v) = dns_support {
+                mp.insert("EnableDnsSupport.Value".to_string(), v.to_string());
+            }
+            if let Some(v) = dns_hostnames {
+                mp.insert("EnableDnsHostnames.Value".to_string(), v.to_string());
+            }
+            self.ec2_dispatch("ModifyVpcAttribute", mp)?;
+        }
+
+        let cidr = prop_str(props, "CidrBlock").unwrap_or("").to_string();
+        Ok(ProvisionResult::new(id.clone())
+            .with("VpcId", id)
+            .with("CidrBlock", cidr))
+    }
+
+    /// `MapPublicIpOnLaunch` is in-place (ModifySubnetAttribute) in AWS;
+    /// `CidrBlock`/`AvailabilityZone`/`VpcId` are immutable. Preserve the subnet
+    /// id.
+    pub(super) fn update_ec2_subnet(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        if let Some(v) = prop_bool(props, "MapPublicIpOnLaunch") {
+            let mut mp = HashMap::new();
+            mp.insert("SubnetId".to_string(), id.clone());
+            mp.insert("MapPublicIpOnLaunch.Value".to_string(), v.to_string());
+            self.ec2_dispatch("ModifySubnetAttribute", mp)?;
+        }
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("SubnetId", id)
+            .with(
+                "AvailabilityZone",
+                prop_str(props, "AvailabilityZone")
+                    .unwrap_or("")
+                    .to_string(),
+            )
+            .with("VpcId", prop_str(props, "VpcId").unwrap_or("").to_string())
+            .with(
+                "CidrBlock",
+                prop_str(props, "CidrBlock").unwrap_or("").to_string(),
+            ))
+    }
+
+    /// A route table has no in-place-mutable property (routes are separate
+    /// `AWS::EC2::Route` resources; tags are re-applied by the create-time
+    /// TagSpecification path, not a standalone CreateTags the internal EC2
+    /// dispatch supports). The whole point of the arm is to AVOID reprovision,
+    /// which would churn the rtb id and orphan every Route /
+    /// SubnetRouteTableAssociation child. So preserve the id and report success.
+    pub(super) fn update_ec2_route_table(
+        &self,
+        existing: &StackResource,
+        _resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let id = existing.physical_id.clone();
+        Ok(ProvisionResult::new(id.clone()).with("RouteTableId", id))
+    }
+
     /// `AWS::EC2::Instance` — create a REAL control-plane instance synchronously
     /// (so `Ref` resolves to the `i-...` id and `Fn::GetAtt`
     /// PrivateIp/PublicIp/AvailabilityZone resolve during provisioning), then
