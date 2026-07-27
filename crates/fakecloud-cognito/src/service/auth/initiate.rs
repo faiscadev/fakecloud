@@ -180,6 +180,7 @@ impl CognitoService {
             }
             "REFRESH_TOKEN_AUTH" | "REFRESH_TOKEN" => {
                 self.initiate_refresh_token_auth(&body, client_id, &explicit_auth_flows, req)
+                    .await
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -724,7 +725,7 @@ impl CognitoService {
             return Ok(resp);
         }
 
-        let pretoken_overrides = if let Some(ctx) = self.delivery_ctx.as_ref() {
+        let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
             if let Some(function_arn) = triggers::get_trigger_arn(
                 &self.state,
                 pool_id,
@@ -743,10 +744,6 @@ impl CognitoService {
                 let invoked_at = chrono::Utc::now();
                 let raw_response = triggers::invoke_trigger(ctx, &function_arn, &event).await;
                 let duration_ms = started.elapsed().as_millis() as u64;
-                let overrides = raw_response
-                    .as_ref()
-                    .and_then(|resp| resp.get("response").cloned());
-
                 record_pre_token_gen_invocation(
                     &self.state,
                     &req.account_id,
@@ -761,7 +758,7 @@ impl CognitoService {
                     duration_ms,
                 );
 
-                overrides
+                raw_response
             } else {
                 None
             }
@@ -783,7 +780,7 @@ impl CognitoService {
             signing,
             None,
             None,
-            pretoken_overrides.as_ref(),
+            pretoken_response.as_ref(),
             &claims,
         );
 
@@ -1066,7 +1063,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(response))
     }
 
-    pub(super) fn initiate_refresh_token_auth(
+    pub(super) async fn initiate_refresh_token_auth(
         &self,
         body: &Value,
         client_id: &str,
@@ -1157,6 +1154,8 @@ impl CognitoService {
             })?;
 
         let region = state.region.clone();
+        let account_id = state.account_id.clone();
+        let user_attrs = triggers::collect_user_attributes(user);
         let sub = user.sub.clone();
         let pool_signing_owned = state.user_pools.get(&token_pool_id).and_then(|pool| {
             pool.signing_key_pem
@@ -1169,16 +1168,70 @@ impl CognitoService {
             .map(|(p, k)| (p.as_str(), k.as_str()));
         let claims =
             crate::service::token_claims_for(state, &token_pool_id, &token_username, client_id);
-        let tokens = generate_tokens(
+        drop(accounts);
+
+        let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &token_pool_id,
+                TriggerSource::TokenGenerationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::TokenGenerationAuthentication,
+                    &token_pool_id,
+                    Some(client_id),
+                    &token_username,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                let started = std::time::Instant::now();
+                let invoked_at = chrono::Utc::now();
+                let raw_response = tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(triggers::invoke_trigger(
+                        ctx,
+                        &function_arn,
+                        &event,
+                    ))
+                });
+                let duration_ms = started.elapsed().as_millis() as u64;
+                record_pre_token_gen_invocation(
+                    &self.state,
+                    &req.account_id,
+                    &token_pool_id,
+                    &region,
+                    &account_id,
+                    &token_username,
+                    &function_arn,
+                    &event,
+                    raw_response.as_ref(),
+                    invoked_at,
+                    duration_ms,
+                );
+
+                raw_response
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let tokens = crate::service::generate_tokens_with_overrides(
             &token_pool_id,
             client_id,
             &sub,
             &token_username,
             &region,
             signing,
+            None,
+            None,
+            pretoken_response.as_ref(),
             &claims,
         );
 
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
         state.access_tokens.insert(
             tokens.access_token.clone(),
             AccessTokenData {

@@ -2119,8 +2119,11 @@ fn generate_tokens_with_overrides(
     //   }
     // Real Cognito also accepts the v1 flat `claimsOverrideDetails` shape.
     if let Some(ov) = overrides {
-        let v2 = &ov["claimsAndScopeOverrideDetails"];
-        let v1 = &ov["claimsOverrideDetails"];
+        // Lambda triggers return the full Cognito event, whose override data
+        // is nested under `response`; retain support for direct override data.
+        let response = ov.get("response").unwrap_or(ov);
+        let v2 = &response["claimsAndScopeOverrideDetails"];
+        let v1 = &response["claimsOverrideDetails"];
         let id_block = if !v2.is_null() {
             &v2["idTokenGeneration"]
         } else {

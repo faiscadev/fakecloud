@@ -14,8 +14,14 @@ impl CognitoService {
         region: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let accounts = self.state.read();
+        let state = accounts.get(&req.account_id).ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ResourceNotFoundException",
+                "User pool does not exist.",
+            )
+        })?;
         let user = state
             .users
             .get(pool_id)
@@ -28,18 +34,64 @@ impl CognitoService {
                 )
             })?;
 
+        let user_attributes = triggers::collect_user_attributes(user);
         let sub = user.sub.clone();
+        let account_id = state.account_id.clone();
         let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
             pool.signing_key_pem
                 .as_ref()
                 .zip(pool.signing_kid.as_ref())
                 .map(|(p, k)| (p.clone(), k.clone()))
         });
+        drop(accounts);
+
+        let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                pool_id,
+                TriggerSource::TokenGenerationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::TokenGenerationAuthentication,
+                    pool_id,
+                    Some(client_id),
+                    username,
+                    &user_attributes,
+                    region,
+                    &account_id,
+                );
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(triggers::invoke_trigger(
+                        ctx,
+                        &function_arn,
+                        &event,
+                    ))
+                })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
         let claims = crate::service::token_claims_for(state, pool_id, username, client_id);
-        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing, &claims);
+        let tokens = crate::service::generate_tokens_with_overrides(
+            pool_id,
+            client_id,
+            &sub,
+            username,
+            region,
+            signing,
+            None,
+            None,
+            pretoken_response.as_ref(),
+            &claims,
+        );
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),

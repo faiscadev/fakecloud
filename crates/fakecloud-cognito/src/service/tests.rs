@@ -7952,6 +7952,42 @@ fn pretoken_v1_claims_override_details_shape() {
 }
 
 #[test]
+fn pretoken_lambda_response_applies_v1_group_overrides_to_access_tokens() {
+    use crate::service::generate_tokens_with_overrides;
+    use base64::Engine;
+
+    let b64url = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let lambda_response = serde_json::json!({
+        "response": {
+            "claimsOverrideDetails": {
+                "groupOverrideDetails": {"groupsToOverride": ["{\\\"id\\\":1}"]},
+            }
+        }
+    });
+
+    let tokens = generate_tokens_with_overrides(
+        "us-east-1_abc",
+        "client1",
+        "sub-1",
+        "alice",
+        "us-east-1",
+        None,
+        None,
+        None,
+        Some(&lambda_response),
+        &crate::service::TokenClaims::default(),
+    );
+
+    let parts: Vec<&str> = tokens.access_token.split('.').collect();
+    let access_payload: serde_json::Value =
+        serde_json::from_slice(&b64url.decode(parts[1]).unwrap()).unwrap();
+    assert_eq!(
+        access_payload["cognito:groups"],
+        serde_json::json!(["{\\\"id\\\":1}"])
+    );
+}
+
+#[test]
 fn get_signing_certificate_returns_real_x509_matching_pool_jwt_key() {
     use base64::Engine;
     let (svc, pool_id) = setup_svc_with_pool();
