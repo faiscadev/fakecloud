@@ -1917,6 +1917,14 @@ impl ResourceProvisioner {
                 Some(self.update_sd_namespace(existing, new_def)?)
             }
             "AWS::ServiceDiscovery::Service" => Some(self.update_sd_service(existing, new_def)?),
+            // In-place updates: reprovision would mint a new ARN/Id, dangling
+            // WebACL rules, WebACLAssociation and CloudFront WebACLId references.
+            "AWS::WAFv2::WebACL" => Some(self.update_wafv2_web_acl(existing, new_def)?),
+            "AWS::WAFv2::IPSet" => Some(self.update_wafv2_ip_set(existing, new_def)?),
+            "AWS::WAFv2::RegexPatternSet" => {
+                Some(self.update_wafv2_regex_pattern_set(existing, new_def)?)
+            }
+            "AWS::WAFv2::RuleGroup" => Some(self.update_wafv2_rule_group(existing, new_def)?),
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -4370,6 +4378,86 @@ mod tests {
             n.service_count, 1,
             "service_count preserved (service not orphaned by reprovision)"
         );
+    }
+
+    #[test]
+    fn wafv2_updates_preserve_arn_and_id() {
+        // bug-audit 2026-07-27 (cycle 5): without update arms a WebACL/IPSet/etc
+        // fell through to reprovision on a rules/addresses edit, minting a new
+        // ARN/Id and dangling WebACL rules / WebACLAssociation / CloudFront
+        // WebACLId references. Updates must be in place.
+        let prov = make_provisioner();
+        let acl = prov
+            .create_resource(&make_resource(
+                "AWS::WAFv2::WebACL",
+                "Acl",
+                serde_json::json!({
+                    "Name": "a", "Scope": "REGIONAL",
+                    "DefaultAction": {"Allow": {}}, "Rules": [], "VisibilityConfig": {}
+                }),
+            ))
+            .expect("web acl provisions");
+        let acl_arn = acl.physical_id.clone();
+
+        let ipset = prov
+            .create_resource(&make_resource(
+                "AWS::WAFv2::IPSet",
+                "Ip",
+                serde_json::json!({
+                    "Name": "ip", "Scope": "REGIONAL",
+                    "IPAddressVersion": "IPV4", "Addresses": ["1.2.3.4/32"]
+                }),
+            ))
+            .expect("ip set provisions");
+        let ip_arn = ipset.physical_id.clone();
+
+        let acl_up = prov
+            .update_resource(
+                &acl,
+                &make_resource(
+                    "AWS::WAFv2::WebACL",
+                    "Acl",
+                    serde_json::json!({
+                        "Name": "a", "Scope": "REGIONAL",
+                        "DefaultAction": {"Block": {}},
+                        "Rules": [{"Name": "r1"}], "VisibilityConfig": {}
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(acl_up.physical_id, acl_arn, "WebACL ARN preserved");
+
+        let ip_up = prov
+            .update_resource(
+                &ipset,
+                &make_resource(
+                    "AWS::WAFv2::IPSet",
+                    "Ip",
+                    serde_json::json!({
+                        "Name": "ip", "Scope": "REGIONAL", "IPAddressVersion": "IPV4",
+                        "Addresses": ["5.6.7.8/32", "9.10.11.12/32"]
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(ip_up.physical_id, ip_arn, "IPSet ARN preserved");
+
+        let accounts = prov.wafv2_state.read();
+        let state = accounts.accounts.get("123456789012").unwrap();
+        let a = state
+            .web_acls
+            .get(&("REGIONAL".to_string(), "a".to_string()))
+            .unwrap();
+        assert_eq!(a.arn, acl_arn);
+        assert_eq!(a.rules.len(), 1, "WebACL rules updated in place");
+        let ip = state
+            .ip_sets
+            .get(&("REGIONAL".to_string(), "ip".to_string()))
+            .unwrap();
+        assert_eq!(ip.arn, ip_arn);
+        assert_eq!(ip.addresses.len(), 2, "IPSet addresses updated in place");
     }
 
     #[test]

@@ -507,4 +507,254 @@ impl ResourceProvisioner {
         state.associations.remove(physical_id);
         Ok(())
     }
+
+    // --- In-place updates ---
+    //
+    // WAFv2 resources are keyed by (scope, name) and their physical id is the
+    // ARN (with a random uuid), also referenced as Id/Arn by WebACL rules,
+    // WebACLAssociation and CloudFront `WebACLId`. Reprovision (delete + create)
+    // on a rules/addresses/patterns edit mints a NEW ARN/Id, dangling every
+    // reference. Name/Scope are immutable, so a change to either still forces
+    // replacement. These arms mutate the mutable config in place and bump the
+    // lock token, preserving the ARN/Id.
+
+    pub(super) fn update_wafv2_web_acl(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let scope = props
+            .get("Scope")
+            .and_then(|v| v.as_str())
+            .ok_or("Scope is required")?
+            .to_string();
+        let updated = {
+            let mut accounts = self.wafv2_state.write();
+            let state = accounts
+                .accounts
+                .entry(self.account_id.clone())
+                .or_default();
+            match state.web_acls.get_mut(&(scope.clone(), name.clone())) {
+                Some(acl) if acl.arn == existing.physical_id => {
+                    acl.default_action = props
+                        .get("DefaultAction")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({"Allow": {}}));
+                    acl.description = props
+                        .get("Description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    acl.rules = props
+                        .get("Rules")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    acl.visibility_config = props
+                        .get("VisibilityConfig")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    acl.lock_token = Uuid::new_v4().simple().to_string();
+                    Some(
+                        ProvisionResult::new(acl.arn.clone())
+                            .with("Arn", acl.arn.clone())
+                            .with("Id", acl.id.clone())
+                            .with("Name", name.clone())
+                            .with("Capacity", acl.capacity.to_string()),
+                    )
+                }
+                _ => None,
+            }
+        };
+        match updated {
+            Some(result) => Ok(result),
+            // Name/Scope changed (immutable) -> replacement.
+            None => self
+                .reprovision_resource(existing, resource)
+                .map(|o| o.unwrap_or_else(|| ProvisionResult::new(existing.physical_id.clone()))),
+        }
+    }
+
+    pub(super) fn update_wafv2_ip_set(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let scope = props
+            .get("Scope")
+            .and_then(|v| v.as_str())
+            .ok_or("Scope is required")?
+            .to_string();
+        let updated = {
+            let mut accounts = self.wafv2_state.write();
+            let state = accounts
+                .accounts
+                .entry(self.account_id.clone())
+                .or_default();
+            match state.ip_sets.get_mut(&(scope.clone(), name.clone())) {
+                Some(set) if set.arn == existing.physical_id => {
+                    set.addresses = props
+                        .get("Addresses")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(String::from))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    set.description = props
+                        .get("Description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    set.lock_token = Uuid::new_v4().simple().to_string();
+                    Some(
+                        ProvisionResult::new(set.arn.clone())
+                            .with("Arn", set.arn.clone())
+                            .with("Id", set.id.clone())
+                            .with("Name", name.clone()),
+                    )
+                }
+                _ => None,
+            }
+        };
+        match updated {
+            Some(result) => Ok(result),
+            None => self
+                .reprovision_resource(existing, resource)
+                .map(|o| o.unwrap_or_else(|| ProvisionResult::new(existing.physical_id.clone()))),
+        }
+    }
+
+    pub(super) fn update_wafv2_regex_pattern_set(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let scope = props
+            .get("Scope")
+            .and_then(|v| v.as_str())
+            .ok_or("Scope is required")?
+            .to_string();
+        let updated = {
+            let mut accounts = self.wafv2_state.write();
+            let state = accounts
+                .accounts
+                .entry(self.account_id.clone())
+                .or_default();
+            match state
+                .regex_pattern_sets
+                .get_mut(&(scope.clone(), name.clone()))
+            {
+                Some(set) if set.arn == existing.physical_id => {
+                    set.regular_expressions = props
+                        .get("RegularExpressionList")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .map(|s| {
+                                    if let Some(s) = s.as_str() {
+                                        serde_json::json!({"RegexString": s})
+                                    } else {
+                                        s.clone()
+                                    }
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    set.description = props
+                        .get("Description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    set.lock_token = Uuid::new_v4().simple().to_string();
+                    Some(
+                        ProvisionResult::new(set.arn.clone())
+                            .with("Arn", set.arn.clone())
+                            .with("Id", set.id.clone())
+                            .with("Name", name.clone()),
+                    )
+                }
+                _ => None,
+            }
+        };
+        match updated {
+            Some(result) => Ok(result),
+            None => self
+                .reprovision_resource(existing, resource)
+                .map(|o| o.unwrap_or_else(|| ProvisionResult::new(existing.physical_id.clone()))),
+        }
+    }
+
+    pub(super) fn update_wafv2_rule_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("Name is required")?
+            .to_string();
+        let scope = props
+            .get("Scope")
+            .and_then(|v| v.as_str())
+            .ok_or("Scope is required")?
+            .to_string();
+        let updated = {
+            let mut accounts = self.wafv2_state.write();
+            let state = accounts
+                .accounts
+                .entry(self.account_id.clone())
+                .or_default();
+            match state.rule_groups.get_mut(&(scope.clone(), name.clone())) {
+                Some(rg) if rg.arn == existing.physical_id => {
+                    rg.rules = props
+                        .get("Rules")
+                        .and_then(|v| v.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    rg.description = props
+                        .get("Description")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    rg.visibility_config = props
+                        .get("VisibilityConfig")
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({}));
+                    rg.lock_token = Uuid::new_v4().simple().to_string();
+                    Some(
+                        ProvisionResult::new(rg.arn.clone())
+                            .with("Arn", rg.arn.clone())
+                            .with("Id", rg.id.clone())
+                            .with("Name", name.clone())
+                            .with("Capacity", rg.capacity.to_string()),
+                    )
+                }
+                _ => None,
+            }
+        };
+        match updated {
+            Some(result) => Ok(result),
+            None => self
+                .reprovision_resource(existing, resource)
+                .map(|o| o.unwrap_or_else(|| ProvisionResult::new(existing.physical_id.clone()))),
+        }
+    }
 }
