@@ -1555,12 +1555,13 @@ impl KinesisService {
 
         let next_token = body["NextToken"].as_str();
         if let Some(token) = next_token {
-            if let Some(pos) = consumers
-                .iter()
-                .position(|c| c["ConsumerName"].as_str() == Some(token))
-            {
-                consumers = consumers.split_off(pos + 1);
-            }
+            // Resume strictly after the token (the last ConsumerName of the
+            // previous page). `partition_point` on the name-sorted vec is robust
+            // to that consumer having been deregistered between pages: a plain
+            // `position(== token)` would return None and leave the full list in
+            // place, re-delivering page 1 (a non-terminating loop).
+            let pos = consumers.partition_point(|c| c["ConsumerName"].as_str() <= Some(token));
+            consumers = consumers.split_off(pos);
         }
 
         let has_more = consumers.len() > max_results;

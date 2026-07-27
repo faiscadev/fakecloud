@@ -205,7 +205,7 @@ impl DynamoDbService {
         // For GSI queries the start key contains both index keys and table PK, so
         // we must match on ALL of them to find the exact item.
         if let Some(ref start_key) = exclusive_start_key {
-            if let Some(pos) = matched.iter().position(|item| {
+            let matches_start = |item: &&HashMap<String, AttributeValue>| {
                 let index_match =
                     item_matches_key(item, start_key, &hash_key_name, range_key_name.as_deref());
                 if is_gsi_query {
@@ -219,8 +219,22 @@ impl DynamoDbService {
                 } else {
                     index_match
                 }
-            }) {
+            };
+            if let Some(pos) = matched.iter().position(&matches_start) {
                 matched = matched.split_off(pos + 1);
+            } else if let Some(rk) = range_key_name.as_deref() {
+                // The ExclusiveStartKey item was deleted between pages. `matched`
+                // is sorted by the range key in the scan direction, so resume by
+                // order — drop every item at-or-before the start key's range
+                // value — instead of leaving the full list, which would restart
+                // at page 1 (a non-terminating delete-drain loop).
+                let sk_rv = start_key.get(rk).cloned();
+                let before = matched.partition_point(|item| {
+                    let ord = compare_attribute_values(item.get(rk), sk_rv.as_ref());
+                    let ord = if scan_forward { ord } else { ord.reverse() };
+                    ord != std::cmp::Ordering::Greater
+                });
+                matched = matched.split_off(before);
             }
         }
 
@@ -501,6 +515,12 @@ impl DynamoDbService {
                 item_matches_key(item, start_key, &hash_key_name, range_key_name.as_deref())
             }) {
                 matched = matched.split_off(pos + 1);
+            } else {
+                // The start-key item was deleted between pages. A Scan's result
+                // order is storage/segment order, NOT sorted by the key, so we
+                // cannot resume by ordering; terminate this segment (empty page)
+                // rather than leave the full list and re-deliver from the top.
+                matched.clear();
             }
         }
 

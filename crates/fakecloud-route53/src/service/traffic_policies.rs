@@ -611,7 +611,18 @@ impl Route53Service {
             .map(|a| a.traffic_policy_instances.values().cloned().collect())
             .unwrap_or_default();
         drop(state);
-        instances.sort_by(|a, b| a.id.cmp(&b.id));
+        // Sort by the same (hostedZoneId, name, type) tuple that the pagination
+        // markers carry — the cursor key must match the sort key so the resume
+        // below is a strictly-greater seek, not an exact-position lookup that
+        // restarts at page 1 when the marker item was deleted between pages.
+        let tuple = |i: &StoredTrafficPolicyInstance| {
+            (
+                i.hosted_zone_id.clone(),
+                i.name.clone(),
+                i.traffic_policy_type.clone(),
+            )
+        };
+        instances.sort_by_key(|a| tuple(a));
         // Honor incoming pagination markers. Without consuming
         // `hostedzoneidmarker` / `trafficpolicyinstancenamemarker` /
         // `trafficpolicyinstancetypemarker`, follow-up pages
@@ -634,15 +645,11 @@ impl Route53Service {
         let start = if hz_marker.is_empty() && name_marker.is_empty() && type_marker.is_empty() {
             0
         } else {
-            instances
-                .iter()
-                .position(|i| {
-                    i.hosted_zone_id == hz_marker
-                        && i.name == name_marker
-                        && i.traffic_policy_type == type_marker
-                })
-                .map(|p| p + 1)
-                .unwrap_or(0)
+            // Resume strictly after the marker tuple. `partition_point` on the
+            // tuple-sorted vec advances correctly even if the marker instance was
+            // deleted between pages.
+            let marker = (hz_marker, name_marker, type_marker);
+            instances.partition_point(|i| tuple(i) <= marker)
         };
         let slice: Vec<&StoredTrafficPolicyInstance> =
             instances.iter().skip(start).take(max_items).collect();
