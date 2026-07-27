@@ -229,7 +229,11 @@ pub struct GoTestRunner<'a> {
 /// Other services have no such heavy per-test load, so parallel-4 is fine.
 fn parallelism_for(service: &str) -> u32 {
     match service {
-        "pipes" | "kinesisanalyticsv2" => 1,
+        // `autoscaling` drives multi-step create/update/delete lifecycle waiters
+        // (launch config -> ASG -> instance settle) that, four-at-a-time on a
+        // 2-core runner, starve the shared fakecloud server enough to wedge the
+        // whole shard to the 60-min job cap under load. Run it serially.
+        "pipes" | "kinesisanalyticsv2" | "autoscaling" => 1,
         _ => 4,
     }
 }

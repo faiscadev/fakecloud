@@ -17,7 +17,7 @@ use fakecloud_servicediscovery::{
     Namespace, Service,
 };
 
-use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner};
+use super::{ProvisionResult, ResourceDefinition, ResourceProvisioner, StackResource};
 
 /// A lowercase alphanumeric fragment of the requested length, seeded from a
 /// random uuid's hex (which is alphanumeric). Mirrors the shape the direct
@@ -332,6 +332,88 @@ impl ResourceProvisioner {
             }
         }
         Ok(())
+    }
+
+    // --- In-place updates ---
+    //
+    // Namespaces and services own contained state (a namespace's service_count,
+    // a service's registered instances) and mint random ids referenced by their
+    // children. Reprovision (delete + create) on a Description/DnsConfig/tag edit
+    // would churn the ns-/srv- id -- orphaning every service under a namespace,
+    // wiping every registered instance under a service -- so mutate in place.
+
+    /// Handles all three CFN namespace types (Http/PublicDns/PrivateDns). AWS
+    /// `UpdateNamespace` mutates the Description in place (and the SOA TTL for
+    /// DNS namespaces); id, arn, service_count, hosted zone and VPC are kept.
+    pub(super) fn update_sd_namespace(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        let mut accounts = self.servicediscovery_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let ns = state
+            .namespaces
+            .get_mut(&id)
+            .ok_or_else(|| format!("Namespace {id} not yet provisioned"))?;
+        ns.description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        // DNS namespaces: refresh the SOA TTL; HTTP namespaces have no `dns`.
+        if let Some(dns) = ns.dns.as_mut() {
+            dns.soa_ttl = sd_soa_ttl(props);
+        }
+        let arn = ns.arn.clone();
+        let hosted_zone_id = ns.dns.as_ref().map(|d| d.hosted_zone_id.clone());
+
+        let mut result = ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("Id", id);
+        if let Some(hz) = hosted_zone_id {
+            result = result.with("HostedZoneId", hz);
+        }
+        Ok(result)
+    }
+
+    /// AWS `UpdateService` mutates Description / DnsConfig / HealthCheckConfig in
+    /// place; the registered instances, instance_count, namespace and id are
+    /// preserved (reprovision would wipe the instances and churn the srv- id).
+    pub(super) fn update_sd_service(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+
+        let mut accounts = self.servicediscovery_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let svc = state
+            .services
+            .get_mut(&id)
+            .ok_or_else(|| format!("Service {id} not yet provisioned"))?;
+        svc.description = props
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        if let Some(dns) = props.get("DnsConfig") {
+            svc.dns_config = Some(parse_dns_config(dns));
+        }
+        if let Some(hc) = props.get("HealthCheckConfig") {
+            svc.health_check_config = Some(parse_health_check(hc));
+        }
+        // instances / instance_count / instances_revision / namespace_id kept.
+        let arn = svc.arn.clone();
+        let name = svc.name.clone();
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("Id", id)
+            .with("Name", name))
     }
 }
 
