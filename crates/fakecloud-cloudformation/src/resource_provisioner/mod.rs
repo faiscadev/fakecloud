@@ -1937,6 +1937,11 @@ impl ResourceProvisioner {
             "AWS::Organizations::Policy" => {
                 Some(self.update_organization_policy(existing, new_def)?)
             }
+            // In-place update: reprovision would mint a new distribution id +
+            // domain + ARN, breaking Ref/GetAtt DomainName and Route53 aliases.
+            "AWS::CloudFront::Distribution" => {
+                Some(self.update_cf_distribution(existing, new_def)?)
+            }
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -4577,6 +4582,59 @@ mod tests {
             "policy still attached to the OU after the in-place update"
         );
         assert!(org.accounts.contains_key(&acct_id), "same account persists");
+    }
+
+    #[test]
+    fn cloudfront_distribution_update_is_in_place() {
+        // bug-audit 2026-07-27 (cycle 5): without an update arm a Distribution
+        // fell through to reprovision on any config edit, minting a new id +
+        // *.cloudfront.net domain + ARN and breaking Ref/GetAtt DomainName and
+        // Route53 aliases. The update must mutate the config in place.
+        let prov = make_provisioner();
+        let cfg = |comment: &str, enabled: bool| {
+            serde_json::json!({"DistributionConfig": {
+                "Comment": comment, "Enabled": enabled,
+                "Origins": [{
+                    "Id": "o1", "DomainName": "ex.com",
+                    "CustomOriginConfig": {
+                        "HTTPPort": 80, "HTTPSPort": 443,
+                        "OriginProtocolPolicy": "http-only"
+                    }
+                }],
+                "DefaultCacheBehavior": {
+                    "TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"
+                }
+            }})
+        };
+        let dist = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::Distribution",
+                "D",
+                cfg("v1", true),
+            ))
+            .expect("distribution provisions");
+        let id = dist.physical_id.clone();
+
+        let up = prov
+            .update_resource(
+                &dist,
+                &make_resource("AWS::CloudFront::Distribution", "D", cfg("v2", false)),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(
+            up.physical_id, id,
+            "distribution id preserved (not reprovisioned)"
+        );
+
+        let accounts = prov.cloudfront_state.read();
+        let state = accounts.get("000000000000").unwrap();
+        let d = state
+            .distributions
+            .get(&id)
+            .expect("distribution still exists");
+        assert_eq!(d.config.comment, "v2", "config mutated in place");
+        assert!(!d.config.enabled);
     }
 
     #[test]
