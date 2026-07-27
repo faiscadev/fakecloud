@@ -2883,6 +2883,166 @@ async fn create_read_replica_unknown_source_errors() {
     assert!(svc.create_db_instance_read_replica(&req).await.is_err());
 }
 
+// ── subnet-group placement on replica / restore paths ──
+
+#[tokio::test]
+async fn read_replica_with_explicit_subnet_group_uses_it_not_the_source() {
+    // Real AWS `CreateDBInstanceReadReplica` accepts its OWN DBSubnetGroupName
+    // and lands the replica there instead of inheriting the source's group.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    create_subnet_group(&svc, "source-subnets");
+    create_subnet_group(&svc, "replica-subnets");
+    seed_instance(&svc, "src");
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .instances
+            .get_mut("src")
+            .unwrap()
+            .db_subnet_group_name = Some("source-subnets".to_string());
+    }
+
+    let req = request(
+        "CreateDBInstanceReadReplica",
+        &[
+            ("DBInstanceIdentifier", "replica1"),
+            ("SourceDBInstanceIdentifier", "src"),
+            ("DBSubnetGroupName", "replica-subnets"),
+        ],
+    );
+    // The synchronous response echoes the replica's OWN group, not the source's.
+    let body = body_of(svc.create_db_instance_read_replica(&req).await.expect("ok"));
+    assert!(
+        body.contains("<DBSubnetGroup><DBSubnetGroupName>replica-subnets"),
+        "replica must report its own subnet group, body was: {body}"
+    );
+    assert!(!body.contains("source-subnets"));
+
+    let accounts = svc.state.read();
+    assert_eq!(
+        accounts
+            .default_ref()
+            .instances
+            .get("replica1")
+            .expect("replica stored")
+            .db_subnet_group_name
+            .as_deref(),
+        Some("replica-subnets"),
+    );
+}
+
+#[tokio::test]
+async fn read_replica_without_subnet_group_inherits_the_source() {
+    // Omitting DBSubnetGroupName keeps the source's group (unchanged behavior).
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    create_subnet_group(&svc, "source-subnets");
+    seed_instance(&svc, "src");
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .instances
+            .get_mut("src")
+            .unwrap()
+            .db_subnet_group_name = Some("source-subnets".to_string());
+    }
+
+    let req = request(
+        "CreateDBInstanceReadReplica",
+        &[
+            ("DBInstanceIdentifier", "replica1"),
+            ("SourceDBInstanceIdentifier", "src"),
+        ],
+    );
+    let body = body_of(svc.create_db_instance_read_replica(&req).await.expect("ok"));
+    assert!(body.contains("<DBSubnetGroup><DBSubnetGroupName>source-subnets"));
+}
+
+#[tokio::test]
+async fn read_replica_unknown_subnet_group_rejected_leaves_no_instance() {
+    // An explicit-but-unknown group is rejected before any provisioning, and
+    // the reservation is rolled back so a retry isn't blocked.
+    let svc = make_service();
+    seed_instance(&svc, "src");
+    let req = request(
+        "CreateDBInstanceReadReplica",
+        &[
+            ("DBInstanceIdentifier", "replica1"),
+            ("SourceDBInstanceIdentifier", "src"),
+            ("DBSubnetGroupName", "ghost"),
+        ],
+    );
+    assert_code(
+        svc.create_db_instance_read_replica(&req).await,
+        "DBSubnetGroupNotFoundFault",
+    );
+    let accounts = svc.state.read();
+    let state = accounts.default_ref();
+    assert!(!state.instances.contains_key("replica1"));
+    assert!(!state.in_progress_instance_ids.contains("replica1"));
+}
+
+#[tokio::test]
+async fn restore_from_snapshot_with_subnet_group_reports_it() {
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    create_subnet_group(&svc, "restore-subnets");
+    seed_snapshot(&svc, "snap", "src");
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored"),
+            ("DBSnapshotIdentifier", "snap"),
+            ("DBSubnetGroupName", "restore-subnets"),
+        ],
+    );
+    let body = body_of(
+        svc.restore_db_instance_from_db_snapshot(&req)
+            .await
+            .expect("restore ok"),
+    );
+    assert!(
+        body.contains("<DBSubnetGroup><DBSubnetGroupName>restore-subnets"),
+        "restored instance must report its subnet group, body was: {body}"
+    );
+    let accounts = svc.state.read();
+    assert_eq!(
+        accounts
+            .default_ref()
+            .instances
+            .get("restored")
+            .expect("restored stored")
+            .db_subnet_group_name
+            .as_deref(),
+        Some("restore-subnets"),
+    );
+}
+
+#[tokio::test]
+async fn restore_from_snapshot_unknown_subnet_group_rejected_leaves_no_instance() {
+    // Validation runs before the runtime is resolved, so no container is
+    // needed to exercise the rejection + rollback.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap", "src");
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored"),
+            ("DBSnapshotIdentifier", "snap"),
+            ("DBSubnetGroupName", "ghost"),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "DBSubnetGroupNotFoundFault",
+    );
+    let accounts = svc.state.read();
+    let state = accounts.default_ref();
+    assert!(!state.instances.contains_key("restored"));
+    assert!(!state.in_progress_instance_ids.contains("restored"));
+}
+
 // ── describe_db_snapshots with filters ──
 
 #[test]

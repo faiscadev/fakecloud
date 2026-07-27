@@ -126,16 +126,11 @@ impl RdsService {
             }
             // Same for the subnet group: AWS rejects an unknown name with
             // DBSubnetGroupNotFoundFault rather than silently ignoring it.
-            if let Some(ref sg_name) = db_subnet_group_name {
-                if !state.subnet_groups.contains_key(sg_name) {
-                    state.cancel_instance_creation(&db_instance_identifier);
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
-                        "DBSubnetGroupNotFoundFault",
-                        format!("DBSubnetGroup {} not found.", sg_name),
-                    ));
-                }
-            }
+            validate_subnet_group_or_cancel(
+                state,
+                &db_instance_identifier,
+                db_subnet_group_name.as_deref(),
+            )?;
         }
 
         let logical_db_name = db_name

@@ -17,6 +17,10 @@ impl RdsService {
             optional_query_param(request, "SourceDBInstanceIdentifier")
                 .or_else(|| optional_query_param(request, "SourceDBClusterIdentifier"))
                 .ok_or_else(|| db_instance_not_found("(none)"))?;
+        // A read replica accepts its OWN DBSubnetGroupName and lands in that
+        // group; only when it's omitted does it inherit the source's group
+        // (handled by the builder below).
+        let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");
 
         let (source_instance, db_name) = {
             let mut accounts = self.state.write();
@@ -38,6 +42,15 @@ impl RdsService {
                     return Err(db_instance_not_found(&source_db_instance_identifier));
                 }
             };
+
+            // Reject an explicit-but-unknown subnet group before any container
+            // is provisioned, rolling back the reservation (mirrors
+            // CreateDBInstance).
+            validate_subnet_group_or_cancel(
+                state,
+                &db_instance_identifier,
+                db_subnet_group_name.as_deref(),
+            )?;
 
             let default_db = default_db_name(&source_instance.engine);
             let db_name = source_instance
@@ -91,6 +104,12 @@ impl RdsService {
         replica.db_instance_status = "creating".to_string();
         replica.endpoint_address = String::new();
         replica.port = 0;
+        // An explicit DBSubnetGroupName places the replica in that group
+        // instead of inheriting the source's (validated above); omitting it
+        // keeps the source's group the builder already copied.
+        if let Some(ref name) = db_subnet_group_name {
+            replica.db_subnet_group_name = Some(name.clone());
+        }
 
         // Register the replica against its source synchronously so a concurrent
         // DescribeDBInstances of the source sees the linkage immediately.

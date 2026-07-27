@@ -1063,6 +1063,38 @@ pub(crate) fn emit_event_static_with_state(
     );
 }
 
+/// The declared `DBSubnetGroupNotFoundFault` wire shape AWS RDS returns
+/// when a request names a subnet group that doesn't exist. Centralized so
+/// every instance-provisioning op (CreateDBInstance, read replica, and the
+/// three restore paths) emits a byte-identical error.
+pub(crate) fn subnet_group_not_found(name: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "DBSubnetGroupNotFoundFault",
+        format!("DBSubnetGroup {name} not found."),
+    )
+}
+
+/// Reject an explicit `DBSubnetGroupName` that names no existing subnet
+/// group, rolling back the in-progress instance-creation reservation so no
+/// half-made instance is left behind. `None` (the caller omitted the
+/// parameter) is always accepted. Mirrors the inline check CreateDBInstance
+/// runs, and is shared by the read-replica and restore paths, which
+/// otherwise dropped or inherited the group instead of honoring it.
+pub(crate) fn validate_subnet_group_or_cancel(
+    state: &mut RdsState,
+    db_instance_identifier: &str,
+    db_subnet_group_name: Option<&str>,
+) -> Result<(), AwsServiceError> {
+    if let Some(name) = db_subnet_group_name {
+        if !state.subnet_groups.contains_key(name) {
+            state.cancel_instance_creation(db_instance_identifier);
+            return Err(subnet_group_not_found(name));
+        }
+    }
+    Ok(())
+}
+
 /// Resolve the subnet group an instance sits in, for callers that hold
 /// the state lock and are about to render that instance.
 pub(crate) fn instance_subnet_group<'a>(
