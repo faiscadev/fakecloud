@@ -45,7 +45,11 @@ impl RdsService {
         // unrelated subnets.
         let mut subnet_availability_zones: Vec<String> = Vec::with_capacity(subnet_ids.len());
         let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        let region = &state.region;
+        // Use the request's SigV4 region (as the returned ARN does), not the
+        // server's frozen startup region: a client in eu-west-1 must not get
+        // subnet AZ names like `us-east-1a` alongside a `...:rds:eu-west-1:...`
+        // ARN.
+        let region = request.region.as_str();
         for sid in &subnet_ids {
             let next = seen.len();
             let idx = *seen.entry(sid.as_str()).or_insert(next);
@@ -204,7 +208,9 @@ impl RdsService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
 
-        let region = state.region.clone();
+        // Request-scope region for AZ names (matches the group's ARN), not the
+        // server's frozen startup region.
+        let region = request.region.clone();
 
         let subnet_group = state
             .subnet_groups

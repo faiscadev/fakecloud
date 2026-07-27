@@ -89,6 +89,8 @@ pub fn cluster_name_from_arn(arn: &str) -> Option<&str> {
 /// by an exact `version` (e.g. `2.4.1.1`) and reads its `status` -- resolves,
 /// and so a cluster can be created at, and upgraded between, any of these.
 pub const KAFKA_VERSIONS: &[&str] = &[
+    "3.9.x.kraft",
+    "3.9.x",
     "3.8.x.kraft",
     "3.8.x",
     "3.7.x.kraft",
