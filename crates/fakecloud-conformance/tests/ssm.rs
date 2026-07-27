@@ -1868,9 +1868,9 @@ async fn ssm_ops_metadata_lifecycle() {
 // -- Automation --
 
 #[test_action("ssm", "StartAutomationExecution", checksum = "c2a57055")]
-#[test_action("ssm", "GetAutomationExecution", checksum = "0a0247e0")]
-#[test_action("ssm", "DescribeAutomationExecutions", checksum = "5b24f457")]
-#[test_action("ssm", "DescribeAutomationStepExecutions", checksum = "ccb2c087")]
+#[test_action("ssm", "GetAutomationExecution", checksum = "c826ee26")]
+#[test_action("ssm", "DescribeAutomationExecutions", checksum = "51108e09")]
+#[test_action("ssm", "DescribeAutomationStepExecutions", checksum = "ae6a9ba6")]
 #[test_action("ssm", "SendAutomationSignal", checksum = "d85c40bb")]
 #[test_action("ssm", "StopAutomationExecution", checksum = "4200ac33")]
 #[tokio::test]

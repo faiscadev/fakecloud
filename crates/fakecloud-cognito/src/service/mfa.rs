@@ -481,4 +481,93 @@ impl CognitoService {
 
         Ok(AwsResponse::ok_json(resp))
     }
+
+    /// Admin (developer-credential) counterpart of `GetUserAuthFactors`.
+    /// Resolves the user by `UserPoolId` + `Username` (with alias support)
+    /// instead of an access token and reports the same configured auth
+    /// factors and MFA settings.
+    pub(super) fn admin_get_user_auth_factors(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+
+        let pool_id = body["UserPoolId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "UserPoolId is required",
+                )
+            })?;
+
+        let username = body["Username"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "Username is required",
+                )
+            })?;
+
+        let accounts = self.state.read();
+        let empty = CognitoState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        ensure_user_pool_exists(state, pool_id)?;
+
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+
+        let user = state
+            .users
+            .get(pool_id)
+            .and_then(|users| users.get(&resolved))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        // Configured auth factors, mirroring GetUserAuthFactors.
+        let mut factors = vec!["PASSWORD"];
+        if user.totp_verified {
+            factors.push("SMS_OTP");
+        }
+
+        let mut mfa_settings = Vec::new();
+        let mut preferred = None;
+        if let Some(ref prefs) = user.mfa_preferences {
+            if prefs.sms_enabled {
+                mfa_settings.push("SMS_MFA");
+                if prefs.sms_preferred {
+                    preferred = Some("SMS_MFA");
+                }
+            }
+            if prefs.software_token_enabled {
+                mfa_settings.push("SOFTWARE_TOKEN_MFA");
+                if prefs.software_token_preferred {
+                    preferred = Some("SOFTWARE_TOKEN_MFA");
+                }
+            }
+        }
+
+        let mut resp = json!({
+            "Username": user.username,
+            "ConfiguredUserAuthFactors": factors,
+        });
+        if !mfa_settings.is_empty() {
+            resp["UserMFASettingList"] = json!(mfa_settings);
+        }
+        if let Some(pref) = preferred {
+            resp["PreferredMfaSetting"] = json!(pref);
+        }
+
+        Ok(AwsResponse::ok_json(resp))
+    }
 }

@@ -848,18 +848,30 @@
         "ML_P3_2XLARGE": {
           "target": "smithy.api#Unit",
           "traits": {
+            "smithy.api#deprecated": {
+              "message": "ml.p3.* is deprecated in SageMaker and no longer deployable; requests are rejected.",
+              "since": "2026-07-01"
+            },
             "smithy.api#enumValue": "ml.p3.2xlarge"
           }
         },
         "ML_P3_8XLARGE": {
           "target": "smithy.api#Unit",
           "traits": {
+            "smithy.api#deprecated": {
+              "message": "ml.p3.* is deprecated in SageMaker and no longer deployable; requests are rejected.",
+              "since": "2026-07-01"
+            },
             "smithy.api#enumValue": "ml.p3.8xlarge"
           }
         },
         "ML_P3_16XLARGE": {
           "target": "smithy.api#Unit",
           "traits": {
+            "smithy.api#deprecated": {
+              "message": "ml.p3.* is deprecated in SageMaker and no longer deployable; requests are rejected.",
+              "since": "2026-07-01"
+            },
             "smithy.api#enumValue": "ml.p3.16xlarge"
           }
         },
@@ -9774,7 +9786,7 @@
         "PatchingStrategy": {
           "target": "com.amazonaws.sagemaker#ClusterPatchingStrategy",
           "traits": {
-            "smithy.api#documentation": "<p>The strategy for applying patches to instances in the group.</p>",
+            "smithy.api#documentation": "<p>The strategy for applying patches to instances in the group.</p> <ul> <li> <p> <code>WhenIdle</code>: Cordons all instances and patches each instance as it becomes idle (no running jobs). Each instance is uncordoned immediately after patching and becomes available for new jobs. If instances do not become idle, they remain on the previous AMI version. You can then use UpdateClusterSoftware with the desired ImageReleaseVersion to manually update the remaining instances.</p> </li> <li> <p> <code>WhenAllIdle</code>: Cordons all instances and waits for all to become idle before patching. All instances are uncordoned after patching completes. If not all instances become idle, no patching occurs and all instances remain on the previous AMI version.</p> </li> </ul>",
             "smithy.api#required": {}
           }
         },
@@ -9801,7 +9813,7 @@
         "PatchingStrategy": {
           "target": "com.amazonaws.sagemaker#ClusterPatchingStrategy",
           "traits": {
-            "smithy.api#documentation": "<p>The strategy used for applying patches to instances in the group.</p>"
+            "smithy.api#documentation": "<p>The strategy used for applying patches to instances in the group.</p> <ul> <li> <p> <code>WhenIdle</code>: Cordons all instances and patches each instance as it becomes idle (no running jobs). Each instance is uncordoned immediately after patching and becomes available for new jobs. If instances do not become idle, they remain on the previous AMI version. You can then use UpdateClusterSoftware with the desired ImageReleaseVersion to manually update the remaining instances.</p> </li> <li> <p> <code>WhenAllIdle</code>: Cordons all instances and waits for all to become idle before patching. All instances are uncordoned after patching completes. If not all instances become idle, no patching occurs and all instances remain on the previous AMI version.</p> </li> </ul>"
           }
         },
         "CurrentPatchSchedule": {
@@ -11874,6 +11886,282 @@
           "target": "smithy.api#Unit",
           "traits": {
             "smithy.api#enumValue": "ml.c8g.48xlarge"
+          }
+        },
+        "ML_C6A_LARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.large"
+          }
+        },
+        "ML_C6A_XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.xlarge"
+          }
+        },
+        "ML_C6A_2XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.2xlarge"
+          }
+        },
+        "ML_C6A_4XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.4xlarge"
+          }
+        },
+        "ML_C6A_8XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.8xlarge"
+          }
+        },
+        "ML_C6A_12XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.12xlarge"
+          }
+        },
+        "ML_C6A_16XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.16xlarge"
+          }
+        },
+        "ML_C6A_24XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.24xlarge"
+          }
+        },
+        "ML_C6A_32XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.32xlarge"
+          }
+        },
+        "ML_C6A_48XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.c6a.48xlarge"
+          }
+        },
+        "ML_M6A_LARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.large"
+          }
+        },
+        "ML_M6A_XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.xlarge"
+          }
+        },
+        "ML_M6A_2XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.2xlarge"
+          }
+        },
+        "ML_M6A_4XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.4xlarge"
+          }
+        },
+        "ML_M6A_8XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.8xlarge"
+          }
+        },
+        "ML_M6A_12XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.12xlarge"
+          }
+        },
+        "ML_M6A_16XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.16xlarge"
+          }
+        },
+        "ML_M6A_24XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.24xlarge"
+          }
+        },
+        "ML_M6A_32XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.32xlarge"
+          }
+        },
+        "ML_M6A_48XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6a.48xlarge"
+          }
+        },
+        "ML_M6G_MEDIUM": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.medium"
+          }
+        },
+        "ML_M6G_LARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.large"
+          }
+        },
+        "ML_M6G_XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.xlarge"
+          }
+        },
+        "ML_M6G_2XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.2xlarge"
+          }
+        },
+        "ML_M6G_4XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.4xlarge"
+          }
+        },
+        "ML_M6G_8XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.8xlarge"
+          }
+        },
+        "ML_M6G_12XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.12xlarge"
+          }
+        },
+        "ML_M6G_16XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m6g.16xlarge"
+          }
+        },
+        "ML_M7G_MEDIUM": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.medium"
+          }
+        },
+        "ML_M7G_LARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.large"
+          }
+        },
+        "ML_M7G_XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.xlarge"
+          }
+        },
+        "ML_M7G_2XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.2xlarge"
+          }
+        },
+        "ML_M7G_4XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.4xlarge"
+          }
+        },
+        "ML_M7G_8XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.8xlarge"
+          }
+        },
+        "ML_M7G_12XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.12xlarge"
+          }
+        },
+        "ML_M7G_16XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m7g.16xlarge"
+          }
+        },
+        "ML_M8G_MEDIUM": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.medium"
+          }
+        },
+        "ML_M8G_LARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.large"
+          }
+        },
+        "ML_M8G_XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.xlarge"
+          }
+        },
+        "ML_M8G_2XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.2xlarge"
+          }
+        },
+        "ML_M8G_4XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.4xlarge"
+          }
+        },
+        "ML_M8G_8XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.8xlarge"
+          }
+        },
+        "ML_M8G_12XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.12xlarge"
+          }
+        },
+        "ML_M8G_16XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.16xlarge"
+          }
+        },
+        "ML_M8G_24XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.24xlarge"
+          }
+        },
+        "ML_M8G_48XLARGE": {
+          "target": "smithy.api#Unit",
+          "traits": {
+            "smithy.api#enumValue": "ml.m8g.48xlarge"
           }
         }
       }

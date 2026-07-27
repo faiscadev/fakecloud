@@ -15,7 +15,7 @@ use helpers::TestServer;
 
 // -- Account --
 
-#[test_action("ses", "GetAccount", checksum = "3104b701")]
+#[test_action("ses", "GetAccount", checksum = "99f85ec3")]
 #[tokio::test]
 async fn ses_get_account() {
     let server = TestServer::start().await;
@@ -30,8 +30,8 @@ async fn ses_get_account() {
 
 // -- Email Identity CRUD --
 
-#[test_action("ses", "CreateEmailIdentity", checksum = "1ff0be27")]
-#[test_action("ses", "GetEmailIdentity", checksum = "a298f1a4")]
+#[test_action("ses", "CreateEmailIdentity", checksum = "324e567e")]
+#[test_action("ses", "GetEmailIdentity", checksum = "340d7732")]
 #[test_action("ses", "ListEmailIdentities", checksum = "3301504d")]
 #[test_action("ses", "DeleteEmailIdentity", checksum = "7b850c25")]
 #[tokio::test]
@@ -842,7 +842,7 @@ async fn ses_identity_policy_lifecycle() {
 // -- DKIM & Identity Attributes --
 
 #[test_action("ses", "PutEmailIdentityDkimAttributes", checksum = "e21fbf7e")]
-#[test_action("ses", "PutEmailIdentityDkimSigningAttributes", checksum = "9127433a")]
+#[test_action("ses", "PutEmailIdentityDkimSigningAttributes", checksum = "35c13a1e")]
 #[test_action("ses", "PutEmailIdentityFeedbackAttributes", checksum = "8d28daf6")]
 #[test_action("ses", "PutEmailIdentityMailFromAttributes", checksum = "c31d8e2b")]
 #[test_action(
@@ -1491,6 +1491,52 @@ async fn ses_put_account_vdm_attributes() {
     let acct = client.get_account().send().await.unwrap();
     let vdm = acct.vdm_attributes().unwrap();
     assert_eq!(vdm.vdm_enabled().as_str(), "ENABLED");
+}
+
+#[test_action("ses", "PutAccountPricingAttributes", checksum = "8ec62e6d")]
+#[tokio::test]
+async fn ses_put_account_pricing_attributes() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+
+    // PutAccountPricingAttributes is newer than aws-sdk-sesv2 1.x, so drive it
+    // (and read PricingAttributes back) over raw HTTP against the REST-JSON
+    // endpoint.
+    let resp = http
+        .put(format!(
+            "{}/v2/email/account/pricing-attributes",
+            server.endpoint()
+        ))
+        .header("content-type", "application/json")
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/ses/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .body(serde_json::json!({"Plan": "PRO"}).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success());
+
+    // GetAccount should report the plan under PricingAttributes.
+    let get = http
+        .get(format!("{}/v2/email/account", server.endpoint()))
+        .header(
+            "authorization",
+            "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260411/us-east-1/ses/aws4_request, SignedHeaders=host, Signature=fake",
+        )
+        .send()
+        .await
+        .unwrap();
+    let body: serde_json::Value = get.json().await.unwrap();
+    assert_eq!(
+        body["PricingAttributes"]["CurrentPlan"].as_str().unwrap(),
+        "PRO"
+    );
+    assert_eq!(
+        body["PricingAttributes"]["NextPlan"].as_str().unwrap(),
+        "PRO"
+    );
 }
 
 // -- Import Jobs --

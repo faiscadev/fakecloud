@@ -18,6 +18,9 @@ pub(crate) fn resolve_account_action(method: &Method, segs: &[String]) -> Resolv
             Some(("PutAccountSuppressionAttributes", None, None))
         }
         (&Method::PUT, 4) if segs[3] == "vdm" => Some(("PutAccountVdmAttributes", None, None)),
+        (&Method::PUT, 4) if segs[3] == "pricing-attributes" => {
+            Some(("PutAccountPricingAttributes", None, None))
+        }
         (&Method::PUT, 5) if segs[3] == "dedicated-ips" && segs[4] == "warmup" => {
             Some(("PutAccountDedicatedIpWarmupAttributes", None, None))
         }

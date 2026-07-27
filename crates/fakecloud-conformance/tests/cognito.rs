@@ -7,7 +7,7 @@ use helpers::TestServer;
 // User Pool lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "CreateUserPool", checksum = "fe28019c")]
+#[test_action("cognito-idp", "CreateUserPool", checksum = "685b8c93")]
 #[tokio::test]
 async fn cognito_create_user_pool() {
     let server = TestServer::start().await;
@@ -25,7 +25,7 @@ async fn cognito_create_user_pool() {
     assert_eq!(pool.name().unwrap(), "conformance-pool");
 }
 
-#[test_action("cognito-idp", "DescribeUserPool", checksum = "8226bbf2")]
+#[test_action("cognito-idp", "DescribeUserPool", checksum = "55685da5")]
 #[tokio::test]
 async fn cognito_describe_user_pool() {
     let server = TestServer::start().await;
@@ -48,7 +48,7 @@ async fn cognito_describe_user_pool() {
     assert_eq!(resp.user_pool().unwrap().name().unwrap(), "desc-pool");
 }
 
-#[test_action("cognito-idp", "UpdateUserPool", checksum = "848ec9e7")]
+#[test_action("cognito-idp", "UpdateUserPool", checksum = "9582199d")]
 #[tokio::test]
 async fn cognito_update_user_pool() {
     let server = TestServer::start().await;
@@ -3473,7 +3473,7 @@ async fn cognito_start_stop_import_job() {
 // GetUserAuthFactors
 // ---------------------------------------------------------------------------
 
-#[test_action("cognito-idp", "GetUserAuthFactors", checksum = "bc93157c")]
+#[test_action("cognito-idp", "GetUserAuthFactors", checksum = "59be8b7d")]
 #[tokio::test]
 async fn cognito_get_user_auth_factors() {
     let server = TestServer::start().await;
@@ -3489,6 +3489,56 @@ async fn cognito_get_user_auth_factors() {
         .unwrap();
     assert_eq!(resp.username(), "selfuser");
     assert!(!resp.configured_user_auth_factors().is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// AdminGetUserAuthFactors (admin counterpart; new op — driven over raw HTTP
+// because the typed SDK release lags the model).
+// ---------------------------------------------------------------------------
+
+#[test_action("cognito-idp", "AdminGetUserAuthFactors", checksum = "8d94ab5e")]
+#[tokio::test]
+async fn cognito_admin_get_user_auth_factors() {
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let endpoint = server.endpoint();
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("admin-authfactors-pool")
+        .send()
+        .await
+        .unwrap();
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("factoruser")
+        .send()
+        .await
+        .unwrap();
+
+    let resp = reqwest::Client::new()
+        .post(endpoint)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSCognitoIdentityProviderService.AdminGetUserAuthFactors",
+        )
+        .json(&serde_json::json!({
+            "UserPoolId": pool_id,
+            "Username": "factoruser"
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), 200);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Username"].as_str().unwrap(), "factoruser");
+    // Every user has at least the PASSWORD auth factor.
+    let factors = body["ConfiguredUserAuthFactors"].as_array().unwrap();
+    assert!(factors.iter().any(|f| f == "PASSWORD"));
 }
 
 // ---------------------------------------------------------------------------
