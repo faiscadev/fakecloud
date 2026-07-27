@@ -62,13 +62,46 @@ pub(crate) fn create_volume(
 ) -> Result<AwsResponse, AwsServiceError> {
     validate_enum(&req.query_params, "VolumeType", VOLUME_TYPES)?;
     let id = gen_id("vol");
+    let size: i64 = req
+        .query_params
+        .get("Size")
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(8);
+    let volume_type = req
+        .query_params
+        .get("VolumeType")
+        .cloned()
+        .unwrap_or_else(|| "gp3".to_string());
+    let req_iops = req
+        .query_params
+        .get("Iops")
+        .and_then(|s| s.parse::<i64>().ok());
+    let req_throughput = req
+        .query_params
+        .get("Throughput")
+        .and_then(|s| s.parse::<i64>().ok());
+    // Per-type IOPS/throughput semantics, matching AWS: gp3 defaults 3000/125
+    // and both are settable; io1/io2 take the requested Iops; gp2 derives IOPS
+    // from size (3 IOPS/GiB, clamped 100-16000); st1/sc1/standard have neither.
+    let iops = match volume_type.as_str() {
+        "gp3" => Some(req_iops.unwrap_or(3000)),
+        "io1" | "io2" => req_iops.or(Some(100)),
+        "gp2" => Some((size * 3).clamp(100, 16000)),
+        _ => None,
+    };
+    let throughput = if volume_type == "gp3" {
+        Some(req_throughput.unwrap_or(125))
+    } else {
+        None
+    };
+    let multi_attach_enabled = req
+        .query_params
+        .get("MultiAttachEnabled")
+        .map(|v| v == "true")
+        .unwrap_or(false);
     let v = Volume {
         volume_id: id.clone(),
-        size: req
-            .query_params
-            .get("Size")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8),
+        size,
         snapshot_id: req.query_params.get("SnapshotId").cloned(),
         availability_zone: req
             .query_params
@@ -85,20 +118,16 @@ pub(crate) fn create_volume(
                 )
             }),
         state: "available".to_string(),
-        volume_type: req
-            .query_params
-            .get("VolumeType")
-            .cloned()
-            .unwrap_or_else(|| "gp3".to_string()),
-        iops: Some(3000),
-        throughput: Some(125),
+        volume_type,
+        iops,
+        throughput,
         encrypted: req
             .query_params
             .get("Encrypted")
             .map(|v| v == "true")
             .unwrap_or(false),
         kms_key_id: req.query_params.get("KmsKeyId").cloned(),
-        multi_attach_enabled: false,
+        multi_attach_enabled,
         auto_enable_io: false,
         attachments: Vec::new(),
         in_recycle_bin: false,
@@ -707,6 +736,53 @@ mod tests {
 
     fn body_of(resp: AwsResponse) -> String {
         String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn create_volume_honors_iops_throughput_multiattach() {
+        // bug-audit 2026-07-27 (cycle 6): create hardcoded iops=3000/throughput=125/
+        // multi_attach=false, ignoring the request -> aws_ebs_volume perpetual drift.
+        let svc = Ec2Service::new();
+        let body = body_of(
+            create_volume(
+                &svc,
+                &req(
+                    "CreateVolume",
+                    &[
+                        ("AvailabilityZone", "us-east-1a"),
+                        ("Size", "100"),
+                        ("VolumeType", "gp3"),
+                        ("Iops", "6000"),
+                        ("Throughput", "250"),
+                        ("MultiAttachEnabled", "true"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(body.contains("<iops>6000</iops>"), "{body}");
+        assert!(body.contains("<throughput>250</throughput>"), "{body}");
+        assert!(
+            body.contains("<multiAttachEnabled>true</multiAttachEnabled>"),
+            "{body}"
+        );
+
+        // A standard (magnetic) volume has neither iops nor throughput.
+        let body2 = body_of(
+            create_volume(
+                &svc,
+                &req(
+                    "CreateVolume",
+                    &[
+                        ("AvailabilityZone", "us-east-1a"),
+                        ("Size", "500"),
+                        ("VolumeType", "standard"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(!body2.contains("<throughput>"), "{body2}");
     }
 
     #[test]
