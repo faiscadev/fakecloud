@@ -1925,6 +1925,18 @@ impl ResourceProvisioner {
                 Some(self.update_wafv2_regex_pattern_set(existing, new_def)?)
             }
             "AWS::WAFv2::RuleGroup" => Some(self.update_wafv2_rule_group(existing, new_def)?),
+            // In-place updates: reprovision churns the random org id (breaking
+            // every Ref/attachment) and, for Account, mints a whole new member
+            // account while closing the old one.
+            "AWS::Organizations::OrganizationalUnit" => {
+                Some(self.update_organization_unit(existing, new_def)?)
+            }
+            "AWS::Organizations::Account" => {
+                Some(self.update_organization_account(existing, new_def)?)
+            }
+            "AWS::Organizations::Policy" => {
+                Some(self.update_organization_policy(existing, new_def)?)
+            }
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -4458,6 +4470,113 @@ mod tests {
             .unwrap();
         assert_eq!(ip.arn, ip_arn);
         assert_eq!(ip.addresses.len(), 2, "IPSet addresses updated in place");
+    }
+
+    #[test]
+    fn organizations_updates_are_in_place_not_reprovisioned() {
+        // bug-audit 2026-07-27 (cycle 5): without update arms these fell through
+        // to reprovision, churning the OU/policy id (dangling attachments) and
+        // minting a brand-new member account. Updates must be in place.
+        let prov = make_provisioner();
+        prov.create_resource(&make_resource(
+            "AWS::Organizations::Organization",
+            "Org",
+            serde_json::json!({"FeatureSet": "ALL"}),
+        ))
+        .expect("org provisions");
+        let root_id = {
+            let g = prov.organizations_state.read();
+            g.as_ref().unwrap().root_id.clone()
+        };
+
+        let ou = prov
+            .create_resource(&make_resource(
+                "AWS::Organizations::OrganizationalUnit",
+                "OU",
+                serde_json::json!({"Name": "team", "ParentId": root_id}),
+            ))
+            .expect("ou provisions");
+        let ou_id = ou.physical_id.clone();
+
+        let policy = prov
+            .create_resource(&make_resource(
+                "AWS::Organizations::Policy",
+                "Pol",
+                serde_json::json!({"Name": "p1", "Content": "{}", "TargetIds": [ou_id]}),
+            ))
+            .expect("policy provisions");
+        let pol_id = policy.physical_id.clone();
+
+        let acct = prov
+            .create_resource(&make_resource(
+                "AWS::Organizations::Account",
+                "Acc",
+                serde_json::json!({"AccountName": "dev", "Email": "dev@example.com"}),
+            ))
+            .expect("account provisions");
+        let acct_id = acct.physical_id.clone();
+
+        // OU rename: id preserved.
+        let ou_up = prov
+            .update_resource(
+                &ou,
+                &make_resource(
+                    "AWS::Organizations::OrganizationalUnit",
+                    "OU",
+                    serde_json::json!({"Name": "team-renamed", "ParentId": root_id}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(ou_up.physical_id, ou_id, "OU id preserved");
+
+        // Policy content change: id preserved, still attached to the OU.
+        let pol_up = prov
+            .update_resource(
+                &policy,
+                &make_resource(
+                    "AWS::Organizations::Policy",
+                    "Pol",
+                    serde_json::json!({"Name": "p1", "Content": "{\"v\":2}", "TargetIds": [ou_id]}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(pol_up.physical_id, pol_id, "policy id preserved");
+
+        // Account tag edit: must NOT mint a new member account.
+        let acct_up = prov
+            .update_resource(
+                &acct,
+                &make_resource(
+                    "AWS::Organizations::Account",
+                    "Acc",
+                    serde_json::json!({
+                        "AccountName": "dev",
+                        "Email": "dev@example.com",
+                        "Tags": [{"Key": "env", "Value": "dev"}]
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(
+            acct_up.physical_id, acct_id,
+            "account id preserved (not a new member account)"
+        );
+
+        let g = prov.organizations_state.read();
+        let org = g.as_ref().unwrap();
+        assert_eq!(org.ous.get(&ou_id).unwrap().name, "team-renamed");
+        assert_eq!(org.policies.get(&pol_id).unwrap().content, "{\"v\":2}");
+        assert!(
+            org.attachments
+                .get(&ou_id)
+                .map(|s| s.contains(&pol_id))
+                .unwrap_or(false),
+            "policy still attached to the OU after the in-place update"
+        );
+        assert!(org.accounts.contains_key(&acct_id), "same account persists");
     }
 
     #[test]
