@@ -205,6 +205,74 @@ impl ResourceProvisioner {
             .with("VersionId", version))
     }
 
+    /// In-place `UpdateStack` for an `AWS::Backup::BackupPlan`. Mutates the
+    /// stored `PlanRecord` in place instead of the reprovision fallback's
+    /// delete+recreate. `delete_backup_plan` removes the plan and re-create
+    /// mints a fresh `BackupPlanId`, dropping the plan's `versions` history and
+    /// every `selection` attached to it (`AWS::Backup::BackupSelection` /
+    /// direct `CreateBackupSelection`). Mirroring the direct `UpdateBackupPlan`
+    /// handler, this applies the new `BackupPlan` body, appends a new version,
+    /// and preserves the plan id, `arn`, `creation_date`, `versions` history and
+    /// `selections`.
+    pub(super) fn update_backup_plan(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let plan_src = props
+            .get("BackupPlan")
+            .filter(|v| v.is_object())
+            .ok_or("AWS::Backup::BackupPlan requires BackupPlan")?;
+        let plan_name = plan_src
+            .get("BackupPlanName")
+            .and_then(Value::as_str)
+            .unwrap_or(&resource.logical_id)
+            .to_string();
+        let plan = normalize_backup_plan(plan_src);
+        let advanced = plan_src
+            .get("AdvancedBackupSettings")
+            .cloned()
+            .unwrap_or(Value::Array(Vec::new()));
+
+        let now = chrono::Utc::now();
+        let version = uuid::Uuid::new_v4().simple().to_string();
+
+        let mut guard = self.backup_state.write();
+        let st = guard.get_or_create(&self.account_id);
+        let arn = {
+            let record = st
+                .plans
+                .get_mut(&id)
+                .ok_or_else(|| format!("Backup plan {id} not yet provisioned"))?;
+            // Mutate the plan body + advanced settings, append a version.
+            // `id`, `arn`, `creation_date`, `selections` are preserved.
+            record.plan = plan;
+            record.advanced_backup_settings = advanced;
+            record.version_id = version.clone();
+            record.versions.push(PlanVersion {
+                version_id: version.clone(),
+                creation_date: now,
+                deletion_date: None,
+                plan_name,
+            });
+            record.arn.clone()
+        };
+        // Tags are replaced wholesale on update, matching CFN tag semantics.
+        let tags = tag_map(props.get("BackupPlanTags"));
+        if tags.is_empty() {
+            st.tags.remove(&arn);
+        } else {
+            st.tags.insert(arn.clone(), tags);
+        }
+
+        Ok(ProvisionResult::new(id.clone())
+            .with("BackupPlanArn", arn)
+            .with("BackupPlanId", id)
+            .with("VersionId", version))
+    }
+
     pub(super) fn delete_backup_plan(&self, physical_id: &str) -> Result<(), String> {
         let mut guard = self.backup_state.write();
         let st = guard.get_or_create(&self.account_id);

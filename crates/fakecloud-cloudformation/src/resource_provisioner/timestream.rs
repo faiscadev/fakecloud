@@ -67,6 +67,50 @@ impl ResourceProvisioner {
             .with("DatabaseName", name))
     }
 
+    /// In-place `UpdateStack` for an `AWS::Timestream::Database`. Mutates the
+    /// stored `Database` record instead of the reprovision fallback's
+    /// delete+recreate. The database's tables and their ingested records live in
+    /// separate maps keyed by `<db>|<table>` and survive a database
+    /// delete+recreate, but the recreated `Database` resets `table_count` to 0 —
+    /// so `DescribeDatabase` would report 0 tables while the tables still exist.
+    /// This applies the mutable `KmsKeyId` (and tags) in place and preserves the
+    /// database identity (`arn`, `creation_time`) and its `table_count`. Real
+    /// AWS `UpdateDatabase` only mutates the KMS key.
+    pub(super) fn update_timestream_database(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let name = existing.physical_id.clone();
+
+        let mut guard = self.timestream_state.write();
+        let data = guard.get_or_create(&self.account_id);
+        let arn = {
+            let db = data
+                .databases
+                .get_mut(&name)
+                .ok_or_else(|| format!("Database {name} not yet provisioned"))?;
+            if let Some(kms) = props.get("KmsKeyId").and_then(Value::as_str) {
+                db.kms_key_id = Some(kms.to_string());
+            }
+            db.last_updated_time = now_epoch();
+            // `table_count`, `arn`, `creation_time` are preserved.
+            db.arn.clone()
+        };
+        // Tags are replaced wholesale on update, matching CFN tag semantics.
+        let tags = string_tag_map(props.get("Tags"));
+        if tags.is_empty() {
+            data.tags.remove(&arn);
+        } else {
+            data.tags.insert(arn.clone(), tags);
+        }
+
+        Ok(ProvisionResult::new(name.clone())
+            .with("Arn", arn)
+            .with("DatabaseName", name))
+    }
+
     pub(super) fn delete_timestream_database(&self, physical_id: &str) -> Result<(), String> {
         let mut guard = self.timestream_state.write();
         let data = guard.get_or_create(&self.account_id);

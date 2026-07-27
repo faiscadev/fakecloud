@@ -584,6 +584,96 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(identity_pool_id.clone()).with("Name", identity_pool_id))
     }
 
+    /// In-place `UpdateStack` for an `AWS::Cognito::IdentityPool`. Mutates the
+    /// stored `IdentityPool` record instead of the reprovision fallback's
+    /// delete+recreate. `delete_cognito_identity_pool` mints a brand-new pool id
+    /// (`<region>:<uuid>`) on recreate AND cascade-drops every
+    /// `identity_pool_role_attachment` tied to the pool, so a benign name/tag
+    /// change would churn the physical id and silently wipe the separately-
+    /// managed role attachment. This applies the mutable properties in place and
+    /// preserves the pool id, `creation_date`, and the untouched role
+    /// attachments.
+    pub(super) fn update_cognito_identity_pool(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let pool_id = &existing.physical_id;
+
+        let mut accounts = self.cognito_state.write();
+        let state = accounts.get_or_create(&self.account_id);
+        let pool = state
+            .identity_pools
+            .get_mut(pool_id)
+            .ok_or_else(|| format!("Identity pool {pool_id} not yet provisioned"))?;
+
+        if let Some(name) = props.get("IdentityPoolName").and_then(|v| v.as_str()) {
+            pool.identity_pool_name = name.to_string();
+        }
+        if let Some(b) = props
+            .get("AllowUnauthenticatedIdentities")
+            .and_then(|v| v.as_bool())
+        {
+            pool.allow_unauthenticated_identities = b;
+        }
+        if let Some(b) = props.get("AllowClassicFlow").and_then(|v| v.as_bool()) {
+            pool.allow_classic_flow = b;
+        }
+        if let Some(dp) = props.get("DeveloperProviderName").and_then(|v| v.as_str()) {
+            pool.developer_provider_name = Some(dp.to_string());
+        }
+        if let Some(providers) = props
+            .get("CognitoIdentityProviders")
+            .and_then(|v| v.as_array())
+        {
+            pool.cognito_identity_providers = providers
+                .iter()
+                .filter_map(|p| {
+                    let obj = p.as_object()?;
+                    Some(CognitoIdentityProvider {
+                        provider_name: obj
+                            .get("ProviderName")
+                            .and_then(|v| v.as_str())?
+                            .to_string(),
+                        client_id: obj.get("ClientId").and_then(|v| v.as_str())?.to_string(),
+                        server_side_token_check: obj
+                            .get("ServerSideTokenCheck")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false),
+                    })
+                })
+                .collect();
+        }
+        if props.get("OpenIdConnectProviderARNs").is_some() {
+            pool.open_id_connect_provider_arns =
+                parse_cognito_string_array(props.get("OpenIdConnectProviderARNs"));
+        }
+        if props.get("SamlProviderARNs").is_some() {
+            pool.saml_provider_arns = parse_cognito_string_array(props.get("SamlProviderARNs"));
+        }
+        if let Some(m) = props
+            .get("SupportedLoginProviders")
+            .and_then(|v| v.as_object())
+        {
+            pool.supported_login_providers = m
+                .iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect();
+        }
+        if let Some(v) = props.get("CognitoStreams") {
+            pool.cognito_streams = Some(v.clone());
+        }
+        if let Some(v) = props.get("PushSync") {
+            pool.push_sync = Some(v.clone());
+        }
+        if props.get("IdentityPoolTags").is_some() {
+            pool.identity_pool_tags = parse_cognito_tags(props.get("IdentityPoolTags"));
+        }
+
+        Ok(ProvisionResult::new(pool_id.clone()).with("Name", pool_id.clone()))
+    }
+
     pub(super) fn delete_cognito_identity_pool(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cognito_state.write();
         let state = accounts.get_or_create(&self.account_id);
