@@ -583,6 +583,28 @@ impl ResourceProvisioner {
             .with("Id", id))
     }
 
+    /// In-place update: `ResolverQueryLoggingConfig` has no mutable property
+    /// other than tags, but reprovision would churn the random rslvr-qlc- id
+    /// (dangling its associations) and reset `association_count`. Preserve the id.
+    pub(super) fn update_r53r_query_log_config(
+        &self,
+        existing: &StackResource,
+        _resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let id = existing.physical_id.clone();
+        let arn = {
+            let st = self.route53resolver_state.read();
+            st.accounts
+                .get(&self.account_id)
+                .and_then(|a| a.query_log_configs.get(&id))
+                .map(|c| c.arn.clone())
+                .ok_or_else(|| format!("Query log config {id} not yet provisioned"))?
+        };
+        Ok(ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("Id", id))
+    }
+
     pub(super) fn delete_r53r_query_log_config(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
         if let Some(acc) = st.accounts.get_mut(&self.account_id) {
@@ -839,6 +861,102 @@ impl ResourceProvisioner {
                 acc.tags.insert(arn.clone(), tags);
             }
         }
+        Ok(ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("Id", id)
+            .with("RuleCount", rule_count.to_string()))
+    }
+
+    /// In-place update: reprovision would churn the random rslvr-frg- id
+    /// (dangling every FirewallRuleGroupAssociation) and drop the group's inline
+    /// rules. Rebuild the rules from the template + update Name in place, and
+    /// preserve the id/arn.
+    pub(super) fn update_r53r_firewall_rule_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let name = props.get("Name").and_then(|v| v.as_str());
+        let mut rules = Vec::new();
+        for r in props
+            .get("FirewallRules")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default()
+        {
+            rules.push(FirewallRule {
+                firewall_rule_group_id: id.clone(),
+                firewall_domain_list_id: r
+                    .get("FirewallDomainListId")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                name: r
+                    .get("Name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                priority: r.get("Priority").and_then(|v| v.as_i64()).unwrap_or(100),
+                action: r
+                    .get("Action")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("ALLOW")
+                    .to_string(),
+                block_response: r
+                    .get("BlockResponse")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                block_override_domain: r
+                    .get("BlockOverrideDomain")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                block_override_dns_type: r
+                    .get("BlockOverrideDnsType")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                block_override_ttl: r.get("BlockOverrideTtl").and_then(|v| v.as_i64()),
+                creator_request_id: id.clone(),
+                creation_time: now_rfc3339(),
+                modification_time: now_rfc3339(),
+                firewall_domain_redirection_action: None,
+                qtype: r.get("Qtype").and_then(|v| v.as_str()).map(String::from),
+                dns_threat_protection: r
+                    .get("DnsThreatProtection")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                confidence_threshold: r
+                    .get("ConfidenceThreshold")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                firewall_rule_type: r.get("FirewallRuleType").filter(|v| !v.is_null()).cloned(),
+                firewall_threat_protection_id: None,
+            });
+        }
+        let rule_count = rules.len() as i64;
+        let tags = self.r53r_tags(props);
+
+        let mut st = self.route53resolver_state.write();
+        let acc = st.account_mut(&self.account_id);
+        let arn = {
+            let group = acc
+                .firewall_rule_groups
+                .get_mut(&id)
+                .ok_or_else(|| format!("Firewall rule group {id} not yet provisioned"))?;
+            if let Some(n) = name {
+                group.name = n.to_string();
+            }
+            group.rule_count = rule_count;
+            group.modification_time = now_rfc3339();
+            group.arn.clone()
+        };
+        acc.firewall_rules.insert(id.clone(), rules);
+        if tags.is_empty() {
+            acc.tags.remove(&arn);
+        } else {
+            acc.tags.insert(arn.clone(), tags);
+        }
+
         Ok(ProvisionResult::new(id.clone())
             .with("Arn", arn)
             .with("Id", id)
