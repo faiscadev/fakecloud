@@ -1904,6 +1904,12 @@ impl ResourceProvisioner {
             // In-place update: reprovision would mint a new BackupPlanId and
             // drop the plan's version history + selections.
             "AWS::Backup::BackupPlan" => Some(self.update_backup_plan(existing, new_def)?),
+            // In-place update: reprovision would churn the CA arn, regenerate the
+            // key + CSR, drop the installed cert + issued certs, and revert an
+            // activated CA to PENDING_CERTIFICATE (catastrophic data loss).
+            "AWS::ACMPCA::CertificateAuthority" => {
+                Some(self.update_acmpca_certificate_authority(existing, new_def)?)
+            }
             // In-place updates: reprovision would churn the random app/env/
             // profile id and cascade-drop the nested environments, profiles,
             // hosted configuration versions and deployment history.
@@ -4807,6 +4813,68 @@ mod tests {
             vec!["rg1".to_string()],
             "replication_groups back-ref preserved"
         );
+    }
+
+    #[test]
+    fn acmpca_ca_update_preserves_key_and_activation() {
+        // bug-audit 2026-07-27 (cycle 6): reprovision on a RevocationConfiguration
+        // edit regenerated the CA key + CSR, dropped the installed cert, and
+        // reverted an activated CA to PENDING_CERTIFICATE. The update must be in
+        // place.
+        let prov = make_provisioner();
+        let ca = prov
+            .create_resource(&make_resource(
+                "AWS::ACMPCA::CertificateAuthority",
+                "CA",
+                serde_json::json!({
+                    "Type": "ROOT", "KeyAlgorithm": "RSA_2048",
+                    "SigningAlgorithm": "SHA256WITHRSA",
+                    "Subject": {"CommonName": "my-ca"}
+                }),
+            ))
+            .expect("CA provisions");
+        let arn = ca.physical_id.clone();
+
+        // Simulate activation: mark ACTIVE and capture the key/CSR.
+        let (orig_key, orig_csr) = {
+            let mut acc = prov.acmpca_state.write();
+            let a = acc.accounts.get_mut("123456789012").unwrap();
+            let rec = a.authorities.get_mut(&arn).unwrap();
+            rec.status = "ACTIVE".to_string();
+            (rec.ca_key_pem.clone(), rec.csr_pem.clone())
+        };
+
+        prov.update_resource(
+            &ca,
+            &make_resource(
+                "AWS::ACMPCA::CertificateAuthority",
+                "CA",
+                serde_json::json!({
+                    "Type": "ROOT", "KeyAlgorithm": "RSA_2048",
+                    "SigningAlgorithm": "SHA256WITHRSA",
+                    "Subject": {"CommonName": "my-ca"},
+                    "RevocationConfiguration": {"CrlConfiguration": {"Enabled": false}}
+                }),
+            ),
+        )
+        .expect("update ok")
+        .expect("updatable");
+
+        let acc = prov.acmpca_state.read();
+        let a = acc.accounts.get("123456789012").unwrap();
+        let rec = a
+            .authorities
+            .get(&arn)
+            .expect("CA still exists under its arn");
+        assert_eq!(
+            rec.status, "ACTIVE",
+            "activation preserved (not reverted to PENDING)"
+        );
+        assert_eq!(
+            rec.ca_key_pem, orig_key,
+            "key material preserved (not regenerated)"
+        );
+        assert_eq!(rec.csr_pem, orig_csr, "CSR preserved");
     }
 
     #[test]

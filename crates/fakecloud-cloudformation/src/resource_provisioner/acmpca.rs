@@ -98,6 +98,41 @@ impl ResourceProvisioner {
             .with("CertificateSigningRequest", csr_pem))
     }
 
+    /// In-place `UpdateCertificateAuthority`. Reprovision here is CATASTROPHIC:
+    /// it churns the CA arn (dangling every Certificate/Activation/Permission and
+    /// ACM cert that references it), REGENERATES the key material + CSR, drops the
+    /// installed CA certificate and issued-cert map, and reverts an activated CA
+    /// to PENDING_CERTIFICATE. Only `RevocationConfiguration` (and Tags) are
+    /// in-place-mutable in AWS; everything else is immutable. So mutate those in
+    /// place and preserve the id, key, status, activation, and issued certs.
+    pub(super) fn update_acmpca_certificate_authority(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let arn = existing.physical_id.clone();
+
+        let mut accounts = self.acmpca_state.write();
+        let account = accounts
+            .accounts
+            .get_mut(&self.account_id)
+            .ok_or_else(|| format!("Certificate authority {arn} not yet provisioned"))?;
+        let ca = account
+            .authorities
+            .get_mut(&arn)
+            .ok_or_else(|| format!("Certificate authority {arn} not yet provisioned"))?;
+        if let Some(rc) = props.get("RevocationConfiguration") {
+            ca.revocation_configuration = Some(rc.clone());
+        }
+        ca.tags = parse_acmpca_tags(props.get("Tags"));
+        let csr = ca.csr_pem.clone();
+
+        Ok(ProvisionResult::new(arn.clone())
+            .with("Arn", arn)
+            .with("CertificateSigningRequest", csr))
+    }
+
     pub(super) fn delete_acmpca_certificate_authority(
         &self,
         physical_id: &str,
