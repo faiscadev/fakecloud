@@ -174,6 +174,15 @@ pub(crate) fn register_image(
     if let Some(a) = req.query_params.get("Architecture") {
         img.architecture = a.clone();
     }
+    // BootMode is validated above but was never persisted; RootDeviceName was
+    // ignored entirely -> DescribeImages read back the render defaults (uefi /
+    // /dev/xvda) and aws_ami drifted. Honor both.
+    if let Some(b) = req.query_params.get("BootMode") {
+        img.boot_mode = Some(b.clone());
+    }
+    if let Some(r) = req.query_params.get("RootDeviceName") {
+        img.root_device_name = Some(r.clone());
+    }
     let id = img.image_id.clone();
     {
         let mut accounts = svc.state.write();
@@ -1180,6 +1189,48 @@ mod tests {
         let mut i = img(None, None);
         i.image_id = id.to_string();
         state.images.insert(id.to_string(), i);
+    }
+
+    #[test]
+    fn register_image_persists_boot_mode_and_root_device() {
+        // bug-audit 2026-07-28 (cycle 7) E2: RegisterImage validated BootMode
+        // then dropped it and ignored RootDeviceName -> DescribeImages read back
+        // the render defaults (uefi / /dev/xvda) and aws_ami drifted.
+        use crate::test_support::ec2_request as req;
+        let svc = crate::service::Ec2Service::new();
+        let created = super::register_image(
+            &svc,
+            &req(
+                "RegisterImage",
+                &[
+                    ("Name", "my-ami"),
+                    ("Architecture", "arm64"),
+                    ("BootMode", "legacy-bios"),
+                    ("RootDeviceName", "/dev/sdf"),
+                ],
+            ),
+        )
+        .unwrap();
+        let cbody = String::from_utf8_lossy(created.body.expect_bytes()).to_string();
+        let id = cbody
+            .split("<imageId>")
+            .nth(1)
+            .unwrap()
+            .split("</imageId>")
+            .next()
+            .unwrap()
+            .to_string();
+        let desc =
+            super::describe_images(&svc, &req("DescribeImages", &[("ImageId", &id)])).unwrap();
+        let dbody = String::from_utf8_lossy(desc.body.expect_bytes()).to_string();
+        assert!(
+            dbody.contains("<bootMode>legacy-bios</bootMode>"),
+            "boot mode not persisted: {dbody}"
+        );
+        assert!(
+            dbody.contains("<rootDeviceName>/dev/sdf</rootDeviceName>"),
+            "root device not persisted: {dbody}"
+        );
     }
 
     #[test]

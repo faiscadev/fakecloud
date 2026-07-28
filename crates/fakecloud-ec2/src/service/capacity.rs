@@ -232,6 +232,16 @@ pub(crate) fn modify_capacity_reservation(
             r.total_instance_count = c;
             r.available_instance_count = c;
         }
+        // EndDateType and InstanceMatchCriteria are validated above but were
+        // never persisted -> DescribeCapacityReservations read back the
+        // create-time values and aws_ec2_capacity_reservation drifted. Both are
+        // modifiable per AWS; honor them.
+        if let Some(t) = req.query_params.get("EndDateType") {
+            r.end_date_type = t.clone();
+        }
+        if let Some(m) = req.query_params.get("InstanceMatchCriteria") {
+            r.instance_match_criteria = m.clone();
+        }
     }
     Ok(Ec2Service::respond(
         "ModifyCapacityReservation",
@@ -742,6 +752,62 @@ mod crfleet_tests {
 
     fn body(resp: AwsResponse) -> String {
         String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn modify_capacity_reservation_persists_end_date_type_and_match() {
+        // bug-audit 2026-07-28 (cycle 7) E3: ModifyCapacityReservation validated
+        // EndDateType + InstanceMatchCriteria then persisted only InstanceCount,
+        // so DescribeCapacityReservations read back the create-time values.
+        let svc = Ec2Service::new();
+        let created = body(
+            create_capacity_reservation(
+                &svc,
+                &req(
+                    "CreateCapacityReservation",
+                    &[
+                        ("InstanceType", "t3.micro"),
+                        ("InstancePlatform", "Linux/UNIX"),
+                        ("AvailabilityZone", "us-east-1a"),
+                        ("InstanceCount", "4"),
+                        ("InstanceMatchCriteria", "open"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let id = created
+            .split("<capacityReservationId>")
+            .nth(1)
+            .unwrap()
+            .split("</capacityReservationId>")
+            .next()
+            .unwrap()
+            .to_string();
+        modify_capacity_reservation(
+            &svc,
+            &req(
+                "ModifyCapacityReservation",
+                &[
+                    ("CapacityReservationId", &id),
+                    ("EndDateType", "unlimited"),
+                    ("InstanceMatchCriteria", "targeted"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc = body(
+            describe_capacity_reservations(&svc, &req("DescribeCapacityReservations", &[]))
+                .unwrap(),
+        );
+        assert!(
+            desc.contains("<instanceMatchCriteria>targeted</instanceMatchCriteria>"),
+            "match criteria not persisted: {desc}"
+        );
+        assert!(
+            desc.contains("<endDateType>unlimited</endDateType>"),
+            "end date type not persisted: {desc}"
+        );
     }
 
     #[test]
