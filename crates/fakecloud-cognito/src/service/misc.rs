@@ -654,7 +654,7 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(json!({})))
     }
 
-    pub(super) fn get_tokens_from_refresh_token(
+    pub(super) async fn get_tokens_from_refresh_token(
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
@@ -665,93 +665,170 @@ impl CognitoService {
         let _client_secret = body["ClientSecret"].as_str();
         let _device_key = body["DeviceKey"].as_str();
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        // Resolve everything under the state lock, then release the guard (it is
+        // not `Send` and must not be held across the trigger `await` below).
+        //
+        // Refresh-token rotation (when enabled) MUST be atomic with validation:
+        // the old token is validated and — in the same critical section, before
+        // the guard is released for the trigger `await` — swapped out for a freshly
+        // minted one. The new token's VALUE does not depend on the trigger result
+        // (only the access/id token claims do), so generating it here lets a
+        // concurrent replay of the same old token fail validation (it has already
+        // been removed), preserving single-use / replay detection.
+        let (
+            pool_id,
+            username,
+            sub,
+            region,
+            user_attrs,
+            account_id,
+            pool_signing_owned,
+            claims,
+            rotated_refresh,
+        ) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        // Validate client exists
-        if !state.user_pool_clients.contains_key(client_id) {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidParameterException",
-                format!("Client {client_id} does not exist."),
-            ));
-        }
+            // Validate client exists
+            if !state.user_pool_clients.contains_key(client_id) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Client {client_id} does not exist."),
+                ));
+            }
 
-        let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid refresh token.",
-            )
-        })?;
-
-        // Verify client matches
-        if token_data.client_id != client_id {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid refresh token.",
-            ));
-        }
-
-        let pool_id = token_data.user_pool_id.clone();
-        let username = token_data.username.clone();
-
-        // Find user to get sub
-        let user = state
-            .users
-            .get(pool_id.as_str())
-            .and_then(|users| users.get(username.as_str()))
-            .ok_or_else(|| {
+            let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotAuthorizedException",
-                    "User not found.",
+                    "Invalid refresh token.",
                 )
             })?;
 
-        let sub = user.sub.clone();
-        let region = state.region.clone();
+            // Verify client matches
+            if token_data.client_id != client_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid refresh token.",
+                ));
+            }
 
-        let pool_signing_owned = state.user_pools.get(&pool_id).and_then(|pool| {
-            pool.signing_key_pem
-                .as_ref()
-                .zip(pool.signing_kid.as_ref())
-                .map(|(p, k)| (p.clone(), k.clone()))
-        });
-        let signing = pool_signing_owned
-            .as_ref()
-            .map(|(p, k)| (p.as_str(), k.as_str()));
-        let claims = super::token_claims_for(state, &pool_id, &username, client_id);
-        let tokens = super::generate_tokens(
-            &pool_id, client_id, &sub, &username, &region, signing, &claims,
-        );
+            let pool_id = token_data.user_pool_id.clone();
+            let username = token_data.username.clone();
 
-        let rotation_enabled = state
-            .user_pool_clients
-            .get(client_id)
-            .and_then(|c| c.refresh_token_rotation.as_ref())
-            .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
-            .unwrap_or(false);
+            // Find user to get sub
+            let user = state
+                .users
+                .get(pool_id.as_str())
+                .and_then(|users| users.get(username.as_str()))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "User not found.",
+                    )
+                })?;
 
-        let now = Utc::now();
-        let rotated_refresh = if rotation_enabled {
-            let new_token = format!("rt-{}", Uuid::new_v4());
-            state.refresh_tokens.insert(
-                new_token.clone(),
-                RefreshTokenData {
-                    user_pool_id: pool_id.clone(),
-                    username: username.clone(),
-                    client_id: client_id.to_string(),
-                    issued_at: now,
-                },
-            );
-            state.refresh_tokens.remove(refresh_token);
-            Some(new_token)
+            let sub = user.sub.clone();
+            let user_attrs = crate::triggers::collect_user_attributes(user);
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+
+            let pool_signing_owned = state.user_pools.get(&pool_id).and_then(|pool| {
+                pool.signing_key_pem
+                    .as_ref()
+                    .zip(pool.signing_kid.as_ref())
+                    .map(|(p, k)| (p.clone(), k.clone()))
+            });
+            let claims = super::token_claims_for(state, &pool_id, &username, client_id);
+
+            let rotation_enabled = state
+                .user_pool_clients
+                .get(client_id)
+                .and_then(|c| c.refresh_token_rotation.as_ref())
+                .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
+                .unwrap_or(false);
+
+            // Atomic swap: mint the replacement and invalidate the old token while
+            // still holding the write guard, so a concurrent replay of the same old
+            // token can no longer validate.
+            let rotated_refresh = if rotation_enabled {
+                let new_token = format!("rt-{}", Uuid::new_v4());
+                state.refresh_tokens.insert(
+                    new_token.clone(),
+                    RefreshTokenData {
+                        user_pool_id: pool_id.clone(),
+                        username: username.clone(),
+                        client_id: client_id.to_string(),
+                        issued_at: Utc::now(),
+                    },
+                );
+                state.refresh_tokens.remove(refresh_token);
+                Some(new_token)
+            } else {
+                None
+            };
+            (
+                pool_id,
+                username,
+                sub,
+                region,
+                user_attrs,
+                account_id,
+                pool_signing_owned,
+                claims,
+                rotated_refresh,
+            )
+        };
+
+        // GetTokensFromRefreshToken issues fresh tokens, so real Cognito fires
+        // the PreTokenGeneration trigger here too; apply any overrides it returns.
+        let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
+            if let Some(function_arn) = crate::triggers::get_trigger_arn(
+                &self.state,
+                &pool_id,
+                crate::triggers::TriggerSource::TokenGenerationAuthentication,
+            ) {
+                let event = crate::triggers::build_trigger_event(
+                    crate::triggers::TriggerSource::TokenGenerationAuthentication,
+                    &pool_id,
+                    Some(client_id),
+                    &username,
+                    &user_attrs,
+                    &region,
+                    &account_id,
+                );
+                crate::triggers::invoke_trigger(ctx, &function_arn, &event).await
+            } else {
+                None
+            }
         } else {
             None
         };
 
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        let signing = pool_signing_owned
+            .as_ref()
+            .map(|(p, k)| (p.as_str(), k.as_str()));
+        let tokens = super::generate_tokens_with_overrides(
+            &pool_id,
+            client_id,
+            &sub,
+            &username,
+            &region,
+            signing,
+            None,
+            None,
+            pretoken_response.as_ref(),
+            &claims,
+        );
+
+        // Rotation (validate + swap) already happened atomically under the scope-1
+        // write guard; here we only persist the freshly minted access token.
+        let now = Utc::now();
         state.access_tokens.insert(
             tokens.access_token.clone(),
             AccessTokenData {
