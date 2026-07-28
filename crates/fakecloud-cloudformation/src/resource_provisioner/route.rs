@@ -316,14 +316,70 @@ impl ResourceProvisioner {
         let cfg_value = props
             .get("HealthCheckConfig")
             .ok_or("HealthCheckConfig is required")?;
+        let cfg = self.build_health_check_config(cfg_value)?;
 
+        let id = Uuid::new_v4().to_string();
+        let hc = StoredHealthCheck {
+            id: id.clone(),
+            caller_reference: format!("cfn-{}", resource.logical_id),
+            version: 1,
+            config: cfg,
+            created_time: Utc::now(),
+            status: fakecloud_route53::HealthCheckStatus::Success,
+            last_failure_reason: None,
+        };
+
+        let mut accounts = self.route53_state.write();
+        // Route53 is a global service in fakecloud; all entries share the
+        // default account bucket so SDK reads land on the same data.
+        let state = accounts.entry("000000000000");
+        state.health_checks.insert(id.clone(), hc);
+
+        Ok(ProvisionResult::new(id.clone()).with("HealthCheckId", id))
+    }
+
+    /// In-place `UpdateHealthCheck`: reprovision would churn the random
+    /// HealthCheckId (dangling every `AWS::Route53::RecordSet` that stored it for
+    /// failover routing) and reset the version/status. AWS mutates the config in
+    /// place, so rebuild the config and swap it into the stored health check,
+    /// preserving the id/caller reference/created time and bumping the version.
+    pub(super) fn update_route53_health_check(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg_value = resource
+            .properties
+            .get("HealthCheckConfig")
+            .ok_or("HealthCheckConfig is required")?;
+        let cfg = self.build_health_check_config(cfg_value)?;
+        let id = existing.physical_id.clone();
+
+        let mut accounts = self.route53_state.write();
+        let state = accounts.entry("000000000000");
+        let hc = state
+            .health_checks
+            .get_mut(&id)
+            .ok_or_else(|| format!("Health check {id} not yet provisioned"))?;
+        hc.config = cfg;
+        hc.version += 1;
+        // id / caller_reference / created_time / status preserved.
+
+        Ok(ProvisionResult::new(id.clone()).with("HealthCheckId", id))
+    }
+
+    /// Parse an `AWS::Route53::HealthCheck` `HealthCheckConfig` block into the
+    /// route53 model (shared by the create + in-place update arms).
+    fn build_health_check_config(
+        &self,
+        cfg_value: &serde_json::Value,
+    ) -> Result<HealthCheckConfig, String> {
         let health_check_type = cfg_value
             .get("Type")
             .and_then(|v| v.as_str())
             .ok_or("HealthCheckConfig.Type is required")?
             .to_string();
-
-        let cfg = HealthCheckConfig {
+        Ok(HealthCheckConfig {
             ip_address: cfg_value
                 .get("IPAddress")
                 .and_then(|v| v.as_str())
@@ -413,26 +469,7 @@ impl ResourceProvisioner {
                 .get("RoutingControlArn")
                 .and_then(|v| v.as_str())
                 .map(String::from),
-        };
-
-        let id = Uuid::new_v4().to_string();
-        let hc = StoredHealthCheck {
-            id: id.clone(),
-            caller_reference: format!("cfn-{}", resource.logical_id),
-            version: 1,
-            config: cfg,
-            created_time: Utc::now(),
-            status: fakecloud_route53::HealthCheckStatus::Success,
-            last_failure_reason: None,
-        };
-
-        let mut accounts = self.route53_state.write();
-        // Route53 is a global service in fakecloud; all entries share the
-        // default account bucket so SDK reads land on the same data.
-        let state = accounts.entry("000000000000");
-        state.health_checks.insert(id.clone(), hc);
-
-        Ok(ProvisionResult::new(id.clone()).with("HealthCheckId", id))
+        })
     }
 
     pub(super) fn delete_route53_health_check(&self, physical_id: &str) -> Result<(), String> {
