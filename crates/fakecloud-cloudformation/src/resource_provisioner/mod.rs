@@ -1939,6 +1939,12 @@ impl ResourceProvisioner {
             "AWS::Route53Resolver::FirewallDomainList" => {
                 Some(self.update_r53r_firewall_domain_list(existing, new_def)?)
             }
+            "AWS::Route53Resolver::ResolverQueryLoggingConfig" => {
+                Some(self.update_r53r_query_log_config(existing, new_def)?)
+            }
+            "AWS::Route53Resolver::FirewallRuleGroup" => {
+                Some(self.update_r53r_firewall_rule_group(existing, new_def)?)
+            }
             // In-place updates: reprovision would churn the ns-/srv- id and drop
             // a namespace's services / a service's registered instances.
             "AWS::ServiceDiscovery::HttpNamespace"
@@ -5033,6 +5039,95 @@ mod tests {
             acc.firewall_domains.get(&fdl_id).map(|d| d.len()),
             Some(2),
             "domains updated in place"
+        );
+    }
+
+    #[test]
+    fn route53resolver_rulegroup_and_querylog_updates_preserve_ids() {
+        // bug-audit 2026-07-27 (cycle 6): reprovision churned the rslvr-frg-/
+        // rslvr-qlc- id (dangling associations) and dropped the rule group's
+        // inline rules / the query-log config's association_count.
+        let prov = make_provisioner();
+        let frg = prov
+            .create_resource(&make_resource(
+                "AWS::Route53Resolver::FirewallRuleGroup",
+                "FRG",
+                serde_json::json!({
+                    "Name": "g1",
+                    "FirewallRules": [{"Priority": 10, "Action": "ALLOW", "FirewallDomainListId": "rslvr-fdl-x"}]
+                }),
+            ))
+            .expect("firewall rule group provisions");
+        let frg_id = frg.physical_id.clone();
+        let frg_up = prov
+            .update_resource(
+                &frg,
+                &make_resource(
+                    "AWS::Route53Resolver::FirewallRuleGroup",
+                    "FRG",
+                    serde_json::json!({
+                        "Name": "g1-renamed",
+                        "FirewallRules": [
+                            {"Priority": 10, "Action": "ALLOW", "FirewallDomainListId": "rslvr-fdl-x"},
+                            {"Priority": 20, "Action": "BLOCK", "FirewallDomainListId": "rslvr-fdl-y"}
+                        ]
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(
+            frg_up.physical_id, frg_id,
+            "firewall rule group id preserved"
+        );
+
+        let qlc = prov
+            .create_resource(&make_resource(
+                "AWS::Route53Resolver::ResolverQueryLoggingConfig",
+                "QLC",
+                serde_json::json!({"Name": "q1", "DestinationArn": "arn:aws:s3:::b"}),
+            ))
+            .expect("query log config provisions");
+        let qlc_id = qlc.physical_id.clone();
+        {
+            let mut st = prov.route53resolver_state.write();
+            let acc = st.account_mut("123456789012");
+            acc.query_log_configs
+                .get_mut(&qlc_id)
+                .unwrap()
+                .association_count = 3;
+        }
+        let qlc_up = prov
+            .update_resource(
+                &qlc,
+                &make_resource(
+                    "AWS::Route53Resolver::ResolverQueryLoggingConfig",
+                    "QLC",
+                    serde_json::json!({"Name": "q1", "DestinationArn": "arn:aws:s3:::b",
+                        "Tags": [{"Key": "env", "Value": "prod"}]}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(qlc_up.physical_id, qlc_id, "query log config id preserved");
+
+        let mut st = prov.route53resolver_state.write();
+        let acc = st.account_mut("123456789012");
+        assert_eq!(
+            acc.firewall_rules.get(&frg_id).map(|r| r.len()),
+            Some(2),
+            "rule group inline rules updated in place"
+        );
+        assert_eq!(
+            acc.firewall_rule_groups.get(&frg_id).map(|g| g.rule_count),
+            Some(2)
+        );
+        assert_eq!(
+            acc.query_log_configs
+                .get(&qlc_id)
+                .map(|c| c.association_count),
+            Some(3),
+            "association_count preserved (not reset by reprovision)"
         );
     }
 
