@@ -1926,6 +1926,11 @@ impl ResourceProvisioner {
             // servers and wipe every record set stored inside the zone. Name is
             // immutable, so a name change still falls back to replacement.
             "AWS::Route53::HostedZone" => Some(self.update_route53_hosted_zone(existing, new_def)?),
+            // In-place update: reprovision would churn the random HealthCheckId,
+            // dangling every RecordSet that references it for failover routing.
+            "AWS::Route53::HealthCheck" => {
+                Some(self.update_route53_health_check(existing, new_def)?)
+            }
             // In-place updates: reprovision would churn the ns-/srv- id and drop
             // a namespace's services / a service's registered instances.
             "AWS::ServiceDiscovery::HttpNamespace"
@@ -1966,6 +1971,9 @@ impl ResourceProvisioner {
             "AWS::EC2::Subnet" => Some(self.update_ec2_subnet(existing, new_def)?),
             "AWS::EC2::RouteTable" => Some(self.update_ec2_route_table(existing, new_def)?),
             "AWS::EC2::SecurityGroup" => Some(self.update_ec2_security_group(existing, new_def)?),
+            "AWS::EC2::InternetGateway" => {
+                Some(self.update_ec2_internet_gateway(existing, new_def)?)
+            }
             // No dedicated in-place update arm for this type. Real
             // CloudFormation, lacking an in-place mutator for a changed
             // property, falls back to REPLACEMENT: it deletes the old backing
@@ -4875,6 +4883,77 @@ mod tests {
             "key material preserved (not regenerated)"
         );
         assert_eq!(rec.csr_pem, orig_csr, "CSR preserved");
+    }
+
+    #[test]
+    fn ec2_internet_gateway_update_preserves_id() {
+        // bug-audit 2026-07-27 (cycle 6): a tag-only edit reprovisioned the IGW,
+        // churning the igw-id and orphaning VPCGatewayAttachment + routes.
+        let prov = make_provisioner();
+        let igw = prov
+            .create_resource(&make_resource(
+                "AWS::EC2::InternetGateway",
+                "IGW",
+                serde_json::json!({}),
+            ))
+            .expect("igw provisions");
+        let id = igw.physical_id.clone();
+        let up = prov
+            .update_resource(
+                &igw,
+                &make_resource(
+                    "AWS::EC2::InternetGateway",
+                    "IGW",
+                    serde_json::json!({"Tags": [{"Key": "env", "Value": "prod"}]}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(up.physical_id, id, "internet gateway id preserved");
+    }
+
+    #[test]
+    fn route53_health_check_update_preserves_id() {
+        // bug-audit 2026-07-27 (cycle 6): a HealthCheckConfig edit reprovisioned
+        // the health check, churning the HealthCheckId that RecordSets store for
+        // failover routing.
+        let prov = make_provisioner();
+        let hc = prov
+            .create_resource(&make_resource(
+                "AWS::Route53::HealthCheck",
+                "HC",
+                serde_json::json!({"HealthCheckConfig": {
+                    "Type": "HTTP", "ResourcePath": "/a",
+                    "FullyQualifiedDomainName": "ex.com", "Port": 80
+                }}),
+            ))
+            .expect("health check provisions");
+        let id = hc.physical_id.clone();
+        prov.update_resource(
+            &hc,
+            &make_resource(
+                "AWS::Route53::HealthCheck",
+                "HC",
+                serde_json::json!({"HealthCheckConfig": {
+                    "Type": "HTTP", "ResourcePath": "/b",
+                    "FullyQualifiedDomainName": "ex.com", "Port": 80
+                }}),
+            ),
+        )
+        .expect("update ok")
+        .expect("updatable");
+        let accounts = prov.route53_state.read();
+        let state = accounts.get("000000000000").unwrap();
+        let rec = state
+            .health_checks
+            .get(&id)
+            .expect("health check preserved");
+        assert_eq!(
+            rec.config.resource_path.as_deref(),
+            Some("/b"),
+            "config updated in place"
+        );
+        assert_eq!(rec.version, 2, "version bumped");
     }
 
     #[test]

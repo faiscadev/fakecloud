@@ -389,6 +389,19 @@ impl ResourceProvisioner {
         Ok(ProvisionResult::new(id.clone()).with("RouteTableId", id))
     }
 
+    /// An internet gateway's only property is `Tags` (in-place in AWS), and the
+    /// internal EC2 dispatch has no standalone CreateTags. The point of the arm
+    /// is to AVOID reprovision, which would churn the igw-id and orphan every
+    /// `VPCGatewayAttachment` + route that references it. Preserve the id.
+    pub(super) fn update_ec2_internet_gateway(
+        &self,
+        existing: &StackResource,
+        _resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let id = existing.physical_id.clone();
+        Ok(ProvisionResult::new(id.clone()).with("InternetGatewayId", id))
+    }
+
     /// In-place `AWS::EC2::SecurityGroup` update. Reprovision would churn the
     /// sg id -- breaking every `Ref`/`SourceSecurityGroupId` that stored it and
     /// dropping the group's rules -- and `GroupDescription`/`GroupName`/`VpcId`
