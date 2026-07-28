@@ -768,6 +768,53 @@ pub(crate) fn validate_sms_endpoint(endpoint: &str) -> Result<(), AwsServiceErro
     Ok(())
 }
 
+/// Match a single filter-policy key's rule set against the message attributes,
+/// applying the full MessageAttributes-scope semantics: `exists:false` on an
+/// absent attribute, per-element matching for a `String.Array` attribute, and
+/// type-aware numeric matching. Shared by the top-level policy loop and the
+/// `$or` alternatives so both paths behave identically (before this existed the
+/// `$or` branch only did a plain string+typed lookup and silently dropped
+/// messages that should have matched via `exists:false` or a `String.Array`).
+fn attr_key_matches(
+    allowed_values: &Value,
+    key: &str,
+    message_attributes: &BTreeMap<String, MessageAttribute>,
+) -> bool {
+    // A non-array rule imposes no constraint (mirrors the loop's `continue`).
+    let allowed = match allowed_values.as_array() {
+        Some(arr) => arr,
+        None => return true,
+    };
+    let msg_attr = match message_attributes.get(key) {
+        Some(a) => a,
+        // Absent attribute matches only an explicit `exists:false`.
+        None => {
+            return allowed.iter().any(|v| {
+                v.as_object()
+                    .and_then(|o| o.get("exists"))
+                    .and_then(|e| e.as_bool())
+                    == Some(false)
+            });
+        }
+    };
+    let attr_value = msg_attr.string_value.as_deref().unwrap_or("");
+    let is_numeric_type = msg_attr.data_type == "Number";
+    // String.Array: match if any element satisfies the rule set.
+    if msg_attr.data_type.starts_with("String.Array") {
+        if let Ok(arr) = serde_json::from_str::<Vec<Value>>(attr_value) {
+            return arr.iter().any(|elem| {
+                let elem_str = match elem {
+                    Value::String(s) => s.clone(),
+                    Value::Number(n) => n.to_string(),
+                    _ => elem.to_string(),
+                };
+                check_filter_values(allowed, &elem_str)
+            });
+        }
+    }
+    check_filter_values_typed(allowed, attr_value, Some(is_numeric_type))
+}
+
 /// Check if a message's attributes match the subscription's FilterPolicy.
 pub(crate) fn matches_filter_policy(
     sub: &SnsSubscription,
@@ -796,35 +843,16 @@ pub(crate) fn matches_filter_policy(
 
     // MessageAttributes scope
     for (attr_name, allowed_values) in &filter {
-        // Handle $or operator
+        // $or: at least one alternative (a mini filter policy) must match, each
+        // evaluated through the same per-key semantics as a top-level key.
         if attr_name == "$or" {
             if let Some(or_conditions) = allowed_values.as_array() {
                 let any_match = or_conditions.iter().any(|condition| {
-                    if let Some(cond_obj) = condition.as_object() {
-                        let cond_map: HashMap<String, Value> = cond_obj
+                    condition.as_object().is_some_and(|cond_obj| {
+                        cond_obj
                             .iter()
-                            .map(|(k, v)| (k.clone(), v.clone()))
-                            .collect();
-                        // Each condition in $or is a mini filter policy
-                        cond_map.iter().all(|(key, vals)| {
-                            if let Some(arr) = vals.as_array() {
-                                if let Some(msg_attr) = message_attributes.get(key) {
-                                    let val = msg_attr.string_value.as_deref().unwrap_or("");
-                                    // Type-aware, matching the non-$or path: a
-                                    // numeric filter must not match a string
-                                    // attribute (and vice versa).
-                                    let is_numeric_type = msg_attr.data_type == "Number";
-                                    check_filter_values_typed(arr, val, Some(is_numeric_type))
-                                } else {
-                                    false
-                                }
-                            } else {
-                                false
-                            }
-                        })
-                    } else {
-                        false
-                    }
+                            .all(|(key, vals)| attr_key_matches(vals, key, message_attributes))
+                    })
                 });
                 if !any_match {
                     return false;
@@ -833,50 +861,7 @@ pub(crate) fn matches_filter_policy(
             }
         }
 
-        let allowed = match allowed_values.as_array() {
-            Some(arr) => arr,
-            None => continue,
-        };
-
-        let msg_attr = match message_attributes.get(attr_name) {
-            Some(a) => a,
-            None => {
-                let has_exists_false = allowed.iter().any(|v| {
-                    v.as_object()
-                        .and_then(|o| o.get("exists"))
-                        .and_then(|e| e.as_bool())
-                        == Some(false)
-                });
-                if has_exists_false {
-                    continue;
-                }
-                return false;
-            }
-        };
-
-        let attr_value = msg_attr.string_value.as_deref().unwrap_or("");
-        let is_numeric_type = msg_attr.data_type == "Number";
-
-        // Handle String.Array data type: parse the JSON array and check each element
-        if msg_attr.data_type.starts_with("String.Array") || msg_attr.data_type == "String.Array" {
-            if let Ok(arr) = serde_json::from_str::<Vec<Value>>(attr_value) {
-                let any_match = arr.iter().any(|elem| {
-                    let elem_str = match elem {
-                        Value::String(s) => s.clone(),
-                        Value::Number(n) => n.to_string(),
-                        _ => elem.to_string(),
-                    };
-                    check_filter_values(allowed, &elem_str)
-                });
-                if !any_match {
-                    return false;
-                }
-                continue;
-            }
-        }
-
-        let matched = check_filter_values_typed(allowed, attr_value, Some(is_numeric_type));
-        if !matched {
+        if !attr_key_matches(allowed_values, attr_name, message_attributes) {
             return false;
         }
     }
@@ -1690,6 +1675,45 @@ mod filter_consistency_tests {
         let mut string_attrs = BTreeMap::new();
         string_attrs.insert("price".to_string(), str_attr("100"));
         assert!(!matches_filter_policy(&sub, &string_attrs, ""));
+    }
+
+    #[test]
+    fn or_branch_applies_exists_false_and_string_array() {
+        // bug-audit 2026-07-28 (cycle 7) S1: the $or branch resolved each key
+        // only via a plain get()+typed check, so it dropped messages that match
+        // via `exists:false` (absent attr) or a String.Array element. Both must
+        // work identically to the top-level path.
+
+        // exists:false alternative — message has no `x`, should match.
+        let policy = json!({ "$or": [ { "x": [{"exists": false}] }, { "y": ["b"] } ] });
+        let sub = sub_with_filter(policy);
+        let mut attrs = BTreeMap::new();
+        attrs.insert("y".to_string(), str_attr("a")); // y != "b", but x is absent
+        assert!(
+            matches_filter_policy(&sub, &attrs, ""),
+            "absent x should satisfy exists:false alternative"
+        );
+
+        // String.Array alternative — `tags` is a String.Array containing "red".
+        let policy2 = json!({ "$or": [ { "tags": ["red"] }, { "kind": ["z"] } ] });
+        let sub2 = sub_with_filter(policy2);
+        let arr_attr = MessageAttribute {
+            data_type: "String.Array".to_string(),
+            string_value: Some(r#"["red","blue"]"#.to_string()),
+            binary_value: None,
+        };
+        let mut attrs2 = BTreeMap::new();
+        attrs2.insert("tags".to_string(), arr_attr);
+        assert!(
+            matches_filter_policy(&sub2, &attrs2, ""),
+            "String.Array element `red` should satisfy the $or alternative"
+        );
+
+        // Negative control: neither alternative satisfied -> no match.
+        let mut attrs3 = BTreeMap::new();
+        attrs3.insert("y".to_string(), str_attr("a"));
+        attrs3.insert("x".to_string(), str_attr("present")); // x exists -> exists:false fails
+        assert!(!matches_filter_policy(&sub, &attrs3, ""));
     }
 
     #[test]
