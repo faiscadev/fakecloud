@@ -394,6 +394,7 @@ impl RdsService {
             .ok_or_else(|| db_snapshot_not_found("(none)"))?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
+        let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");
 
         let (snapshot, dbi_resource_id, db_instance_arn, created_at) = {
             let mut accounts = self.state.write();
@@ -414,6 +415,14 @@ impl RdsService {
                     return Err(db_snapshot_not_found(&db_snapshot_identifier));
                 }
             };
+
+            // Reject an explicit-but-unknown subnet group before provisioning,
+            // rolling back the reservation (mirrors CreateDBInstance).
+            validate_subnet_group_or_cancel(
+                state,
+                &db_instance_identifier,
+                db_subnet_group_name.as_deref(),
+            )?;
 
             let dbi_resource_id = state.next_dbi_resource_id();
             let db_instance_arn =
@@ -460,6 +469,11 @@ impl RdsService {
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
         instance.port = 0;
+        // An explicit DBSubnetGroupName places the restored instance in that
+        // group (validated above); the builder hardcodes None otherwise.
+        if let Some(ref name) = db_subnet_group_name {
+            instance.db_subnet_group_name = Some(name.clone());
+        }
 
         self.state
             .write()
@@ -491,7 +505,12 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, None)
+                    db_instance_xml(
+                        &instance,
+                        None,
+                        self.subnet_group_of(&request.account_id, &instance)
+                            .as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),

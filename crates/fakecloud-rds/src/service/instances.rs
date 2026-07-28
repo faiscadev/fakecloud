@@ -79,6 +79,7 @@ impl RdsService {
         let copy_tags_to_snapshot =
             parse_optional_bool(optional_query_param(request, "CopyTagsToSnapshot").as_deref())?;
         let db_cluster_identifier = optional_query_param(request, "DBClusterIdentifier");
+        let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");
         // Tags supplied at create time. Real RDS applies these to the new
         // instance immediately (they show up in DescribeDBInstances /
         // ListTagsForResource without a follow-up AddTagsToResource call),
@@ -123,6 +124,13 @@ impl RdsService {
                     ));
                 }
             }
+            // Same for the subnet group: AWS rejects an unknown name with
+            // DBSubnetGroupNotFoundFault rather than silently ignoring it.
+            validate_subnet_group_or_cancel(
+                state,
+                &db_instance_identifier,
+                db_subnet_group_name.as_deref(),
+            )?;
         }
 
         let logical_db_name = db_name
@@ -174,6 +182,7 @@ impl RdsService {
                 option_group_name,
                 multi_az,
                 pending_modified_values: None,
+                db_subnet_group_name: db_subnet_group_name.clone(),
                 availability_zone,
                 storage_type,
                 storage_encrypted,
@@ -383,7 +392,12 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, None)
+                    db_instance_xml(
+                        &instance,
+                        None,
+                        self.subnet_group_of(&request.account_id, &instance)
+                            .as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),
@@ -447,7 +461,7 @@ impl RdsService {
             .await?;
         }
 
-        let instance = {
+        let (instance, subnet_group) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
             let instance = state
@@ -469,7 +483,8 @@ impl RdsService {
                 }
             }
 
-            instance
+            let subnet_group = instance_subnet_group(state, &instance).cloned();
+            (instance, subnet_group)
         };
 
         // When a final snapshot was requested, its backgrounded finalizer owns
@@ -503,7 +518,7 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, Some("deleting"))
+                    db_instance_xml(&instance, Some("deleting"), subnet_group.as_ref(),)
                 ),
                 &request.request_id,
             ),
@@ -1029,7 +1044,11 @@ impl RdsService {
             RDS_NS,
             &format!(
                 "<DBInstance>{}</DBInstance>",
-                db_instance_xml(instance, Some("modifying"))
+                db_instance_xml(
+                    instance,
+                    Some("modifying"),
+                    instance_subnet_group(state, instance),
+                )
             ),
             &request.request_id,
         );
@@ -1196,7 +1215,12 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, Some("rebooting"))
+                    db_instance_xml(
+                        &instance,
+                        Some("rebooting"),
+                        self.subnet_group_of(&request.account_id, &instance)
+                            .as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),
@@ -1230,7 +1254,7 @@ impl RdsService {
                     RDS_NS,
                     &format!(
                         "<DBInstances><DBInstance>{}</DBInstance></DBInstances>",
-                        db_instance_xml(&instance, None)
+                        db_instance_xml(&instance, None, instance_subnet_group(state, &instance))
                     ),
                     &request.request_id,
                 ),
@@ -1269,7 +1293,11 @@ impl RdsService {
                         .map(|instance| {
                             format!(
                                 "<DBInstance>{}</DBInstance>",
-                                db_instance_xml(instance, None)
+                                db_instance_xml(
+                                    instance,
+                                    None,
+                                    instance_subnet_group(state, instance),
+                                )
                             )
                         })
                         .collect::<String>(),

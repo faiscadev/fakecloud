@@ -25,6 +25,7 @@ impl RdsService {
         }
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
+        let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");
 
         let (source_id, source_instance, db_name) = {
             let mut accounts = self.state.write();
@@ -101,6 +102,10 @@ impl RdsService {
                 }
             };
 
+            // Reject an explicit-but-unknown subnet group before provisioning,
+            // rolling back the reservation (mirrors CreateDBInstance).
+            validate_subnet_group_or_cancel(state, &target_id, db_subnet_group_name.as_deref())?;
+
             let default_db = default_db_name(&source_instance.engine);
             let db_name = source_instance
                 .db_name
@@ -158,6 +163,11 @@ impl RdsService {
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
         instance.port = 0;
+        // An explicit DBSubnetGroupName places the restored instance in that
+        // group (validated above); the builder hardcodes None otherwise.
+        if let Some(ref name) = db_subnet_group_name {
+            instance.db_subnet_group_name = Some(name.clone());
+        }
 
         if let Some(t) = restore_to_time.as_ref() {
             if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(t) {
@@ -198,7 +208,12 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, None)
+                    db_instance_xml(
+                        &instance,
+                        None,
+                        self.subnet_group_of(&request.account_id, &instance)
+                            .as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),
@@ -236,6 +251,7 @@ impl RdsService {
         let db_name_opt = optional_query_param(request, "DBName");
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
+        let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");
 
         let bus = self.delivery_bus.as_ref().ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -269,6 +285,14 @@ impl RdsService {
                 ));
             }
 
+            // Reject an explicit-but-unknown subnet group before provisioning,
+            // rolling back the reservation (mirrors CreateDBInstance).
+            validate_subnet_group_or_cancel(
+                state,
+                &db_instance_identifier,
+                db_subnet_group_name.as_deref(),
+            )?;
+
             (
                 state.next_dbi_resource_id(),
                 state.db_instance_arn(request.region.as_str(), &db_instance_identifier),
@@ -299,6 +323,11 @@ impl RdsService {
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
         instance.port = 0;
+        // An explicit DBSubnetGroupName places the restored instance in that
+        // group (validated above); the builder hardcodes None otherwise.
+        if let Some(ref name) = db_subnet_group_name {
+            instance.db_subnet_group_name = Some(name.clone());
+        }
 
         self.state
             .write()
@@ -330,7 +359,12 @@ impl RdsService {
                 RDS_NS,
                 &format!(
                     "<DBInstance>{}</DBInstance>",
-                    db_instance_xml(&instance, None)
+                    db_instance_xml(
+                        &instance,
+                        None,
+                        self.subnet_group_of(&request.account_id, &instance)
+                            .as_ref(),
+                    )
                 ),
                 &request.request_id,
             ),

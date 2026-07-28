@@ -1904,6 +1904,130 @@ async fn rds_subnet_group_reports_supported_network_types() {
 }
 
 #[tokio::test]
+async fn rds_db_instance_reports_its_subnet_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    client
+        .create_db_subnet_group()
+        .db_subnet_group_name("private-subnets")
+        .db_subnet_group_description("Private subnets for RDS DB instances")
+        .subnet_ids("subnet-aaaa1111")
+        .subnet_ids("subnet-bbbb2222")
+        .send()
+        .await
+        .unwrap();
+
+    let created = client
+        .create_db_instance()
+        .db_instance_identifier("orders-subnet-group-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_name("appdb")
+        .db_subnet_group_name("private-subnets")
+        .send()
+        .await
+        .unwrap();
+
+    // CreateDBInstance echoes the group back on the placeholder, before
+    // the container is up.
+    let group = created
+        .db_instance()
+        .expect("created instance")
+        .db_subnet_group()
+        .expect("subnet group on create");
+    assert_eq!(group.db_subnet_group_name(), Some("private-subnets"));
+
+    // DescribeDBInstances renders the whole group. Terraform reads
+    // `DBSubnetGroup.DBSubnetGroupName` off here to populate
+    // `db_subnet_group_name` on an instance it just created.
+    let instance = helpers::wait_for_db_available(&client, "orders-subnet-group-db", 180).await;
+    let group = instance
+        .db_subnet_group()
+        .expect("subnet group on describe");
+    assert_eq!(group.db_subnet_group_name(), Some("private-subnets"));
+    assert_eq!(
+        group.db_subnet_group_description(),
+        Some("Private subnets for RDS DB instances")
+    );
+    let mut subnets: Vec<&str> = group
+        .subnets()
+        .iter()
+        .filter_map(|s| s.subnet_identifier())
+        .collect();
+    subnets.sort_unstable();
+    assert_eq!(subnets, ["subnet-aaaa1111", "subnet-bbbb2222"]);
+
+    // The group is resolved from state at render time, so a later
+    // ModifyDBSubnetGroup shows up on the instance.
+    client
+        .modify_db_subnet_group()
+        .db_subnet_group_name("private-subnets")
+        .db_subnet_group_description("Now with three subnets")
+        .subnet_ids("subnet-aaaa1111")
+        .subnet_ids("subnet-bbbb2222")
+        .subnet_ids("subnet-cccc3333")
+        .send()
+        .await
+        .unwrap();
+
+    let described = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-subnet-group-db")
+        .send()
+        .await
+        .unwrap();
+    let group = described.db_instances()[0]
+        .db_subnet_group()
+        .expect("subnet group after modify");
+    assert_eq!(
+        group.db_subnet_group_description(),
+        Some("Now with three subnets")
+    );
+    assert_eq!(group.subnets().len(), 3);
+}
+
+#[tokio::test]
+async fn rds_create_db_instance_rejects_unknown_subnet_group() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let error = client
+        .create_db_instance()
+        .db_instance_identifier("orders-ghost-subnet-db")
+        .allocated_storage(20)
+        .db_instance_class("db.t3.micro")
+        .engine("postgres")
+        .engine_version("16.3")
+        .master_username("admin")
+        .master_user_password("secret123")
+        .db_subnet_group_name("does-not-exist")
+        .send()
+        .await
+        .expect_err("unknown subnet group should be rejected");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBSubnetGroupNotFoundFault")
+    );
+
+    // The rejected create must not leave a half-made instance behind.
+    let error = client
+        .describe_db_instances()
+        .db_instance_identifier("orders-ghost-subnet-db")
+        .send()
+        .await
+        .expect_err("instance should not exist");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBInstanceNotFound")
+    );
+}
+
+#[tokio::test]
 async fn rds_start_db_instance_returns_starting_immediately() {
     let server = TestServer::start().await;
     let client = server.rds_client().await;
