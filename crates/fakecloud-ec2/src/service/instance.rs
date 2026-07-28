@@ -228,6 +228,46 @@ fn reservation_xml(reservation_id: &str, owner: &str, instances: &[String]) -> S
     )
 }
 
+/// Launch-time instance options that `RunInstances` must persist. These were
+/// previously hardcoded to defaults in the instance record even when the
+/// request specified them (only the `Modify*` handlers set the struct fields),
+/// so `aws_instance` / a launch template read them back as defaults and drifted
+/// -- and they are ForceNew, so the drift never self-healed. Parsed once from
+/// the flattened request params.
+#[derive(Default)]
+struct LaunchOpts {
+    cpu_options: Option<crate::state::CpuOptions>,
+    placement_tenancy: Option<String>,
+    placement_affinity: Option<String>,
+    private_dns_hostname_type: Option<String>,
+    enable_a_record: bool,
+    enable_aaaa_record: bool,
+}
+
+fn parse_launch_opts(params: &HashMap<String, String>) -> LaunchOpts {
+    let cc = params
+        .get("CpuOptions.CoreCount")
+        .and_then(|v| v.parse::<i64>().ok());
+    let tpc = params
+        .get("CpuOptions.ThreadsPerCore")
+        .and_then(|v| v.parse::<i64>().ok());
+    LaunchOpts {
+        cpu_options: (cc.is_some() || tpc.is_some()).then(|| crate::state::CpuOptions {
+            core_count: cc.unwrap_or(1),
+            threads_per_core: tpc.unwrap_or(1),
+        }),
+        placement_tenancy: params.get("Placement.Tenancy").cloned(),
+        placement_affinity: params.get("Placement.Affinity").cloned(),
+        private_dns_hostname_type: params.get("PrivateDnsNameOptions.HostnameType").cloned(),
+        enable_a_record: params
+            .get("PrivateDnsNameOptions.EnableResourceNameDnsARecord")
+            .is_some_and(|v| v == "true"),
+        enable_aaaa_record: params
+            .get("PrivateDnsNameOptions.EnableResourceNameDnsAAAARecord")
+            .is_some_and(|v| v == "true"),
+    }
+}
+
 pub(crate) async fn run_instances(
     svc: &Ec2Service,
     req: &AwsRequest,
@@ -445,6 +485,7 @@ pub(crate) async fn run_instances(
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let sg_names = sg_name_map(state);
+        let launch_opts = parse_launch_opts(&req.query_params);
         for (idx, id) in ids.iter().enumerate() {
             let inst = Instance {
                 instance_id: id.clone(),
@@ -479,15 +520,20 @@ pub(crate) async fn run_instances(
                     .unwrap_or_else(|| "stop".to_string()),
                 user_data: user_data.clone().filter(|s| !s.is_empty()),
                 metadata_options: metadata_options.clone(),
-                cpu_options: None,
+                // Launch-time CpuOptions / Placement.Tenancy+Affinity /
+                // PrivateDnsNameOptions were dropped at RunInstances (only the
+                // Modify* handlers set them), so a launch template / aws_instance
+                // that specified them at creation read back defaults and drifted
+                // -- and they are ForceNew, so the drift never self-healed.
+                cpu_options: launch_opts.cpu_options.clone(),
                 bandwidth_weighting: None,
                 maintenance_options: crate::state::MaintenanceOptions::default(),
-                placement_tenancy: None,
-                placement_affinity: None,
+                placement_tenancy: launch_opts.placement_tenancy.clone(),
+                placement_affinity: launch_opts.placement_affinity.clone(),
                 placement_group_name: req.query_params.get("Placement.GroupName").cloned(),
-                private_dns_hostname_type: None,
-                enable_resource_name_dns_a_record: false,
-                enable_resource_name_dns_aaaa_record: false,
+                private_dns_hostname_type: launch_opts.private_dns_hostname_type.clone(),
+                enable_resource_name_dns_a_record: launch_opts.enable_a_record,
+                enable_resource_name_dns_aaaa_record: launch_opts.enable_aaaa_record,
             };
             crate::service::tags::apply_tag_specifications(
                 state,
@@ -2438,6 +2484,42 @@ mod modify_tests {
 
     fn body(resp: AwsResponse) -> String {
         String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn parse_launch_opts_reads_cpu_tenancy_and_dns() {
+        // bug-audit 2026-07-28 (cycle 7) E4: RunInstances hardcoded these to
+        // defaults even when the request set them (only Modify* handlers did),
+        // so aws_instance drifted on ForceNew attributes. The launch path must
+        // parse them.
+        let mut p = std::collections::HashMap::new();
+        p.insert("CpuOptions.CoreCount".to_string(), "2".to_string());
+        p.insert("CpuOptions.ThreadsPerCore".to_string(), "1".to_string());
+        p.insert("Placement.Tenancy".to_string(), "dedicated".to_string());
+        p.insert(
+            "PrivateDnsNameOptions.HostnameType".to_string(),
+            "resource-name".to_string(),
+        );
+        p.insert(
+            "PrivateDnsNameOptions.EnableResourceNameDnsARecord".to_string(),
+            "true".to_string(),
+        );
+        let lo = super::parse_launch_opts(&p);
+        let cpu = lo.cpu_options.expect("cpu options parsed");
+        assert_eq!(cpu.core_count, 2);
+        assert_eq!(cpu.threads_per_core, 1);
+        assert_eq!(lo.placement_tenancy.as_deref(), Some("dedicated"));
+        assert_eq!(
+            lo.private_dns_hostname_type.as_deref(),
+            Some("resource-name")
+        );
+        assert!(lo.enable_a_record);
+        assert!(!lo.enable_aaaa_record);
+
+        // Absent -> all defaults (no phantom cpu_options struct).
+        let empty = super::parse_launch_opts(&std::collections::HashMap::new());
+        assert!(empty.cpu_options.is_none());
+        assert!(empty.placement_tenancy.is_none());
     }
 
     fn seed_instance(svc: &Ec2Service, id: &str) {
