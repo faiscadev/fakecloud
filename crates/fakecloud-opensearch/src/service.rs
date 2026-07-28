@@ -3498,7 +3498,15 @@ fn instance_type_names() -> Vec<&'static str> {
 fn versions(api: Api) -> Vec<&'static str> {
     match api {
         Api::Es => vec!["7.10", "7.9", "6.8"],
-        Api::OpenSearch => vec!["OpenSearch_2.11", "OpenSearch_2.9", "Elasticsearch_7.10"],
+        Api::OpenSearch => vec![
+            "OpenSearch_2.19",
+            "OpenSearch_2.17",
+            "OpenSearch_2.15",
+            "OpenSearch_2.13",
+            "OpenSearch_2.11",
+            "OpenSearch_2.9",
+            "Elasticsearch_7.10",
+        ],
     }
 }
 

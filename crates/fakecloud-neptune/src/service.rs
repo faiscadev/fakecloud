@@ -2385,10 +2385,17 @@ impl NeptuneService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        // Newer majors are APPENDED (not prepended) so `DescribeDBEngineVersions`
+        // with `DefaultOnly=true` (which returns the first entry) keeps resolving
+        // to the established default rather than a brand-new major — see the RDS
+        // engine-major lesson.
         let versions = [
             ("1.2.1.0", "neptune1.2"),
             ("1.3.0.0", "neptune1.3"),
             ("1.3.2.1", "neptune1.3"),
+            ("1.4.1.0", "neptune1.4"),
+            ("1.4.2.0", "neptune1.4"),
+            ("1.4.5.0", "neptune1.4"),
         ];
         let inner: String = versions
             .iter()
