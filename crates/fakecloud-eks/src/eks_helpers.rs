@@ -1190,6 +1190,26 @@ pub(crate) fn cluster_version_catalog(cluster_type: &str) -> Vec<Value> {
             "standard_support",
             false,
         ),
+        (
+            "1.33",
+            "1.33.0",
+            "eks.3",
+            "2025-05-28",
+            "2026-07-28",
+            "2027-07-28",
+            "standard_support",
+            false,
+        ),
+        (
+            "1.34",
+            "1.34.0",
+            "eks.1",
+            "2025-11-11",
+            "2027-01-11",
+            "2028-01-11",
+            "standard_support",
+            false,
+        ),
     ];
     ROWS.iter()
         .map(

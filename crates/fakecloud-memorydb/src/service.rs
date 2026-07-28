@@ -1702,6 +1702,7 @@ impl MemoryDbService {
             { "Engine": "redis", "EngineVersion": "7.1", "EnginePatchVersion": "7.1.1", "ParameterGroupFamily": "memorydb_redis7" },
             { "Engine": "redis", "EngineVersion": "6.2", "EnginePatchVersion": "6.2.6", "ParameterGroupFamily": "memorydb_redis6" },
             { "Engine": "valkey", "EngineVersion": "7.2", "EnginePatchVersion": "7.2.0", "ParameterGroupFamily": "memorydb_valkey7" },
+            { "Engine": "valkey", "EngineVersion": "8.0", "EnginePatchVersion": "8.0.0", "ParameterGroupFamily": "memorydb_valkey8" },
         ]);
         ok(json!({ "EngineVersions": versions, "NextToken": Value::Null }))
     }
