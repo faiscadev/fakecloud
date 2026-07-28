@@ -35,7 +35,10 @@ use fakecloud_cloudfront::{
         StoredPublicKey,
     },
     model::{
-        DefaultCacheBehavior, DistributionConfig, Origin, OriginItems, Origins, ViewerCertificate,
+        AliasItems, Aliases, CacheBehavior, CacheBehaviorItems, CacheBehaviors,
+        CustomErrorResponse, CustomErrorResponseItems, CustomErrorResponses, DefaultCacheBehavior,
+        DistributionConfig, GeoRestriction, LocationList, LoggingConfig, Origin, OriginItems,
+        Origins, Restrictions, ViewerCertificate,
     },
     policies::{
         CachePolicyConfig, OriginAccessControlConfig, OriginRequestPolicyConfig,
@@ -4702,6 +4705,127 @@ mod tests {
             .expect("distribution still exists");
         assert_eq!(d.config.comment, "v2", "config mutated in place");
         assert!(!d.config.enabled);
+    }
+
+    #[test]
+    fn cloudfront_distribution_persists_aliases_and_extras() {
+        // bug-audit 2026-07-28 (cycle 7) C4: create/update read only a subset of
+        // DistributionConfig and dropped Aliases / CacheBehaviors /
+        // CustomErrorResponses / Logging / Restrictions -> custom-domain aliases
+        // + error/geo config silently vanished. They must round-trip.
+        let prov = make_provisioner();
+        let dist = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::Distribution",
+                "D",
+                serde_json::json!({"DistributionConfig": {
+                    "Comment": "c", "Enabled": true,
+                    "Aliases": ["cdn.example.com", "www.example.com"],
+                    "Origins": [{"Id": "o1", "DomainName": "ex.com",
+                        "CustomOriginConfig": {"HTTPPort": 80, "HTTPSPort": 443,
+                            "OriginProtocolPolicy": "http-only"}}],
+                    "DefaultCacheBehavior": {"TargetOriginId": "o1", "ViewerProtocolPolicy": "allow-all"},
+                    "CustomErrorResponses": [{"ErrorCode": 404, "ResponseCode": "200",
+                        "ResponsePagePath": "/index.html"}],
+                    "Logging": {"Bucket": "logs.s3.amazonaws.com", "IncludeCookies": true, "Prefix": "cf/"},
+                    "Restrictions": {"GeoRestriction": {"RestrictionType": "whitelist",
+                        "Locations": ["US", "CA"]}}
+                }}),
+            ))
+            .expect("distribution provisions");
+        let accounts = prov.cloudfront_state.read();
+        let d = &accounts.get("000000000000").unwrap().distributions[&dist.physical_id];
+        let aliases = d.config.aliases.as_ref().expect("aliases persisted");
+        assert_eq!(aliases.quantity, 2);
+        assert_eq!(
+            aliases.items.as_ref().unwrap().cname,
+            vec!["cdn.example.com", "www.example.com"]
+        );
+        assert_eq!(
+            d.config.custom_error_responses.as_ref().unwrap().quantity,
+            1
+        );
+        assert_eq!(
+            d.config.logging.as_ref().unwrap().bucket,
+            "logs.s3.amazonaws.com"
+        );
+        let geo = &d.config.restrictions.as_ref().unwrap().geo_restriction;
+        assert_eq!(geo.restriction_type, "whitelist");
+        assert_eq!(geo.items.as_ref().unwrap().location, vec!["US", "CA"]);
+    }
+
+    #[test]
+    fn glue_table_persists_storage_descriptor_and_partition_keys() {
+        // bug-audit 2026-07-28 (cycle 7) C3: create/update hardcoded
+        // storage_descriptor=None / partition_keys=[] / parameters={} and never
+        // read TableInput.* -> a CFN-provisioned Glue table had no columns or
+        // partitions; GetTable returned an empty schema.
+        let prov = make_provisioner();
+        prov.create_resource(&make_resource(
+            "AWS::Glue::Database",
+            "DB",
+            serde_json::json!({"DatabaseInput": {"Name": "db1"}}),
+        ))
+        .expect("database provisions");
+        prov.create_resource(&make_resource(
+            "AWS::Glue::Table",
+            "T",
+            serde_json::json!({"DatabaseName": "db1", "TableInput": {
+                "Name": "t1",
+                "StorageDescriptor": {"Columns": [{"Name": "id", "Type": "int"},
+                    {"Name": "name", "Type": "string"}], "Location": "s3://b/t1/"},
+                "PartitionKeys": [{"Name": "dt", "Type": "string"}],
+                "Parameters": {"classification": "parquet"}
+            }}),
+        ))
+        .expect("table provisions");
+
+        let accounts = prov.glue_state.read();
+        let db = &accounts
+            .get(&prov.account_id)
+            .unwrap()
+            .dbs_in(&prov.region)
+            .unwrap()["db1"];
+        let table = &db.tables["t1"];
+        let sd = table
+            .storage_descriptor
+            .as_ref()
+            .expect("storage descriptor persisted");
+        assert_eq!(sd.columns.len(), 2);
+        assert_eq!(sd.columns[0].name, "id");
+        assert_eq!(sd.location.as_deref(), Some("s3://b/t1/"));
+        assert_eq!(table.partition_keys.len(), 1);
+        assert_eq!(table.partition_keys[0].name, "dt");
+        assert_eq!(
+            table.parameters.get("classification").map(String::as_str),
+            Some("parquet")
+        );
+    }
+
+    #[test]
+    fn sfn_state_machine_revision_id_getatt_is_real() {
+        // bug-audit 2026-07-28 (cycle 7) C5: the StateMachineRevisionId GetAtt
+        // attribute was hardcoded "INITIAL"/"UPDATED" instead of the stored
+        // revision UUID, so a StateMachineVersion wired via
+        // !GetAtt Machine.StateMachineRevisionId stored the placeholder.
+        let prov = make_provisioner();
+        let sm = prov
+            .create_resource(&make_resource(
+                "AWS::StepFunctions::StateMachine",
+                "M",
+                serde_json::json!({
+                    "StateMachineName": "m1",
+                    "RoleArn": "arn:aws:iam::000000000000:role/r",
+                    "DefinitionString": "{\"StartAt\":\"A\",\"States\":{\"A\":{\"Type\":\"Pass\",\"End\":true}}}"
+                }),
+            ))
+            .expect("state machine provisions");
+        let rev = sm
+            .attributes
+            .get("StateMachineRevisionId")
+            .expect("revision id attribute present");
+        assert_ne!(rev, "INITIAL", "must expose the real revision id");
+        assert_eq!(rev.len(), 36, "revision id is a UUID: {rev}");
     }
 
     #[test]
