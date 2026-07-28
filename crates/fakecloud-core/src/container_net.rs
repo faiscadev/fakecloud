@@ -165,7 +165,21 @@ impl HostNetworking {
     /// Resolve networking for `cli`, reading `FAKECLOUD_IN_CONTAINER` from
     /// the process environment.
     pub fn detect(cli: &str) -> Self {
-        let (host_alias, add_host_arg) = resolve_host_alias(cli);
+        let (host_alias, mut add_host_arg) = resolve_host_alias(cli);
+        // A resolving `host.docker.internal` is only trustworthy evidence that
+        // the runtime provides the alias natively (and will inject it into
+        // sibling containers too) when fakecloud is itself containerized:
+        // Docker-Desktop-class runtimes inject the alias into CONTAINERS, never
+        // onto the host. On a bare native-Linux host a resolving alias is
+        // spurious (a hijacking NXDOMAIN resolver, a stray /etc/hosts entry, or
+        // a wildcard search domain), so suppressing the bridge --add-host there
+        // would break the host route sibling containers need. Gate the
+        // suppression on the in-container signal to avoid that regression.
+        let in_container = in_container_mode(std::env::var("FAKECLOUD_IN_CONTAINER").ok());
+        add_host_arg = preserve_native_host_alias(
+            add_host_arg,
+            in_container && host_alias_resolves(&host_alias),
+        );
         let sibling_host =
             resolve_sibling_host(&host_alias, std::env::var("FAKECLOUD_IN_CONTAINER").ok());
         Self {
@@ -183,6 +197,50 @@ impl HostNetworking {
             argv.push("--add-host".to_string());
             argv.push(arg.clone());
         }
+    }
+}
+
+/// How long to wait for the blocking `getaddrinfo` in [`host_alias_resolves`]
+/// before giving up and returning `false`. `getaddrinfo` has no timeout of its
+/// own, and a slow or unreachable DNS server would otherwise block a runtime
+/// thread at startup (this runs inside runtime constructors under
+/// `#[tokio::main]`). Bounding it — same tradeoff as [`CLI_PROBE_TIMEOUT`] —
+/// turns "DNS wedged" into "alias doesn't resolve", the safe default that keeps
+/// the `--add-host` bridge mapping.
+pub const HOST_ALIAS_RESOLVE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// True when `host_alias` resolves via the process resolver. The `getaddrinfo`
+/// call is blocking with no timeout of its own, so it runs on a spawned thread
+/// bounded by [`HOST_ALIAS_RESOLVE_TIMEOUT`]; on timeout we return `false` (the
+/// safe default that keeps `--add-host`). A leaked resolver thread on timeout
+/// is acceptable — same tradeoff as [`probe_cli`].
+fn host_alias_resolves(host_alias: &str) -> bool {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let alias = host_alias.to_string();
+    std::thread::spawn(move || {
+        let resolves = std::net::ToSocketAddrs::to_socket_addrs(&(alias.as_str(), 0)).is_ok();
+        let _ = tx.send(resolves);
+    });
+    rx.recv_timeout(HOST_ALIAS_RESOLVE_TIMEOUT).unwrap_or(false)
+}
+
+fn preserve_native_host_alias(
+    add_host_arg: Option<String>,
+    should_suppress: bool,
+) -> Option<String> {
+    if add_host_arg.is_some() && should_suppress {
+        // Suppress the injected `--add-host host.docker.internal:<vm-bridge-ip>`
+        // only when fakecloud is containerized AND the alias already resolves
+        // (see the gate in `detect`). In that case a Docker-Desktop-class
+        // runtime provides `host.docker.internal` natively inside every sibling
+        // container, pointing at the real host; injecting the VM bridge-gateway
+        // IP would shadow it and break the host route. On a bare host — where a
+        // hijacking resolver can make the alias resolve spuriously — the caller
+        // passes `false` here so native Linux docker keeps the bridge mapping
+        // it genuinely needs.
+        None
+    } else {
+        add_host_arg
     }
 }
 
@@ -228,14 +286,21 @@ pub fn resolve_host_alias(cli: &str) -> (String, Option<String>) {
 /// - anything else, including `None` -> fakecloud runs on the host,
 ///   siblings live on `127.0.0.1:<port>`.
 pub fn resolve_sibling_host(host_alias: &str, env_value: Option<String>) -> String {
-    let in_container = env_value
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
-    if in_container {
+    if in_container_mode(env_value) {
         host_alias.to_string()
     } else {
         "127.0.0.1".to_string()
     }
+}
+
+/// Parse the `FAKECLOUD_IN_CONTAINER` signal: `Some("1")` or a case-insensitive
+/// `Some("true")` mean fakecloud is running inside a container; anything else,
+/// including `None`, means it runs on the host. Single source of truth for the
+/// parse so `detect`'s native-alias gate and `resolve_sibling_host` can't drift.
+fn in_container_mode(env_value: Option<String>) -> bool {
+    env_value
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
 }
 
 /// Hostnames fakecloud's bundled ECR/OCI registry can be addressed by from a
@@ -351,6 +416,84 @@ mod tests {
         // way docker must get an explicit --add-host.
         assert!(add_host.is_some());
         assert!(add_host.unwrap().starts_with("host.docker.internal:"));
+    }
+
+    #[test]
+    fn native_host_alias_prevents_docker_add_host_override() {
+        let add_host =
+            preserve_native_host_alias(Some("host.docker.internal:host-gateway".to_string()), true);
+
+        assert_eq!(add_host, None);
+    }
+
+    #[test]
+    fn unresolved_host_alias_keeps_docker_add_host() {
+        let add_host = preserve_native_host_alias(
+            Some("host.docker.internal:host-gateway".to_string()),
+            false,
+        );
+
+        assert_eq!(
+            add_host.as_deref(),
+            Some("host.docker.internal:host-gateway")
+        );
+    }
+
+    #[test]
+    fn absent_docker_add_host_remains_absent() {
+        assert_eq!(preserve_native_host_alias(None, true), None);
+        assert_eq!(preserve_native_host_alias(None, false), None);
+    }
+
+    #[test]
+    fn in_container_mode_parses_truthy_values() {
+        assert!(in_container_mode(Some("1".to_string())));
+        assert!(in_container_mode(Some("true".to_string())));
+        assert!(in_container_mode(Some("True".to_string())));
+        assert!(in_container_mode(Some("TRUE".to_string())));
+    }
+
+    #[test]
+    fn in_container_mode_rejects_falsey_and_absent() {
+        assert!(!in_container_mode(None));
+        assert!(!in_container_mode(Some(String::new())));
+        assert!(!in_container_mode(Some("0".to_string())));
+        assert!(!in_container_mode(Some("false".to_string())));
+        assert!(!in_container_mode(Some("yes".to_string())));
+    }
+
+    #[test]
+    fn native_alias_gate_suppresses_only_in_container() {
+        // The gate `detect` computes: `in_container && host_alias_resolves`.
+        let add_host = || Some("host.docker.internal:172.17.0.1".to_string());
+
+        // In-container + resolves -> Desktop-class runtime provides the alias
+        // natively in siblings; drop the shadowing bridge mapping.
+        let in_container = true;
+        let resolves = true;
+        assert_eq!(
+            preserve_native_host_alias(add_host(), in_container && resolves),
+            None,
+        );
+
+        // NOT in-container (bare host) + resolves -> the resolving alias is
+        // spurious (hijacking resolver / stray hosts entry). Native Linux docker
+        // needs the bridge mapping; must NOT drop it. Regression guard.
+        let in_container = false;
+        let resolves = true;
+        assert_eq!(
+            preserve_native_host_alias(add_host(), in_container && resolves).as_deref(),
+            Some("host.docker.internal:172.17.0.1"),
+        );
+
+        // In-container + does NOT resolve -> nothing native to preserve; keep
+        // the injected mapping.
+        let in_container = true;
+        let resolves = false;
+        assert_eq!(
+            preserve_native_host_alias(add_host(), in_container && resolves).as_deref(),
+            Some("host.docker.internal:172.17.0.1"),
+        );
     }
 
     #[test]

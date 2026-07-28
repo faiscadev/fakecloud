@@ -46,6 +46,10 @@ pub struct DockerBackend {
     /// not `127.0.0.1:<port>`. Set via the `FAKECLOUD_IN_CONTAINER=1`
     /// env var baked into the published image (issue #1539 Bug 4).
     sibling_host: String,
+    /// Registry host used by the Docker daemon when pulling fakecloud ECR
+    /// images. This is separate from `sibling_host`: Docker Desktop and
+    /// OrbStack accept the local HTTP registry only over loopback.
+    registry_host: String,
     /// Isolated DOCKER_CONFIG dir with Basic auth for `127.0.0.1:<port>`.
     /// Lets `docker pull` talk to fakecloud ECR without mutating the user's
     /// `~/.docker/config.json`.
@@ -77,6 +81,8 @@ impl DockerBackend {
             add_host_arg: net.add_host_arg,
             server_port,
             sibling_host: net.sibling_host,
+            registry_host: std::env::var("FAKECLOUD_ECR_REGISTRY_HOST")
+                .unwrap_or_else(|_| "127.0.0.1".to_string()),
             docker_config,
         })
     }
@@ -108,15 +114,12 @@ impl DockerBackend {
             RuntimeError::ContainerStartFailed("PackageType=Image function has no ImageUri".into())
         })?;
 
-        // Point the registry host at `sibling_host` (not a bare
-        // `127.0.0.1`): when fakecloud runs in a container the daemon and
-        // the spawned sibling reach fakecloud's published registry port via
-        // `host.docker.internal`, since `127.0.0.1` is the host loopback
-        // from the daemon's view (issue #1539, bug 0.8). On the host,
-        // `sibling_host` is `127.0.0.1`, unchanged.
+        // Docker pulls through the host daemon. Unlike the Lambda callback
+        // path, local ECR must use the loopback registry on Docker Desktop
+        // and OrbStack because it is served over HTTP.
         let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local_at(
             image,
-            &self.sibling_host,
+            &self.registry_host,
             self.server_port,
         );
         let pull_uri = local_pull_uri.as_deref().unwrap_or(image);
@@ -495,7 +498,7 @@ impl LambdaBackend for DockerBackend {
         // back to the URI as-is for public-ECR / Docker Hub / Quay images.
         let local_uri = fakecloud_core::ecr_uri::translate_to_local_at(
             image,
-            &self.sibling_host,
+            &self.registry_host,
             self.server_port,
         );
         let pull_uri = local_uri.as_deref().unwrap_or(image);

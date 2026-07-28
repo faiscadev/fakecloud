@@ -97,7 +97,7 @@ impl LambdaDelivery for LambdaDeliveryImpl {
                 });
             }
 
-            if func.code_zip.is_none() {
+            if func.code_zip.is_none() && func.package_type != "Image" {
                 return Err(format!(
                     "Function {function_name} has no deployment package"
                 ));
