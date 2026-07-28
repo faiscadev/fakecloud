@@ -756,4 +756,175 @@ impl ResourceProvisioner {
         state.response_headers_policies.remove(physical_id);
         Ok(())
     }
+
+    // --- In-place policy updates ---
+    //
+    // These policies mint a random id that a Distribution stores via
+    // DefaultCacheBehavior.{CachePolicyId,OriginRequestPolicyId,
+    // ResponseHeadersPolicyId}. Reprovision on a config edit churns the id and
+    // dangles that reference (the Distribution is not re-run in the same update).
+    // AWS updates the policy in place (UpdateCachePolicy etc.), so rebuild the
+    // config, preserve the id, and bump the ETag.
+
+    pub(crate) fn update_cf_cache_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("CachePolicyConfig")
+            .ok_or("CachePolicyConfig is required")?;
+        let name = cfg
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("CachePolicyConfig.Name is required")?
+            .to_string();
+        let min_ttl = cfg
+            .get("MinTTL")
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            })
+            .unwrap_or(0);
+        let default_ttl = cfg.get("DefaultTTL").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
+        let max_ttl = cfg.get("MaxTTL").and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+        });
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
+
+        let id = existing.physical_id.clone();
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let p = state
+            .cache_policies
+            .get_mut(&id)
+            .ok_or_else(|| format!("Cache policy {id} not yet provisioned"))?;
+        p.config = CachePolicyConfig {
+            comment,
+            name,
+            default_ttl,
+            max_ttl,
+            min_ttl,
+            parameters_in_cache_key_and_forwarded_to_origin: None,
+        };
+        p.etag = etag;
+        p.last_modified_time = Utc::now();
+        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+    }
+
+    pub(crate) fn update_cf_origin_request_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("OriginRequestPolicyConfig")
+            .ok_or("OriginRequestPolicyConfig is required")?;
+        let name = cfg
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("OriginRequestPolicyConfig.Name is required")?
+            .to_string();
+        let header_behavior = cfg
+            .get("HeadersConfig")
+            .and_then(|v| v.get("HeaderBehavior"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        let cookie_behavior = cfg
+            .get("CookiesConfig")
+            .and_then(|v| v.get("CookieBehavior"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        let query_string_behavior = cfg
+            .get("QueryStringsConfig")
+            .and_then(|v| v.get("QueryStringBehavior"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("none")
+            .to_string();
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
+
+        let id = existing.physical_id.clone();
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let p = state
+            .origin_request_policies
+            .get_mut(&id)
+            .ok_or_else(|| format!("Origin request policy {id} not yet provisioned"))?;
+        p.config = OriginRequestPolicyConfig {
+            comment,
+            name,
+            headers_config: OriginRequestPolicyHeadersConfig {
+                header_behavior,
+                headers: None,
+            },
+            cookies_config: OriginRequestPolicyCookiesConfig {
+                cookie_behavior,
+                cookies: None,
+            },
+            query_strings_config: OriginRequestPolicyQueryStringsConfig {
+                query_string_behavior,
+                query_strings: None,
+            },
+        };
+        p.etag = etag;
+        p.last_modified_time = Utc::now();
+        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+    }
+
+    pub(crate) fn update_cf_response_headers_policy(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("ResponseHeadersPolicyConfig")
+            .ok_or("ResponseHeadersPolicyConfig is required")?;
+        let name = cfg
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("ResponseHeadersPolicyConfig.Name is required")?
+            .to_string();
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
+
+        let id = existing.physical_id.clone();
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let p = state
+            .response_headers_policies
+            .get_mut(&id)
+            .ok_or_else(|| format!("Response headers policy {id} not yet provisioned"))?;
+        p.config = ResponseHeadersPolicyConfig {
+            comment,
+            name,
+            cors_config: None,
+            security_headers_config: None,
+            server_timing_headers_config: None,
+            custom_headers_config: None,
+            remove_headers_config: None,
+        };
+        p.etag = etag;
+        p.last_modified_time = Utc::now();
+        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+    }
 }

@@ -1978,6 +1978,15 @@ impl ResourceProvisioner {
             "AWS::CloudFront::Distribution" => {
                 Some(self.update_cf_distribution(existing, new_def)?)
             }
+            // In-place updates: reprovision would churn the random policy id that
+            // a Distribution stores as DefaultCacheBehavior.*PolicyId.
+            "AWS::CloudFront::CachePolicy" => Some(self.update_cf_cache_policy(existing, new_def)?),
+            "AWS::CloudFront::OriginRequestPolicy" => {
+                Some(self.update_cf_origin_request_policy(existing, new_def)?)
+            }
+            "AWS::CloudFront::ResponseHeadersPolicy" => {
+                Some(self.update_cf_response_headers_policy(existing, new_def)?)
+            }
             // In-place updates: reprovision would churn the vpc-/subnet-/rtb- id
             // and orphan every child/sibling that references it (subnets, SGs,
             // route tables, routes, associations, instances, ENIs).
@@ -5128,6 +5137,81 @@ mod tests {
                 .map(|c| c.association_count),
             Some(3),
             "association_count preserved (not reset by reprovision)"
+        );
+    }
+
+    #[test]
+    fn cloudfront_policy_updates_preserve_ids() {
+        // bug-audit 2026-07-27 (cycle 6): reprovision churned the random policy id
+        // that a Distribution stores as DefaultCacheBehavior.*PolicyId. Updates
+        // must be in place.
+        let prov = make_provisioner();
+        let cp = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::CachePolicy",
+                "CP",
+                serde_json::json!({"CachePolicyConfig": {"Name": "cp", "MinTTL": 100}}),
+            ))
+            .expect("cache policy provisions");
+        let cp_id = cp.physical_id.clone();
+        let cp_up = prov
+            .update_resource(
+                &cp,
+                &make_resource(
+                    "AWS::CloudFront::CachePolicy",
+                    "CP",
+                    serde_json::json!({"CachePolicyConfig": {"Name": "cp", "MinTTL": 200}}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(cp_up.physical_id, cp_id, "cache policy id preserved");
+
+        let orp = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::OriginRequestPolicy",
+                "ORP",
+                serde_json::json!({"OriginRequestPolicyConfig": {"Name": "orp",
+                    "HeadersConfig": {"HeaderBehavior": "none"},
+                    "CookiesConfig": {"CookieBehavior": "none"},
+                    "QueryStringsConfig": {"QueryStringBehavior": "none"}}}),
+            ))
+            .expect("origin request policy provisions");
+        let orp_id = orp.physical_id.clone();
+        let orp_up = prov
+            .update_resource(
+                &orp,
+                &make_resource(
+                    "AWS::CloudFront::OriginRequestPolicy",
+                    "ORP",
+                    serde_json::json!({"OriginRequestPolicyConfig": {"Name": "orp",
+                        "HeadersConfig": {"HeaderBehavior": "allViewer"},
+                        "CookiesConfig": {"CookieBehavior": "none"},
+                        "QueryStringsConfig": {"QueryStringBehavior": "none"}}}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(
+            orp_up.physical_id, orp_id,
+            "origin request policy id preserved"
+        );
+
+        let accounts = prov.cloudfront_state.read();
+        let state = accounts.get("000000000000").unwrap();
+        assert_eq!(
+            state.cache_policies.get(&cp_id).map(|p| p.config.min_ttl),
+            Some(200),
+            "cache policy config updated in place"
+        );
+        assert_eq!(
+            state.origin_request_policies.get(&orp_id).map(|p| p
+                .config
+                .headers_config
+                .header_behavior
+                .clone()),
+            Some("allViewer".to_string()),
+            "origin request policy config updated in place"
         );
     }
 
