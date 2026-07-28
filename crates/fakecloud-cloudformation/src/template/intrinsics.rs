@@ -346,6 +346,39 @@ pub(super) fn resolve_refs_full(
                     }
                 }
             }
+            // Fn::GetAZs: the availability zones for a region. The argument is
+            // usually the empty string (meaning the stack's region), but may be
+            // an explicit region literal or `{"Ref":"AWS::Region"}`. Real CFN
+            // returns the region's AZ list; without this arm the object fell
+            // through unresolved and the ubiquitous `!Select [0, !GetAZs ""]`
+            // idiom yielded null (Select got an object, not an array). Matches
+            // DescribeAvailabilityZones' a/b/c set.
+            if let Some(azs_val) = map.get("Fn::GetAZs") {
+                let resolved = resolve_refs_full(
+                    azs_val,
+                    parameters,
+                    _resources,
+                    resource_physical_ids,
+                    resource_attributes,
+                    imports,
+                    conditions,
+                );
+                let region = match &resolved {
+                    Value::String(s) if !s.is_empty() => s.clone(),
+                    _ => parameters.get("AWS::Region").cloned().unwrap_or_default(),
+                };
+                let region = if region.is_empty() {
+                    "us-east-1".to_string()
+                } else {
+                    region
+                };
+                return Value::Array(
+                    ["a", "b", "c"]
+                        .iter()
+                        .map(|s| Value::String(format!("{region}{s}")))
+                        .collect(),
+                );
+            }
             // Fn::Select: pick element at index from an array. Args:
             // [index, list]. The list may itself be an Fn::Split / Ref.
             if let Some(sel_val) = map.get("Fn::Select") {
@@ -546,6 +579,14 @@ pub(super) fn resolve_refs_full(
                             result = result.replace(&format!("${{{logical}.{attr}}}"), value);
                         }
                     }
+                    // 6. Unescape `${!Literal}` -> `${Literal}`. `${!` is CFN's
+                    //    escape for a literal `${`, so these were deliberately
+                    //    never substituted above (the leading `!` prevents any
+                    //    key match); strip the `!` now. Without this the escape
+                    //    leaked through verbatim and corrupted IAM policy
+                    //    variables (`${!aws:username}` stayed literal instead of
+                    //    rendering `${aws:username}`).
+                    result = result.replace("${!", "${");
                     return Value::String(result);
                 }
             }
