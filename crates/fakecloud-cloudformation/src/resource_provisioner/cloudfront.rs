@@ -927,4 +927,199 @@ impl ResourceProvisioner {
         p.last_modified_time = Utc::now();
         Ok(ProvisionResult::new(id.clone()).with("Id", id))
     }
+
+    pub(crate) fn update_cf_origin_access_control(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("OriginAccessControlConfig")
+            .ok_or("OriginAccessControlConfig is required")?;
+        let name = cfg
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("OriginAccessControlConfig.Name is required")?
+            .to_string();
+        let signing_protocol = cfg
+            .get("SigningProtocol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("sigv4")
+            .to_string();
+        let signing_behavior = cfg
+            .get("SigningBehavior")
+            .and_then(|v| v.as_str())
+            .unwrap_or("always")
+            .to_string();
+        let origin_type = cfg
+            .get("OriginAccessControlOriginType")
+            .and_then(|v| v.as_str())
+            .ok_or("OriginAccessControlConfig.OriginAccessControlOriginType is required")?
+            .to_string();
+        let description = cfg
+            .get("Description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
+
+        let id = existing.physical_id.clone();
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let oac = state
+            .origin_access_controls
+            .get_mut(&id)
+            .ok_or_else(|| format!("Origin access control {id} not yet provisioned"))?;
+        oac.config = OriginAccessControlConfig {
+            name,
+            description,
+            signing_protocol,
+            signing_behavior,
+            origin_access_control_origin_type: origin_type,
+        };
+        oac.etag = etag;
+        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+    }
+
+    pub(crate) fn update_cf_public_key(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("PublicKeyConfig")
+            .ok_or("PublicKeyConfig is required")?;
+        let name = cfg
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("PublicKeyConfig.Name is required")?
+            .to_string();
+        let encoded_key = cfg
+            .get("EncodedKey")
+            .and_then(|v| v.as_str())
+            .ok_or("PublicKeyConfig.EncodedKey is required")?
+            .to_string();
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
+
+        let id = existing.physical_id.clone();
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let pk = state
+            .public_keys
+            .get_mut(&id)
+            .ok_or_else(|| format!("Public key {id} not yet provisioned"))?;
+        // CallerReference is immutable in CloudFront; preserve the stored one.
+        let caller_reference = pk.config.caller_reference.clone();
+        pk.config = PublicKeyConfig {
+            caller_reference,
+            name,
+            encoded_key,
+            comment,
+        };
+        pk.etag = etag;
+        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+    }
+
+    pub(crate) fn update_cf_key_group(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let cfg = resource
+            .properties
+            .get("KeyGroupConfig")
+            .ok_or("KeyGroupConfig is required")?;
+        let name = cfg
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .ok_or("KeyGroupConfig.Name is required")?
+            .to_string();
+        let items: Vec<String> = cfg
+            .get("Items")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
+
+        let id = existing.physical_id.clone();
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let kg = state
+            .key_groups
+            .get_mut(&id)
+            .ok_or_else(|| format!("Key group {id} not yet provisioned"))?;
+        kg.config = KeyGroupConfig {
+            name,
+            items: KeyGroupItems { public_key: items },
+            comment,
+        };
+        kg.etag = etag;
+        kg.last_modified_time = Utc::now();
+        Ok(ProvisionResult::new(id.clone()).with("Id", id))
+    }
+
+    pub(crate) fn update_cf_function(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let function_code = props
+            .get("FunctionCode")
+            .and_then(|v| v.as_str())
+            .ok_or("FunctionCode is required")?
+            .to_string();
+        let cfg = props
+            .get("FunctionConfig")
+            .ok_or("FunctionConfig is required")?;
+        let runtime = cfg
+            .get("Runtime")
+            .and_then(|v| v.as_str())
+            .unwrap_or("cloudfront-js-2.0")
+            .to_string();
+        let comment = cfg
+            .get("Comment")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let etag = format!("E{}", fakecloud_core::ids::short_id(7).to_uppercase());
+
+        // Functions are keyed by Name (== physical id). Name is the resource
+        // identifier, so an in-place update mutates the dev-stage code + config
+        // and preserves the ARN Ref/GetAtt targets. A Name change would fall
+        // back to replacement through the generic path.
+        let id = existing.physical_id.clone();
+        let mut accounts = self.cloudfront_state.write();
+        let state = accounts.entry("000000000000");
+        let func = state
+            .functions
+            .get_mut(&id)
+            .ok_or_else(|| format!("Function {id} not yet provisioned"))?;
+        func.config = FunctionConfig {
+            comment,
+            runtime,
+            key_value_store_associations: func.config.key_value_store_associations.clone(),
+        };
+        func.function_code = function_code;
+        func.status = "UNPUBLISHED".to_string();
+        func.stage = "DEVELOPMENT".to_string();
+        func.etag = etag;
+        func.last_modified_time = Utc::now();
+        let function_arn = func.function_arn.clone();
+        Ok(ProvisionResult::new(id.clone())
+            .with("FunctionARN", function_arn)
+            .with("Stage", "DEVELOPMENT"))
+    }
 }

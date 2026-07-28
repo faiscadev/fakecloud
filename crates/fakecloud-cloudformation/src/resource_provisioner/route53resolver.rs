@@ -317,6 +317,83 @@ impl ResourceProvisioner {
             .with("Name", name_att))
     }
 
+    pub(super) fn update_r53r_resolver_endpoint(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        // In-place mutate the fields AWS's UpdateResolverEndpoint touches
+        // (Name / ResolverEndpointType / Protocols / PreferredInstanceType +
+        // the metric/DNS64 toggles). Direction, SecurityGroupIds, IpAddresses
+        // and the host VPC are immutable/replace-only, so preserve them along
+        // with the id/arn — reprovision would churn the rslvr-*-id that sibling
+        // ResolverRule.ResolverEndpointId / associations reference.
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let name = props.get("Name").and_then(|v| v.as_str()).map(String::from);
+        let tags = self.r53r_tags(props);
+        let (arn, ip_count, direction, host_vpc) = {
+            let mut st = self.route53resolver_state.write();
+            let acc = st.account_mut(&self.account_id);
+            let rec = acc
+                .endpoints
+                .get_mut(&id)
+                .ok_or_else(|| format!("Resolver endpoint {id} not yet provisioned"))?;
+            rec.endpoint.name = name.clone();
+            if let Some(t) = props.get("ResolverEndpointType").and_then(|v| v.as_str()) {
+                rec.endpoint.resolver_endpoint_type = t.to_string();
+            }
+            if let Some(p) = props.get("Protocols").and_then(|v| v.as_array()) {
+                rec.endpoint.protocols = p
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect();
+            }
+            if let Some(v) = props.get("PreferredInstanceType").and_then(|v| v.as_str()) {
+                rec.endpoint.preferred_instance_type = Some(v.to_string());
+            }
+            if let Some(b) = props.get("Dns64Enabled").and_then(|v| v.as_bool()) {
+                rec.endpoint.dns64_enabled = Some(b);
+            }
+            if let Some(b) = props
+                .get("Ipv6InternetAccessEnabled")
+                .and_then(|v| v.as_bool())
+            {
+                rec.endpoint.ipv6_internet_access_enabled = Some(b);
+            }
+            if let Some(b) = props
+                .get("RniEnhancedMetricsEnabled")
+                .and_then(|v| v.as_bool())
+            {
+                rec.endpoint.rni_enhanced_metrics_enabled = Some(b);
+            }
+            if let Some(b) = props
+                .get("TargetNameServerMetricsEnabled")
+                .and_then(|v| v.as_bool())
+            {
+                rec.endpoint.target_name_server_metrics_enabled = Some(b);
+            }
+            rec.endpoint.modification_time = now_rfc3339();
+            let arn = rec.endpoint.arn.clone();
+            let ip_count = rec.endpoint.ip_address_count;
+            let direction = rec.endpoint.direction.clone();
+            let host_vpc = rec.endpoint.host_vpc_id.clone();
+            if tags.is_empty() {
+                acc.tags.remove(&arn);
+            } else {
+                acc.tags.insert(arn.clone(), tags);
+            }
+            (arn, ip_count, direction, host_vpc)
+        };
+        Ok(ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("ResolverEndpointId", id)
+            .with("IpAddressCount", ip_count.to_string())
+            .with("Direction", direction)
+            .with("HostVPCId", host_vpc)
+            .with("Name", name.unwrap_or_default()))
+    }
+
     pub(super) fn delete_r53r_resolver_endpoint(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
         if let Some(acc) = st.accounts.get_mut(&self.account_id) {
