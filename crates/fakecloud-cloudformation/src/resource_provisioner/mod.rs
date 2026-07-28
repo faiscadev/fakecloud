@@ -1933,6 +1933,9 @@ impl ResourceProvisioner {
             }
             // In-place updates: reprovision would churn the random rslvr-* id,
             // dangling sibling associations / rules that reference it.
+            "AWS::Route53Resolver::ResolverEndpoint" => {
+                Some(self.update_r53r_resolver_endpoint(existing, new_def)?)
+            }
             "AWS::Route53Resolver::ResolverRule" => {
                 Some(self.update_r53r_resolver_rule(existing, new_def)?)
             }
@@ -1987,6 +1990,15 @@ impl ResourceProvisioner {
             "AWS::CloudFront::ResponseHeadersPolicy" => {
                 Some(self.update_cf_response_headers_policy(existing, new_def)?)
             }
+            // In-place updates: reprovision would churn the random id these
+            // types mint, dangling a Distribution's TrustedKeyGroups /
+            // FunctionAssociations / OAC reference or a KeyGroup's key-id list.
+            "AWS::CloudFront::OriginAccessControl" => {
+                Some(self.update_cf_origin_access_control(existing, new_def)?)
+            }
+            "AWS::CloudFront::PublicKey" => Some(self.update_cf_public_key(existing, new_def)?),
+            "AWS::CloudFront::KeyGroup" => Some(self.update_cf_key_group(existing, new_def)?),
+            "AWS::CloudFront::Function" => Some(self.update_cf_function(existing, new_def)?),
             // In-place updates: reprovision would churn the vpc-/subnet-/rtb- id
             // and orphan every child/sibling that references it (subnets, SGs,
             // route tables, routes, associations, instances, ENIs).
@@ -5212,6 +5224,179 @@ mod tests {
                 .clone()),
             Some("allViewer".to_string()),
             "origin request policy config updated in place"
+        );
+    }
+
+    #[test]
+    fn cloudfront_keygroup_family_updates_preserve_ids() {
+        // bug-audit 2026-07-27 (cycle 6) tail: KeyGroup / PublicKey / Function /
+        // OriginAccessControl mint a random id referenced by a Distribution's
+        // TrustedKeyGroups / FunctionAssociations / OAC. A config edit must
+        // update in place, not churn the id.
+        let prov = make_provisioner();
+
+        let pk = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::PublicKey",
+                "PK",
+                serde_json::json!({"PublicKeyConfig": {"Name": "pk", "EncodedKey": "-----KEY-----",
+                    "CallerReference": "cr-1", "Comment": "v1"}}),
+            ))
+            .expect("public key provisions");
+        let pk_id = pk.physical_id.clone();
+        let pk_up = prov
+            .update_resource(
+                &pk,
+                &make_resource(
+                    "AWS::CloudFront::PublicKey",
+                    "PK",
+                    serde_json::json!({"PublicKeyConfig": {"Name": "pk", "EncodedKey": "-----KEY-----",
+                        "CallerReference": "cr-1", "Comment": "v2"}}),
+                ),
+            )
+            .expect("pk update ok")
+            .expect("updatable");
+        assert_eq!(pk_up.physical_id, pk_id, "public key id preserved");
+
+        let kg = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::KeyGroup",
+                "KG",
+                serde_json::json!({"KeyGroupConfig": {"Name": "kg", "Items": [pk_id.clone()]}}),
+            ))
+            .expect("key group provisions");
+        let kg_id = kg.physical_id.clone();
+        let kg_up = prov
+            .update_resource(
+                &kg,
+                &make_resource(
+                    "AWS::CloudFront::KeyGroup",
+                    "KG",
+                    serde_json::json!({"KeyGroupConfig": {"Name": "kg2", "Items": [pk_id.clone()]}}),
+                ),
+            )
+            .expect("kg update ok")
+            .expect("updatable");
+        assert_eq!(kg_up.physical_id, kg_id, "key group id preserved");
+
+        let oac = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::OriginAccessControl",
+                "OAC",
+                serde_json::json!({"OriginAccessControlConfig": {"Name": "oac",
+                    "OriginAccessControlOriginType": "s3", "SigningBehavior": "always",
+                    "SigningProtocol": "sigv4"}}),
+            ))
+            .expect("oac provisions");
+        let oac_id = oac.physical_id.clone();
+        let oac_up = prov
+            .update_resource(
+                &oac,
+                &make_resource(
+                    "AWS::CloudFront::OriginAccessControl",
+                    "OAC",
+                    serde_json::json!({"OriginAccessControlConfig": {"Name": "oac",
+                        "OriginAccessControlOriginType": "s3", "SigningBehavior": "never",
+                        "SigningProtocol": "sigv4"}}),
+                ),
+            )
+            .expect("oac update ok")
+            .expect("updatable");
+        assert_eq!(oac_up.physical_id, oac_id, "oac id preserved");
+
+        let func = prov
+            .create_resource(&make_resource(
+                "AWS::CloudFront::Function",
+                "FN",
+                serde_json::json!({"Name": "fn1", "FunctionCode": "function handler(){}",
+                    "FunctionConfig": {"Runtime": "cloudfront-js-2.0", "Comment": "v1"}}),
+            ))
+            .expect("function provisions");
+        let fn_id = func.physical_id.clone();
+        let fn_up = prov
+            .update_resource(
+                &func,
+                &make_resource(
+                    "AWS::CloudFront::Function",
+                    "FN",
+                    serde_json::json!({"Name": "fn1", "FunctionCode": "function handler(){return 2;}",
+                        "FunctionConfig": {"Runtime": "cloudfront-js-2.0", "Comment": "v2"}}),
+                ),
+            )
+            .expect("fn update ok")
+            .expect("updatable");
+        assert_eq!(fn_up.physical_id, fn_id, "function id preserved");
+
+        let accounts = prov.cloudfront_state.read();
+        let state = accounts.get("000000000000").unwrap();
+        assert_eq!(
+            state
+                .public_keys
+                .get(&pk_id)
+                .and_then(|p| p.config.comment.clone()),
+            Some("v2".to_string()),
+            "public key comment updated in place"
+        );
+        assert_eq!(
+            state.key_groups.get(&kg_id).map(|g| g.config.name.clone()),
+            Some("kg2".to_string()),
+            "key group name updated in place"
+        );
+        assert_eq!(
+            state
+                .origin_access_controls
+                .get(&oac_id)
+                .map(|o| o.config.signing_behavior.clone()),
+            Some("never".to_string()),
+            "oac signing behavior updated in place"
+        );
+        assert_eq!(
+            state.functions.get(&fn_id).map(|f| f.function_code.clone()),
+            Some("function handler(){return 2;}".to_string()),
+            "function code updated in place"
+        );
+    }
+
+    #[test]
+    fn route53resolver_endpoint_update_preserves_id() {
+        // bug-audit 2026-07-27 (cycle 6) tail: reprovision churned the
+        // rslvr-*-id that sibling ResolverRule.ResolverEndpointId references.
+        // Name/Protocols edits must apply in place.
+        let prov = make_provisioner();
+        let ep = prov
+            .create_resource(&make_resource(
+                "AWS::Route53Resolver::ResolverEndpoint",
+                "EP",
+                serde_json::json!({"Direction": "OUTBOUND", "Name": "ep1",
+                    "SecurityGroupIds": ["sg-1"],
+                    "IpAddresses": [{"SubnetId": "subnet-1", "Ip": "10.0.0.5"}]}),
+            ))
+            .expect("endpoint provisions");
+        let ep_id = ep.physical_id.clone();
+        let ep_up = prov
+            .update_resource(
+                &ep,
+                &make_resource(
+                    "AWS::Route53Resolver::ResolverEndpoint",
+                    "EP",
+                    serde_json::json!({"Direction": "OUTBOUND", "Name": "ep2",
+                        "SecurityGroupIds": ["sg-1"],
+                        "Protocols": ["Do53", "DoH"],
+                        "IpAddresses": [{"SubnetId": "subnet-1", "Ip": "10.0.0.5"}]}),
+                ),
+            )
+            .expect("endpoint update ok")
+            .expect("updatable");
+        assert_eq!(ep_up.physical_id, ep_id, "resolver endpoint id preserved");
+
+        let st = prov.route53resolver_state.read();
+        let acc = st.accounts.get(&prov.account_id).unwrap();
+        let rec = acc.endpoints.get(&ep_id).unwrap();
+        assert_eq!(rec.endpoint.name.as_deref(), Some("ep2"), "name updated");
+        assert_eq!(
+            rec.endpoint.protocols,
+            vec!["Do53".to_string(), "DoH".to_string()],
+            "protocols updated in place"
         );
     }
 
