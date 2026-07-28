@@ -648,6 +648,7 @@ mod tests {
                 db_instance_status: "available".to_string(),
                 master_username: "admin".to_string(),
                 db_name: Some("postgres".to_string()),
+                db_subnet_group_name: None,
                 endpoint_address: "127.0.0.1".to_string(),
                 port: 5432,
                 allocated_storage: 20,
