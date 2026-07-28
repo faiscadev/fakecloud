@@ -817,6 +817,51 @@ Resources:
     }
 
     #[test]
+    fn fn_getazs_returns_region_azs() {
+        // bug-audit 2026-07-28 (cycle 7) C1: Fn::GetAZs was unimplemented, so
+        // the canonical `!Select [0, !GetAZs ""]` subnet idiom fed Select an
+        // object and yielded null. GetAZs must resolve to the region's AZ list.
+        let (mut p, r, ids, attrs) = empty();
+        p.insert("AWS::Region".to_string(), "us-west-2".to_string());
+        let v: Value = serde_json::from_str(r#"{"Fn::GetAZs": ""}"#).unwrap();
+        assert_eq!(
+            resolve_refs(&v, &p, &r, &ids, &attrs),
+            serde_json::json!(["us-west-2a", "us-west-2b", "us-west-2c"])
+        );
+        // The ubiquitous Select-over-GetAZs pattern now resolves.
+        let sel: Value =
+            serde_json::from_str(r#"{"Fn::Select": [1, {"Fn::GetAZs": ""}]}"#).unwrap();
+        assert_eq!(
+            resolve_refs(&sel, &p, &r, &ids, &attrs),
+            Value::String("us-west-2b".to_string())
+        );
+    }
+
+    #[test]
+    fn fn_getazs_explicit_region() {
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::GetAZs": "eu-west-1"}"#).unwrap();
+        assert_eq!(
+            resolve_refs(&v, &p, &r, &ids, &attrs),
+            serde_json::json!(["eu-west-1a", "eu-west-1b", "eu-west-1c"])
+        );
+    }
+
+    #[test]
+    fn fn_sub_unescapes_literal_variable() {
+        // bug-audit 2026-07-28 (cycle 7) C2: `${!X}` is CFN's escape for a
+        // literal `${X}` (used to protect IAM policy variables). The render loop
+        // never stripped the `!`, corrupting the policy variable. `${!X}` must
+        // render `${X}`.
+        let (p, r, ids, attrs) = empty();
+        let v: Value = serde_json::from_str(r#"{"Fn::Sub": "arn ${!aws:username} end"}"#).unwrap();
+        assert_eq!(
+            resolve_refs(&v, &p, &r, &ids, &attrs),
+            Value::String("arn ${aws:username} end".to_string())
+        );
+    }
+
+    #[test]
     fn fn_length_counts_array() {
         let (p, r, ids, attrs) = empty();
         let v: Value = serde_json::from_str(r#"{"Fn::Length": [1,2,3,4]}"#).unwrap();
