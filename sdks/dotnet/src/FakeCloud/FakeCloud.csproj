@@ -9,7 +9,7 @@
     <AssemblyName>FakeCloud</AssemblyName>
 
     <PackageId>FakeCloud</PackageId>
-    <Version>0.44.6</Version>
+    <Version>0.44.7</Version>
     <Authors>fakecloud contributors</Authors>
     <Description>C#/.NET client SDK for fakecloud, a local AWS cloud emulator. Provides typed access to the fakecloud introspection and simulation API for test assertions.</Description>
     <PackageLicenseExpression>AGPL-3.0-or-later</PackageLicenseExpression>
