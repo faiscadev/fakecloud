@@ -5,8 +5,14 @@
 # tries to pull that tag first and falls back to building from this
 # Dockerfile locally when the pull fails (dev / unreleased / airgapped).
 # PG_VERSION must sit before the first FROM so its substitution is
-# available across all stages. Inside each stage it has to be
-# re-declared (Dockerfile spec) for `RUN`/`COPY` references to expand.
+# available there. Do NOT re-declare it inside the postgres stage: that
+# image already sets `ENV PG_VERSION=<major>.<minor>-<n>.pgdg<rel>` (e.g.
+# 18.4-1.pgdg13+1), and the legacy builder resolves the ENV ahead of the
+# ARG, so `postgresql-plpython3-${PG_VERSION}` becomes the full Debian
+# version string and apt exits 100. BuildKit prefers the ARG and hides
+# the clash, but fakecloud shells out to whatever `docker` it finds —
+# in-container CLIs usually have no buildx and fall back to the legacy
+# builder. Use the base image's own PG_MAJOR after FROM instead.
 ARG PG_VERSION=16
 
 # Rebuild `gosu` from source with current Go to eliminate the upstream
@@ -19,7 +25,6 @@ ENV CGO_ENABLED=0
 RUN go install -ldflags='-s -w' github.com/tianon/gosu@v0.0.0-20250923190938-6456aaa0f3c8
 
 FROM postgres:${PG_VERSION}
-ARG PG_VERSION
 
 COPY --from=gosu-builder /go/bin/gosu /usr/local/bin/gosu
 RUN chmod 0755 /usr/local/bin/gosu
@@ -32,11 +37,11 @@ RUN chmod 0755 /usr/local/bin/gosu
 RUN apt-get update \
     && apt-get upgrade -y --no-install-recommends \
     && apt-get install -y --no-install-recommends \
-        postgresql-plpython3-${PG_VERSION} \
+        postgresql-plpython3-${PG_MAJOR} \
         ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY aws_commons.control aws_commons--1.1.sql aws_commons--1.0--1.1.sql \
      aws_lambda.control aws_lambda--1.0.sql \
      aws_s3.control aws_s3--1.0.sql \
-     /usr/share/postgresql/${PG_VERSION}/extension/
+     /usr/share/postgresql/${PG_MAJOR}/extension/
