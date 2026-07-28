@@ -171,8 +171,13 @@ impl ResourceProvisioner {
                 update_time: now,
                 last_access_time: None,
                 retention: input.get("Retention").and_then(|v| v.as_i64()).unwrap_or(0),
-                storage_descriptor: None,
-                partition_keys: Vec::new(),
+                storage_descriptor: input
+                    .get("StorageDescriptor")
+                    .and_then(fakecloud_glue::parse_storage_descriptor),
+                partition_keys: input
+                    .get("PartitionKeys")
+                    .map(fakecloud_glue::parse_columns)
+                    .unwrap_or_default(),
                 view_original_text: input
                     .get("ViewOriginalText")
                     .and_then(|v| v.as_str())
@@ -185,7 +190,10 @@ impl ResourceProvisioner {
                     .get("TableType")
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
-                parameters: BTreeMap::new(),
+                parameters: input
+                    .get("Parameters")
+                    .map(fakecloud_glue::parse_string_map)
+                    .unwrap_or_default(),
                 partitions: BTreeMap::new(),
             },
         );
@@ -259,8 +267,22 @@ impl ResourceProvisioner {
             .get("TableType")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // AWS UpdateTable replaces the schema-bearing members from TableInput.
+        // Apply them so a CFN update actually changes the columns/partition
+        // keys/parameters; table.partitions (separate Glue::Partition
+        // resources) are preserved.
+        table.storage_descriptor = input
+            .get("StorageDescriptor")
+            .and_then(fakecloud_glue::parse_storage_descriptor);
+        table.partition_keys = input
+            .get("PartitionKeys")
+            .map(fakecloud_glue::parse_columns)
+            .unwrap_or_default();
+        table.parameters = input
+            .get("Parameters")
+            .map(fakecloud_glue::parse_string_map)
+            .unwrap_or_default();
         table.update_time = Utc::now();
-        // table.partitions and storage_descriptor location intentionally kept.
         Ok(ProvisionResult::new(physical_id))
     }
 

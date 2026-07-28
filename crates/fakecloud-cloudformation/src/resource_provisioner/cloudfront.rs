@@ -53,16 +53,115 @@ impl ResourceProvisioner {
         Ok(())
     }
 
+    /// Translate the CFN-flat `DistributionConfig` members that the create /
+    /// update paths would otherwise drop -- Aliases, CacheBehaviors,
+    /// CustomErrorResponses, Logging, Restrictions -- into the CloudFront wire
+    /// shape and apply them. CFN spells these as flat lists / a bare object;
+    /// the service model nests them under Quantity+Items, mirroring the Origins
+    /// translation. Only members present in the template are set, so an absent
+    /// one stays `None` (create) / is cleared on update.
+    fn apply_cfn_distribution_extras(config: &mut DistributionConfig, cfg: &serde_json::Value) {
+        // Aliases: flat ["a.example.com", ...].
+        config.aliases = cfg.get("Aliases").and_then(|v| v.as_array()).map(|arr| {
+            let cname: Vec<String> = arr
+                .iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect();
+            Aliases {
+                quantity: cname.len() as i32,
+                items: Some(AliasItems { cname }),
+            }
+        });
+        // CacheBehaviors: flat [{ PathPattern, ... }, ...].
+        config.cache_behaviors = cfg
+            .get("CacheBehaviors")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                let cache_behavior: Vec<CacheBehavior> = arr
+                    .iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect();
+                CacheBehaviors {
+                    quantity: cache_behavior.len() as i32,
+                    items: Some(CacheBehaviorItems { cache_behavior }),
+                }
+            });
+        // CustomErrorResponses: flat [{ ErrorCode, ... }, ...].
+        config.custom_error_responses = cfg
+            .get("CustomErrorResponses")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                let custom_error_response: Vec<CustomErrorResponse> = arr
+                    .iter()
+                    .filter_map(|v| serde_json::from_value(v.clone()).ok())
+                    .collect();
+                CustomErrorResponses {
+                    quantity: custom_error_response.len() as i32,
+                    items: Some(CustomErrorResponseItems {
+                        custom_error_response,
+                    }),
+                }
+            });
+        // Logging: { Bucket, IncludeCookies, Prefix } -- CFN has no Enabled, so
+        // presence of the block means logging is on.
+        config.logging = cfg
+            .get("Logging")
+            .filter(|v| v.is_object())
+            .map(|log| LoggingConfig {
+                enabled: true,
+                include_cookies: log
+                    .get("IncludeCookies")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                bucket: log
+                    .get("Bucket")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+                prefix: log
+                    .get("Prefix")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string(),
+            });
+        // Restrictions: { GeoRestriction: { RestrictionType, Locations: [..] } }.
+        config.restrictions = cfg
+            .get("Restrictions")
+            .and_then(|v| v.get("GeoRestriction"))
+            .map(|geo| {
+                let location: Vec<String> = geo
+                    .get("Locations")
+                    .and_then(|v| v.as_array())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                Restrictions {
+                    geo_restriction: GeoRestriction {
+                        restriction_type: geo
+                            .get("RestrictionType")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("none")
+                            .to_string(),
+                        quantity: location.len() as i32,
+                        items: if location.is_empty() {
+                            None
+                        } else {
+                            Some(LocationList { location })
+                        },
+                    },
+                }
+            });
+    }
+
     /// Provision an `AWS::CloudFront::Distribution`. Reads
-    /// DistributionConfig.Origins/DefaultCacheBehavior/etc. and persists
-    /// a StoredDistribution in CloudFront state. CFN's Origins property
-    /// is a flat array, so we wrap it back into the wire shape with a
-    /// quantity + Items.Origin nesting.
-    /// Provision an `AWS::CloudFront::Distribution`. Reads
-    /// DistributionConfig.Origins/DefaultCacheBehavior/etc. and persists
-    /// a StoredDistribution in CloudFront state. CFN's Origins property
-    /// is a flat array, so we wrap it back into the wire shape with a
-    /// quantity + Items.Origin nesting.
+    /// DistributionConfig.Origins/DefaultCacheBehavior/etc. and persists a
+    /// StoredDistribution in CloudFront state. CFN's Origins property is a flat
+    /// array, so we wrap it back into the wire shape with a quantity +
+    /// Items.Origin nesting; `apply_cfn_distribution_extras` does the same for
+    /// Aliases / CacheBehaviors / CustomErrorResponses / Logging / Restrictions.
     pub(crate) fn create_cf_distribution(
         &self,
         resource: &ResourceDefinition,
@@ -150,6 +249,7 @@ impl ResourceProvisioner {
         config.default_root_object = default_root_object;
         config.web_acl_id = web_acl_id;
         config.viewer_certificate = viewer_certificate;
+        Self::apply_cfn_distribution_extras(&mut config, cfg);
 
         // Mint distribution id + ARN + domain in the same shape the
         // CloudFront service uses.
@@ -286,6 +386,7 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
         config.viewer_certificate = viewer_certificate;
+        Self::apply_cfn_distribution_extras(&mut config, cfg);
 
         let etag_suffix: String = Uuid::new_v4()
             .simple()

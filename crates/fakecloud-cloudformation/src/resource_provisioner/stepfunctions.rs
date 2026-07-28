@@ -53,7 +53,7 @@ impl ResourceProvisioner {
             creation_date: now,
             update_date: now,
             tags: BTreeMap::new(),
-            revision_id,
+            revision_id: revision_id.clone(),
             logging_configuration,
             tracing_configuration,
             description: String::new(),
@@ -64,10 +64,14 @@ impl ResourceProvisioner {
         let state = accounts.get_or_create(&self.account_id);
         state.state_machines.insert(arn.clone(), sm);
 
+        // Expose the real revision id (not a literal "INITIAL") so a sibling
+        // `!GetAtt Machine.StateMachineRevisionId` -- e.g. wired into an
+        // AWS::StepFunctions::StateMachineVersion -- resolves to the actual
+        // revision the state machine stores.
         Ok(ProvisionResult::new(arn.clone())
             .with("Arn", arn.clone())
             .with("Name", name)
-            .with("StateMachineRevisionId", "INITIAL"))
+            .with("StateMachineRevisionId", revision_id))
     }
 
     /// Resolve a state machine's ASL definition from any of the three
@@ -160,11 +164,12 @@ impl ResourceProvisioner {
         sm.revision_id = Uuid::new_v4().to_string();
         sm.update_date = Utc::now();
         let name = sm.name.clone();
+        let revision_id = sm.revision_id.clone();
 
         Ok(ProvisionResult::new(arn.clone())
             .with("Arn", arn)
             .with("Name", name)
-            .with("StateMachineRevisionId", "UPDATED"))
+            .with("StateMachineRevisionId", revision_id))
     }
 
     pub(super) fn delete_sfn_state_machine(&self, physical_id: &str) -> Result<(), String> {
