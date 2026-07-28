@@ -1983,6 +1983,11 @@ fn inject_identity_claims(map: &mut serde_json::Map<String, Value>, attributes: 
 ///
 /// `claims` carries the signed-in user's attributes + group memberships and
 /// the client's token-validity config; see [`TokenClaims`].
+/// Convenience wrapper for the no-scope / no-override case. Only the tests
+/// mint tokens without scope/overrides now — every production caller (the
+/// OAuth grants and the InitiateAuth flows) goes through
+/// [`generate_tokens_with_overrides`] directly.
+#[cfg(test)]
 fn generate_tokens(
     pool_id: &str,
     client_id: &str,
@@ -1992,33 +1997,14 @@ fn generate_tokens(
     signing: Option<(&str, &str)>,
     claims: &TokenClaims,
 ) -> TokenSet {
-    generate_tokens_with_scope(
-        pool_id, client_id, sub, username, region, signing, None, None, claims,
-    )
-}
-
-/// Like [`generate_tokens`] but lets callers stamp custom `scope` and
-/// `nonce` claims into the issued tokens — used by the
-/// `authorization_code` grant which carries the scopes and nonce the
-/// user originally consented to at `/oauth2/authorize`.
-#[allow(clippy::too_many_arguments)]
-fn generate_tokens_with_scope(
-    pool_id: &str,
-    client_id: &str,
-    sub: &str,
-    username: &str,
-    region: &str,
-    signing: Option<(&str, &str)>,
-    scope: Option<&str>,
-    nonce: Option<&str>,
-    claims: &TokenClaims,
-) -> TokenSet {
     generate_tokens_with_overrides(
-        pool_id, client_id, sub, username, region, signing, scope, nonce, None, claims,
+        pool_id, client_id, sub, username, region, signing, None, None, None, claims,
     )
 }
 
-/// Like [`generate_tokens_with_scope`] but accepts a
+/// Like [`generate_tokens`] but also accepts optional `scope` / `nonce`
+/// claims (the `authorization_code` and implicit grants carry the scopes and
+/// nonce the user consented to at `/oauth2/authorize`) and a
 /// `claimsAndScopeOverrideDetails`-shaped JSON value from a
 /// PreTokenGeneration trigger response.
 ///
@@ -2473,11 +2459,85 @@ impl OAuthTokenResponse {
 /// are present, AWS treats the Basic header as authoritative and fails
 /// on conflict; we follow the same rule here.
 /// `region` is the AWS region used for the JWT `iss` claim.
+/// Invoke the PreTokenGeneration Lambda trigger for a hosted-UI OAuth grant
+/// and return its `response` overrides `Value`, or `None` when fakecloud has
+/// no delivery context, the user can't be resolved, or the pool has no trigger
+/// configured -- in which case token issuance is unchanged. Mirrors the
+/// InitiateAuth pre-token block in `service/auth/initiate.rs` so hosted-UI
+/// grants apply `cognito:groups` and claim overrides like the API auth flows,
+/// and records the invocation for introspection. The read lock that resolves
+/// the user is released before the trigger `await`.
+async fn oauth_pre_token_overrides(
+    state: &SharedCognitoState,
+    delivery_ctx: Option<&CognitoDeliveryContext>,
+    pool_id: &str,
+    client_id: &str,
+    username: &str,
+) -> Option<Value> {
+    let ctx = delivery_ctx?;
+    let (account_id_key, account_id, event_region, user_attrs) = {
+        let mas = state.read();
+        let mut found = None;
+        for (key, account) in mas.iter() {
+            if let Some(user) = account
+                .users
+                .get(pool_id)
+                .and_then(|users| users.get(username))
+            {
+                found = Some((
+                    key.to_string(),
+                    account.account_id.clone(),
+                    account.region.clone(),
+                    crate::triggers::collect_user_attributes(user),
+                ));
+                break;
+            }
+        }
+        found?
+    };
+    let function_arn = crate::triggers::get_trigger_arn(
+        state,
+        pool_id,
+        crate::triggers::TriggerSource::TokenGenerationAuthentication,
+    )?;
+    // The event region/account come from the resolved account (not the request
+    // region), mirroring how the InitiateAuth flows build this event so the
+    // `userPoolId`/ARN in the trigger payload match the pool's own identity.
+    let event = crate::triggers::build_trigger_event(
+        crate::triggers::TriggerSource::TokenGenerationAuthentication,
+        pool_id,
+        Some(client_id),
+        username,
+        &user_attrs,
+        &event_region,
+        &account_id,
+    );
+    let started = std::time::Instant::now();
+    let invoked_at = Utc::now();
+    let raw_response = crate::triggers::invoke_trigger(ctx, &function_arn, &event).await;
+    let duration_ms = started.elapsed().as_millis() as u64;
+    auth::record_pre_token_gen_invocation(
+        state,
+        &account_id_key,
+        pool_id,
+        &event_region,
+        &account_id,
+        username,
+        &function_arn,
+        &event,
+        raw_response.as_ref(),
+        invoked_at,
+        duration_ms,
+    );
+    raw_response
+}
+
 pub async fn handle_oauth2_token(
     state: &SharedCognitoState,
     params: &BTreeMap<String, String>,
     basic_auth: Option<(&str, &str)>,
     region: &str,
+    delivery_ctx: Option<&CognitoDeliveryContext>,
 ) -> Result<OAuthTokenResponse, OAuthTokenError> {
     let grant_type = params
         .get("grant_type")
@@ -2550,11 +2610,13 @@ pub async fn handle_oauth2_token(
                 &allowed_flows,
                 oauth_flows_enabled,
                 region,
+                delivery_ctx,
             )
             .await
         }
         "refresh_token" => {
-            handle_refresh_token_grant(state, params, client_id, &pool_id, region).await
+            handle_refresh_token_grant(state, params, client_id, &pool_id, region, delivery_ctx)
+                .await
         }
         "client_credentials" => {
             handle_client_credentials_grant(
@@ -2574,6 +2636,7 @@ pub async fn handle_oauth2_token(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_authorization_code_grant(
     state: &SharedCognitoState,
     params: &BTreeMap<String, String>,
@@ -2582,6 +2645,7 @@ async fn handle_authorization_code_grant(
     allowed_flows: &[String],
     oauth_flows_enabled: bool,
     region: &str,
+    delivery_ctx: Option<&CognitoDeliveryContext>,
 ) -> Result<OAuthTokenResponse, OAuthTokenError> {
     // Cognito only accepts authorization_code on app clients that have
     // explicitly opted into Hosted-UI OAuth flows. When the client
@@ -2661,7 +2725,10 @@ async fn handle_authorization_code_grant(
         Some(consumed.scopes.join(" "))
     };
     let claims = collect_token_claims(state, pool_id, &consumed.username, client_id);
-    let tokens = generate_tokens_with_scope(
+    let overrides =
+        oauth_pre_token_overrides(state, delivery_ctx, pool_id, client_id, &consumed.username)
+            .await;
+    let tokens = generate_tokens_with_overrides(
         pool_id,
         client_id,
         &sub,
@@ -2670,6 +2737,7 @@ async fn handle_authorization_code_grant(
         signing_ref,
         scope_str.as_deref(),
         consumed.nonce.as_deref(),
+        overrides.as_ref(),
         &claims,
     );
 
@@ -2717,6 +2785,7 @@ async fn handle_refresh_token_grant(
     client_id: &str,
     pool_id: &str,
     region: &str,
+    delivery_ctx: Option<&CognitoDeliveryContext>,
 ) -> Result<OAuthTokenResponse, OAuthTokenError> {
     let refresh_token = params
         .get("refresh_token")
@@ -2758,13 +2827,18 @@ async fn handle_refresh_token_grant(
     let signing = ensure_pool_signing_key(state, pool_id).await;
     let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
     let claims = collect_token_claims(state, pool_id, &username, client_id);
-    let tokens = generate_tokens(
+    let overrides =
+        oauth_pre_token_overrides(state, delivery_ctx, pool_id, client_id, &username).await;
+    let tokens = generate_tokens_with_overrides(
         pool_id,
         client_id,
         &sub,
         &username,
         region,
         signing_ref,
+        None,
+        None,
+        overrides.as_ref(),
         &claims,
     );
     let rotated_refresh = {
@@ -3263,6 +3337,7 @@ pub async fn handle_oauth2_authorize(
     state: &SharedCognitoState,
     req: &OAuth2AuthorizeRequest,
     region: &str,
+    delivery_ctx: Option<&CognitoDeliveryContext>,
 ) -> Result<OAuth2AuthorizeOutcome, OAuth2AuthorizeError> {
     // Look up the client and validate redirect_uri *before* trusting
     // anything else. RFC 6749 §3.1.2.4: an invalid redirect_uri MUST
@@ -3455,7 +3530,10 @@ pub async fn handle_oauth2_authorize(
             let signing = ensure_pool_signing_key(state, &pool_id).await;
             let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
             let claims = collect_token_claims(state, &pool_id, username, &req.client_id);
-            let tokens = generate_tokens_with_scope(
+            let overrides =
+                oauth_pre_token_overrides(state, delivery_ctx, &pool_id, &req.client_id, username)
+                    .await;
+            let tokens = generate_tokens_with_overrides(
                 &pool_id,
                 &req.client_id,
                 &sub,
@@ -3464,6 +3542,7 @@ pub async fn handle_oauth2_authorize(
                 signing_ref,
                 scope_str.as_deref(),
                 req.nonce.as_deref(),
+                overrides.as_ref(),
                 &claims,
             );
             // Persist the access_token so /oauth2/userInfo and
