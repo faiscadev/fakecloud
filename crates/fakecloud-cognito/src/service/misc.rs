@@ -667,7 +667,25 @@ impl CognitoService {
 
         // Resolve everything under the state lock, then release the guard (it is
         // not `Send` and must not be held across the trigger `await` below).
-        let (pool_id, username, sub, region, user_attrs, account_id, pool_signing_owned, claims) = {
+        //
+        // Refresh-token rotation (when enabled) MUST be atomic with validation:
+        // the old token is validated and — in the same critical section, before
+        // the guard is released for the trigger `await` — swapped out for a freshly
+        // minted one. The new token's VALUE does not depend on the trigger result
+        // (only the access/id token claims do), so generating it here lets a
+        // concurrent replay of the same old token fail validation (it has already
+        // been removed), preserving single-use / replay detection.
+        let (
+            pool_id,
+            username,
+            sub,
+            region,
+            user_attrs,
+            account_id,
+            pool_signing_owned,
+            claims,
+            rotated_refresh,
+        ) = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
 
@@ -725,6 +743,33 @@ impl CognitoService {
                     .map(|(p, k)| (p.clone(), k.clone()))
             });
             let claims = super::token_claims_for(state, &pool_id, &username, client_id);
+
+            let rotation_enabled = state
+                .user_pool_clients
+                .get(client_id)
+                .and_then(|c| c.refresh_token_rotation.as_ref())
+                .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
+                .unwrap_or(false);
+
+            // Atomic swap: mint the replacement and invalidate the old token while
+            // still holding the write guard, so a concurrent replay of the same old
+            // token can no longer validate.
+            let rotated_refresh = if rotation_enabled {
+                let new_token = format!("rt-{}", Uuid::new_v4());
+                state.refresh_tokens.insert(
+                    new_token.clone(),
+                    RefreshTokenData {
+                        user_pool_id: pool_id.clone(),
+                        username: username.clone(),
+                        client_id: client_id.to_string(),
+                        issued_at: Utc::now(),
+                    },
+                );
+                state.refresh_tokens.remove(refresh_token);
+                Some(new_token)
+            } else {
+                None
+            };
             (
                 pool_id,
                 username,
@@ -734,6 +779,7 @@ impl CognitoService {
                 account_id,
                 pool_signing_owned,
                 claims,
+                rotated_refresh,
             )
         };
 
@@ -780,31 +826,9 @@ impl CognitoService {
             &claims,
         );
 
-        let rotation_enabled = state
-            .user_pool_clients
-            .get(client_id)
-            .and_then(|c| c.refresh_token_rotation.as_ref())
-            .map(|r| r.feature.eq_ignore_ascii_case("ENABLED"))
-            .unwrap_or(false);
-
+        // Rotation (validate + swap) already happened atomically under the scope-1
+        // write guard; here we only persist the freshly minted access token.
         let now = Utc::now();
-        let rotated_refresh = if rotation_enabled {
-            let new_token = format!("rt-{}", Uuid::new_v4());
-            state.refresh_tokens.insert(
-                new_token.clone(),
-                RefreshTokenData {
-                    user_pool_id: pool_id.clone(),
-                    username: username.clone(),
-                    client_id: client_id.to_string(),
-                    issued_at: now,
-                },
-            );
-            state.refresh_tokens.remove(refresh_token);
-            Some(new_token)
-        } else {
-            None
-        };
-
         state.access_tokens.insert(
             tokens.access_token.clone(),
             AccessTokenData {

@@ -991,7 +991,9 @@ impl CognitoService {
         }
 
         if issue_tokens {
-            return self.custom_auth_issue_tokens(pool_id, client_id, username, &region, req);
+            return self
+                .custom_auth_issue_tokens(pool_id, client_id, username, &region, req)
+                .await;
         }
 
         let challenge_name = define_response["response"]["challengeName"]

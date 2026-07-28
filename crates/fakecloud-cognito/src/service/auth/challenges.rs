@@ -6,7 +6,7 @@ impl CognitoService {
     /// Mint and persist tokens for a CUSTOM_AUTH flow that DefineAuthChallenge
     /// resolved with `issueTokens: true` on the very first call (no challenge
     /// round-trip needed).
-    pub(super) fn custom_auth_issue_tokens(
+    pub(super) async fn custom_auth_issue_tokens(
         &self,
         pool_id: &str,
         client_id: &str,
@@ -14,36 +14,40 @@ impl CognitoService {
         region: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let accounts = self.state.read();
-        let state = accounts.get(&req.account_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                "User pool does not exist.",
-            )
-        })?;
-        let user = state
-            .users
-            .get(pool_id)
-            .and_then(|users| users.get(username))
-            .ok_or_else(|| {
+        // Resolve everything under the state lock, then release the guard (it is
+        // not `Send` and must not be held across the trigger `await` below).
+        let (user_attributes, sub, account_id, pool_signing_owned) = {
+            let accounts = self.state.read();
+            let state = accounts.get(&req.account_id).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "NotAuthorizedException",
-                    "Incorrect username or password.",
+                    "ResourceNotFoundException",
+                    "User pool does not exist.",
                 )
             })?;
+            let user = state
+                .users
+                .get(pool_id)
+                .and_then(|users| users.get(username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "Incorrect username or password.",
+                    )
+                })?;
 
-        let user_attributes = triggers::collect_user_attributes(user);
-        let sub = user.sub.clone();
-        let account_id = state.account_id.clone();
-        let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
-            pool.signing_key_pem
-                .as_ref()
-                .zip(pool.signing_kid.as_ref())
-                .map(|(p, k)| (p.clone(), k.clone()))
-        });
-        drop(accounts);
+            let user_attributes = triggers::collect_user_attributes(user);
+            let sub = user.sub.clone();
+            let account_id = state.account_id.clone();
+            let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
+                pool.signing_key_pem
+                    .as_ref()
+                    .zip(pool.signing_kid.as_ref())
+                    .map(|(p, k)| (p.clone(), k.clone()))
+            });
+            (user_attributes, sub, account_id, pool_signing_owned)
+        };
 
         let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
             if let Some(function_arn) = triggers::get_trigger_arn(
@@ -60,13 +64,7 @@ impl CognitoService {
                     region,
                     &account_id,
                 );
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(triggers::invoke_trigger(
-                        ctx,
-                        &function_arn,
-                        &event,
-                    ))
-                })
+                triggers::invoke_trigger(ctx, &function_arn, &event).await
             } else {
                 None
             }
@@ -161,10 +159,17 @@ impl CognitoService {
                 self.respond_new_password_required(client_id, session, body, req)
                     .await
             }
-            "PASSWORD_VERIFIER" => self.respond_password_verifier(client_id, session, body, req),
-            "SELECT_CHALLENGE" => self.respond_select_challenge(client_id, session, body, req),
+            "PASSWORD_VERIFIER" => {
+                self.respond_password_verifier(client_id, session, body, req)
+                    .await
+            }
+            "SELECT_CHALLENGE" => {
+                self.respond_select_challenge(client_id, session, body, req)
+                    .await
+            }
             "SOFTWARE_TOKEN_MFA" | "SMS_MFA" | "MFA_SETUP" => {
                 self.respond_mfa_challenge(challenge_name, client_id, session, body, req)
+                    .await
             }
             "CUSTOM_CHALLENGE" => {
                 self.respond_custom_challenge(client_id, session, body, req)
@@ -288,7 +293,7 @@ impl CognitoService {
     /// `SOFTWARE_TOKEN_MFA` (RFC 6238 TOTP), `SMS_MFA` (the code dispatched at
     /// challenge time) and `MFA_SETUP` (the user must have associated + verified
     /// a software token via this session first).
-    pub(super) fn respond_mfa_challenge(
+    pub(super) async fn respond_mfa_challenge(
         &self,
         challenge_name: &str,
         client_id: &str,
@@ -396,6 +401,7 @@ impl CognitoService {
                 .remove(session);
         }
         self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
+            .await
     }
 
     /// Record a failed MFA attempt in the auth-event log for introspection.
@@ -465,7 +471,7 @@ impl CognitoService {
     /// `RespondToAuthChallenge(ChallengeName=PASSWORD_VERIFIER)`: verify the
     /// client's SRP6a proof against the handshake stashed at InitiateAuth time
     /// and, on success, mint real tokens. Reuses the shared token issuer.
-    pub(super) fn respond_password_verifier(
+    pub(super) async fn respond_password_verifier(
         &self,
         client_id: &str,
         session: &str,
@@ -602,13 +608,14 @@ impl CognitoService {
         }
 
         self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
+            .await
     }
 
     /// `RespondToAuthChallenge(ChallengeName=SELECT_CHALLENGE)` for the
     /// `USER_AUTH` flow: the client's `ANSWER` picks a challenge. `PASSWORD_SRP`
     /// kicks off the SRP handshake (reusing the shared builder); `PASSWORD`
     /// verifies the password directly and mints tokens.
-    pub(super) fn respond_select_challenge(
+    pub(super) async fn respond_select_challenge(
         &self,
         client_id: &str,
         session: &str,
@@ -717,6 +724,7 @@ impl CognitoService {
                     return Ok(resp);
                 }
                 self.custom_auth_issue_tokens(&pool_id, client_id, &username, &region, req)
+                    .await
             }
             other => Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,

@@ -7276,6 +7276,65 @@ fn get_tokens_from_refresh_token_returns_new_tokens() {
     assert!(b["AuthenticationResult"]["IdToken"].as_str().is_some());
 }
 
+/// Fix 2 regression guard: with refresh-token rotation ENABLED, the old token is
+/// single-use. The validate + rotation-swap happens atomically under the scope-1
+/// write guard (before the guard is released for the trigger await), so the OLD
+/// token is invalidated synchronously on first use — a concurrent replay of the
+/// same old token can no longer validate. Here we assert the synchronous
+/// invalidation: a second call with the old token fails, and the returned new
+/// token works.
+#[test]
+fn get_tokens_from_refresh_token_rotation_makes_old_token_single_use() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "rox");
+    let rt_old = "rt-old".to_string();
+    {
+        let mut st = state.write();
+        let acct = st.get_or_create("123456789012");
+        // Enable rotation on the client.
+        acct.user_pool_clients
+            .get_mut(&client_id)
+            .unwrap()
+            .refresh_token_rotation = Some(crate::state::RefreshTokenRotationConfig {
+            feature: "ENABLED".to_string(),
+            retry_grace_period_seconds: None,
+        });
+        acct.refresh_tokens.insert(
+            rt_old.clone(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "rox".to_string(),
+                client_id: client_id.clone(),
+                issued_at: chrono::Utc::now(),
+            },
+        );
+    }
+
+    // First use rotates: a fresh refresh token comes back.
+    let body = json!({"RefreshToken": rt_old, "ClientId": client_id});
+    let req = make_req("GetTokensFromRefreshToken", &body.to_string());
+    let resp = block_on(svc.get_tokens_from_refresh_token(&req)).unwrap();
+    let b = resp_json(&resp);
+    let rt_new = b["AuthenticationResult"]["RefreshToken"]
+        .as_str()
+        .expect("rotation returns a new refresh token")
+        .to_string();
+    assert_ne!(rt_new, "rt-old");
+
+    // The old token is now single-use: replaying it is rejected (it was removed
+    // synchronously in the same critical section as validation).
+    let body = json!({"RefreshToken": "rt-old", "ClientId": client_id});
+    let req = make_req("GetTokensFromRefreshToken", &body.to_string());
+    assert!(block_on(svc.get_tokens_from_refresh_token(&req)).is_err());
+
+    // The newly issued token works.
+    let body = json!({"RefreshToken": rt_new, "ClientId": client_id});
+    let req = make_req("GetTokensFromRefreshToken", &body.to_string());
+    assert!(block_on(svc.get_tokens_from_refresh_token(&req)).is_ok());
+}
+
 // ── Branding + WebAuthn extra coverage (branding.rs) ──────────────
 
 fn issue_at(
@@ -8146,6 +8205,63 @@ fn custom_challenge_completion_applies_pretoken_overrides_to_access_token() {
 
     // These only appear if the CUSTOM_CHALLENGE completion path routed token
     // generation through the PreTokenGeneration override path.
+    assert_eq!(claims["cognito:groups"], json!(["pretoken-admins"]));
+    assert_eq!(claims["tenant"], "acme");
+}
+
+/// Fix 1 regression guard: `custom_auth_issue_tokens` used to invoke the
+/// PreTokenGeneration trigger via `block_in_place`/`Handle::block_on`, which
+/// PANICS on a current-thread tokio runtime (exactly what the `block_on` test
+/// harness uses). Driving a custom-auth issueTokens path (the SELECT_CHALLENGE
+/// PASSWORD answer) WITH a configured PreTokenGeneration trigger must complete
+/// without panicking and must apply the trigger's claim overrides.
+#[test]
+fn custom_auth_issue_tokens_applies_pretoken_overrides_on_current_thread_runtime() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "cara");
+    set_user_password(&svc, &pool_id, "cara", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+
+    // Seed a SELECT_CHALLENGE session; answering with PASSWORD verifies the
+    // password directly and mints tokens via `custom_auth_issue_tokens`.
+    let session = "sc-session".to_string();
+    {
+        let mut w = state.write();
+        let st = w.default_mut();
+        st.sessions.insert(
+            session.clone(),
+            SessionData {
+                user_pool_id: pool_id.clone(),
+                username: "cara".to_string(),
+                client_id: client_id.clone(),
+                challenge_name: "SELECT_CHALLENGE".to_string(),
+                challenge_results: vec![],
+                challenge_metadata: None,
+            },
+        );
+    }
+
+    let body = json!({
+        "ClientId": client_id,
+        "ChallengeName": "SELECT_CHALLENGE",
+        "Session": session,
+        "ChallengeResponses": {"ANSWER": "PASSWORD", "PASSWORD": "P@ssw0rd!"},
+    });
+    let req = make_req("RespondToAuthChallenge", &body.to_string());
+    // Would PANIC before the async conversion (block_on == current-thread runtime).
+    let resp = block_on(svc.respond_to_auth_challenge(&req)).unwrap();
+    let b = resp_json(&resp);
+    let access = b["AuthenticationResult"]["AccessToken"].as_str().unwrap();
+    let claims = decode_jwt_claims(access);
+
+    // Present only if the token-minting path routed through the PreTokenGeneration
+    // override path (the user has no real group membership or `tenant` claim).
     assert_eq!(claims["cognito:groups"], json!(["pretoken-admins"]));
     assert_eq!(claims["tenant"], "acme");
 }
