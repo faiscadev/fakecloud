@@ -159,6 +159,7 @@ impl CognitoService {
         match challenge_name {
             "NEW_PASSWORD_REQUIRED" => {
                 self.respond_new_password_required(client_id, session, body, req)
+                    .await
             }
             "PASSWORD_VERIFIER" => self.respond_password_verifier(client_id, session, body, req),
             "SELECT_CHALLENGE" => self.respond_select_challenge(client_id, session, body, req),
@@ -725,7 +726,7 @@ impl CognitoService {
         }
     }
 
-    pub(super) fn respond_new_password_required(
+    pub(super) async fn respond_new_password_required(
         &self,
         client_id: &str,
         session: &str,
@@ -751,77 +752,130 @@ impl CognitoService {
                 )
             })?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        // Validate + rotate the password and gather token inputs under the state
+        // lock, then release the guard (it is not `Send` and must not be held
+        // across the trigger `await` below).
+        let (sub, username, user_attributes, pool_id, account_id, region, pool_signing_owned) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        let session_data = state.sessions.remove(session).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid session.",
-            )
-        })?;
-
-        if session_data.client_id != client_id
-            || session_data.challenge_name != "NEW_PASSWORD_REQUIRED"
-        {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid session.",
-            ));
-        }
-
-        let password_policy = state
-            .user_pools
-            .get(&session_data.user_pool_id)
-            .ok_or_else(|| {
+            let session_data = state.sessions.remove(session).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "ResourceNotFoundException",
-                    "User pool does not exist.",
-                )
-            })?
-            .policies
-            .password_policy
-            .clone();
-        validate_password(new_password, &password_policy)?;
-
-        let region = state.region.clone();
-
-        let user = state
-            .users
-            .get_mut(&session_data.user_pool_id)
-            .and_then(|users| users.get_mut(&session_data.username))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "UserNotFoundException",
-                    "User does not exist.",
+                    "NotAuthorizedException",
+                    "Invalid session.",
                 )
             })?;
 
-        user.password = Some(new_password.to_string());
-        user.temporary_password = None;
-        user.user_status = user_status::CONFIRMED.to_string();
-        user.user_last_modified_date = Utc::now();
+            if session_data.client_id != client_id
+                || session_data.challenge_name != "NEW_PASSWORD_REQUIRED"
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid session.",
+                ));
+            }
 
-        let sub = user.sub.clone();
-        let username = user.username.clone();
-        let pool_id = session_data.user_pool_id.clone();
+            let password_policy = state
+                .user_pools
+                .get(&session_data.user_pool_id)
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ResourceNotFoundException",
+                        "User pool does not exist.",
+                    )
+                })?
+                .policies
+                .password_policy
+                .clone();
+            validate_password(new_password, &password_policy)?;
 
-        let pool_signing_owned = state.user_pools.get(&pool_id).and_then(|pool| {
-            pool.signing_key_pem
-                .as_ref()
-                .zip(pool.signing_kid.as_ref())
-                .map(|(p, k)| (p.clone(), k.clone()))
-        });
+            let region = state.region.clone();
+
+            let user = state
+                .users
+                .get_mut(&session_data.user_pool_id)
+                .and_then(|users| users.get_mut(&session_data.username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    )
+                })?;
+
+            user.password = Some(new_password.to_string());
+            user.temporary_password = None;
+            user.user_status = user_status::CONFIRMED.to_string();
+            user.user_last_modified_date = Utc::now();
+
+            let sub = user.sub.clone();
+            let username = user.username.clone();
+            let user_attributes = triggers::collect_user_attributes(user);
+            let pool_id = session_data.user_pool_id.clone();
+            let account_id = state.account_id.clone();
+
+            let pool_signing_owned = state.user_pools.get(&pool_id).and_then(|pool| {
+                pool.signing_key_pem
+                    .as_ref()
+                    .zip(pool.signing_kid.as_ref())
+                    .map(|(p, k)| (p.clone(), k.clone()))
+            });
+            (
+                sub,
+                username,
+                user_attributes,
+                pool_id,
+                account_id,
+                region,
+                pool_signing_owned,
+            )
+        };
+
+        // NEW_PASSWORD_REQUIRED completion issues tokens, so real Cognito fires
+        // the PreTokenGeneration trigger here too; apply any overrides it returns.
+        let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &pool_id,
+                TriggerSource::TokenGenerationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::TokenGenerationAuthentication,
+                    &pool_id,
+                    Some(client_id),
+                    &username,
+                    &user_attributes,
+                    &region,
+                    &account_id,
+                );
+                triggers::invoke_trigger(ctx, &function_arn, &event).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
         let claims = crate::service::token_claims_for(state, &pool_id, &username, client_id);
-        let tokens = generate_tokens(
-            &pool_id, client_id, &sub, &username, &region, signing, &claims,
+        let tokens = crate::service::generate_tokens_with_overrides(
+            &pool_id,
+            client_id,
+            &sub,
+            &username,
+            &region,
+            signing,
+            None,
+            None,
+            pretoken_response.as_ref(),
+            &claims,
         );
 
         state.refresh_tokens.insert(
@@ -1049,13 +1103,15 @@ impl CognitoService {
         }
 
         if issue_tokens {
-            return self.custom_challenge_issue_tokens(
-                &pool_id,
-                &session_client_id,
-                &username,
-                &region,
-                req,
-            );
+            return self
+                .custom_challenge_issue_tokens(
+                    &pool_id,
+                    &session_client_id,
+                    &username,
+                    &region,
+                    req,
+                )
+                .await;
         }
 
         let next_challenge_name = define_response["response"]["challengeName"]
@@ -1130,7 +1186,7 @@ impl CognitoService {
     /// Mint and persist tokens for a CUSTOM_CHALLENGE round whose final
     /// DefineAuthChallenge response set `issueTokens: true`. Mirrors the
     /// success-path bookkeeping that USER_PASSWORD_AUTH does.
-    pub(super) fn custom_challenge_issue_tokens(
+    pub(super) async fn custom_challenge_issue_tokens(
         &self,
         pool_id: &str,
         client_id: &str,
@@ -1138,32 +1194,85 @@ impl CognitoService {
         region: &str,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let user = state
-            .users
-            .get(pool_id)
-            .and_then(|users| users.get(username))
-            .ok_or_else(|| {
+        // Resolve everything under the state lock, then release the guard (it is
+        // not `Send` and must not be held across the trigger `await` below).
+        let (user_attributes, sub, account_id, pool_signing_owned) = {
+            let accounts = self.state.read();
+            let state = accounts.get(&req.account_id).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
-                    "NotAuthorizedException",
-                    "User does not exist.",
+                    "ResourceNotFoundException",
+                    "User pool does not exist.",
                 )
             })?;
+            let user = state
+                .users
+                .get(pool_id)
+                .and_then(|users| users.get(username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "User does not exist.",
+                    )
+                })?;
 
-        let sub = user.sub.clone();
-        let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
-            pool.signing_key_pem
-                .as_ref()
-                .zip(pool.signing_kid.as_ref())
-                .map(|(p, k)| (p.clone(), k.clone()))
-        });
+            let user_attributes = triggers::collect_user_attributes(user);
+            let sub = user.sub.clone();
+            let account_id = state.account_id.clone();
+            let pool_signing_owned = state.user_pools.get(pool_id).and_then(|pool| {
+                pool.signing_key_pem
+                    .as_ref()
+                    .zip(pool.signing_kid.as_ref())
+                    .map(|(p, k)| (p.clone(), k.clone()))
+            });
+            (user_attributes, sub, account_id, pool_signing_owned)
+        };
+
+        // A multi-round CUSTOM_AUTH flow fires PreTokenGeneration once the final
+        // challenge resolves with issueTokens:true — apply its overrides, matching
+        // the first-call custom-auth path.
+        let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                pool_id,
+                TriggerSource::TokenGenerationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::TokenGenerationAuthentication,
+                    pool_id,
+                    Some(client_id),
+                    username,
+                    &user_attributes,
+                    region,
+                    &account_id,
+                );
+                triggers::invoke_trigger(ctx, &function_arn, &event).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
         let claims = crate::service::token_claims_for(state, pool_id, username, client_id);
-        let tokens = generate_tokens(pool_id, client_id, &sub, username, region, signing, &claims);
+        let tokens = crate::service::generate_tokens_with_overrides(
+            pool_id,
+            client_id,
+            &sub,
+            username,
+            region,
+            signing,
+            None,
+            None,
+            pretoken_response.as_ref(),
+            &claims,
+        );
 
         state.refresh_tokens.insert(
             tokens.refresh_token.clone(),

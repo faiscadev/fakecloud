@@ -15,8 +15,8 @@ use crate::triggers::{self, TriggerSource};
 use crate::user_status;
 
 use super::{
-    ensure_user_pool_exists, generate_confirmation_code, generate_tokens, parse_user_attributes,
-    require_str, validate_password, CognitoService, TokenSet,
+    ensure_user_pool_exists, generate_confirmation_code, parse_user_attributes, require_str,
+    validate_password, CognitoService, TokenSet,
 };
 
 struct AdminAuthInput {

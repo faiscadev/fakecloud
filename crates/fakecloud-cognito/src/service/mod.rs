@@ -462,7 +462,7 @@ impl AwsService for CognitoService {
             "ListDevices" => self.list_devices(&req),
             "UpdateDeviceStatus" => self.update_device_status(&req),
             "RevokeToken" => self.revoke_token(&req),
-            "GetTokensFromRefreshToken" => self.get_tokens_from_refresh_token(&req),
+            "GetTokensFromRefreshToken" => self.get_tokens_from_refresh_token(&req).await,
             "TagResource" => self.tag_resource(&req),
             "UntagResource" => self.untag_resource(&req),
             "ListTagsForResource" => self.list_tags_for_resource(&req),

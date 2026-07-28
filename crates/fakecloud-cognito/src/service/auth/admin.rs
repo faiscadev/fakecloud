@@ -78,7 +78,7 @@ impl CognitoService {
         })
     }
 
-    pub(super) fn admin_auth_verify(
+    pub(super) async fn admin_auth_verify(
         &self,
         input: &AdminAuthInput,
         region: &str,
@@ -91,122 +91,162 @@ impl CognitoService {
             &input.password,
         )?;
 
+        // Resolve everything the token grant needs under the state lock, then
+        // release the guard (it is not `Send` and must not be held across the
+        // trigger `await` below). Challenge/error outcomes return early.
+        let (sub, user_attrs, account_id, pool_signing_owned, claims) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+
+            let user = state
+                .users
+                .get(&input.pool_id)
+                .and_then(|users| users.get(&input.username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "UserNotFoundException",
+                        "User does not exist.",
+                    )
+                })?;
+
+            let password_matches = match (&user.password, &user.temporary_password) {
+                (Some(p), _) if p == &input.password => true,
+                (_, Some(tp)) if tp == &input.password => true,
+                _ => false,
+            };
+            if !password_matches {
+                state.auth_events.push(AuthEvent {
+                    event_id: Uuid::new_v4().to_string(),
+                    event_type: "SIGN_IN_FAILURE".to_string(),
+                    username: input.username.clone(),
+                    user_pool_id: input.pool_id.clone(),
+                    client_id: Some(input.client_id.clone()),
+                    timestamp: Utc::now(),
+                    success: false,
+                    feedback_value: None,
+                });
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Incorrect username or password.",
+                ));
+            }
+
+            if user.user_status == user_status::FORCE_CHANGE_PASSWORD {
+                let session = Uuid::new_v4().to_string();
+                state.sessions.insert(
+                    session.clone(),
+                    SessionData {
+                        user_pool_id: input.pool_id.clone(),
+                        username: input.username.clone(),
+                        client_id: input.client_id.clone(),
+                        challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
+                        challenge_results: vec![],
+                        challenge_metadata: None,
+                    },
+                );
+                return Ok(AdminAuthOutcome::NewPasswordRequired { session });
+            }
+
+            let sub = user.sub.clone();
+            let user_attrs = triggers::collect_user_attributes(user);
+            let account_id = state.account_id.clone();
+
+            // Enforce a second factor before minting tokens (fixes the
+            // AdminInitiateAuth MFA bypass). Compute the decision + delivery
+            // destination while `user` is still borrowed, then drop the borrow so
+            // the challenge session can be inserted.
+            let mfa_challenge = state
+                .user_pools
+                .get(&input.pool_id)
+                .and_then(|pool| super::required_mfa_challenge(pool, user));
+            let mfa_phone = user
+                .attributes
+                .iter()
+                .find(|a| a.name == "phone_number")
+                .map(|a| a.value.clone());
+            if let Some(challenge_name) = mfa_challenge {
+                let sms_destination = mfa_phone.as_deref().map(super::mask_phone);
+                // For SMS_MFA the code is stored on the session; the admin path does
+                // not dispatch it here (SNS delivery must not run under the state
+                // write lock), but the challenge is still enforced.
+                let sms_code = (challenge_name == "SMS_MFA").then(generate_confirmation_code);
+                let session = Uuid::new_v4().to_string();
+                state.sessions.insert(
+                    session.clone(),
+                    SessionData {
+                        user_pool_id: input.pool_id.clone(),
+                        username: input.username.clone(),
+                        client_id: input.client_id.clone(),
+                        challenge_name: challenge_name.to_string(),
+                        challenge_results: vec![],
+                        challenge_metadata: sms_code,
+                    },
+                );
+                return Ok(AdminAuthOutcome::MfaChallenge {
+                    challenge_name,
+                    session,
+                    sms_destination,
+                });
+            }
+
+            let pool_signing_owned = state.user_pools.get(&input.pool_id).and_then(|pool| {
+                pool.signing_key_pem
+                    .as_ref()
+                    .zip(pool.signing_kid.as_ref())
+                    .map(|(p, k)| (p.clone(), k.clone()))
+            });
+            let claims = crate::service::token_claims_for(
+                state,
+                &input.pool_id,
+                &input.username,
+                &input.client_id,
+            );
+
+            (sub, user_attrs, account_id, pool_signing_owned, claims)
+        };
+
+        // Real Cognito fires the PreTokenGeneration trigger on AdminInitiateAuth
+        // token grants too; apply any claim/group/scope overrides it returns.
+        let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
+            if let Some(function_arn) = triggers::get_trigger_arn(
+                &self.state,
+                &input.pool_id,
+                TriggerSource::TokenGenerationAuthentication,
+            ) {
+                let event = triggers::build_trigger_event(
+                    TriggerSource::TokenGenerationAuthentication,
+                    &input.pool_id,
+                    Some(&input.client_id),
+                    &input.username,
+                    &user_attrs,
+                    region,
+                    &account_id,
+                );
+                triggers::invoke_trigger(ctx, &function_arn, &event).await
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
-
-        let user = state
-            .users
-            .get(&input.pool_id)
-            .and_then(|users| users.get(&input.username))
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "UserNotFoundException",
-                    "User does not exist.",
-                )
-            })?;
-
-        let password_matches = match (&user.password, &user.temporary_password) {
-            (Some(p), _) if p == &input.password => true,
-            (_, Some(tp)) if tp == &input.password => true,
-            _ => false,
-        };
-        if !password_matches {
-            state.auth_events.push(AuthEvent {
-                event_id: Uuid::new_v4().to_string(),
-                event_type: "SIGN_IN_FAILURE".to_string(),
-                username: input.username.clone(),
-                user_pool_id: input.pool_id.clone(),
-                client_id: Some(input.client_id.clone()),
-                timestamp: Utc::now(),
-                success: false,
-                feedback_value: None,
-            });
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Incorrect username or password.",
-            ));
-        }
-
-        if user.user_status == user_status::FORCE_CHANGE_PASSWORD {
-            let session = Uuid::new_v4().to_string();
-            state.sessions.insert(
-                session.clone(),
-                SessionData {
-                    user_pool_id: input.pool_id.clone(),
-                    username: input.username.clone(),
-                    client_id: input.client_id.clone(),
-                    challenge_name: "NEW_PASSWORD_REQUIRED".to_string(),
-                    challenge_results: vec![],
-                    challenge_metadata: None,
-                },
-            );
-            return Ok(AdminAuthOutcome::NewPasswordRequired { session });
-        }
-
-        let sub = user.sub.clone();
-
-        // Enforce a second factor before minting tokens (fixes the
-        // AdminInitiateAuth MFA bypass). Compute the decision + delivery
-        // destination while `user` is still borrowed, then drop the borrow so
-        // the challenge session can be inserted.
-        let mfa_challenge = state
-            .user_pools
-            .get(&input.pool_id)
-            .and_then(|pool| super::required_mfa_challenge(pool, user));
-        let mfa_phone = user
-            .attributes
-            .iter()
-            .find(|a| a.name == "phone_number")
-            .map(|a| a.value.clone());
-        if let Some(challenge_name) = mfa_challenge {
-            let sms_destination = mfa_phone.as_deref().map(super::mask_phone);
-            // For SMS_MFA the code is stored on the session; the admin path does
-            // not dispatch it here (SNS delivery must not run under the state
-            // write lock), but the challenge is still enforced.
-            let sms_code = (challenge_name == "SMS_MFA").then(generate_confirmation_code);
-            let session = Uuid::new_v4().to_string();
-            state.sessions.insert(
-                session.clone(),
-                SessionData {
-                    user_pool_id: input.pool_id.clone(),
-                    username: input.username.clone(),
-                    client_id: input.client_id.clone(),
-                    challenge_name: challenge_name.to_string(),
-                    challenge_results: vec![],
-                    challenge_metadata: sms_code,
-                },
-            );
-            return Ok(AdminAuthOutcome::MfaChallenge {
-                challenge_name,
-                session,
-                sms_destination,
-            });
-        }
-
-        let pool_signing_owned = state.user_pools.get(&input.pool_id).and_then(|pool| {
-            pool.signing_key_pem
-                .as_ref()
-                .zip(pool.signing_kid.as_ref())
-                .map(|(p, k)| (p.clone(), k.clone()))
-        });
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
-        let claims = crate::service::token_claims_for(
-            state,
-            &input.pool_id,
-            &input.username,
-            &input.client_id,
-        );
-        let tokens = generate_tokens(
+        let tokens = crate::service::generate_tokens_with_overrides(
             &input.pool_id,
             &input.client_id,
             &sub,
             &input.username,
             region,
             signing,
+            None,
+            None,
+            pretoken_response.as_ref(),
             &claims,
         );
 

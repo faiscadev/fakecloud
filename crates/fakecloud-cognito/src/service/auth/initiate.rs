@@ -59,7 +59,7 @@ impl CognitoService {
             }
         }
 
-        let tokens = match self.admin_auth_verify(&input, &lookup.region, req)? {
+        let tokens = match self.admin_auth_verify(&input, &lookup.region, req).await? {
             AdminAuthOutcome::NewPasswordRequired { session } => {
                 return Ok(AwsResponse::ok_json(json!({
                     "ChallengeName": "NEW_PASSWORD_REQUIRED",
@@ -1100,75 +1100,97 @@ impl CognitoService {
                 )
             })?;
 
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        // Resolve everything under the state lock, then release the guard (it is
+        // not `Send` and must not be held across the trigger `await` below).
+        let (
+            token_pool_id,
+            token_username,
+            region,
+            account_id,
+            user_attrs,
+            sub,
+            pool_signing_owned,
+            claims,
+        ) = {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
 
-        let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid refresh token.",
-            )
-        })?;
-
-        if token_data.client_id != client_id {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Invalid refresh token.",
-            ));
-        }
-
-        // Enforce the app client's RefreshTokenValidity: an expired refresh
-        // token can no longer mint access tokens (L2). Previously the token was
-        // honored forever.
-        let refresh_validity_secs = state
-            .user_pool_clients
-            .get(client_id)
-            .map(crate::service::refresh_token_validity_secs)
-            .unwrap_or(30 * 86400);
-        let age = Utc::now()
-            .signed_duration_since(token_data.issued_at)
-            .num_seconds();
-        if refresh_validity_secs > 0 && age >= refresh_validity_secs {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "NotAuthorizedException",
-                "Refresh Token has expired.",
-            ));
-        }
-
-        let token_pool_id = token_data.user_pool_id.clone();
-        let token_username = token_data.username.clone();
-
-        let user = state
-            .users
-            .get(&token_pool_id)
-            .and_then(|users| users.get(&token_username))
-            .ok_or_else(|| {
+            let token_data = state.refresh_tokens.get(refresh_token).ok_or_else(|| {
                 AwsServiceError::aws_error(
                     StatusCode::BAD_REQUEST,
                     "NotAuthorizedException",
-                    "User does not exist.",
+                    "Invalid refresh token.",
                 )
             })?;
 
-        let region = state.region.clone();
-        let account_id = state.account_id.clone();
-        let user_attrs = triggers::collect_user_attributes(user);
-        let sub = user.sub.clone();
-        let pool_signing_owned = state.user_pools.get(&token_pool_id).and_then(|pool| {
-            pool.signing_key_pem
-                .as_ref()
-                .zip(pool.signing_kid.as_ref())
-                .map(|(p, k)| (p.clone(), k.clone()))
-        });
+            if token_data.client_id != client_id {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Invalid refresh token.",
+                ));
+            }
+
+            // Enforce the app client's RefreshTokenValidity: an expired refresh
+            // token can no longer mint access tokens (L2). Previously the token was
+            // honored forever.
+            let refresh_validity_secs = state
+                .user_pool_clients
+                .get(client_id)
+                .map(crate::service::refresh_token_validity_secs)
+                .unwrap_or(30 * 86400);
+            let age = Utc::now()
+                .signed_duration_since(token_data.issued_at)
+                .num_seconds();
+            if refresh_validity_secs > 0 && age >= refresh_validity_secs {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "NotAuthorizedException",
+                    "Refresh Token has expired.",
+                ));
+            }
+
+            let token_pool_id = token_data.user_pool_id.clone();
+            let token_username = token_data.username.clone();
+
+            let user = state
+                .users
+                .get(&token_pool_id)
+                .and_then(|users| users.get(&token_username))
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "NotAuthorizedException",
+                        "User does not exist.",
+                    )
+                })?;
+
+            let region = state.region.clone();
+            let account_id = state.account_id.clone();
+            let user_attrs = triggers::collect_user_attributes(user);
+            let sub = user.sub.clone();
+            let pool_signing_owned = state.user_pools.get(&token_pool_id).and_then(|pool| {
+                pool.signing_key_pem
+                    .as_ref()
+                    .zip(pool.signing_kid.as_ref())
+                    .map(|(p, k)| (p.clone(), k.clone()))
+            });
+            let claims =
+                crate::service::token_claims_for(state, &token_pool_id, &token_username, client_id);
+            (
+                token_pool_id,
+                token_username,
+                region,
+                account_id,
+                user_attrs,
+                sub,
+                pool_signing_owned,
+                claims,
+            )
+        };
         let signing = pool_signing_owned
             .as_ref()
             .map(|(p, k)| (p.as_str(), k.as_str()));
-        let claims =
-            crate::service::token_claims_for(state, &token_pool_id, &token_username, client_id);
-        drop(accounts);
 
         let pretoken_response = if let Some(ctx) = self.delivery_ctx.as_ref() {
             if let Some(function_arn) = triggers::get_trigger_arn(
@@ -1187,13 +1209,7 @@ impl CognitoService {
                 );
                 let started = std::time::Instant::now();
                 let invoked_at = chrono::Utc::now();
-                let raw_response = tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(triggers::invoke_trigger(
-                        ctx,
-                        &function_arn,
-                        &event,
-                    ))
-                });
+                let raw_response = triggers::invoke_trigger(ctx, &function_arn, &event).await;
                 let duration_ms = started.elapsed().as_millis() as u64;
                 record_pre_token_gen_invocation(
                     &self.state,
