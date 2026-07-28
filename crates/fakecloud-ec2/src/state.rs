@@ -757,6 +757,14 @@ pub struct LaunchTemplate {
     pub name: String,
     pub default_version: i64,
     pub latest_version: i64,
+    /// Per-version `LaunchTemplateData`, keyed by version number. Each value is
+    /// the flattened request sub-map (the query keys under `LaunchTemplateData.`
+    /// with that prefix stripped), so every field the caller wrote round-trips
+    /// through DescribeLaunchTemplateVersions instead of reading back empty.
+    /// `#[serde(default)]` keeps pre-existing snapshots (which lacked this
+    /// field) loadable.
+    #[serde(default)]
+    pub versions: BTreeMap<i64, BTreeMap<String, String>>,
 }
 
 /// A Spot instance request.

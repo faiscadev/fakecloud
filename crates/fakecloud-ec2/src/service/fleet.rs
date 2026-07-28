@@ -1,6 +1,8 @@
 //! Launch templates (+ versions), Spot instance/fleet requests, EC2 fleets,
 //! and the spot datafeed subscription.
 
+use std::collections::BTreeMap;
+
 use fakecloud_aws::ec2query::{ec2_elem, ec2_list, ec2_return};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -35,15 +37,235 @@ fn lt_xml(t: &LaunchTemplate, tags: &[Tag], owner: &str) -> String {
     )
 }
 
-fn lt_version_xml(t: &LaunchTemplate, version: i64, owner: &str) -> String {
+/// Extract the flattened `LaunchTemplateData.*` sub-map from a request: every
+/// query key under the `LaunchTemplateData.` prefix, with that prefix stripped.
+/// Stored verbatim so the whole structure round-trips (nothing is discarded on
+/// the write side); `render_lt_data` projects the wire shape back on read.
+fn collect_lt_data(params: &std::collections::HashMap<String, String>) -> BTreeMap<String, String> {
+    params
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("LaunchTemplateData.")
+                .map(|suffix| (suffix.to_string(), v.clone()))
+        })
+        .collect()
+}
+
+/// Collect a flattened EC2 list (`<prefix>.1`, `<prefix>.2`, …) from the stored
+/// data sub-map, in index order, stopping at the first gap.
+fn lt_indexed(d: &BTreeMap<String, String>, prefix: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut i = 1;
+    while let Some(v) = d.get(&format!("{prefix}.{i}")) {
+        out.push(v.clone());
+        i += 1;
+    }
+    out
+}
+
+/// Render one nested struct member if any of its sub-keys are present, wrapping
+/// the joined inner elements in `<wrapper>…</wrapper>`. Returns empty when the
+/// struct has no set members (EC2 omits absent optional structs).
+fn lt_struct(wrapper: &str, inner: String) -> String {
+    if inner.is_empty() {
+        String::new()
+    } else {
+        format!("<{wrapper}>{inner}</{wrapper}>")
+    }
+}
+
+/// Project a stored `LaunchTemplateData` sub-map back to the DescribeLaunch\
+/// TemplateVersions `<launchTemplateData>` wire shape. Scalars, id/name lists,
+/// and the common nested structs are emitted with their exact EC2 response
+/// element names; every stored key is preserved even if a given member is not
+/// re-rendered, so no written value is lost.
+fn render_lt_data(d: &BTreeMap<String, String>) -> String {
+    if d.is_empty() {
+        return "<launchTemplateData/>".to_string();
+    }
+    let mut out = String::from("<launchTemplateData>");
+
+    // Scalar members: request-suffix -> response element name.
+    for (suffix, elem) in [
+        ("ImageId", "imageId"),
+        ("InstanceType", "instanceType"),
+        ("KeyName", "keyName"),
+        ("UserData", "userData"),
+        ("EbsOptimized", "ebsOptimized"),
+        ("DisableApiTermination", "disableApiTermination"),
+        ("DisableApiStop", "disableApiStop"),
+        (
+            "InstanceInitiatedShutdownBehavior",
+            "instanceInitiatedShutdownBehavior",
+        ),
+        ("KernelId", "kernelId"),
+        ("RamDiskId", "ramDiskId"),
+    ] {
+        if let Some(v) = d.get(suffix) {
+            out.push_str(&ec2_elem(elem, v));
+        }
+    }
+
+    // Security groups (by id and by name).
+    out.push_str(&ec2_list(
+        "securityGroupIdSet",
+        &lt_indexed(d, "SecurityGroupId"),
+    ));
+    out.push_str(&ec2_list(
+        "securityGroupSet",
+        &lt_indexed(d, "SecurityGroupName"),
+    ));
+
+    // Monitoring.
+    if let Some(v) = d.get("Monitoring.Enabled") {
+        out.push_str(&lt_struct("monitoring", ec2_elem("enabled", v)));
+    }
+    // IAM instance profile.
+    let iam = format!(
+        "{}{}",
+        d.get("IamInstanceProfile.Arn")
+            .map(|v| ec2_elem("arn", v))
+            .unwrap_or_default(),
+        d.get("IamInstanceProfile.Name")
+            .map(|v| ec2_elem("name", v))
+            .unwrap_or_default(),
+    );
+    out.push_str(&lt_struct("iamInstanceProfile", iam));
+    // Placement.
+    let placement = [
+        ("Placement.AvailabilityZone", "availabilityZone"),
+        ("Placement.GroupName", "groupName"),
+        ("Placement.Tenancy", "tenancy"),
+        ("Placement.Affinity", "affinity"),
+        ("Placement.HostId", "hostId"),
+        ("Placement.PartitionNumber", "partitionNumber"),
+        ("Placement.HostResourceGroupArn", "hostResourceGroupArn"),
+    ]
+    .iter()
+    .filter_map(|(k, e)| d.get(*k).map(|v| ec2_elem(e, v)))
+    .collect::<String>();
+    out.push_str(&lt_struct("placement", placement));
+    // CPU options.
+    let cpu = [
+        ("CpuOptions.CoreCount", "coreCount"),
+        ("CpuOptions.ThreadsPerCore", "threadsPerCore"),
+        ("CpuOptions.AmdSevSnp", "amdSevSnp"),
+    ]
+    .iter()
+    .filter_map(|(k, e)| d.get(*k).map(|v| ec2_elem(e, v)))
+    .collect::<String>();
+    out.push_str(&lt_struct("cpuOptions", cpu));
+    // Metadata options.
+    let meta = [
+        ("MetadataOptions.HttpTokens", "httpTokens"),
+        (
+            "MetadataOptions.HttpPutResponseHopLimit",
+            "httpPutResponseHopLimit",
+        ),
+        ("MetadataOptions.HttpEndpoint", "httpEndpoint"),
+        ("MetadataOptions.HttpProtocolIpv6", "httpProtocolIpv6"),
+        (
+            "MetadataOptions.InstanceMetadataTags",
+            "instanceMetadataTags",
+        ),
+    ]
+    .iter()
+    .filter_map(|(k, e)| d.get(*k).map(|v| ec2_elem(e, v)))
+    .collect::<String>();
+    out.push_str(&lt_struct("metadataOptions", meta));
+    // Credit specification.
+    if let Some(v) = d.get("CreditSpecification.CpuCredits") {
+        out.push_str(&lt_struct("creditSpecification", ec2_elem("cpuCredits", v)));
+    }
+
+    // Block device mappings (indexed list of structs).
+    let mut bdms: Vec<String> = Vec::new();
+    let mut i = 1;
+    while d.contains_key(&format!("BlockDeviceMapping.{i}.DeviceName"))
+        || d.contains_key(&format!("BlockDeviceMapping.{i}.Ebs.VolumeSize"))
+        || d.contains_key(&format!("BlockDeviceMapping.{i}.VirtualName"))
+        || d.contains_key(&format!("BlockDeviceMapping.{i}.NoDevice"))
+    {
+        let p = format!("BlockDeviceMapping.{i}");
+        let ebs = [
+            ("Ebs.VolumeSize", "volumeSize"),
+            ("Ebs.VolumeType", "volumeType"),
+            ("Ebs.Iops", "iops"),
+            ("Ebs.Throughput", "throughput"),
+            ("Ebs.DeleteOnTermination", "deleteOnTermination"),
+            ("Ebs.Encrypted", "encrypted"),
+            ("Ebs.SnapshotId", "snapshotId"),
+            ("Ebs.KmsKeyId", "kmsKeyId"),
+        ]
+        .iter()
+        .filter_map(|(k, e)| d.get(&format!("{p}.{k}")).map(|v| ec2_elem(e, v)))
+        .collect::<String>();
+        let item = format!(
+            "{}{}{}{}",
+            d.get(&format!("{p}.DeviceName"))
+                .map(|v| ec2_elem("deviceName", v))
+                .unwrap_or_default(),
+            d.get(&format!("{p}.VirtualName"))
+                .map(|v| ec2_elem("virtualName", v))
+                .unwrap_or_default(),
+            d.get(&format!("{p}.NoDevice"))
+                .map(|v| ec2_elem("noDevice", v))
+                .unwrap_or_default(),
+            lt_struct("ebs", ebs),
+        );
+        bdms.push(item);
+        i += 1;
+    }
+    out.push_str(&ec2_list("blockDeviceMappingSet", &bdms));
+
+    // Tag specifications (indexed list; each carries a resource type + tag set).
+    let mut tag_specs: Vec<String> = Vec::new();
+    let mut i = 1;
+    while d.contains_key(&format!("TagSpecification.{i}.ResourceType"))
+        || d.contains_key(&format!("TagSpecification.{i}.Tag.1.Key"))
+    {
+        let p = format!("TagSpecification.{i}");
+        let mut tags: Vec<String> = Vec::new();
+        let mut j = 1;
+        while let Some(k) = d.get(&format!("{p}.Tag.{j}.Key")) {
+            let val = d
+                .get(&format!("{p}.Tag.{j}.Value"))
+                .cloned()
+                .unwrap_or_default();
+            tags.push(format!("{}{}", ec2_elem("key", k), ec2_elem("value", &val)));
+            j += 1;
+        }
+        let item = format!(
+            "{}{}",
+            d.get(&format!("{p}.ResourceType"))
+                .map(|v| ec2_elem("resourceType", v))
+                .unwrap_or_default(),
+            ec2_list("tagSet", &tags),
+        );
+        tag_specs.push(item);
+        i += 1;
+    }
+    out.push_str(&ec2_list("tagSpecificationSet", &tag_specs));
+
+    out.push_str("</launchTemplateData>");
+    out
+}
+
+fn lt_version_xml(
+    t: &LaunchTemplate,
+    version: i64,
+    owner: &str,
+    data: &BTreeMap<String, String>,
+) -> String {
     format!(
-        "{}{}<versionNumber>{}</versionNumber>{}{}<defaultVersion>{}</defaultVersion><launchTemplateData/>",
+        "{}{}<versionNumber>{}</versionNumber>{}{}<defaultVersion>{}</defaultVersion>{}",
         ec2_elem("launchTemplateId", &t.id),
         ec2_elem("launchTemplateName", &t.name),
         version,
         ec2_elem("createTime", FIXED_TIME),
         ec2_elem("createdBy", &format!("arn:aws:iam::{owner}:root")),
         version == t.default_version,
+        render_lt_data(data),
     )
 }
 
@@ -63,6 +285,7 @@ pub(crate) fn create_launch_template(
         name,
         default_version: 1,
         latest_version: 1,
+        versions: BTreeMap::from([(1, collect_lt_data(&req.query_params))]),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -99,6 +322,7 @@ pub(crate) fn create_launch_template_version(
     let owner = req.account_id.clone();
     let id = req.query_params.get("LaunchTemplateId").cloned();
     let name = req.query_params.get("LaunchTemplateName").cloned();
+    let data = collect_lt_data(&req.query_params);
     let (t, version) = {
         let mut accounts = svc.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -116,7 +340,9 @@ pub(crate) fn create_launch_template_version(
             .unwrap_or_default();
         if let Some(t) = state.launch_templates.get_mut(&key) {
             t.latest_version += 1;
-            (t.clone(), t.latest_version)
+            let v = t.latest_version;
+            t.versions.insert(v, data.clone());
+            (t.clone(), v)
         } else {
             // Unknown template: synthesize a response-only record (do NOT
             // persist — fabricating a template for a version request on a
@@ -126,6 +352,7 @@ pub(crate) fn create_launch_template_version(
                 name: name.unwrap_or_default(),
                 default_version: 1,
                 latest_version: 2,
+                versions: BTreeMap::from([(2, data.clone())]),
             };
             (synthetic, 2)
         }
@@ -135,7 +362,7 @@ pub(crate) fn create_launch_template_version(
         &req.request_id,
         &format!(
             "<launchTemplateVersion>{}</launchTemplateVersion>",
-            lt_version_xml(&t, version, &owner)
+            lt_version_xml(&t, version, &owner, &data)
         ),
     ))
 }
@@ -250,10 +477,14 @@ pub(crate) fn describe_launch_template_versions(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let empty_data = BTreeMap::new();
     let items: Vec<String> = resolve_lt(state, req)
         .map(|t| {
             (1..=t.latest_version)
-                .map(|v| lt_version_xml(&t, v, &owner))
+                .map(|v| {
+                    let data = t.versions.get(&v).unwrap_or(&empty_data);
+                    lt_version_xml(&t, v, &owner, data)
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -1036,6 +1267,134 @@ mod capacity_tests {
             &req("ModifyFleet", &[("FleetId", "fleet-nope")]),
         ));
         assert_eq!(err.code(), "InvalidFleetId.NotFound");
+    }
+
+    #[test]
+    fn launch_template_data_round_trips() {
+        // bug-audit 2026-07-28 (cycle 7) E1: CreateLaunchTemplate accepted the
+        // LaunchTemplateData blob, used it for the 200, then dropped it ->
+        // DescribeLaunchTemplateVersions returned <launchTemplateData/> ->
+        // aws_launch_template perpetual drift. Every written field must read back.
+        let svc = Ec2Service::new();
+        create_launch_template(
+            &svc,
+            &req(
+                "CreateLaunchTemplate",
+                &[
+                    ("LaunchTemplateName", "web"),
+                    ("LaunchTemplateData.ImageId", "ami-0abc"),
+                    ("LaunchTemplateData.InstanceType", "t3.large"),
+                    ("LaunchTemplateData.KeyName", "kp"),
+                    ("LaunchTemplateData.EbsOptimized", "true"),
+                    ("LaunchTemplateData.SecurityGroupId.1", "sg-1"),
+                    ("LaunchTemplateData.SecurityGroupId.2", "sg-2"),
+                    ("LaunchTemplateData.Monitoring.Enabled", "true"),
+                    ("LaunchTemplateData.IamInstanceProfile.Name", "role-x"),
+                    ("LaunchTemplateData.Placement.Tenancy", "dedicated"),
+                    ("LaunchTemplateData.CpuOptions.CoreCount", "2"),
+                    ("LaunchTemplateData.CpuOptions.ThreadsPerCore", "1"),
+                    ("LaunchTemplateData.MetadataOptions.HttpTokens", "required"),
+                    (
+                        "LaunchTemplateData.BlockDeviceMapping.1.DeviceName",
+                        "/dev/sda",
+                    ),
+                    (
+                        "LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeSize",
+                        "40",
+                    ),
+                    (
+                        "LaunchTemplateData.BlockDeviceMapping.1.Ebs.VolumeType",
+                        "gp3",
+                    ),
+                    (
+                        "LaunchTemplateData.TagSpecification.1.ResourceType",
+                        "instance",
+                    ),
+                    ("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "Env"),
+                    ("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "prod"),
+                ],
+            ),
+        )
+        .unwrap();
+
+        let desc = body(
+            describe_launch_template_versions(
+                &svc,
+                &req(
+                    "DescribeLaunchTemplateVersions",
+                    &[("LaunchTemplateName", "web")],
+                ),
+            )
+            .unwrap(),
+        );
+        for needle in [
+            "<imageId>ami-0abc</imageId>",
+            "<instanceType>t3.large</instanceType>",
+            "<keyName>kp</keyName>",
+            "<ebsOptimized>true</ebsOptimized>",
+            "<securityGroupIdSet><item>sg-1</item><item>sg-2</item></securityGroupIdSet>",
+            "<monitoring><enabled>true</enabled></monitoring>",
+            "<iamInstanceProfile><name>role-x</name></iamInstanceProfile>",
+            "<placement><tenancy>dedicated</tenancy></placement>",
+            "<cpuOptions><coreCount>2</coreCount><threadsPerCore>1</threadsPerCore></cpuOptions>",
+            "<metadataOptions><httpTokens>required</httpTokens></metadataOptions>",
+            "<deviceName>/dev/sda</deviceName>",
+            "<ebs><volumeSize>40</volumeSize><volumeType>gp3</volumeType></ebs>",
+            "<resourceType>instance</resourceType>",
+            "<key>Env</key><value>prod</value>",
+        ] {
+            assert!(desc.contains(needle), "missing {needle} in:\n{desc}");
+        }
+        assert!(
+            !desc.contains("<launchTemplateData/>"),
+            "data must not read back empty: {desc}"
+        );
+    }
+
+    #[test]
+    fn launch_template_version_data_round_trips() {
+        // A second version carries its own data; describe returns both distinctly.
+        let svc = Ec2Service::new();
+        create_launch_template(
+            &svc,
+            &req(
+                "CreateLaunchTemplate",
+                &[
+                    ("LaunchTemplateName", "app"),
+                    ("LaunchTemplateData.InstanceType", "t3.micro"),
+                ],
+            ),
+        )
+        .unwrap();
+        create_launch_template_version(
+            &svc,
+            &req(
+                "CreateLaunchTemplateVersion",
+                &[
+                    ("LaunchTemplateName", "app"),
+                    ("LaunchTemplateData.InstanceType", "m5.large"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc = body(
+            describe_launch_template_versions(
+                &svc,
+                &req(
+                    "DescribeLaunchTemplateVersions",
+                    &[("LaunchTemplateName", "app")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            desc.contains("<instanceType>t3.micro</instanceType>"),
+            "{desc}"
+        );
+        assert!(
+            desc.contains("<instanceType>m5.large</instanceType>"),
+            "{desc}"
+        );
     }
 
     #[test]
