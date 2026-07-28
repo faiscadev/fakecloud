@@ -1931,6 +1931,14 @@ impl ResourceProvisioner {
             "AWS::Route53::HealthCheck" => {
                 Some(self.update_route53_health_check(existing, new_def)?)
             }
+            // In-place updates: reprovision would churn the random rslvr-* id,
+            // dangling sibling associations / rules that reference it.
+            "AWS::Route53Resolver::ResolverRule" => {
+                Some(self.update_r53r_resolver_rule(existing, new_def)?)
+            }
+            "AWS::Route53Resolver::FirewallDomainList" => {
+                Some(self.update_r53r_firewall_domain_list(existing, new_def)?)
+            }
             // In-place updates: reprovision would churn the ns-/srv- id and drop
             // a namespace's services / a service's registered instances.
             "AWS::ServiceDiscovery::HttpNamespace"
@@ -4954,6 +4962,78 @@ mod tests {
             "config updated in place"
         );
         assert_eq!(rec.version, 2, "version bumped");
+    }
+
+    #[test]
+    fn route53resolver_updates_preserve_ids() {
+        // bug-audit 2026-07-27 (cycle 6): reprovision churned the random rslvr-*
+        // id, dangling sibling associations/rules. Updates must be in place.
+        let prov = make_provisioner();
+        let rule = prov
+            .create_resource(&make_resource(
+                "AWS::Route53Resolver::ResolverRule",
+                "RR",
+                serde_json::json!({
+                    "RuleType": "FORWARD", "DomainName": "ex.com.", "Name": "r1",
+                    "TargetIps": [{"Ip": "10.0.0.2", "Port": 53}]
+                }),
+            ))
+            .expect("resolver rule provisions");
+        let rule_id = rule.physical_id.clone();
+        let rule_up = prov
+            .update_resource(
+                &rule,
+                &make_resource(
+                    "AWS::Route53Resolver::ResolverRule",
+                    "RR",
+                    serde_json::json!({
+                        "RuleType": "FORWARD", "DomainName": "ex.com.", "Name": "r1-renamed",
+                        "TargetIps": [{"Ip": "10.0.0.3", "Port": 53}, {"Ip": "10.0.0.4", "Port": 53}]
+                    }),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(rule_up.physical_id, rule_id, "resolver rule id preserved");
+
+        let fdl = prov
+            .create_resource(&make_resource(
+                "AWS::Route53Resolver::FirewallDomainList",
+                "FDL",
+                serde_json::json!({"Name": "dl", "Domains": ["a.com."]}),
+            ))
+            .expect("firewall domain list provisions");
+        let fdl_id = fdl.physical_id.clone();
+        let fdl_up = prov
+            .update_resource(
+                &fdl,
+                &make_resource(
+                    "AWS::Route53Resolver::FirewallDomainList",
+                    "FDL",
+                    serde_json::json!({"Name": "dl", "Domains": ["b.com.", "c.com."]}),
+                ),
+            )
+            .expect("update ok")
+            .expect("updatable");
+        assert_eq!(
+            fdl_up.physical_id, fdl_id,
+            "firewall domain list id preserved"
+        );
+
+        let mut st = prov.route53resolver_state.write();
+        let acc = st.account_mut("123456789012");
+        let r = acc.rules.get(&rule_id).expect("rule preserved");
+        assert_eq!(
+            r.name.as_deref(),
+            Some("r1-renamed"),
+            "name updated in place"
+        );
+        assert_eq!(r.target_ips.len(), 2, "target ips updated in place");
+        assert_eq!(
+            acc.firewall_domains.get(&fdl_id).map(|d| d.len()),
+            Some(2),
+            "domains updated in place"
+        );
     }
 
     #[test]

@@ -409,6 +409,77 @@ impl ResourceProvisioner {
         Ok(out)
     }
 
+    /// In-place `UpdateResolverRule`: reprovision would churn the random
+    /// rslvr-rr- id, dangling every `AWS::Route53Resolver::ResolverRuleAssociation`
+    /// that stored it. Name/TargetIps/ResolverEndpointId are the mutable
+    /// properties; RuleType/DomainName are immutable. Preserve id/arn/creation.
+    pub(super) fn update_r53r_resolver_rule(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let target_ips: Vec<TargetAddress> = props
+            .get("TargetIps")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .map(|t| TargetAddress {
+                        ip: t.get("Ip").and_then(|v| v.as_str()).map(String::from),
+                        port: Some(t.get("Port").and_then(|v| v.as_i64()).unwrap_or(53)),
+                        ipv6: t.get("Ipv6").and_then(|v| v.as_str()).map(String::from),
+                        protocol: t.get("Protocol").and_then(|v| v.as_str()).map(String::from),
+                        server_name_indication: t
+                            .get("ServerNameIndication")
+                            .and_then(|v| v.as_str())
+                            .map(String::from),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let name = props.get("Name").and_then(|v| v.as_str()).map(String::from);
+        let resolver_endpoint_id = props
+            .get("ResolverEndpointId")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let target_ips_att =
+            serde_json::to_string(&target_ips).unwrap_or_else(|_| "[]".to_string());
+
+        let tags = self.r53r_tags(props);
+        let (arn, domain_name) = {
+            let mut st = self.route53resolver_state.write();
+            let acc = st.account_mut(&self.account_id);
+            let rule = acc
+                .rules
+                .get_mut(&id)
+                .ok_or_else(|| format!("Resolver rule {id} not yet provisioned"))?;
+            rule.name = name.clone();
+            rule.target_ips = target_ips;
+            rule.resolver_endpoint_id = resolver_endpoint_id.clone();
+            rule.modification_time = now_rfc3339();
+            let arn = rule.arn.clone();
+            let domain_name = rule.domain_name.clone();
+            if tags.is_empty() {
+                acc.tags.remove(&arn);
+            } else {
+                acc.tags.insert(arn.clone(), tags);
+            }
+            (arn, domain_name)
+        };
+
+        let mut out = ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("ResolverRuleId", id)
+            .with("Name", name.unwrap_or_default())
+            .with("DomainName", domain_name.unwrap_or_default())
+            .with("TargetIps", target_ips_att);
+        if let Some(ep) = resolver_endpoint_id {
+            out = out.with("ResolverEndpointId", ep);
+        }
+        Ok(out)
+    }
+
     pub(super) fn delete_r53r_resolver_rule(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
         if let Some(acc) = st.accounts.get_mut(&self.account_id) {
@@ -613,6 +684,54 @@ impl ResourceProvisioner {
                 acc.tags.insert(arn.clone(), tags);
             }
         }
+        Ok(ProvisionResult::new(id.clone())
+            .with("Arn", arn)
+            .with("Id", id))
+    }
+
+    /// In-place update: reprovision would churn the random rslvr-fdl- id,
+    /// dangling every FirewallRule that references this domain list. Name/Domains
+    /// are the mutable properties (UpdateFirewallDomains); preserve id/arn.
+    pub(super) fn update_r53r_firewall_domain_list(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let id = existing.physical_id.clone();
+        let name = props.get("Name").and_then(|v| v.as_str());
+        let domains: Vec<String> = props
+            .get("Domains")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let tags = self.r53r_tags(props);
+
+        let mut st = self.route53resolver_state.write();
+        let acc = st.account_mut(&self.account_id);
+        let arn = {
+            let list = acc
+                .firewall_domain_lists
+                .get_mut(&id)
+                .ok_or_else(|| format!("Firewall domain list {id} not yet provisioned"))?;
+            if let Some(n) = name {
+                list.name = n.to_string();
+            }
+            list.domain_count = domains.len() as i64;
+            list.modification_time = now_rfc3339();
+            list.arn.clone()
+        };
+        acc.firewall_domains.insert(id.clone(), domains);
+        if tags.is_empty() {
+            acc.tags.remove(&arn);
+        } else {
+            acc.tags.insert(arn.clone(), tags);
+        }
+
         Ok(ProvisionResult::new(id.clone())
             .with("Arn", arn)
             .with("Id", id))
