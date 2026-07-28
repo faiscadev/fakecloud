@@ -77,6 +77,8 @@ pub struct Vpc {
     pub enable_dns_support: bool,
     pub enable_dns_hostnames: bool,
     #[serde(default)]
+    pub enable_network_address_usage_metrics: bool,
+    #[serde(default)]
     pub cidr_associations: Vec<VpcCidrAssoc>,
     /// Amazon-provided IPv6 /56 CIDR, set when the VPC was created (or updated)
     /// with `AmazonProvidedIpv6CidrBlock=true`. Reported in the
@@ -116,6 +118,10 @@ pub struct Subnet {
     pub assign_ipv6_address_on_creation: bool,
     pub map_customer_owned_ip_on_launch: bool,
     pub enable_dns64: bool,
+    #[serde(default)]
+    pub enable_resource_name_dns_a_record_on_launch: bool,
+    #[serde(default)]
+    pub enable_resource_name_dns_aaaa_record_on_launch: bool,
     /// `ip-name` | `resource-name`.
     pub private_dns_hostname_type: String,
     /// IPv6 /64 associated with the subnet (via CreateSubnet `Ipv6CidrBlock` or

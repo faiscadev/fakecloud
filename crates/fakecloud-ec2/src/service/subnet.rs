@@ -59,8 +59,10 @@ pub(crate) fn subnet_xml(s: &Subnet, tags: &[Tag], owner: &str, region: &str) ->
         // (and the DNS-record toggles) from this block; AWS defaults the
         // hostname type to `ip-name`.
         format_args!(
-            "<privateDnsNameOptionsOnLaunch><hostnameType>{}</hostnameType><enableResourceNameDnsARecord>false</enableResourceNameDnsARecord><enableResourceNameDnsAAAARecord>false</enableResourceNameDnsAAAARecord></privateDnsNameOptionsOnLaunch>",
-            s.private_dns_hostname_type
+            "<privateDnsNameOptionsOnLaunch><hostnameType>{}</hostnameType><enableResourceNameDnsARecord>{}</enableResourceNameDnsARecord><enableResourceNameDnsAAAARecord>{}</enableResourceNameDnsAAAARecord></privateDnsNameOptionsOnLaunch>",
+            s.private_dns_hostname_type,
+            s.enable_resource_name_dns_a_record_on_launch,
+            s.enable_resource_name_dns_aaaa_record_on_launch
         ),
         ipv6_set,
         super::tags::tag_set_xml(tags),
@@ -93,6 +95,8 @@ fn build_subnet(vpc_id: String, cidr: String, az: &str, default_for_az: bool) ->
         assign_ipv6_address_on_creation: false,
         map_customer_owned_ip_on_launch: false,
         enable_dns64: false,
+        enable_resource_name_dns_a_record_on_launch: false,
+        enable_resource_name_dns_aaaa_record_on_launch: false,
         private_dns_hostname_type: "ip-name".to_string(),
         ipv6_cidr_block: None,
     }
@@ -415,6 +419,21 @@ pub(crate) fn modify_subnet_attribute(
             if let Some(v) = req.query_params.get("PrivateDnsHostnameTypeOnLaunch") {
                 s.private_dns_hostname_type = v.clone();
             }
+            if let Some(v) = req
+                .query_params
+                .get("EnableResourceNameDnsARecordOnLaunch.Value")
+            {
+                s.enable_resource_name_dns_a_record_on_launch = v == "true";
+            }
+            if let Some(v) = req
+                .query_params
+                .get("EnableResourceNameDnsAAAARecordOnLaunch.Value")
+            {
+                s.enable_resource_name_dns_aaaa_record_on_launch = v == "true";
+            }
+            if let Some(v) = req.query_params.get("MapCustomerOwnedIpOnLaunch.Value") {
+                s.map_customer_owned_ip_on_launch = v == "true";
+            }
         }
     }
     Ok(Ec2Service::respond(
@@ -599,6 +618,42 @@ mod tests {
             .and_then(|s| s.split("</subnetId>").next())
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn modify_subnet_attribute_persists_dns_record_and_customer_owned_ip() {
+        // bug-audit 2026-07-27 (cycle 6): these attrs were ignored on modify and
+        // the render hardcoded the DNS-record toggles to false -> perpetual drift.
+        let svc = Ec2Service::new();
+        let id = make_subnet(&svc, "vpc-test", "10.0.7.0/24");
+        for (k, v) in [
+            ("EnableResourceNameDnsARecordOnLaunch.Value", "true"),
+            ("EnableResourceNameDnsAAAARecordOnLaunch.Value", "true"),
+            ("MapCustomerOwnedIpOnLaunch.Value", "true"),
+        ] {
+            modify_subnet_attribute(
+                &svc,
+                &req("ModifySubnetAttribute", &[("SubnetId", &id), (k, v)]),
+            )
+            .unwrap();
+        }
+        let body = body_of(
+            describe_subnets(&svc, &req("DescribeSubnets", &[("SubnetId.1", &id)])).unwrap(),
+        );
+        assert!(
+            body.contains("<enableResourceNameDnsARecord>true</enableResourceNameDnsARecord>"),
+            "{body}"
+        );
+        assert!(
+            body.contains(
+                "<enableResourceNameDnsAAAARecord>true</enableResourceNameDnsAAAARecord>"
+            ),
+            "{body}"
+        );
+        assert!(
+            body.contains("<mapCustomerOwnedIpOnLaunch>true</mapCustomerOwnedIpOnLaunch>"),
+            "{body}"
+        );
     }
 
     #[test]

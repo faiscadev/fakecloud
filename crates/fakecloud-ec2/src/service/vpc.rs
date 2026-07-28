@@ -209,6 +209,7 @@ fn build_vpc(cidr: String, tenancy: String, is_default: bool) -> Vpc {
         is_default,
         enable_dns_support: true,
         enable_dns_hostnames: is_default,
+        enable_network_address_usage_metrics: false,
         cidr_associations: Vec::new(),
         ipv6_cidr_block: None,
     }
@@ -293,6 +294,9 @@ pub(crate) fn modify_vpc_attribute(
         if let Some(v) = bool_attr(&req.query_params, "EnableDnsHostnames.Value") {
             vpc.enable_dns_hostnames = v;
         }
+        if let Some(v) = bool_attr(&req.query_params, "EnableNetworkAddressUsageMetrics.Value") {
+            vpc.enable_network_address_usage_metrics = v;
+        }
     }
     Ok(Ec2Service::respond(
         "ModifyVpcAttribute",
@@ -323,18 +327,24 @@ pub(crate) fn describe_vpc_attribute(
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
     let state = accounts.get(&req.account_id).unwrap_or(&empty);
-    let (dns_support, dns_hostnames) = state
+    let (dns_support, dns_hostnames, nau_metrics) = state
         .vpcs
         .get(&vpc_id)
-        .map(|v| (v.enable_dns_support, v.enable_dns_hostnames))
-        .unwrap_or((true, false));
+        .map(|v| {
+            (
+                v.enable_dns_support,
+                v.enable_dns_hostnames,
+                v.enable_network_address_usage_metrics,
+            )
+        })
+        .unwrap_or((true, false, false));
 
     let attr_xml = match attribute.as_str() {
-        "enableDnsHostnames" => format!(
-            "<enableDnsHostnames><value>{dns_hostnames}</value></enableDnsHostnames>"
-        ),
+        "enableDnsHostnames" => {
+            format!("<enableDnsHostnames><value>{dns_hostnames}</value></enableDnsHostnames>")
+        }
         "enableNetworkAddressUsageMetrics" => {
-            "<enableNetworkAddressUsageMetrics><value>false</value></enableNetworkAddressUsageMetrics>".to_string()
+            format!("<enableNetworkAddressUsageMetrics><value>{nau_metrics}</value></enableNetworkAddressUsageMetrics>")
         }
         _ => format!("<enableDnsSupport><value>{dns_support}</value></enableDnsSupport>"),
     };
@@ -510,6 +520,42 @@ mod tests {
             .and_then(|s| s.split("</vpcId>").next())
             .unwrap()
             .to_string()
+    }
+
+    #[test]
+    fn modify_vpc_attribute_persists_network_address_usage_metrics() {
+        // bug-audit 2026-07-27 (cycle 6): the attr was ignored on modify and
+        // describe hardcoded false -> aws_vpc perpetual drift.
+        let svc = Ec2Service::new();
+        let vpc_id = make_vpc(&svc, "10.9.0.0/16");
+        modify_vpc_attribute(
+            &svc,
+            &req(
+                "ModifyVpcAttribute",
+                &[
+                    ("VpcId", &vpc_id),
+                    ("EnableNetworkAddressUsageMetrics.Value", "true"),
+                ],
+            ),
+        )
+        .unwrap();
+        let body = body_of(
+            describe_vpc_attribute(
+                &svc,
+                &req(
+                    "DescribeVpcAttribute",
+                    &[
+                        ("VpcId", &vpc_id),
+                        ("Attribute", "enableNetworkAddressUsageMetrics"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            body.contains("<enableNetworkAddressUsageMetrics><value>true</value>"),
+            "{body}"
+        );
     }
 
     #[test]
