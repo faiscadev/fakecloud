@@ -111,10 +111,15 @@ fn vgw_xml(g: &VpnGateway, tags: &[Tag]) -> String {
         .map(|v| format!("{}<state>attached</state>", ec2_elem("vpcId", v)))
         .collect();
     format!(
-        "{}<state>{}</state>{}<amazonSideAsn>64512</amazonSideAsn>{}{}",
+        "{}<state>{}</state>{}<amazonSideAsn>{}</amazonSideAsn>{}{}{}",
         ec2_elem("vpnGatewayId", &g.id),
         g.state,
         ec2_elem("type", "ipsec.1"),
+        g.amazon_side_asn,
+        g.availability_zone
+            .as_ref()
+            .map(|z| ec2_elem("availabilityZone", z))
+            .unwrap_or_default(),
         ec2_list("attachments", &atts),
         super::tags::tag_set_xml(tags),
     )
@@ -131,6 +136,12 @@ pub(crate) fn create_vpn_gateway(
         id: id.clone(),
         state: "available".to_string(),
         attachments: Vec::new(),
+        amazon_side_asn: req
+            .query_params
+            .get("AmazonSideAsn")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(64512),
+        availability_zone: req.query_params.get("AvailabilityZone").cloned(),
     };
     let tags = {
         let mut accounts = svc.state.write();
@@ -256,7 +267,7 @@ fn vpn_conn_xml(c: &VpnConnection, tags: &[Tag]) -> String {
         .collect();
     format!(
         "{}<state>{}</state>{}{}{}<customerGatewayConfiguration>&lt;vpn_connection/&gt;</customerGatewayConfiguration>\
-         <options><staticRoutesOnly>false</staticRoutesOnly></options>{}{}{}",
+         <options><staticRoutesOnly>{}</staticRoutesOnly></options>{}{}{}",
         ec2_elem("vpnConnectionId", &c.id),
         c.state,
         ec2_elem("type", "ipsec.1"),
@@ -266,6 +277,7 @@ fn vpn_conn_xml(c: &VpnConnection, tags: &[Tag]) -> String {
             c.vpn_gateway_id.as_ref().map(|g| ec2_elem("vpnGatewayId", g)).unwrap_or_default(),
             c.transit_gateway_id.as_ref().map(|g| ec2_elem("transitGatewayId", g)).unwrap_or_default(),
         ),
+        c.static_routes_only,
         ec2_list("routes", &routes),
         ec2_list("vgwTelemetry", &[]),
         super::tags::tag_set_xml(tags),
@@ -289,6 +301,10 @@ pub(crate) fn create_vpn_connection(
         customer_gateway_id: cgw,
         vpn_gateway_id: req.query_params.get("VpnGatewayId").cloned(),
         transit_gateway_id: req.query_params.get("TransitGatewayId").cloned(),
+        static_routes_only: req
+            .query_params
+            .get("Options.StaticRoutesOnly")
+            .is_some_and(|v| v == "true"),
         routes: Vec::new(),
     };
     let tags = {
@@ -360,6 +376,7 @@ fn vpn_conn_lookup(svc: &Ec2Service, req: &AwsRequest, id: &str) -> (VpnConnecti
             customer_gateway_id: "cgw-0".to_string(),
             vpn_gateway_id: None,
             transit_gateway_id: None,
+            static_routes_only: false,
             routes: Vec::new(),
         });
     let tags = accounts
@@ -664,6 +681,61 @@ mod modify_vpn_tests {
 
     fn body(resp: AwsResponse) -> String {
         String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn create_vpn_connection_persists_static_routes_only() {
+        // bug-audit 2026-07-29 (cycle 8) E2-4: Options.StaticRoutesOnly was
+        // dropped; the describe render hardcoded false.
+        let svc = Ec2Service::new();
+        create_vpn_connection(
+            &svc,
+            &ec2_request(
+                "CreateVpnConnection",
+                &[
+                    ("CustomerGatewayId", "cgw-1"),
+                    ("Type", "ipsec.1"),
+                    ("Options.StaticRoutesOnly", "true"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc = body(
+            describe_vpn_connections(&svc, &ec2_request("DescribeVpnConnections", &[])).unwrap(),
+        );
+        assert!(
+            desc.contains("<staticRoutesOnly>true</staticRoutesOnly>"),
+            "{desc}"
+        );
+    }
+
+    #[test]
+    fn create_vpn_gateway_persists_asn_and_az() {
+        // bug-audit 2026-07-29 (cycle 8) E2-5: AmazonSideAsn/AvailabilityZone
+        // were dropped; the render hardcoded ASN 64512 and emitted no AZ.
+        let svc = Ec2Service::new();
+        create_vpn_gateway(
+            &svc,
+            &ec2_request(
+                "CreateVpnGateway",
+                &[
+                    ("Type", "ipsec.1"),
+                    ("AmazonSideAsn", "65001"),
+                    ("AvailabilityZone", "us-east-1b"),
+                ],
+            ),
+        )
+        .unwrap();
+        let desc =
+            body(describe_vpn_gateways(&svc, &ec2_request("DescribeVpnGateways", &[])).unwrap());
+        assert!(
+            desc.contains("<amazonSideAsn>65001</amazonSideAsn>"),
+            "{desc}"
+        );
+        assert!(
+            desc.contains("<availabilityZone>us-east-1b</availabilityZone>"),
+            "{desc}"
+        );
     }
 
     #[test]
