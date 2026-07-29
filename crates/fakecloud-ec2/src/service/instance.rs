@@ -159,6 +159,14 @@ fn instance_xml(
         .as_ref()
         .map(|g| ec2_elem("groupName", g))
         .unwrap_or_default();
+    // `placement_affinity` was written by ModifyInstancePlacement/RunInstances
+    // but never rendered here (a dead write) -> the value never reflected on
+    // DescribeInstances. Emit it when set.
+    let affinity = i
+        .placement_affinity
+        .as_ref()
+        .map(|a| ec2_elem("affinity", a))
+        .unwrap_or_default();
     format!(
         "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("instanceId", &i.instance_id),
@@ -184,8 +192,8 @@ fn instance_xml(
             i.ebs_optimized, i.source_dest_check
         ),
         format_args!(
-            "<placement><availabilityZone>{}</availabilityZone>{}<tenancy>{}</tenancy></placement>",
-            i.az, placement_group, tenancy
+            "<placement><availabilityZone>{}</availabilityZone>{}{}<tenancy>{}</tenancy></placement>",
+            i.az, affinity, placement_group, tenancy
         ),
         format_args!(
             "<monitoring><state>{}</state></monitoring>",
@@ -2484,6 +2492,25 @@ mod modify_tests {
 
     fn body(resp: AwsResponse) -> String {
         String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn modify_instance_placement_renders_affinity() {
+        // bug-audit 2026-07-29 (cycle 8) E2-7: placement_affinity was written but
+        // the DescribeInstances <placement> render omitted <affinity> (dead
+        // write) -> the value never reflected.
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-aff");
+        modify_instance_placement(
+            &svc,
+            &req(
+                "ModifyInstancePlacement",
+                &[("InstanceId", "i-aff"), ("Affinity", "host")],
+            ),
+        )
+        .unwrap();
+        let desc = body(describe_instances(&svc, &req("DescribeInstances", &[])).unwrap());
+        assert!(desc.contains("<affinity>host</affinity>"), "{desc}");
     }
 
     #[test]

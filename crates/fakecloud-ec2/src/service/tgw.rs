@@ -6,7 +6,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{gen_id, indexed_list, require, validate_max_results};
-use crate::state::{Ec2State, Tag, TgwAttachment, TgwRoute, TgwRouteTable, TransitGateway};
+use crate::state::{
+    Ec2State, Tag, TgwAttachment, TgwRoute, TgwRouteTable, TransitGateway, TransitGatewayOptions,
+};
 
 const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
@@ -17,12 +19,14 @@ fn mr(req: &AwsRequest) -> Result<(), AwsServiceError> {
 // ---- transit gateways ----
 
 fn tgw_xml(t: &TransitGateway, tags: &[Tag], owner: &str, region: &str) -> String {
+    let o = &t.options;
     format!(
-        "{}{}{}{}{}{}<options><amazonSideAsn>64512</amazonSideAsn>\
-         <autoAcceptSharedAttachments>disable</autoAcceptSharedAttachments>\
-         <defaultRouteTableAssociation>enable</defaultRouteTableAssociation>\
-         <defaultRouteTablePropagation>enable</defaultRouteTablePropagation>\
-         <dnsSupport>enable</dnsSupport><vpnEcmpSupport>enable</vpnEcmpSupport></options>{}",
+        "{}{}{}{}{}{}<options><amazonSideAsn>{}</amazonSideAsn>\
+         <autoAcceptSharedAttachments>{}</autoAcceptSharedAttachments>\
+         <defaultRouteTableAssociation>{}</defaultRouteTableAssociation>\
+         <defaultRouteTablePropagation>{}</defaultRouteTablePropagation>\
+         <dnsSupport>{}</dnsSupport><vpnEcmpSupport>{}</vpnEcmpSupport>\
+         <multicastSupport>{}</multicastSupport></options>{}",
         ec2_elem("transitGatewayId", &t.id),
         ec2_elem("state", &t.state),
         ec2_elem(
@@ -32,8 +36,46 @@ fn tgw_xml(t: &TransitGateway, tags: &[Tag], owner: &str, region: &str) -> Strin
         ec2_elem("ownerId", owner),
         ec2_elem("description", &t.description),
         ec2_elem("creationTime", FIXED_TIME),
+        o.amazon_side_asn,
+        o.auto_accept_shared_attachments,
+        o.default_route_table_association,
+        o.default_route_table_propagation,
+        o.dns_support,
+        o.vpn_ecmp_support,
+        o.multicast_support,
         super::tags::tag_set_xml(tags),
     )
+}
+
+/// Parse the flattened `Options.*` request params into stored options, keeping
+/// AWS's create-time defaults for any member the caller omits.
+fn parse_tgw_options(params: &std::collections::HashMap<String, String>) -> TransitGatewayOptions {
+    let mut o = TransitGatewayOptions::default();
+    if let Some(v) = params
+        .get("Options.AmazonSideAsn")
+        .and_then(|v| v.parse().ok())
+    {
+        o.amazon_side_asn = v;
+    }
+    if let Some(v) = params.get("Options.AutoAcceptSharedAttachments") {
+        o.auto_accept_shared_attachments = v.clone();
+    }
+    if let Some(v) = params.get("Options.DefaultRouteTableAssociation") {
+        o.default_route_table_association = v.clone();
+    }
+    if let Some(v) = params.get("Options.DefaultRouteTablePropagation") {
+        o.default_route_table_propagation = v.clone();
+    }
+    if let Some(v) = params.get("Options.DnsSupport") {
+        o.dns_support = v.clone();
+    }
+    if let Some(v) = params.get("Options.VpnEcmpSupport") {
+        o.vpn_ecmp_support = v.clone();
+    }
+    if let Some(v) = params.get("Options.MulticastSupport") {
+        o.multicast_support = v.clone();
+    }
+    o
 }
 
 pub(crate) fn create_transit_gateway(
@@ -49,6 +91,7 @@ pub(crate) fn create_transit_gateway(
             .cloned()
             .unwrap_or_default(),
         state: "available".to_string(),
+        options: parse_tgw_options(&req.query_params),
     };
     let owner = req.account_id.clone();
     let tags = {
@@ -89,6 +132,7 @@ pub(crate) fn delete_transit_gateway(
             id: id.clone(),
             description: String::new(),
             state: "available".to_string(),
+            options: TransitGatewayOptions::default(),
         });
     let tags = state.tags_for(&id).to_vec();
     state.tags.remove(&id);
@@ -147,6 +191,7 @@ pub(crate) fn modify_transit_gateway(
             id: id.clone(),
             description: String::new(),
             state: "available".to_string(),
+            options: TransitGatewayOptions::default(),
         });
     let tags = state.tags_for(&id).to_vec();
     Ok(Ec2Service::respond(
@@ -919,6 +964,63 @@ pub(crate) fn get_transit_gateway_prefix_list_references(
 }
 
 #[cfg(test)]
+mod options_tests {
+    use super::*;
+    use crate::test_support::ec2_request as req;
+
+    #[test]
+    fn create_transit_gateway_persists_options() {
+        // bug-audit 2026-07-29 (cycle 8) E2-1: CreateTransitGateway dropped the
+        // whole Options block; the describe render hardcoded ASN 64512 + all
+        // defaults, so a non-default value never round-tripped.
+        let svc = Ec2Service::new();
+        let resp = create_transit_gateway(
+            &svc,
+            &req(
+                "CreateTransitGateway",
+                &[
+                    ("Options.AmazonSideAsn", "64513"),
+                    ("Options.DnsSupport", "disable"),
+                    ("Options.DefaultRouteTableAssociation", "disable"),
+                    ("Options.MulticastSupport", "enable"),
+                ],
+            ),
+        )
+        .unwrap();
+        let b = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        let id = b
+            .split("<transitGatewayId>")
+            .nth(1)
+            .unwrap()
+            .split("</transitGatewayId>")
+            .next()
+            .unwrap()
+            .to_string();
+        let desc = String::from_utf8_lossy(
+            describe_transit_gateways(&svc, &req("DescribeTransitGateways", &[]))
+                .unwrap()
+                .body
+                .expect_bytes(),
+        )
+        .to_string();
+        assert!(desc.contains(&id));
+        assert!(
+            desc.contains("<amazonSideAsn>64513</amazonSideAsn>"),
+            "{desc}"
+        );
+        assert!(desc.contains("<dnsSupport>disable</dnsSupport>"), "{desc}");
+        assert!(
+            desc.contains("<defaultRouteTableAssociation>disable</defaultRouteTableAssociation>"),
+            "{desc}"
+        );
+        assert!(
+            desc.contains("<multicastSupport>enable</multicastSupport>"),
+            "{desc}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod modify_tests {
     use super::*;
 
@@ -990,6 +1092,7 @@ mod modify_tests {
             id: "tgw-abc123".into(),
             description: String::new(),
             state: "available".into(),
+            options: TransitGatewayOptions::default(),
         };
         let xml = tgw_xml(&t, &[], "000000000000", "eu-central-1");
         assert!(

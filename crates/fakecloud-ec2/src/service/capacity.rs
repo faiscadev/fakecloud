@@ -37,7 +37,7 @@ const INSTANCE_PLATFORMS: &[&str] = &[
 fn cr_xml(r: &CapacityReservation, tags: &[Tag], owner: &str) -> String {
     format!(
         "{}{}{}{}{}{}{}<totalInstanceCount>{}</totalInstanceCount><availableInstanceCount>{}</availableInstanceCount>\
-         <ebsOptimized>false</ebsOptimized><ephemeralStorage>false</ephemeralStorage>{}{}{}{}{}{}",
+         <ebsOptimized>{}</ebsOptimized><ephemeralStorage>{}</ephemeralStorage>{}{}{}{}{}{}",
         ec2_elem("capacityReservationId", &r.id),
         ec2_elem("ownerId", owner),
         ec2_elem("capacityReservationArn", &format!("arn:aws:ec2:{}:{owner}:capacity-reservation/{}", region_of(r), r.id)),
@@ -47,6 +47,8 @@ fn cr_xml(r: &CapacityReservation, tags: &[Tag], owner: &str) -> String {
         ec2_elem("tenancy", &r.tenancy),
         r.total_instance_count,
         r.available_instance_count,
+        r.ebs_optimized,
+        r.ephemeral_storage,
         ec2_elem("state", &r.state),
         ec2_elem("endDateType", &r.end_date_type),
         ec2_elem("instanceMatchCriteria", &r.instance_match_criteria),
@@ -121,6 +123,14 @@ pub(crate) fn create_capacity_reservation(
         total_instance_count: count,
         available_instance_count: count,
         state: "active".to_string(),
+        ebs_optimized: req
+            .query_params
+            .get("EbsOptimized")
+            .is_some_and(|v| v == "true"),
+        ephemeral_storage: req
+            .query_params
+            .get("EphemeralStorage")
+            .is_some_and(|v| v == "true"),
         end_date_type: req
             .query_params
             .get("EndDateType")
@@ -439,6 +449,8 @@ fn synth_cr_xml(id: &str, owner: &str, count: i64) -> String {
         state: "active".to_string(),
         end_date_type: "unlimited".to_string(),
         instance_match_criteria: "open".to_string(),
+        ebs_optimized: false,
+        ephemeral_storage: false,
     };
     cr_xml(&r, &[], owner)
 }
@@ -625,6 +637,8 @@ pub(crate) fn purchase_capacity_block(
                     state: "active".to_string(),
                     end_date_type: "limited".to_string(),
                     instance_match_criteria: "targeted".to_string(),
+                    ebs_optimized: false,
+                    ephemeral_storage: false,
                 },
             );
     }
@@ -752,6 +766,39 @@ mod crfleet_tests {
 
     fn body(resp: AwsResponse) -> String {
         String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn create_capacity_reservation_persists_ebs_optimized_and_ephemeral() {
+        // bug-audit 2026-07-29 (cycle 8) E2-3: CreateCapacityReservation dropped
+        // EbsOptimized/EphemeralStorage; cr_xml hardcoded both false.
+        let svc = Ec2Service::new();
+        body(
+            create_capacity_reservation(
+                &svc,
+                &req(
+                    "CreateCapacityReservation",
+                    &[
+                        ("InstanceType", "t3.micro"),
+                        ("InstancePlatform", "Linux/UNIX"),
+                        ("AvailabilityZone", "us-east-1a"),
+                        ("InstanceCount", "1"),
+                        ("EbsOptimized", "true"),
+                        ("EphemeralStorage", "true"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let desc = body(
+            describe_capacity_reservations(&svc, &req("DescribeCapacityReservations", &[]))
+                .unwrap(),
+        );
+        assert!(desc.contains("<ebsOptimized>true</ebsOptimized>"), "{desc}");
+        assert!(
+            desc.contains("<ephemeralStorage>true</ephemeralStorage>"),
+            "{desc}"
+        );
     }
 
     #[test]

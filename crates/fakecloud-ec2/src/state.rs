@@ -744,6 +744,10 @@ pub struct FlowLog {
     /// defaults to 600 when unspecified.
     #[serde(default = "default_max_aggregation_interval")]
     pub max_aggregation_interval: i64,
+    /// Custom log line format. Accepted at CreateFlowLogs but previously
+    /// dropped; AWS always echoes `LogFormat` on DescribeFlowLogs.
+    #[serde(default)]
+    pub log_format: Option<String>,
 }
 
 fn default_max_aggregation_interval() -> i64 {
@@ -812,6 +816,13 @@ pub struct CapacityReservation {
     pub state: String,
     pub end_date_type: String,
     pub instance_match_criteria: String,
+    /// Accepted at CreateCapacityReservation but previously hardcoded false in
+    /// the describe render, so `aws_ec2_capacity_reservation` drifted on these
+    /// ForceNew flags.
+    #[serde(default)]
+    pub ebs_optimized: bool,
+    #[serde(default)]
+    pub ephemeral_storage: bool,
 }
 
 /// A Reserved Instance purchase.
@@ -870,6 +881,54 @@ pub struct TransitGateway {
     /// `pending` | `available` | `modifying` | `deleting` | `deleted`.
     #[serde(default = "tgw_default_state")]
     pub state: String,
+    /// The `Options` block. Previously hardcoded in the describe render, so a
+    /// non-default AmazonSideAsn / DnsSupport / route-table default read back
+    /// wrong and churned `aws_ec2_transit_gateway` (several are ForceNew).
+    #[serde(default)]
+    pub options: TransitGatewayOptions,
+}
+
+/// `AWS::EC2::TransitGateway` Options, with AWS's create-time defaults.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TransitGatewayOptions {
+    #[serde(default = "tgw_default_asn")]
+    pub amazon_side_asn: i64,
+    #[serde(default = "tgw_disable")]
+    pub auto_accept_shared_attachments: String,
+    #[serde(default = "tgw_enable")]
+    pub default_route_table_association: String,
+    #[serde(default = "tgw_enable")]
+    pub default_route_table_propagation: String,
+    #[serde(default = "tgw_enable")]
+    pub dns_support: String,
+    #[serde(default = "tgw_enable")]
+    pub vpn_ecmp_support: String,
+    #[serde(default = "tgw_disable")]
+    pub multicast_support: String,
+}
+
+fn tgw_default_asn() -> i64 {
+    64512
+}
+fn tgw_enable() -> String {
+    "enable".to_string()
+}
+fn tgw_disable() -> String {
+    "disable".to_string()
+}
+
+impl Default for TransitGatewayOptions {
+    fn default() -> Self {
+        Self {
+            amazon_side_asn: tgw_default_asn(),
+            auto_accept_shared_attachments: tgw_disable(),
+            default_route_table_association: tgw_enable(),
+            default_route_table_propagation: tgw_enable(),
+            dns_support: tgw_enable(),
+            vpn_ecmp_support: tgw_enable(),
+            multicast_support: tgw_disable(),
+        }
+    }
 }
 
 fn tgw_default_state() -> String {
