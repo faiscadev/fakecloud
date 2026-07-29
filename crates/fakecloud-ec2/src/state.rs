@@ -992,6 +992,16 @@ pub struct VpnGateway {
     pub state: String,
     #[serde(default)]
     pub attachments: Vec<String>,
+    /// `AmazonSideAsn` / `AvailabilityZone`, previously hardcoded (asn 64512, no
+    /// AZ) in the describe render -> `aws_vpn_gateway` (ForceNew) drifted.
+    #[serde(default = "vgw_default_asn")]
+    pub amazon_side_asn: i64,
+    #[serde(default)]
+    pub availability_zone: Option<String>,
+}
+
+fn vgw_default_asn() -> i64 {
+    64512
 }
 
 /// A Site-to-Site VPN connection.
@@ -1003,6 +1013,10 @@ pub struct VpnConnection {
     pub vpn_gateway_id: Option<String>,
     #[serde(default)]
     pub transit_gateway_id: Option<String>,
+    /// `Options.StaticRoutesOnly`; previously hardcoded false in the describe
+    /// render, so `aws_vpn_connection` (ForceNew) drifted on a non-default.
+    #[serde(default)]
+    pub static_routes_only: bool,
     #[serde(default)]
     pub routes: Vec<String>,
 }
