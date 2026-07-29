@@ -6133,6 +6133,53 @@ mod tests {
     }
 
     #[test]
+    fn sns_subscription_create_persists_filter_and_raw_delivery() {
+        // bug-audit 2026-07-29 (cycle 8) CF2-1: create hardcoded empty
+        // attributes, so a CFN-created subscription ignored FilterPolicy /
+        // RawMessageDelivery until an unrelated update happened to run.
+        let prov = make_provisioner();
+        let topic_arn = prov
+            .create_resource(&make_resource(
+                "AWS::SNS::Topic",
+                "T",
+                serde_json::json!({ "TopicName": "t" }),
+            ))
+            .unwrap()
+            .physical_id;
+        let sub = prov
+            .create_resource(&make_resource(
+                "AWS::SNS::Subscription",
+                "S",
+                serde_json::json!({
+                    "TopicArn": topic_arn,
+                    "Protocol": "sqs",
+                    "Endpoint": "arn:aws:sqs:us-east-1:123456789012:q",
+                    "RawMessageDelivery": true,
+                    "FilterPolicy": { "eventType": ["order_placed"] }
+                }),
+            ))
+            .unwrap();
+        let sns = prov.sns_state.read();
+        let s = sns
+            .get("123456789012")
+            .unwrap()
+            .subscriptions
+            .get(&sub.physical_id)
+            .unwrap();
+        assert_eq!(
+            s.attributes.get("RawMessageDelivery").map(String::as_str),
+            Some("true")
+        );
+        assert!(
+            s.attributes
+                .get("FilterPolicy")
+                .is_some_and(|f| f.contains("order_placed")),
+            "{:?}",
+            s.attributes
+        );
+    }
+
+    #[test]
     fn eventbridge_rule_arn_default_bus_omits_bus_name() {
         let prov = make_provisioner();
         let resource = make_resource(
@@ -8322,6 +8369,57 @@ mod tests {
         assert_eq!(inst.db_instance_class, "db.t3.large");
         assert_eq!(inst.allocated_storage, 100);
         assert_eq!(inst.backup_retention_period, 7);
+    }
+
+    #[test]
+    fn rds_db_instance_persists_preferred_windows() {
+        // bug-audit 2026-07-29 (cycle 8) CF2-2: create hardcoded the backup
+        // window "03:00-04:00" and a null maintenance window, and update never
+        // touched them -> DescribeDBInstances always drifted on both.
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::RDS::DBInstance",
+                "DB",
+                serde_json::json!({
+                    "DBInstanceIdentifier": "win-db",
+                    "DBInstanceClass": "db.t3.micro",
+                    "Engine": "postgres",
+                    "AllocatedStorage": "20",
+                    "PreferredBackupWindow": "07:00-09:00",
+                    "PreferredMaintenanceWindow": "sun:05:00-sun:06:00"
+                }),
+            ))
+            .expect("instance provisions");
+        {
+            let rds = prov.rds_state.read();
+            let inst = &rds.get("123456789012").unwrap().instances["win-db"];
+            assert_eq!(inst.preferred_backup_window, "07:00-09:00");
+            assert_eq!(
+                inst.preferred_maintenance_window.as_deref(),
+                Some("sun:05:00-sun:06:00")
+            );
+        }
+        // Update applies new windows in place.
+        prov.update_resource(
+            &created,
+            &make_resource(
+                "AWS::RDS::DBInstance",
+                "DB",
+                serde_json::json!({
+                    "DBInstanceIdentifier": "win-db",
+                    "DBInstanceClass": "db.t3.micro",
+                    "Engine": "postgres",
+                    "AllocatedStorage": "20",
+                    "PreferredBackupWindow": "10:00-11:00"
+                }),
+            ),
+        )
+        .expect("update ok")
+        .expect("updatable");
+        let rds = prov.rds_state.read();
+        let inst = &rds.get("123456789012").unwrap().instances["win-db"];
+        assert_eq!(inst.preferred_backup_window, "10:00-11:00");
     }
 
     // --- Orchestration/persistence sweep (#1766 family): CFN write-through for
