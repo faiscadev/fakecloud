@@ -1407,6 +1407,51 @@ mod tests {
     }
 
     #[test]
+    fn start_query_execution_uses_workgroup_output_location() {
+        // bug-audit 2026-07-29 (cycle 8) DP-1: StartQueryExecution resolved
+        // OutputLocation only from the request; a workgroup-configured location
+        // (the common pattern, esp. with EnforceWorkGroupConfiguration) was
+        // ignored, so GetQueryExecution echoed no location and no S3 result was
+        // written. It must fall back to (and enforce) the workgroup config.
+        let svc = AthenaService::new(SharedAthenaState::default());
+        svc.create_work_group(&req(
+            "CreateWorkGroup",
+            json!({
+                "Name": "wg",
+                "Configuration": {
+                    "ResultConfiguration": {"OutputLocation": "s3://wg-results/prefix/"},
+                    "EnforceWorkGroupConfiguration": true
+                }
+            }),
+        ))
+        .unwrap();
+
+        let started = parse_json(
+            &svc.start_query_execution(&req(
+                "StartQueryExecution",
+                json!({ "QueryString": "SELECT 1", "WorkGroup": "wg" }),
+            ))
+            .unwrap(),
+        );
+        let qid = started["QueryExecutionId"].as_str().unwrap().to_string();
+
+        let got = parse_json(
+            &svc.get_query_execution(&req(
+                "GetQueryExecution",
+                json!({ "QueryExecutionId": qid }),
+            ))
+            .unwrap(),
+        );
+        let loc = got["QueryExecution"]["ResultConfiguration"]["OutputLocation"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            loc.contains("wg-results"),
+            "should resolve the workgroup output location, got: {got}"
+        );
+    }
+
+    #[test]
     fn start_query_execution_with_named_query_id() {
         let svc = AthenaService::new(SharedAthenaState::default());
         let create_resp = svc
