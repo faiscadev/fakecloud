@@ -5,6 +5,40 @@
 
 use super::*;
 
+/// Parse the mutable `AWS::SNS::Subscription` delivery/filter properties into
+/// the stored attribute map. Shared by create and update so a CFN-created
+/// subscription honors its FilterPolicy/RawMessageDelivery/RedrivePolicy/etc.
+/// immediately (create previously stored an empty map). JSON-document members
+/// accept an inline object or a string; RawMessageDelivery accepts bool or
+/// "true"/"false".
+fn sns_subscription_attributes(props: &serde_json::Value) -> BTreeMap<String, String> {
+    let mut attributes = BTreeMap::new();
+    for key in ["FilterPolicy", "RedrivePolicy", "DeliveryPolicy"] {
+        if let Some(v) = props.get(key) {
+            if !v.is_null() {
+                let doc = if let Some(s) = v.as_str() {
+                    s.to_string()
+                } else {
+                    serde_json::to_string(v).unwrap_or_default()
+                };
+                attributes.insert(key.to_string(), doc);
+            }
+        }
+    }
+    for key in ["FilterPolicyScope", "SubscriptionRoleArn"] {
+        if let Some(s) = props.get(key).and_then(|v| v.as_str()) {
+            attributes.insert(key.to_string(), s.to_string());
+        }
+    }
+    if let Some(b) = props
+        .get("RawMessageDelivery")
+        .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
+    {
+        attributes.insert("RawMessageDelivery".to_string(), b.to_string());
+    }
+    attributes
+}
+
 impl ResourceProvisioner {
     pub(super) fn get_att_sns_topic(&self, physical_id: &str, attribute: &str) -> Option<String> {
         let mut accounts = self.sns_state.write();
@@ -208,7 +242,11 @@ impl ResourceProvisioner {
             protocol: protocol.to_string(),
             endpoint: endpoint.to_string(),
             owner: state.account_id.clone(),
-            attributes: BTreeMap::new(),
+            // Parse the delivery/filter attributes at create time (previously
+            // hardcoded empty, so a CFN-created subscription silently ignored
+            // its FilterPolicy/RawMessageDelivery until an unrelated stack
+            // update happened to run the update path). Same set update applies.
+            attributes: sns_subscription_attributes(props),
             confirmed: true,
             confirmation_token: None,
         };
@@ -239,33 +277,10 @@ impl ResourceProvisioner {
             .get_mut(sub_arn)
             .ok_or_else(|| format!("SNS subscription {sub_arn} not yet provisioned"))?;
 
-        // JSON-document attributes: accept either an inline object or a string.
-        for key in ["FilterPolicy", "RedrivePolicy", "DeliveryPolicy"] {
-            if let Some(v) = props.get(key) {
-                if !v.is_null() {
-                    let doc = if let Some(s) = v.as_str() {
-                        s.to_string()
-                    } else {
-                        serde_json::to_string(v).unwrap_or_default()
-                    };
-                    subscription.attributes.insert(key.to_string(), doc);
-                }
-            }
-        }
-        for key in ["FilterPolicyScope", "SubscriptionRoleArn"] {
-            if let Some(s) = props.get(key).and_then(|v| v.as_str()) {
-                subscription
-                    .attributes
-                    .insert(key.to_string(), s.to_string());
-            }
-        }
-        if let Some(b) = props
-            .get("RawMessageDelivery")
-            .and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true")))
-        {
-            subscription
-                .attributes
-                .insert("RawMessageDelivery".to_string(), b.to_string());
+        // Re-apply the same delivery/filter attributes create parses, so a
+        // stack update reaches the subscription instead of leaving stale values.
+        for (k, v) in sns_subscription_attributes(props) {
+            subscription.attributes.insert(k, v);
         }
 
         Ok(ProvisionResult::new(sub_arn.clone()).with("Arn", sub_arn.clone()))

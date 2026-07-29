@@ -509,8 +509,15 @@ impl ResourceProvisioner {
             vpc_security_group_ids,
             db_parameter_group_name,
             backup_retention_period,
-            preferred_backup_window: "03:00-04:00".to_string(),
-            preferred_maintenance_window: None,
+            preferred_backup_window: props
+                .get("PreferredBackupWindow")
+                .and_then(|v| v.as_str())
+                .unwrap_or("03:00-04:00")
+                .to_string(),
+            preferred_maintenance_window: props
+                .get("PreferredMaintenanceWindow")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
             latest_restorable_time: None,
             option_group_name,
             multi_az,
@@ -673,6 +680,15 @@ impl ResourceProvisioner {
 
         if let Some(class) = props.get("DBInstanceClass").and_then(|v| v.as_str()) {
             inst.db_instance_class = class.to_string();
+        }
+        if let Some(w) = props.get("PreferredBackupWindow").and_then(|v| v.as_str()) {
+            inst.preferred_backup_window = w.to_string();
+        }
+        if let Some(w) = props
+            .get("PreferredMaintenanceWindow")
+            .and_then(|v| v.as_str())
+        {
+            inst.preferred_maintenance_window = Some(w.to_string());
         }
         if let Some(ev) = props.get("EngineVersion").and_then(|v| v.as_str()) {
             inst.engine_version = ev.to_string();
