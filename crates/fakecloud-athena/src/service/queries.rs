@@ -66,15 +66,38 @@ impl AthenaService {
         // EngineVersion from the workgroup it runs in (the workgroup's
         // Configuration/EngineVersion, set at Create/UpdateWorkGroup) rather than
         // hardcoding AUTO/v3.
-        let engine_version = {
+        let (engine_version, wg_output_location, enforce_wg) = {
             let mut state = self.state.write();
             let account = account_mut(&mut state, &req.account_id);
             match account.work_groups.get(&work_group) {
-                Some(wg) => resolve_engine_version(wg),
+                Some(wg) => {
+                    let cfg = wg.configuration.as_ref();
+                    let wg_out = cfg
+                        .and_then(|c| c.pointer("/ResultConfiguration/OutputLocation"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let enforce = cfg
+                        .and_then(|c| c.get("EnforceWorkGroupConfiguration"))
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    (resolve_engine_version(wg), wg_out, enforce)
+                }
                 None => {
                     return Err(invalid_request(format!("Workgroup {work_group} not found")));
                 }
             }
+        };
+
+        // Effective result location: the workgroup's own ResultConfiguration.
+        // OutputLocation is consulted when the request omits one, and OVERRIDES
+        // the request when EnforceWorkGroupConfiguration is set -- matching real
+        // Athena, where the common pattern is to configure OutputLocation once on
+        // the workgroup and omit it per query. Without this the result S3 object
+        // was never written and GetQueryExecution echoed an empty location.
+        let output_location = if enforce_wg {
+            wg_output_location.clone().or(output_location)
+        } else {
+            output_location.or_else(|| wg_output_location.clone())
         };
 
         let id = synth_uuid();
@@ -121,16 +144,18 @@ impl AthenaService {
             }
         };
 
-        // Re-merge the executed output_location back into ResultConfiguration
-        // so GetQueryExecution echoes the resolved s3:// key back to the
-        // caller (real Athena does this).
+        // Echo the resolved OutputLocation back in ResultConfiguration so
+        // GetQueryExecution reports where results go (real Athena always does,
+        // whether or not a file was materialized). Prefer the executor's exact
+        // s3:// key; otherwise fall back to the effective location resolved from
+        // the request / workgroup config above.
         let mut effective_result_config = result_configuration.clone();
-        if let Some(ref out) = output {
+        if let Some(out) = output.clone().or_else(|| output_location.clone()) {
             let cfg = effective_result_config
                 .get_or_insert_with(|| json!({}))
                 .as_object_mut();
             if let Some(obj) = cfg {
-                obj.insert("OutputLocation".to_string(), Value::String(out.clone()));
+                obj.insert("OutputLocation".to_string(), Value::String(out));
             }
         }
 
