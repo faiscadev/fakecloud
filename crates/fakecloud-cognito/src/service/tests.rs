@@ -8266,6 +8266,252 @@ fn custom_auth_issue_tokens_applies_pretoken_overrides_on_current_thread_runtime
     assert_eq!(claims["tenant"], "acme");
 }
 
+/// Build a standalone delivery context wired to [`SwitchingTriggerLambda`] for
+/// driving the free `handle_oauth2_*` handlers (the service owns its ctx
+/// privately, so the hosted-UI grant tests construct their own).
+fn pretoken_ctx() -> triggers::CognitoDeliveryContext {
+    let bus = std::sync::Arc::new(
+        fakecloud_core::delivery::DeliveryBus::new()
+            .with_lambda(std::sync::Arc::new(SwitchingTriggerLambda)),
+    );
+    triggers::CognitoDeliveryContext::new(bus)
+}
+
+/// Hosted-UI OAuth `authorization_code` grant must route token generation
+/// through the PreTokenGeneration override path. The asserted claims come ONLY
+/// from the trigger — reverting `handle_authorization_code_grant` to plain
+/// (no-override) issuance drops both.
+#[test]
+fn oauth_authorization_code_grant_applies_pretoken_overrides_to_access_token() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    set_user_password(&svc, &pool_id, "alice", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+
+    // Seed the single-use authorization code the grant will consume.
+    {
+        let mut w = state.write();
+        let acct = w.default_mut();
+        acct.authorization_codes.insert(
+            "code-abc".to_string(),
+            AuthorizationCodeData {
+                user_pool_id: pool_id.clone(),
+                client_id: client_id.clone(),
+                username: "alice".to_string(),
+                redirect_uri: "https://app/callback".to_string(),
+                scopes: vec![],
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                issued_at: Utc::now(),
+            },
+        );
+    }
+
+    let ctx = pretoken_ctx();
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("grant_type".to_string(), "authorization_code".to_string());
+    params.insert("code".to_string(), "code-abc".to_string());
+    params.insert(
+        "redirect_uri".to_string(),
+        "https://app/callback".to_string(),
+    );
+    params.insert("client_id".to_string(), client_id.clone());
+
+    let resp = block_on(handle_oauth2_token(
+        &state,
+        &params,
+        None,
+        "us-east-1",
+        Some(&ctx),
+    ))
+    .unwrap();
+    let claims = decode_jwt_claims(&resp.access_token);
+
+    assert_eq!(claims["cognito:groups"], json!(["pretoken-admins"]));
+    assert_eq!(claims["tenant"], "acme");
+}
+
+/// Hosted-UI OAuth `refresh_token` grant must route token generation through the
+/// PreTokenGeneration override path. Reverting `handle_refresh_token_grant` to
+/// no-override issuance drops both asserted claims.
+#[test]
+fn oauth_refresh_token_grant_applies_pretoken_overrides_to_access_token() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    set_user_password(&svc, &pool_id, "alice", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+
+    // Seed a valid refresh token bound to the user/client.
+    {
+        let mut w = state.write();
+        let acct = w.default_mut();
+        acct.refresh_tokens.insert(
+            "rt-xyz".to_string(),
+            crate::state::RefreshTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "alice".to_string(),
+                client_id: client_id.clone(),
+                issued_at: Utc::now(),
+            },
+        );
+    }
+
+    let ctx = pretoken_ctx();
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("grant_type".to_string(), "refresh_token".to_string());
+    params.insert("refresh_token".to_string(), "rt-xyz".to_string());
+    params.insert("client_id".to_string(), client_id.clone());
+
+    let resp = block_on(handle_oauth2_token(
+        &state,
+        &params,
+        None,
+        "us-east-1",
+        Some(&ctx),
+    ))
+    .unwrap();
+    let claims = decode_jwt_claims(&resp.access_token);
+
+    assert_eq!(claims["cognito:groups"], json!(["pretoken-admins"]));
+    assert_eq!(claims["tenant"], "acme");
+}
+
+/// Hosted-UI OAuth implicit grant (`response_type=token`) must route token
+/// generation through the PreTokenGeneration override path. The access token is
+/// returned in the redirect URL fragment; reverting the `token` branch to
+/// no-override issuance drops both asserted claims.
+#[test]
+fn oauth_implicit_grant_applies_pretoken_overrides_to_access_token() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    set_user_password(&svc, &pool_id, "alice", "P@ssw0rd!");
+    set_lambda_config(
+        &state,
+        &pool_id,
+        json!({"PreTokenGeneration": "arn:aws:lambda:us-east-1:123456789012:function:pretoken"}),
+    );
+
+    let ctx = pretoken_ctx();
+    let req = OAuth2AuthorizeRequest {
+        response_type: "token".to_string(),
+        client_id: client_id.clone(),
+        redirect_uri: "https://app/callback".to_string(),
+        scope: None,
+        state: None,
+        code_challenge: None,
+        code_challenge_method: None,
+        nonce: None,
+        username: Some("alice".to_string()),
+        password: Some("P@ssw0rd!".to_string()),
+    };
+
+    let outcome = block_on(handle_oauth2_authorize(
+        &state,
+        &req,
+        "us-east-1",
+        Some(&ctx),
+    ))
+    .unwrap();
+    let url = match outcome {
+        OAuth2AuthorizeOutcome::Redirect(u) => u,
+        other => panic!("expected implicit-grant redirect, got {other:?}"),
+    };
+    // Implicit grant returns tokens in the URL fragment (RFC 6749 §4.2.2).
+    let fragment = url
+        .split_once('#')
+        .expect("redirect must carry a fragment")
+        .1;
+    let access = fragment
+        .split('&')
+        .find_map(|kv| kv.strip_prefix("access_token="))
+        .expect("fragment must contain access_token");
+    // JWT chars are all URL-unreserved, so the token is verbatim in the fragment.
+    let claims = decode_jwt_claims(access);
+
+    assert_eq!(claims["cognito:groups"], json!(["pretoken-admins"]));
+    assert_eq!(claims["tenant"], "acme");
+}
+
+/// With NO PreTokenGeneration trigger configured, the OAuth grant path must mint
+/// tokens unchanged: `oauth_pre_token_overrides` returns `None` and
+/// `generate_tokens_with_overrides` injects nothing. Guards that the override
+/// wiring is inert when the trigger is absent (no phantom `tenant`/group claims).
+#[test]
+fn oauth_token_grant_without_trigger_is_unchanged() {
+    let (svc, state) = svc_with_pretoken_lambda();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+    set_user_password(&svc, &pool_id, "alice", "P@ssw0rd!");
+    // Deliberately skip set_lambda_config: no PreTokenGeneration trigger.
+
+    {
+        let mut w = state.write();
+        let acct = w.default_mut();
+        acct.authorization_codes.insert(
+            "code-noop".to_string(),
+            AuthorizationCodeData {
+                user_pool_id: pool_id.clone(),
+                client_id: client_id.clone(),
+                username: "alice".to_string(),
+                redirect_uri: "https://app/callback".to_string(),
+                scopes: vec![],
+                code_challenge: None,
+                code_challenge_method: None,
+                nonce: None,
+                issued_at: Utc::now(),
+            },
+        );
+    }
+
+    let ctx = pretoken_ctx();
+    let mut params = std::collections::BTreeMap::new();
+    params.insert("grant_type".to_string(), "authorization_code".to_string());
+    params.insert("code".to_string(), "code-noop".to_string());
+    params.insert(
+        "redirect_uri".to_string(),
+        "https://app/callback".to_string(),
+    );
+    params.insert("client_id".to_string(), client_id.clone());
+
+    let resp = block_on(handle_oauth2_token(
+        &state,
+        &params,
+        None,
+        "us-east-1",
+        Some(&ctx),
+    ))
+    .unwrap();
+    let claims = decode_jwt_claims(&resp.access_token);
+
+    // No trigger => no injected overrides. `alice` has no group membership.
+    assert!(
+        claims.get("tenant").is_none(),
+        "no PreTokenGeneration trigger must not inject a `tenant` claim, got {:?}",
+        claims.get("tenant")
+    );
+    assert!(
+        claims["cognito:groups"].is_null(),
+        "no PreTokenGeneration trigger must not inject `cognito:groups`, got {:?}",
+        claims["cognito:groups"]
+    );
+}
+
 #[test]
 fn get_signing_certificate_returns_real_x509_matching_pool_jwt_key() {
     use base64::Engine;

@@ -175,7 +175,7 @@ impl CognitoService {}
 /// `claims_added` / `claims_overridden` / `group_overrides` instead of
 /// having to walk the raw Lambda response themselves.
 #[allow(clippy::too_many_arguments)]
-fn record_pre_token_gen_invocation(
+pub(crate) fn record_pre_token_gen_invocation(
     state: &SharedCognitoState,
     account_id_key: &str,
     pool_id: &str,

@@ -2894,6 +2894,12 @@ async fn main() {
     // shared lock; snapshot files are written atomically.
     let cognito_oauth2_snapshot_store = cognito_snapshot_store.clone();
     let cognito_oauth2_snapshot_lock = Arc::new(tokio::sync::Mutex::new(()));
+    // The Hosted-UI OAuth2 routes issue tokens outside the service object, so
+    // hand them a clone of the delivery context to fire the PreTokenGeneration
+    // trigger on the authorization_code / refresh_token / implicit grants
+    // (issue #2448); without it those grants drop Lambda claim overrides.
+    let cognito_authorize_delivery_ctx = cognito_delivery_ctx.clone();
+    let cognito_token_delivery_ctx = cognito_delivery_ctx.clone();
     let mut cognito_service =
         CognitoService::new(cognito_state.clone()).with_delivery(cognito_delivery_ctx);
     if let Some(store) = cognito_snapshot_store {
@@ -9201,12 +9207,14 @@ async fn main() {
                 let cs = cognito_authorize_state;
                 let store = cognito_oauth2_snapshot_store.clone();
                 let lock = cognito_oauth2_snapshot_lock.clone();
+                let dctx = cognito_authorize_delivery_ctx;
                 move |axum::extract::Query(q): axum::extract::Query<
                     std::collections::BTreeMap<String, String>,
                 >| {
                     let cs = cs.clone();
                     let store = store.clone();
                     let lock = lock.clone();
+                    let dctx = dctx.clone();
                     async move {
                         let region = std::env::var("AWS_DEFAULT_REGION")
                             .or_else(|_| std::env::var("AWS_REGION"))
@@ -9262,7 +9270,14 @@ async fn main() {
                             username: q.get("username").cloned(),
                             password: q.get("password").cloned(),
                         };
-                        match fakecloud_cognito::handle_oauth2_authorize(&cs, &req, &region).await {
+                        match fakecloud_cognito::handle_oauth2_authorize(
+                            &cs,
+                            &req,
+                            &region,
+                            Some(&dctx),
+                        )
+                        .await
+                        {
                             Ok(fakecloud_cognito::OAuth2AuthorizeOutcome::Redirect(url)) => {
                                 // A successful authorize minted an authorization
                                 // code (or implicit-grant token) in state; write
@@ -9316,10 +9331,12 @@ async fn main() {
                 let cs = cognito_token_state;
                 let store = cognito_oauth2_snapshot_store.clone();
                 let lock = cognito_oauth2_snapshot_lock.clone();
+                let dctx = cognito_token_delivery_ctx;
                 move |headers: axum::http::HeaderMap, body: String| {
                     let cs = cs.clone();
                     let store = store.clone();
                     let lock = lock.clone();
+                    let dctx = dctx.clone();
                     async move {
                         let params: std::collections::BTreeMap<String, String> =
                             match serde_urlencoded::from_str::<Vec<(String, String)>>(&body) {
@@ -9337,7 +9354,11 @@ async fn main() {
                             .unwrap_or_else(|_| "us-east-1".to_string());
                         let basic_ref = basic.as_ref().map(|(i, s)| (i.as_str(), s.as_str()));
                         match fakecloud_cognito::handle_oauth2_token(
-                            &cs, &params, basic_ref, &region,
+                            &cs,
+                            &params,
+                            basic_ref,
+                            &region,
+                            Some(&dctx),
                         )
                         .await
                         {
