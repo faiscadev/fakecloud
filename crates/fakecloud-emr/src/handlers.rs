@@ -461,7 +461,7 @@ impl EmrService {
                 return Err(invalid_request(format!("Cluster id '{id}' is not valid.")));
             }
             let steps = acct.steps.get(&id).cloned().unwrap_or_default();
-            let summaries: Vec<Value> = steps
+            let mut summaries: Vec<Value> = steps
                 .iter()
                 .filter(|s| {
                     let state_ok = states.is_empty()
@@ -474,6 +474,12 @@ impl EmrService {
                 })
                 .map(step_summary)
                 .collect();
+            // AWS ListSteps returns steps in reverse (newest-first) submission
+            // order unless the caller passes StepIds or filters by StepStates.
+            // Steps are stored in submission order, so reverse when unfiltered.
+            if states.is_empty() && step_ids.is_empty() {
+                summaries.reverse();
+            }
             ok(json!({ "Steps": summaries }))
         })
     }
@@ -1655,6 +1661,44 @@ mod run_job_flow_tests {
 
     fn json_of(resp: AwsResponse) -> Value {
         serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    #[test]
+    fn list_steps_returns_newest_first_when_unfiltered() {
+        // bug-audit 2026-07-29 (cycle 8) BS-1: ListSteps returned steps in
+        // submission order; AWS documents reverse (newest-first) order unless
+        // StepIds/StepStates are given, so a client reading Steps[0] to get the
+        // most-recently-submitted step got the oldest.
+        let s = svc();
+        let id = json_of(
+            s.run_job_flow(&req(
+                "RunJobFlow",
+                json!({"Name": "c", "Instances": {"KeepJobFlowAliveWhenNoSteps": true}}),
+            ))
+            .unwrap(),
+        )["JobFlowId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        s.add_job_flow_steps(&req(
+            "AddJobFlowSteps",
+            json!({"JobFlowId": id, "Steps": [{"Name": "A"}]}),
+        ))
+        .unwrap();
+        s.add_job_flow_steps(&req(
+            "AddJobFlowSteps",
+            json!({"JobFlowId": id, "Steps": [{"Name": "B"}]}),
+        ))
+        .unwrap();
+
+        let steps = json_of(s.list_steps(&req("ListSteps", json!({"ClusterId": id}))).unwrap());
+        let names: Vec<&str> = steps["Steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.pointer("/Name").and_then(Value::as_str))
+            .collect();
+        assert_eq!(names, vec!["B", "A"], "newest-first: {names:?}");
     }
 
     #[test]
