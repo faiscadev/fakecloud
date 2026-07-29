@@ -456,11 +456,18 @@ impl ApiGatewayService {
         req: &AwsRequest,
         params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let arn = params.get("resourceArn").cloned().unwrap_or_default();
+        let arn = decode_resource_arn(&params.get("resourceArn").cloned().unwrap_or_default());
         let body = req.json_body();
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
-        let entry = state.tags.entry(arn).or_default();
+        // A REST API's tags live on the RestApi itself (the same store
+        // CreateRestApi writes and GetRestApi reads); route there so a tag set
+        // via TagResource is visible to GetRestApi and vice-versa. Other
+        // taggable resources fall back to the generic ARN-keyed tag map.
+        let entry = match rest_api_id_from_arn(&arn).and_then(|id| state.apis.get_mut(&id)) {
+            Some(api) => &mut api.tags,
+            None => state.tags.entry(arn).or_default(),
+        };
         if let Some(map) = body.get("tags").and_then(Value::as_object) {
             for (k, v) in map {
                 if let Some(s) = v.as_str() {
@@ -500,9 +507,14 @@ impl ApiGatewayService {
                     .collect();
             }
         }
+        let arn = decode_resource_arn(&arn);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request_account(req));
-        if let Some(entry) = state.tags.get_mut(&arn) {
+        let entry = match rest_api_id_from_arn(&arn).and_then(|id| state.apis.get_mut(&id)) {
+            Some(api) => Some(&mut api.tags),
+            None => state.tags.get_mut(&arn),
+        };
+        if let Some(entry) = entry {
             for k in &keys {
                 entry.remove(k);
             }
@@ -515,15 +527,45 @@ impl ApiGatewayService {
         req: &AwsRequest,
         params: &BTreeMap<String, String>,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let arn = params.get("resourceArn").cloned().unwrap_or_default();
+        let arn = decode_resource_arn(&params.get("resourceArn").cloned().unwrap_or_default());
         let accounts = self.state.read();
         let map = accounts
             .get(&request_account(req))
-            .and_then(|s| s.tags.get(&arn))
-            .cloned()
+            .and_then(
+                |s| match rest_api_id_from_arn(&arn).and_then(|id| s.apis.get(&id)) {
+                    Some(api) => Some(api.tags.clone()),
+                    None => s.tags.get(&arn).cloned(),
+                },
+            )
             .unwrap_or_default();
         ok(json!({"tags": map}))
     }
+}
+
+/// Percent-decode the greedy `resourceArn` path suffix. The core dispatcher
+/// captures `/tags/{arn+}` as raw path segments and re-joins them without
+/// decoding, so the SDK's percent-encoded `:` (`%3A`) and `/` (`%2F`) arrive
+/// literal; decode them back to a real ARN before matching.
+fn decode_resource_arn(raw: &str) -> String {
+    percent_encoding::percent_decode_str(raw)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+/// When `arn` names a REST API itself (`arn:aws:apigateway:{region}::/restapis/{id}`
+/// with no trailing sub-resource), return its id. Returns None for stage /
+/// other sub-resource ARNs, which keep using the generic tag map.
+fn rest_api_id_from_arn(arn: &str) -> Option<String> {
+    let tail = arn.split("::/").nth(1)?;
+    let mut parts = tail.split('/');
+    if parts.next()? != "restapis" {
+        return None;
+    }
+    let id = parts.next()?;
+    if id.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    Some(id.to_string())
 }
 
 /// Build an OpenAPI 3.0 operation object from the stored Method.
@@ -575,4 +617,123 @@ fn method_to_openapi_op(method: &crate::state::Method) -> Value {
         json!({"200": {"description": "OK"}}),
     );
     Value::Object(op)
+}
+
+#[cfg(test)]
+mod tag_store_tests {
+    use super::*;
+    use fakecloud_core::service::ResponseBody;
+    use std::collections::HashMap;
+
+    fn svc() -> ApiGatewayService {
+        let state =
+            std::sync::Arc::new(
+                parking_lot::RwLock::new(fakecloud_core::multi_account::MultiAccountState::<
+                    crate::state::ApiGatewayState,
+                >::new("123456789012", "us-east-1", "")),
+            );
+        ApiGatewayService::new(state)
+    }
+
+    fn req_body(body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "apigateway".into(),
+            action: "x".into(),
+            region: "us-east-1".into(),
+            account_id: "123456789012".into(),
+            request_id: "rid".into(),
+            headers: http::HeaderMap::new(),
+            query_params: HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: Vec::new(),
+            raw_path: "/".into(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    fn body_json(resp: &AwsResponse) -> Value {
+        match &resp.body {
+            ResponseBody::Bytes(b) => serde_json::from_slice(b).unwrap(),
+            _ => panic!("expected bytes body"),
+        }
+    }
+
+    fn params(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn rest_api_id_from_arn_parses_only_the_api_itself() {
+        assert_eq!(
+            rest_api_id_from_arn("arn:aws:apigateway:us-east-1::/restapis/abc123").as_deref(),
+            Some("abc123")
+        );
+        // sub-resource ARN (a stage) -> not the api itself.
+        assert_eq!(
+            rest_api_id_from_arn("arn:aws:apigateway:us-east-1::/restapis/abc123/stages/prod"),
+            None
+        );
+    }
+
+    #[test]
+    fn tag_resource_and_get_rest_api_share_one_store() {
+        // bug-audit 2026-07-29 (cycle 8) CO-1: TagResource/GetTags used a
+        // separate ARN-keyed map from CreateRestApi's api.tags, so a tag added
+        // via TagResource never appeared in GetRestApi (terraform tag drift).
+        let s = svc();
+        let created = body_json(
+            &s.create_rest_api(&req_body(json!({"name": "api", "tags": {"env": "prod"}})))
+                .unwrap(),
+        );
+        let id = created["id"].as_str().unwrap().to_string();
+        // resourceArn arrives percent-encoded (as the dispatcher hands it over).
+        let arn_enc = format!("arn%3Aaws%3Aapigateway%3Aus-east-1%3A%3A%2Frestapis%2F{id}");
+
+        // Add a tag via the generic TagResource path.
+        s.tag_resource(
+            &req_body(json!({"tags": {"team": "core"}})),
+            &params(&[("resourceArn", &arn_enc)]),
+        )
+        .unwrap();
+
+        // GetRestApi now reflects BOTH the create-time and TagResource tag.
+        let api = body_json(
+            &s.get_rest_api(&req_body(json!({})), &params(&[("restApiId", &id)]))
+                .unwrap(),
+        );
+        assert_eq!(api["tags"]["env"], json!("prod"));
+        assert_eq!(api["tags"]["team"], json!("core"));
+
+        // GetTags returns the same unified set (incl. the create-time tag).
+        let tags = body_json(
+            &s.get_tags(&req_body(json!({})), &params(&[("resourceArn", &arn_enc)]))
+                .unwrap(),
+        );
+        assert_eq!(tags["tags"]["env"], json!("prod"));
+        assert_eq!(tags["tags"]["team"], json!("core"));
+
+        // UntagResource removes from the same store.
+        s.untag_resource(
+            &AwsRequest {
+                raw_query: "tagKeys=team".into(),
+                ..req_body(json!({}))
+            },
+            &params(&[("resourceArn", &arn_enc)]),
+        )
+        .unwrap();
+        let api2 = body_json(
+            &s.get_rest_api(&req_body(json!({})), &params(&[("restApiId", &id)]))
+                .unwrap(),
+        );
+        assert!(api2["tags"].get("team").is_none(), "{api2}");
+        assert_eq!(api2["tags"]["env"], json!("prod"));
+    }
 }
