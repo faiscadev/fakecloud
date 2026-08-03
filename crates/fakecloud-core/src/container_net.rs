@@ -318,6 +318,7 @@ fn in_container_mode(env_value: Option<String>) -> bool {
 /// drift again.
 pub fn registry_auth_hosts(server_port: u16) -> Vec<String> {
     [
+        "localhost",
         "127.0.0.1",
         "host.docker.internal",
         "host.containers.internal",
@@ -377,6 +378,7 @@ mod tests {
         // The podman sibling alias (host.containers.internal) must be authorized
         // or image-based Lambda/ECS pulls 401 under podman-in-a-container (0.B2).
         let hosts = registry_auth_hosts(4566);
+        assert!(hosts.contains(&"localhost:4566".to_string()));
         assert!(hosts.contains(&"127.0.0.1:4566".to_string()));
         assert!(hosts.contains(&"host.docker.internal:4566".to_string()));
         assert!(
