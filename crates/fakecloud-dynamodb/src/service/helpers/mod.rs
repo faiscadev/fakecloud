@@ -751,11 +751,22 @@ pub(crate) fn resolve_ref_or_path(
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> Option<Value> {
-    let reference = reference.trim();
+    let reference = reference.trim().trim_matches('"');
     if reference.starts_with(':') {
         return expr_attr_values.get(reference).cloned();
     }
-    resolve_path(reference, item, expr_attr_names)
+    resolve_path(reference, item, expr_attr_names).or_else(|| {
+        reference
+            .strip_prefix('\'')
+            .and_then(|x| x.strip_suffix('\''))
+            .map(|x| json!({ "S": x }))
+            .or_else(|| {
+                reference
+                    .parse::<f64>()
+                    .ok()
+                    .map(|_| json!({ "N": reference }))
+            })
+    })
 }
 
 /// True if `path` targets a nested key inside an M-typed attribute. Bracketed

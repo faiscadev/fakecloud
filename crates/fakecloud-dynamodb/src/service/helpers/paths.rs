@@ -3,6 +3,7 @@
 use super::*;
 
 pub(crate) fn resolve_attr_name(name: &str, expr_attr_names: &HashMap<String, String>) -> String {
+    let name = name.trim_matches('"');
     if name.starts_with('#') {
         expr_attr_names
             .get(name)

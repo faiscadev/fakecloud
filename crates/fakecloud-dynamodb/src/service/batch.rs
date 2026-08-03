@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::AttributeValue;
+use crate::state::{AttributeValue, DynamoTable};
 
 /// A queued Kinesis delivery for a single transact write — fired after
 /// the apply phase succeeds and the write lock is dropped. Tuple shape:
@@ -1233,7 +1233,14 @@ impl DynamoDbService {
 
                 match execute_partiql_in_state(state, statement, &parameters) {
                     Ok(outcome) => {
-                        responses.push(batch_partiql_response(statement, outcome.response.clone()));
+                        responses.push(batch_partiql_response(
+                            statement,
+                            outcome.response.clone(),
+                            outcome
+                                .table_name
+                                .as_ref()
+                                .and_then(|name| state.tables.get(name)),
+                        ));
                         if let (Some(table_name), Some(event_name)) =
                             (outcome.table_name.as_ref(), outcome.event_name.as_ref())
                         {
@@ -1549,19 +1556,28 @@ impl DynamoDbService {
     }
 }
 
-fn batch_partiql_response(statement: &str, response: Value) -> Value {
+fn batch_partiql_response(statement: &str, response: Value, table: Option<&DynamoTable>) -> Value {
     let upper = statement.trim_start().to_ascii_uppercase();
     if !upper.starts_with("SELECT") {
         return response;
     }
 
-    let Some(from_pos) = upper.find("FROM") else {
+    let Some(from_pos) = super::find_outside_quotes(&upper, "FROM") else {
         return batch_single_item_select_error();
     };
     let after_from = statement.trim_start()[from_pos + 4..].trim_start();
     let (_, rest) = super::parse_partiql_table_name(after_from);
     let rest = rest.trim_start();
     if rest.starts_with('.') || !rest.to_ascii_uppercase().starts_with("WHERE") {
+        return batch_single_item_select_error();
+    }
+    let where_clause = &rest[5..];
+    if table.is_none_or(|table| {
+        table.key_schema.iter().any(|key| {
+            !where_clause.contains(&format!("\"{}\" = ?", key.attribute_name))
+                && !where_clause.contains(&format!("{} = ?", key.attribute_name))
+        })
+    }) {
         return batch_single_item_select_error();
     }
 
@@ -2609,6 +2625,22 @@ mod tests {
             "Only single item select is supported"
         );
 
+        let non_key_select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE data = ?",
+                        "Parameters": [{ "S": "missing" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            response_body(&non_key_select)["Responses"][0]["Error"]["Message"],
+            "Only single item select is supported"
+        );
+
         let update = svc
             .batch_execute_statement(&req_for(
                 "BatchExecuteStatement",
@@ -2633,6 +2665,33 @@ mod tests {
         assert_eq!(
             update_body["Responses"][0]["Item"]["results"]["L"][0]["S"],
             "new"
+        );
+
+        let literal_update = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({
+                    "Statement": "UPDATE \"Widgets\" SET \"state\" = 'ready' WHERE \"pk\" = ?",
+                    "Parameters": [{ "S": "a" }]
+                }),
+            ))
+            .unwrap();
+        assert!(response_body(&literal_update).get("Item").is_none());
+
+        let literal_select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE \"pk\" = ?",
+                        "Parameters": [{ "S": "a" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            response_body(&literal_select)["Responses"][0]["Item"]["state"]["S"],
+            "ready"
         );
     }
 

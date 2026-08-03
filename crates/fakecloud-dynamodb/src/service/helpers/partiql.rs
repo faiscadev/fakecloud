@@ -486,7 +486,7 @@ pub(crate) fn execute_partiql_in_state(
         } else {
             (after_set, "")
         };
-        let where_clause = strip_partiql_returning_clause(where_clause);
+        let (where_clause, returns_item) = split_partiql_returning_clause(where_clause);
         let table = get_table_mut(&mut state.tables, &table_name)?;
         // Positional `?` parameters bind in textual order: the SET clause comes
         // before WHERE, so SET consumes parameters[0..set_count] and WHERE the
@@ -520,10 +520,14 @@ pub(crate) fn execute_partiql_in_state(
         }
         table.recalculate_stats();
         Ok(PartiqlOutcome {
-            response: last_new
-                .as_ref()
-                .map(|item| json!({ "Item": item }))
-                .unwrap_or_else(|| json!({})),
+            response: if returns_item {
+                last_new
+                    .as_ref()
+                    .map(|item| json!({ "Item": item }))
+                    .unwrap_or_else(|| json!({}))
+            } else {
+                json!({})
+            },
             table_name: Some(table_name),
             event_name: last_old.as_ref().map(|_| "MODIFY".to_string()),
             keys: last_key,
@@ -578,11 +582,23 @@ pub(crate) fn execute_partiql_in_state(
     }
 }
 
-fn strip_partiql_returning_clause(where_clause: &str) -> &str {
+fn split_partiql_returning_clause(where_clause: &str) -> (&str, bool) {
     let upper = where_clause.to_ascii_uppercase();
-    find_outside_quotes(&upper, "RETURNING")
-        .map(|pos| where_clause[..pos].trim())
-        .unwrap_or(where_clause)
+    let mut in_quote = false;
+    for index in 0..upper.len() {
+        if upper.as_bytes()[index] == b'\'' {
+            in_quote = !in_quote;
+        }
+        if !in_quote
+            && upper[index..].starts_with("RETURNING")
+            && index > 0
+            && upper[..index].ends_with(char::is_whitespace)
+            && upper[index + 9..].starts_with(char::is_whitespace)
+        {
+            return (where_clause[..index].trim(), true);
+        }
+    }
+    (where_clause, false)
 }
 
 fn prepare_partiql_update_expression(
@@ -610,12 +626,7 @@ fn prepare_partiql_update_expression(
         expression.push(character);
     }
 
-    let expression = expression
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace(" SET ", ", ")
-        .replace('"', "");
+    let expression = split_repeated_set_clauses(&expression);
     let values = parameters
         .iter()
         .enumerate()
@@ -623,6 +634,37 @@ fn prepare_partiql_update_expression(
         .collect();
 
     (expression, values)
+}
+
+fn split_repeated_set_clauses(expression: &str) -> String {
+    let mut result = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut index = 0;
+
+    while index < expression.len() {
+        let byte = expression.as_bytes()[index];
+        match byte {
+            b'\'' if !in_double_quote => in_single_quote = !in_single_quote,
+            b'"' if !in_single_quote => in_double_quote = !in_double_quote,
+            _ => {}
+        }
+        if !in_single_quote
+            && !in_double_quote
+            && expression[index..].starts_with("SET")
+            && index > 0
+            && expression[..index].ends_with(char::is_whitespace)
+            && expression[index + 3..].starts_with(char::is_whitespace)
+        {
+            result.push(',');
+            index += 3;
+            continue;
+        }
+        result.push(byte as char);
+        index += 1;
+    }
+
+    result
 }
 
 /// Parse a table name that may be quoted with double quotes.
@@ -1537,6 +1579,26 @@ mod number_compare_tests {
 #[cfg(test)]
 mod quote_aware_tests {
     use super::*;
+
+    #[test]
+    fn returning_clause_requires_keyword_boundaries() {
+        assert_eq!(
+            split_partiql_returning_clause("returning_status = ? RETURNING ALL NEW *"),
+            ("returning_status = ?", true)
+        );
+        assert_eq!(
+            split_partiql_returning_clause("note = 'RETURNING'"),
+            ("note = 'RETURNING'", false)
+        );
+    }
+
+    #[test]
+    fn repeated_set_split_preserves_quoted_text() {
+        assert_eq!(
+            split_repeated_set_clauses("SET \"SET\" = 'ready SET now' SET state = ?"),
+            "SET \"SET\" = 'ready SET now' , state = ?"
+        );
+    }
 
     // bug-hunt 2026-07-01: operator/keyword scans must skip single-quoted
     // literals so a `<` or `WHERE`/`IN` inside a string is treated as data.
