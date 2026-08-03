@@ -608,10 +608,12 @@ pub(crate) fn evaluate_list_append_rhs(
     expr_attr_values: &HashMap<String, Value>,
 ) -> Option<Value> {
     let inner = rest.strip_suffix(')')?;
-    let mut split = inner.splitn(2, ',');
-    let (a_ref, b_ref) = (split.next()?, split.next()?);
-    let a_val = resolve_ref_or_path(a_ref.trim(), item, expr_attr_names, expr_attr_values);
-    let b_val = resolve_ref_or_path(b_ref.trim(), item, expr_attr_names, expr_attr_values);
+    let operands = split_on_top_level_keyword(inner, ",");
+    let [a_ref, b_ref] = operands.as_slice() else {
+        return None;
+    };
+    let a_val = resolve_list_append_operand(a_ref.trim(), item, expr_attr_names, expr_attr_values);
+    let b_val = resolve_list_append_operand(b_ref.trim(), item, expr_attr_names, expr_attr_values);
 
     let mut merged = Vec::new();
     for v in [&a_val, &b_val].iter().copied().flatten() {
@@ -622,6 +624,25 @@ pub(crate) fn evaluate_list_append_rhs(
         }
     }
     Some(json!({ "L": merged }))
+}
+
+fn resolve_list_append_operand(
+    reference: &str,
+    item: &HashMap<String, AttributeValue>,
+    expr_attr_names: &HashMap<String, String>,
+    expr_attr_values: &HashMap<String, Value>,
+) -> Option<Value> {
+    let rest = reference
+        .strip_prefix("if_not_exists(")
+        .or_else(|| reference.strip_prefix("if_not_exists ("));
+    let Some(rest) = rest else {
+        return resolve_ref_or_path(reference, item, expr_attr_names, expr_attr_values);
+    };
+    let inner = rest.strip_suffix(')')?;
+    let (path, default) = inner.split_once(',')?;
+
+    resolve_ref_or_path(path.trim(), item, expr_attr_names, expr_attr_values)
+        .or_else(|| resolve_ref_or_path(default.trim(), item, expr_attr_names, expr_attr_values))
 }
 
 /// `<arith_left> +/- <arith_right>` — both operands must resolve to N values.

@@ -486,6 +486,7 @@ pub(crate) fn execute_partiql_in_state(
         } else {
             (after_set, "")
         };
+        let where_clause = strip_partiql_returning_clause(where_clause);
         let table = get_table_mut(&mut state.tables, &table_name)?;
         // Positional `?` parameters bind in textual order: the SET clause comes
         // before WHERE, so SET consumes parameters[0..set_count] and WHERE the
@@ -501,30 +502,28 @@ pub(crate) fn execute_partiql_in_state(
         } else {
             (0..table.items.len()).collect()
         };
-        let assignments: Vec<&str> = set_clause.split(',').collect();
+        let (update_expression, expression_attribute_values) =
+            prepare_partiql_update_expression(set_clause, parameters);
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
         let mut last_old: Option<HashMap<String, AttributeValue>> = None;
         let mut last_new: Option<HashMap<String, AttributeValue>> = None;
         for idx in &matched_indices {
             last_old = Some(table.items[*idx].clone());
-            let mut local_offset = 0;
-            for assignment in &assignments {
-                let assignment = assignment.trim();
-                if let Some((attr, val_str)) = assignment.split_once('=') {
-                    let attr = attr.trim().trim_matches('"');
-                    let val_str = val_str.trim();
-                    let value = parse_partiql_literal(val_str, parameters, &mut local_offset);
-                    if let Some(v) = value {
-                        table.items[*idx].insert(attr.to_string(), v);
-                    }
-                }
-            }
+            apply_update_expression(
+                &mut table.items[*idx],
+                &update_expression,
+                &HashMap::new(),
+                &expression_attribute_values,
+            )?;
             last_key = Some(extract_key(table, &table.items[*idx]));
             last_new = Some(table.items[*idx].clone());
         }
         table.recalculate_stats();
         Ok(PartiqlOutcome {
-            response: json!({}),
+            response: last_new
+                .as_ref()
+                .map(|item| json!({ "Item": item }))
+                .unwrap_or_else(|| json!({})),
             table_name: Some(table_name),
             event_name: last_old.as_ref().map(|_| "MODIFY".to_string()),
             keys: last_key,
@@ -577,6 +576,53 @@ pub(crate) fn execute_partiql_in_state(
             format!("Unsupported PartiQL statement: {trimmed}"),
         ))
     }
+}
+
+fn strip_partiql_returning_clause(where_clause: &str) -> &str {
+    let upper = where_clause.to_ascii_uppercase();
+    find_outside_quotes(&upper, "RETURNING")
+        .map(|pos| where_clause[..pos].trim())
+        .unwrap_or(where_clause)
+}
+
+fn prepare_partiql_update_expression(
+    set_clause: &str,
+    parameters: &[Value],
+) -> (String, HashMap<String, Value>) {
+    let mut expression = String::from("SET ");
+    let mut parameter_index = 0;
+    let mut in_quote = false;
+    let mut chars = set_clause.trim().chars().peekable();
+
+    while let Some(character) = chars.next() {
+        if character == '\'' {
+            in_quote = !in_quote;
+            expression.push(character);
+            continue;
+        }
+
+        if !in_quote && character == '?' {
+            expression.push_str(&format!(":p{parameter_index}"));
+            parameter_index += 1;
+            continue;
+        }
+
+        expression.push(character);
+    }
+
+    let expression = expression
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" SET ", ", ")
+        .replace('"', "");
+    let values = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (format!(":p{index}"), value.clone()))
+        .collect();
+
+    (expression, values)
 }
 
 /// Parse a table name that may be quoted with double quotes.

@@ -1233,7 +1233,7 @@ impl DynamoDbService {
 
                 match execute_partiql_in_state(state, statement, &parameters) {
                     Ok(outcome) => {
-                        responses.push(outcome.response.clone());
+                        responses.push(batch_partiql_response(statement, outcome.response.clone()));
                         if let (Some(table_name), Some(event_name)) =
                             (outcome.table_name.as_ref(), outcome.event_name.as_ref())
                         {
@@ -1549,6 +1549,46 @@ impl DynamoDbService {
     }
 }
 
+fn batch_partiql_response(statement: &str, response: Value) -> Value {
+    let upper = statement.trim_start().to_ascii_uppercase();
+    if !upper.starts_with("SELECT") {
+        return response;
+    }
+
+    let Some(from_pos) = upper.find("FROM") else {
+        return batch_single_item_select_error();
+    };
+    let after_from = statement.trim_start()[from_pos + 4..].trim_start();
+    let (_, rest) = super::parse_partiql_table_name(after_from);
+    let rest = rest.trim_start();
+    if rest.starts_with('.') || !rest.to_ascii_uppercase().starts_with("WHERE") {
+        return batch_single_item_select_error();
+    }
+
+    let items = response
+        .get("Items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if items.len() == 1 {
+        return json!({ "Item": items[0] });
+    }
+    if items.is_empty() {
+        return json!({});
+    }
+
+    batch_single_item_select_error()
+}
+
+fn batch_single_item_select_error() -> Value {
+    json!({
+        "Error": {
+            "Code": "ValidationError",
+            "Message": "Only single item select is supported"
+        }
+    })
+}
+
 /// Apply `Limit` + `NextToken` to a PartiQL SELECT response. The token is an
 /// opaque base64-encoded offset into the (deterministically ordered) result
 /// set. No-op for write statements (which carry no `Items`).
@@ -1611,6 +1651,10 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    fn response_body(response: &AwsResponse) -> Value {
+        serde_json::from_slice(response.body.expect_bytes()).unwrap()
     }
 
     fn make_state() -> SharedDynamoDbState {
@@ -2525,6 +2569,71 @@ mod tests {
             .unwrap();
         assert_eq!(table.items.len(), 2);
         assert_eq!(table.stream_records.read().len(), 2);
+    }
+
+    #[test]
+    fn batch_execute_statement_returns_single_items_and_updates() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({ "Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}" }),
+        ))
+        .unwrap();
+
+        let select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE \"pk\" = ?",
+                        "Parameters": [{ "S": "a" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        let select_body = response_body(&select);
+        assert_eq!(select_body["Responses"][0]["Item"]["pk"]["S"], "a");
+
+        let scan = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({ "Statements": [{ "Statement": "SELECT * FROM \"Widgets\"" }] }),
+            ))
+            .unwrap();
+        let scan_body = response_body(&scan);
+        assert_eq!(
+            scan_body["Responses"][0]["Error"]["Message"],
+            "Only single item select is supported"
+        );
+
+        let update = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "UPDATE \"Widgets\" SET \"results\" = list_append(if_not_exists(\"results\", ?), ?) SET \"updatedAt\" = ? WHERE \"pk\" = ? RETURNING ALL NEW *",
+                        "Parameters": [
+                            { "L": [] },
+                            { "L": [{ "S": "new" }] },
+                            { "S": "now" },
+                            { "S": "a" }
+                        ]
+                    }]
+                }),
+            ))
+            .unwrap();
+        let update_body = response_body(&update);
+        assert_eq!(
+            update_body["Responses"][0]["Item"]["updatedAt"]["S"], "now",
+            "unexpected update response: {update_body}"
+        );
+        assert_eq!(
+            update_body["Responses"][0]["Item"]["results"]["L"][0]["S"],
+            "new"
+        );
     }
 
     #[tokio::test]
