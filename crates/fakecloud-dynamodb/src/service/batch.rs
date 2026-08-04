@@ -1573,10 +1573,10 @@ fn batch_partiql_response(statement: &str, response: Value, table: Option<&Dynam
     }
     let where_clause = &rest[5..];
     if table.is_none_or(|table| {
-        table.key_schema.iter().any(|key| {
-            !where_clause.contains(&format!("\"{}\" = ?", key.attribute_name))
-                && !where_clause.contains(&format!("{} = ?", key.attribute_name))
-        })
+        table
+            .key_schema
+            .iter()
+            .any(|key| !where_matches_key_equals(where_clause, &key.attribute_name))
     }) {
         return batch_single_item_select_error();
     }
@@ -1594,6 +1594,36 @@ fn batch_partiql_response(statement: &str, response: Value, table: Option<&Dynam
     }
 
     batch_single_item_select_error()
+}
+
+/// True if the batch SELECT `WHERE` clause pins `attr` to a positional
+/// parameter (`attr = ?`), tolerant of arbitrary spacing around `=`. The
+/// quoted form matches directly; the unquoted form must be a whole identifier
+/// so a longer attribute such as `mypk` is not mistaken for key `pk`.
+fn where_matches_key_equals(where_clause: &str, attr: &str) -> bool {
+    // Normalize `"pk"=?`, `"pk" = ?` and `"pk"  =  ?` to one canonical spacing.
+    let normalized = where_clause.replace('=', " = ");
+    let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if normalized.contains(&format!("\"{attr}\" = ?")) {
+        return true;
+    }
+
+    let needle = format!("{attr} = ?");
+    let mut from = 0;
+    while let Some(rel) = normalized[from..].find(&needle) {
+        let start = from + rel;
+        let prev_ok = start == 0
+            || !matches!(
+                normalized.as_bytes()[start - 1],
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
+            );
+        if prev_ok {
+            return true;
+        }
+        from = start + needle.len();
+    }
+    false
 }
 
 fn batch_single_item_select_error() -> Value {
@@ -2693,6 +2723,82 @@ mod tests {
             response_body(&literal_select)["Responses"][0]["Item"]["state"]["S"],
             "ready"
         );
+    }
+
+    #[test]
+    fn where_matches_key_equals_spacing_and_word_boundary() {
+        // Tolerant of arbitrary spacing around `=`, quoted or bare.
+        assert!(where_matches_key_equals("\"pk\"=?", "pk"));
+        assert!(where_matches_key_equals("\"pk\"  =  ?", "pk"));
+        assert!(where_matches_key_equals("pk = ?", "pk"));
+        // A longer attribute name must not be mistaken for the key.
+        assert!(!where_matches_key_equals("mypk = ?", "pk"));
+        assert!(!where_matches_key_equals("pkid = ?", "pk"));
+        // A non-`?` RHS is not a positional single-item lookup.
+        assert!(!where_matches_key_equals("\"pk\" = :v", "pk"));
+    }
+
+    #[test]
+    fn batch_execute_statement_handles_non_ascii_and_keyword_literals() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({ "Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}" }),
+        ))
+        .unwrap();
+
+        // Non-ASCII value in a quoted literal must round-trip byte-for-byte
+        // (previously corrupted to mojibake by byte-wise expression rebuild).
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"label\" = 'José 名前 🚀' WHERE \"pk\" = ?",
+                "Parameters": [{ "S": "a" }]
+            }),
+        ))
+        .unwrap();
+
+        // A keyword-looking word inside a quoted literal is data, not a clause:
+        // the write must land instead of being silently dropped.
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"note\" = 'please REMOVE this' WHERE \"pk\" = ?",
+                "Parameters": [{ "S": "a" }]
+            }),
+        ))
+        .unwrap();
+
+        // A non-ASCII, non-key attribute in the WHERE predicate must not panic
+        // the RETURNING scan (it simply matches nothing).
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"x\" = ? WHERE \"café\" = ?",
+                "Parameters": [{ "S": "1" }, { "S": "z" }]
+            }),
+        ))
+        .unwrap();
+
+        // Read back through a batch single-item SELECT with tight `"pk"=?`
+        // spacing (no surrounding spaces) to confirm the key-check tolerates it.
+        let select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE \"pk\"=?",
+                        "Parameters": [{ "S": "a" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        let item = &response_body(&select)["Responses"][0]["Item"];
+        assert_eq!(item["label"]["S"], "José 名前 🚀");
+        assert_eq!(item["note"]["S"], "please REMOVE this");
     }
 
     #[tokio::test]

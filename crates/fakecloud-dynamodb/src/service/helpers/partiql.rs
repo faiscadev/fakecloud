@@ -583,10 +583,14 @@ pub(crate) fn execute_partiql_in_state(
 }
 
 fn split_partiql_returning_clause(where_clause: &str) -> (&str, bool) {
+    // `to_ascii_uppercase` preserves byte length and never touches non-ASCII
+    // bytes, so char boundaries stay aligned between `upper` and `where_clause`.
+    // Iterate real char boundaries (not raw byte indices) so a non-ASCII byte
+    // in the predicate cannot make a slice land mid-character and panic.
     let upper = where_clause.to_ascii_uppercase();
     let mut in_quote = false;
-    for index in 0..upper.len() {
-        if upper.as_bytes()[index] == b'\'' {
+    for (index, ch) in upper.char_indices() {
+        if ch == '\'' {
             in_quote = !in_quote;
         }
         if !in_quote
@@ -608,9 +612,8 @@ fn prepare_partiql_update_expression(
     let mut expression = String::from("SET ");
     let mut parameter_index = 0;
     let mut in_quote = false;
-    let mut chars = set_clause.trim().chars().peekable();
 
-    while let Some(character) = chars.next() {
+    for character in set_clause.trim().chars() {
         if character == '\'' {
             in_quote = !in_quote;
             expression.push(character);
@@ -637,16 +640,18 @@ fn prepare_partiql_update_expression(
 }
 
 fn split_repeated_set_clauses(expression: &str) -> String {
+    // Walk char boundaries and copy `char`s (never `byte as char`, which
+    // corrupts multibyte UTF-8) so an accented/CJK/emoji value or attribute
+    // name in the SET clause survives intact and no slice panics mid-character.
     let mut result = String::new();
     let mut in_single_quote = false;
     let mut in_double_quote = false;
-    let mut index = 0;
+    let mut chars = expression.char_indices();
 
-    while index < expression.len() {
-        let byte = expression.as_bytes()[index];
-        match byte {
-            b'\'' if !in_double_quote => in_single_quote = !in_single_quote,
-            b'"' if !in_single_quote => in_double_quote = !in_double_quote,
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+            '"' if !in_single_quote => in_double_quote = !in_double_quote,
             _ => {}
         }
         if !in_single_quote
@@ -657,11 +662,12 @@ fn split_repeated_set_clauses(expression: &str) -> String {
             && expression[index + 3..].starts_with(char::is_whitespace)
         {
             result.push(',');
-            index += 3;
+            // "SET" is three ASCII bytes; `ch` consumed the 'S', skip 'E','T'.
+            chars.next();
+            chars.next();
             continue;
         }
-        result.push(byte as char);
-        index += 1;
+        result.push(ch);
     }
 
     result
@@ -1597,6 +1603,33 @@ mod quote_aware_tests {
         assert_eq!(
             split_repeated_set_clauses("SET \"SET\" = 'ready SET now' SET state = ?"),
             "SET \"SET\" = 'ready SET now' , state = ?"
+        );
+    }
+
+    // Non-ASCII values and attribute names must round-trip byte-for-byte: the
+    // splitters walk char boundaries, so an accented / CJK / emoji character
+    // neither corrupts the rebuilt expression nor panics a mid-char slice.
+    #[test]
+    fn repeated_set_split_preserves_non_ascii() {
+        assert_eq!(
+            split_repeated_set_clauses("SET \"café\" = 'José 名前 🚀' SET n = ?"),
+            "SET \"café\" = 'José 名前 🚀' , n = ?"
+        );
+        // Unquoted non-ASCII attribute name must not panic.
+        assert_eq!(split_repeated_set_clauses("SET café = ?"), "SET café = ?");
+    }
+
+    #[test]
+    fn returning_clause_handles_non_ascii_predicate() {
+        // A non-ASCII byte in the WHERE predicate (quoted or bare) must not
+        // panic the byte-index scan.
+        assert_eq!(
+            split_partiql_returning_clause("\"café\" = ? RETURNING ALL NEW *"),
+            ("\"café\" = ?", true)
+        );
+        assert_eq!(
+            split_partiql_returning_clause("\"名前\" = ?"),
+            ("\"名前\" = ?", false)
         );
     }
 

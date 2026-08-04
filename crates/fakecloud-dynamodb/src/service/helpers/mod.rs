@@ -397,6 +397,20 @@ pub(crate) fn parse_update_clauses(expr: &str) -> Vec<(UpdateAction, Vec<String>
     // boundary on each side so `set foo = ...` is a keyword, but
     // `:set_arg`, `my_set_field`, `#set` are not.
     let is_boundary = |b: u8| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
+    // A single-quoted PartiQL string literal may contain a word that matches an
+    // update keyword (`SET note = 'please REMOVE this'`). Those bytes are data,
+    // not clause boundaries, so mark quoted spans and ignore any keyword match
+    // that begins inside one. Real UpdateItem expressions bind values through
+    // `:placeholders` and carry no quoted literals, so this only affects the
+    // inline-literal PartiQL path.
+    let mut in_quote = vec![false; expr.len()];
+    let mut quoted = false;
+    for (i, b) in expr.bytes().enumerate() {
+        if b == b'\'' {
+            quoted = !quoted;
+        }
+        in_quote[i] = quoted;
+    }
     for &(kw, action) in UpdateAction::KEYWORDS {
         let mut search_from = 0;
         while let Some(pos) = upper[search_from..].find(kw) {
@@ -404,7 +418,7 @@ pub(crate) fn parse_update_clauses(expr: &str) -> Vec<(UpdateAction, Vec<String>
             let before_ok = abs_pos == 0 || is_boundary(expr.as_bytes()[abs_pos - 1]);
             let after_pos = abs_pos + kw.len();
             let after_ok = after_pos >= expr.len() || is_boundary(expr.as_bytes()[after_pos]);
-            if before_ok && after_ok {
+            if before_ok && after_ok && !in_quote[abs_pos] {
                 positions.push((abs_pos, action));
             }
             search_from = abs_pos + kw.len();
@@ -612,8 +626,11 @@ pub(crate) fn evaluate_list_append_rhs(
     let [a_ref, b_ref] = operands.as_slice() else {
         return None;
     };
-    let a_val = resolve_list_append_operand(a_ref.trim(), item, expr_attr_names, expr_attr_values);
-    let b_val = resolve_list_append_operand(b_ref.trim(), item, expr_attr_names, expr_attr_values);
+    // Each operand may be `if_not_exists(path, :default)` or a plain ref/path,
+    // resolving to the value-when-present-else-default -- identical semantics to
+    // an arithmetic operand, so share that evaluator instead of a second copy.
+    let a_val = evaluate_arithmetic_operand(a_ref.trim(), item, expr_attr_names, expr_attr_values);
+    let b_val = evaluate_arithmetic_operand(b_ref.trim(), item, expr_attr_names, expr_attr_values);
 
     let mut merged = Vec::new();
     for v in [&a_val, &b_val].iter().copied().flatten() {
@@ -624,25 +641,6 @@ pub(crate) fn evaluate_list_append_rhs(
         }
     }
     Some(json!({ "L": merged }))
-}
-
-fn resolve_list_append_operand(
-    reference: &str,
-    item: &HashMap<String, AttributeValue>,
-    expr_attr_names: &HashMap<String, String>,
-    expr_attr_values: &HashMap<String, Value>,
-) -> Option<Value> {
-    let rest = reference
-        .strip_prefix("if_not_exists(")
-        .or_else(|| reference.strip_prefix("if_not_exists ("));
-    let Some(rest) = rest else {
-        return resolve_ref_or_path(reference, item, expr_attr_names, expr_attr_values);
-    };
-    let inner = rest.strip_suffix(')')?;
-    let (path, default) = inner.split_once(',')?;
-
-    resolve_ref_or_path(path.trim(), item, expr_attr_names, expr_attr_values)
-        .or_else(|| resolve_ref_or_path(default.trim(), item, expr_attr_names, expr_attr_values))
 }
 
 /// `<arith_left> +/- <arith_right>` — both operands must resolve to N values.
@@ -1061,5 +1059,25 @@ mod filter_in_contains_tests {
             &no_names(),
             &values
         ));
+    }
+
+    // A keyword-looking word inside a single-quoted PartiQL literal is data,
+    // not a clause boundary: `'please REMOVE this'` must stay attached to the
+    // SET assignment instead of splitting off a spurious REMOVE clause (which
+    // silently dropped the write before the quote-aware scan).
+    #[test]
+    fn parse_update_clauses_ignores_keywords_in_quoted_literal() {
+        let clauses = parse_update_clauses("SET note = 'please REMOVE this'");
+        assert_eq!(clauses.len(), 1);
+        assert!(matches!(clauses[0].0, UpdateAction::Set));
+        assert_eq!(
+            clauses[0].1,
+            vec!["note = 'please REMOVE this'".to_string()]
+        );
+
+        let multi = parse_update_clauses("SET a = 'reset the SET value' SET b = :v");
+        assert_eq!(multi.len(), 2);
+        assert_eq!(multi[0].1, vec!["a = 'reset the SET value'".to_string()]);
+        assert_eq!(multi[1].1, vec!["b = :v".to_string()]);
     }
 }
