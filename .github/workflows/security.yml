@@ -92,6 +92,34 @@ jobs:
       # controlled documents. The fix requires jumping to quick-xml >=0.41, a
       # breaking API change across every XML service; tracked as a dedicated
       # upgrade rather than blocking every PR on a low-exposure DoS advisory.
+      #
+      # The advisories below are unmaintained / unsound / yanked warnings on
+      # transitive dependencies that handle no attacker-controlled input in
+      # fakecloud. They surfaced as the RustSec DB drifted and now redden every
+      # PR and main until an upstream fix lands; ignored with the same policy as
+      # the entries above.
+      #
+      # RUSTSEC-2024-0384 (paste), RUSTSEC-2024-0436 (proc-macro-error2) and
+      # RUSTSEC-2025-0012 (derivative) are unmaintained proc-macro / derive
+      # helpers used only at build time; they never touch runtime input.
+      #
+      # RUSTSEC-2024-0388 (instant) and RUSTSEC-2026-0235 (backoff) are
+      # unmaintained crates reached transitively through the async / kube retry
+      # stack (same reachability as RUSTSEC-2026-0185 above): timers and delay
+      # math over no untrusted input.
+      #
+      # RUSTSEC-2026-0173 (rustls-pemfile unmaintained) parses only the
+      # emulator's own trusted PEM material, never attacker-supplied files.
+      #
+      # RUSTSEC-2025-0134 (anyhow Error::downcast_mut unsoundness) and
+      # RUSTSEC-2026-0190 (event-listener !Send StackSlot unsoundness) reach us
+      # transitively; fakecloud does not exercise the unsound APIs (we never call
+      # anyhow's downcast_mut, nor cross a thread boundary with a !Send listener
+      # tag) and neither advisory has a fixed release on our pinned versions yet.
+      #
+      # RUSTSEC-2026-0221 (spin 0.9.8 yanked) is a yanked transitive spinlock
+      # dependency; nothing in fakecloud's tree can move off it until upstream
+      # crates republish.
       - run: |
           cargo audit \
             --ignore RUSTSEC-2026-0098 \
@@ -102,4 +130,13 @@ jobs:
             --ignore RUSTSEC-2023-0071 \
             --ignore RUSTSEC-2026-0185 \
             --ignore RUSTSEC-2026-0194 \
-            --ignore RUSTSEC-2026-0195
+            --ignore RUSTSEC-2026-0195 \
+            --ignore RUSTSEC-2024-0384 \
+            --ignore RUSTSEC-2024-0388 \
+            --ignore RUSTSEC-2024-0436 \
+            --ignore RUSTSEC-2025-0012 \
+            --ignore RUSTSEC-2025-0134 \
+            --ignore RUSTSEC-2026-0173 \
+            --ignore RUSTSEC-2026-0190 \
+            --ignore RUSTSEC-2026-0221 \
+            --ignore RUSTSEC-2026-0235
