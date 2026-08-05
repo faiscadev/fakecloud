@@ -922,6 +922,6 @@ mod tests {
     fn service_name_and_actions() {
         let s = svc();
         assert_eq!(s.service_name(), "account");
-        assert_eq!(s.supported_actions().len(), 15);
+        assert_eq!(s.supported_actions().len(), 16);
     }
 }
