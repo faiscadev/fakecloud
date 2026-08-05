@@ -1572,12 +1572,7 @@ fn batch_partiql_response(statement: &str, response: Value, table: Option<&Dynam
         return batch_single_item_select_error();
     }
     let where_clause = &rest[5..];
-    if table.is_none_or(|table| {
-        table
-            .key_schema
-            .iter()
-            .any(|key| !where_matches_key_equals(where_clause, &key.attribute_name))
-    }) {
+    if table.is_none_or(|table| !where_is_full_key_equality(where_clause, table)) {
         return batch_single_item_select_error();
     }
 
@@ -1596,71 +1591,59 @@ fn batch_partiql_response(statement: &str, response: Value, table: Option<&Dynam
     batch_single_item_select_error()
 }
 
-/// True if the batch SELECT `WHERE` clause pins `attr` to a positional
-/// parameter (`attr = ?`), tolerant of arbitrary spacing around `=`. Matches
-/// either the double-quoted token (`"attr" = ?`, preserving any internal spaces
-/// in the name) or the bare identifier (`attr = ?`, as a whole word so a longer
-/// name such as `mypk` is not mistaken for key `pk`). A single-quoted string
-/// literal in the predicate is skipped, so a value like `'pk = ?'` is not
-/// mistaken for the key predicate itself.
-fn where_matches_key_equals(where_clause: &str, attr: &str) -> bool {
-    let bytes = where_clause.as_bytes();
-    let n = bytes.len();
-    let quoted_tok = format!("\"{attr}\"");
-    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
+/// True if a batch SELECT `WHERE` clause is exactly a full-primary-key point
+/// lookup: every key attribute pinned to a positional parameter (`attr = ?`),
+/// joined by `AND`, with no other predicates. AWS `BatchExecuteStatement`
+/// requires equality on the complete key and nothing else, so a missing key, an
+/// extra non-key predicate, or a non-`?` right-hand side all fail here.
+///
+/// The `AND` split is quote-aware (via [`split_on_top_level_keyword`]), so a
+/// value such as `'a AND b'` or `'pk = ?'` is treated as data, not structure.
+fn where_is_full_key_equality(where_clause: &str, table: &DynamoTable) -> bool {
+    let conjuncts: Vec<&str> = super::split_on_top_level_keyword(where_clause, "AND")
+        .into_iter()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    // One conjunct per key attribute, no more: this rejects both a missing key
+    // and an extra non-key predicate (`pk = ? AND data = ?`).
+    conjuncts.len() == table.key_schema.len()
+        && table.key_schema.iter().all(|key| {
+            conjuncts
+                .iter()
+                .any(|c| conjunct_is_key_equals(c, &key.attribute_name))
+        })
+        && conjuncts.iter().all(|c| {
+            table
+                .key_schema
+                .iter()
+                .any(|key| conjunct_is_key_equals(c, &key.attribute_name))
+        })
+}
 
-    let mut i = 0;
-    let mut in_squote = false;
-    while i < n {
-        let b = bytes[i];
-        if in_squote {
-            if b == b'\'' {
-                in_squote = false;
-            }
-            i += 1;
-            continue;
+/// True if a single WHERE conjunct is exactly `attr = ?` -- either double-quoted
+/// (`"attr" = ?`, preserving internal spaces in the name) or the bare whole
+/// identifier (`attr = ?`, so `mypk` is not mistaken for key `pk`) -- tolerant
+/// of arbitrary whitespace around `=`.
+fn conjunct_is_key_equals(conjunct: &str, attr: &str) -> bool {
+    let c = conjunct.trim();
+    if let Some(rest) = c.strip_prefix(&format!("\"{attr}\"")) {
+        return is_equals_placeholder(rest);
+    }
+    if let Some(rest) = c.strip_prefix(attr) {
+        // The bare name must be a whole identifier, not a prefix of a longer one.
+        if !rest.starts_with(|ch: char| ch.is_alphanumeric() || ch == '_') {
+            return is_equals_placeholder(rest);
         }
-        if b == b'\'' {
-            in_squote = true;
-            i += 1;
-            continue;
-        }
-        if where_clause.is_char_boundary(i) {
-            // `"attr"` immediately (modulo spacing) followed by `= ?`.
-            if where_clause[i..].starts_with(&quoted_tok)
-                && equals_placeholder_after(bytes, i + quoted_tok.len())
-            {
-                return true;
-            }
-            // Bare `attr` as a whole identifier.
-            let before_ok = i == 0 || !is_ident(bytes[i - 1]);
-            if before_ok && where_clause[i..].starts_with(attr) {
-                let after = i + attr.len();
-                if (after >= n || !is_ident(bytes[after])) && equals_placeholder_after(bytes, after)
-                {
-                    return true;
-                }
-            }
-        }
-        i += 1;
     }
     false
 }
 
-/// From byte offset `j`, match optional spaces, `=`, optional spaces, `?`.
-fn equals_placeholder_after(bytes: &[u8], mut j: usize) -> bool {
-    let skip_ws = |j: &mut usize| {
-        while *j < bytes.len() && (bytes[*j] == b' ' || bytes[*j] == b'\t') {
-            *j += 1;
-        }
-    };
-    skip_ws(&mut j);
-    if j >= bytes.len() || bytes[j] != b'=' {
-        return false;
-    }
-    j += 1;
-    skip_ws(&mut j);
-    j < bytes.len() && bytes[j] == b'?'
+/// True if `s` is `= ?` modulo surrounding whitespace and nothing else.
+fn is_equals_placeholder(s: &str) -> bool {
+    s.trim_start()
+        .strip_prefix('=')
+        .is_some_and(|rhs| rhs.trim() == "?")
 }
 
 fn batch_single_item_select_error() -> Value {
@@ -2763,20 +2746,41 @@ mod tests {
     }
 
     #[test]
-    fn where_matches_key_equals_spacing_and_word_boundary() {
-        // Tolerant of arbitrary spacing around `=`, quoted or bare.
-        assert!(where_matches_key_equals("\"pk\"=?", "pk"));
-        assert!(where_matches_key_equals("\"pk\"  =  ?", "pk"));
-        assert!(where_matches_key_equals("pk = ?", "pk"));
+    fn conjunct_is_key_equals_spacing_and_word_boundary() {
+        // Tolerant of arbitrary whitespace around `=`, quoted or bare.
+        assert!(conjunct_is_key_equals("\"pk\"=?", "pk"));
+        assert!(conjunct_is_key_equals("\"pk\"  =  ?", "pk"));
+        assert!(conjunct_is_key_equals("pk = ?", "pk"));
+        assert!(conjunct_is_key_equals("\"pk\" =\n?", "pk"));
         // A longer attribute name must not be mistaken for the key.
-        assert!(!where_matches_key_equals("mypk = ?", "pk"));
-        assert!(!where_matches_key_equals("pkid = ?", "pk"));
+        assert!(!conjunct_is_key_equals("mypk = ?", "pk"));
+        assert!(!conjunct_is_key_equals("pkid = ?", "pk"));
         // A non-`?` RHS is not a positional single-item lookup.
-        assert!(!where_matches_key_equals("\"pk\" = :v", "pk"));
-        // The key pattern inside a string literal is data, not a predicate.
-        assert!(!where_matches_key_equals("data = 'pk = ?'", "pk"));
+        assert!(!conjunct_is_key_equals("\"pk\" = :v", "pk"));
         // A quoted key name keeps its internal whitespace intact.
-        assert!(where_matches_key_equals("\"my  pk\" = ?", "my  pk"));
+        assert!(conjunct_is_key_equals("\"my  pk\" = ?", "my  pk"));
+        // Trailing junk after the placeholder is not an exact key equality.
+        assert!(!conjunct_is_key_equals("pk = ? extra", "pk"));
+    }
+
+    #[test]
+    fn where_is_full_key_equality_rejects_missing_and_extra_predicates() {
+        let state = make_state();
+        seed_table_with_stream(&state, "T"); // single HASH key `pk`
+        let accts = state.read();
+        let table = accts.get("123456789012").unwrap().tables.get("T").unwrap();
+
+        assert!(where_is_full_key_equality("\"pk\" = ?", table));
+        assert!(where_is_full_key_equality("\"pk\"=?", table));
+        // Extra non-key predicate is rejected (AWS requires key-only).
+        assert!(!where_is_full_key_equality(
+            "\"pk\" = ? AND data = ?",
+            table
+        ));
+        // Missing key is rejected.
+        assert!(!where_is_full_key_equality("data = ?", table));
+        // A key pattern inside a string literal is data, not a predicate.
+        assert!(!where_is_full_key_equality("data = 'pk = ?'", table));
     }
 
     #[test]
