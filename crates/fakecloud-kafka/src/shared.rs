@@ -31,6 +31,12 @@ pub fn config_arn(region: &str, account: &str, name: &str, uuid: &str, n: u64) -
     format!("arn:aws:kafka:{region}:{account}:configuration/{name}/{uuid}-{n}")
 }
 
+/// MSK channel ARN:
+/// `arn:aws:kafka:{region}:{account}:channel/{name}/{uuid}-{n}`.
+pub fn channel_arn(region: &str, account: &str, name: &str, uuid: &str, n: u64) -> String {
+    format!("arn:aws:kafka:{region}:{account}:channel/{name}/{uuid}-{n}")
+}
+
 /// MSK cluster-operation ARN, derived from the cluster ARN by swapping the
 /// `:cluster/` resource prefix for `:cluster-operation/` and appending a unique
 /// operation UUID (matching the real MSK cluster-operation ARN shape).

@@ -6,7 +6,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::Ec2Service;
 use crate::service_helpers::{gen_id, require, require_struct, validate_max_results};
-use crate::state::{Ec2State, TgwPeering};
+use crate::state::{Ec2State, TgwPeering, TgwPolicyTableEntry};
 
 const FIXED_TIME: &str = "2024-01-01T00:00:00.000Z";
 
@@ -511,16 +511,172 @@ pub(crate) fn get_transit_gateway_policy_table_associations(
     ))
 }
 
-pub(crate) fn get_transit_gateway_policy_table_entries(
-    _svc: &Ec2Service,
+fn policy_entry_from_req(req: &AwsRequest, _pt: &str, rule_number: &str) -> TgwPolicyTableEntry {
+    let g = |k: &str| req.query_params.get(k).cloned();
+    TgwPolicyTableEntry {
+        policy_rule_number: rule_number.to_string(),
+        target_route_table_id: g("TargetRouteTableId").unwrap_or_default(),
+        source_cidr_block: g("PolicyRule.SourceCidrBlock"),
+        source_port_range: g("PolicyRule.SourcePortRange"),
+        destination_cidr_block: g("PolicyRule.DestinationCidrBlock"),
+        destination_port_range: g("PolicyRule.DestinationPortRange"),
+        protocol: g("PolicyRule.Protocol"),
+        meta_data_key: g("PolicyRule.MetaData.MetaDataKey"),
+        meta_data_value: g("PolicyRule.MetaData.MetaDataValue"),
+    }
+}
+
+fn policy_entry_xml(e: &TgwPolicyTableEntry, state: &str) -> String {
+    let mut rule = String::new();
+    if let Some(v) = &e.source_cidr_block {
+        rule.push_str(&ec2_elem("sourceCidrBlock", v));
+    }
+    if let Some(v) = &e.source_port_range {
+        rule.push_str(&ec2_elem("sourcePortRange", v));
+    }
+    if let Some(v) = &e.destination_cidr_block {
+        rule.push_str(&ec2_elem("destinationCidrBlock", v));
+    }
+    if let Some(v) = &e.destination_port_range {
+        rule.push_str(&ec2_elem("destinationPortRange", v));
+    }
+    if let Some(v) = &e.protocol {
+        rule.push_str(&ec2_elem("protocol", v));
+    }
+    if e.meta_data_key.is_some() || e.meta_data_value.is_some() {
+        rule.push_str(&format!(
+            "<metaData>{}{}</metaData>",
+            ec2_elem("metaDataKey", e.meta_data_key.as_deref().unwrap_or("")),
+            ec2_elem("metaDataValue", e.meta_data_value.as_deref().unwrap_or("")),
+        ));
+    }
+    format!(
+        "{}<policyRule>{}</policyRule>{}<state>{state}</state>",
+        ec2_elem("policyRuleNumber", &e.policy_rule_number),
+        rule,
+        ec2_elem("targetRouteTableId", &e.target_route_table_id),
+    )
+}
+
+pub(crate) fn create_transit_gateway_policy_table_entry(
+    svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
-    require(&req.query_params, "TransitGatewayPolicyTableId")?;
+    let pt = require(&req.query_params, "TransitGatewayPolicyTableId")?;
+    let rule_number = require(&req.query_params, "PolicyRuleNumber")?;
+    require(&req.query_params, "TargetRouteTableId")?;
+    let entry = policy_entry_from_req(req, &pt, &rule_number);
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .tgw_policy_table_entries
+            .entry(pt.clone())
+            .or_default()
+            .insert(rule_number.clone(), entry.clone());
+    }
+    Ok(Ec2Service::respond(
+        "CreateTransitGatewayPolicyTableEntry",
+        &req.request_id,
+        &format!(
+            "<transitGatewayPolicyTableEntry>{}</transitGatewayPolicyTableEntry>",
+            policy_entry_xml(&entry, "active")
+        ),
+    ))
+}
+
+pub(crate) fn modify_transit_gateway_policy_table_entry(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let pt = require(&req.query_params, "TransitGatewayPolicyTableId")?;
+    let rule_number = require(&req.query_params, "PolicyRuleNumber")?;
+    let entry = {
+        let mut accounts = svc.state.write();
+        let entries = accounts
+            .get_or_create(&req.account_id)
+            .tgw_policy_table_entries
+            .entry(pt.clone())
+            .or_default();
+        let mut e = entries
+            .get(&rule_number)
+            .cloned()
+            .unwrap_or_else(|| policy_entry_from_req(req, &pt, &rule_number));
+        if let Some(v) = req.query_params.get("TargetRouteTableId") {
+            e.target_route_table_id = v.clone();
+        }
+        let over = |cur: &mut Option<String>, k: &str| {
+            if let Some(v) = req.query_params.get(k) {
+                *cur = Some(v.clone());
+            }
+        };
+        over(&mut e.source_cidr_block, "PolicyRule.SourceCidrBlock");
+        over(&mut e.source_port_range, "PolicyRule.SourcePortRange");
+        over(
+            &mut e.destination_cidr_block,
+            "PolicyRule.DestinationCidrBlock",
+        );
+        over(
+            &mut e.destination_port_range,
+            "PolicyRule.DestinationPortRange",
+        );
+        over(&mut e.protocol, "PolicyRule.Protocol");
+        over(&mut e.meta_data_key, "PolicyRule.MetaData.MetaDataKey");
+        over(&mut e.meta_data_value, "PolicyRule.MetaData.MetaDataValue");
+        entries.insert(rule_number.clone(), e.clone());
+        e
+    };
+    Ok(Ec2Service::respond(
+        "ModifyTransitGatewayPolicyTableEntry",
+        &req.request_id,
+        &format!(
+            "<transitGatewayPolicyTableEntry>{}</transitGatewayPolicyTableEntry>",
+            policy_entry_xml(&entry, "active")
+        ),
+    ))
+}
+
+pub(crate) fn delete_transit_gateway_policy_table_entry(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let pt = require(&req.query_params, "TransitGatewayPolicyTableId")?;
+    let rule_number = require(&req.query_params, "PolicyRuleNumber")?;
+    let entry = {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create(&req.account_id)
+            .tgw_policy_table_entries
+            .get_mut(&pt)
+            .and_then(|m| m.remove(&rule_number))
+            .unwrap_or_else(|| policy_entry_from_req(req, &pt, &rule_number))
+    };
+    Ok(Ec2Service::respond(
+        "DeleteTransitGatewayPolicyTableEntry",
+        &req.request_id,
+        &format!(
+            "<transitGatewayPolicyTableEntry>{}</transitGatewayPolicyTableEntry>",
+            policy_entry_xml(&entry, "deleted")
+        ),
+    ))
+}
+
+pub(crate) fn get_transit_gateway_policy_table_entries(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let pt = require(&req.query_params, "TransitGatewayPolicyTableId")?;
     mr(req)?;
+    let accounts = svc.state.read();
+    let items: Vec<String> = accounts
+        .get(&req.account_id)
+        .and_then(|s| s.tgw_policy_table_entries.get(&pt))
+        .map(|m| m.values().map(|e| policy_entry_xml(e, "active")).collect())
+        .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetTransitGatewayPolicyTableEntries",
         &req.request_id,
-        &ec2_list("transitGatewayPolicyTableEntries", &[]),
+        &ec2_list("transitGatewayPolicyTableEntries", &items),
     ))
 }
 

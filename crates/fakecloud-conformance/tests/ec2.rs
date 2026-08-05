@@ -6101,7 +6101,7 @@ async fn ec2_delete_transit_gateway_vpc_attachment() {
     assert!(r.transit_gateway_vpc_attachment().is_some());
 }
 
-#[test_action("ec2", "DescribeTransitGatewayAttachments", checksum = "5a838b8e")]
+#[test_action("ec2", "DescribeTransitGatewayAttachments", checksum = "9a6418fc")]
 #[tokio::test]
 async fn ec2_describe_transit_gateway_attachments() {
     let s = TestServer::start().await;
@@ -6764,7 +6764,7 @@ async fn ec2_get_transit_gateway_policy_table_associations() {
     assert!(r.associations().is_empty());
 }
 
-#[test_action("ec2", "GetTransitGatewayPolicyTableEntries", checksum = "5cb16c6c")]
+#[test_action("ec2", "GetTransitGatewayPolicyTableEntries", checksum = "2a072135")]
 #[tokio::test]
 async fn ec2_get_transit_gateway_policy_table_entries() {
     let s = TestServer::start().await;
@@ -6776,6 +6776,94 @@ async fn ec2_get_transit_gateway_policy_table_entries() {
         .await
         .unwrap();
     assert!(r.transit_gateway_policy_table_entries().is_empty());
+}
+
+// TransitGatewayPolicyTableEntry create/modify/delete are absent from the
+// vendored aws-sdk-ec2 client, so they are driven over a raw ec2Query POST
+// (see `ec2_raw`). They round-trip through GetTransitGatewayPolicyTableEntries.
+#[test_action("ec2", "CreateTransitGatewayPolicyTableEntry", checksum = "29534934")]
+#[tokio::test]
+async fn ec2_create_transit_gateway_policy_table_entry() {
+    let server = TestServer::start().await;
+    ec2_raw(
+        &server,
+        "Action=CreateTransitGatewayPolicyTableEntry&Version=2016-11-15\
+         &TransitGatewayPolicyTableId=tgw-ptb-1&PolicyRuleNumber=10\
+         &TargetRouteTableId=tgw-rtb-1&PolicyRule.SourceCidrBlock=10.0.0.0/8\
+         &PolicyRule.Protocol=tcp",
+    )
+    .await;
+    // The created entry is visible via GetTransitGatewayPolicyTableEntries.
+    let resp = ec2_raw(
+        &server,
+        "Action=GetTransitGatewayPolicyTableEntries&Version=2016-11-15&TransitGatewayPolicyTableId=tgw-ptb-1",
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<policyRuleNumber>10</policyRuleNumber>"),
+        "created entry not returned: {body}"
+    );
+    assert!(
+        body.contains("<sourceCidrBlock>10.0.0.0/8</sourceCidrBlock>"),
+        "policy rule not round-tripped: {body}"
+    );
+}
+
+#[test_action("ec2", "ModifyTransitGatewayPolicyTableEntry", checksum = "feae709d")]
+#[tokio::test]
+async fn ec2_modify_transit_gateway_policy_table_entry() {
+    let server = TestServer::start().await;
+    ec2_raw(
+        &server,
+        "Action=CreateTransitGatewayPolicyTableEntry&Version=2016-11-15\
+         &TransitGatewayPolicyTableId=tgw-ptb-2&PolicyRuleNumber=20&TargetRouteTableId=tgw-rtb-1",
+    )
+    .await;
+    ec2_raw(
+        &server,
+        "Action=ModifyTransitGatewayPolicyTableEntry&Version=2016-11-15\
+         &TransitGatewayPolicyTableId=tgw-ptb-2&PolicyRuleNumber=20&TargetRouteTableId=tgw-rtb-9",
+    )
+    .await;
+    let resp = ec2_raw(
+        &server,
+        "Action=GetTransitGatewayPolicyTableEntries&Version=2016-11-15&TransitGatewayPolicyTableId=tgw-ptb-2",
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<targetRouteTableId>tgw-rtb-9</targetRouteTableId>"),
+        "modify did not persist new target: {body}"
+    );
+}
+
+#[test_action("ec2", "DeleteTransitGatewayPolicyTableEntry", checksum = "ffc85cae")]
+#[tokio::test]
+async fn ec2_delete_transit_gateway_policy_table_entry() {
+    let server = TestServer::start().await;
+    ec2_raw(
+        &server,
+        "Action=CreateTransitGatewayPolicyTableEntry&Version=2016-11-15\
+         &TransitGatewayPolicyTableId=tgw-ptb-3&PolicyRuleNumber=30&TargetRouteTableId=tgw-rtb-1",
+    )
+    .await;
+    ec2_raw(
+        &server,
+        "Action=DeleteTransitGatewayPolicyTableEntry&Version=2016-11-15\
+         &TransitGatewayPolicyTableId=tgw-ptb-3&PolicyRuleNumber=30",
+    )
+    .await;
+    let resp = ec2_raw(
+        &server,
+        "Action=GetTransitGatewayPolicyTableEntries&Version=2016-11-15&TransitGatewayPolicyTableId=tgw-ptb-3",
+    )
+    .await;
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.contains("<policyRuleNumber>30</policyRuleNumber>"),
+        "deleted entry still present: {body}"
+    );
 }
 
 async fn make_tgw_announce(c: &aws_sdk_ec2::Client) -> String {

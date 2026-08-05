@@ -486,7 +486,7 @@ async fn bedrock_invoke_model() {
     assert!(response_body["content"][0]["text"].as_str().is_some());
 }
 
-#[test_action("bedrock-runtime", "Converse", checksum = "b543e50c")]
+#[test_action("bedrock-runtime", "Converse", checksum = "1197e446")]
 #[tokio::test]
 async fn bedrock_converse_conformance() {
     let server = TestServer::start().await;
@@ -567,7 +567,7 @@ async fn bedrock_apply_guardrail_conformance() {
     assert_eq!(result.action().as_str(), "GUARDRAIL_INTERVENED");
 }
 
-#[test_action("bedrock-runtime", "CountTokens", checksum = "6bfae761")]
+#[test_action("bedrock-runtime", "CountTokens", checksum = "c09044d3")]
 #[tokio::test]
 async fn bedrock_count_tokens_conformance() {
     let server = TestServer::start().await;
@@ -2229,7 +2229,7 @@ async fn bedrock_invoke_model_with_response_stream() {
     assert!(body_bytes.len() > 16);
 }
 
-#[test_action("bedrock-runtime", "ConverseStream", checksum = "f26e243a")]
+#[test_action("bedrock-runtime", "ConverseStream", checksum = "0f5fb4ce")]
 #[tokio::test]
 async fn bedrock_converse_stream() {
     let server = TestServer::start().await;

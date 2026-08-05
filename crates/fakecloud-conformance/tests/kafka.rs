@@ -66,3 +66,142 @@ use helpers::TestServer;
 async fn kafka_conformance() {
     let _server = TestServer::start().await;
 }
+
+const KAFKA_AUTH: &str = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/kafka/aws4_request, SignedHeaders=host, Signature=0";
+
+fn enc_arn(arn: &str) -> String {
+    arn.replace(':', "%3A").replace('/', "%2F")
+}
+
+// Channel operations are newer than the typed aws-sdk-kafka client, so drive
+// them over raw restJson1 path calls. They round-trip through the channels
+// sub-resource of a provisioned cluster.
+#[test_action("kafka", "CreateChannel", checksum = "e38972bb")]
+#[test_action("kafka", "DeleteChannel", checksum = "45b159d2")]
+#[test_action("kafka", "DescribeChannel", checksum = "abbb1427")]
+#[test_action("kafka", "ListChannels", checksum = "5c454c94")]
+#[test_action("kafka", "UpdateChannel", checksum = "f5cb6bf2")]
+#[tokio::test]
+async fn kafka_channel_lifecycle() {
+    let server = TestServer::start().await;
+    let client = reqwest::Client::new();
+    let base = server.endpoint();
+
+    // Provision a cluster to host the channel.
+    let resp = client
+        .post(format!("{base}/v1/clusters"))
+        .header("Authorization", KAFKA_AUTH)
+        .header("Content-Type", "application/json")
+        .body(
+            r#"{"clusterName":"chan-cluster","kafkaVersion":"3.5.1","numberOfBrokerNodes":3,"brokerNodeGroupInfo":{"instanceType":"kafka.m5.large","clientSubnets":["subnet-1","subnet-2","subnet-3"]}}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create cluster: {}",
+        resp.status()
+    );
+    let cluster_arn = resp.json::<serde_json::Value>().await.unwrap()["clusterArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let enc = enc_arn(&cluster_arn);
+
+    // CreateChannel.
+    let resp = client
+        .post(format!("{base}/v1/clusters/{enc}/channels"))
+        .header("Authorization", KAFKA_AUTH)
+        .header("Content-Type", "application/json")
+        .body(
+            r#"{"channelName":"chan-1","topicConfigurationList":[{"topicName":"orders"}],"s3DestinationConfiguration":{"bucketArn":"arn:aws:s3:::b"}}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "create channel: {}",
+        resp.status()
+    );
+    let channel_arn = resp.json::<serde_json::Value>().await.unwrap()["channelArn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let cenc = enc_arn(&channel_arn);
+
+    // ListChannels returns it.
+    let resp = client
+        .get(format!("{base}/v1/clusters/{enc}/channels"))
+        .header("Authorization", KAFKA_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "list channels: {}",
+        resp.status()
+    );
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        v["channels"][0]["channelName"].as_str(),
+        Some("chan-1"),
+        "{v}"
+    );
+
+    // DescribeChannel settles CREATING -> ACTIVE.
+    let resp = client
+        .get(format!("{base}/v1/clusters/{enc}/channels/{cenc}"))
+        .header("Authorization", KAFKA_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "describe channel: {}",
+        resp.status()
+    );
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(v["status"].as_str(), Some("ACTIVE"), "{v}");
+    assert_eq!(v["destinationType"].as_str(), Some("S3"), "{v}");
+
+    // UpdateChannel.
+    let resp = client
+        .put(format!("{base}/v1/clusters/{enc}/channels/{cenc}"))
+        .header("Authorization", KAFKA_AUTH)
+        .header("Content-Type", "application/json")
+        .body(r#"{"s3DestinationUpdate":{"bucketArn":"arn:aws:s3:::b2"}}"#)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "update channel: {}",
+        resp.status()
+    );
+
+    // DeleteChannel, then it is gone from ListChannels.
+    let resp = client
+        .delete(format!("{base}/v1/clusters/{enc}/channels/{cenc}"))
+        .header("Authorization", KAFKA_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        resp.status().is_success(),
+        "delete channel: {}",
+        resp.status()
+    );
+    let resp = client
+        .get(format!("{base}/v1/clusters/{enc}/channels"))
+        .header("Authorization", KAFKA_AUTH)
+        .send()
+        .await
+        .unwrap();
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert!(
+        v["channels"].as_array().map(Vec::is_empty).unwrap_or(true),
+        "channel not deleted: {v}"
+    );
+}

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use http::{Method, StatusCode};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
@@ -27,6 +28,7 @@ pub const ACCOUNT_ACTIONS: &[&str] = &[
     "GetContactInformation",
     "GetGovCloudAccountInformation",
     "GetPrimaryEmail",
+    "GetPrimaryEmailUpdateStatus",
     "GetRegionOptStatus",
     "ListRegions",
     "PutAccountName",
@@ -46,6 +48,7 @@ enum Route {
     GetContactInformation,
     GetGovCloudAccountInformation,
     GetPrimaryEmail,
+    GetPrimaryEmailUpdateStatus,
     GetRegionOptStatus,
     ListRegions,
     PutAccountName,
@@ -122,6 +125,9 @@ impl AccountService {
                 Some(Route::GetGovCloudAccountInformation)
             }
             (&Method::POST, ["getPrimaryEmail"]) => Some(Route::GetPrimaryEmail),
+            (&Method::POST, ["getPrimaryEmailUpdateStatus"]) => {
+                Some(Route::GetPrimaryEmailUpdateStatus)
+            }
             (&Method::POST, ["getRegionOptStatus"]) => Some(Route::GetRegionOptStatus),
             (&Method::POST, ["listRegions"]) => Some(Route::ListRegions),
             (&Method::POST, ["putAccountName"]) => Some(Route::PutAccountName),
@@ -298,6 +304,37 @@ impl AccountService {
         ))
     }
 
+    fn get_primary_email_update_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_json(&req.body)?;
+        // AccountId is optional in the model; absent, it targets the caller's
+        // own account.
+        let account = target_account(&body, req)?;
+        let accounts = self.state.read();
+        let st = accounts
+            .get(&account)
+            .ok_or_else(|| not_found("No primary email update in progress for this account."))?;
+        // A change awaiting AcceptPrimaryEmailUpdate is PENDING; once accepted the
+        // primary email is set and the last update reports ACCEPTED. With neither,
+        // no update has ever been started for the account.
+        let status = if st.pending_email_update.is_some() {
+            "PENDING"
+        } else if !st.primary_email.is_empty() {
+            "ACCEPTED"
+        } else {
+            return Err(not_found(
+                "No primary email update in progress for this account.",
+            ));
+        };
+        let mut out = json!({ "Status": status });
+        if let Some(at) = st.primary_email_update_at {
+            out["UpdatedAt"] = json!(at.timestamp());
+        }
+        Ok(AwsResponse::json_value(StatusCode::OK, out))
+    }
+
     fn start_primary_email_update(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
         let account = require_account(&body)?;
@@ -310,6 +347,7 @@ impl AccountService {
             email,
             otp: "000000".to_string(),
         });
+        st.primary_email_update_at = Some(Utc::now());
         Ok(AwsResponse::json_value(
             StatusCode::OK,
             json!({ "Status": "PENDING" }),
@@ -330,6 +368,7 @@ impl AccountService {
             Some(pending) if pending.email == email && pending.otp == otp => {
                 st.primary_email = email;
                 st.pending_email_update = None;
+                st.primary_email_update_at = Some(Utc::now());
                 Ok(AwsResponse::json_value(
                     StatusCode::OK,
                     json!({ "Status": "ACCEPTED" }),
@@ -483,6 +522,7 @@ impl AwsService for AccountService {
             Route::GetContactInformation => self.get_contact_information(&req),
             Route::GetGovCloudAccountInformation => self.get_gov_cloud_account_information(&req),
             Route::GetPrimaryEmail => self.get_primary_email(&req),
+            Route::GetPrimaryEmailUpdateStatus => self.get_primary_email_update_status(&req),
             Route::GetRegionOptStatus => self.get_region_opt_status(&req),
             Route::ListRegions => self.list_regions(&req),
             Route::PutAccountName => self.put_account_name(&req),
@@ -888,6 +928,6 @@ mod tests {
     fn service_name_and_actions() {
         let s = svc();
         assert_eq!(s.service_name(), "account");
-        assert_eq!(s.supported_actions().len(), 15);
+        assert_eq!(s.supported_actions().len(), 16);
     }
 }

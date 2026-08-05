@@ -1276,10 +1276,10 @@ async fn logs_integrations() {
 
 // -- Lookup tables --
 
-#[test_action("logs", "CreateLookupTable", checksum = "359aec46")]
+#[test_action("logs", "CreateLookupTable", checksum = "98b71fb9")]
 #[test_action("logs", "GetLookupTable", checksum = "9088c4f3")]
 #[test_action("logs", "DescribeLookupTables", checksum = "8acf2b21")]
-#[test_action("logs", "UpdateLookupTable", checksum = "5b96c1a9")]
+#[test_action("logs", "UpdateLookupTable", checksum = "f96295a6")]
 #[test_action("logs", "DeleteLookupTable", checksum = "4decb352")]
 #[tokio::test]
 async fn logs_lookup_tables() {
@@ -1322,11 +1322,11 @@ async fn logs_lookup_tables() {
 
 // -- Scheduled queries --
 
-#[test_action("logs", "CreateScheduledQuery", checksum = "1c813961")]
-#[test_action("logs", "GetScheduledQuery", checksum = "58a944f5")]
-#[test_action("logs", "GetScheduledQueryHistory", checksum = "01f0a893")]
-#[test_action("logs", "ListScheduledQueries", checksum = "e55e8bd9")]
-#[test_action("logs", "UpdateScheduledQuery", checksum = "a2754f6e")]
+#[test_action("logs", "CreateScheduledQuery", checksum = "5426d6d8")]
+#[test_action("logs", "GetScheduledQuery", checksum = "0cdf44df")]
+#[test_action("logs", "GetScheduledQueryHistory", checksum = "742a64c1")]
+#[test_action("logs", "ListScheduledQueries", checksum = "3364460a")]
+#[test_action("logs", "UpdateScheduledQuery", checksum = "5830ab3b")]
 #[test_action("logs", "DeleteScheduledQuery", checksum = "401121a8")]
 #[tokio::test]
 async fn logs_scheduled_queries() {

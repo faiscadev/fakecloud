@@ -53,6 +53,11 @@ pub struct AccountData {
     /// A primary-email change awaiting `AcceptPrimaryEmailUpdate`.
     #[serde(default)]
     pub pending_email_update: Option<PendingEmailUpdate>,
+    /// When the primary-email update status last changed (a `StartPrimaryEmail
+    /// Update` or `AcceptPrimaryEmailUpdate`), surfaced as `UpdatedAt` by
+    /// `GetPrimaryEmailUpdateStatus`.
+    #[serde(default)]
+    pub primary_email_update_at: Option<DateTime<Utc>>,
     /// Per-region opt status overrides. A region absent here reports its default
     /// (opt-in regions -> DISABLED, all others -> ENABLED_BY_DEFAULT).
     #[serde(default)]
@@ -69,6 +74,7 @@ impl Default for AccountData {
             account_state: "ACTIVE".to_string(),
             primary_email: String::new(),
             pending_email_update: None,
+            primary_email_update_at: None,
             region_opt_status: BTreeMap::new(),
         }
     }

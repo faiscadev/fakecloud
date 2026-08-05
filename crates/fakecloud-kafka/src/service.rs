@@ -34,18 +34,21 @@ use crate::state::{ClusterDataPlane, KafkaData, SharedKafkaState};
 pub const KAFKA_ACTIONS: &[&str] = &[
     "BatchAssociateScramSecret",
     "BatchDisassociateScramSecret",
+    "CreateChannel",
     "CreateCluster",
     "CreateClusterV2",
     "CreateConfiguration",
     "CreateReplicator",
     "CreateTopic",
     "CreateVpcConnection",
+    "DeleteChannel",
     "DeleteCluster",
     "DeleteClusterPolicy",
     "DeleteConfiguration",
     "DeleteReplicator",
     "DeleteTopic",
     "DeleteVpcConnection",
+    "DescribeChannel",
     "DescribeCluster",
     "DescribeClusterOperation",
     "DescribeClusterOperationV2",
@@ -68,6 +71,7 @@ pub const KAFKA_ACTIONS: &[&str] = &[
     "ListConfigurations",
     "ListKafkaVersions",
     "ListNodes",
+    "ListChannels",
     "ListReplicators",
     "ListScramSecrets",
     "ListTagsForResource",
@@ -87,6 +91,7 @@ pub const KAFKA_ACTIONS: &[&str] = &[
     "UpdateConnectivity",
     "UpdateMonitoring",
     "UpdateRebalancing",
+    "UpdateChannel",
     "UpdateReplicationInfo",
     "UpdateSecurity",
     "UpdateStorage",
@@ -97,12 +102,14 @@ pub const KAFKA_ACTIONS: &[&str] = &[
 const MUTATING: &[&str] = &[
     "BatchAssociateScramSecret",
     "BatchDisassociateScramSecret",
+    "CreateChannel",
     "CreateCluster",
     "CreateClusterV2",
     "CreateConfiguration",
     "CreateReplicator",
     "CreateTopic",
     "CreateVpcConnection",
+    "DeleteChannel",
     "DeleteCluster",
     "DeleteClusterPolicy",
     "DeleteConfiguration",
@@ -123,6 +130,7 @@ const MUTATING: &[&str] = &[
     "UpdateConnectivity",
     "UpdateMonitoring",
     "UpdateRebalancing",
+    "UpdateChannel",
     "UpdateReplicationInfo",
     "UpdateSecurity",
     "UpdateStorage",
@@ -267,6 +275,12 @@ impl KafkaService {
             ["v1", "clusters", arn, "topics", topic, "partitions"] if get => {
                 ("DescribeTopicPartitions", two(arn, topic))
             }
+            // ---- channels ----
+            ["v1", "clusters", arn, "channels"] if post => ("CreateChannel", l(arn)),
+            ["v1", "clusters", arn, "channels"] if get => ("ListChannels", l(arn)),
+            ["v1", "clusters", arn, "channels", ch] if get => ("DescribeChannel", two(arn, ch)),
+            ["v1", "clusters", arn, "channels", ch] if put => ("UpdateChannel", two(arn, ch)),
+            ["v1", "clusters", arn, "channels", ch] if del => ("DeleteChannel", two(arn, ch)),
             // ---- api/v2 clusters ----
             ["api", "v2", "clusters"] if post => ("CreateClusterV2", vec![]),
             ["api", "v2", "clusters"] if get => ("ListClustersV2", vec![]),
@@ -443,6 +457,11 @@ impl KafkaService {
             "ListVpcConnections" => self.list_vpc_connections(&ctx, &q),
             "DescribeVpcConnection" => self.describe_vpc_connection(&ctx, a0),
             "DeleteVpcConnection" => self.delete_vpc_connection(&ctx, a0),
+            "CreateChannel" => self.create_channel(&ctx, a0, &body),
+            "ListChannels" => self.list_channels(&ctx, a0, &q),
+            "DescribeChannel" => self.describe_channel(&ctx, a0, a1),
+            "UpdateChannel" => self.update_channel(&ctx, a0, a1, &body),
+            "DeleteChannel" => self.delete_channel(&ctx, a0, a1),
             "CreateReplicator" => self.create_replicator(&ctx, &body),
             "ListReplicators" => self.list_replicators(&ctx, &q),
             "DescribeReplicator" => self.describe_replicator(&ctx, a0),
@@ -2742,6 +2761,212 @@ impl KafkaService {
             .insert("state".into(), json!("DELETING"));
         ok(json!({ "vpcConnectionArn": arn, "state": "DELETING" }))
     }
+}
+
+// ===================== channels =====================
+
+impl KafkaService {
+    fn create_channel(
+        &self,
+        ctx: &Ctx,
+        cluster_arn: &str,
+        b: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let name = b
+            .get("channelName")
+            .and_then(Value::as_str)
+            .ok_or_else(|| bad_request("channelName is required."))?
+            .to_string();
+        if b.get("topicConfigurationList")
+            .and_then(Value::as_array)
+            .is_none()
+        {
+            return Err(bad_request("topicConfigurationList is required."));
+        }
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        if !data.clusters.contains_key(cluster_arn) {
+            return Err(not_found(&format!(
+                "The cluster '{cluster_arn}' does not exist."
+            )));
+        }
+        let n = data.next_seq();
+        let uuid = Uuid::new_v4().to_string();
+        let arn = shared::channel_arn(&ctx.region, &ctx.account, &name, &uuid, n);
+        let op_arn = shared::operation_arn_from_cluster(cluster_arn, &Uuid::new_v4().to_string());
+        let destination_type = if b.get("icebergDestinationConfiguration").is_some() {
+            "ICEBERG"
+        } else {
+            "S3"
+        };
+        let tags = b.get("tags").cloned().unwrap_or(json!({}));
+        let mut record = json!({
+            "channelArn": arn,
+            "channelName": name,
+            "clusterArn": cluster_arn,
+            "status": "CREATING",
+            "destinationType": destination_type,
+            "creationTime": now_iso(),
+            "topicConfigurationList": b.get("topicConfigurationList").cloned().unwrap_or(json!([])),
+            "clusterOperationArn": op_arn,
+            "tags": tags.clone(),
+        });
+        for k in [
+            "encryptionConfiguration",
+            "icebergDestinationConfiguration",
+            "s3DestinationConfiguration",
+            "loggingInfo",
+        ] {
+            if let Some(v) = b.get(k) {
+                record[k] = v.clone();
+            }
+        }
+        data.channels.insert(arn.clone(), record);
+        if let Some(map) = tags.as_object() {
+            if !map.is_empty() {
+                let tm = data.tags.entry(arn.clone()).or_default();
+                for (k, v) in map {
+                    if let Some(s) = v.as_str() {
+                        tm.insert(k.clone(), s.to_string());
+                    }
+                }
+            }
+        }
+        ok(json!({ "channelArn": arn, "clusterOperationArn": op_arn }))
+    }
+
+    fn list_channels(
+        &self,
+        ctx: &Ctx,
+        cluster_arn: &str,
+        q: &[(String, String)],
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        let topic_filter = query_one(q, "topicNameFilter");
+        let items: Vec<Value> = data
+            .channels
+            .values()
+            .filter(|c| c.get("clusterArn").and_then(Value::as_str) == Some(cluster_arn))
+            .filter(|c| {
+                let Some(tf) = topic_filter else {
+                    return true;
+                };
+                c.get("topicConfigurationList")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tcs| {
+                        tcs.iter()
+                            .any(|t| t.get("topicName").and_then(Value::as_str) == Some(tf))
+                    })
+            })
+            .map(channel_info_view)
+            .collect();
+        let (page, next) = paginate(&items, q);
+        let mut out = json!({ "channels": page });
+        if let Some(nt) = next {
+            out["nextToken"] = json!(nt);
+        }
+        ok(out)
+    }
+
+    fn describe_channel(
+        &self,
+        ctx: &Ctx,
+        cluster_arn: &str,
+        channel_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        let c = data
+            .channels
+            .get_mut(channel_arn)
+            .filter(|c| channel_in_cluster(c, cluster_arn))
+            .ok_or_else(|| not_found(&format!("The channel '{channel_arn}' does not exist.")))?;
+        // Settle CREATING/UPDATING -> ACTIVE on read.
+        if let Some(obj) = c.as_object_mut() {
+            let status = obj.get("status").and_then(Value::as_str).unwrap_or("");
+            if status == "CREATING" || status == "UPDATING" {
+                obj.insert("status".into(), json!("ACTIVE"));
+            }
+        }
+        let mut out = c.clone();
+        if out.get("tags").is_none() {
+            out["tags"] = json!({});
+        }
+        ok(out)
+    }
+
+    fn update_channel(
+        &self,
+        ctx: &Ctx,
+        cluster_arn: &str,
+        channel_arn: &str,
+        b: &Value,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        let c = data
+            .channels
+            .get_mut(channel_arn)
+            .filter(|c| channel_in_cluster(c, cluster_arn))
+            .ok_or_else(|| not_found(&format!("The channel '{channel_arn}' does not exist.")))?;
+        let op_arn = shared::operation_arn_from_cluster(cluster_arn, &Uuid::new_v4().to_string());
+        if let Some(obj) = c.as_object_mut() {
+            if let Some(v) = b.get("icebergDestinationUpdate") {
+                obj.insert("icebergDestinationConfiguration".into(), v.clone());
+            }
+            if let Some(v) = b.get("s3DestinationUpdate") {
+                obj.insert("s3DestinationConfiguration".into(), v.clone());
+            }
+            obj.insert("status".into(), json!("UPDATING"));
+            obj.insert("clusterOperationArn".into(), json!(op_arn));
+        }
+        ok(json!({ "channelArn": channel_arn, "clusterOperationArn": op_arn }))
+    }
+
+    fn delete_channel(
+        &self,
+        ctx: &Ctx,
+        cluster_arn: &str,
+        channel_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut guard = self.state.write();
+        let data = guard.get_or_create(&ctx.account);
+        let scoped = data
+            .channels
+            .get(channel_arn)
+            .is_some_and(|c| channel_in_cluster(c, cluster_arn));
+        if !scoped {
+            return Err(not_found(&format!(
+                "The channel '{channel_arn}' does not exist."
+            )));
+        }
+        let op_arn = shared::operation_arn_from_cluster(cluster_arn, &Uuid::new_v4().to_string());
+        data.channels.remove(channel_arn);
+        data.tags.remove(channel_arn);
+        ok(json!({ "channelArn": channel_arn, "clusterOperationArn": op_arn }))
+    }
+}
+
+/// Whether a stored channel record belongs to the given cluster ARN. Channel
+/// ops are addressed as `/v1/clusters/{clusterArn}/channels/{channelArn}`, so a
+/// channel must be scoped to its owning cluster — fetching it under a different
+/// cluster's path reports it as not found.
+fn channel_in_cluster(c: &Value, cluster_arn: &str) -> bool {
+    c.get("clusterArn").and_then(Value::as_str) == Some(cluster_arn)
+}
+
+/// Project a stored channel record down to the `ChannelInfo` summary shape used
+/// by `ListChannels`.
+fn channel_info_view(c: &Value) -> Value {
+    json!({
+        "channelArn": c.get("channelArn").cloned().unwrap_or(json!("")),
+        "channelName": c.get("channelName").cloned().unwrap_or(json!("")),
+        "status": c.get("status").cloned().unwrap_or(json!("ACTIVE")),
+        "creationTime": c.get("creationTime").cloned().unwrap_or(json!("")),
+        "destinationType": c.get("destinationType").cloned().unwrap_or(json!("S3")),
+        "clusterOperationArn": c.get("clusterOperationArn").cloned().unwrap_or(json!("")),
+    })
 }
 
 // ===================== replicators =====================

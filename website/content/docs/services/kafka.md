@@ -1,11 +1,11 @@
 +++
 title = "Amazon MSK"
-description = "Amazon MSK (Managed Streaming for Apache Kafka, kafka) on fakecloud: a complete 59-operation control plane (100% conformance). restJson1."
+description = "Amazon MSK (Managed Streaming for Apache Kafka, kafka) on fakecloud: a complete 64-operation control plane (100% conformance). restJson1."
 weight = 71
 +++
 
 fakecloud implements **Amazon MSK** (Managed Streaming for Apache Kafka) as a
-restJson1 service. All **59 operations** ship with **100% conformance** against
+restJson1 service. All **64 operations** ship with **100% conformance** against
 AWS's own Smithy model, backed by account-partitioned state that persists across
 restarts in persistent mode. MSK signs as `kafka`.
 
@@ -106,6 +106,11 @@ broker.
   `ListScramSecrets` paginates them.
 - **Cluster policy** - `PutClusterPolicy` / `GetClusterPolicy` /
   `DeleteClusterPolicy` store a JSON policy document with a `CurrentVersion`.
+- **Channels** - `CreateChannel` / `DescribeChannel` / `ListChannels` /
+  `UpdateChannel` / `DeleteChannel` manage per-cluster streaming channels
+  (S3 or Iceberg destinations, a `topicConfigurationList`, and a
+  `clusterOperationArn`), settling `CREATING` -> `ACTIVE` on the next read;
+  `ListChannels` is cluster-scoped and honors the `topicNameFilter` query param.
 - **VPC connections & replicators** - full CRUD with persistence and faithful
   shapes, settling to `AVAILABLE` (VPC connections) and `RUNNING` (replicators)
   on the next read; `ListClientVpcConnections` / `RejectClientVpcConnection`

@@ -83,6 +83,9 @@ pub struct KafkaData {
     /// VPC connections keyed by `VpcConnectionArn`.
     #[serde(default)]
     pub vpc_connections: BTreeMap<String, Value>,
+    /// Channels keyed by `ChannelArn`, stored as their `Channel` wire object.
+    #[serde(default)]
+    pub channels: BTreeMap<String, Value>,
     /// SCRAM secret ARNs keyed by `ClusterArn`.
     #[serde(default)]
     pub scram_secrets: BTreeMap<String, Vec<String>>,
