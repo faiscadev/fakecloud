@@ -303,15 +303,16 @@ fn in_container_mode(env_value: Option<String>) -> bool {
         .unwrap_or(false)
 }
 
-/// Hostnames fakecloud's bundled ECR/OCI registry can be addressed by from a
-/// sibling container, each at `server_port`.
+/// Hostnames fakecloud's bundled ECR/OCI registry can be addressed from a
+/// sibling container or the host, each at `server_port`.
 ///
 /// A container-spawning service rewrites the image pull URI to the runtime's
 /// sibling host -- `host.docker.internal` under Docker, `host.containers.internal`
-/// under podman -- or leaves it `127.0.0.1` when fakecloud runs on the host. The
-/// registry enforces auth, and the Docker/Podman CLI only attaches the
-/// `Authorization` header for hosts present in `config.json`, so the isolated
-/// pull config must list *every* alias or the pull gets a 401. The map
+/// under podman -- or leaves it `localhost` / `127.0.0.1` when fakecloud runs on
+/// the host (`localhost:<port>` is the documented local ECR endpoint, e.g.
+/// `localhost:4566`). The registry enforces auth, and the Docker/Podman CLI only
+/// attaches the `Authorization` header for hosts present in `config.json`, so the
+/// isolated pull config must list *every* alias or the pull gets a 401. The map
 /// previously omitted the podman alias, so image-based Lambda/ECS pulls failed
 /// under podman-in-a-container (bug-audit 2026-06-20, 0.B2). Authorize all of
 /// them with the same credential; centralized here so the two builders can't
