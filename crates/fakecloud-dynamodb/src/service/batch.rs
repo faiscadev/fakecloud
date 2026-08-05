@@ -1597,33 +1597,70 @@ fn batch_partiql_response(statement: &str, response: Value, table: Option<&Dynam
 }
 
 /// True if the batch SELECT `WHERE` clause pins `attr` to a positional
-/// parameter (`attr = ?`), tolerant of arbitrary spacing around `=`. The
-/// quoted form matches directly; the unquoted form must be a whole identifier
-/// so a longer attribute such as `mypk` is not mistaken for key `pk`.
+/// parameter (`attr = ?`), tolerant of arbitrary spacing around `=`. Matches
+/// either the double-quoted token (`"attr" = ?`, preserving any internal spaces
+/// in the name) or the bare identifier (`attr = ?`, as a whole word so a longer
+/// name such as `mypk` is not mistaken for key `pk`). A single-quoted string
+/// literal in the predicate is skipped, so a value like `'pk = ?'` is not
+/// mistaken for the key predicate itself.
 fn where_matches_key_equals(where_clause: &str, attr: &str) -> bool {
-    // Normalize `"pk"=?`, `"pk" = ?` and `"pk"  =  ?` to one canonical spacing.
-    let normalized = where_clause.replace('=', " = ");
-    let normalized = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let bytes = where_clause.as_bytes();
+    let n = bytes.len();
+    let quoted_tok = format!("\"{attr}\"");
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b >= 0x80;
 
-    if normalized.contains(&format!("\"{attr}\" = ?")) {
-        return true;
-    }
-
-    let needle = format!("{attr} = ?");
-    let mut from = 0;
-    while let Some(rel) = normalized[from..].find(&needle) {
-        let start = from + rel;
-        let prev_ok = start == 0
-            || !matches!(
-                normalized.as_bytes()[start - 1],
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_'
-            );
-        if prev_ok {
-            return true;
+    let mut i = 0;
+    let mut in_squote = false;
+    while i < n {
+        let b = bytes[i];
+        if in_squote {
+            if b == b'\'' {
+                in_squote = false;
+            }
+            i += 1;
+            continue;
         }
-        from = start + needle.len();
+        if b == b'\'' {
+            in_squote = true;
+            i += 1;
+            continue;
+        }
+        if where_clause.is_char_boundary(i) {
+            // `"attr"` immediately (modulo spacing) followed by `= ?`.
+            if where_clause[i..].starts_with(&quoted_tok)
+                && equals_placeholder_after(bytes, i + quoted_tok.len())
+            {
+                return true;
+            }
+            // Bare `attr` as a whole identifier.
+            let before_ok = i == 0 || !is_ident(bytes[i - 1]);
+            if before_ok && where_clause[i..].starts_with(attr) {
+                let after = i + attr.len();
+                if (after >= n || !is_ident(bytes[after])) && equals_placeholder_after(bytes, after)
+                {
+                    return true;
+                }
+            }
+        }
+        i += 1;
     }
     false
+}
+
+/// From byte offset `j`, match optional spaces, `=`, optional spaces, `?`.
+fn equals_placeholder_after(bytes: &[u8], mut j: usize) -> bool {
+    let skip_ws = |j: &mut usize| {
+        while *j < bytes.len() && (bytes[*j] == b' ' || bytes[*j] == b'\t') {
+            *j += 1;
+        }
+    };
+    skip_ws(&mut j);
+    if j >= bytes.len() || bytes[j] != b'=' {
+        return false;
+    }
+    j += 1;
+    skip_ws(&mut j);
+    j < bytes.len() && bytes[j] == b'?'
 }
 
 fn batch_single_item_select_error() -> Value {
@@ -2736,6 +2773,10 @@ mod tests {
         assert!(!where_matches_key_equals("pkid = ?", "pk"));
         // A non-`?` RHS is not a positional single-item lookup.
         assert!(!where_matches_key_equals("\"pk\" = :v", "pk"));
+        // The key pattern inside a string literal is data, not a predicate.
+        assert!(!where_matches_key_equals("data = 'pk = ?'", "pk"));
+        // A quoted key name keeps its internal whitespace intact.
+        assert!(where_matches_key_equals("\"my  pk\" = ?", "my  pk"));
     }
 
     #[test]
@@ -2772,6 +2813,17 @@ mod tests {
         ))
         .unwrap();
 
+        // A comma inside a quoted literal must not split the SET assignment and
+        // drop the write (`SET addr = 'City, State'`).
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"addr\" = 'City, State' WHERE \"pk\" = ?",
+                "Parameters": [{ "S": "a" }]
+            }),
+        ))
+        .unwrap();
+
         // A non-ASCII, non-key attribute in the WHERE predicate must not panic
         // the RETURNING scan (it simply matches nothing).
         svc.execute_statement(&req_for(
@@ -2799,6 +2851,34 @@ mod tests {
         let item = &response_body(&select)["Responses"][0]["Item"];
         assert_eq!(item["label"]["S"], "José 名前 🚀");
         assert_eq!(item["note"]["S"], "please REMOVE this");
+        assert_eq!(item["addr"]["S"], "City, State");
+    }
+
+    #[test]
+    fn partiql_update_returning_without_where_does_not_corrupt_set() {
+        // `RETURNING` after a WHERE-less UPDATE must be stripped from the SET
+        // clause, not fed into the update-expression evaluator. The update
+        // matches every item (no WHERE) and returns the new image.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({ "Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}" }),
+        ))
+        .unwrap();
+
+        let updated = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({
+                    "Statement": "UPDATE \"Widgets\" SET \"flag\" = ? RETURNING ALL NEW *",
+                    "Parameters": [{ "S": "on" }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(response_body(&updated)["Item"]["flag"]["S"], "on");
     }
 
     #[tokio::test]

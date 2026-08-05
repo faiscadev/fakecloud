@@ -479,14 +479,18 @@ pub(crate) fn execute_partiql_in_state(
                 "Invalid UPDATE statement: missing SET",
             )
         })?;
-        let after_set = rest.trim()[set_pos + 3..].trim();
+        // Strip a trailing `RETURNING ...` clause from the whole post-SET
+        // segment first, so it is removed whether or not a WHERE is present
+        // (a WHERE-less `UPDATE t SET x = ? RETURNING *` would otherwise leave
+        // RETURNING inside the SET clause and corrupt the update expression).
+        let (after_set, returns_item) =
+            split_partiql_returning_clause(rest.trim()[set_pos + 3..].trim());
         let where_pos = find_outside_quotes(&after_set.to_ascii_uppercase(), "WHERE");
         let (set_clause, where_clause) = if let Some(wp) = where_pos {
             (&after_set[..wp], after_set[wp + 5..].trim())
         } else {
             (after_set, "")
         };
-        let (where_clause, returns_item) = split_partiql_returning_clause(where_clause);
         let table = get_table_mut(&mut state.tables, &table_name)?;
         // Positional `?` parameters bind in textual order: the SET clause comes
         // before WHERE, so SET consumes parameters[0..set_count] and WHERE the

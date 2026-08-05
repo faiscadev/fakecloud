@@ -88,10 +88,12 @@ pub(crate) fn evaluate_key_condition(
 /// ``:s\tAND\t:o`` and ``:s\nAND\n:o`` split the same as ``:s AND :o``.
 ///
 /// Parenthesised groups are skipped so only unparenthesised occurrences of the
-/// keyword act as separators. When splitting on ``AND``, each top-level
-/// ``BETWEEN`` keyword consumes the next top-level ``AND`` as its own inner
-/// separator (``x BETWEEN :lo AND :hi``) rather than letting it split the
-/// expression.
+/// keyword act as separators. Single- and double-quoted spans are skipped too,
+/// so a separator (or paren) inside a PartiQL string literal (`'a, b'`) or a
+/// quoted attribute name (`"my,attr"`) is treated as data, not a boundary.
+/// When splitting on ``AND``, each top-level ``BETWEEN`` keyword consumes the
+/// next top-level ``AND`` as its own inner separator (``x BETWEEN :lo AND :hi``)
+/// rather than letting it split the expression.
 pub(crate) fn split_on_top_level_keyword<'a>(expr: &'a str, keyword: &str) -> Vec<&'a str> {
     let bytes = expr.as_bytes();
     let len = bytes.len();
@@ -102,10 +104,38 @@ pub(crate) fn split_on_top_level_keyword<'a>(expr: &'a str, keyword: &str) -> Ve
     let mut start = 0usize;
     let mut depth: i32 = 0;
     let mut between_skip: u32 = 0;
+    let mut in_squote = false;
+    let mut in_dquote = false;
     let mut i = 0usize;
 
     while i < len {
         let ch = bytes[i];
+        // Skip quoted spans wholesale: a comma/keyword/paren inside a string
+        // literal or a quoted identifier is data, never a separator.
+        if in_squote {
+            if ch == b'\'' {
+                in_squote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if in_dquote {
+            if ch == b'"' {
+                in_dquote = false;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == b'\'' {
+            in_squote = true;
+            i += 1;
+            continue;
+        }
+        if ch == b'"' {
+            in_dquote = true;
+            i += 1;
+            continue;
+        }
         if ch == b'(' {
             depth += 1;
             i += 1;

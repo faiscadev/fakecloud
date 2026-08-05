@@ -397,19 +397,23 @@ pub(crate) fn parse_update_clauses(expr: &str) -> Vec<(UpdateAction, Vec<String>
     // boundary on each side so `set foo = ...` is a keyword, but
     // `:set_arg`, `my_set_field`, `#set` are not.
     let is_boundary = |b: u8| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
-    // A single-quoted PartiQL string literal may contain a word that matches an
-    // update keyword (`SET note = 'please REMOVE this'`). Those bytes are data,
+    // A quoted span may contain a word that matches an update keyword: a
+    // single-quoted string literal (`SET note = 'please REMOVE this'`) or a
+    // double-quoted attribute name (`SET "a SET b" = ?`). Those bytes are data,
     // not clause boundaries, so mark quoted spans and ignore any keyword match
     // that begins inside one. Real UpdateItem expressions bind values through
     // `:placeholders` and carry no quoted literals, so this only affects the
     // inline-literal PartiQL path.
     let mut in_quote = vec![false; expr.len()];
-    let mut quoted = false;
+    let mut in_squote = false;
+    let mut in_dquote = false;
     for (i, b) in expr.bytes().enumerate() {
-        if b == b'\'' {
-            quoted = !quoted;
+        match b {
+            b'\'' if !in_dquote => in_squote = !in_squote,
+            b'"' if !in_squote => in_dquote = !in_dquote,
+            _ => {}
         }
-        in_quote[i] = quoted;
+        in_quote[i] = in_squote || in_dquote;
     }
     for &(kw, action) in UpdateAction::KEYWORDS {
         let mut search_from = 0;
@@ -1079,5 +1083,18 @@ mod filter_in_contains_tests {
         assert_eq!(multi.len(), 2);
         assert_eq!(multi[0].1, vec!["a = 'reset the SET value'".to_string()]);
         assert_eq!(multi[1].1, vec!["b = :v".to_string()]);
+    }
+
+    // A comma inside a quoted string literal is data, not an assignment
+    // separator: `SET addr = 'City, State'` is one assignment, not two (which
+    // previously tore the literal apart and silently dropped the update).
+    #[test]
+    fn parse_update_clauses_keeps_comma_inside_quoted_literal() {
+        let clauses = parse_update_clauses("SET addr = 'City, State', code = :c");
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(
+            clauses[0].1,
+            vec!["addr = 'City, State'".to_string(), "code = :c".to_string()]
+        );
     }
 }
