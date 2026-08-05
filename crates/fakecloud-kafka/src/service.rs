@@ -2872,7 +2872,7 @@ impl KafkaService {
     fn describe_channel(
         &self,
         ctx: &Ctx,
-        _cluster_arn: &str,
+        cluster_arn: &str,
         channel_arn: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
@@ -2880,6 +2880,7 @@ impl KafkaService {
         let c = data
             .channels
             .get_mut(channel_arn)
+            .filter(|c| channel_in_cluster(c, cluster_arn))
             .ok_or_else(|| not_found(&format!("The channel '{channel_arn}' does not exist.")))?;
         // Settle CREATING/UPDATING -> ACTIVE on read.
         if let Some(obj) = c.as_object_mut() {
@@ -2907,6 +2908,7 @@ impl KafkaService {
         let c = data
             .channels
             .get_mut(channel_arn)
+            .filter(|c| channel_in_cluster(c, cluster_arn))
             .ok_or_else(|| not_found(&format!("The channel '{channel_arn}' does not exist.")))?;
         let op_arn = shared::operation_arn_from_cluster(cluster_arn, &Uuid::new_v4().to_string());
         if let Some(obj) = c.as_object_mut() {
@@ -2930,7 +2932,11 @@ impl KafkaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
         let data = guard.get_or_create(&ctx.account);
-        if !data.channels.contains_key(channel_arn) {
+        let scoped = data
+            .channels
+            .get(channel_arn)
+            .is_some_and(|c| channel_in_cluster(c, cluster_arn));
+        if !scoped {
             return Err(not_found(&format!(
                 "The channel '{channel_arn}' does not exist."
             )));
@@ -2940,6 +2946,14 @@ impl KafkaService {
         data.tags.remove(channel_arn);
         ok(json!({ "channelArn": channel_arn, "clusterOperationArn": op_arn }))
     }
+}
+
+/// Whether a stored channel record belongs to the given cluster ARN. Channel
+/// ops are addressed as `/v1/clusters/{clusterArn}/channels/{channelArn}`, so a
+/// channel must be scoped to its owning cluster — fetching it under a different
+/// cluster's path reports it as not found.
+fn channel_in_cluster(c: &Value, cluster_arn: &str) -> bool {
+    c.get("clusterArn").and_then(Value::as_str) == Some(cluster_arn)
 }
 
 /// Project a stored channel record down to the `ChannelInfo` summary shape used

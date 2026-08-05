@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use chrono::Utc;
 use http::{Method, StatusCode};
 use serde_json::{json, Value};
 use tokio::sync::Mutex as AsyncMutex;
@@ -308,7 +309,9 @@ impl AccountService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_json(&req.body)?;
-        let account = require_account(&body)?;
+        // AccountId is optional in the model; absent, it targets the caller's
+        // own account.
+        let account = target_account(&body, req)?;
         let accounts = self.state.read();
         let st = accounts
             .get(&account)
@@ -325,10 +328,11 @@ impl AccountService {
                 "No primary email update in progress for this account.",
             ));
         };
-        Ok(AwsResponse::json_value(
-            StatusCode::OK,
-            json!({ "Status": status, "UpdatedAt": st.created_date.timestamp() }),
-        ))
+        let mut out = json!({ "Status": status });
+        if let Some(at) = st.primary_email_update_at {
+            out["UpdatedAt"] = json!(at.timestamp());
+        }
+        Ok(AwsResponse::json_value(StatusCode::OK, out))
     }
 
     fn start_primary_email_update(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -343,6 +347,7 @@ impl AccountService {
             email,
             otp: "000000".to_string(),
         });
+        st.primary_email_update_at = Some(Utc::now());
         Ok(AwsResponse::json_value(
             StatusCode::OK,
             json!({ "Status": "PENDING" }),
@@ -363,6 +368,7 @@ impl AccountService {
             Some(pending) if pending.email == email && pending.otp == otp => {
                 st.primary_email = email;
                 st.pending_email_update = None;
+                st.primary_email_update_at = Some(Utc::now());
                 Ok(AwsResponse::json_value(
                     StatusCode::OK,
                     json!({ "Status": "ACCEPTED" }),

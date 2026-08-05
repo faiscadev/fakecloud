@@ -526,7 +526,7 @@ fn policy_entry_from_req(req: &AwsRequest, _pt: &str, rule_number: &str) -> TgwP
     }
 }
 
-fn policy_entry_xml(e: &TgwPolicyTableEntry) -> String {
+fn policy_entry_xml(e: &TgwPolicyTableEntry, state: &str) -> String {
     let mut rule = String::new();
     if let Some(v) = &e.source_cidr_block {
         rule.push_str(&ec2_elem("sourceCidrBlock", v));
@@ -551,7 +551,7 @@ fn policy_entry_xml(e: &TgwPolicyTableEntry) -> String {
         ));
     }
     format!(
-        "{}<policyRule>{}</policyRule>{}<state>active</state>",
+        "{}<policyRule>{}</policyRule>{}<state>{state}</state>",
         ec2_elem("policyRuleNumber", &e.policy_rule_number),
         rule,
         ec2_elem("targetRouteTableId", &e.target_route_table_id),
@@ -580,7 +580,7 @@ pub(crate) fn create_transit_gateway_policy_table_entry(
         &req.request_id,
         &format!(
             "<transitGatewayPolicyTableEntry>{}</transitGatewayPolicyTableEntry>",
-            policy_entry_xml(&entry)
+            policy_entry_xml(&entry, "active")
         ),
     ))
 }
@@ -631,7 +631,7 @@ pub(crate) fn modify_transit_gateway_policy_table_entry(
         &req.request_id,
         &format!(
             "<transitGatewayPolicyTableEntry>{}</transitGatewayPolicyTableEntry>",
-            policy_entry_xml(&entry)
+            policy_entry_xml(&entry, "active")
         ),
     ))
 }
@@ -656,7 +656,7 @@ pub(crate) fn delete_transit_gateway_policy_table_entry(
         &req.request_id,
         &format!(
             "<transitGatewayPolicyTableEntry>{}</transitGatewayPolicyTableEntry>",
-            policy_entry_xml(&entry)
+            policy_entry_xml(&entry, "deleted")
         ),
     ))
 }
@@ -671,7 +671,7 @@ pub(crate) fn get_transit_gateway_policy_table_entries(
     let items: Vec<String> = accounts
         .get(&req.account_id)
         .and_then(|s| s.tgw_policy_table_entries.get(&pt))
-        .map(|m| m.values().map(policy_entry_xml).collect())
+        .map(|m| m.values().map(|e| policy_entry_xml(e, "active")).collect())
         .unwrap_or_default();
     Ok(Ec2Service::respond(
         "GetTransitGatewayPolicyTableEntries",
