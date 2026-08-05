@@ -397,6 +397,24 @@ pub(crate) fn parse_update_clauses(expr: &str) -> Vec<(UpdateAction, Vec<String>
     // boundary on each side so `set foo = ...` is a keyword, but
     // `:set_arg`, `my_set_field`, `#set` are not.
     let is_boundary = |b: u8| b == b' ' || b == b'\t' || b == b'\n' || b == b'\r';
+    // A quoted span may contain a word that matches an update keyword: a
+    // single-quoted string literal (`SET note = 'please REMOVE this'`) or a
+    // double-quoted attribute name (`SET "a SET b" = ?`). Those bytes are data,
+    // not clause boundaries, so mark quoted spans and ignore any keyword match
+    // that begins inside one. Real UpdateItem expressions bind values through
+    // `:placeholders` and carry no quoted literals, so this only affects the
+    // inline-literal PartiQL path.
+    let mut in_quote = vec![false; expr.len()];
+    let mut in_squote = false;
+    let mut in_dquote = false;
+    for (i, b) in expr.bytes().enumerate() {
+        match b {
+            b'\'' if !in_dquote => in_squote = !in_squote,
+            b'"' if !in_squote => in_dquote = !in_dquote,
+            _ => {}
+        }
+        in_quote[i] = in_squote || in_dquote;
+    }
     for &(kw, action) in UpdateAction::KEYWORDS {
         let mut search_from = 0;
         while let Some(pos) = upper[search_from..].find(kw) {
@@ -404,7 +422,7 @@ pub(crate) fn parse_update_clauses(expr: &str) -> Vec<(UpdateAction, Vec<String>
             let before_ok = abs_pos == 0 || is_boundary(expr.as_bytes()[abs_pos - 1]);
             let after_pos = abs_pos + kw.len();
             let after_ok = after_pos >= expr.len() || is_boundary(expr.as_bytes()[after_pos]);
-            if before_ok && after_ok {
+            if before_ok && after_ok && !in_quote[abs_pos] {
                 positions.push((abs_pos, action));
             }
             search_from = abs_pos + kw.len();
@@ -608,10 +626,15 @@ pub(crate) fn evaluate_list_append_rhs(
     expr_attr_values: &HashMap<String, Value>,
 ) -> Option<Value> {
     let inner = rest.strip_suffix(')')?;
-    let mut split = inner.splitn(2, ',');
-    let (a_ref, b_ref) = (split.next()?, split.next()?);
-    let a_val = resolve_ref_or_path(a_ref.trim(), item, expr_attr_names, expr_attr_values);
-    let b_val = resolve_ref_or_path(b_ref.trim(), item, expr_attr_names, expr_attr_values);
+    let operands = split_on_top_level_keyword(inner, ",");
+    let [a_ref, b_ref] = operands.as_slice() else {
+        return None;
+    };
+    // Each operand may be `if_not_exists(path, :default)` or a plain ref/path,
+    // resolving to the value-when-present-else-default -- identical semantics to
+    // an arithmetic operand, so share that evaluator instead of a second copy.
+    let a_val = evaluate_arithmetic_operand(a_ref.trim(), item, expr_attr_names, expr_attr_values);
+    let b_val = evaluate_arithmetic_operand(b_ref.trim(), item, expr_attr_names, expr_attr_values);
 
     let mut merged = Vec::new();
     for v in [&a_val, &b_val].iter().copied().flatten() {
@@ -730,11 +753,22 @@ pub(crate) fn resolve_ref_or_path(
     expr_attr_names: &HashMap<String, String>,
     expr_attr_values: &HashMap<String, Value>,
 ) -> Option<Value> {
-    let reference = reference.trim();
+    let reference = reference.trim().trim_matches('"');
     if reference.starts_with(':') {
         return expr_attr_values.get(reference).cloned();
     }
-    resolve_path(reference, item, expr_attr_names)
+    resolve_path(reference, item, expr_attr_names).or_else(|| {
+        reference
+            .strip_prefix('\'')
+            .and_then(|x| x.strip_suffix('\''))
+            .map(|x| json!({ "S": x }))
+            .or_else(|| {
+                reference
+                    .parse::<f64>()
+                    .ok()
+                    .map(|_| json!({ "N": reference }))
+            })
+    })
 }
 
 /// True if `path` targets a nested key inside an M-typed attribute. Bracketed
@@ -1029,5 +1063,38 @@ mod filter_in_contains_tests {
             &no_names(),
             &values
         ));
+    }
+
+    // A keyword-looking word inside a single-quoted PartiQL literal is data,
+    // not a clause boundary: `'please REMOVE this'` must stay attached to the
+    // SET assignment instead of splitting off a spurious REMOVE clause (which
+    // silently dropped the write before the quote-aware scan).
+    #[test]
+    fn parse_update_clauses_ignores_keywords_in_quoted_literal() {
+        let clauses = parse_update_clauses("SET note = 'please REMOVE this'");
+        assert_eq!(clauses.len(), 1);
+        assert!(matches!(clauses[0].0, UpdateAction::Set));
+        assert_eq!(
+            clauses[0].1,
+            vec!["note = 'please REMOVE this'".to_string()]
+        );
+
+        let multi = parse_update_clauses("SET a = 'reset the SET value' SET b = :v");
+        assert_eq!(multi.len(), 2);
+        assert_eq!(multi[0].1, vec!["a = 'reset the SET value'".to_string()]);
+        assert_eq!(multi[1].1, vec!["b = :v".to_string()]);
+    }
+
+    // A comma inside a quoted string literal is data, not an assignment
+    // separator: `SET addr = 'City, State'` is one assignment, not two (which
+    // previously tore the literal apart and silently dropped the update).
+    #[test]
+    fn parse_update_clauses_keeps_comma_inside_quoted_literal() {
+        let clauses = parse_update_clauses("SET addr = 'City, State', code = :c");
+        assert_eq!(clauses.len(), 1);
+        assert_eq!(
+            clauses[0].1,
+            vec!["addr = 'City, State'".to_string(), "code = :c".to_string()]
+        );
     }
 }

@@ -479,7 +479,12 @@ pub(crate) fn execute_partiql_in_state(
                 "Invalid UPDATE statement: missing SET",
             )
         })?;
-        let after_set = rest.trim()[set_pos + 3..].trim();
+        // Strip a trailing `RETURNING ...` clause from the whole post-SET
+        // segment first, so it is removed whether or not a WHERE is present
+        // (a WHERE-less `UPDATE t SET x = ? RETURNING *` would otherwise leave
+        // RETURNING inside the SET clause and corrupt the update expression).
+        let (after_set, returns_item) =
+            split_partiql_returning_clause(rest.trim()[set_pos + 3..].trim());
         let where_pos = find_outside_quotes(&after_set.to_ascii_uppercase(), "WHERE");
         let (set_clause, where_clause) = if let Some(wp) = where_pos {
             (&after_set[..wp], after_set[wp + 5..].trim())
@@ -501,30 +506,32 @@ pub(crate) fn execute_partiql_in_state(
         } else {
             (0..table.items.len()).collect()
         };
-        let assignments: Vec<&str> = set_clause.split(',').collect();
+        let (update_expression, expression_attribute_values) =
+            prepare_partiql_update_expression(set_clause, parameters);
         let mut last_key: Option<HashMap<String, AttributeValue>> = None;
         let mut last_old: Option<HashMap<String, AttributeValue>> = None;
         let mut last_new: Option<HashMap<String, AttributeValue>> = None;
         for idx in &matched_indices {
             last_old = Some(table.items[*idx].clone());
-            let mut local_offset = 0;
-            for assignment in &assignments {
-                let assignment = assignment.trim();
-                if let Some((attr, val_str)) = assignment.split_once('=') {
-                    let attr = attr.trim().trim_matches('"');
-                    let val_str = val_str.trim();
-                    let value = parse_partiql_literal(val_str, parameters, &mut local_offset);
-                    if let Some(v) = value {
-                        table.items[*idx].insert(attr.to_string(), v);
-                    }
-                }
-            }
+            apply_update_expression(
+                &mut table.items[*idx],
+                &update_expression,
+                &HashMap::new(),
+                &expression_attribute_values,
+            )?;
             last_key = Some(extract_key(table, &table.items[*idx]));
             last_new = Some(table.items[*idx].clone());
         }
         table.recalculate_stats();
         Ok(PartiqlOutcome {
-            response: json!({}),
+            response: if returns_item {
+                last_new
+                    .as_ref()
+                    .map(|item| json!({ "Item": item }))
+                    .unwrap_or_else(|| json!({}))
+            } else {
+                json!({})
+            },
             table_name: Some(table_name),
             event_name: last_old.as_ref().map(|_| "MODIFY".to_string()),
             keys: last_key,
@@ -577,6 +584,97 @@ pub(crate) fn execute_partiql_in_state(
             format!("Unsupported PartiQL statement: {trimmed}"),
         ))
     }
+}
+
+fn split_partiql_returning_clause(where_clause: &str) -> (&str, bool) {
+    // `to_ascii_uppercase` preserves byte length and never touches non-ASCII
+    // bytes, so char boundaries stay aligned between `upper` and `where_clause`.
+    // Iterate real char boundaries (not raw byte indices) so a non-ASCII byte
+    // in the predicate cannot make a slice land mid-character and panic.
+    let upper = where_clause.to_ascii_uppercase();
+    let mut in_quote = false;
+    for (index, ch) in upper.char_indices() {
+        if ch == '\'' {
+            in_quote = !in_quote;
+        }
+        if !in_quote
+            && upper[index..].starts_with("RETURNING")
+            && index > 0
+            && upper[..index].ends_with(char::is_whitespace)
+            && upper[index + 9..].starts_with(char::is_whitespace)
+        {
+            return (where_clause[..index].trim(), true);
+        }
+    }
+    (where_clause, false)
+}
+
+fn prepare_partiql_update_expression(
+    set_clause: &str,
+    parameters: &[Value],
+) -> (String, HashMap<String, Value>) {
+    let mut expression = String::from("SET ");
+    let mut parameter_index = 0;
+    let mut in_quote = false;
+
+    for character in set_clause.trim().chars() {
+        if character == '\'' {
+            in_quote = !in_quote;
+            expression.push(character);
+            continue;
+        }
+
+        if !in_quote && character == '?' {
+            expression.push_str(&format!(":p{parameter_index}"));
+            parameter_index += 1;
+            continue;
+        }
+
+        expression.push(character);
+    }
+
+    let expression = split_repeated_set_clauses(&expression);
+    let values = parameters
+        .iter()
+        .enumerate()
+        .map(|(index, value)| (format!(":p{index}"), value.clone()))
+        .collect();
+
+    (expression, values)
+}
+
+fn split_repeated_set_clauses(expression: &str) -> String {
+    // Walk char boundaries and copy `char`s (never `byte as char`, which
+    // corrupts multibyte UTF-8) so an accented/CJK/emoji value or attribute
+    // name in the SET clause survives intact and no slice panics mid-character.
+    let mut result = String::new();
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut chars = expression.char_indices();
+
+    while let Some((index, ch)) = chars.next() {
+        match ch {
+            '\'' if !in_double_quote => in_single_quote = !in_single_quote,
+            '"' if !in_single_quote => in_double_quote = !in_double_quote,
+            _ => {}
+        }
+        if !in_single_quote
+            && !in_double_quote
+            && expression[index..].starts_with("SET")
+            && index > 0
+            && expression[..index].ends_with(char::is_whitespace)
+            && expression[index + 3..].starts_with(char::is_whitespace)
+        {
+            result.push(',');
+            // "SET" is three ASCII bytes; `ch` consumed the 'S', skip 'E','T'.
+            chars.next();
+            chars.next();
+            continue;
+        }
+        result.push(ch);
+    }
+
+    result
 }
 
 /// Parse a table name that may be quoted with double quotes.
@@ -1491,6 +1589,53 @@ mod number_compare_tests {
 #[cfg(test)]
 mod quote_aware_tests {
     use super::*;
+
+    #[test]
+    fn returning_clause_requires_keyword_boundaries() {
+        assert_eq!(
+            split_partiql_returning_clause("returning_status = ? RETURNING ALL NEW *"),
+            ("returning_status = ?", true)
+        );
+        assert_eq!(
+            split_partiql_returning_clause("note = 'RETURNING'"),
+            ("note = 'RETURNING'", false)
+        );
+    }
+
+    #[test]
+    fn repeated_set_split_preserves_quoted_text() {
+        assert_eq!(
+            split_repeated_set_clauses("SET \"SET\" = 'ready SET now' SET state = ?"),
+            "SET \"SET\" = 'ready SET now' , state = ?"
+        );
+    }
+
+    // Non-ASCII values and attribute names must round-trip byte-for-byte: the
+    // splitters walk char boundaries, so an accented / CJK / emoji character
+    // neither corrupts the rebuilt expression nor panics a mid-char slice.
+    #[test]
+    fn repeated_set_split_preserves_non_ascii() {
+        assert_eq!(
+            split_repeated_set_clauses("SET \"café\" = 'José 名前 🚀' SET n = ?"),
+            "SET \"café\" = 'José 名前 🚀' , n = ?"
+        );
+        // Unquoted non-ASCII attribute name must not panic.
+        assert_eq!(split_repeated_set_clauses("SET café = ?"), "SET café = ?");
+    }
+
+    #[test]
+    fn returning_clause_handles_non_ascii_predicate() {
+        // A non-ASCII byte in the WHERE predicate (quoted or bare) must not
+        // panic the byte-index scan.
+        assert_eq!(
+            split_partiql_returning_clause("\"café\" = ? RETURNING ALL NEW *"),
+            ("\"café\" = ?", true)
+        );
+        assert_eq!(
+            split_partiql_returning_clause("\"名前\" = ?"),
+            ("\"名前\" = ?", false)
+        );
+    }
 
     // bug-hunt 2026-07-01: operator/keyword scans must skip single-quoted
     // literals so a `<` or `WHERE`/`IN` inside a string is treated as data.

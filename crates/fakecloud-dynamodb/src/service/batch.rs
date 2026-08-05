@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
 
-use crate::state::AttributeValue;
+use crate::state::{AttributeValue, DynamoTable};
 
 /// A queued Kinesis delivery for a single transact write — fired after
 /// the apply phase succeeds and the write lock is dropped. Tuple shape:
@@ -1233,7 +1233,14 @@ impl DynamoDbService {
 
                 match execute_partiql_in_state(state, statement, &parameters) {
                     Ok(outcome) => {
-                        responses.push(outcome.response.clone());
+                        responses.push(batch_partiql_response(
+                            statement,
+                            outcome.response.clone(),
+                            outcome
+                                .table_name
+                                .as_ref()
+                                .and_then(|name| state.tables.get(name)),
+                        ));
                         if let (Some(table_name), Some(event_name)) =
                             (outcome.table_name.as_ref(), outcome.event_name.as_ref())
                         {
@@ -1549,6 +1556,105 @@ impl DynamoDbService {
     }
 }
 
+fn batch_partiql_response(statement: &str, response: Value, table: Option<&DynamoTable>) -> Value {
+    let upper = statement.trim_start().to_ascii_uppercase();
+    if !upper.starts_with("SELECT") {
+        return response;
+    }
+
+    let Some(from_pos) = super::find_outside_quotes(&upper, "FROM") else {
+        return batch_single_item_select_error();
+    };
+    let after_from = statement.trim_start()[from_pos + 4..].trim_start();
+    let (_, rest) = super::parse_partiql_table_name(after_from);
+    let rest = rest.trim_start();
+    if rest.starts_with('.') || !rest.to_ascii_uppercase().starts_with("WHERE") {
+        return batch_single_item_select_error();
+    }
+    let where_clause = &rest[5..];
+    if table.is_none_or(|table| !where_is_full_key_equality(where_clause, table)) {
+        return batch_single_item_select_error();
+    }
+
+    let items = response
+        .get("Items")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if items.len() == 1 {
+        return json!({ "Item": items[0] });
+    }
+    if items.is_empty() {
+        return json!({});
+    }
+
+    batch_single_item_select_error()
+}
+
+/// True if a batch SELECT `WHERE` clause is exactly a full-primary-key point
+/// lookup: every key attribute pinned to a positional parameter (`attr = ?`),
+/// joined by `AND`, with no other predicates. AWS `BatchExecuteStatement`
+/// requires equality on the complete key and nothing else, so a missing key, an
+/// extra non-key predicate, or a non-`?` right-hand side all fail here.
+///
+/// The `AND` split is quote-aware (via [`split_on_top_level_keyword`]), so a
+/// value such as `'a AND b'` or `'pk = ?'` is treated as data, not structure.
+fn where_is_full_key_equality(where_clause: &str, table: &DynamoTable) -> bool {
+    let conjuncts: Vec<&str> = super::split_on_top_level_keyword(where_clause, "AND")
+        .into_iter()
+        .map(str::trim)
+        .filter(|c| !c.is_empty())
+        .collect();
+    // One conjunct per key attribute, no more: this rejects both a missing key
+    // and an extra non-key predicate (`pk = ? AND data = ?`).
+    conjuncts.len() == table.key_schema.len()
+        && table.key_schema.iter().all(|key| {
+            conjuncts
+                .iter()
+                .any(|c| conjunct_is_key_equals(c, &key.attribute_name))
+        })
+        && conjuncts.iter().all(|c| {
+            table
+                .key_schema
+                .iter()
+                .any(|key| conjunct_is_key_equals(c, &key.attribute_name))
+        })
+}
+
+/// True if a single WHERE conjunct is exactly `attr = ?` -- either double-quoted
+/// (`"attr" = ?`, preserving internal spaces in the name) or the bare whole
+/// identifier (`attr = ?`, so `mypk` is not mistaken for key `pk`) -- tolerant
+/// of arbitrary whitespace around `=`.
+fn conjunct_is_key_equals(conjunct: &str, attr: &str) -> bool {
+    let c = conjunct.trim();
+    if let Some(rest) = c.strip_prefix(&format!("\"{attr}\"")) {
+        return is_equals_placeholder(rest);
+    }
+    if let Some(rest) = c.strip_prefix(attr) {
+        // The bare name must be a whole identifier, not a prefix of a longer one.
+        if !rest.starts_with(|ch: char| ch.is_alphanumeric() || ch == '_') {
+            return is_equals_placeholder(rest);
+        }
+    }
+    false
+}
+
+/// True if `s` is `= ?` modulo surrounding whitespace and nothing else.
+fn is_equals_placeholder(s: &str) -> bool {
+    s.trim_start()
+        .strip_prefix('=')
+        .is_some_and(|rhs| rhs.trim() == "?")
+}
+
+fn batch_single_item_select_error() -> Value {
+    json!({
+        "Error": {
+            "Code": "ValidationError",
+            "Message": "Only single item select is supported"
+        }
+    })
+}
+
 /// Apply `Limit` + `NextToken` to a PartiQL SELECT response. The token is an
 /// opaque base64-encoded offset into the (deterministically ordered) result
 /// set. No-op for write statements (which carry no `Items`).
@@ -1611,6 +1717,10 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    fn response_body(response: &AwsResponse) -> Value {
+        serde_json::from_slice(response.body.expect_bytes()).unwrap()
     }
 
     fn make_state() -> SharedDynamoDbState {
@@ -2525,6 +2635,254 @@ mod tests {
             .unwrap();
         assert_eq!(table.items.len(), 2);
         assert_eq!(table.stream_records.read().len(), 2);
+    }
+
+    #[test]
+    fn batch_execute_statement_returns_single_items_and_updates() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({ "Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}" }),
+        ))
+        .unwrap();
+
+        let select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE \"pk\" = ?",
+                        "Parameters": [{ "S": "a" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        let select_body = response_body(&select);
+        assert_eq!(select_body["Responses"][0]["Item"]["pk"]["S"], "a");
+
+        let scan = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({ "Statements": [{ "Statement": "SELECT * FROM \"Widgets\"" }] }),
+            ))
+            .unwrap();
+        let scan_body = response_body(&scan);
+        assert_eq!(
+            scan_body["Responses"][0]["Error"]["Message"],
+            "Only single item select is supported"
+        );
+
+        let non_key_select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE data = ?",
+                        "Parameters": [{ "S": "missing" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            response_body(&non_key_select)["Responses"][0]["Error"]["Message"],
+            "Only single item select is supported"
+        );
+
+        let update = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "UPDATE \"Widgets\" SET \"results\" = list_append(if_not_exists(\"results\", ?), ?) SET \"updatedAt\" = ? WHERE \"pk\" = ? RETURNING ALL NEW *",
+                        "Parameters": [
+                            { "L": [] },
+                            { "L": [{ "S": "new" }] },
+                            { "S": "now" },
+                            { "S": "a" }
+                        ]
+                    }]
+                }),
+            ))
+            .unwrap();
+        let update_body = response_body(&update);
+        assert_eq!(
+            update_body["Responses"][0]["Item"]["updatedAt"]["S"], "now",
+            "unexpected update response: {update_body}"
+        );
+        assert_eq!(
+            update_body["Responses"][0]["Item"]["results"]["L"][0]["S"],
+            "new"
+        );
+
+        let literal_update = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({
+                    "Statement": "UPDATE \"Widgets\" SET \"state\" = 'ready' WHERE \"pk\" = ?",
+                    "Parameters": [{ "S": "a" }]
+                }),
+            ))
+            .unwrap();
+        assert!(response_body(&literal_update).get("Item").is_none());
+
+        let literal_select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE \"pk\" = ?",
+                        "Parameters": [{ "S": "a" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            response_body(&literal_select)["Responses"][0]["Item"]["state"]["S"],
+            "ready"
+        );
+    }
+
+    #[test]
+    fn conjunct_is_key_equals_spacing_and_word_boundary() {
+        // Tolerant of arbitrary whitespace around `=`, quoted or bare.
+        assert!(conjunct_is_key_equals("\"pk\"=?", "pk"));
+        assert!(conjunct_is_key_equals("\"pk\"  =  ?", "pk"));
+        assert!(conjunct_is_key_equals("pk = ?", "pk"));
+        assert!(conjunct_is_key_equals("\"pk\" =\n?", "pk"));
+        // A longer attribute name must not be mistaken for the key.
+        assert!(!conjunct_is_key_equals("mypk = ?", "pk"));
+        assert!(!conjunct_is_key_equals("pkid = ?", "pk"));
+        // A non-`?` RHS is not a positional single-item lookup.
+        assert!(!conjunct_is_key_equals("\"pk\" = :v", "pk"));
+        // A quoted key name keeps its internal whitespace intact.
+        assert!(conjunct_is_key_equals("\"my  pk\" = ?", "my  pk"));
+        // Trailing junk after the placeholder is not an exact key equality.
+        assert!(!conjunct_is_key_equals("pk = ? extra", "pk"));
+    }
+
+    #[test]
+    fn where_is_full_key_equality_rejects_missing_and_extra_predicates() {
+        let state = make_state();
+        seed_table_with_stream(&state, "T"); // single HASH key `pk`
+        let accts = state.read();
+        let table = accts.get("123456789012").unwrap().tables.get("T").unwrap();
+
+        assert!(where_is_full_key_equality("\"pk\" = ?", table));
+        assert!(where_is_full_key_equality("\"pk\"=?", table));
+        // Extra non-key predicate is rejected (AWS requires key-only).
+        assert!(!where_is_full_key_equality(
+            "\"pk\" = ? AND data = ?",
+            table
+        ));
+        // Missing key is rejected.
+        assert!(!where_is_full_key_equality("data = ?", table));
+        // A key pattern inside a string literal is data, not a predicate.
+        assert!(!where_is_full_key_equality("data = 'pk = ?'", table));
+    }
+
+    #[test]
+    fn batch_execute_statement_handles_non_ascii_and_keyword_literals() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({ "Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}" }),
+        ))
+        .unwrap();
+
+        // Non-ASCII value in a quoted literal must round-trip byte-for-byte
+        // (previously corrupted to mojibake by byte-wise expression rebuild).
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"label\" = 'José 名前 🚀' WHERE \"pk\" = ?",
+                "Parameters": [{ "S": "a" }]
+            }),
+        ))
+        .unwrap();
+
+        // A keyword-looking word inside a quoted literal is data, not a clause:
+        // the write must land instead of being silently dropped.
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"note\" = 'please REMOVE this' WHERE \"pk\" = ?",
+                "Parameters": [{ "S": "a" }]
+            }),
+        ))
+        .unwrap();
+
+        // A comma inside a quoted literal must not split the SET assignment and
+        // drop the write (`SET addr = 'City, State'`).
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"addr\" = 'City, State' WHERE \"pk\" = ?",
+                "Parameters": [{ "S": "a" }]
+            }),
+        ))
+        .unwrap();
+
+        // A non-ASCII, non-key attribute in the WHERE predicate must not panic
+        // the RETURNING scan (it simply matches nothing).
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({
+                "Statement": "UPDATE \"Widgets\" SET \"x\" = ? WHERE \"café\" = ?",
+                "Parameters": [{ "S": "1" }, { "S": "z" }]
+            }),
+        ))
+        .unwrap();
+
+        // Read back through a batch single-item SELECT with tight `"pk"=?`
+        // spacing (no surrounding spaces) to confirm the key-check tolerates it.
+        let select = svc
+            .batch_execute_statement(&req_for(
+                "BatchExecuteStatement",
+                json!({
+                    "Statements": [{
+                        "Statement": "SELECT * FROM \"Widgets\" WHERE \"pk\"=?",
+                        "Parameters": [{ "S": "a" }]
+                    }]
+                }),
+            ))
+            .unwrap();
+        let item = &response_body(&select)["Responses"][0]["Item"];
+        assert_eq!(item["label"]["S"], "José 名前 🚀");
+        assert_eq!(item["note"]["S"], "please REMOVE this");
+        assert_eq!(item["addr"]["S"], "City, State");
+    }
+
+    #[test]
+    fn partiql_update_returning_without_where_does_not_corrupt_set() {
+        // `RETURNING` after a WHERE-less UPDATE must be stripped from the SET
+        // clause, not fed into the update-expression evaluator. The update
+        // matches every item (no WHERE) and returns the new image.
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        let svc = DynamoDbService::new(state);
+
+        svc.execute_statement(&req_for(
+            "ExecuteStatement",
+            json!({ "Statement": "INSERT INTO \"Widgets\" VALUE {'pk': 'a'}" }),
+        ))
+        .unwrap();
+
+        let updated = svc
+            .execute_statement(&req_for(
+                "ExecuteStatement",
+                json!({
+                    "Statement": "UPDATE \"Widgets\" SET \"flag\" = ? RETURNING ALL NEW *",
+                    "Parameters": [{ "S": "on" }]
+                }),
+            ))
+            .unwrap();
+        assert_eq!(response_body(&updated)["Item"]["flag"]["S"], "on");
     }
 
     #[tokio::test]

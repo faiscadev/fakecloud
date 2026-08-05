@@ -5235,6 +5235,19 @@ fn split_on_top_level_keyword_does_not_match_inside_identifiers() {
     assert_eq!(parts.len(), 1);
 }
 
+#[test]
+fn split_on_top_level_keyword_skips_quoted_spans() {
+    // A separator inside a single-quoted literal or a double-quoted identifier
+    // is data, not a boundary.
+    let parts = split_on_top_level_keyword("addr = 'City, State', code = :c", ",");
+    assert_eq!(parts, vec!["addr = 'City, State'", " code = :c"]);
+    let parts = split_on_top_level_keyword("\"a,b\" = :a AND c = :b", "AND");
+    assert_eq!(parts.len(), 2);
+    // A keyword inside a quoted literal must not split either.
+    let parts = split_on_top_level_keyword("note = 'x AND y'", "AND");
+    assert_eq!(parts.len(), 1);
+}
+
 // ── Smithy-declared wire error code regression tests ─────────────────────
 //
 // These ops' Smithy error_shapes lists do not include the generic codes our
