@@ -5,7 +5,7 @@ weight = 48
 +++
 
 fakecloud implements **AWS Account Management** (`account`) as a restJson1
-control plane. **The complete 15-operation surface** ships — alternate contacts,
+control plane. **The complete 16-operation surface** ships — alternate contacts,
 primary contact information, account information, primary-email management, and
 Region opt-in control — backed by account-partitioned state that persists across
 restarts in persistent mode.
@@ -16,7 +16,7 @@ would against real AWS; absent `AccountId`, the operation targets the caller's
 own account. (The primary-email operations mark `AccountId` as required, matching
 the AWS Smithy model.)
 
-## Supported now (all 15 operations)
+## Supported now (all 16 operations)
 
 - **Alternate contacts** — `PutAlternateContact`, `GetAlternateContact`,
   `DeleteAlternateContact`. Each account exposes three independent contact slots
@@ -34,10 +34,13 @@ the AWS Smithy model.)
   (`AccountName` <= 50), and `GetGovCloudAccountInformation` (returns a
   deterministically-paired `GovCloudAccountId` for a standard account id).
 - **Primary email** — `GetPrimaryEmail`, `StartPrimaryEmailUpdate`,
-  `AcceptPrimaryEmailUpdate`. Starting an update records a pending change and
-  returns `Status: PENDING`; accepting it with the matching one-time password
-  commits the new address and returns `Status: ACCEPTED`. A wrong OTP or email
-  returns `ValidationException`.
+  `AcceptPrimaryEmailUpdate`, `GetPrimaryEmailUpdateStatus`. Starting an update
+  records a pending change and returns `Status: PENDING`; accepting it with the
+  matching one-time password commits the new address and returns
+  `Status: ACCEPTED`. A wrong OTP or email returns `ValidationException`.
+  `GetPrimaryEmailUpdateStatus` reports the in-flight status (`PENDING` while an
+  update awaits acceptance, `ACCEPTED` once committed) and returns
+  `ResourceNotFoundException` when no update has been started.
 - **Region opt-in** — `ListRegions`, `GetRegionOptStatus`, `EnableRegion`,
   `DisableRegion`. Backed by the real AWS Region catalogue: always-on regions
   report `ENABLED_BY_DEFAULT`, opt-in regions default to `DISABLED`. `EnableRegion`

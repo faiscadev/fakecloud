@@ -480,6 +480,67 @@ impl GlueService {
         Ok(AwsResponse::ok_json(json!({ "Runs": runs })))
     }
 
+    pub(crate) fn batch_get_data_quality_ruleset_evaluation_run(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        req_present(&body, "RunIds")?;
+        let run_ids: Vec<String> = body
+            .get("RunIds")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id, &req.region);
+        let mut runs: Vec<Value> = Vec::new();
+        let mut not_found: Vec<String> = Vec::new();
+        let mut pending_results: Vec<Value> = Vec::new();
+        for id in run_ids {
+            let Some(r) = st.dq_ruleset_runs.get_mut(&id) else {
+                not_found.push(id);
+                continue;
+            };
+            // Settle to a terminal state on read, mirroring the single-run getter.
+            if settle_run_status(r, "Status", "SUCCEEDED", Some("CompletedOn")) {
+                let result_id = format!("dqresult-{}", new_id());
+                let ruleset0 = r
+                    .get("RulesetNames")
+                    .and_then(|v| v.as_array())
+                    .and_then(|a| a.first())
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                let data_source = r.get("DataSource").cloned().unwrap_or(Value::Null);
+                let started_on = r.get("StartedOn").cloned().unwrap_or(Value::Null);
+                if let Some(obj) = r.as_object_mut() {
+                    obj.insert("ResultIds".into(), json!([result_id]));
+                }
+                pending_results.push(json!({
+                    "ResultId": result_id,
+                    "RulesetName": ruleset0,
+                    "Score": 1.0,
+                    "DataSource": data_source,
+                    "StartedOn": started_on,
+                    "CompletedOn": now_ts(),
+                    "RuleResults": [],
+                }));
+            }
+            runs.push(r.clone());
+        }
+        for result in pending_results {
+            if let Some(rid) = result.get("ResultId").and_then(|v| v.as_str()) {
+                st.dq_results.insert(rid.to_string(), result);
+            }
+        }
+        Ok(AwsResponse::ok_json(
+            json!({ "Runs": runs, "RunsNotFound": not_found }),
+        ))
+    }
+
     pub(crate) fn start_data_quality_rule_recommendation_run(
         &self,
         req: &AwsRequest,

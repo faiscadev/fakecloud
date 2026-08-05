@@ -969,6 +969,27 @@ pub struct TgwMulticastDomain {
     pub tgw_id: String,
 }
 
+/// An entry in a Transit Gateway policy table.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TgwPolicyTableEntry {
+    pub policy_rule_number: String,
+    pub target_route_table_id: String,
+    #[serde(default)]
+    pub source_cidr_block: Option<String>,
+    #[serde(default)]
+    pub source_port_range: Option<String>,
+    #[serde(default)]
+    pub destination_cidr_block: Option<String>,
+    #[serde(default)]
+    pub destination_port_range: Option<String>,
+    #[serde(default)]
+    pub protocol: Option<String>,
+    #[serde(default)]
+    pub meta_data_key: Option<String>,
+    #[serde(default)]
+    pub meta_data_value: Option<String>,
+}
+
 /// A Transit Gateway metering policy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TgwMeteringPolicy {
@@ -1723,6 +1744,9 @@ pub struct Ec2State {
     /// policy-table-id -> associated attachment ids.
     #[serde(default)]
     pub tgw_policy_table_associations: BTreeMap<String, Vec<String>>,
+    /// policy-table-id -> (rule number -> entry).
+    #[serde(default)]
+    pub tgw_policy_table_entries: BTreeMap<String, BTreeMap<String, TgwPolicyTableEntry>>,
     /// announcement-id -> (route-table id, peering-attachment id).
     #[serde(default)]
     pub tgw_announcements: BTreeMap<String, (String, String)>,

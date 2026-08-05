@@ -27,6 +27,7 @@ pub const ACCOUNT_ACTIONS: &[&str] = &[
     "GetContactInformation",
     "GetGovCloudAccountInformation",
     "GetPrimaryEmail",
+    "GetPrimaryEmailUpdateStatus",
     "GetRegionOptStatus",
     "ListRegions",
     "PutAccountName",
@@ -46,6 +47,7 @@ enum Route {
     GetContactInformation,
     GetGovCloudAccountInformation,
     GetPrimaryEmail,
+    GetPrimaryEmailUpdateStatus,
     GetRegionOptStatus,
     ListRegions,
     PutAccountName,
@@ -122,6 +124,9 @@ impl AccountService {
                 Some(Route::GetGovCloudAccountInformation)
             }
             (&Method::POST, ["getPrimaryEmail"]) => Some(Route::GetPrimaryEmail),
+            (&Method::POST, ["getPrimaryEmailUpdateStatus"]) => {
+                Some(Route::GetPrimaryEmailUpdateStatus)
+            }
             (&Method::POST, ["getRegionOptStatus"]) => Some(Route::GetRegionOptStatus),
             (&Method::POST, ["listRegions"]) => Some(Route::ListRegions),
             (&Method::POST, ["putAccountName"]) => Some(Route::PutAccountName),
@@ -295,6 +300,34 @@ impl AccountService {
         Ok(AwsResponse::json_value(
             StatusCode::OK,
             json!({ "PrimaryEmail": email }),
+        ))
+    }
+
+    fn get_primary_email_update_status(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = parse_json(&req.body)?;
+        let account = require_account(&body)?;
+        let accounts = self.state.read();
+        let st = accounts
+            .get(&account)
+            .ok_or_else(|| not_found("No primary email update in progress for this account."))?;
+        // A change awaiting AcceptPrimaryEmailUpdate is PENDING; once accepted the
+        // primary email is set and the last update reports ACCEPTED. With neither,
+        // no update has ever been started for the account.
+        let status = if st.pending_email_update.is_some() {
+            "PENDING"
+        } else if !st.primary_email.is_empty() {
+            "ACCEPTED"
+        } else {
+            return Err(not_found(
+                "No primary email update in progress for this account.",
+            ));
+        };
+        Ok(AwsResponse::json_value(
+            StatusCode::OK,
+            json!({ "Status": status, "UpdatedAt": st.created_date.timestamp() }),
         ))
     }
 
@@ -483,6 +516,7 @@ impl AwsService for AccountService {
             Route::GetContactInformation => self.get_contact_information(&req),
             Route::GetGovCloudAccountInformation => self.get_gov_cloud_account_information(&req),
             Route::GetPrimaryEmail => self.get_primary_email(&req),
+            Route::GetPrimaryEmailUpdateStatus => self.get_primary_email_update_status(&req),
             Route::GetRegionOptStatus => self.get_region_opt_status(&req),
             Route::ListRegions => self.list_regions(&req),
             Route::PutAccountName => self.put_account_name(&req),

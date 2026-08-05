@@ -39,6 +39,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "BatchGetCrawlers",
     "BatchGetCustomEntityTypes",
     "BatchGetDataQualityResult",
+    "BatchGetDataQualityRulesetEvaluationRun",
     "BatchGetDevEndpoints",
     "BatchGetJobs",
     "BatchGetPartition",
@@ -417,6 +418,9 @@ impl AwsService for GlueService {
             "BatchGetCrawlers" => self.batch_get_crawlers(&req),
             "BatchGetCustomEntityTypes" => self.batch_get_custom_entity_types(&req),
             "BatchGetDataQualityResult" => self.batch_get_data_quality_result(&req),
+            "BatchGetDataQualityRulesetEvaluationRun" => {
+                self.batch_get_data_quality_ruleset_evaluation_run(&req)
+            }
             "BatchGetDevEndpoints" => self.batch_get_dev_endpoints(&req),
             "BatchGetJobs" => self.batch_get_jobs(&req),
             "BatchGetPartition" => self.batch_get_partition(&req),

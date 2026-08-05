@@ -608,8 +608,8 @@ async fn classifier_lifecycle() {
 #[test_action("glue", "DeleteConnection", checksum = "6a3c81db")]
 #[test_action("glue", "BatchDeleteConnection", checksum = "b282ad29")]
 #[test_action("glue", "TestConnection", checksum = "f82f784b")]
-#[test_action("glue", "RegisterConnectionType", checksum = "68fca6da")]
-#[test_action("glue", "DescribeConnectionType", checksum = "10876bc9")]
+#[test_action("glue", "RegisterConnectionType", checksum = "03537fad")]
+#[test_action("glue", "DescribeConnectionType", checksum = "d3a63942")]
 #[test_action("glue", "ListConnectionTypes", checksum = "a33ad5a1")]
 #[test_action("glue", "DeleteConnectionType", checksum = "6dbdcea6")]
 #[tokio::test]
@@ -1391,6 +1391,71 @@ async fn session_endpoint_and_dashboard_url() {
     assert!(v["Url"].as_str().unwrap().contains("ep-sess"));
 }
 
+// BatchGetDataQualityRulesetEvaluationRun is newer than the typed
+// aws-sdk-glue client, so drive it over raw awsJson1.1. It resolves runs
+// started by StartDataQualityRulesetEvaluationRun and reports unknown ids in
+// RunsNotFound.
+#[test_action(
+    "glue",
+    "BatchGetDataQualityRulesetEvaluationRun",
+    checksum = "961b0883"
+)]
+#[tokio::test]
+async fn batch_get_data_quality_ruleset_evaluation_run() {
+    let server = TestServer::start().await;
+    let glue = server.glue_client().await;
+    use aws_sdk_glue::types::DataSource;
+    use aws_sdk_glue::types::GlueTable;
+
+    let run_id = glue
+        .start_data_quality_ruleset_evaluation_run()
+        .data_source(
+            DataSource::builder()
+                .glue_table(
+                    GlueTable::builder()
+                        .database_name("db")
+                        .table_name("t")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .role("arn:aws:iam::123456789012:role/glue")
+        .ruleset_names("rs1")
+        .send()
+        .await
+        .unwrap()
+        .run_id()
+        .unwrap()
+        .to_string();
+
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/glue/aws4_request, SignedHeaders=host, Signature=0";
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("Authorization", auth)
+        .header("Content-Type", "application/x-amz-json-1.1")
+        .header(
+            "X-Amz-Target",
+            "AWSGlue.BatchGetDataQualityRulesetEvaluationRun",
+        )
+        .body(format!(r#"{{"RunIds":["{run_id}","missing-run"]}}"#))
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "BatchGet: {}", resp.status());
+    let v: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(
+        v["Runs"][0]["RunId"].as_str(),
+        Some(run_id.as_str()),
+        "known run not returned: {v}"
+    );
+    assert_eq!(
+        v["RunsNotFound"][0].as_str(),
+        Some("missing-run"),
+        "unknown run not reported: {v}"
+    );
+}
+
 // ----------------------------------------------------------------------------
 // ML transforms, ML task runs
 // ----------------------------------------------------------------------------
@@ -1522,22 +1587,22 @@ async fn ml_transform_lifecycle() {
 #[test_action("glue", "UpdateDataQualityRuleset", checksum = "ad3921ed")]
 #[test_action("glue", "DeleteDataQualityRuleset", checksum = "a93e44eb")]
 #[test_action("glue", "ListDataQualityRulesets", checksum = "027065ce")]
-#[test_action("glue", "StartDataQualityRulesetEvaluationRun", checksum = "0679a9ae")]
-#[test_action("glue", "GetDataQualityRulesetEvaluationRun", checksum = "4568160f")]
+#[test_action("glue", "StartDataQualityRulesetEvaluationRun", checksum = "d8b7962a")]
+#[test_action("glue", "GetDataQualityRulesetEvaluationRun", checksum = "8db534f5")]
 #[test_action("glue", "CancelDataQualityRulesetEvaluationRun", checksum = "b0a62a97")]
 #[test_action("glue", "ListDataQualityRulesetEvaluationRuns", checksum = "fe701f73")]
-#[test_action("glue", "StartDataQualityRuleRecommendationRun", checksum = "baa12af4")]
-#[test_action("glue", "GetDataQualityRuleRecommendationRun", checksum = "b6a59046")]
+#[test_action("glue", "StartDataQualityRuleRecommendationRun", checksum = "bf2586f6")]
+#[test_action("glue", "GetDataQualityRuleRecommendationRun", checksum = "c3d59d2b")]
 #[test_action(
     "glue",
     "CancelDataQualityRuleRecommendationRun",
     checksum = "3e8c4340"
 )]
-#[test_action("glue", "ListDataQualityRuleRecommendationRuns", checksum = "b618f1d1")]
-#[test_action("glue", "GetDataQualityResult", checksum = "ec6a6c7f")]
-#[test_action("glue", "BatchGetDataQualityResult", checksum = "6e251d6c")]
+#[test_action("glue", "ListDataQualityRuleRecommendationRuns", checksum = "a09d3308")]
+#[test_action("glue", "GetDataQualityResult", checksum = "d9dc8ab3")]
+#[test_action("glue", "BatchGetDataQualityResult", checksum = "0865cc3e")]
 #[test_action("glue", "ListDataQualityResults", checksum = "bf58b5d5")]
-#[test_action("glue", "ListDataQualityStatistics", checksum = "5613af7f")]
+#[test_action("glue", "ListDataQualityStatistics", checksum = "11e48c9a")]
 #[test_action("glue", "ListDataQualityStatisticAnnotations", checksum = "93df472f")]
 #[test_action(
     "glue",

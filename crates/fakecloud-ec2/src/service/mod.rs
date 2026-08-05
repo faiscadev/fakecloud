@@ -462,6 +462,9 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DisassociateTransitGatewayPolicyTable",
     "GetTransitGatewayPolicyTableAssociations",
     "GetTransitGatewayPolicyTableEntries",
+    "CreateTransitGatewayPolicyTableEntry",
+    "DeleteTransitGatewayPolicyTableEntry",
+    "ModifyTransitGatewayPolicyTableEntry",
     "CreateTransitGatewayRouteTableAnnouncement",
     "DeleteTransitGatewayRouteTableAnnouncement",
     "DescribeTransitGatewayRouteTableAnnouncements",
@@ -1961,6 +1964,15 @@ impl AwsService for Ec2Service {
             }
             "GetTransitGatewayPolicyTableEntries" => {
                 tgw_peering::get_transit_gateway_policy_table_entries(self, &request)
+            }
+            "CreateTransitGatewayPolicyTableEntry" => {
+                tgw_peering::create_transit_gateway_policy_table_entry(self, &request)
+            }
+            "DeleteTransitGatewayPolicyTableEntry" => {
+                tgw_peering::delete_transit_gateway_policy_table_entry(self, &request)
+            }
+            "ModifyTransitGatewayPolicyTableEntry" => {
+                tgw_peering::modify_transit_gateway_policy_table_entry(self, &request)
             }
             "CreateTransitGatewayRouteTableAnnouncement" => {
                 tgw_peering::create_transit_gateway_route_table_announcement(self, &request)

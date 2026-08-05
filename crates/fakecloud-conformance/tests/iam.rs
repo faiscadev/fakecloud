@@ -2030,8 +2030,8 @@ async fn iam_mfa_device_tags_and_introspection() {
     assert!(r.status().is_success());
 }
 
-#[test_action("iam", "SimulateCustomPolicy", checksum = "d3d7ac96")]
-#[test_action("iam", "SimulatePrincipalPolicy", checksum = "f045fc96")]
+#[test_action("iam", "SimulateCustomPolicy", checksum = "5de8dd24")]
+#[test_action("iam", "SimulatePrincipalPolicy", checksum = "dec644ca")]
 #[test_action("iam", "GetContextKeysForCustomPolicy", checksum = "513a86d2")]
 #[test_action("iam", "GetContextKeysForPrincipalPolicy", checksum = "203fbd07")]
 #[test_action("iam", "ListPoliciesGrantingServiceAccess", checksum = "64185421")]

@@ -59,7 +59,7 @@ async fn rds_describe_orderable_db_instance_options() {
         .any(|o| o.db_instance_class() == Some("db.m6i.large")));
 }
 
-#[test_action("rds", "CreateDBInstance", checksum = "66cdd119")]
+#[test_action("rds", "CreateDBInstance", checksum = "7241a74d")]
 #[tokio::test]
 async fn rds_create_db_instance() {
     let server = TestServer::start().await;
@@ -85,7 +85,7 @@ async fn rds_create_db_instance() {
     assert_eq!(instance.db_instance_status(), Some("creating"));
 }
 
-#[test_action("rds", "DescribeDBInstances", checksum = "aa5486d4")]
+#[test_action("rds", "DescribeDBInstances", checksum = "3008061d")]
 #[tokio::test]
 async fn rds_describe_db_instances() {
     let server = TestServer::start().await;
@@ -126,7 +126,7 @@ async fn rds_describe_db_instances() {
     );
 }
 
-#[test_action("rds", "DeleteDBInstance", checksum = "22909663")]
+#[test_action("rds", "DeleteDBInstance", checksum = "42ec5343")]
 #[tokio::test]
 async fn rds_delete_db_instance() {
     let server = TestServer::start().await;
@@ -158,7 +158,7 @@ async fn rds_delete_db_instance() {
     );
 }
 
-#[test_action("rds", "ModifyDBInstance", checksum = "51a84a9d")]
+#[test_action("rds", "ModifyDBInstance", checksum = "83549362")]
 #[tokio::test]
 async fn rds_modify_db_instance() {
     let server = TestServer::start().await;
@@ -180,7 +180,7 @@ async fn rds_modify_db_instance() {
     assert_eq!(instance.deletion_protection(), Some(true));
 }
 
-#[test_action("rds", "RebootDBInstance", checksum = "cd4d463b")]
+#[test_action("rds", "RebootDBInstance", checksum = "d30160e3")]
 #[tokio::test]
 async fn rds_reboot_db_instance() {
     let server = TestServer::start().await;
@@ -485,7 +485,7 @@ async fn rds_delete_db_snapshot() {
     );
 }
 
-#[test_action("rds", "RestoreDBInstanceFromDBSnapshot", checksum = "368eb366")]
+#[test_action("rds", "RestoreDBInstanceFromDBSnapshot", checksum = "147f152e")]
 #[tokio::test]
 async fn rds_restore_db_instance_from_db_snapshot() {
     let server = TestServer::start().await;
@@ -515,7 +515,7 @@ async fn rds_restore_db_instance_from_db_snapshot() {
     assert_eq!(instance.db_name(), Some("appdb"));
 }
 
-#[test_action("rds", "CreateDBInstanceReadReplica", checksum = "23be1880")]
+#[test_action("rds", "CreateDBInstanceReadReplica", checksum = "e6c0a4ec")]
 #[tokio::test]
 async fn rds_create_db_instance_read_replica() {
     let server = TestServer::start().await;
@@ -823,7 +823,7 @@ async fn rds_delete_db_parameter_group() {
     );
 }
 
-#[test_action("rds", "CreateDBInstance", checksum = "66cdd119")]
+#[test_action("rds", "CreateDBInstance", checksum = "7241a74d")]
 #[tokio::test]
 async fn rds_create_db_instance_with_vpc_security_groups() {
     let server = TestServer::start().await;
@@ -861,7 +861,7 @@ async fn rds_create_db_instance_with_vpc_security_groups() {
     assert_eq!(sg_memberships[1].status(), Some("active"));
 }
 
-#[test_action("rds", "ModifyDBInstance", checksum = "51a84a9d")]
+#[test_action("rds", "ModifyDBInstance", checksum = "83549362")]
 #[tokio::test]
 async fn rds_modify_db_instance_vpc_security_groups() {
     let server = TestServer::start().await;
@@ -909,7 +909,7 @@ async fn rds_modify_db_instance_vpc_security_groups() {
     );
 }
 
-#[test_action("rds", "DeleteDBInstance", checksum = "22909663")]
+#[test_action("rds", "DeleteDBInstance", checksum = "42ec5343")]
 #[tokio::test]
 async fn rds_delete_db_instance_with_final_snapshot() {
     let server = TestServer::start().await;
@@ -962,7 +962,7 @@ async fn rds_delete_db_instance_with_final_snapshot() {
     );
 }
 
-#[test_action("rds", "DescribeDBInstances", checksum = "aa5486d4")]
+#[test_action("rds", "DescribeDBInstances", checksum = "3008061d")]
 #[tokio::test]
 async fn rds_describe_db_instances_pagination() {
     let server = TestServer::start().await;
@@ -1353,7 +1353,7 @@ async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
 #[test_action("rds", "ModifyIntegration", checksum = "c7e426a4")]
 #[test_action("rds", "ModifyOptionGroup", checksum = "4529b3ed")]
 #[test_action("rds", "ModifyTenantDatabase", checksum = "d0bd1054")]
-#[test_action("rds", "PromoteReadReplica", checksum = "79f0d115")]
+#[test_action("rds", "PromoteReadReplica", checksum = "26dc3b7b")]
 #[test_action("rds", "PromoteReadReplicaDBCluster", checksum = "bec39eb3")]
 #[test_action("rds", "PurchaseReservedDBInstancesOffering", checksum = "3d520b2d")]
 #[test_action("rds", "RebootDBCluster", checksum = "e0fda2e3")]
@@ -1368,12 +1368,12 @@ async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
 #[test_action("rds", "RestoreDBClusterFromS3", checksum = "aab67d70")]
 #[test_action("rds", "RestoreDBClusterFromSnapshot", checksum = "e30a8944")]
 #[test_action("rds", "RestoreDBClusterToPointInTime", checksum = "00966439")]
-#[test_action("rds", "RestoreDBInstanceFromS3", checksum = "3c75df14")]
-#[test_action("rds", "RestoreDBInstanceToPointInTime", checksum = "ca7acfb3")]
+#[test_action("rds", "RestoreDBInstanceFromS3", checksum = "2491de2f")]
+#[test_action("rds", "RestoreDBInstanceToPointInTime", checksum = "964143d7")]
 #[test_action("rds", "RevokeDBSecurityGroupIngress", checksum = "226aa024")]
 #[test_action("rds", "StartActivityStream", checksum = "816cf0b7")]
 #[test_action("rds", "StartDBCluster", checksum = "8b22ce2b")]
-#[test_action("rds", "StartDBInstance", checksum = "0a3a8d2a")]
+#[test_action("rds", "StartDBInstance", checksum = "b5079452")]
 #[test_action(
     "rds",
     "StartDBInstanceAutomatedBackupsReplication",
@@ -1382,7 +1382,7 @@ async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
 #[test_action("rds", "StartExportTask", checksum = "6f4b5684")]
 #[test_action("rds", "StopActivityStream", checksum = "88048a83")]
 #[test_action("rds", "StopDBCluster", checksum = "3731f027")]
-#[test_action("rds", "StopDBInstance", checksum = "308c781d")]
+#[test_action("rds", "StopDBInstance", checksum = "3a001b93")]
 #[test_action(
     "rds",
     "StopDBInstanceAutomatedBackupsReplication",
@@ -1390,7 +1390,7 @@ async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
 )]
 #[test_action("rds", "SwitchoverBlueGreenDeployment", checksum = "2f00439e")]
 #[test_action("rds", "SwitchoverGlobalCluster", checksum = "5b3ca7b7")]
-#[test_action("rds", "SwitchoverReadReplica", checksum = "0928d5b0")]
+#[test_action("rds", "SwitchoverReadReplica", checksum = "de644850")]
 #[tokio::test]
 async fn rds_closure_routes_exist() {
     // Every route added in this PR is exercised below. We assert HTTP 2xx

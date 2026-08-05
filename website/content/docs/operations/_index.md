@@ -2454,18 +2454,21 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 - `BatchAssociateScramSecret`
 - `BatchDisassociateScramSecret`
+- `CreateChannel`
 - `CreateCluster`
 - `CreateClusterV2`
 - `CreateConfiguration`
 - `CreateReplicator`
 - `CreateTopic`
 - `CreateVpcConnection`
+- `DeleteChannel`
 - `DeleteCluster`
 - `DeleteClusterPolicy`
 - `DeleteConfiguration`
 - `DeleteReplicator`
 - `DeleteTopic`
 - `DeleteVpcConnection`
+- `DescribeChannel`
 - `DescribeCluster`
 - `DescribeClusterOperation`
 - `DescribeClusterOperationV2`
@@ -2479,6 +2482,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetBootstrapBrokers`
 - `GetClusterPolicy`
 - `GetCompatibleKafkaVersions`
+- `ListChannels`
 - `ListClientVpcConnections`
 - `ListClusterOperations`
 - `ListClusterOperationsV2`
@@ -2501,6 +2505,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `UpdateBrokerCount`
 - `UpdateBrokerStorage`
 - `UpdateBrokerType`
+- `UpdateChannel`
 - `UpdateClusterConfiguration`
 - `UpdateClusterKafkaVersion`
 - `UpdateConfiguration`
@@ -4142,6 +4147,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetContactInformation`
 - `GetGovCloudAccountInformation`
 - `GetPrimaryEmail`
+- `GetPrimaryEmailUpdateStatus`
 - `GetRegionOptStatus`
 - `ListRegions`
 - `PutAccountName`
@@ -6353,6 +6359,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `BatchGetCrawlers`
 - `BatchGetCustomEntityTypes`
 - `BatchGetDataQualityResult`
+- `BatchGetDataQualityRulesetEvaluationRun`
 - `BatchGetDevEndpoints`
 - `BatchGetIterableForms`
 - `BatchGetJobs`
@@ -7244,6 +7251,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateTransitGatewayMulticastDomain`
 - `CreateTransitGatewayPeeringAttachment`
 - `CreateTransitGatewayPolicyTable`
+- `CreateTransitGatewayPolicyTableEntry`
 - `CreateTransitGatewayPrefixListReference`
 - `CreateTransitGatewayRoute`
 - `CreateTransitGatewayRouteTable`
@@ -7337,6 +7345,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteTransitGatewayMulticastDomain`
 - `DeleteTransitGatewayPeeringAttachment`
 - `DeleteTransitGatewayPolicyTable`
+- `DeleteTransitGatewayPolicyTableEntry`
 - `DeleteTransitGatewayPrefixListReference`
 - `DeleteTransitGatewayRoute`
 - `DeleteTransitGatewayRouteTable`
@@ -7762,6 +7771,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ModifyTrafficMirrorSession`
 - `ModifyTransitGateway`
 - `ModifyTransitGatewayMeteringPolicy`
+- `ModifyTransitGatewayPolicyTableEntry`
 - `ModifyTransitGatewayPrefixListReference`
 - `ModifyTransitGatewayVpcAttachment`
 - `ModifyVerifiedAccessEndpoint`
