@@ -14,9 +14,9 @@ use std::collections::HashMap;
 // Table lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("dynamodb", "CreateTable", checksum = "871827e1")]
-#[test_action("dynamodb", "DescribeTable", checksum = "543aeed6")]
-#[test_action("dynamodb", "DeleteTable", checksum = "609d7442")]
+#[test_action("dynamodb", "CreateTable", checksum = "936f2ca5")]
+#[test_action("dynamodb", "DescribeTable", checksum = "12fa1345")]
+#[test_action("dynamodb", "DeleteTable", checksum = "1272b76c")]
 #[tokio::test]
 async fn dynamodb_create_describe_delete_table() {
     let server = TestServer::start().await;
@@ -97,7 +97,7 @@ async fn dynamodb_list_tables() {
     assert!(resp.table_names().contains(&"ListMe".to_string()));
 }
 
-#[test_action("dynamodb", "UpdateTable", checksum = "5862b42d")]
+#[test_action("dynamodb", "UpdateTable", checksum = "5ceb80eb")]
 #[tokio::test]
 async fn dynamodb_update_table() {
     let server = TestServer::start().await;
@@ -159,9 +159,9 @@ async fn dynamodb_update_table() {
 // Item operations
 // ---------------------------------------------------------------------------
 
-#[test_action("dynamodb", "PutItem", checksum = "65656c32")]
-#[test_action("dynamodb", "GetItem", checksum = "bfb4efce")]
-#[test_action("dynamodb", "DeleteItem", checksum = "1f2be9ef")]
+#[test_action("dynamodb", "PutItem", checksum = "546758bf")]
+#[test_action("dynamodb", "GetItem", checksum = "ed77bf9a")]
+#[test_action("dynamodb", "DeleteItem", checksum = "14bf0b5d")]
 #[tokio::test]
 async fn dynamodb_put_get_delete_item() {
     let server = TestServer::start().await;
@@ -226,7 +226,7 @@ async fn dynamodb_put_get_delete_item() {
     assert!(resp.item().is_none());
 }
 
-#[test_action("dynamodb", "UpdateItem", checksum = "d29893e3")]
+#[test_action("dynamodb", "UpdateItem", checksum = "27224e68")]
 #[tokio::test]
 async fn dynamodb_update_item() {
     let server = TestServer::start().await;
@@ -291,7 +291,7 @@ async fn dynamodb_update_item() {
 // Query and Scan
 // ---------------------------------------------------------------------------
 
-#[test_action("dynamodb", "Query", checksum = "0cd83e93")]
+#[test_action("dynamodb", "Query", checksum = "ff3c903c")]
 #[tokio::test]
 async fn dynamodb_query() {
     let server = TestServer::start().await;
@@ -356,7 +356,7 @@ async fn dynamodb_query() {
     assert_eq!(resp.count(), 3);
 }
 
-#[test_action("dynamodb", "Scan", checksum = "282511c3")]
+#[test_action("dynamodb", "Scan", checksum = "449ee454")]
 #[tokio::test]
 async fn dynamodb_scan() {
     let server = TestServer::start().await;
@@ -402,8 +402,8 @@ async fn dynamodb_scan() {
 // Batch operations
 // ---------------------------------------------------------------------------
 
-#[test_action("dynamodb", "BatchWriteItem", checksum = "20b0040e")]
-#[test_action("dynamodb", "BatchGetItem", checksum = "5eb50c02")]
+#[test_action("dynamodb", "BatchWriteItem", checksum = "a5278458")]
+#[test_action("dynamodb", "BatchGetItem", checksum = "90fd986b")]
 #[tokio::test]
 async fn dynamodb_batch_write_and_get() {
     let server = TestServer::start().await;
@@ -571,8 +571,8 @@ async fn dynamodb_tag_untag_list_tags() {
 // Transactions
 // ---------------------------------------------------------------------------
 
-#[test_action("dynamodb", "TransactWriteItems", checksum = "f48b6112")]
-#[test_action("dynamodb", "TransactGetItems", checksum = "b858229e")]
+#[test_action("dynamodb", "TransactWriteItems", checksum = "0d06ddcb")]
+#[test_action("dynamodb", "TransactGetItems", checksum = "4f283a9d")]
 #[tokio::test]
 async fn dynamodb_transact_write_and_get() {
     let server = TestServer::start().await;
@@ -722,7 +722,7 @@ async fn dynamodb_update_and_describe_ttl() {
 // PartiQL
 // ---------------------------------------------------------------------------
 
-#[test_action("dynamodb", "ExecuteStatement", checksum = "76679282")]
+#[test_action("dynamodb", "ExecuteStatement", checksum = "f62685f6")]
 #[tokio::test]
 async fn dynamodb_execute_statement() {
     let server = TestServer::start().await;
@@ -768,7 +768,7 @@ async fn dynamodb_execute_statement() {
     assert!(!resp.items().is_empty());
 }
 
-#[test_action("dynamodb", "BatchExecuteStatement", checksum = "7f3aa0d5")]
+#[test_action("dynamodb", "BatchExecuteStatement", checksum = "c0d02b46")]
 #[tokio::test]
 async fn dynamodb_batch_execute_statement() {
     let server = TestServer::start().await;
@@ -818,7 +818,7 @@ async fn dynamodb_batch_execute_statement() {
     assert!(!resp.responses().is_empty());
 }
 
-#[test_action("dynamodb", "ExecuteTransaction", checksum = "39e327cc")]
+#[test_action("dynamodb", "ExecuteTransaction", checksum = "d2313ab6")]
 #[tokio::test]
 async fn dynamodb_execute_transaction() {
     let server = TestServer::start().await;
@@ -966,9 +966,9 @@ async fn dynamodb_describe_limits() {
 // ---------------------------------------------------------------------------
 
 #[test_action("dynamodb", "CreateBackup", checksum = "167527dd")]
-#[test_action("dynamodb", "DescribeBackup", checksum = "0148179a")]
+#[test_action("dynamodb", "DescribeBackup", checksum = "d5830fd3")]
 #[test_action("dynamodb", "ListBackups", checksum = "98153f65")]
-#[test_action("dynamodb", "DeleteBackup", checksum = "a5f8e396")]
+#[test_action("dynamodb", "DeleteBackup", checksum = "43cc1dc3")]
 #[tokio::test]
 async fn dynamodb_backup_lifecycle() {
     let server = TestServer::start().await;
@@ -1024,7 +1024,7 @@ async fn dynamodb_backup_lifecycle() {
         .unwrap();
 }
 
-#[test_action("dynamodb", "RestoreTableFromBackup", checksum = "f4e12277")]
+#[test_action("dynamodb", "RestoreTableFromBackup", checksum = "e421fd42")]
 #[tokio::test]
 async fn dynamodb_restore_from_backup() {
     let server = TestServer::start().await;
@@ -1071,7 +1071,7 @@ async fn dynamodb_restore_from_backup() {
     assert!(resp.table_description().is_some());
 }
 
-#[test_action("dynamodb", "RestoreTableToPointInTime", checksum = "03f1343a")]
+#[test_action("dynamodb", "RestoreTableToPointInTime", checksum = "54ce5f95")]
 #[tokio::test]
 async fn dynamodb_restore_to_pitr() {
     let server = TestServer::start().await;
@@ -1493,8 +1493,8 @@ async fn dynamodb_export_lifecycle() {
     assert!(!resp.export_summaries().is_empty());
 }
 
-#[test_action("dynamodb", "ImportTable", checksum = "578c2666")]
-#[test_action("dynamodb", "DescribeImport", checksum = "2361c15d")]
+#[test_action("dynamodb", "ImportTable", checksum = "511681c6")]
+#[test_action("dynamodb", "DescribeImport", checksum = "b96a9650")]
 #[test_action("dynamodb", "ListImports", checksum = "552e14f8")]
 #[tokio::test]
 async fn dynamodb_import_lifecycle() {

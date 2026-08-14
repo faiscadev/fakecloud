@@ -480,7 +480,7 @@ async fn register_conformance_task_def(client: &aws_sdk_ecs::Client, family: &st
         .unwrap();
 }
 
-#[test_action("ecs", "RunTask", checksum = "1486abbf")]
+#[test_action("ecs", "RunTask", checksum = "99452d98")]
 #[tokio::test]
 async fn ecs_run_task() {
     let server = TestServer::start().await;
@@ -503,7 +503,7 @@ async fn ecs_run_task() {
     assert!(resp.failures().is_empty());
 }
 
-#[test_action("ecs", "StartTask", checksum = "8ae1f503")]
+#[test_action("ecs", "StartTask", checksum = "204a75f7")]
 #[tokio::test]
 async fn ecs_start_task() {
     let server = TestServer::start().await;
@@ -538,7 +538,7 @@ async fn ecs_start_task() {
     assert_eq!(resp.tasks().len(), 1);
 }
 
-#[test_action("ecs", "DescribeTasks", checksum = "c33cdef2")]
+#[test_action("ecs", "DescribeTasks", checksum = "8e16a815")]
 #[tokio::test]
 async fn ecs_describe_tasks() {
     let server = TestServer::start().await;
@@ -596,7 +596,7 @@ async fn ecs_list_tasks() {
     assert!(!resp.task_arns().is_empty());
 }
 
-#[test_action("ecs", "StopTask", checksum = "f998789e")]
+#[test_action("ecs", "StopTask", checksum = "bcbdb136")]
 #[tokio::test]
 async fn ecs_stop_task() {
     let server = TestServer::start().await;
@@ -810,7 +810,7 @@ async fn ecs_delete_service() {
 
 // ── Batch 4: completeness ──────────────────────────────────────────
 
-#[test_action("ecs", "RegisterContainerInstance", checksum = "ddca1d63")]
+#[test_action("ecs", "RegisterContainerInstance", checksum = "b5dc02fc")]
 #[tokio::test]
 async fn ecs_register_container_instance() {
     let server = TestServer::start().await;
@@ -830,7 +830,7 @@ async fn ecs_register_container_instance() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "DeregisterContainerInstance", checksum = "9247dbb3")]
+#[test_action("ecs", "DeregisterContainerInstance", checksum = "d4260848")]
 #[tokio::test]
 async fn ecs_deregister_container_instance() {
     let server = TestServer::start().await;
@@ -863,7 +863,7 @@ async fn ecs_deregister_container_instance() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "DescribeContainerInstances", checksum = "f4b80fa6")]
+#[test_action("ecs", "DescribeContainerInstances", checksum = "f97758da")]
 #[tokio::test]
 async fn ecs_describe_container_instances() {
     let server = TestServer::start().await;
@@ -922,7 +922,7 @@ async fn ecs_list_container_instances() {
     assert!(!resp.container_instance_arns().is_empty());
 }
 
-#[test_action("ecs", "UpdateContainerAgent", checksum = "01df0bc6")]
+#[test_action("ecs", "UpdateContainerAgent", checksum = "fde7dd4c")]
 #[tokio::test]
 async fn ecs_update_container_agent() {
     let server = TestServer::start().await;
@@ -955,7 +955,7 @@ async fn ecs_update_container_agent() {
     assert!(resp.container_instance().is_some());
 }
 
-#[test_action("ecs", "UpdateContainerInstancesState", checksum = "527fe01a")]
+#[test_action("ecs", "UpdateContainerInstancesState", checksum = "08210d81")]
 #[tokio::test]
 async fn ecs_update_container_instances_state() {
     use aws_sdk_ecs::types::ContainerInstanceStatus;

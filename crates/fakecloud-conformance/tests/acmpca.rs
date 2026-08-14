@@ -120,7 +120,7 @@ fn client_csr(cn: &str) -> String {
     params.serialize_request(&key).unwrap().pem().unwrap()
 }
 
-#[test_action("acm-pca", "CreateCertificateAuthority", checksum = "e1bebf85")]
+#[test_action("acm-pca", "CreateCertificateAuthority", checksum = "7c2ac163")]
 #[tokio::test]
 async fn create_certificate_authority() {
     let server = TestServer::start().await;
@@ -128,7 +128,7 @@ async fn create_certificate_authority() {
     assert!(arn.contains(":certificate-authority/"));
 }
 
-#[test_action("acm-pca", "DescribeCertificateAuthority", checksum = "00f2a4ff")]
+#[test_action("acm-pca", "DescribeCertificateAuthority", checksum = "07a2f93c")]
 #[tokio::test]
 async fn describe_certificate_authority() {
     let server = TestServer::start().await;
@@ -143,7 +143,7 @@ async fn describe_certificate_authority() {
     assert_eq!(body["CertificateAuthority"]["Status"], "ACTIVE");
 }
 
-#[test_action("acm-pca", "ListCertificateAuthorities", checksum = "2d46131c")]
+#[test_action("acm-pca", "ListCertificateAuthorities", checksum = "1bd114fa")]
 #[tokio::test]
 async fn list_certificate_authorities() {
     let server = TestServer::start().await;
@@ -156,7 +156,7 @@ async fn list_certificate_authorities() {
         .is_empty());
 }
 
-#[test_action("acm-pca", "UpdateCertificateAuthority", checksum = "de377cb4")]
+#[test_action("acm-pca", "UpdateCertificateAuthority", checksum = "f08b8aae")]
 #[tokio::test]
 async fn update_certificate_authority() {
     let server = TestServer::start().await;
@@ -279,7 +279,7 @@ async fn import_certificate_authority_certificate() {
     assert_eq!(status, 200, "{body}");
 }
 
-#[test_action("acm-pca", "IssueCertificate", checksum = "fe2893ca")]
+#[test_action("acm-pca", "IssueCertificate", checksum = "04918dc2")]
 #[tokio::test]
 async fn issue_certificate() {
     let server = TestServer::start().await;
