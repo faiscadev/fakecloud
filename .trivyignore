@@ -1,15 +1,21 @@
-# CVE-2026-39822 — Go stdlib os.Root symlink-following vulnerability (HIGH),
-# fixed upstream in go1.26.5 / 1.27.0-rc.2.
-#
-# Present ONLY in the bundled static Docker CLI (/usr/local/bin/docker, from the
-# docker-cli build stage), which is compiled with go1.26.4. As of 2026-07-12 no
-# Docker static release ships a go>=1.26.5 toolchain (latest 29.6.1 is still on
-# go1.26.4), so the CLI version cannot yet be bumped past it.
+# Go stdlib HIGH vulnerabilities present ONLY in the bundled static Docker CLI
+# (/usr/local/bin/docker, from the docker-cli build stage), which as of
+# DOCKER_CLI_VERSION 29.7.2 is compiled with go1.26.5. Both are fixed upstream
+# only in go1.26.6 / 1.27.0-rc.3, and no Docker static release ships a
+# go>=1.26.6 toolchain yet (latest 29.7.2 is still on go1.26.5), so the CLI
+# version cannot be bumped past it.
 #
 # Not exploitable in fakecloud's usage: fakecloud shells out to the docker CLI
-# purely for container lifecycle (run/exec/cp/rm) and never invokes the os.Root
-# symlink-traversal code path. Our own binary is Rust.
+# purely for container lifecycle (run/exec/cp/rm). It never processes untrusted
+# Punycode/IDNA hostnames (CVE-2026-39821) or parses untrusted DNS wire messages
+# (CVE-2026-46600) through the CLI. Our own binary is Rust.
 #
-# REMOVE this entry once a Docker static release built with go>=1.26.5 exists and
-# DOCKER_CLI_VERSION in the Dockerfile is bumped to it.
-CVE-2026-39822
+# REMOVE these entries once a Docker static release built with go>=1.26.6 exists
+# and DOCKER_CLI_VERSION in the Dockerfile is bumped to it.
+#
+# CVE-2026-39821 — golang.org/x/net/idna: privilege escalation via incorrect
+#   Punycode label processing.
+# CVE-2026-46600 — golang.org/x/net/dns/dnsmessage: denial of service via
+#   invalid DNS record parsing.
+CVE-2026-39821
+CVE-2026-46600

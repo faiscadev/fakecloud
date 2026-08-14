@@ -23,8 +23,10 @@ ARG TARGETARCH
 # Pin a docker CLI built with a current Go toolchain — the static build
 # bakes the Go stdlib into the binary, so a stale toolchain trips the
 # image's Trivy CRITICAL/HIGH gate (27.5.1 shipped go1.22.11, flagged by
-# CVE-2025-68121). 29.5.3 ships go1.26.3, which clears the gate.
-ARG DOCKER_CLI_VERSION=29.5.3
+# CVE-2025-68121). 29.7.2 ships go1.26.5, which clears CVE-2026-39822; the
+# two remaining stdlib HIGHs (CVE-2026-39821, CVE-2026-46600) are fixed only
+# in go1.26.6, which no Docker static release ships yet — see .trivyignore.
+ARG DOCKER_CLI_VERSION=29.7.2
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl ca-certificates \
     && case "$TARGETARCH" in \
