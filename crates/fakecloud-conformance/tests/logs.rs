@@ -833,7 +833,7 @@ async fn logs_data_protection_policy() {
 #[test_action("logs", "PutIndexPolicy", checksum = "717ed27c")]
 #[test_action("logs", "DescribeIndexPolicies", checksum = "051994f3")]
 #[test_action("logs", "DeleteIndexPolicy", checksum = "5d81a42e")]
-#[test_action("logs", "DescribeFieldIndexes", checksum = "815cc664")]
+#[test_action("logs", "DescribeFieldIndexes", checksum = "71999fe1")]
 #[tokio::test]
 async fn logs_index_policies() {
     let server = TestServer::start().await;

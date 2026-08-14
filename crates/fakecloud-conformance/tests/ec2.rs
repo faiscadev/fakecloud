@@ -74,7 +74,7 @@ async fn ec2_delete_tags() {
     assert!(!described.tags().iter().any(|t| t.key() == Some("env")));
 }
 
-#[test_action("ec2", "DescribeTags", checksum = "aa62d5db")]
+#[test_action("ec2", "DescribeTags", checksum = "0682486c")]
 #[tokio::test]
 async fn ec2_describe_tags() {
     let server = TestServer::start().await;
@@ -181,7 +181,7 @@ async fn ec2_describe_account_attributes() {
 
 // ---- VPCs ----
 
-#[test_action("ec2", "CreateVpc", checksum = "d6e43867")]
+#[test_action("ec2", "CreateVpc", checksum = "6a8251a6")]
 #[tokio::test]
 async fn ec2_create_vpc() {
     let server = TestServer::start().await;
@@ -393,7 +393,7 @@ async fn ec2_disassociate_vpc_cidr_block() {
 
 // ---- DHCP options ----
 
-#[test_action("ec2", "CreateDhcpOptions", checksum = "49e69e77")]
+#[test_action("ec2", "CreateDhcpOptions", checksum = "542b2a17")]
 #[tokio::test]
 async fn ec2_create_dhcp_options() {
     let server = TestServer::start().await;
@@ -530,7 +530,7 @@ async fn ec2_associate_dhcp_options() {
 
 // ---- Subnets ----
 
-#[test_action("ec2", "CreateSubnet", checksum = "1be65903")]
+#[test_action("ec2", "CreateSubnet", checksum = "48cfc969")]
 #[tokio::test]
 async fn ec2_create_subnet() {
     let server = TestServer::start().await;
@@ -561,7 +561,7 @@ async fn ec2_create_default_subnet() {
     assert_eq!(r.subnet().unwrap().default_for_az(), Some(true));
 }
 
-#[test_action("ec2", "CreateSecondarySubnet", checksum = "22b49aff")]
+#[test_action("ec2", "CreateSecondarySubnet", checksum = "03ae8f37")]
 #[tokio::test]
 async fn ec2_create_secondary_subnet() {
     let server = TestServer::start().await;
@@ -713,7 +713,7 @@ async fn ec2_disassociate_subnet_cidr_block() {
     assert!(r.ipv6_cidr_block_association().is_some());
 }
 
-#[test_action("ec2", "CreateSubnetCidrReservation", checksum = "ab036383")]
+#[test_action("ec2", "CreateSubnetCidrReservation", checksum = "34594b2e")]
 #[tokio::test]
 async fn ec2_create_subnet_cidr_reservation() {
     let server = TestServer::start().await;
@@ -810,7 +810,7 @@ async fn make_sg(client: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateSecurityGroup", checksum = "a08ce784")]
+#[test_action("ec2", "CreateSecurityGroup", checksum = "b3ebb35b")]
 #[tokio::test]
 async fn ec2_create_security_group() {
     let server = TestServer::start().await;
@@ -860,7 +860,7 @@ async fn ec2_delete_security_group() {
         .any(|g| g.group_id() == Some(id.as_str())));
 }
 
-#[test_action("ec2", "AuthorizeSecurityGroupIngress", checksum = "1aab945e")]
+#[test_action("ec2", "AuthorizeSecurityGroupIngress", checksum = "af413d5c")]
 #[tokio::test]
 async fn ec2_authorize_ingress() {
     let server = TestServer::start().await;
@@ -888,7 +888,7 @@ async fn ec2_authorize_ingress() {
     assert!(!r.security_group_rules().is_empty());
 }
 
-#[test_action("ec2", "AuthorizeSecurityGroupEgress", checksum = "851ec8cb")]
+#[test_action("ec2", "AuthorizeSecurityGroupEgress", checksum = "370d32d3")]
 #[tokio::test]
 async fn ec2_authorize_egress() {
     let server = TestServer::start().await;
@@ -1119,7 +1119,7 @@ async fn ec2_describe_security_group_references() {
 
 // ---- Route tables / gateways ----
 
-#[test_action("ec2", "CreateRouteTable", checksum = "bc2d13d4")]
+#[test_action("ec2", "CreateRouteTable", checksum = "5256b0a0")]
 #[tokio::test]
 async fn ec2_create_route_table() {
     let s = TestServer::start().await;
@@ -1374,7 +1374,7 @@ async fn ec2_replace_route_table_association() {
     assert!(r.new_association_id().unwrap().starts_with("rtbassoc-"));
 }
 
-#[test_action("ec2", "CreateInternetGateway", checksum = "88dcf2c8")]
+#[test_action("ec2", "CreateInternetGateway", checksum = "b4ac50d6")]
 #[tokio::test]
 async fn ec2_create_internet_gateway() {
     let s = TestServer::start().await;
@@ -1489,7 +1489,7 @@ async fn ec2_delete_internet_gateway() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateEgressOnlyInternetGateway", checksum = "d1592658")]
+#[test_action("ec2", "CreateEgressOnlyInternetGateway", checksum = "edf7f2e3")]
 #[tokio::test]
 async fn ec2_create_eigw() {
     let s = TestServer::start().await;
@@ -1561,7 +1561,7 @@ async fn ec2_delete_eigw() {
     assert_eq!(r.return_code(), Some(true));
 }
 
-#[test_action("ec2", "CreateNatGateway", checksum = "d0d28d06")]
+#[test_action("ec2", "CreateNatGateway", checksum = "41055b14")]
 #[tokio::test]
 async fn ec2_create_nat_gateway() {
     let s = TestServer::start().await;
@@ -1694,7 +1694,7 @@ async fn ec2_unassign_private_nat_address() {
 
 // ---- Elastic IPs / key pairs / placement groups ----
 
-#[test_action("ec2", "AllocateAddress", checksum = "72e9819e")]
+#[test_action("ec2", "AllocateAddress", checksum = "d622ebe9")]
 #[tokio::test]
 async fn ec2_allocate_address() {
     let s = TestServer::start().await;
@@ -1873,7 +1873,7 @@ async fn ec2_restore_address_to_classic() {
     assert_eq!(r.public_ip(), Some("52.1.2.3"));
 }
 
-#[test_action("ec2", "AcceptAddressTransfer", checksum = "2c5acb12")]
+#[test_action("ec2", "AcceptAddressTransfer", checksum = "f6ff7017")]
 #[tokio::test]
 async fn ec2_accept_address_transfer() {
     let s = TestServer::start().await;
@@ -1944,7 +1944,7 @@ async fn ec2_describe_moving_addresses() {
         .is_empty());
 }
 
-#[test_action("ec2", "CreateKeyPair", checksum = "fda0b5e7")]
+#[test_action("ec2", "CreateKeyPair", checksum = "5e503db2")]
 #[tokio::test]
 async fn ec2_create_key_pair() {
     let s = TestServer::start().await;
@@ -1954,7 +1954,7 @@ async fn ec2_create_key_pair() {
     assert!(r.key_material().is_some());
 }
 
-#[test_action("ec2", "ImportKeyPair", checksum = "dd40237e")]
+#[test_action("ec2", "ImportKeyPair", checksum = "8e9be443")]
 #[tokio::test]
 async fn ec2_import_key_pair() {
     let s = TestServer::start().await;
@@ -2001,7 +2001,7 @@ async fn ec2_delete_key_pair() {
         .all(|k| k.key_name() != Some("kp4")));
 }
 
-#[test_action("ec2", "CreatePlacementGroup", checksum = "d75eaee7")]
+#[test_action("ec2", "CreatePlacementGroup", checksum = "7e767ca3")]
 #[tokio::test]
 async fn ec2_create_placement_group() {
     let s = TestServer::start().await;
@@ -2111,7 +2111,7 @@ async fn make_eni(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateNetworkInterface", checksum = "fb8b07c5")]
+#[test_action("ec2", "CreateNetworkInterface", checksum = "6d4fae60")]
 #[tokio::test]
 async fn ec2_create_network_interface() {
     let s = TestServer::start().await;
@@ -2480,7 +2480,7 @@ async fn run_one(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "RunInstances", checksum = "9fa46cec")]
+#[test_action("ec2", "RunInstances", checksum = "67c28d0f")]
 #[tokio::test]
 async fn ec2_run_instances() {
     let s = TestServer::start().await;
@@ -2603,7 +2603,7 @@ async fn ec2_unmonitor_instances() {
         .unwrap();
 }
 
-#[test_action("ec2", "DescribeInstanceStatus", checksum = "b46a8879")]
+#[test_action("ec2", "DescribeInstanceStatus", checksum = "5c7277fd")]
 #[tokio::test]
 async fn ec2_describe_instance_status() {
     let s = TestServer::start().await;
@@ -2972,7 +2972,7 @@ async fn make_vol(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateVolume", checksum = "0e36827b")]
+#[test_action("ec2", "CreateVolume", checksum = "01037f49")]
 #[tokio::test]
 async fn ec2_create_volume() {
     let s = TestServer::start().await;
@@ -3250,7 +3250,7 @@ async fn make_snap(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateSnapshot", checksum = "1b208998")]
+#[test_action("ec2", "CreateSnapshot", checksum = "3e436206")]
 #[tokio::test]
 async fn ec2_create_snapshot() {
     let s = TestServer::start().await;
@@ -3266,7 +3266,7 @@ async fn ec2_create_snapshot() {
     assert!(r.snapshot_id().unwrap().starts_with("snap-"));
 }
 
-#[test_action("ec2", "CreateSnapshots", checksum = "530f0177")]
+#[test_action("ec2", "CreateSnapshots", checksum = "57f2f05c")]
 #[tokio::test]
 async fn ec2_create_snapshots() {
     let s = TestServer::start().await;
@@ -3326,7 +3326,7 @@ async fn ec2_delete_snapshot() {
         .is_empty());
 }
 
-#[test_action("ec2", "CopySnapshot", checksum = "d0ffe09e")]
+#[test_action("ec2", "CopySnapshot", checksum = "f23b3b1c")]
 #[tokio::test]
 async fn ec2_copy_snapshot() {
     let s = TestServer::start().await;
@@ -3585,7 +3585,7 @@ async fn make_ami(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateImage", checksum = "e8a35566")]
+#[test_action("ec2", "CreateImage", checksum = "32e8dd50")]
 #[tokio::test]
 async fn ec2_create_image() {
     let s = TestServer::start().await;
@@ -3600,7 +3600,7 @@ async fn ec2_create_image() {
     assert!(r.image_id().unwrap().starts_with("ami-"));
 }
 
-#[test_action("ec2", "RegisterImage", checksum = "034deb69")]
+#[test_action("ec2", "RegisterImage", checksum = "2d7ae053")]
 #[tokio::test]
 async fn ec2_register_image() {
     let s = TestServer::start().await;
@@ -3650,7 +3650,7 @@ async fn ec2_deregister_image() {
         .is_empty());
 }
 
-#[test_action("ec2", "CopyImage", checksum = "021e759a")]
+#[test_action("ec2", "CopyImage", checksum = "f0a95c4b")]
 #[tokio::test]
 async fn ec2_copy_image() {
     let s = TestServer::start().await;
@@ -3930,7 +3930,7 @@ async fn ec2_describe_store_image_tasks() {
     assert!(r.store_image_task_results().is_empty());
 }
 
-#[test_action("ec2", "CreateRestoreImageTask", checksum = "61e48f5a")]
+#[test_action("ec2", "CreateRestoreImageTask", checksum = "2af0061e")]
 #[tokio::test]
 async fn ec2_create_restore_image_task() {
     let s = TestServer::start().await;
@@ -3969,7 +3969,7 @@ async fn make_nacl(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateNetworkAcl", checksum = "7ceb4c2d")]
+#[test_action("ec2", "CreateNetworkAcl", checksum = "e43c3c27")]
 #[tokio::test]
 async fn ec2_create_network_acl() {
     let s = TestServer::start().await;
@@ -4123,7 +4123,7 @@ async fn make_pcx(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateVpcPeeringConnection", checksum = "654dd690")]
+#[test_action("ec2", "CreateVpcPeeringConnection", checksum = "18af4675")]
 #[tokio::test]
 async fn ec2_create_vpc_peering_connection() {
     let s = TestServer::start().await;
@@ -4240,7 +4240,7 @@ async fn make_vpce(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateVpcEndpoint", checksum = "5d77f198")]
+#[test_action("ec2", "CreateVpcEndpoint", checksum = "243597dd")]
 #[tokio::test]
 async fn ec2_create_vpc_endpoint() {
     let s = TestServer::start().await;
@@ -4359,7 +4359,7 @@ async fn ec2_reject_vpc_endpoint_connections() {
     assert!(r.unsuccessful().is_empty());
 }
 
-#[test_action("ec2", "CreateVpcEndpointServiceConfiguration", checksum = "e7523b64")]
+#[test_action("ec2", "CreateVpcEndpointServiceConfiguration", checksum = "7d4bf179")]
 #[tokio::test]
 async fn ec2_create_vpc_endpoint_service_configuration() {
     let s = TestServer::start().await;
@@ -4630,7 +4630,7 @@ async fn ec2_describe_vpc_endpoint_associations() {
 
 // ---- flow logs ----
 
-#[test_action("ec2", "CreateFlowLogs", checksum = "11dcdafd")]
+#[test_action("ec2", "CreateFlowLogs", checksum = "fffec53a")]
 #[tokio::test]
 async fn ec2_create_flow_logs() {
     let s = TestServer::start().await;
@@ -4716,7 +4716,7 @@ async fn make_lt(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateLaunchTemplate", checksum = "7ad87060")]
+#[test_action("ec2", "CreateLaunchTemplate", checksum = "b14932d9")]
 #[tokio::test]
 async fn ec2_create_launch_template() {
     let s = TestServer::start().await;
@@ -4740,7 +4740,7 @@ async fn ec2_create_launch_template() {
         .starts_with("lt-"));
 }
 
-#[test_action("ec2", "CreateLaunchTemplateVersion", checksum = "2c5fa6be")]
+#[test_action("ec2", "CreateLaunchTemplateVersion", checksum = "30151ce2")]
 #[tokio::test]
 async fn ec2_create_launch_template_version() {
     let s = TestServer::start().await;
@@ -4778,7 +4778,7 @@ async fn ec2_describe_launch_templates() {
     assert_eq!(r.launch_templates().len(), 1);
 }
 
-#[test_action("ec2", "DescribeLaunchTemplateVersions", checksum = "4602b9a4")]
+#[test_action("ec2", "DescribeLaunchTemplateVersions", checksum = "bd5d8f16")]
 #[tokio::test]
 async fn ec2_describe_launch_template_versions() {
     let s = TestServer::start().await;
@@ -4827,7 +4827,7 @@ async fn ec2_delete_launch_template_versions() {
         .unwrap();
 }
 
-#[test_action("ec2", "GetLaunchTemplateData", checksum = "01b045c5")]
+#[test_action("ec2", "GetLaunchTemplateData", checksum = "3b4ef9da")]
 #[tokio::test]
 async fn ec2_get_launch_template_data() {
     let s = TestServer::start().await;
@@ -4862,7 +4862,7 @@ async fn ec2_modify_launch_template() {
 
 // ---- spot instance requests ----
 
-#[test_action("ec2", "RequestSpotInstances", checksum = "f4328b64")]
+#[test_action("ec2", "RequestSpotInstances", checksum = "3dc74475")]
 #[tokio::test]
 async fn ec2_request_spot_instances() {
     let s = TestServer::start().await;
@@ -4933,7 +4933,7 @@ async fn make_sfr(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "RequestSpotFleet", checksum = "9d1cc052")]
+#[test_action("ec2", "RequestSpotFleet", checksum = "23acfc5d")]
 #[tokio::test]
 async fn ec2_request_spot_fleet() {
     let s = TestServer::start().await;
@@ -4942,7 +4942,7 @@ async fn ec2_request_spot_fleet() {
     assert!(id.starts_with("sfr-"));
 }
 
-#[test_action("ec2", "DescribeSpotFleetRequests", checksum = "a8306e32")]
+#[test_action("ec2", "DescribeSpotFleetRequests", checksum = "0825b38d")]
 #[tokio::test]
 async fn ec2_describe_spot_fleet_requests() {
     let s = TestServer::start().await;
@@ -5022,7 +5022,7 @@ async fn ec2_describe_spot_price_history() {
     assert!(!r.spot_price_history().is_empty());
 }
 
-#[test_action("ec2", "GetSpotPlacementScores", checksum = "87fe06d2")]
+#[test_action("ec2", "GetSpotPlacementScores", checksum = "a7763d3d")]
 #[tokio::test]
 async fn ec2_get_spot_placement_scores() {
     let s = TestServer::start().await;
@@ -5103,7 +5103,7 @@ async fn make_fleet(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateFleet", checksum = "072f9378")]
+#[test_action("ec2", "CreateFleet", checksum = "53159a0c")]
 #[tokio::test]
 async fn ec2_create_fleet() {
     let s = TestServer::start().await;
@@ -5196,7 +5196,7 @@ async fn make_cr(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateCapacityReservation", checksum = "109889e7")]
+#[test_action("ec2", "CreateCapacityReservation", checksum = "f1bdd159")]
 #[tokio::test]
 async fn ec2_create_capacity_reservation() {
     let s = TestServer::start().await;
@@ -5278,7 +5278,7 @@ async fn ec2_get_capacity_reservation_usage() {
     assert_eq!(r.capacity_reservation_id(), Some(id.as_str()));
 }
 
-#[test_action("ec2", "CreateCapacityReservationFleet", checksum = "fcd785ab")]
+#[test_action("ec2", "CreateCapacityReservationFleet", checksum = "4b0d449a")]
 #[tokio::test]
 async fn ec2_create_capacity_reservation_fleet() {
     let s = TestServer::start().await;
@@ -5389,7 +5389,7 @@ async fn ec2_modify_instance_capacity_reservation_attributes() {
     assert_eq!(r.r#return(), Some(true));
 }
 
-#[test_action("ec2", "CreateCapacityReservationBySplitting", checksum = "de4f15b5")]
+#[test_action("ec2", "CreateCapacityReservationBySplitting", checksum = "6b626c96")]
 #[tokio::test]
 async fn ec2_create_capacity_reservation_by_splitting() {
     let s = TestServer::start().await;
@@ -5536,7 +5536,7 @@ async fn ec2_describe_capacity_blocks() {
     assert!(r.capacity_blocks().is_empty());
 }
 
-#[test_action("ec2", "PurchaseCapacityBlock", checksum = "3794b5e7")]
+#[test_action("ec2", "PurchaseCapacityBlock", checksum = "c194354d")]
 #[tokio::test]
 async fn ec2_purchase_capacity_block() {
     let s = TestServer::start().await;
@@ -5621,7 +5621,7 @@ async fn ec2_describe_capacity_reservation_topology() {
 #[test_action(
     "ec2",
     "CreateInterruptibleCapacityReservationAllocation",
-    checksum = "d116b139"
+    checksum = "84e54291"
 )]
 #[tokio::test]
 async fn ec2_create_interruptible_capacity_reservation_allocation() {
@@ -5823,7 +5823,7 @@ async fn make_host(c: &aws_sdk_ec2::Client) -> String {
         .clone()
 }
 
-#[test_action("ec2", "AllocateHosts", checksum = "ee797dd1")]
+#[test_action("ec2", "AllocateHosts", checksum = "0eea0b98")]
 #[tokio::test]
 async fn ec2_allocate_hosts() {
     let s = TestServer::start().await;
@@ -5911,7 +5911,7 @@ async fn make_tgw_rtb(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateTransitGateway", checksum = "11bf8ed7")]
+#[test_action("ec2", "CreateTransitGateway", checksum = "06ba7d20")]
 #[tokio::test]
 async fn ec2_create_transit_gateway() {
     let s = TestServer::start().await;
@@ -5984,7 +5984,7 @@ async fn ec2_delete_transit_gateway() {
         .is_empty());
 }
 
-#[test_action("ec2", "CreateTransitGatewayVpcAttachment", checksum = "ce9759ac")]
+#[test_action("ec2", "CreateTransitGatewayVpcAttachment", checksum = "29c02bad")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_vpc_attachment() {
     let s = TestServer::start().await;
@@ -6114,7 +6114,7 @@ async fn ec2_describe_transit_gateway_attachments() {
     assert!(r.transit_gateway_attachments().is_empty());
 }
 
-#[test_action("ec2", "CreateTransitGatewayRouteTable", checksum = "228d421c")]
+#[test_action("ec2", "CreateTransitGatewayRouteTable", checksum = "fc596375")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_route_table() {
     let s = TestServer::start().await;
@@ -6452,7 +6452,7 @@ async fn make_tgw_peer(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateTransitGatewayPeeringAttachment", checksum = "af9d51e6")]
+#[test_action("ec2", "CreateTransitGatewayPeeringAttachment", checksum = "15d918e4")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_peering_attachment() {
     let s = TestServer::start().await;
@@ -6524,7 +6524,7 @@ async fn ec2_delete_transit_gateway_peering_attachment() {
     assert!(r.transit_gateway_peering_attachment().is_some());
 }
 
-#[test_action("ec2", "CreateTransitGatewayConnect", checksum = "2408f4f5")]
+#[test_action("ec2", "CreateTransitGatewayConnect", checksum = "74d4745e")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_connect() {
     let s = TestServer::start().await;
@@ -6597,7 +6597,7 @@ async fn ec2_delete_transit_gateway_connect() {
     assert!(r.transit_gateway_connect().is_some());
 }
 
-#[test_action("ec2", "CreateTransitGatewayConnectPeer", checksum = "cad18588")]
+#[test_action("ec2", "CreateTransitGatewayConnectPeer", checksum = "45816221")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_connect_peer() {
     let s = TestServer::start().await;
@@ -6678,7 +6678,7 @@ async fn make_tgw_pt(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateTransitGatewayPolicyTable", checksum = "2bd6ed75")]
+#[test_action("ec2", "CreateTransitGatewayPolicyTable", checksum = "83c8d038")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_policy_table() {
     let s = TestServer::start().await;
@@ -6883,7 +6883,7 @@ async fn make_tgw_announce(c: &aws_sdk_ec2::Client) -> String {
 #[test_action(
     "ec2",
     "CreateTransitGatewayRouteTableAnnouncement",
-    checksum = "edad2f14"
+    checksum = "55793344"
 )]
 #[tokio::test]
 async fn ec2_create_transit_gateway_route_table_announcement() {
@@ -6945,7 +6945,7 @@ async fn make_tgw_mcast(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateTransitGatewayMulticastDomain", checksum = "4557638b")]
+#[test_action("ec2", "CreateTransitGatewayMulticastDomain", checksum = "d2699bae")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_multicast_domain() {
     let s = TestServer::start().await;
@@ -7176,7 +7176,7 @@ async fn make_tgw_mp(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateTransitGatewayMeteringPolicy", checksum = "4b2d73d2")]
+#[test_action("ec2", "CreateTransitGatewayMeteringPolicy", checksum = "f95fdb60")]
 #[tokio::test]
 async fn ec2_create_transit_gateway_metering_policy() {
     let s = TestServer::start().await;
@@ -7378,7 +7378,7 @@ async fn make_vpn(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateCustomerGateway", checksum = "d905541f")]
+#[test_action("ec2", "CreateCustomerGateway", checksum = "25f96ccb")]
 #[tokio::test]
 async fn ec2_create_customer_gateway() {
     let s = TestServer::start().await;
@@ -7415,7 +7415,7 @@ async fn ec2_delete_customer_gateway() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateVpnGateway", checksum = "980342bd")]
+#[test_action("ec2", "CreateVpnGateway", checksum = "5191da7e")]
 #[tokio::test]
 async fn ec2_create_vpn_gateway() {
     let s = TestServer::start().await;
@@ -7482,7 +7482,7 @@ async fn ec2_detach_vpn_gateway() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateVpnConnection", checksum = "b84874a8")]
+#[test_action("ec2", "CreateVpnConnection", checksum = "d6e6d15e")]
 #[tokio::test]
 async fn ec2_create_vpn_connection() {
     let s = TestServer::start().await;
@@ -7705,7 +7705,7 @@ async fn make_vpnc(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateVpnConcentrator", checksum = "fa1d1630")]
+#[test_action("ec2", "CreateVpnConcentrator", checksum = "9e3e1da6")]
 #[tokio::test]
 async fn ec2_create_vpn_concentrator() {
     let s = TestServer::start().await;
@@ -7761,7 +7761,7 @@ async fn make_cvpn(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateClientVpnEndpoint", checksum = "2a23e2d7")]
+#[test_action("ec2", "CreateClientVpnEndpoint", checksum = "1ef1d026")]
 #[tokio::test]
 async fn ec2_create_client_vpn_endpoint() {
     let s = TestServer::start().await;
@@ -8130,7 +8130,7 @@ async fn make_pool(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateIpam", checksum = "3485527d")]
+#[test_action("ec2", "CreateIpam", checksum = "fcd98122")]
 #[tokio::test]
 async fn ec2_create_ipam() {
     let s = TestServer::start().await;
@@ -8174,7 +8174,7 @@ async fn ec2_delete_ipam() {
     c.delete_ipam().ipam_id(&id).send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateIpamScope", checksum = "61270911")]
+#[test_action("ec2", "CreateIpamScope", checksum = "9f088148")]
 #[tokio::test]
 async fn ec2_create_ipam_scope() {
     let s = TestServer::start().await;
@@ -8221,7 +8221,7 @@ async fn ec2_delete_ipam_scope() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateIpamPool", checksum = "025e7679")]
+#[test_action("ec2", "CreateIpamPool", checksum = "596b281c")]
 #[tokio::test]
 async fn ec2_create_ipam_pool() {
     let s = TestServer::start().await;
@@ -8318,7 +8318,7 @@ async fn ec2_deprovision_ipam_pool_cidr() {
     assert!(r.ipam_pool_cidr().is_some());
 }
 
-#[test_action("ec2", "AllocateIpamPoolCidr", checksum = "6da44777")]
+#[test_action("ec2", "AllocateIpamPoolCidr", checksum = "8925f84e")]
 #[tokio::test]
 async fn ec2_allocate_ipam_pool_cidr() {
     let s = TestServer::start().await;
@@ -8473,7 +8473,7 @@ async fn make_rd(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateIpamResourceDiscovery", checksum = "b6b75a20")]
+#[test_action("ec2", "CreateIpamResourceDiscovery", checksum = "a5b6ef24")]
 #[tokio::test]
 async fn ec2_create_ipam_resource_discovery() {
     let s = TestServer::start().await;
@@ -8520,7 +8520,7 @@ async fn ec2_delete_ipam_resource_discovery() {
         .unwrap();
 }
 
-#[test_action("ec2", "AssociateIpamResourceDiscovery", checksum = "0acbb307")]
+#[test_action("ec2", "AssociateIpamResourceDiscovery", checksum = "8a4e9351")]
 #[tokio::test]
 async fn ec2_associate_ipam_resource_discovery() {
     let s = TestServer::start().await;
@@ -8713,7 +8713,7 @@ async fn ec2_describe_ipam_byoasn() {
     assert!(!r.byoasns().is_empty());
 }
 
-#[test_action("ec2", "MoveByoipCidrToIpam", checksum = "666a0d06")]
+#[test_action("ec2", "MoveByoipCidrToIpam", checksum = "2bb5f19f")]
 #[tokio::test]
 async fn ec2_move_byoip_cidr_to_ipam() {
     let s = TestServer::start().await;
@@ -8745,7 +8745,7 @@ async fn make_token(c: &aws_sdk_ec2::Client) -> String {
 #[test_action(
     "ec2",
     "CreateIpamExternalResourceVerificationToken",
-    checksum = "68eda0ae"
+    checksum = "a3e8ce90"
 )]
 #[tokio::test]
 async fn ec2_create_ipam_external_resource_verification_token() {
@@ -8818,7 +8818,7 @@ async fn make_resolver(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateIpamPolicy", checksum = "15092a13")]
+#[test_action("ec2", "CreateIpamPolicy", checksum = "25717504")]
 #[tokio::test]
 async fn ec2_create_ipam_policy() {
     let s = TestServer::start().await;
@@ -8937,7 +8937,7 @@ async fn ec2_get_ipam_policy_organization_targets() {
     assert!(r.organization_targets().is_empty());
 }
 
-#[test_action("ec2", "CreateIpamPrefixListResolver", checksum = "a8163dc8")]
+#[test_action("ec2", "CreateIpamPrefixListResolver", checksum = "e7a0fb51")]
 #[tokio::test]
 async fn ec2_create_ipam_prefix_list_resolver() {
     let s = TestServer::start().await;
@@ -8988,7 +8988,7 @@ async fn ec2_delete_ipam_prefix_list_resolver() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateIpamPrefixListResolverTarget", checksum = "564bc0d9")]
+#[test_action("ec2", "CreateIpamPrefixListResolverTarget", checksum = "aac98f20")]
 #[tokio::test]
 async fn ec2_create_ipam_prefix_list_resolver_target() {
     let s = TestServer::start().await;
@@ -9189,7 +9189,7 @@ async fn make_vae(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateVerifiedAccessInstance", checksum = "e83a8aae")]
+#[test_action("ec2", "CreateVerifiedAccessInstance", checksum = "70c54d6a")]
 #[tokio::test]
 async fn ec2_create_verified_access_instance() {
     let s = TestServer::start().await;
@@ -9237,7 +9237,7 @@ async fn ec2_delete_verified_access_instance() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateVerifiedAccessTrustProvider", checksum = "5efc2ca6")]
+#[test_action("ec2", "CreateVerifiedAccessTrustProvider", checksum = "142e33fd")]
 #[tokio::test]
 async fn ec2_create_verified_access_trust_provider() {
     let s = TestServer::start().await;
@@ -9329,7 +9329,7 @@ async fn ec2_detach_verified_access_trust_provider() {
     assert!(r.verified_access_instance().is_some());
 }
 
-#[test_action("ec2", "CreateVerifiedAccessGroup", checksum = "ee1b40da")]
+#[test_action("ec2", "CreateVerifiedAccessGroup", checksum = "a0cfa1ef")]
 #[tokio::test]
 async fn ec2_create_verified_access_group() {
     let s = TestServer::start().await;
@@ -9419,7 +9419,7 @@ async fn ec2_get_verified_access_group_policy() {
     );
 }
 
-#[test_action("ec2", "CreateVerifiedAccessEndpoint", checksum = "e44490ec")]
+#[test_action("ec2", "CreateVerifiedAccessEndpoint", checksum = "37ccd987")]
 #[tokio::test]
 async fn ec2_create_verified_access_endpoint() {
     let s = TestServer::start().await;
@@ -9609,7 +9609,7 @@ async fn make_ni_scope(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateNetworkInsightsPath", checksum = "dd7c97ff")]
+#[test_action("ec2", "CreateNetworkInsightsPath", checksum = "97f88214")]
 #[tokio::test]
 async fn ec2_create_network_insights_path() {
     let s = TestServer::start().await;
@@ -9643,7 +9643,7 @@ async fn ec2_delete_network_insights_path() {
     assert_eq!(r.network_insights_path_id(), Some(id.as_str()));
 }
 
-#[test_action("ec2", "StartNetworkInsightsAnalysis", checksum = "58d89237")]
+#[test_action("ec2", "StartNetworkInsightsAnalysis", checksum = "3eb73536")]
 #[tokio::test]
 async fn ec2_start_network_insights_analysis() {
     let s = TestServer::start().await;
@@ -9702,7 +9702,7 @@ async fn ec2_delete_network_insights_analysis() {
     assert_eq!(r.network_insights_analysis_id(), Some(a.as_str()));
 }
 
-#[test_action("ec2", "CreateNetworkInsightsAccessScope", checksum = "df8f0d0a")]
+#[test_action("ec2", "CreateNetworkInsightsAccessScope", checksum = "57190704")]
 #[tokio::test]
 async fn ec2_create_network_insights_access_scope() {
     let s = TestServer::start().await;
@@ -9758,7 +9758,7 @@ async fn ec2_get_network_insights_access_scope_content() {
 #[test_action(
     "ec2",
     "StartNetworkInsightsAccessScopeAnalysis",
-    checksum = "81da18fe"
+    checksum = "511d1b13"
 )]
 #[tokio::test]
 async fn ec2_start_network_insights_access_scope_analysis() {
@@ -9894,7 +9894,7 @@ async fn make_vifg(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateCarrierGateway", checksum = "d0d31b02")]
+#[test_action("ec2", "CreateCarrierGateway", checksum = "6e1c3c11")]
 #[tokio::test]
 async fn ec2_create_carrier_gateway() {
     let s = TestServer::start().await;
@@ -9950,7 +9950,7 @@ async fn ec2_delete_carrier_gateway() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateCoipPool", checksum = "6ae7afd8")]
+#[test_action("ec2", "CreateCoipPool", checksum = "a6cd866d")]
 #[tokio::test]
 async fn ec2_create_coip_pool() {
     let s = TestServer::start().await;
@@ -10067,7 +10067,7 @@ async fn ec2_get_coip_pool_usage() {
     assert_eq!(r.coip_pool_id(), Some("ipv4pool-coip-1"));
 }
 
-#[test_action("ec2", "CreateLocalGatewayRouteTable", checksum = "aefa7f05")]
+#[test_action("ec2", "CreateLocalGatewayRouteTable", checksum = "0ebc0e5c")]
 #[tokio::test]
 async fn ec2_create_local_gateway_route_table() {
     let s = TestServer::start().await;
@@ -10181,7 +10181,7 @@ async fn ec2_search_local_gateway_routes() {
 #[test_action(
     "ec2",
     "CreateLocalGatewayRouteTableVpcAssociation",
-    checksum = "d60005c1"
+    checksum = "e72a7203"
 )]
 #[tokio::test]
 async fn ec2_create_local_gateway_route_table_vpc_association() {
@@ -10251,7 +10251,7 @@ async fn ec2_delete_local_gateway_route_table_vpc_association() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateLocalGatewayVirtualInterface", checksum = "fe0cd2d7")]
+#[test_action("ec2", "CreateLocalGatewayVirtualInterface", checksum = "3d144171")]
 #[tokio::test]
 async fn ec2_create_local_gateway_virtual_interface() {
     let s = TestServer::start().await;
@@ -10324,7 +10324,7 @@ async fn ec2_delete_local_gateway_virtual_interface() {
 #[test_action(
     "ec2",
     "CreateLocalGatewayVirtualInterfaceGroup",
-    checksum = "797074d8"
+    checksum = "05b2bf65"
 )]
 #[tokio::test]
 async fn ec2_create_local_gateway_virtual_interface_group() {
@@ -10372,7 +10372,7 @@ async fn ec2_delete_local_gateway_virtual_interface_group() {
 #[test_action(
     "ec2",
     "CreateLocalGatewayRouteTableVirtualInterfaceGroupAssociation",
-    checksum = "db7084d2"
+    checksum = "70d9a1af"
 )]
 #[tokio::test]
 async fn ec2_create_local_gateway_route_table_virtual_interface_group_association() {
@@ -10473,7 +10473,7 @@ async fn make_ice(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateInstanceConnectEndpoint", checksum = "8d75bdcd")]
+#[test_action("ec2", "CreateInstanceConnectEndpoint", checksum = "15d696ee")]
 #[tokio::test]
 async fn ec2_create_instance_connect_endpoint() {
     let s = TestServer::start().await;
@@ -10627,7 +10627,7 @@ async fn ec2_get_password_data() {
 }
 
 // ---- remainder sweep ----
-#[test_action("ec2", "AdvertiseByoipCidr", checksum = "6182b651")]
+#[test_action("ec2", "AdvertiseByoipCidr", checksum = "f942d007")]
 #[tokio::test]
 async fn ec2_advertise_byoip_cidr() {
     let s = TestServer::start().await;
@@ -10797,7 +10797,7 @@ async fn ec2_copy_fpga_image() {
         .unwrap();
 }
 
-#[test_action("ec2", "CopyVolumes", checksum = "b7d12bb9")]
+#[test_action("ec2", "CopyVolumes", checksum = "fb31e0b4")]
 #[tokio::test]
 async fn ec2_copy_volumes() {
     let s = TestServer::start().await;
@@ -10805,7 +10805,7 @@ async fn ec2_copy_volumes() {
     c.copy_volumes().source_volume_id("x").send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateCapacityManagerDataExport", checksum = "5bc1d840")]
+#[test_action("ec2", "CreateCapacityManagerDataExport", checksum = "10f4fbc7")]
 #[tokio::test]
 async fn ec2_create_capacity_manager_data_export() {
     let s = TestServer::start().await;
@@ -10819,7 +10819,7 @@ async fn ec2_create_capacity_manager_data_export() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateDelegateMacVolumeOwnershipTask", checksum = "bb874277")]
+#[test_action("ec2", "CreateDelegateMacVolumeOwnershipTask", checksum = "d994c096")]
 #[tokio::test]
 async fn ec2_create_delegate_mac_volume_ownership_task() {
     let s = TestServer::start().await;
@@ -10832,7 +10832,7 @@ async fn ec2_create_delegate_mac_volume_ownership_task() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateFpgaImage", checksum = "745b65b9")]
+#[test_action("ec2", "CreateFpgaImage", checksum = "ada4cc91")]
 #[tokio::test]
 async fn ec2_create_fpga_image() {
     let s = TestServer::start().await;
@@ -10840,7 +10840,7 @@ async fn ec2_create_fpga_image() {
     c.create_fpga_image().send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateImageUsageReport", checksum = "27fd3c86")]
+#[test_action("ec2", "CreateImageUsageReport", checksum = "d76297a9")]
 #[tokio::test]
 async fn ec2_create_image_usage_report() {
     let s = TestServer::start().await;
@@ -10852,7 +10852,7 @@ async fn ec2_create_image_usage_report() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateInstanceEventWindow", checksum = "9153b568")]
+#[test_action("ec2", "CreateInstanceEventWindow", checksum = "c1c27e6e")]
 #[tokio::test]
 async fn ec2_create_instance_event_window() {
     let s = TestServer::start().await;
@@ -10860,7 +10860,7 @@ async fn ec2_create_instance_event_window() {
     c.create_instance_event_window().send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateInstanceExportTask", checksum = "3dcf91ae")]
+#[test_action("ec2", "CreateInstanceExportTask", checksum = "7db3eca6")]
 #[tokio::test]
 async fn ec2_create_instance_export_task() {
     let s = TestServer::start().await;
@@ -10876,7 +10876,7 @@ async fn ec2_create_instance_export_task() {
 #[test_action(
     "ec2",
     "CreateMacSystemIntegrityProtectionModificationTask",
-    checksum = "95b0a29c"
+    checksum = "72a02484"
 )]
 #[tokio::test]
 async fn ec2_create_mac_system_integrity_protection_modification_task() {
@@ -10892,7 +10892,7 @@ async fn ec2_create_mac_system_integrity_protection_modification_task() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateManagedPrefixList", checksum = "fcdd6c4a")]
+#[test_action("ec2", "CreateManagedPrefixList", checksum = "ab19b6c3")]
 #[tokio::test]
 async fn ec2_create_managed_prefix_list() {
     let s = TestServer::start().await;
@@ -10906,7 +10906,7 @@ async fn ec2_create_managed_prefix_list() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreatePublicIpv4Pool", checksum = "102bce7b")]
+#[test_action("ec2", "CreatePublicIpv4Pool", checksum = "125c9264")]
 #[tokio::test]
 async fn ec2_create_public_ipv4_pool() {
     let s = TestServer::start().await;
@@ -10914,7 +10914,7 @@ async fn ec2_create_public_ipv4_pool() {
     c.create_public_ipv4_pool().send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateReplaceRootVolumeTask", checksum = "3d04fe73")]
+#[test_action("ec2", "CreateReplaceRootVolumeTask", checksum = "7a1129b1")]
 #[tokio::test]
 async fn ec2_create_replace_root_volume_task() {
     let s = TestServer::start().await;
@@ -10926,7 +10926,7 @@ async fn ec2_create_replace_root_volume_task() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateRouteServer", checksum = "66197c80")]
+#[test_action("ec2", "CreateRouteServer", checksum = "4ce42624")]
 #[tokio::test]
 async fn ec2_create_route_server() {
     let s = TestServer::start().await;
@@ -10938,7 +10938,7 @@ async fn ec2_create_route_server() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateRouteServerEndpoint", checksum = "57e78f86")]
+#[test_action("ec2", "CreateRouteServerEndpoint", checksum = "e7b50d74")]
 #[tokio::test]
 async fn ec2_create_route_server_endpoint() {
     let s = TestServer::start().await;
@@ -10951,7 +10951,7 @@ async fn ec2_create_route_server_endpoint() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateRouteServerPeer", checksum = "58233885")]
+#[test_action("ec2", "CreateRouteServerPeer", checksum = "8bd99c97")]
 #[tokio::test]
 async fn ec2_create_route_server_peer() {
     let s = TestServer::start().await;
@@ -10969,7 +10969,7 @@ async fn ec2_create_route_server_peer() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateSecondaryNetwork", checksum = "28c1a44a")]
+#[test_action("ec2", "CreateSecondaryNetwork", checksum = "28c7a31e")]
 #[tokio::test]
 async fn ec2_create_secondary_network() {
     let s = TestServer::start().await;
@@ -10982,7 +10982,7 @@ async fn ec2_create_secondary_network() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateTrafficMirrorFilter", checksum = "29878f45")]
+#[test_action("ec2", "CreateTrafficMirrorFilter", checksum = "f4d6cc3e")]
 #[tokio::test]
 async fn ec2_create_traffic_mirror_filter() {
     let s = TestServer::start().await;
@@ -10990,7 +10990,7 @@ async fn ec2_create_traffic_mirror_filter() {
     c.create_traffic_mirror_filter().send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateTrafficMirrorFilterRule", checksum = "21144e98")]
+#[test_action("ec2", "CreateTrafficMirrorFilterRule", checksum = "9b55a55b")]
 #[tokio::test]
 async fn ec2_create_traffic_mirror_filter_rule() {
     let s = TestServer::start().await;
@@ -11007,7 +11007,7 @@ async fn ec2_create_traffic_mirror_filter_rule() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateTrafficMirrorSession", checksum = "95d18892")]
+#[test_action("ec2", "CreateTrafficMirrorSession", checksum = "d84dc397")]
 #[tokio::test]
 async fn ec2_create_traffic_mirror_session() {
     let s = TestServer::start().await;
@@ -11022,7 +11022,7 @@ async fn ec2_create_traffic_mirror_session() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateTrafficMirrorTarget", checksum = "abbf8faa")]
+#[test_action("ec2", "CreateTrafficMirrorTarget", checksum = "9b7cae64")]
 #[tokio::test]
 async fn ec2_create_traffic_mirror_target() {
     let s = TestServer::start().await;
@@ -11030,7 +11030,7 @@ async fn ec2_create_traffic_mirror_target() {
     c.create_traffic_mirror_target().send().await.unwrap();
 }
 
-#[test_action("ec2", "CreateVpcBlockPublicAccessExclusion", checksum = "09dff4a8")]
+#[test_action("ec2", "CreateVpcBlockPublicAccessExclusion", checksum = "d3a6f31f")]
 #[tokio::test]
 async fn ec2_create_vpc_block_public_access_exclusion() {
     let s = TestServer::start().await;
@@ -11044,7 +11044,7 @@ async fn ec2_create_vpc_block_public_access_exclusion() {
         .unwrap();
 }
 
-#[test_action("ec2", "CreateVpcEncryptionControl", checksum = "b21408b9")]
+#[test_action("ec2", "CreateVpcEncryptionControl", checksum = "7180bcf9")]
 #[tokio::test]
 async fn ec2_create_vpc_encryption_control() {
     let s = TestServer::start().await;
@@ -11248,7 +11248,7 @@ async fn ec2_delete_vpc_encryption_control() {
         .unwrap();
 }
 
-#[test_action("ec2", "DeprovisionByoipCidr", checksum = "640626b7")]
+#[test_action("ec2", "DeprovisionByoipCidr", checksum = "0d668bd7")]
 #[tokio::test]
 async fn ec2_deprovision_byoip_cidr() {
     let s = TestServer::start().await;
@@ -11300,7 +11300,7 @@ async fn ec2_describe_bundle_tasks() {
     c.describe_bundle_tasks().send().await.unwrap();
 }
 
-#[test_action("ec2", "DescribeByoipCidrs", checksum = "73b1d66d")]
+#[test_action("ec2", "DescribeByoipCidrs", checksum = "1386d919")]
 #[tokio::test]
 async fn ec2_describe_byoip_cidrs() {
     let s = TestServer::start().await;
@@ -12022,7 +12022,7 @@ async fn ec2_enable_vpc_classic_link_dns_support() {
         .unwrap();
 }
 
-#[test_action("ec2", "ExportImage", checksum = "936219fd")]
+#[test_action("ec2", "ExportImage", checksum = "edb24c70")]
 #[tokio::test]
 async fn ec2_export_image() {
     let s = TestServer::start().await;
@@ -12180,7 +12180,7 @@ async fn ec2_get_instance_tpm_ek_pub() {
         .unwrap();
 }
 
-#[test_action("ec2", "GetInstanceUefiData", checksum = "320e3b0f")]
+#[test_action("ec2", "GetInstanceUefiData", checksum = "187a91e8")]
 #[tokio::test]
 async fn ec2_get_instance_uefi_data() {
     let s = TestServer::start().await;
@@ -12276,7 +12276,7 @@ async fn ec2_get_vpc_resources_blocking_encryption_enforcement() {
         .unwrap();
 }
 
-#[test_action("ec2", "ImportImage", checksum = "5eb964dd")]
+#[test_action("ec2", "ImportImage", checksum = "ce571b7a")]
 #[tokio::test]
 async fn ec2_import_image() {
     let s = TestServer::start().await;
@@ -12296,7 +12296,7 @@ async fn ec2_import_instance() {
         .unwrap();
 }
 
-#[test_action("ec2", "ImportSnapshot", checksum = "8f0efb29")]
+#[test_action("ec2", "ImportSnapshot", checksum = "5b093d33")]
 #[tokio::test]
 async fn ec2_import_snapshot() {
     let s = TestServer::start().await;
@@ -12540,7 +12540,7 @@ async fn ec2_modify_vpc_encryption_control() {
         .unwrap();
 }
 
-#[test_action("ec2", "ProvisionByoipCidr", checksum = "740650f7")]
+#[test_action("ec2", "ProvisionByoipCidr", checksum = "d6020675")]
 #[tokio::test]
 async fn ec2_provision_byoip_cidr() {
     let s = TestServer::start().await;
@@ -12562,7 +12562,7 @@ async fn ec2_provision_public_ipv4_pool_cidr() {
         .unwrap();
 }
 
-#[test_action("ec2", "PurchaseHostReservation", checksum = "463a389d")]
+#[test_action("ec2", "PurchaseHostReservation", checksum = "bcd7a609")]
 #[tokio::test]
 async fn ec2_purchase_host_reservation() {
     let s = TestServer::start().await;
@@ -12649,7 +12649,7 @@ async fn ec2_send_diagnostic_interrupt() {
         .unwrap();
 }
 
-#[test_action("ec2", "StartDeclarativePoliciesReport", checksum = "d130f2fd")]
+#[test_action("ec2", "StartDeclarativePoliciesReport", checksum = "62733abd")]
 #[tokio::test]
 async fn ec2_start_declarative_policies_report() {
     let s = TestServer::start().await;
@@ -12689,7 +12689,7 @@ async fn ec2_update_capacity_manager_organizations_access() {
         .unwrap();
 }
 
-#[test_action("ec2", "WithdrawByoipCidr", checksum = "63483baa")]
+#[test_action("ec2", "WithdrawByoipCidr", checksum = "b6942d57")]
 #[tokio::test]
 async fn ec2_withdraw_byoip_cidr() {
     let s = TestServer::start().await;
@@ -12780,7 +12780,7 @@ async fn ec2_error_uses_ec2query_envelope() {
 #[test_action(
     "ec2",
     "CreateCapacityReservationCancellationQuote",
-    checksum = "be8ec5c8"
+    checksum = "77fe88cc"
 )]
 #[tokio::test]
 async fn ec2_create_capacity_reservation_cancellation_quote() {

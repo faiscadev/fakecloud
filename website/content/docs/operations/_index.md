@@ -419,6 +419,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `RestoreTableFromBackup`
 - `RestoreTableToPointInTime`
 - `Scan`
+- `SearchVectors`
 - `TagResource`
 - `TransactGetItems`
 - `TransactWriteItems`
@@ -3778,6 +3779,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 - `AssociateBackupVaultMpaApprovalTeam`
 - `CancelLegalHold`
+- `CreateBackupAccessPoint`
 - `CreateBackupPlan`
 - `CreateBackupSelection`
 - `CreateBackupVault`
@@ -3789,6 +3791,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateRestoreTestingPlan`
 - `CreateRestoreTestingSelection`
 - `CreateTieringConfiguration`
+- `DeleteBackupAccessPoint`
 - `DeleteBackupPlan`
 - `DeleteBackupSelection`
 - `DeleteBackupVault`
@@ -3801,6 +3804,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteRestoreTestingPlan`
 - `DeleteRestoreTestingSelection`
 - `DeleteTieringConfiguration`
+- `DescribeBackupAccessPoint`
 - `DescribeBackupJob`
 - `DescribeBackupVault`
 - `DescribeCopyJob`
@@ -3833,6 +3837,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetRestoreTestingSelection`
 - `GetSupportedResourceTypes`
 - `GetTieringConfiguration`
+- `ListBackupAccessPoints`
+- `ListBackupAccessPointsByRecoveryPoint`
+- `ListBackupAccessPointsByResource`
 - `ListBackupJobSummaries`
 - `ListBackupJobs`
 - `ListBackupPlanTemplates`
@@ -6474,6 +6481,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetCustomEntityType`
 - `GetDashboardUrl`
 - `GetDataCatalogEncryptionSettings`
+- `GetDataCatalogExportConfiguration`
 - `GetDataQualityModel`
 - `GetDataQualityModelResult`
 - `GetDataQualityResult`
@@ -6575,6 +6583,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutAssetType`
 - `PutAttachment`
 - `PutDataCatalogEncryptionSettings`
+- `PutDataCatalogExportConfiguration`
 - `PutDataQualityProfileAnnotation`
 - `PutFormType`
 - `PutResourcePolicy`
@@ -7122,6 +7131,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `AssignPrivateIpAddresses`
 - `AssignPrivateNatGatewayAddress`
 - `AssociateAddress`
+- `AssociateApplicationStatusCheck`
 - `AssociateCapacityReservationBillingOwner`
 - `AssociateClientVpnTargetNetwork`
 - `AssociateDhcpOptions`
@@ -7150,6 +7160,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `AuthorizeClientVpnIngress`
 - `AuthorizeSecurityGroupEgress`
 - `AuthorizeSecurityGroupIngress`
+- `BatchModifyIpamRoutingPolicyRegistrations`
 - `BundleInstance`
 - `CancelBundleTask`
 - `CancelCapacityReservation`
@@ -7167,6 +7178,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CopyImage`
 - `CopySnapshot`
 - `CopyVolumes`
+- `CreateApplicationStatusCheck`
 - `CreateCapacityManagerDataExport`
 - `CreateCapacityReservation`
 - `CreateCapacityReservationBySplitting`
@@ -7195,11 +7207,13 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateInterruptibleCapacityReservationAllocation`
 - `CreateIpam`
 - `CreateIpamExternalResourceVerificationToken`
+- `CreateIpamInternetRegistryAssociation`
 - `CreateIpamPolicy`
 - `CreateIpamPool`
 - `CreateIpamPrefixListResolver`
 - `CreateIpamPrefixListResolverTarget`
 - `CreateIpamResourceDiscovery`
+- `CreateIpamRoutingPolicyRegistration`
 - `CreateIpamScope`
 - `CreateKeyPair`
 - `CreateLaunchTemplate`
@@ -7273,6 +7287,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateVpnConnection`
 - `CreateVpnConnectionRoute`
 - `CreateVpnGateway`
+- `DeleteApplicationStatusCheck`
 - `DeleteCapacityManagerDataExport`
 - `DeleteCarrierGateway`
 - `DeleteClientVpnEndpoint`
@@ -7291,11 +7306,13 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteInternetGateway`
 - `DeleteIpam`
 - `DeleteIpamExternalResourceVerificationToken`
+- `DeleteIpamInternetRegistryAssociation`
 - `DeleteIpamPolicy`
 - `DeleteIpamPool`
 - `DeleteIpamPrefixListResolver`
 - `DeleteIpamPrefixListResolverTarget`
 - `DeleteIpamResourceDiscovery`
+- `DeleteIpamRoutingPolicyRegistration`
 - `DeleteIpamScope`
 - `DeleteKeyPair`
 - `DeleteLaunchTemplate`
@@ -7381,6 +7398,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeAddresses`
 - `DescribeAddressesAttribute`
 - `DescribeAggregateIdFormat`
+- `DescribeApplicationStatus`
+- `DescribeApplicationStatusCheckAssociations`
+- `DescribeApplicationStatusChecks`
 - `DescribeAvailabilityZones`
 - `DescribeAwsNetworkPerformanceMetricSubscriptions`
 - `DescribeBundleTasks`
@@ -7449,6 +7469,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeInternetGateways`
 - `DescribeIpamByoasn`
 - `DescribeIpamExternalResourceVerificationTokens`
+- `DescribeIpamInternetRegistryAssociations`
 - `DescribeIpamPolicies`
 - `DescribeIpamPoolAllocations`
 - `DescribeIpamPools`
@@ -7572,6 +7593,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DetachVpnGateway`
 - `DisableAddressTransfer`
 - `DisableAllowedImagesSettings`
+- `DisableApplicationStatusCheckSuppression`
 - `DisableAwsNetworkPerformanceMetricSubscription`
 - `DisableCapacityManager`
 - `DisableEbsEncryptionByDefault`
@@ -7592,6 +7614,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DisableVpcClassicLink`
 - `DisableVpcClassicLinkDnsSupport`
 - `DisassociateAddress`
+- `DisassociateApplicationStatusCheck`
 - `DisassociateCapacityReservationBillingOwner`
 - `DisassociateClientVpnTargetNetwork`
 - `DisassociateEnclaveCertificateIamRole`
@@ -7611,6 +7634,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DisassociateVpcCidrBlock`
 - `EnableAddressTransfer`
 - `EnableAllowedImagesSettings`
+- `EnableApplicationStatusCheckSuppression`
 - `EnableAwsNetworkPerformanceMetricSubscription`
 - `EnableCapacityManager`
 - `EnableEbsEncryptionByDefault`
@@ -7621,6 +7645,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `EnableImageDeprecation`
 - `EnableImageDeregistrationProtection`
 - `EnableInstanceSqlHaStandbyDetections`
+- `EnableIpamInternetRegistryAssociation`
 - `EnableIpamOrganizationAdminAccount`
 - `EnableIpamPolicy`
 - `EnableReachabilityAnalyzerOrganizationSharing`
@@ -7668,6 +7693,9 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetIpamDiscoveredAccounts`
 - `GetIpamDiscoveredPublicAddresses`
 - `GetIpamDiscoveredResourceCidrs`
+- `GetIpamDiscoveredRoutes`
+- `GetIpamInternetRegistryAssociationAsns`
+- `GetIpamInternetRegistryAssociationCidrs`
 - `GetIpamPolicyAllocationRules`
 - `GetIpamPolicyOrganizationTargets`
 - `GetIpamPoolAllocations`
@@ -7676,6 +7704,10 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetIpamPrefixListResolverVersionEntries`
 - `GetIpamPrefixListResolverVersions`
 - `GetIpamResourceCidrs`
+- `GetIpamRouteOriginAuthorizations`
+- `GetIpamRouteProtectionFindings`
+- `GetIpamRoutingPolicyRegistrationDeltas`
+- `GetIpamRoutingPolicyRegistrations`
 - `GetLaunchTemplateData`
 - `GetManagedPrefixListAssociations`
 - `GetManagedPrefixListEntries`
@@ -7719,6 +7751,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `LockSnapshot`
 - `ModifyAccountVpcEncryptionControl`
 - `ModifyAddressAttribute`
+- `ModifyApplicationStatusCheck`
 - `ModifyAvailabilityZoneGroup`
 - `ModifyCapacityReservation`
 - `ModifyCapacityReservationFleet`
@@ -7751,6 +7784,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ModifyIpamPrefixListResolverTarget`
 - `ModifyIpamResourceCidr`
 - `ModifyIpamResourceDiscovery`
+- `ModifyIpamRoutingPolicyRegistration`
 - `ModifyIpamScope`
 - `ModifyLaunchTemplate`
 - `ModifyLocalGatewayRoute`

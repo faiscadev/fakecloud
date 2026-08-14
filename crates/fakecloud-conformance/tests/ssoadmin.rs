@@ -54,7 +54,7 @@ use helpers::TestServer;
 #[test_action("sso", "DescribeApplication", checksum = "04bfbb96")]
 #[test_action("sso", "DescribeApplicationAssignment", checksum = "6da00b39")]
 #[test_action("sso", "DescribeApplicationProvider", checksum = "bc843c7f")]
-#[test_action("sso", "DescribeInstance", checksum = "fc5c02ab")]
+#[test_action("sso", "DescribeInstance", checksum = "507505c2")]
 #[test_action(
     "sso",
     "DescribeInstanceAccessControlAttributeConfiguration",
@@ -122,7 +122,7 @@ use helpers::TestServer;
 #[test_action("sso", "TagResource", checksum = "92207645")]
 #[test_action("sso", "UntagResource", checksum = "0e0b6802")]
 #[test_action("sso", "UpdateApplication", checksum = "08b88059")]
-#[test_action("sso", "UpdateInstance", checksum = "965285db")]
+#[test_action("sso", "UpdateInstance", checksum = "e41b8371")]
 #[test_action(
     "sso",
     "UpdateInstanceAccessControlAttributeConfiguration",
