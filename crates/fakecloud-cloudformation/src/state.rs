@@ -16,6 +16,17 @@ pub struct StackResource {
     /// provisioning time by each resource type's create handler.
     #[serde(default)]
     pub attributes: BTreeMap<String, String>,
+    /// The resource's `DeletionPolicy` (`Retain`/`Snapshot`/`Delete`/
+    /// `RetainExceptOnCreate`), captured from the template at provision time so
+    /// `DeleteStack` and the update-remove path can honor Retain/Snapshot
+    /// instead of unconditionally destroying the physical resource. `None` =
+    /// the CFN default (`Delete`).
+    #[serde(default)]
+    pub deletion_policy: Option<String>,
+    /// The resource's `UpdateReplacePolicy`, honored when an update replaces
+    /// this resource. `None` = default (`Delete`).
+    #[serde(default)]
+    pub update_replace_policy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

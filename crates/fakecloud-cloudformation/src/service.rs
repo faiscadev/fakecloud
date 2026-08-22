@@ -499,6 +499,9 @@ fn reconstruct_stack_resource(
         status: "CREATE_COMPLETE".to_string(),
         service_token: None,
         attributes: attributes.clone(),
+        // Cloud Control has no CloudFormation DeletionPolicy concept.
+        deletion_policy: None,
+        update_replace_policy: None,
     }
 }
 
@@ -1190,6 +1193,9 @@ impl CloudFormationService {
             logical_id: "Resource".to_string(),
             resource_type: type_name.to_string(),
             properties,
+            // Cloud Control has no CloudFormation DeletionPolicy concept.
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         let resource = provisioner.create_resource(&def)?;
         // Back any container-backed resource with a real container, off the
@@ -1219,6 +1225,8 @@ impl CloudFormationService {
             logical_id: "Resource".to_string(),
             resource_type: type_name.to_string(),
             properties: new_properties,
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         // `None` means the handler treated the change as a no-op (nothing to
         // mutate); the resource keeps its prior identity + attributes.
@@ -2129,9 +2137,11 @@ impl CloudFormationService {
                 let provisioner =
                     self.provisioner_deferred(&stack_id, &req.account_id, &req.region);
 
-                // Delete resources in reverse order
+                // Delete resources in reverse order, honoring each resource's
+                // DeletionPolicy (Retain/Snapshot leaves the physical resource
+                // in place instead of destroying it).
                 for resource in resources.iter().rev() {
-                    let _ = provisioner.delete_resource(resource);
+                    let _ = provisioner.delete_resource_respecting_policy(resource);
                 }
 
                 // Reap the REAL backing containers for the deleted container
@@ -2944,7 +2954,10 @@ pub(crate) fn apply_resource_updates(
         .cloned()
         .collect();
     for resource in &to_remove {
-        let _ = provisioner.delete_resource(resource);
+        // A resource dropped from the template is deleted, but its
+        // DeletionPolicy still governs whether the physical resource is torn
+        // down (Retain/Snapshot preserves it).
+        let _ = provisioner.delete_resource_respecting_policy(resource);
         changes.push(ResourceChange {
             action: ResourceChangeAction::Delete,
             logical_id: resource.logical_id.clone(),

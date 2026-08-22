@@ -2535,6 +2535,8 @@ mod tests {
             logical_id: logical_id.to_string(),
             resource_type: ty.to_string(),
             properties: props,
+            deletion_policy: None,
+            update_replace_policy: None,
         }
     }
 

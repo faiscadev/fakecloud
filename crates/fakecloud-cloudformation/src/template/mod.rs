@@ -35,6 +35,14 @@ pub struct ResourceDefinition {
     pub logical_id: String,
     pub resource_type: String,
     pub properties: Value,
+    /// The resource's `DeletionPolicy` attribute (`Delete` / `Retain` /
+    /// `Snapshot` / `RetainExceptOnCreate`), verbatim from the template.
+    /// `None` means the CFN default (`Delete`).
+    pub deletion_policy: Option<String>,
+    /// The resource's `UpdateReplacePolicy` attribute, governing what happens
+    /// to the OLD physical resource when an update replaces it. Same value set
+    /// as `DeletionPolicy`; `None` means the default (`Delete`).
+    pub update_replace_policy: Option<String>,
 }
 
 /// Known pseudo-references that should be passed through as-is.
@@ -97,6 +105,27 @@ mod tests {
         assert_eq!(parsed.resources.len(), 1);
         assert_eq!(parsed.resources[0].logical_id, "MyQueue");
         assert_eq!(parsed.resources[0].resource_type, "AWS::SQS::Queue");
+        // No DeletionPolicy on the resource -> defaults to None (Delete).
+        assert_eq!(parsed.resources[0].deletion_policy, None);
+        assert_eq!(parsed.resources[0].update_replace_policy, None);
+    }
+
+    #[test]
+    fn parse_captures_deletion_and_update_replace_policy() {
+        let template = r#"{
+            "Resources": {
+                "Db": {
+                    "Type": "AWS::RDS::DBInstance",
+                    "DeletionPolicy": "Retain",
+                    "UpdateReplacePolicy": "Snapshot",
+                    "Properties": { "Engine": "postgres" }
+                }
+            }
+        }"#;
+        let parsed = parse_template(template, &BTreeMap::new()).unwrap();
+        let db = &parsed.resources[0];
+        assert_eq!(db.deletion_policy.as_deref(), Some("Retain"));
+        assert_eq!(db.update_replace_policy.as_deref(), Some("Snapshot"));
     }
 
     #[test]

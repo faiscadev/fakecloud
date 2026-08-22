@@ -254,8 +254,11 @@ impl ResourceProvisioner {
             let stack_name = stack.name.clone();
             let stack_id = stack.stack_id.clone();
 
+            // Honor each child resource's DeletionPolicy when a nested stack is
+            // torn down, exactly as the top-level DeleteStack path does — a
+            // `Retain` resource inside a nested stack must survive too.
             for resource in stack.resources.iter().rev() {
-                let _ = self.delete_resource(resource);
+                let _ = self.delete_resource_respecting_policy(resource);
             }
 
             {
