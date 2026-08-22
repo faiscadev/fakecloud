@@ -632,7 +632,7 @@ impl SsmService {
                     "ExecutionDate": a.status_date.timestamp_millis() as f64 / 1000.0,
                     "Status": a.status,
                     "DetailedStatus": a.status,
-                    "ExecutionSummary": format!("1 out of 1 plugin processed, 1 success"),
+                    "ExecutionSummary": "1 out of 1 plugin processed, 1 success",
                 })
             })
             .collect();
