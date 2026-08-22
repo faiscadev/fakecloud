@@ -729,6 +729,8 @@ async fn queue_fault(endpoint: &str, http: &reqwest::Client, body: serde_json::V
     assert!(resp.status().is_success());
 }
 
+// SdkError is a large enum; this is a test helper that just forwards it.
+#[allow(clippy::result_large_err)]
 async fn invoke_simple(
     client: &aws_sdk_bedrockruntime::Client,
     model_id: &str,

@@ -203,7 +203,7 @@ async fn make_stream(client: &aws_sdk_dsql::Client, cluster_id: &str) -> String 
         .clone()
 }
 
-#[test_action("dsql", "CreateStream", checksum = "5b4285a1")]
+#[test_action("dsql", "CreateStream", checksum = "ffb28976")]
 #[tokio::test]
 async fn dsql_create_stream() {
     let server = TestServer::start().await;
@@ -223,7 +223,7 @@ async fn dsql_create_stream() {
     assert_eq!(resp.status().as_str(), "CREATING");
 }
 
-#[test_action("dsql", "GetStream", checksum = "0cbcee24")]
+#[test_action("dsql", "GetStream", checksum = "d985156f")]
 #[tokio::test]
 async fn dsql_get_stream() {
     let server = TestServer::start().await;

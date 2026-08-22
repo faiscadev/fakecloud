@@ -26,7 +26,7 @@ async fn make_cert(server: &TestServer, domain: &str) -> String {
         .to_string()
 }
 
-#[test_action("acm", "RequestCertificate", checksum = "040fb904")]
+#[test_action("acm", "RequestCertificate", checksum = "385cddec")]
 #[tokio::test]
 async fn acm_request_certificate() {
     let server = TestServer::start().await;
@@ -38,7 +38,7 @@ async fn acm_request_certificate() {
         .unwrap();
 }
 
-#[test_action("acm", "DescribeCertificate", checksum = "8aa8ceaa")]
+#[test_action("acm", "DescribeCertificate", checksum = "cf0b76ba")]
 #[tokio::test]
 async fn acm_describe_certificate() {
     let server = TestServer::start().await;
@@ -257,7 +257,7 @@ async fn acm_put_account_config() {
         .unwrap();
 }
 
-#[test_action("acm", "UpdateCertificateOptions", checksum = "01fc07d9")]
+#[test_action("acm", "UpdateCertificateOptions", checksum = "7f299377")]
 #[tokio::test]
 async fn acm_update_options() {
     let server = TestServer::start().await;

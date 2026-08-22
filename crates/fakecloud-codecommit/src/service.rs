@@ -53,6 +53,7 @@ pub const CODECOMMIT_ACTIONS: &[&str] = &[
     "EvaluatePullRequestApprovalRules",
     "GetApprovalRuleTemplate",
     "GetBlob",
+    "GetBlobDifferences",
     "GetBranch",
     "GetComment",
     "GetCommentReactions",
@@ -221,6 +222,7 @@ impl CodeCommitService {
             "GetFile" => self.get_file(req),
             "GetFolder" => self.get_folder(req),
             "GetBlob" => self.get_blob(req),
+            "GetBlobDifferences" => self.get_blob_differences(req),
             "CreateCommit" => self.create_commit(req),
             "GetCommit" => self.get_commit(req),
             "BatchGetCommits" => self.batch_get_commits(req),
@@ -1148,6 +1150,96 @@ impl CodeCommitService {
                 "The specified blob does not exist.",
             )),
         }
+    }
+
+    fn get_blob_differences(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let b = body(req);
+        let name = require_repository_name(&b)?;
+        let after_blob = require(&b, "afterBlobId", "BlobIdRequiredException")?;
+        if !is_object_id(&after_blob) {
+            return Err(err("InvalidBlobIdException", "The blob ID is not valid."));
+        }
+        let before_blob = b
+            .get("beforeBlobId")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        if let Some(bb) = &before_blob {
+            if !is_object_id(bb) {
+                return Err(err("InvalidBlobIdException", "The blob ID is not valid."));
+            }
+        }
+        // Default context matches CodeCommit's DiffContext default of 3.
+        let context = b
+            .get("contextLines")
+            .and_then(Value::as_i64)
+            .filter(|n| *n >= 0)
+            .unwrap_or(3) as usize;
+
+        let account = self.account(req);
+        let guard = self.state.read();
+        let st = guard.get(&account);
+        let repo = st
+            .and_then(|s| s.repositories.get(&name))
+            .ok_or_else(|| repo_not_found(&name))?;
+
+        let decode = |id: &str| -> Result<Vec<u8>, AwsServiceError> {
+            let content = repo.blobs.get(id).ok_or_else(|| {
+                err(
+                    "BlobIdDoesNotExistException",
+                    "The specified blob does not exist.",
+                )
+            })?;
+            Ok(base64::engine::general_purpose::STANDARD
+                .decode(content.as_bytes())
+                .unwrap_or_else(|_| content.clone().into_bytes()))
+        };
+
+        let after_bytes = decode(&after_blob)?;
+        let before_bytes = match &before_blob {
+            Some(id) => decode(id)?,
+            None => Vec::new(),
+        };
+
+        let is_binary_diff = is_binary(&before_bytes) || is_binary(&after_bytes);
+        let all_hunks = if is_binary_diff {
+            Vec::new()
+        } else {
+            blob_diff_hunks(&before_bytes, &after_bytes, context)
+        };
+
+        // Paginate the hunk list. NextToken is the opaque 1-based offset of the
+        // next hunk to return; MaxResults bounds the page.
+        let start: usize = b
+            .get("NextToken")
+            .and_then(Value::as_str)
+            .and_then(|t| t.parse().ok())
+            .unwrap_or(0);
+        let max: usize = b
+            .get("MaxResults")
+            .and_then(Value::as_i64)
+            .filter(|n| *n > 0)
+            .map_or(usize::MAX, |n| n as usize);
+        let end = start.saturating_add(max).min(all_hunks.len());
+        let page = if start < all_hunks.len() {
+            all_hunks[start..end].to_vec()
+        } else {
+            Vec::new()
+        };
+        let next_token = if end < all_hunks.len() {
+            Some(end.to_string())
+        } else {
+            None
+        };
+
+        let mut out = serde_json::Map::new();
+        out.insert("hunks".into(), json!(page));
+        out.insert("isBinary".into(), json!(is_binary_diff));
+        out.insert("beforeBlobSize".into(), json!(before_bytes.len()));
+        out.insert("afterBlobSize".into(), json!(after_bytes.len()));
+        if let Some(tok) = next_token {
+            out.insert("NextToken".into(), json!(tok));
+        }
+        ok(Value::Object(out))
     }
 
     fn get_file(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -3729,6 +3821,45 @@ mod engine_tests {
 
     fn commit(parents: &[&str]) -> Value {
         json!({ "parents": parents, "treeId": "t" })
+    }
+
+    #[test]
+    fn blob_diff_reports_modified_line_with_context() {
+        let before = b"line1\nline2\nline3\n";
+        let after = b"line1\nCHANGED\nline3\n";
+        let hunks = blob_diff_hunks(before, after, 3);
+        assert_eq!(hunks.len(), 1);
+        let h = &hunks[0];
+        assert_eq!(h["beforeStartLine"], json!(1));
+        assert_eq!(h["afterStartLine"], json!(1));
+        let changes = h["changes"].as_array().unwrap();
+        // 2 context lines + 1 delete + 1 add for the modified middle line.
+        let types: Vec<&str> = changes
+            .iter()
+            .map(|c| c["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(types, ["CONTEXT", "DELETE", "ADD", "CONTEXT"]);
+        let deleted = changes.iter().find(|c| c["type"] == "DELETE").unwrap();
+        assert_eq!(deleted["content"], json!("line2"));
+        assert_eq!(deleted["beforeLineNumber"], json!(2));
+        let added = changes.iter().find(|c| c["type"] == "ADD").unwrap();
+        assert_eq!(added["content"], json!("CHANGED"));
+        assert_eq!(added["afterLineNumber"], json!(2));
+    }
+
+    #[test]
+    fn blob_diff_identical_blobs_yield_no_hunks() {
+        let same = b"a\nb\nc\n";
+        assert!(blob_diff_hunks(same, same, 3).is_empty());
+    }
+
+    #[test]
+    fn blob_diff_pure_addition_from_empty_before() {
+        let hunks = blob_diff_hunks(b"", b"only\n", 3);
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0]["beforeLineCount"], json!(0));
+        assert_eq!(hunks[0]["afterLineCount"], json!(1));
+        assert_eq!(hunks[0]["changes"][0]["type"], json!("ADD"));
     }
 
     // Defect 3: merge_base is the lowest common ancestor, not any ancestor.

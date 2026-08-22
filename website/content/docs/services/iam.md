@@ -4,7 +4,7 @@ description = "Users, roles, policies, groups, instance profiles, OIDC/SAML prov
 weight = 7
 +++
 
-fakecloud implements **176 of 176** IAM operations at 100% Smithy conformance.
+fakecloud implements **180 of 180** IAM operations at 100% Smithy conformance.
 
 ## Supported features
 
@@ -16,7 +16,8 @@ fakecloud implements **176 of 176** IAM operations at 100% Smithy conformance.
 - **Instance profiles** — CRUD, role attachment
 - **OIDC providers** — CRUD, client IDs, thumbprints
 - **SAML providers** — CRUD, metadata documents
-- **Account management** — aliases, password policy, summary
+- **Account management** — aliases, password policy, summary, and account-level key/value properties (`PutAccountProperties` / `GetAccountProperties`)
+- **Role templates** — `AcquireRole` and `GetRoleTemplateVersion` resolve template ARNs; templates are provisioned by AWS out of band (no create-template API), so on a fresh account any template ARN returns `NoSuchEntity`, matching AWS
 - **Tags** — on users, roles, policies, and policy versions
 - **Service-linked roles** — CRUD with service name validation
 - **PassRole trust enforcement** — when a role ARN is passed to Lambda (`CreateFunction`) or ECS (`RegisterTaskDefinition`, `RunTask` overrides), the role's `AssumeRolePolicyDocument` is checked against the calling service's principal (`lambda.amazonaws.com`, `ecs-tasks.amazonaws.com`). Roles whose trust policy doesn't allow the principal are rejected with `InvalidParameterValueException` / `InvalidParameterException`, matching real AWS

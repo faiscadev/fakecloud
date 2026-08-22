@@ -437,6 +437,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 ## [IAM](@/docs/services/iam.md)
 
 - `AcceptDelegationRequest`
+- `AcquireRole`
 - `AddClientIDToOpenIDConnectProvider`
 - `AddRoleToInstanceProfile`
 - `AddUserToGroup`
@@ -500,6 +501,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetAccessKeyLastUsed`
 - `GetAccountAuthorizationDetails`
 - `GetAccountPasswordPolicy`
+- `GetAccountProperties`
 - `GetAccountSummary`
 - `GetContextKeysForCustomPolicy`
 - `GetContextKeysForPrincipalPolicy`
@@ -518,6 +520,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetPolicyVersion`
 - `GetRole`
 - `GetRolePolicy`
+- `GetRoleTemplateVersion`
 - `GetSAMLProvider`
 - `GetSSHPublicKey`
 - `GetServerCertificate`
@@ -562,6 +565,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListUserTags`
 - `ListUsers`
 - `ListVirtualMFADevices`
+- `PutAccountProperties`
 - `PutGroupPolicy`
 - `PutRolePermissionsBoundary`
 - `PutRolePolicy`
@@ -5531,6 +5535,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `EvaluatePullRequestApprovalRules`
 - `GetApprovalRuleTemplate`
 - `GetBlob`
+- `GetBlobDifferences`
 - `GetBranch`
 - `GetComment`
 - `GetCommentReactions`
@@ -6137,6 +6142,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListAcmeDomainValidations`
 - `ListAcmeEndpoints`
 - `ListAcmeExternalAccountBindings`
+- `ListCertificateDomainValidations`
 - `ListCertificates`
 - `ListTagsForCertificate`
 - `ListTagsForResource`

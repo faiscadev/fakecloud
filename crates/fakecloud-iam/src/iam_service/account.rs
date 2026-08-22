@@ -699,6 +699,127 @@ impl IamService {
         let xml = empty_response("DeleteAccountPasswordPolicy", &req.request_id);
         Ok(AwsResponse::xml(StatusCode::OK, xml))
     }
+
+    pub(super) fn put_account_properties(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // The Properties map is a required, non-flattened awsQuery map, so each
+        // pair arrives as Properties.entry.<n>.key / Properties.entry.<n>.value.
+        // Walk the contiguous index range from 1 until a gap.
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for i in 1.. {
+            let key = req.query_params.get(&format!("Properties.entry.{i}.key"));
+            let Some(key) = key else { break };
+            let value = req
+                .query_params
+                .get(&format!("Properties.entry.{i}.value"))
+                .cloned()
+                .unwrap_or_default();
+            pairs.push((key.clone(), value));
+        }
+
+        if pairs.is_empty() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidInput",
+                "At least one property must be supplied.",
+            ));
+        }
+
+        // Each key must be Namespace/PropertyName: exactly one '/', and it may
+        // not start or end with '/'. Values are bounded 1..=1024 by the model.
+        for (key, value) in &pairs {
+            validate_string_length_with_code("key", key, 1, 256, "InvalidInput")?;
+            if key.matches('/').count() != 1 || key.starts_with('/') || key.ends_with('/') {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidInput",
+                    format!(
+                        "The property key {key} is not valid. Keys must use the format Namespace/PropertyName."
+                    ),
+                ));
+            }
+            validate_string_length_with_code("value", value, 1, 1024, "InvalidInput")?;
+        }
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        for (key, value) in pairs {
+            state.account_properties.insert(key, value);
+        }
+
+        let xml = empty_response("PutAccountProperties", &req.request_id);
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    pub(super) fn get_account_properties(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let empty = crate::state::IamState::new(&req.account_id);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        let entries: String = state
+            .account_properties
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "      <entry>\n        <key>{}</key>\n        <value>{}</value>\n      </entry>",
+                    xml_escape(k),
+                    xml_escape(v)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<GetAccountPropertiesResponse xmlns="https://iam.amazonaws.com/doc/2010-05-08/">
+  <GetAccountPropertiesResult>
+    <Properties>
+{entries}
+    </Properties>
+  </GetAccountPropertiesResult>
+  <ResponseMetadata>
+    <RequestId>{}</RequestId>
+  </ResponseMetadata>
+</GetAccountPropertiesResponse>"#,
+            req.request_id
+        );
+        Ok(AwsResponse::xml(StatusCode::OK, xml))
+    }
+
+    /// Acquire a role from a role template. Role templates are provisioned by
+    /// AWS out of band (there is no create-template operation), so on a fresh
+    /// account no template ARN can resolve — AWS returns NoSuchEntity for any
+    /// TemplateArn. We validate the required input and mirror that behavior.
+    pub(super) fn acquire_role(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let template_arn =
+            required_param_with_code(&req.query_params, "TemplateArn", "InvalidInput")?;
+        Err(AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "NoSuchEntity",
+            format!("The role template with ARN {template_arn} cannot be found."),
+        ))
+    }
+
+    /// Retrieve a version of a role template. As with AcquireRole, no role
+    /// template can exist on a fresh account (there is no create-template
+    /// operation), so every TemplateArn resolves to NoSuchEntity.
+    pub(super) fn get_role_template_version(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let template_arn =
+            required_param_with_code(&req.query_params, "TemplateArn", "InvalidInput")?;
+        Err(AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "NoSuchEntity",
+            format!("The role template with ARN {template_arn} cannot be found."),
+        ))
+    }
 }
 
 impl IamService {

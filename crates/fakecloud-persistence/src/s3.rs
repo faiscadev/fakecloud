@@ -904,27 +904,22 @@ impl S3Store for DiskS3Store {
             return Ok(BodyRef::Memory(Bytes::new()));
         }
 
-        let size: u64;
-        let bytes_for_cache: Option<Bytes>;
-        match body {
+        let (size, bytes_for_cache): (u64, Option<Bytes>) = match body {
             BodySource::Bytes(b) => {
-                size = b.len() as u64;
                 crate::atomic::write_atomic_bytes(&bin_path, &b)?;
-                bytes_for_cache = Some(b);
+                (b.len() as u64, Some(b))
             }
             BodySource::File(src) => {
                 let src_size = std::fs::metadata(&src)?.len();
-                size = src_size;
                 crate::atomic::write_atomic_from_file(&src, &bin_path)?;
-                bytes_for_cache = None;
+                (src_size, None)
             }
             BodySource::FileCopy(src) => {
                 let src_size = std::fs::metadata(&src)?.len();
-                size = src_size;
                 crate::atomic::write_atomic_copy_from_file(&src, &bin_path)?;
-                bytes_for_cache = None;
+                (src_size, None)
             }
-        }
+        };
 
         crate::atomic::write_atomic_toml(&toml_path, meta)?;
 

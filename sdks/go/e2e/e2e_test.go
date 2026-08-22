@@ -249,14 +249,16 @@ func TestE2ECloudFrontGetDistributions(t *testing.T) {
 			DefaultCacheBehavior: &cftypes.DefaultCacheBehavior{
 				TargetOriginId:       aws.String("o1"),
 				ViewerProtocolPolicy: cftypes.ViewerProtocolPolicyAllowAll,
-				ForwardedValues: &cftypes.ForwardedValues{
+				// ForwardedValues/MinTTL are deprecated in the AWS SDK but remain
+				// valid CloudFront distribution config; exercise them on purpose.
+				ForwardedValues: &cftypes.ForwardedValues{ //nolint:staticcheck
 					QueryString: aws.Bool(false),
 					Cookies: &cftypes.CookiePreference{
 						Forward: cftypes.ItemSelectionNone,
 					},
 					Headers: &cftypes.Headers{Quantity: aws.Int32(0)},
 				},
-				MinTTL: aws.Int64(0),
+				MinTTL: aws.Int64(0), //nolint:staticcheck
 			},
 		},
 	})

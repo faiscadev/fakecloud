@@ -107,6 +107,9 @@ impl CloudFrontDataPlane {
     /// The `Host` check happens on the request headers before the body is touched,
     /// so pass-through traffic (all AWS API calls, `/_fakecloud/*`) is never
     /// buffered.
+    // The Err variant IS the original request, returned untouched for
+    // pass-through dispatch; boxing it would defeat that zero-copy contract.
+    #[allow(clippy::result_large_err)]
     pub async fn serve(&self, req: Request<Body>) -> Result<Response, Request<Body>> {
         if !self.enabled {
             return Err(req);
