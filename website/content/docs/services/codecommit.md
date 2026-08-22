@@ -1,11 +1,11 @@
 +++
 title = "AWS CodeCommit"
-description = "AWS CodeCommit (codecommit) on fakecloud: a complete 79-operation implementation (100% conformance) covering repositories, branches, commits and files over a real content-addressed object store, pull requests with approvals and events, approval-rule templates and associations, comments and reactions, repository triggers, and tagging. awsJson1.1."
+description = "AWS CodeCommit (codecommit) on fakecloud: a complete 80-operation implementation (100% conformance) covering repositories, branches, commits and files over a real content-addressed object store, pull requests with approvals and events, approval-rule templates and associations, comments and reactions, repository triggers, and tagging. awsJson1.1."
 weight = 66
 +++
 
 fakecloud implements **AWS CodeCommit** as an awsJson1.1 service (sigv4 signing
-name `codecommit`, target prefix `CodeCommit_20150413`). All **79 operations**
+name `codecommit`, target prefix `CodeCommit_20150413`). All **80 operations**
 ship with **100% conformance** against AWS's own Smithy model, backed by
 account-partitioned state that persists across restarts in persistent mode.
 
@@ -44,6 +44,9 @@ name or a 40-char commit id) against the stored graph: `GetFile`, `GetFolder`,
 `GetBlob`, `GetCommit`, `BatchGetCommits`, `GetDifferences`, and
 `ListFileCommitHistory` all return real data from the materialized trees, with
 `fileMode` mapped to the `EXECUTABLE` / `NORMAL` / `SYMLINK` model enum.
+`GetBlobDifferences` computes a real line-level diff between two blobs, returning
+unified `DiffHunk`s (with `CONTEXT` / `ADD` / `DELETE` changes and the requested
+`contextLines`), binary-file detection, and `NextToken` paging over hunks.
 
 ## Merges
 

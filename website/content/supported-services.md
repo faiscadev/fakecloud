@@ -1,10 +1,10 @@
 +++
 title = "AWS Service Coverage & API Conformance"
-description = "fakecloud provides 100% API conformance across 7,391 operations. Explore our supported AWS services for local development."
+description = "fakecloud provides 100% API conformance across 7,396 operations. Explore our supported AWS services for local development."
 template = "page.html"
 +++
 
-fakecloud provides 100% API conformance across 7,391 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
+fakecloud provides 100% API conformance across 7,396 operations. Unlike mocks, fakecloud is built against official AWS Smithy models to ensure wire-protocol compatibility and deterministic behavior for local development.
 
 ## Coverage Summary
 - **Total Services**: 54
@@ -61,7 +61,7 @@ fakecloud provides 100% API conformance across 7,391 operations. Unlike mocks, f
 - **Verified Permissions**: 34 operations (complete). Full `verifiedpermissions` Cedar authorization control plane: policy stores, Cedar schemas (`PutSchema`/`GetSchema`), static and template-linked policies, policy templates, identity sources (Cognito/OIDC), policy-store aliases, and tagging. `IsAuthorized`/`IsAuthorizedWithToken`/`BatchIsAuthorized`/`BatchIsAuthorizedWithToken` compute real Cedar decisions via the official `cedar-policy` engine — policies compile into a Cedar `PolicySet` and the request is evaluated to an `ALLOW`/`DENY` with determining policies and errors. `*WithToken` resolves the principal from the JWT `sub` claim. `@length`/`@range`/enum constraints enforced. Account-partitioned and persisted.
 
 ### Security & Management
-- **IAM**: 176 operations. Policy evaluation including permission boundaries, session policies, ABAC, NotPrincipal, and KMS key policies.
+- **IAM**: 180 operations. Policy evaluation including permission boundaries, session policies, ABAC, NotPrincipal, and KMS key policies.
 - **STS**: 11 operations. Local token generation and session management.
 - **SSM**: 152 operations. Parameter Store; Secrets Manager (23 operations) is a separate service.
 

@@ -338,6 +338,11 @@ pub struct IamState {
     pub signing_certificates: BTreeMap<String, Vec<SigningCertificate>>, // user_name -> certs
     pub account_aliases: Vec<String>,
     pub account_password_policy: Option<AccountPasswordPolicy>,
+    /// Account-level key/value properties set via PutAccountProperties and
+    /// read back by GetAccountProperties. Keys are free-form strings the
+    /// caller chooses; values are stored verbatim as strings.
+    #[serde(default)]
+    pub account_properties: BTreeMap<String, String>,
     pub virtual_mfa_devices: BTreeMap<String, VirtualMfaDevice>, // serial_number -> device
     pub service_linked_role_deletions: BTreeMap<String, ServiceLinkedRoleDeletion>,
     /// Maps access key ID to the identity that should be returned by GetCallerIdentity.
@@ -449,6 +454,7 @@ impl IamState {
             signing_certificates: BTreeMap::new(),
             account_aliases: Vec::new(),
             account_password_policy: None,
+            account_properties: BTreeMap::new(),
             virtual_mfa_devices: BTreeMap::new(),
             service_linked_role_deletions: BTreeMap::new(),
             credential_identities: BTreeMap::new(),

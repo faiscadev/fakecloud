@@ -278,6 +278,12 @@ impl AwsService for IamService {
             "UpdateAccountPasswordPolicy" => self.update_account_password_policy(&req),
             "GetAccountPasswordPolicy" => self.get_account_password_policy(&req),
             "DeleteAccountPasswordPolicy" => self.delete_account_password_policy(&req),
+            "PutAccountProperties" => self.put_account_properties(&req),
+            "GetAccountProperties" => self.get_account_properties(&req),
+
+            // Role templates
+            "AcquireRole" => self.acquire_role(&req),
+            "GetRoleTemplateVersion" => self.get_role_template_version(&req),
 
             // Credential Report
             "GenerateCredentialReport" => self.generate_credential_report(&req),
@@ -460,6 +466,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UpdateRole",
     "UpdateRoleDescription",
     "UpdateAssumeRolePolicy",
+    "AcquireRole",
+    "GetRoleTemplateVersion",
     "TagRole",
     "UntagRole",
     "ListRoleTags",
@@ -556,6 +564,8 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UpdateAccountPasswordPolicy",
     "GetAccountPasswordPolicy",
     "DeleteAccountPasswordPolicy",
+    "PutAccountProperties",
+    "GetAccountProperties",
     "GenerateCredentialReport",
     "GetCredentialReport",
     "CreateVirtualMFADevice",

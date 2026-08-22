@@ -857,6 +857,178 @@ pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.contains(&0)
 }
 
+/// Split a text blob into logical lines, dropping the empty trailing element
+/// produced by a final newline (so "a\nb\n" is two lines, not three).
+fn split_lines(bytes: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(bytes);
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = text.split('\n').map(|s| s.to_string()).collect();
+    if lines.last().map(|s| s.is_empty()).unwrap_or(false) {
+        lines.pop();
+    }
+    lines
+}
+
+/// The comparison key for a line: the raw line, or its whitespace stripped out
+/// when the caller asked to ignore whitespace. The original content is always
+/// preserved for the emitted change; only equality testing uses this key.
+fn line_key(line: &str, ignore_ws: bool) -> String {
+    if ignore_ws {
+        line.chars().filter(|c| !c.is_whitespace()).collect()
+    } else {
+        line.to_string()
+    }
+}
+
+/// One line-level edit produced by the diff before it is grouped into hunks.
+enum Op {
+    /// Unchanged line present on both sides: (before_idx, after_idx).
+    Context(usize, usize),
+    /// Line only in the before blob: before_idx.
+    Delete(usize),
+    /// Line only in the after blob: after_idx.
+    Add(usize),
+}
+
+/// Compute the line-level edit script between two blobs using a classic LCS
+/// dynamic program. Blob sizes here are test/repo scale, so the quadratic table
+/// is fine and keeps the output deterministic.
+fn edit_script(before: &[String], after: &[String], ignore_ws: bool) -> Vec<Op> {
+    let bk: Vec<String> = before.iter().map(|l| line_key(l, ignore_ws)).collect();
+    let ak: Vec<String> = after.iter().map(|l| line_key(l, ignore_ws)).collect();
+    let (n, m) = (bk.len(), ak.len());
+    // lcs[i][j] = length of LCS of before[i..] and after[j..].
+    let mut lcs = vec![vec![0usize; m + 1]; n + 1];
+    for i in (0..n).rev() {
+        for j in (0..m).rev() {
+            lcs[i][j] = if bk[i] == ak[j] {
+                lcs[i + 1][j + 1] + 1
+            } else {
+                lcs[i + 1][j].max(lcs[i][j + 1])
+            };
+        }
+    }
+    let mut ops = Vec::new();
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < n && j < m {
+        if bk[i] == ak[j] {
+            ops.push(Op::Context(i, j));
+            i += 1;
+            j += 1;
+        } else if lcs[i + 1][j] >= lcs[i][j + 1] {
+            ops.push(Op::Delete(i));
+            i += 1;
+        } else {
+            ops.push(Op::Add(j));
+            j += 1;
+        }
+    }
+    while i < n {
+        ops.push(Op::Delete(i));
+        i += 1;
+    }
+    while j < m {
+        ops.push(Op::Add(j));
+        j += 1;
+    }
+    ops
+}
+
+/// Build the `DiffHunk` list for a before/after blob pair, honoring the
+/// requested number of surrounding context lines. Runs of changes plus their
+/// context are grouped into hunks; adjacent runs whose context windows touch
+/// are merged, matching CodeCommit's documented behavior.
+pub(crate) fn blob_diff_hunks(before: &[u8], after: &[u8], context: usize) -> Vec<Value> {
+    let before_lines = split_lines(before);
+    let after_lines = split_lines(after);
+    let ops = edit_script(&before_lines, &after_lines, false);
+
+    // Indices of the ops that represent an actual change (Add/Delete).
+    let change_positions: Vec<usize> = ops
+        .iter()
+        .enumerate()
+        .filter(|(_, op)| !matches!(op, Op::Context(_, _)))
+        .map(|(idx, _)| idx)
+        .collect();
+    if change_positions.is_empty() {
+        return Vec::new();
+    }
+
+    // Coalesce change positions into hunk ranges over the op list, expanding by
+    // `context` on each side and merging ranges that overlap once expanded.
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for &pos in &change_positions {
+        let lo = pos.saturating_sub(context);
+        let hi = (pos + context).min(ops.len() - 1);
+        match ranges.last_mut() {
+            Some(last) if lo <= last.1 + 1 => last.1 = last.1.max(hi),
+            _ => ranges.push((lo, hi)),
+        }
+    }
+
+    ranges
+        .into_iter()
+        .map(|(lo, hi)| {
+            let mut changes = Vec::new();
+            let (mut before_start, mut after_start) = (0usize, 0usize);
+            let (mut before_count, mut after_count) = (0usize, 0usize);
+            let mut seen_before = false;
+            let mut seen_after = false;
+            for op in &ops[lo..=hi] {
+                let mut change = Map::new();
+                match op {
+                    Op::Context(bi, ai) => {
+                        change.insert("type".into(), json!("CONTEXT"));
+                        change.insert("beforeLineNumber".into(), json!(bi + 1));
+                        change.insert("afterLineNumber".into(), json!(ai + 1));
+                        change.insert("content".into(), json!(before_lines[*bi]));
+                        if !seen_before {
+                            before_start = bi + 1;
+                            seen_before = true;
+                        }
+                        if !seen_after {
+                            after_start = ai + 1;
+                            seen_after = true;
+                        }
+                        before_count += 1;
+                        after_count += 1;
+                    }
+                    Op::Delete(bi) => {
+                        change.insert("type".into(), json!("DELETE"));
+                        change.insert("beforeLineNumber".into(), json!(bi + 1));
+                        change.insert("content".into(), json!(before_lines[*bi]));
+                        if !seen_before {
+                            before_start = bi + 1;
+                            seen_before = true;
+                        }
+                        before_count += 1;
+                    }
+                    Op::Add(ai) => {
+                        change.insert("type".into(), json!("ADD"));
+                        change.insert("afterLineNumber".into(), json!(ai + 1));
+                        change.insert("content".into(), json!(after_lines[*ai]));
+                        if !seen_after {
+                            after_start = ai + 1;
+                            seen_after = true;
+                        }
+                        after_count += 1;
+                    }
+                }
+                changes.push(Value::Object(change));
+            }
+            json!({
+                "beforeStartLine": before_start,
+                "beforeLineCount": before_count,
+                "afterStartLine": after_start,
+                "afterLineCount": after_count,
+                "changes": changes,
+            })
+        })
+        .collect()
+}
+
 /// Build a `PullRequestEvent`-shaped JSON value.
 pub(crate) fn pr_event(
     pr_id: &str,

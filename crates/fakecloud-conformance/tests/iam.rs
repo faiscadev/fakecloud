@@ -164,11 +164,11 @@ async fn iam_access_key_lifecycle() {
 
 const ASSUME_ROLE_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"Service":"ec2.amazonaws.com"},"Action":"sts:AssumeRole"}]}"#;
 
-#[test_action("iam", "CreateRole", checksum = "873f52f2")]
-#[test_action("iam", "GetRole", checksum = "eb87506d")]
-#[test_action("iam", "ListRoles", checksum = "65174afc")]
+#[test_action("iam", "CreateRole", checksum = "336cfd35")]
+#[test_action("iam", "GetRole", checksum = "82cf1c9d")]
+#[test_action("iam", "ListRoles", checksum = "b2027761")]
 #[test_action("iam", "UpdateRole", checksum = "4ef4a056")]
-#[test_action("iam", "UpdateRoleDescription", checksum = "b7ded596")]
+#[test_action("iam", "UpdateRoleDescription", checksum = "3ca4f8fa")]
 #[test_action("iam", "UpdateAssumeRolePolicy", checksum = "2097f40b")]
 #[test_action("iam", "DeleteRole", checksum = "13b863d4")]
 #[tokio::test]
@@ -911,9 +911,9 @@ async fn iam_group_managed_policies() {
 // Instance profiles
 // ==========================================================================
 
-#[test_action("iam", "CreateInstanceProfile", checksum = "55d4f12f")]
-#[test_action("iam", "GetInstanceProfile", checksum = "dc894f55")]
-#[test_action("iam", "ListInstanceProfiles", checksum = "73fb3093")]
+#[test_action("iam", "CreateInstanceProfile", checksum = "1f6146c0")]
+#[test_action("iam", "GetInstanceProfile", checksum = "e9df6bb9")]
+#[test_action("iam", "ListInstanceProfiles", checksum = "7198febc")]
 #[test_action("iam", "DeleteInstanceProfile", checksum = "0bcced85")]
 #[tokio::test]
 async fn iam_instance_profile_lifecycle() {
@@ -946,7 +946,7 @@ async fn iam_instance_profile_lifecycle() {
 
 #[test_action("iam", "AddRoleToInstanceProfile", checksum = "d91b8859")]
 #[test_action("iam", "RemoveRoleFromInstanceProfile", checksum = "db70911c")]
-#[test_action("iam", "ListInstanceProfilesForRole", checksum = "62799439")]
+#[test_action("iam", "ListInstanceProfilesForRole", checksum = "23b10686")]
 #[tokio::test]
 async fn iam_instance_profile_role() {
     let server = TestServer::start().await;
@@ -1362,7 +1362,7 @@ async fn iam_signing_certificate() {
 // Service-linked roles
 // ==========================================================================
 
-#[test_action("iam", "CreateServiceLinkedRole", checksum = "7e8f9e97")]
+#[test_action("iam", "CreateServiceLinkedRole", checksum = "cdb015f6")]
 #[test_action("iam", "DeleteServiceLinkedRole", checksum = "8ac7f160")]
 #[test_action("iam", "GetServiceLinkedRoleDeletionStatus", checksum = "506cf566")]
 #[tokio::test]
@@ -1398,7 +1398,7 @@ async fn iam_service_linked_role() {
 // ==========================================================================
 
 #[test_action("iam", "GetAccountSummary", checksum = "e23c8072")]
-#[test_action("iam", "GetAccountAuthorizationDetails", checksum = "a939671b")]
+#[test_action("iam", "GetAccountAuthorizationDetails", checksum = "6cdab198")]
 #[tokio::test]
 async fn iam_account_info() {
     let server = TestServer::start().await;
@@ -1752,6 +1752,54 @@ async fn iam_post_raw(server: &TestServer, params: &[(&str, &str)]) -> reqwest::
         .send()
         .await
         .unwrap()
+}
+
+#[test_action("iam", "PutAccountProperties", checksum = "323a84ed")]
+#[test_action("iam", "GetAccountProperties", checksum = "4b041ee7")]
+#[tokio::test]
+async fn iam_account_properties() {
+    let server = TestServer::start().await;
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "PutAccountProperties"),
+            ("Properties.entry.1.key", "IdentityCenter/Enabled"),
+            ("Properties.entry.1.value", "true"),
+        ],
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    let resp = iam_post_raw(&server, &[("Action", "GetAccountProperties")]).await;
+    assert!(resp.status().is_success());
+    let body = resp.text().await.unwrap();
+    assert!(body.contains("IdentityCenter/Enabled"), "{body}");
+    assert!(body.contains("<value>true</value>"), "{body}");
+}
+
+#[test_action("iam", "AcquireRole", checksum = "de68e87f")]
+#[test_action("iam", "GetRoleTemplateVersion", checksum = "9648f5ba")]
+#[tokio::test]
+async fn iam_role_templates_absent() {
+    let server = TestServer::start().await;
+    // No role templates can exist (there is no create-template API), so both
+    // ops resolve to NoSuchEntity for any TemplateArn.
+    let arn = "arn:aws:iam::123456789012:role-template/example";
+    let resp = iam_post_raw(&server, &[("Action", "AcquireRole"), ("TemplateArn", arn)]).await;
+    assert_eq!(resp.status().as_u16(), 404);
+    assert!(resp.text().await.unwrap().contains("NoSuchEntity"));
+
+    let resp = iam_post_raw(
+        &server,
+        &[
+            ("Action", "GetRoleTemplateVersion"),
+            ("TemplateArn", arn),
+            ("MinorVersion", "1"),
+        ],
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 404);
+    assert!(resp.text().await.unwrap().contains("NoSuchEntity"));
 }
 
 #[test_action(

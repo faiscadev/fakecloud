@@ -48,6 +48,7 @@ use helpers::TestServer;
 )]
 #[test_action("codecommit", "GetApprovalRuleTemplate", checksum = "1e984f9f")]
 #[test_action("codecommit", "GetBlob", checksum = "a2705900")]
+#[test_action("codecommit", "GetBlobDifferences", checksum = "ff2b89ad")]
 #[test_action("codecommit", "GetBranch", checksum = "c1096e18")]
 #[test_action("codecommit", "GetComment", checksum = "75481012")]
 #[test_action("codecommit", "GetCommentReactions", checksum = "89d65bec")]
