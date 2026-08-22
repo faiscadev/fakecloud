@@ -120,6 +120,11 @@ jobs:
       # RUSTSEC-2026-0221 (spin 0.9.8 yanked) is a yanked transitive spinlock
       # dependency; nothing in fakecloud's tree can move off it until upstream
       # crates republish.
+      #
+      # RUSTSEC-2026-0258 (h2 unbounded empty DATA frames) is fixed on the 0.4
+      # line (bumped to 0.4.16) but still reaches us via the legacy h2 0.3.x that
+      # hyper 0.14 pulls in transitively; the 0.3 line has no patched release, so
+      # that one path stays ignored until the upstream 0.14 stack moves off it.
       - run: |
           cargo audit \
             --ignore RUSTSEC-2026-0098 \
@@ -139,4 +144,5 @@ jobs:
             --ignore RUSTSEC-2026-0173 \
             --ignore RUSTSEC-2026-0190 \
             --ignore RUSTSEC-2026-0221 \
-            --ignore RUSTSEC-2026-0235
+            --ignore RUSTSEC-2026-0235 \
+            --ignore RUSTSEC-2026-0258
