@@ -452,7 +452,7 @@ pub(crate) fn describe_network_interface_attribute(
     let attr_xml = match attribute.as_str() {
         "description" => format!(
             "<description><value>{}</value></description>",
-            eni.map(|e| e.description.as_str()).unwrap_or("")
+            fakecloud_aws::xml::xml_escape(eni.map(|e| e.description.as_str()).unwrap_or(""))
         ),
         "groupSet" => {
             let groups: Vec<String> = eni
@@ -881,6 +881,26 @@ mod tests {
         assert!(describe_attr(&svc, "description")
             .contains("<description><value>new-desc</value></description>"));
         assert!(describe_attr(&svc, "groupSet").contains("<groupId>sg-a</groupId>"));
+    }
+
+    #[test]
+    fn describe_network_interface_attribute_escapes_description_xml() {
+        let svc = Ec2Service::new();
+        seed_eni(&svc);
+        modify_network_interface_attribute(
+            &svc,
+            &req(&[
+                ("NetworkInterfaceId", "eni-1"),
+                ("Description.Value", "web & db <tier>"),
+            ]),
+        )
+        .unwrap();
+        let xml = describe_attr(&svc, "description");
+        assert!(
+            xml.contains("web &amp; db &lt;tier&gt;"),
+            "description must be XML-escaped: {xml}"
+        );
+        assert!(!xml.contains("db <tier>"), "raw < must not appear: {xml}");
     }
 
     #[test]

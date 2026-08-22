@@ -1762,7 +1762,10 @@ pub(crate) fn describe_instance_attribute(
             inst.instance_initiated_shutdown_behavior
         ),
         "userData" => match &inst.user_data {
-            Some(d) => format!("<userData><value>{d}</value></userData>"),
+            Some(d) => format!(
+                "<userData><value>{}</value></userData>",
+                fakecloud_aws::xml::xml_escape(d)
+            ),
             None => "<userData/>".to_string(),
         },
         "groupSet" => {
@@ -2547,6 +2550,31 @@ mod modify_tests {
         let empty = super::parse_launch_opts(&std::collections::HashMap::new());
         assert!(empty.cpu_options.is_none());
         assert!(empty.placement_tenancy.is_none());
+    }
+
+    #[test]
+    fn describe_instance_attribute_escapes_user_data_xml() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-esc");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            state.instances.get_mut("i-esc").unwrap().user_data = Some("echo a && b <c>".into());
+        }
+        let resp = describe_instance_attribute(
+            &svc,
+            &req(
+                "DescribeInstanceAttribute",
+                &[("InstanceId", "i-esc"), ("Attribute", "userData")],
+            ),
+        )
+        .unwrap();
+        let xml = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        assert!(
+            xml.contains("echo a &amp;&amp; b &lt;c&gt;"),
+            "userData must be XML-escaped: {xml}"
+        );
+        assert!(!xml.contains("b <c>"), "raw < must not appear: {xml}");
     }
 
     fn seed_instance(svc: &Ec2Service, id: &str) {

@@ -839,7 +839,7 @@ pub(crate) fn paginate_policy_names(
     };
     let members = page
         .iter()
-        .map(|n| format!("      <member>{n}</member>"))
+        .map(|n| format!("      <member>{}</member>", xml_escape(n)))
         .collect::<Vec<_>>()
         .join("\n");
     (members, is_truncated, next_marker)
