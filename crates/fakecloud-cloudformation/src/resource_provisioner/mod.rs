@@ -129,6 +129,18 @@ use fakecloud_wafv2::{IpSet, RegexPatternSet, RuleGroup, SharedWafv2State, WebAc
 use crate::state::StackResource;
 use crate::template::ResourceDefinition;
 
+/// Whether a `DeletionPolicy` / `UpdateReplacePolicy` value means the physical
+/// resource should be preserved rather than destroyed. `Retain`, `Snapshot`,
+/// and `RetainExceptOnCreate` all preserve it (Snapshot is treated as retain —
+/// see `delete_resource_respecting_policy`); `Delete` and `None` (the CFN
+/// default) do not. Comparison is case-insensitive to tolerate lenient input.
+pub(crate) fn policy_retains_physical(policy: Option<&str>) -> bool {
+    matches!(
+        policy.map(|p| p.trim().to_ascii_lowercase()).as_deref(),
+        Some("retain") | Some("snapshot") | Some("retainexceptoncreate")
+    )
+}
+
 /// Convert a CFN `Tags` property (`[{Key, Value}, ...]`) into the IAM
 /// crate's `Tag` Vec form. Silently skips malformed entries — the same
 /// tolerant behaviour the existing IAM service uses for runtime input.
@@ -1599,6 +1611,8 @@ impl ResourceProvisioner {
             status: "CREATE_COMPLETE".to_string(),
             service_token,
             attributes: res.attributes,
+            deletion_policy: resource.deletion_policy.clone(),
+            update_replace_policy: resource.update_replace_policy.clone(),
         })
     }
 
@@ -2030,6 +2044,9 @@ impl ResourceProvisioner {
             status: "UPDATE_COMPLETE".to_string(),
             service_token: existing.service_token.clone(),
             attributes: res.attributes,
+            // Carry the new template's policies onto the updated record.
+            deletion_policy: new_def.deletion_policy.clone(),
+            update_replace_policy: new_def.update_replace_policy.clone(),
         }))
     }
 
@@ -2059,7 +2076,20 @@ impl ResourceProvisioner {
         existing: &StackResource,
         new_def: &ResourceDefinition,
     ) -> Result<Option<ProvisionResult>, String> {
-        self.delete_resource(existing)?;
+        // A replacement destroys the OLD physical resource — unless its
+        // UpdateReplacePolicy is Retain/Snapshot, in which case CloudFormation
+        // leaves the old resource in place (unmanaged) and only creates the
+        // new one. Honoring this prevents silent data loss on replacement.
+        if policy_retains_physical(existing.update_replace_policy.as_deref()) {
+            tracing::info!(
+                logical_id = %existing.logical_id,
+                resource_type = %existing.resource_type,
+                policy = existing.update_replace_policy.as_deref().unwrap_or(""),
+                "CloudFormation: UpdateReplacePolicy retains the old physical resource on replacement; not deleting it"
+            );
+        } else {
+            self.delete_resource(existing)?;
+        }
         let created = self.create_resource(new_def)?;
         Ok(Some(ProvisionResult {
             physical_id: created.physical_id,
@@ -2331,6 +2361,33 @@ impl ResourceProvisioner {
             "Id" => Some(dist.id.clone()),
             _ => None,
         }
+    }
+
+    /// Delete a resource, honoring its `DeletionPolicy`. `Retain`, `Snapshot`,
+    /// and `RetainExceptOnCreate` all leave the backing physical resource in
+    /// place (the stack stops managing it); every other value — including the
+    /// default `None`/`Delete` — tears it down via [`Self::delete_resource`].
+    /// This is the gate that stops `DeleteStack` from destroying data a user
+    /// explicitly protected with `DeletionPolicy: Retain`.
+    ///
+    /// NOTE: `Snapshot` is treated as retain (the resource is preserved rather
+    /// than snapshot-then-deleted). Materializing a real per-service snapshot
+    /// is deliberately out of scope here; preserving the resource is the
+    /// no-data-loss direction and never destroys the protected data.
+    pub fn delete_resource_respecting_policy(
+        &self,
+        resource: &StackResource,
+    ) -> Result<(), String> {
+        if policy_retains_physical(resource.deletion_policy.as_deref()) {
+            tracing::info!(
+                logical_id = %resource.logical_id,
+                resource_type = %resource.resource_type,
+                policy = resource.deletion_policy.as_deref().unwrap_or(""),
+                "CloudFormation: DeletionPolicy retains the physical resource; not deleting it"
+            );
+            return Ok(());
+        }
+        self.delete_resource(resource)
     }
 
     /// Delete a previously created resource.
@@ -4181,6 +4238,8 @@ mod tests {
             logical_id: logical_id.to_string(),
             resource_type: resource_type.to_string(),
             properties: props,
+            deletion_policy: None,
+            update_replace_policy: None,
         }
     }
 
@@ -7145,6 +7204,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&stack_resource, "Arn"), None);
     }
@@ -7166,6 +7227,8 @@ mod tests {
                 m.insert("TopicArn".to_string(), "captured-arn".to_string());
                 m
             },
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(
             prov.get_att(&stack_resource, "TopicArn"),
@@ -7283,6 +7346,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -7313,6 +7378,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -7342,6 +7409,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -7373,6 +7442,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "Arn"), None);
     }
@@ -7438,6 +7509,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "Name"), None);
     }
@@ -7465,6 +7538,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "IdentityName"), None);
     }
@@ -7499,6 +7574,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "TemplateName"), None);
     }
@@ -7530,6 +7607,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "ContactListName"), None);
     }
@@ -7554,6 +7633,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "PoolName"), None);
     }
@@ -7578,6 +7659,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         };
         assert_eq!(prov.get_att(&fresh, "RuleSetName"), None);
     }
@@ -7677,6 +7760,8 @@ mod tests {
                     status: "CREATE_COMPLETE".to_string(),
                     service_token: None,
                     attributes: BTreeMap::new(),
+                    deletion_policy: None,
+                    update_replace_policy: None,
                 },
                 "Name",
             ),
@@ -8041,6 +8126,84 @@ mod tests {
         assert_eq!(param.value, "v2", "GetParameter must return the new value");
         assert_eq!(param.version, 2, "overwrite bumps the version");
         assert_eq!(param.history.len(), 1, "old value rotated into history");
+    }
+
+    #[test]
+    fn policy_retains_physical_truth_table() {
+        for v in [
+            "Retain",
+            "retain",
+            "Snapshot",
+            "RetainExceptOnCreate",
+            " Retain ",
+        ] {
+            assert!(policy_retains_physical(Some(v)), "{v} should retain");
+        }
+        for v in [
+            None,
+            Some("Delete"),
+            Some("delete"),
+            Some(""),
+            Some("other"),
+        ] {
+            assert!(!policy_retains_physical(v), "{v:?} should delete");
+        }
+    }
+
+    #[test]
+    fn deletion_policy_retain_preserves_backing_resource() {
+        let prov = make_provisioner();
+        let mut def = make_resource(
+            "AWS::SSM::Parameter",
+            "P",
+            serde_json::json!({"Name": "/keep/me", "Type": "String", "Value": "v1"}),
+        );
+        def.deletion_policy = Some("Retain".to_string());
+        let created = prov.create_resource(&def).expect("param provisions");
+        // The recorded StackResource carries the policy through provisioning.
+        assert_eq!(created.deletion_policy.as_deref(), Some("Retain"));
+
+        // A stack delete honoring the policy must NOT remove the parameter.
+        prov.delete_resource_respecting_policy(&created)
+            .expect("delete returns ok");
+        {
+            let ssm = prov.ssm_state.read();
+            let acct = ssm.get("123456789012").unwrap();
+            assert!(
+                acct.parameters.contains_key("/keep/me"),
+                "DeletionPolicy: Retain must preserve the parameter"
+            );
+        }
+
+        // The unconditional delete still tears it down (control).
+        prov.delete_resource(&created).expect("hard delete ok");
+        let ssm = prov.ssm_state.read();
+        let acct = ssm.get("123456789012").unwrap();
+        assert!(
+            !acct.parameters.contains_key("/keep/me"),
+            "an explicit delete removes the parameter"
+        );
+    }
+
+    #[test]
+    fn default_deletion_policy_deletes_backing_resource() {
+        let prov = make_provisioner();
+        let created = prov
+            .create_resource(&make_resource(
+                "AWS::SSM::Parameter",
+                "P",
+                serde_json::json!({"Name": "/gone", "Type": "String", "Value": "v1"}),
+            ))
+            .expect("param provisions");
+        assert_eq!(created.deletion_policy, None, "default policy is None");
+        prov.delete_resource_respecting_policy(&created)
+            .expect("delete ok");
+        let ssm = prov.ssm_state.read();
+        let acct = ssm.get("123456789012").unwrap();
+        assert!(
+            !acct.parameters.contains_key("/gone"),
+            "default (None) policy deletes the parameter"
+        );
     }
 
     #[test]

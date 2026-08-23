@@ -333,6 +333,8 @@ mod tests {
             status: "CREATE_COMPLETE".to_string(),
             service_token: None,
             attributes: std::collections::BTreeMap::new(),
+            deletion_policy: None,
+            update_replace_policy: None,
         }
     }
 

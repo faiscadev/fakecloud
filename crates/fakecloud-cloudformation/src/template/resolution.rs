@@ -78,6 +78,8 @@ pub fn resolve_resource_properties_with_attrs(
         logical_id: resource.logical_id.clone(),
         resource_type: resource.resource_type.clone(),
         properties: resolved,
+        deletion_policy: resource.deletion_policy.clone(),
+        update_replace_policy: resource.update_replace_policy.clone(),
     })
 }
 
@@ -286,6 +288,8 @@ mod dependency_order_tests {
             logical_id: logical.to_string(),
             resource_type: resource_type.to_string(),
             properties: serde_json::json!({}),
+            deletion_policy: None,
+            update_replace_policy: None,
         }
     }
 

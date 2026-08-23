@@ -98,10 +98,24 @@ pub fn parse_template_with_resolution(
         );
         let resolved = strip_no_value(resolved);
 
+        // DeletionPolicy / UpdateReplacePolicy are resource-level attributes
+        // (siblings of Type/Properties), not properties. Capture them verbatim
+        // so the delete/replace paths can honor Retain/Snapshot.
+        let deletion_policy = resource
+            .get("DeletionPolicy")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        let update_replace_policy = resource
+            .get("UpdateReplacePolicy")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
         resources.push(ResourceDefinition {
             logical_id: logical_id.clone(),
             resource_type,
             properties: resolved,
+            deletion_policy,
+            update_replace_policy,
         });
     }
 
