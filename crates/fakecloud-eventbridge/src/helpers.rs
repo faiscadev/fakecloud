@@ -1116,12 +1116,25 @@ pub(crate) fn deliver_to_logs(
         log_group_arn
     };
 
+    // Deliver into the account and region the target log-group ARN names, not
+    // the default account/frozen region — otherwise a cross-account/region
+    // target silently lands in the default account with a wrong-region ARN.
+    // ARN shape: arn:aws:logs:REGION:ACCOUNT:log-group:NAME[:*].
+    let arn_parts: Vec<&str> = log_group_arn.split(':').collect();
+    let target_region = arn_parts.get(3).filter(|s| !s.is_empty()).copied();
+    let target_account = arn_parts.get(4).filter(|s| !s.is_empty()).copied();
+
     let stream_name = "events".to_string();
     let ts_millis = timestamp.timestamp_millis();
 
     let mut accounts = logs_state.write();
-    let state = accounts.default_mut();
-    let region = state.region.clone();
+    let state = match target_account {
+        Some(acct) => accounts.get_or_create(acct),
+        None => accounts.default_mut(),
+    };
+    let region = target_region
+        .map(str::to_string)
+        .unwrap_or_else(|| state.region.clone());
     let account_id = state.account_id.clone();
 
     // Auto-create log group and stream if they don't exist
@@ -1561,5 +1574,29 @@ mod logs_persist_tests {
         let accounts = logs_state.read();
         let logs = accounts.get("123456789012").unwrap();
         assert!(logs.log_groups.contains_key("/eb/nohook"));
+    }
+
+    #[test]
+    fn deliver_to_logs_honors_target_arn_account_and_region() {
+        // A target log-group ARN in a non-default account/region must deliver
+        // into THAT account with a correctly-scoped group ARN, not collapse
+        // into the default account with a wrong-region ARN.
+        let logs_state = empty_logs_state();
+        let arn = "arn:aws:logs:eu-central-1:999999999999:log-group:/eb/xacct:*";
+        deliver_to_logs(&logs_state, arn, "payload", chrono::Utc::now());
+
+        let accounts = logs_state.read();
+        let logs = accounts
+            .get("999999999999")
+            .expect("group must land in the target account, not the default");
+        let group = logs
+            .log_groups
+            .get("/eb/xacct")
+            .expect("group created in target account");
+        assert!(
+            group.arn.contains(":eu-central-1:999999999999:"),
+            "group ARN must carry the target region+account: {}",
+            group.arn
+        );
     }
 }

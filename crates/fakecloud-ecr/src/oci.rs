@@ -492,7 +492,8 @@ async fn blob_head(
     }
     // Cache miss: try pull-through, which (on success) also caches.
     if let Some(outcome) =
-        crate::pull_through::proxy_blob(service, &request.account_id, name, digest).await
+        crate::pull_through::proxy_blob(service, &request.account_id, &request.region, name, digest)
+            .await
     {
         let proxied = outcome?;
         let mut resp = crate::pull_through::blob_response(&proxied, digest);
@@ -562,7 +563,8 @@ async fn blob_get(
         return Ok(resp);
     }
     if let Some(outcome) =
-        crate::pull_through::proxy_blob(service, &request.account_id, name, digest).await
+        crate::pull_through::proxy_blob(service, &request.account_id, &request.region, name, digest)
+            .await
     {
         let proxied = outcome?;
         // Pull-through cached the blob; mirror the local-hit code path
@@ -1049,6 +1051,7 @@ async fn manifest_head(
     if let Some(outcome) = crate::pull_through::proxy_manifest(
         service,
         &request.account_id,
+        &request.region,
         name,
         reference,
         request.principal.as_ref().map(|p| p.arn.as_str()),
@@ -1118,6 +1121,7 @@ async fn manifest_get(
     if let Some(outcome) = crate::pull_through::proxy_manifest(
         service,
         &request.account_id,
+        &request.region,
         name,
         reference,
         request.principal.as_ref().map(|p| p.arn.as_str()),
