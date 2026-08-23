@@ -1470,6 +1470,9 @@ async fn get_secret_value_not_found() {
     let req = make_request("GetSecretValue", r#"{"SecretId": "nope"}"#);
     let err = expect_err(svc.handle(req).await);
     assert!(err.to_string().contains("ResourceNotFoundException"));
+    // awsJson1_1: ResourceNotFoundException has no @httpError trait, so AWS
+    // returns HTTP 400, not 404. SDK retry classifiers key on this.
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
 }
 
 #[tokio::test]
