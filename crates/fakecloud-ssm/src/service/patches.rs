@@ -879,9 +879,10 @@ impl SsmService {
             })));
         }
 
-        // Otherwise look up from defaults
-        let baseline_id =
-            default_patch_baseline(&state.region, operating_system).unwrap_or_default();
+        // Otherwise look up from defaults. Resolve against the request region,
+        // not the frozen account region, so GetDefaultPatchBaseline from a
+        // different region returns that region's baseline id.
+        let baseline_id = default_patch_baseline(&req.region, operating_system).unwrap_or_default();
         Ok(AwsResponse::ok_json(json!({
             "BaselineId": baseline_id,
             "OperatingSystem": operating_system,

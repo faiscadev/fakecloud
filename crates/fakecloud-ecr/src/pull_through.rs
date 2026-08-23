@@ -181,9 +181,11 @@ async fn exchange_bearer_token(
 
 /// Proxy a manifest GET. On success, persist the manifest + auto-create
 /// the local `Repository` so subsequent requests hit local.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn proxy_manifest(
     service: &EcrService,
     account_id: &str,
+    region: &str,
     repo_name: &str,
     reference: &str,
     caller_arn: Option<&str>,
@@ -230,6 +232,7 @@ pub(crate) async fn proxy_manifest(
     cache_manifest(
         service,
         account_id,
+        region,
         repo_name,
         reference,
         &bytes,
@@ -250,6 +253,7 @@ pub(crate) async fn proxy_manifest(
 pub(crate) async fn proxy_blob(
     service: &EcrService,
     account_id: &str,
+    region: &str,
     repo_name: &str,
     digest: &str,
 ) -> Option<Result<ProxiedBlob, AwsServiceError>> {
@@ -285,7 +289,15 @@ pub(crate) async fn proxy_blob(
         Ok(b) => b.to_vec(),
         Err(e) => return Some(Err(proxy_error(repo_name, &e.to_string()))),
     };
-    cache_blob(service, account_id, repo_name, digest, &bytes, &media_type);
+    cache_blob(
+        service,
+        account_id,
+        region,
+        repo_name,
+        digest,
+        &bytes,
+        &media_type,
+    );
     Some(Ok(ProxiedBlob { bytes, media_type }))
 }
 
@@ -293,6 +305,7 @@ pub(crate) async fn proxy_blob(
 fn cache_manifest(
     service: &EcrService,
     account_id: &str,
+    region: &str,
     repo_name: &str,
     reference: &str,
     bytes: &[u8],
@@ -304,7 +317,10 @@ fn cache_manifest(
     let mut accounts = service.state_handle().write();
     let state = accounts.get_or_create(account_id);
     let account_id = state.account_id.clone();
-    let region = state.region.clone();
+    // Scope the auto-created repository ARN to the request region, not the
+    // frozen account region, so a pull-through from a non-default region
+    // yields a correctly-scoped repositoryArn.
+    let region = region.to_string();
     // Honour pull-time exclusions: an excluded principal that triggers
     // a proxy-cache should not bump the in-use counter on the freshly
     // cached image. HEAD requests also opt out via `count_as_pull=false`
@@ -364,6 +380,7 @@ fn cache_manifest(
 fn cache_blob(
     service: &EcrService,
     account_id: &str,
+    region: &str,
     repo_name: &str,
     digest: &str,
     bytes: &[u8],
@@ -372,7 +389,8 @@ fn cache_blob(
     let mut accounts = service.state_handle().write();
     let state = accounts.get_or_create(account_id);
     let account_id = state.account_id.clone();
-    let region = state.region.clone();
+    // Scope the auto-created repository ARN to the request region.
+    let region = region.to_string();
     let repo = state
         .repositories
         .entry(repo_name.to_string())

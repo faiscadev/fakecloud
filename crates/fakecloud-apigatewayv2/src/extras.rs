@@ -1280,7 +1280,10 @@ impl ApiGatewayV2Service {
                 let spec_raw = req_str(&body, "Body")?.to_string();
                 let spec = parse_openapi_spec(&spec_raw)?;
                 let (rebuilt, routes, integrations) =
-                    build_api_from_spec(&spec, api.clone(), &region);
+                    // Use the request region (as ImportApi does), not the
+                    // frozen account region, so a ReimportApi from a different
+                    // region rebuilds a correctly-scoped api_endpoint host.
+                    build_api_from_spec(&spec, api.clone(), &req.region);
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(aid);
                 let existing = state
