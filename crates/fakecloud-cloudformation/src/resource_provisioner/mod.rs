@@ -3448,10 +3448,14 @@ impl ResourceProvisioner {
 /// JSON template (this is the standard "DB credential" pattern).
 /// Without those two, the bare generated password is returned.
 fn generate_secret_string_payload(gen: &serde_json::Value) -> Result<String, String> {
+    // AWS bounds PasswordLength to 1..=4096 (default 32). Clamp into range so a
+    // negative value (`-1 as usize` == usize::MAX -> `with_capacity` abort) or a
+    // huge one (OOM in the fill loop) can't crash the server.
     let length = gen
         .get("PasswordLength")
         .and_then(|v| v.as_i64())
-        .unwrap_or(32) as usize;
+        .unwrap_or(32)
+        .clamp(1, 4096) as usize;
     let exclude_lowercase = gen
         .get("ExcludeLowercase")
         .and_then(|v| v.as_bool())
@@ -8148,6 +8152,34 @@ mod tests {
         ] {
             assert!(!policy_retains_physical(v), "{v:?} should delete");
         }
+    }
+
+    #[test]
+    fn generate_secret_string_clamps_password_length() {
+        // -1 previously became usize::MAX and aborted with a capacity overflow.
+        let neg = generate_secret_string_payload(&serde_json::json!({
+            "PasswordLength": -1
+        }))
+        .expect("negative length must not panic");
+        assert_eq!(neg.chars().count(), 1, "clamped up to the min of 1");
+
+        // A huge value would OOM the fill loop; clamp to the AWS max of 4096.
+        let huge = generate_secret_string_payload(&serde_json::json!({
+            "PasswordLength": 1_000_000_000
+        }))
+        .expect("huge length must not OOM");
+        assert_eq!(
+            huge.chars().count(),
+            4096,
+            "clamped down to the max of 4096"
+        );
+
+        // A normal value is honored.
+        let ok = generate_secret_string_payload(&serde_json::json!({
+            "PasswordLength": 24
+        }))
+        .unwrap();
+        assert_eq!(ok.chars().count(), 24);
     }
 
     #[test]
