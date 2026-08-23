@@ -436,7 +436,7 @@ impl SecretsManagerService {
             None => {
                 // No versions exist
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
+                    StatusCode::BAD_REQUEST,
                     "ResourceNotFoundException",
                     format!(
                         "Secrets Manager can't find the specified secret value for staging label: {requested_stage}"
@@ -447,7 +447,7 @@ impl SecretsManagerService {
 
         let version = secret.versions.get(&version_id).ok_or_else(|| {
             AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
+                StatusCode::BAD_REQUEST,
                 "ResourceNotFoundException",
                 format!(
                     "Secrets Manager can't find the specified secret value for VersionId: {version_id}"
@@ -460,7 +460,7 @@ impl SecretsManagerService {
             if let Some(stage) = body["VersionStage"].as_str() {
                 if !version.stages.contains(&stage.to_string()) {
                     return Err(AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
+                        StatusCode::BAD_REQUEST,
                         "ResourceNotFoundException",
                         "You provided a VersionStage that is not associated to the provided VersionId.",
                     ));
@@ -532,7 +532,7 @@ impl SecretsManagerService {
             Ok(s) => s,
             Err(_) => {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
+                    StatusCode::BAD_REQUEST,
                     "ResourceNotFoundException",
                     "Secrets Manager can't find the specified secret.",
                 ));
@@ -678,7 +678,7 @@ impl SecretsManagerService {
             Ok(s) => s,
             Err(_) => {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
+                    StatusCode::BAD_REQUEST,
                     "ResourceNotFoundException",
                     "Secrets Manager can't find the specified secret.",
                 ));
@@ -1923,7 +1923,7 @@ impl SecretsManagerService {
 
             if no_value_found && secret_values.is_empty() {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
+                    StatusCode::BAD_REQUEST,
                     "ResourceNotFoundException",
                     "Secrets Manager can't find the specified secret.",
                 ));
@@ -2198,7 +2198,7 @@ impl SecretsManagerService {
 /// The standard "secret can't be found" error, shared by the resolution helpers.
 fn secret_not_found() -> AwsServiceError {
     AwsServiceError::aws_error(
-        StatusCode::NOT_FOUND,
+        StatusCode::BAD_REQUEST,
         "ResourceNotFoundException",
         "Secrets Manager can't find the specified secret.",
     )
