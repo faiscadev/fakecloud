@@ -606,7 +606,10 @@ impl IamService {
         // Validate version ID format: must match v[1-9][0-9]*(\.[A-Za-z0-9-]*)?
         let valid_format = version_id.starts_with('v')
             && version_id.len() > 1
-            && version_id[1..2]
+            // Slice from byte 1 (always a boundary — 'v' is one byte) and take
+            // the first char; slicing `[1..2]` panics when that char is
+            // multibyte (e.g. VersionId "v日").
+            && version_id[1..]
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_digit() && c != '0')

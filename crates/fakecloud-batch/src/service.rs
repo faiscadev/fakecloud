@@ -1148,7 +1148,7 @@ impl BatchService {
             .collect();
         let mut resp = serde_json::Map::new();
         resp.insert("jobSummaryList".into(), Value::Array(items));
-        let next = start + max_results;
+        let next = start.saturating_add(max_results);
         if next < total {
             resp.insert("nextToken".into(), json!(next.to_string()));
         }

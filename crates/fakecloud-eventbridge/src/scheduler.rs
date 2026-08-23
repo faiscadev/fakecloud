@@ -147,7 +147,12 @@ fn parse_rate(inner: &str) -> Option<Schedule> {
     if singular != (value == 1) {
         return None;
     }
-    Some(Schedule::Rate(Duration::from_secs(value * secs_per)))
+    // A huge value (e.g. `rate(100000000000000000 days)`) overflows `value *
+    // secs_per`; saturate so it clamps instead of panicking (debug) / wrapping
+    // to a garbage rate (release).
+    Some(Schedule::Rate(Duration::from_secs(
+        value.saturating_mul(secs_per),
+    )))
 }
 
 fn parse_cron(inner: &str) -> Option<Schedule> {
@@ -603,6 +608,14 @@ mod tests {
         // AWS requires a positive value; `rate(0 ...)` is invalid.
         assert!(parse_schedule("rate(0 seconds)").is_none());
         assert!(parse_schedule("rate(0 minutes)").is_none());
+    }
+
+    #[test]
+    fn parse_rate_huge_value_saturates_without_panic() {
+        // `value * secs_per` would overflow u64; saturating_mul clamps instead
+        // of panicking (debug) or wrapping to a garbage rate (release).
+        let s = parse_schedule("rate(100000000000000000 days)");
+        assert!(matches!(s, Some(Schedule::Rate(_))));
     }
 
     #[test]

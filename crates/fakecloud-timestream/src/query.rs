@@ -197,7 +197,9 @@ pub fn parse_query(sql: &str) -> Result<Plan, QueryError> {
         let per = unit_nanos(unit).ok_or_else(|| {
             QueryError::Validation(format!("Unsupported ago() time unit '{unit}'."))
         })?;
-        Some((op, now_nanos() - n * per))
+        // A ~36-digit magnitude overflows i128 on `n * per`; saturate so a
+        // pathological ago() bound clamps instead of panicking.
+        Some((op, now_nanos().saturating_sub(n.saturating_mul(per))))
     } else {
         None
     };

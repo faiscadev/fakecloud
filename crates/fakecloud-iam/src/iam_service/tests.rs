@@ -840,6 +840,32 @@ fn create_and_get_policy_version() {
 }
 
 #[test]
+fn set_default_policy_version_multibyte_version_id_does_not_panic() {
+    // Regression: `version_id[1..2]` panicked on a multibyte char after 'v'
+    // (byte 2 not a char boundary) before the format-reject branch ran. The
+    // handler must return an InvalidInput error instead of a slice panic.
+    let svc = make_service();
+    let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
+    let req = make_request(
+        "CreatePolicy",
+        vec![("PolicyName", "mb-pol"), ("PolicyDocument", policy_doc)],
+    );
+    let resp = svc.create_policy(&req).unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    let policy_arn = extract_xml_tag(&body, "Arn");
+
+    let req = make_request(
+        "SetDefaultPolicyVersion",
+        vec![("PolicyArn", policy_arn), ("VersionId", "v日")],
+    );
+    let err = svc
+        .set_default_policy_version(&req)
+        .err()
+        .expect("multibyte VersionId must be rejected, not panic");
+    assert_eq!(err.code(), "InvalidInput");
+}
+
+#[test]
 fn list_policy_versions() {
     let svc = make_service();
     let policy_doc = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}"#;
