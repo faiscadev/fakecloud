@@ -546,7 +546,7 @@ pub fn get_policy_response(policy: &IamPolicy, request_id: &str) -> String {
 pub fn list_role_policies_response(policy_names: &[String], request_id: &str) -> String {
     let members: String = policy_names
         .iter()
-        .map(|name| format!("      <member>{name}</member>"))
+        .map(|name| format!("      <member>{}</member>", xml_escape(name)))
         .collect::<Vec<_>>()
         .join("\n");
 
@@ -1036,6 +1036,19 @@ mod tests {
     fn url_encode_policy_escapes_special_chars() {
         let encoded = url_encode_policy("a b");
         assert!(encoded.contains("%20") || encoded.contains("+"));
+    }
+
+    #[test]
+    fn list_role_policies_response_escapes_policy_names() {
+        // Real AWS restricts PolicyName to [\w+=,.@-]+, but fakecloud is
+        // lenient on input, so an inline policy named with XML metacharacters
+        // must still produce a well-formed response rather than corrupt XML.
+        let xml = list_role_policies_response(&["a<b&c".to_string()], "req-1");
+        assert!(
+            xml.contains("<member>a&lt;b&amp;c</member>"),
+            "policy name must be XML-escaped: {xml}"
+        );
+        assert!(!xml.contains("a<b&c"), "raw metacharacters must not leak");
     }
 
     #[test]
