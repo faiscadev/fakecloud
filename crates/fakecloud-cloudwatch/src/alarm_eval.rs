@@ -388,7 +388,11 @@ fn eval_node(node: &RuleNode, states: &HashMap<String, AlarmState>) -> bool {
 /// malformed rule so `PutCompositeAlarm` can reject it.
 pub(crate) fn parse_alarm_rule(rule: &str) -> Result<RuleNode, String> {
     let chars: Vec<char> = rule.chars().collect();
-    let mut p = RuleParser { chars, pos: 0 };
+    let mut p = RuleParser {
+        chars,
+        pos: 0,
+        depth: 0,
+    };
     p.skip_ws();
     if p.pos >= p.chars.len() {
         return Err("empty alarm rule".to_string());
@@ -404,9 +408,16 @@ pub(crate) fn parse_alarm_rule(rule: &str) -> Result<RuleNode, String> {
     Ok(node)
 }
 
+/// Maximum nesting depth for an `AlarmRule`. Guards against a stack overflow
+/// on a pathologically nested rule (e.g. thousands of `(` or `NOT`); the
+/// length cap alone (~10240 chars) still permits ~5000 nesting levels. Mirrors
+/// the `metric_math` parser's depth guard.
+const MAX_RULE_DEPTH: usize = 256;
+
 struct RuleParser {
     chars: Vec<char>,
     pos: usize,
+    depth: usize,
 }
 
 impl RuleParser {
@@ -471,7 +482,12 @@ impl RuleParser {
     fn parse_unary(&mut self) -> Result<RuleNode, String> {
         if self.peek_keyword().as_deref() == Some("NOT") {
             self.consume_keyword("NOT");
+            self.depth += 1;
+            if self.depth > MAX_RULE_DEPTH {
+                return Err("alarm rule nested too deeply".to_string());
+            }
             let inner = self.parse_unary()?;
+            self.depth -= 1;
             return Ok(RuleNode::Not(Box::new(inner)));
         }
         self.parse_primary()
@@ -482,7 +498,12 @@ impl RuleParser {
         match self.peek() {
             Some('(') => {
                 self.pos += 1;
+                self.depth += 1;
+                if self.depth > MAX_RULE_DEPTH {
+                    return Err("alarm rule nested too deeply".to_string());
+                }
                 let node = self.parse_or()?;
+                self.depth -= 1;
                 self.skip_ws();
                 if self.peek() != Some(')') {
                     return Err("expected ')' in alarm rule".to_string());
@@ -634,6 +655,19 @@ mod tests {
         assert!(parse_alarm_rule("ALARM(a) AND").is_err());
         assert!(parse_alarm_rule("BOGUS(a)").is_err());
         assert!(parse_alarm_rule("ALARM(a) garbage").is_err());
+    }
+
+    #[test]
+    fn deeply_nested_rule_errors_without_stack_overflow() {
+        // Thousands of nested parens / NOTs would blow the stack via unbounded
+        // recursive descent; the depth guard rejects them with an error.
+        let parens = format!("{}TRUE{}", "(".repeat(5000), ")".repeat(5000));
+        assert!(parse_alarm_rule(&parens).is_err());
+        let nots = format!("{}TRUE", "NOT ".repeat(5000));
+        assert!(parse_alarm_rule(&nots).is_err());
+        // A modestly nested rule still parses.
+        assert!(parse_alarm_rule("((TRUE))").is_ok());
+        assert!(parse_alarm_rule("NOT NOT FALSE").is_ok());
     }
 
     #[test]

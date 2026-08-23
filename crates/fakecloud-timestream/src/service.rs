@@ -1403,7 +1403,7 @@ fn paginate(items: &[Value], start: usize, max: usize) -> (Vec<Value>, Option<St
     if start >= items.len() {
         return (Vec::new(), None);
     }
-    let end = (start + max).min(items.len());
+    let end = start.saturating_add(max).min(items.len());
     let page = items[start..end].to_vec();
     let next = if end < items.len() {
         Some(end.to_string())
