@@ -114,6 +114,13 @@ impl AwsService for MemoryDbService {
 
     async fn handle(&self, request: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mutates = is_mutating(request.action.as_str());
+        // Account state is shared across regions; re-point the AWS-provided
+        // defaults' ARNs at the region this request names before any handler
+        // reads them (bug-hunt 2026-08-22 §0.4).
+        self.state
+            .write()
+            .get_or_create(&request.account_id)
+            .retarget_default_arns(&request.region, &request.account_id);
         let result = dispatch(self, &request);
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
             self.save().await;
@@ -2031,6 +2038,71 @@ mod tests {
         assert_eq!(
             users["Users"][0]["ARN"],
             "arn:aws:memorydb:us-east-1:123456789012:user/default"
+        );
+    }
+
+    #[tokio::test]
+    async fn seeded_defaults_carry_the_request_region_not_the_configured_one() {
+        let s = service();
+        let mut r = req("DescribeUsers", json!({"UserName": "default"}));
+        r.region = "eu-west-1".to_string();
+        let resp = s.handle(r).await.unwrap();
+        let users: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            users["Users"][0]["ARN"],
+            "arn:aws:memorydb:eu-west-1:123456789012:user/default"
+        );
+
+        let mut r = req("DescribeACLs", json!({"ACLName": "open-access"}));
+        r.region = "eu-west-1".to_string();
+        let resp = s.handle(r).await.unwrap();
+        let acls: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            acls["ACLs"][0]["ARN"],
+            "arn:aws:memorydb:eu-west-1:123456789012:acl/open-access"
+        );
+
+        let mut r = req(
+            "DescribeParameterGroups",
+            json!({"ParameterGroupName": "default.memorydb-redis7"}),
+        );
+        r.region = "eu-west-1".to_string();
+        let resp = s.handle(r).await.unwrap();
+        let pgs: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            pgs["ParameterGroups"][0]["ARN"],
+            "arn:aws:memorydb:eu-west-1:123456789012:parametergroup/default.memorydb-redis7"
+        );
+
+        // Back in the configured region the ARNs read back that region again.
+        let resp = s
+            .handle(req("DescribeUsers", json!({"UserName": "default"})))
+            .await
+            .unwrap();
+        let users: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(
+            users["Users"][0]["ARN"],
+            "arn:aws:memorydb:us-east-1:123456789012:user/default"
+        );
+    }
+
+    #[tokio::test]
+    async fn retargeting_defaults_leaves_created_resources_alone() {
+        let s = service();
+        call(
+            &s,
+            "CreateUser",
+            json!({"UserName": "app", "AccessString": "on ~* +@all", "AuthenticationMode": {"Type": "password", "Passwords": ["averylongpassword123"]}}),
+        )
+        .unwrap();
+        let mut r = req("DescribeUsers", json!({"UserName": "app"}));
+        r.region = "eu-west-1".to_string();
+        let resp = s.handle(r).await.unwrap();
+        let users: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        // A user created in us-east-1 keeps its us-east-1 ARN.
+        assert_eq!(
+            users["Users"][0]["ARN"],
+            "arn:aws:memorydb:us-east-1:123456789012:user/app"
         );
     }
 

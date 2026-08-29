@@ -224,6 +224,13 @@ impl XrayService {
             account: req.account_id.clone(),
             region: req.region.clone(),
         };
+        // Account state is shared across regions; re-point the built-in
+        // `Default` sampling rule's ARN at the region this request names
+        // before any handler reads it (bug-hunt 2026-08-22 §0.5).
+        self.state
+            .write()
+            .get_or_create(&ctx.account)
+            .ensure_default_rule(&ctx.region, &ctx.account);
         match action {
             "PutTraceSegments" => self.put_trace_segments(&ctx, &body),
             "BatchGetTraces" => self.batch_get_traces(&ctx, &body),
@@ -1576,6 +1583,39 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    #[tokio::test]
+    async fn default_sampling_rule_arn_follows_the_request_region() {
+        let s = svc();
+        let mut r = req("/GetSamplingRules");
+        r.region = "eu-west-1".to_string();
+        let out = s.handle(r).await.unwrap();
+        let body = body_json(&out);
+        let rule = body["SamplingRuleRecords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["SamplingRule"]["RuleName"] == "Default")
+            .expect("built-in Default rule");
+        assert_eq!(
+            rule["SamplingRule"]["RuleARN"],
+            "arn:aws:xray:eu-west-1:000000000000:sampling-rule/Default"
+        );
+
+        // Reading from the configured region reports that region again.
+        let out = s.handle(req("/GetSamplingRules")).await.unwrap();
+        let body = body_json(&out);
+        let rule = body["SamplingRuleRecords"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["SamplingRule"]["RuleName"] == "Default")
+            .expect("built-in Default rule");
+        assert_eq!(
+            rule["SamplingRule"]["RuleARN"],
+            "arn:aws:xray:us-east-1:000000000000:sampling-rule/Default"
+        );
     }
 
     #[test]
