@@ -2675,3 +2675,64 @@ async fn delete_cluster_cascades_certificate_authorities() {
         1
     );
 }
+
+#[tokio::test]
+async fn only_the_most_recently_demoted_ca_is_the_rollback_target() {
+    let svc = EksService::new(make_state());
+    create_cluster(&svc, "c1").await;
+
+    async fn add_and_activate(svc: &EksService) -> String {
+        let resp = svc
+            .handle(make_request(
+                Method::POST,
+                "/clusters/c1/certificate-authorities",
+                "{}",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let id = v["certificateAuthority"]["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        svc.handle(make_request(
+            Method::POST,
+            &format!("/clusters/c1/certificate-authorities/{id}/activate"),
+            "{}",
+        ))
+        .await
+        .unwrap();
+        id
+    }
+
+    let b = add_and_activate(&svc).await;
+    let c = add_and_activate(&svc).await;
+
+    // After A -> B -> C, only B (the CA C superseded) is rollbackable.
+    let mut rollbackable = Vec::new();
+    for id in [&b, &c] {
+        let resp = svc
+            .handle(make_request(
+                Method::GET,
+                &format!("/clusters/c1/certificate-authorities/{id}"),
+                "",
+            ))
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        if v["certificateAuthority"]["rollbackAvailable"] == true {
+            rollbackable.push(id.clone());
+        }
+    }
+    assert_eq!(rollbackable, vec![b.clone()]);
+
+    let v = list_cas(&svc, "c1").await;
+    let in_use: Vec<&str> = v["certificateAuthorities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|ca| ca["signingStatus"] == "IN_USE")
+        .map(|ca| ca["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(in_use, vec![c.as_str()]);
+}

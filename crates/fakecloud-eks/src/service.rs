@@ -3304,13 +3304,19 @@ impl EksService {
         if !authorities.contains_key(id) {
             return Err(not_found_certificate_authority(id)());
         }
-        // Demote whichever CA is signing today; it stays available as the
-        // rollback target until a third activation supersedes it.
+        // Demote whichever CA is signing today. Exactly one CA is the
+        // rollback target at a time — the one just demoted — so clear the
+        // flag everywhere else rather than leaving every past signer
+        // claiming it.
         for (other_id, ca) in authorities.iter_mut() {
-            if other_id != id && ca.signing_status == "IN_USE" {
-                ca.signing_status = "NOT_USED".to_string();
-                ca.rollback_available = true;
+            if other_id == id {
+                continue;
             }
+            let demoting = ca.signing_status == "IN_USE";
+            if demoting {
+                ca.signing_status = "NOT_USED".to_string();
+            }
+            ca.rollback_available = demoting;
         }
         let ca = authorities.get_mut(id).unwrap();
         // Activation implies the CA finished distributing to the control plane.

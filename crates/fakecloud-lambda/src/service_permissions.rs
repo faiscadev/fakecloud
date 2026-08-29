@@ -187,6 +187,11 @@ impl LambdaService {
         statements.push(statement_json.clone());
 
         func.policy = Some(serde_json::to_string(&doc).unwrap());
+        // The policy changed, so the revision the caller would pass back as a
+        // `PutResourcePolicy`/`DeleteResourcePolicy` precondition must move —
+        // otherwise a stale `RevisionId` still validates and silently discards
+        // this statement.
+        func.revision_id = uuid::Uuid::new_v4().to_string();
 
         Ok(AwsResponse::json(
             StatusCode::CREATED,
@@ -242,6 +247,9 @@ impl LambdaService {
         // the field to None — AWS's GetPolicy keeps returning the
         // (empty) doc until the function itself is deleted.
         func.policy = Some(serde_json::to_string(&doc).unwrap());
+        // Same revision bump as `AddPermission`: the document changed, so a
+        // `RevisionId` captured before this call must stop validating.
+        func.revision_id = uuid::Uuid::new_v4().to_string();
         Ok(AwsResponse::json(StatusCode::NO_CONTENT, String::new()))
     }
 
@@ -315,6 +323,19 @@ impl LambdaService {
                 "The policy document is not valid JSON",
             )
         })?;
+        // `AddPermission` was previously the only writer and always wrote a
+        // canonical `{"Version":..,"Statement":[..]}` object. This op takes the
+        // document verbatim, so reject anything that isn't that shape here —
+        // a stored scalar or bare array would later make `RemovePermission`
+        // fail its `Statement` lookup with a 500, and would be fed to the IAM
+        // evaluator as a resource policy.
+        if !doc.get("Statement").is_some_and(Value::is_array) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "The policy document must be a JSON object with a Statement array",
+            ));
+        }
         if grants_public_access(&doc) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -492,12 +513,20 @@ fn grants_public_access(doc: &Value) -> bool {
     })
 }
 
+/// True for every spelling of "any principal" an IAM document allows:
+/// the bare string, a single-element or longer array, and either form nested
+/// under a principal-type key (`{"AWS": "*"}` / `{"AWS": ["*"]}`).
 fn is_wildcard_principal(principal: Option<&Value>) -> bool {
+    fn is_star(v: &Value) -> bool {
+        match v {
+            Value::String(s) => s == "*",
+            Value::Array(items) => items.iter().any(is_star),
+            _ => false,
+        }
+    }
     match principal {
-        Some(Value::String(s)) => s == "*",
-        Some(Value::Object(map)) => map
-            .values()
-            .any(|v| matches!(v, Value::String(s) if s == "*")),
-        _ => false,
+        Some(Value::Object(map)) => map.values().any(is_star),
+        Some(v) => is_star(v),
+        None => false,
     }
 }

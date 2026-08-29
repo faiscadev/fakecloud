@@ -1,6 +1,6 @@
 {
-  "variants_passed": 248319,
-  "total_variants": 248319,
+  "variants_passed": 248557,
+  "total_variants": 248557,
   "per_service": {
     "account": {
       "passed": 412,
@@ -155,8 +155,8 @@
       "total": 2378
     },
     "eks": {
-      "passed": 1865,
-      "total": 1865
+      "passed": 1995,
+      "total": 1995
     },
     "elasticache": {
       "passed": 2251,
@@ -243,8 +243,8 @@
       "total": 1985
     },
     "lambda": {
-      "passed": 3178,
-      "total": 3178
+      "passed": 3286,
+      "total": 3286
     },
     "logs": {
       "passed": 3897,

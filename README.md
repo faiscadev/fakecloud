@@ -48,7 +48,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 ## Why fakecloud
 
 - **Free, forever.** AGPL-3.0, no paid tier, no account, no token.
-- **True 100% conformance.** 248,319 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
+- **True 100% conformance.** 248,557 Smithy-model-generated test variants pass on every commit, validated against AWS's own Smithy models. CI also runs upstream `terraform-provider-aws` `TestAcc*` suites to catch waiter/field/drift bugs that SDK tests miss.
 - **Real cross-service wiring.** EventBridge -> Step Functions, S3 -> Lambda, SES inbound -> S3/SNS/Lambda, and 15+ more integrations execute end-to-end.
 - **Real infrastructure for stateful services.** Lambda (23 runtimes), RDS (Postgres/MySQL/MariaDB/Oracle/SQL Server/Db2), ElastiCache (Redis/Valkey/Memcached), ECS, and EC2 run as real containers. Use Docker (default) or native Kubernetes Pods via `FAKECLOUD_CONTAINER_BACKEND=k8s`. See the [Kubernetes backend guide](https://fakecloud.dev/docs/guides/kubernetes-backend/).
 - **Single binary.** ~19 MB, ~10 MiB idle, ~300ms startup. No Docker needed to run fakecloud itself.
@@ -78,7 +78,7 @@ Since March 2026, LocalStack's Community image requires an account and token, an
 | License | AGPL-3.0, free for commercial use | Proprietary, paid plans |
 | Auth | None | Account + token required |
 | Footprint | ~19 MB binary, ~10 MiB idle, ~300ms start, no Docker | ~1 GB image, ~150 MiB idle, ~3s start, Docker required |
-| Conformance | true 100% (248,319 Smithy variants) | partial |
+| Conformance | true 100% (248,557 Smithy variants) | partial |
 | Paywalled services | None (RDS, Cognito, SES, ElastiCache, ECS/ECR, EKS, Redshift, and more are all free) | Many core services paid-only |
 | Test-assertion SDKs | TypeScript, Python, Go, PHP, Java, Rust | Python, Java |
 
