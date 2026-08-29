@@ -185,6 +185,32 @@ pub struct MemoryDbState {
     pub tags: BTreeMap<String, TagMap>,
 }
 
+impl MemoryDbState {
+    /// Re-point the ARNs of the AWS-provided defaults (`default` user,
+    /// `open-access` ACL, `default.memorydb-*` parameter groups) at the region
+    /// the caller is asking about.
+    ///
+    /// Account state is shared across regions, so defaults seeded when the
+    /// account was first touched from `us-east-1` would otherwise keep
+    /// answering `DescribeUsers`/`DescribeACLs`/`DescribeParameterGroups` in
+    /// `eu-west-1` with `us-east-1` ARNs, which the Terraform provider reads
+    /// back as drift. These resources exist in every region, so re-point them
+    /// rather than freezing whichever region created the account.
+    pub fn retarget_default_arns(&mut self, region: &str, account_id: &str) {
+        if let Some(user) = self.users.get_mut("default") {
+            user.arn = format!("arn:aws:memorydb:{region}:{account_id}:user/default");
+        }
+        if let Some(acl) = self.acls.get_mut("open-access") {
+            acl.arn = format!("arn:aws:memorydb:{region}:{account_id}:acl/open-access");
+        }
+        for (name, pg) in self.parameter_groups.iter_mut() {
+            if name.starts_with("default.") {
+                pg.arn = format!("arn:aws:memorydb:{region}:{account_id}:parametergroup/{name}");
+            }
+        }
+    }
+}
+
 impl AccountState for MemoryDbState {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         // AWS seeds every account with a default ACL and default user.

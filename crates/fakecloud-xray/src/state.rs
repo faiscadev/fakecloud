@@ -81,17 +81,29 @@ impl Default for XrayData {
 
 impl XrayData {
     /// Seed the built-in, undeletable `Default` sampling rule that every X-Ray
-    /// account carries (matched last, 1 req/s reservoir + 5% of the rest).
-    fn seed_default_rule(&mut self, region: &str, account: &str) {
-        if self.sampling_rules.contains_key(DEFAULT_SAMPLING_RULE) {
+    /// account carries (matched last, 1 req/s reservoir + 5% of the rest), and
+    /// keep its `RuleARN` pointed at the region the caller is asking about.
+    ///
+    /// Account state is shared across regions, so a rule seeded when the
+    /// account was first touched from `us-east-1` would otherwise keep
+    /// answering `GetSamplingRules` in `eu-west-1` with a `us-east-1` ARN.
+    /// The built-in rule exists in every region, so re-point it instead of
+    /// freezing whichever region happened to create the account.
+    pub(crate) fn ensure_default_rule(&mut self, region: &str, account: &str) {
+        let want = format!("arn:aws:xray:{region}:{account}:sampling-rule/{DEFAULT_SAMPLING_RULE}");
+        if let Some(existing) = self.sampling_rules.get_mut(DEFAULT_SAMPLING_RULE) {
+            if let Some(rule) = existing.get_mut("SamplingRule") {
+                if rule.get("RuleARN").and_then(|v| v.as_str()) != Some(want.as_str()) {
+                    rule["RuleARN"] = json!(want);
+                }
+            }
             return;
         }
-        let arn = format!("arn:aws:xray:{region}:{account}:sampling-rule/{DEFAULT_SAMPLING_RULE}");
         let now = now_epoch();
         let record = json!({
             "SamplingRule": {
                 "RuleName": DEFAULT_SAMPLING_RULE,
-                "RuleARN": arn,
+                "RuleARN": want,
                 "ResourceARN": "*",
                 "Priority": 10000,
                 "FixedRate": 0.05,
@@ -122,7 +134,7 @@ pub fn now_epoch() -> f64 {
 impl AccountState for XrayData {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         let mut data = Self::default();
-        data.seed_default_rule(region, account_id);
+        data.ensure_default_rule(region, account_id);
         data
     }
 }
