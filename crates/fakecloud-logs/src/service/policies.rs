@@ -690,6 +690,35 @@ impl LogsService {
                 "logGroupIdentifiers is required",
             )
         })?;
+        // `indexCategories` filters the result set. Every index fakecloud
+        // reports comes from a customer-created index policy, so they are all
+        // `CUSTOM`; asking for only the other categories returns nothing.
+        let categories = match body["indexCategories"].as_array() {
+            Some(list) => {
+                if list.len() > 4 {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterException",
+                        "indexCategories may contain at most 4 values",
+                    ));
+                }
+                let mut wanted = Vec::with_capacity(list.len());
+                for v in list {
+                    let c = v.as_str().unwrap_or_default();
+                    if !matches!(c, "DEFAULT" | "CUSTOM" | "AUTO" | "INACTIVE") {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterException",
+                            format!("indexCategories contains an unsupported value: {c}"),
+                        ));
+                    }
+                    wanted.push(c.to_string());
+                }
+                Some(wanted)
+            }
+            None => None,
+        };
+        let want_custom = categories.is_none_or(|c| c.iter().any(|c| c == "CUSTOM"));
 
         let accounts = self.state.read();
         let empty = crate::state::LogsState::new(&req.account_id, &req.region);
@@ -697,6 +726,9 @@ impl LogsService {
         let mut field_indexes = Vec::new();
 
         for id_val in log_group_ids {
+            if !want_custom {
+                break;
+            }
             let id = id_val.as_str().unwrap_or("");
             let group_name = if id.starts_with("arn:") {
                 extract_log_group_from_arn(id).unwrap_or_default()
@@ -717,6 +749,8 @@ impl LogsService {
                                 "lastScanTime": p.last_updated_time,
                                 "firstEventTime": p.last_updated_time,
                                 "lastEventTime": p.last_updated_time,
+                                "type": "FIELD_INDEX",
+                                "indexCategory": "CUSTOM",
                             }));
                         }
                     }
@@ -1314,6 +1348,71 @@ mod tests {
         let resp = svc.describe_field_indexes(&req).unwrap();
         let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
         assert!(body["fieldIndexes"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn describe_field_indexes_reports_and_filters_by_index_category() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        let req = make_request(
+            "PutIndexPolicy",
+            json!({
+                "logGroupIdentifier": "g",
+                "policyDocument": "{\"Fields\":[\"userId\"]}"
+            }),
+        );
+        svc.put_index_policy(&req).unwrap();
+
+        // Every index fakecloud reports comes from a customer index policy.
+        let req = make_request(
+            "DescribeFieldIndexes",
+            json!({"logGroupIdentifiers": ["g"]}),
+        );
+        let resp = svc.describe_field_indexes(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["fieldIndexes"][0]["indexCategory"], "CUSTOM");
+        assert_eq!(body["fieldIndexes"][0]["type"], "FIELD_INDEX");
+
+        // Asking for CUSTOM keeps it; asking only for other categories drops it.
+        let req = make_request(
+            "DescribeFieldIndexes",
+            json!({"logGroupIdentifiers": ["g"], "indexCategories": ["CUSTOM"]}),
+        );
+        let resp = svc.describe_field_indexes(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["fieldIndexes"].as_array().unwrap().len(), 1);
+
+        let req = make_request(
+            "DescribeFieldIndexes",
+            json!({"logGroupIdentifiers": ["g"], "indexCategories": ["DEFAULT", "AUTO"]}),
+        );
+        let resp = svc.describe_field_indexes(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(body["fieldIndexes"].as_array().unwrap().is_empty());
+
+        // Index policies still list normally — the filter is field-index only.
+        let req = make_request(
+            "DescribeIndexPolicies",
+            json!({"logGroupIdentifiers": ["g"]}),
+        );
+        let resp = svc.describe_index_policies(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["indexPolicies"].as_array().unwrap().len(), 1);
+
+        // Values outside the enum, and an over-long list, are rejected.
+        let req = make_request(
+            "DescribeFieldIndexes",
+            json!({"logGroupIdentifiers": ["g"], "indexCategories": ["NOPE"]}),
+        );
+        assert!(svc.describe_field_indexes(&req).is_err());
+        let req = make_request(
+            "DescribeFieldIndexes",
+            json!({
+                "logGroupIdentifiers": ["g"],
+                "indexCategories": ["DEFAULT", "CUSTOM", "AUTO", "INACTIVE", "CUSTOM"]
+            }),
+        );
+        assert!(svc.describe_field_indexes(&req).is_err());
     }
 
     #[test]

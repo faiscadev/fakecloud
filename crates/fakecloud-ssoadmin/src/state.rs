@@ -52,6 +52,16 @@ pub struct StoredInstance {
     pub attr_config: Option<Value>,
     #[serde(default)]
     pub attr_config_status: Option<String>,
+    /// `PermissionSetsEnabled` — opt-in and one-way: `UpdateInstance` only
+    /// accepts `true`, and permission sets cannot be disabled again.
+    #[serde(default)]
+    pub permission_sets_enabled: bool,
+    /// `EncryptionConfigurationDetails.KeyType`. Every instance starts on the
+    /// AWS-owned key; `UpdateInstance` can move it to a customer-managed one.
+    #[serde(default)]
+    pub encryption_key_type: Option<String>,
+    #[serde(default)]
+    pub encryption_kms_key_arn: Option<String>,
 }
 
 /// A managed policy attached to a permission set.
@@ -253,6 +263,9 @@ pub fn ensure_default_instance(state: &SharedSsoAdminState, account_id: &str, re
             primary_region: Some(region.to_string()),
             attr_config: None,
             attr_config_status: None,
+            permission_sets_enabled: false,
+            encryption_key_type: None,
+            encryption_kms_key_arn: None,
         },
     );
 }

@@ -611,3 +611,139 @@ fn list_account_assignments_for_principal_filters_by_principal_type() {
     assert_eq!(rows[0]["PrincipalType"], json!("USER"));
     assert_eq!(rows[0]["AccountId"], json!("111122223333"));
 }
+
+#[test]
+fn update_instance_enables_permission_sets_and_describe_reports_it() {
+    let s = svc();
+    let arn = new_instance(&s);
+
+    // A fresh instance has permission sets off and rides the AWS-owned key.
+    let desc = call(&s, "DescribeInstance", json!({ "InstanceArn": arn }));
+    assert_eq!(desc["PermissionSetsEnabled"], json!(false));
+    assert_eq!(
+        desc["EncryptionConfigurationDetails"]["KeyType"],
+        json!("AWS_OWNED_KMS_KEY")
+    );
+    assert_eq!(
+        desc["EncryptionConfigurationDetails"]["EncryptionStatus"],
+        json!("ENABLED")
+    );
+    assert!(desc["EncryptionConfigurationDetails"]
+        .get("KmsKeyArn")
+        .is_none());
+
+    call(
+        &s,
+        "UpdateInstance",
+        json!({ "InstanceArn": arn, "PermissionSetsEnabled": true }),
+    );
+    let desc = call(&s, "DescribeInstance", json!({ "InstanceArn": arn }));
+    assert_eq!(desc["PermissionSetsEnabled"], json!(true));
+
+    // Only `true` is accepted, and permission sets cannot be turned back off.
+    let e = err(
+        &s,
+        "UpdateInstance",
+        json!({ "InstanceArn": arn, "PermissionSetsEnabled": false }),
+    );
+    assert_eq!(e.code(), "ValidationException");
+    let desc = call(&s, "DescribeInstance", json!({ "InstanceArn": arn }));
+    assert_eq!(desc["PermissionSetsEnabled"], json!(true));
+}
+
+#[test]
+fn update_instance_switches_to_a_customer_managed_key() {
+    let s = svc();
+    let arn = new_instance(&s);
+    let key = "arn:aws:kms:us-east-1:000000000000:key/12345678-1234-1234-1234-123456789012";
+
+    call(
+        &s,
+        "UpdateInstance",
+        json!({
+            "InstanceArn": arn,
+            "EncryptionConfiguration": { "KeyType": "CUSTOMER_MANAGED_KEY", "KmsKeyArn": key },
+        }),
+    );
+    let desc = call(&s, "DescribeInstance", json!({ "InstanceArn": arn }));
+    assert_eq!(
+        desc["EncryptionConfigurationDetails"]["KeyType"],
+        json!("CUSTOMER_MANAGED_KEY")
+    );
+    assert_eq!(
+        desc["EncryptionConfigurationDetails"]["KmsKeyArn"],
+        json!(key)
+    );
+
+    // Back to the AWS-owned key drops the ARN.
+    call(
+        &s,
+        "UpdateInstance",
+        json!({
+            "InstanceArn": arn,
+            "EncryptionConfiguration": { "KeyType": "AWS_OWNED_KMS_KEY" },
+        }),
+    );
+    let desc = call(&s, "DescribeInstance", json!({ "InstanceArn": arn }));
+    assert_eq!(
+        desc["EncryptionConfigurationDetails"]["KeyType"],
+        json!("AWS_OWNED_KMS_KEY")
+    );
+    assert!(desc["EncryptionConfigurationDetails"]
+        .get("KmsKeyArn")
+        .is_none());
+}
+
+#[test]
+fn update_instance_rejects_invalid_encryption_and_combined_requests() {
+    let s = svc();
+    let arn = new_instance(&s);
+
+    // A customer-managed key needs an ARN.
+    let e = err(
+        &s,
+        "UpdateInstance",
+        json!({
+            "InstanceArn": arn,
+            "EncryptionConfiguration": { "KeyType": "CUSTOMER_MANAGED_KEY" },
+        }),
+    );
+    assert_eq!(e.code(), "ValidationException");
+
+    // KeyType is required and enum-bound.
+    let e = err(
+        &s,
+        "UpdateInstance",
+        json!({ "InstanceArn": arn, "EncryptionConfiguration": { "KmsKeyArn": "x" } }),
+    );
+    assert_eq!(e.code(), "ValidationException");
+    let e = err(
+        &s,
+        "UpdateInstance",
+        json!({
+            "InstanceArn": arn,
+            "EncryptionConfiguration": { "KeyType": "SOMETHING_ELSE" },
+        }),
+    );
+    assert_eq!(e.code(), "ValidationException");
+
+    // The two settings cannot travel in one request.
+    let e = err(
+        &s,
+        "UpdateInstance",
+        json!({
+            "InstanceArn": arn,
+            "PermissionSetsEnabled": true,
+            "EncryptionConfiguration": { "KeyType": "AWS_OWNED_KMS_KEY" },
+        }),
+    );
+    assert_eq!(e.code(), "ValidationException");
+
+    // Neither setting was applied.
+    let desc = call(&s, "DescribeInstance", json!({ "InstanceArn": arn }));
+    assert_eq!(desc["PermissionSetsEnabled"], json!(false));
+    assert_eq!(
+        desc["EncryptionConfigurationDetails"]["KeyType"],
+        json!("AWS_OWNED_KMS_KEY")
+    );
+}
