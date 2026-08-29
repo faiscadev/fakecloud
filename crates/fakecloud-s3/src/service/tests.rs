@@ -5287,3 +5287,81 @@ fn list_object_versions_keeps_low_sorting_common_prefix_on_first_page() {
     // The page is capped at max-keys: "cc" spills to the next page.
     assert!(!body.contains("<Key>cc</Key>"), "body: {body}");
 }
+
+#[tokio::test]
+async fn put_object_accepts_every_modeled_storage_class() {
+    // The `StorageClass` allowlist drifted behind `aws-models/s3.json`: the
+    // FSx and AWS Backup classes are modeled values AWS accepts, and a stale
+    // list turned them into `InvalidStorageClass` on a valid request.
+    let svc = make_service();
+    seed_bucket(&svc, "classes");
+    for class in [
+        "STANDARD",
+        "REDUCED_REDUNDANCY",
+        "STANDARD_IA",
+        "ONEZONE_IA",
+        "INTELLIGENT_TIERING",
+        "GLACIER",
+        "DEEP_ARCHIVE",
+        "GLACIER_IR",
+        "OUTPOSTS",
+        "SNOW",
+        "EXPRESS_ONEZONE",
+        "FSX_OPENZFS",
+        "FSX_ONTAP",
+        "AWS_BACKUP_WARM",
+        "AWS_BACKUP_LOW_COST_WARM",
+    ] {
+        let key = format!("k-{class}");
+        let path = format!("/classes/{key}");
+        let mut req = make_request(Method::PUT, &path, &[], b"x");
+        req.headers
+            .insert("x-amz-storage-class", class.parse().unwrap());
+        svc.put_object("123456789012", &req, "classes", &key)
+            .await
+            .unwrap_or_else(|e| panic!("storage class {class} rejected: {e:?}"));
+
+        let req = make_request(Method::HEAD, &path, &[], b"");
+        let resp = svc
+            .head_object("123456789012", &req, "classes", &key)
+            .unwrap();
+        // STANDARD is the default and AWS omits the header for it.
+        if class != "STANDARD" {
+            assert_eq!(resp.headers.get("x-amz-storage-class").unwrap(), class);
+        }
+    }
+
+    // A value outside the enum is still rejected.
+    let mut req = make_request(Method::PUT, "/classes/bad", &[], b"x");
+    req.headers
+        .insert("x-amz-storage-class", "NOT_A_CLASS".parse().unwrap());
+    assert!(svc
+        .put_object("123456789012", &req, "classes", "bad")
+        .await
+        .is_err());
+}
+
+#[test]
+fn put_bucket_encryption_accepts_every_modeled_sse_algorithm() {
+    // `ServerSideEncryption` models five values; the validator only knew the
+    // three customer-facing ones, so `aws:fsx` / `aws:backup` came back as
+    // MalformedXML on a request AWS accepts.
+    let svc = make_service();
+    seed_bucket(&svc, "sse");
+    for algo in ["AES256", "aws:fsx", "aws:backup"] {
+        let body = format!(
+            "<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>{algo}</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>"
+        );
+        let req = make_request(Method::PUT, "/sse", &[("encryption", "")], body.as_bytes());
+        svc.put_bucket_encryption("123456789012", &req, "sse")
+            .unwrap_or_else(|e| panic!("SSEAlgorithm {algo} rejected: {e:?}"));
+    }
+
+    // Anything outside the enum is still MalformedXML.
+    let body = b"<ServerSideEncryptionConfiguration><Rule><ApplyServerSideEncryptionByDefault><SSEAlgorithm>aws:nope</SSEAlgorithm></ApplyServerSideEncryptionByDefault></Rule></ServerSideEncryptionConfiguration>";
+    let req = make_request(Method::PUT, "/sse", &[("encryption", "")], body);
+    assert_aws_err(
+        svc.put_bucket_encryption("123456789012", &req, "sse"),
+        "MalformedXML",
+    );
+}
