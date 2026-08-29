@@ -555,7 +555,24 @@ impl ElastiCacheService {
             state.account_id,
             target
         );
-        snap.snapshot_status = "creating".to_string();
+        // A copy duplicates an already-complete snapshot, so it is available
+        // immediately — there is nothing to dump. (Previously it was left
+        // `creating` with no finalizer, so it was stuck forever: unusable as a
+        // restore source with its name permanently blocked.) Give the copy its
+        // own RDB file so deleting the source can't dangle it.
+        if let Some(src_rdb) = snap.rdb_path.clone() {
+            let dst_rdb = snapshot_rdb_path(self.data_dir.as_deref(), &state.account_id, &target);
+            match std::fs::copy(&src_rdb, &dst_rdb) {
+                Ok(_) => snap.rdb_path = Some(dst_rdb),
+                Err(err) => {
+                    // Fall back to a metadata-only copy rather than blocking the
+                    // row; the snapshot still becomes usable, just without data.
+                    tracing::warn!("CopySnapshot: failed to copy RDB {src_rdb}: {err}");
+                    snap.rdb_path = None;
+                }
+            }
+        }
+        snap.snapshot_status = "available".to_string();
         snap.snapshot_source = "manual".to_string();
         let xml = snapshot_xml(&snap);
         state.snapshots.insert(target, snap);
@@ -603,7 +620,9 @@ impl ElastiCacheService {
             state.account_id,
             target
         );
-        snap.status = "creating".to_string();
+        // A copy of an already-complete serverless snapshot is available
+        // immediately; it was previously stuck `creating` with no finalizer.
+        snap.status = "available".to_string();
         let xml = serverless_cache_snapshot_xml(&snap);
         state.serverless_cache_snapshots.insert(target, snap);
         Ok(AwsResponse::xml(

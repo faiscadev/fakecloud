@@ -2477,6 +2477,76 @@ async fn create_snapshot_without_runtime_is_available_immediately() {
 }
 
 #[tokio::test]
+async fn copy_snapshot_is_available_not_stuck_creating() {
+    let service = service_with_replication_group("copy-rg", 1);
+    service
+        .create_snapshot(&request(
+            "CreateSnapshot",
+            &[
+                ("SnapshotName", "src-snap"),
+                ("ReplicationGroupId", "copy-rg"),
+            ],
+        ))
+        .await
+        .unwrap();
+
+    let body = String::from_utf8(
+        service
+            .copy_snapshot(&request(
+                "CopySnapshot",
+                &[
+                    ("SourceSnapshotName", "src-snap"),
+                    ("TargetSnapshotName", "dst-snap"),
+                ],
+            ))
+            .unwrap()
+            .body
+            .expect_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    // Previously the copy was left `creating` with no finalizer -> stuck forever.
+    assert!(
+        body.contains("<SnapshotStatus>available</SnapshotStatus>"),
+        "copied snapshot must be available, not stuck creating: {body}"
+    );
+}
+
+#[tokio::test]
+async fn copy_serverless_cache_snapshot_is_available_not_stuck_creating() {
+    let service = service_with_serverless_cache("sl-cache");
+    // Seed a source serverless snapshot directly, then copy it.
+    service
+        .create_serverless_cache_snapshot(&request(
+            "CreateServerlessCacheSnapshot",
+            &[
+                ("ServerlessCacheSnapshotName", "sl-src"),
+                ("ServerlessCacheName", "sl-cache"),
+            ],
+        ))
+        .unwrap();
+    let body = String::from_utf8(
+        service
+            .copy_serverless_cache_snapshot(&request(
+                "CopyServerlessCacheSnapshot",
+                &[
+                    ("SourceServerlessCacheSnapshotName", "sl-src"),
+                    ("TargetServerlessCacheSnapshotName", "sl-dst"),
+                ],
+            ))
+            .unwrap()
+            .body
+            .expect_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        body.contains("<Status>available</Status>"),
+        "copied serverless snapshot must be available: {body}"
+    );
+}
+
+#[tokio::test]
 async fn create_snapshot_via_cache_cluster_id() {
     let service = service_with_replication_group("cc-rg", 2);
     let req = request(
