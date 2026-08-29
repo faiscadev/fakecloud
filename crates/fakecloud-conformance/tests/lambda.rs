@@ -20,8 +20,8 @@ fn make_python_zip() -> Vec<u8> {
 // Function lifecycle
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "CreateFunction", checksum = "16a7e43d")]
-#[test_action("lambda", "GetFunction", checksum = "020c000e")]
+#[test_action("lambda", "CreateFunction", checksum = "5f765b54")]
+#[test_action("lambda", "GetFunction", checksum = "99d0a95e")]
 #[test_action("lambda", "DeleteFunction", checksum = "d6c8676a")]
 #[tokio::test]
 async fn lambda_create_get_delete_function() {
@@ -72,7 +72,7 @@ async fn lambda_create_get_delete_function() {
     assert!(result.is_err());
 }
 
-#[test_action("lambda", "ListFunctions", checksum = "88e9ff3b")]
+#[test_action("lambda", "ListFunctions", checksum = "73439b22")]
 #[tokio::test]
 async fn lambda_list_functions() {
     let server = TestServer::start().await;
@@ -148,7 +148,7 @@ async fn lambda_invoke() {
 // PublishVersion
 // ---------------------------------------------------------------------------
 
-#[test_action("lambda", "PublishVersion", checksum = "1b9d476d")]
+#[test_action("lambda", "PublishVersion", checksum = "63700287")]
 #[tokio::test]
 async fn lambda_publish_version() {
     let server = TestServer::start().await;
@@ -406,7 +406,7 @@ async fn lambda_alias_lifecycle() {
         .unwrap();
 }
 
-#[test_action("lambda", "ListVersionsByFunction", checksum = "b7e12fa9")]
+#[test_action("lambda", "ListVersionsByFunction", checksum = "56aa9ad0")]
 #[tokio::test]
 async fn lambda_list_versions_by_function() {
     let server = TestServer::start().await;
@@ -420,9 +420,9 @@ async fn lambda_list_versions_by_function() {
         .unwrap();
 }
 
-#[test_action("lambda", "GetFunctionConfiguration", checksum = "68d0dacb")]
-#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "3e4b73c1")]
-#[test_action("lambda", "UpdateFunctionCode", checksum = "0734a567")]
+#[test_action("lambda", "GetFunctionConfiguration", checksum = "00d485f6")]
+#[test_action("lambda", "UpdateFunctionConfiguration", checksum = "8eb65bb3")]
+#[test_action("lambda", "UpdateFunctionCode", checksum = "c6677048")]
 #[tokio::test]
 async fn lambda_function_configuration_extras() {
     let server = TestServer::start().await;
@@ -1071,4 +1071,74 @@ async fn lambda_update_event_source_mapping() {
         .send()
         .await
         .unwrap();
+}
+
+/// The document-level resource-policy API (`/resource-policy/{arn}`), added
+/// to the Lambda model in the 2026-08 refresh. The vendored `aws-sdk-lambda`
+/// predates these operations, so drive them over raw HTTP the same way
+/// `lambda_function_scaling_config` does.
+#[test_action("lambda", "PutResourcePolicy", checksum = "5f86d823")]
+#[test_action("lambda", "GetResourcePolicy", checksum = "1b02ffd1")]
+#[test_action("lambda", "DeleteResourcePolicy", checksum = "75532266")]
+#[tokio::test]
+async fn lambda_resource_policy_document_api() {
+    let server = TestServer::start().await;
+    let client = server.lambda_client().await;
+    make_basic_function(&client, "rbp-fn").await;
+
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/lambda/aws4_request, SignedHeaders=host, Signature=0";
+    let url = format!(
+        "{}/2026-07-09/resource-policy/arn%3Aaws%3Alambda%3Aus-east-1%3A000000000000%3Afunction%3Arbp-fn",
+        server.endpoint()
+    );
+    let policy = r#"{"Version":"2012-10-17","Statement":[{"Sid":"s3","Effect":"Allow","Principal":{"Service":"s3.amazonaws.com"},"Action":"lambda:InvokeFunction","Resource":"arn:aws:lambda:us-east-1:000000000000:function:rbp-fn"}]}"#;
+
+    let http = reqwest::Client::new();
+    let resp = http
+        .put(&url)
+        .header("Authorization", auth)
+        .body(serde_json::json!({ "Policy": policy }).to_string())
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "put status: {}", resp.status());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    let revision = body["RevisionId"].as_str().unwrap().to_string();
+
+    let resp = http
+        .get(&url)
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "get status: {}", resp.status());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["RevisionId"].as_str().unwrap(), revision);
+    let stored: serde_json::Value = serde_json::from_str(body["Policy"].as_str().unwrap()).unwrap();
+    assert_eq!(stored["Statement"][0]["Sid"], "s3");
+
+    // A stale RevisionId precondition fails the delete.
+    let resp = http
+        .delete(format!("{url}?RevisionId=stale"))
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 412, "stale delete should 412");
+
+    let resp = http
+        .delete(&url)
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204, "delete status");
+
+    let resp = http
+        .get(&url)
+        .header("Authorization", auth)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 404, "policy should be gone");
 }

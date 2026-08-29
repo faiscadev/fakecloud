@@ -307,6 +307,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteFunctionUrlConfig`
 - `DeleteLayerVersion`
 - `DeleteProvisionedConcurrencyConfig`
+- `DeleteResourcePolicy`
 - `GetAccountSettings`
 - `GetAlias`
 - `GetCapacityProvider`
@@ -328,6 +329,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `GetLayerVersionPolicy`
 - `GetPolicy`
 - `GetProvisionedConcurrencyConfig`
+- `GetResourcePolicy`
 - `GetRuntimeManagementConfig`
 - `Invoke`
 - `InvokeAsync`
@@ -355,6 +357,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `PutFunctionRecursionConfig`
 - `PutFunctionScalingConfig`
 - `PutProvisionedConcurrencyConfig`
+- `PutResourcePolicy`
 - `PutRuntimeManagementConfig`
 - `RemoveLayerVersionPermission`
 - `RemovePermission`
@@ -2327,6 +2330,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 
 ## [EKS](@/docs/services/eks.md)
 
+- `ActivateCertificateAuthority`
 - `AssociateAccessPolicy`
 - `AssociateEncryptionConfig`
 - `AssociateIdentityProviderConfig`
@@ -2334,6 +2338,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `CreateAccessEntry`
 - `CreateAddon`
 - `CreateCapability`
+- `CreateCertificateAuthority`
 - `CreateCluster`
 - `CreateEksAnywhereSubscription`
 - `CreateFargateProfile`
@@ -2342,6 +2347,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DeleteAccessEntry`
 - `DeleteAddon`
 - `DeleteCapability`
+- `DeleteCertificateAuthority`
 - `DeleteCluster`
 - `DeleteEksAnywhereSubscription`
 - `DeleteFargateProfile`
@@ -2353,6 +2359,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeAddonConfiguration`
 - `DescribeAddonVersions`
 - `DescribeCapability`
+- `DescribeCertificateAuthority`
 - `DescribeCluster`
 - `DescribeClusterVersions`
 - `DescribeEksAnywhereSubscription`
@@ -2370,6 +2377,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ListAddons`
 - `ListAssociatedAccessPolicies`
 - `ListCapabilities`
+- `ListCertificateAuthorities`
 - `ListClusters`
 - `ListEksAnywhereSubscriptions`
 - `ListFargateProfiles`

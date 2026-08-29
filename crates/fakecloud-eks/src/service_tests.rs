@@ -2460,3 +2460,218 @@ async fn nodegroup_round_trips_node_repair_and_warm_pool_config() {
     let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_eq!(v["nodegroup"]["nodeRepairConfig"]["enabled"], false);
 }
+
+// -----------------------------------------------------------------------
+// Certificate authorities
+// -----------------------------------------------------------------------
+
+async fn list_cas(svc: &EksService, cluster: &str) -> Value {
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            &format!("/clusters/{cluster}/certificate-authorities"),
+            "",
+        ))
+        .await
+        .unwrap();
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+}
+
+#[tokio::test]
+async fn cluster_create_seeds_an_eks_signed_certificate_authority() {
+    let svc = EksService::new(make_state());
+    create_cluster(&svc, "c1").await;
+
+    let v = list_cas(&svc, "c1").await;
+    let cas = v["certificateAuthorities"].as_array().unwrap();
+    assert_eq!(cas.len(), 1);
+    assert_eq!(cas[0]["createdBy"], "EKS");
+    assert_eq!(cas[0]["activatedBy"], "EKS");
+    assert_eq!(cas[0]["signingStatus"], "IN_USE");
+    assert_eq!(cas[0]["distributionStatus"], "COMPLETE");
+}
+
+#[tokio::test]
+async fn certificate_authority_create_describe_activate_delete() {
+    let svc = EksService::new(make_state());
+    create_cluster(&svc, "c1").await;
+    let seeded = list_cas(&svc, "c1").await["certificateAuthorities"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            "/clusters/c1/certificate-authorities",
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["update"]["type"], "CertificateAuthorityUpdate");
+    assert_eq!(v["certificateAuthority"]["createdBy"], "CUSTOMER");
+    assert_eq!(v["certificateAuthority"]["signingStatus"], "NOT_USED");
+    assert_eq!(
+        v["certificateAuthority"]["distributionStatus"],
+        "IN_PROGRESS"
+    );
+    let new_id = v["certificateAuthority"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Describe settles IN_PROGRESS -> COMPLETE and carries the full shape.
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            &format!("/clusters/c1/certificate-authorities/{new_id}"),
+            "",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let ca = &v["certificateAuthority"];
+    assert_eq!(ca["distributionStatus"], "COMPLETE");
+    assert_eq!(ca["rollbackAvailable"], false);
+    assert!(!ca["data"].as_str().unwrap().is_empty());
+    assert!(
+        ca["validity"]["notAfter"].as_f64().unwrap()
+            > ca["validity"]["notBefore"].as_f64().unwrap()
+    );
+
+    // Activating the new CA demotes the seeded one and leaves it rollbackable.
+    let resp = svc
+        .handle(make_request(
+            Method::POST,
+            &format!("/clusters/c1/certificate-authorities/{new_id}/activate"),
+            "{}",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["certificateAuthority"]["signingStatus"], "IN_USE");
+    assert_eq!(v["certificateAuthority"]["activatedBy"], "CUSTOMER");
+    assert_eq!(v["update"]["type"], "CertificateAuthorityUpdate");
+
+    let v = list_cas(&svc, "c1").await;
+    let cas = v["certificateAuthorities"].as_array().unwrap();
+    assert_eq!(cas.len(), 2);
+    let old = cas
+        .iter()
+        .find(|c| c["id"] == seeded.as_str())
+        .expect("seeded CA still listed");
+    assert_eq!(old["signingStatus"], "NOT_USED");
+
+    // The demoted CA is deletable; the signing one is not.
+    let err = svc
+        .handle(make_request(
+            Method::DELETE,
+            &format!("/clusters/c1/certificate-authorities/{new_id}"),
+            "",
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.status(), StatusCode::CONFLICT);
+    assert_eq!(err.code(), "ResourceInUseException");
+
+    let resp = svc
+        .handle(make_request(
+            Method::DELETE,
+            &format!("/clusters/c1/certificate-authorities/{seeded}"),
+            "",
+        ))
+        .await
+        .unwrap();
+    let v: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(v["certificateAuthority"]["distributionStatus"], "DELETING");
+    assert_eq!(
+        list_cas(&svc, "c1").await["certificateAuthorities"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn certificate_authority_create_while_one_distributes_is_in_use() {
+    let svc = EksService::new(make_state());
+    create_cluster(&svc, "c1").await;
+    svc.handle(make_request(
+        Method::POST,
+        "/clusters/c1/certificate-authorities",
+        "{}",
+    ))
+    .await
+    .unwrap();
+    let err = svc
+        .handle(make_request(
+            Method::POST,
+            "/clusters/c1/certificate-authorities",
+            "{}",
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.status(), StatusCode::CONFLICT);
+    assert_eq!(err.code(), "ResourceInUseException");
+}
+
+#[tokio::test]
+async fn certificate_authority_on_missing_cluster_or_id_is_not_found() {
+    let svc = EksService::new(make_state());
+    create_cluster(&svc, "c1").await;
+
+    let err = svc
+        .handle(make_request(
+            Method::GET,
+            "/clusters/ghost/certificate-authorities",
+            "",
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+
+    let err = svc
+        .handle(make_request(
+            Method::GET,
+            "/clusters/c1/certificate-authorities/ca-missing",
+            "",
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+
+    let err = svc
+        .handle(make_request(
+            Method::POST,
+            "/clusters/c1/certificate-authorities/ca-missing/activate",
+            "{}",
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn delete_cluster_cascades_certificate_authorities() {
+    let svc = EksService::new(make_state());
+    create_cluster(&svc, "c1").await;
+    svc.handle(make_request(Method::DELETE, "/clusters/c1", ""))
+        .await
+        .unwrap();
+    create_cluster(&svc, "c1").await;
+    // The recreated cluster gets exactly one fresh EKS CA, not the old one too.
+    assert_eq!(
+        list_cas(&svc, "c1").await["certificateAuthorities"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}

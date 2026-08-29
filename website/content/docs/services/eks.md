@@ -1,18 +1,18 @@
 +++
 title = "EKS"
-description = "Amazon EKS (eks) on fakecloud: complete 65-op Elastic Kubernetes Service control plane — clusters, node groups, Fargate profiles, add-ons, access entries, identity-provider configs, pod identity, insights, capabilities, and EKS Anywhere. restJson1."
+description = "Amazon EKS (eks) on fakecloud: complete 70-op Elastic Kubernetes Service control plane — clusters, node groups, Fargate profiles, add-ons, access entries, identity-provider configs, pod identity, insights, capabilities, certificate authorities, and EKS Anywhere. restJson1."
 weight = 46
 +++
 
 fakecloud implements **Amazon EKS** (`eks`), the managed Kubernetes service, as a
-restJson1 control plane. **The complete 65-operation surface** ships — clusters,
+restJson1 control plane. **The complete 70-operation surface** ships — clusters,
 managed node groups, Fargate profiles, add-ons, access entries, OIDC
 identity-provider configs, pod-identity associations, upgrade insights,
-capabilities, connected-cluster registration, encryption config, and EKS Anywhere
-subscriptions — backed by account-partitioned state that persists across restarts
+capabilities, cluster certificate authorities, connected-cluster registration,
+encryption config, and EKS Anywhere subscriptions — backed by account-partitioned state that persists across restarts
 in persistent mode.
 
-## Supported now (all 65 operations)
+## Supported now (all 70 operations)
 
 - **Cluster lifecycle** — `CreateCluster`, `DescribeCluster`, `ListClusters`,
   `DeleteCluster`. Clusters are created with the requested `roleArn`,
@@ -50,6 +50,14 @@ in persistent mode.
   `DescribeInsightsRefresh`.
 - **Capabilities** — `CreateCapability`, `DescribeCapability`, `ListCapabilities`,
   `UpdateCapability` (tracked `Update`), `DeleteCapability`.
+- **Certificate authorities** — `CreateCertificateAuthority`,
+  `DescribeCertificateAuthority`, `ListCertificateAuthorities`,
+  `DeleteCertificateAuthority`, `ActivateCertificateAuthority`. Every cluster is
+  created with an EKS-signed CA already `IN_USE`; a customer-created CA starts
+  `NOT_USED`/`IN_PROGRESS`, settles to `COMPLETE` on describe, and activation
+  promotes it while demoting the previous signer to `NOT_USED` with
+  `rollbackAvailable`. Deleting the signing CA is refused with
+  `ResourceInUseException`.
 - **Connected clusters** — `RegisterCluster` (creates a `PENDING` cluster with a
   `connectorConfig`) and `DeregisterCluster`.
 - **Cluster maintenance** — `AssociateEncryptionConfig` and `CancelUpdate` (both
@@ -63,8 +71,8 @@ in persistent mode.
 - **Tagging** — `TagResource`, `UntagResource`, `ListTagsForResource` (EKS uses
   a `map<String,String>` tag shape, keyed by resource ARN).
 
-100% conformance across the full surface: all 1,865 generated Smithy probe
-variants for the 65 operations pass. There is no real Kubernetes API-server
+100% conformance across the full surface: all 1,995 generated Smithy probe
+variants for the 70 operations pass. There is no real Kubernetes API-server
 endpoint; the control plane models the AWS management API, not `kubectl` traffic.
 
 ## Example

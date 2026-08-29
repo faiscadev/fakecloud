@@ -764,7 +764,7 @@ async fn ecr_describe_image_scan_findings() {
         .unwrap();
 }
 
-#[test_action("ecr", "DescribeRegistry", checksum = "f44a4b59")]
+#[test_action("ecr", "DescribeRegistry", checksum = "7c416682")]
 #[tokio::test]
 async fn ecr_describe_registry() {
     let server = TestServer::start().await;
@@ -862,7 +862,7 @@ async fn ecr_batch_get_repository_scanning_configuration() {
         .unwrap();
 }
 
-#[test_action("ecr", "PutReplicationConfiguration", checksum = "1ec45e3b")]
+#[test_action("ecr", "PutReplicationConfiguration", checksum = "07d7dbd2")]
 #[tokio::test]
 async fn ecr_put_replication_configuration() {
     use aws_sdk_ecr::types::ReplicationConfiguration;

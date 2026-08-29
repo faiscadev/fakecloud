@@ -86,9 +86,9 @@ async fn cloudwatch_metrics() {
         .unwrap();
 }
 
-#[test_action("monitoring", "PutMetricAlarm", checksum = "afe4e4a0")]
-#[test_action("monitoring", "DescribeAlarms", checksum = "fa3c217f")]
-#[test_action("monitoring", "DescribeAlarmsForMetric", checksum = "ed2833f6")]
+#[test_action("monitoring", "PutMetricAlarm", checksum = "c853c255")]
+#[test_action("monitoring", "DescribeAlarms", checksum = "2d9b182f")]
+#[test_action("monitoring", "DescribeAlarmsForMetric", checksum = "aebfad2f")]
 #[test_action("monitoring", "SetAlarmState", checksum = "bd020d12")]
 #[test_action("monitoring", "EnableAlarmActions", checksum = "bf17737e")]
 #[test_action("monitoring", "DisableAlarmActions", checksum = "d9efce2a")]

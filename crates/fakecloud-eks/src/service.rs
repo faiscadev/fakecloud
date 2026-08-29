@@ -100,6 +100,11 @@ pub const EKS_ACTIONS: &[&str] = &[
     "DescribeCapability",
     "ListCapabilities",
     "UpdateCapability",
+    "CreateCertificateAuthority",
+    "DescribeCertificateAuthority",
+    "ListCertificateAuthorities",
+    "DeleteCertificateAuthority",
+    "ActivateCertificateAuthority",
     "CreateEksAnywhereSubscription",
     "DeleteEksAnywhereSubscription",
     "DescribeEksAnywhereSubscription",
@@ -478,6 +483,34 @@ impl EksService {
                     name: decode(n),
                 },
             )),
+            // Certificate authorities (sub-resources of a cluster).
+            (&Method::POST, ["clusters", c, "certificate-authorities"]) => {
+                Some(("CreateCertificateAuthority", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "certificate-authorities"]) => {
+                Some(("ListCertificateAuthorities", PathArgs::Cluster(decode(c))))
+            }
+            (&Method::GET, ["clusters", c, "certificate-authorities", id]) => Some((
+                "DescribeCertificateAuthority",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(id),
+                },
+            )),
+            (&Method::DELETE, ["clusters", c, "certificate-authorities", id]) => Some((
+                "DeleteCertificateAuthority",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(id),
+                },
+            )),
+            (&Method::POST, ["clusters", c, "certificate-authorities", id, "activate"]) => Some((
+                "ActivateCertificateAuthority",
+                PathArgs::ClusterChild {
+                    cluster: decode(c),
+                    name: decode(id),
+                },
+            )),
             // EKS Anywhere subscriptions (account-scoped).
             (&Method::POST, ["eks-anywhere-subscriptions"]) => {
                 Some(("CreateEksAnywhereSubscription", PathArgs::None))
@@ -584,6 +617,18 @@ impl EksService {
         };
 
         let out = cluster_json(&cluster, &id);
+        // Every EKS cluster ships with an EKS-created CA already signing.
+        let mut seeded = new_certificate_authority(&name, "EKS");
+        seeded.signing_status = "IN_USE".to_string();
+        seeded.distribution_status = "COMPLETE".to_string();
+        seeded.activated_at = Some(seeded.created_at);
+        seeded.activated_by = Some("EKS".to_string());
+        seeded.data = cluster.certificate_authority_data.clone();
+        state
+            .certificate_authorities
+            .entry(name.clone())
+            .or_default()
+            .insert(seeded.id.clone(), seeded);
         state.clusters.insert(name, cluster);
         Ok(AwsResponse::json(
             StatusCode::OK,
@@ -674,6 +719,7 @@ impl EksService {
         state.insights.remove(name);
         state.insights_refresh.remove(name);
         state.capabilities.remove(name);
+        state.certificate_authorities.remove(name);
         let mut cluster = state
             .clusters
             .remove(name)
@@ -3096,6 +3142,196 @@ impl EksService {
     }
 
     // -----------------------------------------------------------------------
+    // Cluster certificate authorities
+    // -----------------------------------------------------------------------
+
+    fn create_certificate_authority(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let authorities = state
+            .certificate_authorities
+            .entry(cluster_name.to_string())
+            .or_default();
+        // One CA distribution at a time per cluster — a second create while
+        // one is still `IN_PROGRESS` hits the op's declared
+        // `ResourceInUseException` rather than silently queueing.
+        if authorities
+            .values()
+            .any(|ca| ca.distribution_status == "IN_PROGRESS")
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!(
+                    "A certificate authority is already being created for cluster {cluster_name}"
+                ),
+            ));
+        }
+        let ca = new_certificate_authority(cluster_name, "CUSTOMER");
+        let summary = certificate_authority_summary_json(&ca);
+        authorities.insert(ca.id.clone(), ca);
+
+        let update = new_update("CertificateAuthorityUpdate", Vec::new());
+        let update_out = update_json(&update);
+        let cluster = state.clusters.get_mut(cluster_name).unwrap();
+        cluster.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": update_out, "certificateAuthority": summary }).to_string(),
+        ))
+    }
+
+    fn describe_certificate_authority(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let ca = state
+            .certificate_authorities
+            .get_mut(cluster_name)
+            .and_then(|m| m.get_mut(id))
+            .ok_or_else(not_found_certificate_authority(id))?;
+        // Distribution to the control plane settles on the first read, the
+        // same way node groups and capabilities settle their CREATING state.
+        if ca.distribution_status == "IN_PROGRESS" {
+            ca.distribution_status = "COMPLETE".to_string();
+        }
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "certificateAuthority": certificate_authority_json(ca) }).to_string(),
+        ))
+    }
+
+    fn list_certificate_authorities(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let max_results = validate_max_results(req)?;
+        let next_token = req.query_params.get("nextToken").cloned();
+        let accounts = self.state.read();
+        let state = accounts
+            .get(&req.account_id)
+            .ok_or_else(not_found_cluster(cluster_name))?;
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let summaries: Vec<Value> = state
+            .certificate_authorities
+            .get(cluster_name)
+            .map(|m| m.values().map(certificate_authority_summary_json).collect())
+            .unwrap_or_default();
+        let (page, token) = paginate_checked(&summaries, next_token.as_deref(), max_results)
+            .map_err(|_| invalid_parameter("Invalid nextToken"))?;
+        let mut out = json!({ "certificateAuthorities": page });
+        if let Some(t) = token {
+            out["nextToken"] = Value::String(t);
+        }
+        Ok(AwsResponse::json(StatusCode::OK, out.to_string()))
+    }
+
+    fn delete_certificate_authority(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let authorities = state
+            .certificate_authorities
+            .get_mut(cluster_name)
+            .ok_or_else(not_found_certificate_authority(id))?;
+        let in_use = authorities
+            .get(id)
+            .ok_or_else(not_found_certificate_authority(id))?
+            .signing_status
+            == "IN_USE";
+        if in_use {
+            // The signing CA backs every kubelet certificate on the cluster;
+            // AWS refuses to delete it until another CA is activated.
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "ResourceInUseException",
+                format!("Certificate authority {id} is in use and cannot be deleted"),
+            ));
+        }
+        let mut ca = authorities.remove(id).unwrap();
+        ca.distribution_status = "DELETING".to_string();
+        let summary = certificate_authority_summary_json(&ca);
+
+        let update = new_update("CertificateAuthorityUpdate", Vec::new());
+        let update_out = update_json(&update);
+        let cluster = state.clusters.get_mut(cluster_name).unwrap();
+        cluster.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": update_out, "certificateAuthority": summary }).to_string(),
+        ))
+    }
+
+    fn activate_certificate_authority(
+        &self,
+        req: &AwsRequest,
+        cluster_name: &str,
+        id: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        if !state.clusters.contains_key(cluster_name) {
+            return Err(not_found_cluster(cluster_name)());
+        }
+        let authorities = state
+            .certificate_authorities
+            .get_mut(cluster_name)
+            .ok_or_else(not_found_certificate_authority(id))?;
+        if !authorities.contains_key(id) {
+            return Err(not_found_certificate_authority(id)());
+        }
+        // Demote whichever CA is signing today; it stays available as the
+        // rollback target until a third activation supersedes it.
+        for (other_id, ca) in authorities.iter_mut() {
+            if other_id != id && ca.signing_status == "IN_USE" {
+                ca.signing_status = "NOT_USED".to_string();
+                ca.rollback_available = true;
+            }
+        }
+        let ca = authorities.get_mut(id).unwrap();
+        // Activation implies the CA finished distributing to the control plane.
+        ca.distribution_status = "COMPLETE".to_string();
+        ca.signing_status = "IN_USE".to_string();
+        ca.activated_at = Some(Utc::now());
+        ca.activated_by = Some("CUSTOMER".to_string());
+        ca.rollback_available = false;
+        let summary = certificate_authority_summary_json(ca);
+
+        let update = new_update("CertificateAuthorityUpdate", Vec::new());
+        let update_out = update_json(&update);
+        let cluster = state.clusters.get_mut(cluster_name).unwrap();
+        cluster.updates.insert(update.id.clone(), update);
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "update": update_out, "certificateAuthority": summary }).to_string(),
+        ))
+    }
+
+    // -----------------------------------------------------------------------
     // EKS Anywhere subscriptions
     // -----------------------------------------------------------------------
 
@@ -3373,6 +3609,11 @@ impl AwsService for EksService {
                 | "CancelUpdate"
                 | "RegisterCluster"
                 | "DeregisterCluster"
+                | "CreateCertificateAuthority"
+                | "DeleteCertificateAuthority"
+                | "ActivateCertificateAuthority"
+                // Describe settles the CA's IN_PROGRESS -> COMPLETE distribution.
+                | "DescribeCertificateAuthority"
                 | "CreateCapability"
                 | "DeleteCapability"
                 | "UpdateCapability"
@@ -3512,6 +3753,21 @@ impl AwsService for EksService {
             }
             ("UpdateCapability", PathArgs::ClusterChild { cluster, name }) => {
                 self.update_capability(&req, cluster, name)
+            }
+            ("CreateCertificateAuthority", PathArgs::Cluster(c)) => {
+                self.create_certificate_authority(&req, c)
+            }
+            ("ListCertificateAuthorities", PathArgs::Cluster(c)) => {
+                self.list_certificate_authorities(&req, c)
+            }
+            ("DescribeCertificateAuthority", PathArgs::ClusterChild { cluster, name }) => {
+                self.describe_certificate_authority(&req, cluster, name)
+            }
+            ("DeleteCertificateAuthority", PathArgs::ClusterChild { cluster, name }) => {
+                self.delete_certificate_authority(&req, cluster, name)
+            }
+            ("ActivateCertificateAuthority", PathArgs::ClusterChild { cluster, name }) => {
+                self.activate_certificate_authority(&req, cluster, name)
             }
             ("CreateEksAnywhereSubscription", _) => self.create_eks_anywhere_subscription(&req),
             ("ListEksAnywhereSubscriptions", _) => self.list_eks_anywhere_subscriptions(&req),

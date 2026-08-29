@@ -272,6 +272,112 @@ impl LambdaService {
             .to_string(),
         ))
     }
+
+    /// Replace a function's whole resource-based policy in one call.
+    ///
+    /// The document lands in the same `LambdaFunction::policy` slot that
+    /// `AddPermission`/`GetPolicy` read and write — AWS keeps a single
+    /// resource policy per function, so the statement-level API and this
+    /// document-level API are two views of one object. Writing bumps
+    /// `RevisionId`, and a caller-supplied `RevisionId` acts as an
+    /// optimistic-concurrency precondition.
+    pub(super) fn put_resource_policy(
+        &self,
+        function_name: &str,
+        account_id: &str,
+        region: &str,
+        qualifier: Option<&str>,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body: Value = serde_json::from_slice(&req.body).unwrap_or_default();
+        let policy = body
+            .get("Policy")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "Policy is required",
+                )
+            })?
+            .to_string();
+        if policy.chars().count() > 20480 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "PolicyLengthExceededException",
+                "The policy document exceeds the 20480-character limit",
+            ));
+        }
+        let doc: Value = serde_json::from_str(&policy).map_err(|_| {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidParameterValueException",
+                "The policy document is not valid JSON",
+            )
+        })?;
+        if grants_public_access(&doc) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "PublicPolicyException",
+                "The resource-based policy you tried to add to the Lambda resource \
+                 would grant public access to it, which isn't allowed.",
+            ));
+        }
+        let expected_revision = body.get("RevisionId").and_then(|v| v.as_str());
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        let func = resolve_policy_target_mut(state, function_name, region, qualifier)?;
+        check_revision(expected_revision, &func.revision_id)?;
+        func.policy = Some(policy.clone());
+        func.revision_id = uuid::Uuid::new_v4().to_string();
+        Ok(AwsResponse::json(
+            StatusCode::OK,
+            json!({ "Policy": policy, "RevisionId": func.revision_id.clone() }).to_string(),
+        ))
+    }
+
+    /// `GetResourcePolicy` reads the same document `GetPolicy` returns —
+    /// AWS keeps one resource policy per function/qualifier, and both
+    /// operations project it as `{ Policy, RevisionId }`.
+    pub(super) fn get_resource_policy(
+        &self,
+        function_name: &str,
+        account_id: &str,
+        region: &str,
+        qualifier: Option<&str>,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        self.get_policy(function_name, account_id, region, qualifier)
+    }
+
+    pub(super) fn delete_resource_policy(
+        &self,
+        function_name: &str,
+        account_id: &str,
+        region: &str,
+        qualifier: Option<&str>,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        // `RevisionId` is an httpQuery member on this op, not a body member.
+        let expected_revision = req.query_params.get("RevisionId").map(String::as_str);
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(account_id);
+        let func = resolve_policy_target_mut(state, function_name, region, qualifier)?;
+        if func.policy.is_none() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("No policy is associated with function {function_name}"),
+            ));
+        }
+        check_revision(expected_revision, &func.revision_id)?;
+        // Unlike `RemovePermission` (which leaves an empty statement list
+        // behind), deleting the policy document removes it outright — a
+        // following `GetResourcePolicy`/`GetPolicy` 404s.
+        func.policy = None;
+        func.revision_id = uuid::Uuid::new_v4().to_string();
+        Ok(AwsResponse::json(StatusCode::NO_CONTENT, String::new()))
+    }
 }
 
 /// Mutable lookup for the LambdaFunction record that owns the
@@ -349,5 +455,49 @@ fn resolve_policy_target_ref<'a>(
                     ),
                 )
             }),
+    }
+}
+
+/// Reject a caller-supplied `RevisionId` that no longer matches the
+/// function's current revision, the precondition AWS enforces on the
+/// resource-policy write path.
+fn check_revision(expected: Option<&str>, current: &str) -> Result<(), AwsServiceError> {
+    match expected {
+        Some(rev) if rev != current => Err(AwsServiceError::aws_error(
+            StatusCode::PRECONDITION_FAILED,
+            "PreconditionFailedException",
+            format!("The RevisionId provided ({rev}) does not match the latest RevisionId for the Lambda function."),
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// True when the document has an `Allow` statement open to every principal
+/// with nothing narrowing it. Lambda's resource-policy API refuses those
+/// outright with `PublicPolicyException`.
+fn grants_public_access(doc: &Value) -> bool {
+    let statements = match doc.get("Statement") {
+        Some(Value::Array(list)) => list.clone(),
+        Some(one @ Value::Object(_)) => vec![one.clone()],
+        _ => return false,
+    };
+    statements.iter().any(|st| {
+        if st.get("Effect").and_then(|v| v.as_str()) != Some("Allow") {
+            return false;
+        }
+        if st.get("Condition").is_some() {
+            return false;
+        }
+        is_wildcard_principal(st.get("Principal"))
+    })
+}
+
+fn is_wildcard_principal(principal: Option<&Value>) -> bool {
+    match principal {
+        Some(Value::String(s)) => s == "*",
+        Some(Value::Object(map)) => map
+            .values()
+            .any(|v| matches!(v, Value::String(s) if s == "*")),
+        _ => false,
     }
 }

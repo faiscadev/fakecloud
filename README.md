@@ -60,7 +60,7 @@ Works as a drop-in for LocalStack in CI, with Terraform (`endpoints` block), CDK
 
 ## Supported services
 
-105 services, 7,396 operations, and true 100% conformance across every implemented service.
+105 services, 7,404 operations, and true 100% conformance across every implemented service.
 
 Highlights: S3, DynamoDB, SQS, SNS, EventBridge, Lambda, IAM, STS, KMS, Secrets Manager, CloudFormation, SES, Cognito, Kinesis, RDS (6 real engines), ElastiCache, ECS/ECR, EC2, Step Functions, API Gateway v1/v2, Bedrock, and 80+ more.
 
