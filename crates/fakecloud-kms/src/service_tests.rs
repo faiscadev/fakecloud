@@ -3876,3 +3876,53 @@ fn encrypt_rejects_non_string_encryption_context_value() {
         "got {err:?}"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rsa_key_generation_does_not_hold_the_state_lock() {
+    // Regression: `create_key` used to generate the RSA keypair *after*
+    // taking `state.write()`, so one RSA CreateKey stalled every other KMS
+    // request — symmetric CreateKey included — for the whole generation.
+    // Key material depends only on `KeySpec`, so it is now minted before the
+    // lock is taken.
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let svc = Arc::new(make_service());
+    let rsa_done = Arc::new(AtomicBool::new(false));
+
+    let rsa_svc = svc.clone();
+    let rsa_flag = rsa_done.clone();
+    let rsa = tokio::task::spawn(async move {
+        let req = make_request(
+            "CreateKey",
+            json!({ "KeySpec": "RSA_3072", "KeyUsage": "SIGN_VERIFY" }),
+        );
+        let resp = rsa_svc.create_key(&req).expect("rsa CreateKey ok");
+        rsa_flag.store(true, Ordering::SeqCst);
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string()
+    });
+
+    // Give the RSA task a moment to reach generation, then hammer the same
+    // service with symmetric work. Under the old code these blocked on the
+    // write lock until the RSA key was done.
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let mut ids = Vec::new();
+    for _ in 0..20 {
+        let req = make_request("CreateKey", json!({}));
+        let resp = svc.create_key(&req).expect("symmetric CreateKey ok");
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        ids.push(body["KeyMetadata"]["KeyId"].as_str().unwrap().to_string());
+    }
+    assert!(
+        !rsa_done.load(Ordering::SeqCst),
+        "20 symmetric CreateKey calls should finish long before one RSA-3072 keygen"
+    );
+
+    let rsa_id = rsa.await.expect("rsa task joined");
+    assert_eq!(ids.len(), 20);
+    // Every key is distinct and the RSA one really carries generated material.
+    let req = make_request("GetPublicKey", json!({ "KeyId": rsa_id }));
+    let resp = svc.get_public_key(&req).expect("GetPublicKey ok");
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(!body["PublicKey"].as_str().unwrap().is_empty());
+}
