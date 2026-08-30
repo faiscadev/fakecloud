@@ -2495,6 +2495,27 @@ fn describe_db_cluster_snapshots_unknown_identifier_is_not_found() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_accepts_an_arn_identifier() {
+    // Clients pass the snapshot ARN here as readily as the plain id
+    // (CopyDBClusterSnapshot normalizes the same way), so an ARN must
+    // resolve rather than 404.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:snap-1",
+        )],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
 fn describe_db_clusters_reports_clone_group_id() {
     // A copy-on-write restore puts source and clone in one clone group,
     // which is what the `clone-group-id` filter selects on.

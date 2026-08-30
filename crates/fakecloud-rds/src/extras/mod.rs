@@ -422,8 +422,14 @@ impl RdsService {
                 // SnapshotType and Filters — all AND-ed, as on real AWS.
                 // Returning every snapshot regardless makes clients that
                 // expect a unique match (Terraform) fail to resolve one.
-                let snapshot_id = get_param(req, "DBClusterSnapshotIdentifier");
-                let cluster_id = get_param(req, "DBClusterIdentifier");
+                // Clients pass the snapshot's ARN here as readily as its
+                // plain id (CopyDBClusterSnapshot already normalizes the
+                // same way), so reduce an ARN to its resource segment
+                // before matching -- otherwise ARN input would 404 below.
+                let snapshot_id = get_param(req, "DBClusterSnapshotIdentifier")
+                    .map(|id| id.rsplit(':').next().unwrap_or(&id).to_string());
+                let cluster_id = get_param(req, "DBClusterIdentifier")
+                    .map(|id| id.rsplit(':').next().unwrap_or(&id).to_string());
                 let snapshot_type = get_param(req, "SnapshotType");
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();

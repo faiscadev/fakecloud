@@ -2288,6 +2288,164 @@ fn reconcile_ignores_available_snapshots() {
     assert_eq!(snapshot_status(&svc, "snap1"), "available");
 }
 
+/// Seed a cluster entry with the identity fields a restore must not
+/// inherit verbatim.
+fn seed_cluster_entry(svc: &RdsService, id: &str, extra: serde_json::Value) {
+    let mut accounts = svc.state.write();
+    let state = accounts.default_mut();
+    let mut entry = serde_json::json!({
+        "DBClusterIdentifier": id,
+        "DBClusterArn": format!("arn:aws:rds:us-east-1:123456789012:cluster:{id}"),
+        "Engine": "postgres",
+        "Status": "available",
+        "DbClusterResourceId": format!("cluster-{id}"),
+    });
+    if let (Some(obj), Some(extra)) = (entry.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    state
+        .extras
+        .entry("clusters".to_string())
+        .or_default()
+        .insert(id.to_string(), entry);
+}
+
+fn cluster_entry(svc: &RdsService, id: &str) -> serde_json::Value {
+    svc.state
+        .read()
+        .default_ref()
+        .extras
+        .get("clusters")
+        .and_then(|m| m.get(id))
+        .cloned()
+        .unwrap_or_else(|| panic!("cluster {id} not recorded"))
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_assigns_its_own_resource_id() {
+    // The restored cluster is a new resource: inheriting the source's
+    // immutable resource id makes `db-cluster-resource-id` — a unique
+    // match on AWS — select two clusters.
+    let svc = make_service();
+    seed_cluster_entry(&svc, "src-cluster", serde_json::json!({}));
+
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored-cluster");
+    let source = cluster_entry(&svc, "src-cluster");
+    assert_ne!(
+        restored["DbClusterResourceId"], source["DbClusterResourceId"],
+        "restored cluster reused the source resource id"
+    );
+    assert!(restored["DbClusterResourceId"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("cluster-"));
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_clone_group_follows_restore_type() {
+    let svc = make_service();
+    seed_cluster_entry(&svc, "src-cluster", serde_json::json!({}));
+
+    // copy-on-write: clone and source share a clone group.
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "clone-cluster"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("RestoreType", "copy-on-write"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let clone_group = cluster_entry(&svc, "clone-cluster")["CloneGroupId"]
+        .as_str()
+        .expect("clone carries a clone group")
+        .to_string();
+    assert_eq!(
+        cluster_entry(&svc, "src-cluster")["CloneGroupId"].as_str(),
+        Some(clone_group.as_str()),
+        "source was not stamped with the shared clone group"
+    );
+
+    // full-copy (the default) is an independent cluster and must not
+    // inherit the source's group.
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "full-copy-cluster"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+    assert!(
+        cluster_entry(&svc, "full-copy-cluster")
+            .get("CloneGroupId")
+            .is_none(),
+        "full-copy restore inherited the source clone group"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_drops_inherited_identity() {
+    // CreateDBClusterSnapshot copies the whole cluster JSON, so the
+    // snapshot carries the source's resource id and clone group. A
+    // restore is an independent full copy of both.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "postgres",
+                    "Status": "available",
+                    "DbClusterResourceId": "cluster-source",
+                    "CloneGroupId": "clone-group-source",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored-cluster");
+    assert_ne!(
+        restored["DbClusterResourceId"].as_str(),
+        Some("cluster-source"),
+        "restored cluster reused the snapshot's resource id"
+    );
+    assert!(
+        restored.get("CloneGroupId").is_none(),
+        "restored cluster inherited the source clone group"
+    );
+}
+
 #[tokio::test]
 async fn restore_db_cluster_to_point_in_time_returns_promptly() {
     // 1.1: the source-writer dump is backgrounded, so PITR returns without

@@ -209,6 +209,17 @@ impl RdsService {
             obj.remove("DBClusterSnapshotIdentifier");
             obj.remove("DBClusterSnapshotArn");
             obj.remove("DumpDataB64");
+            // The snapshot carries the source cluster's identity fields
+            // (CreateDBClusterSnapshot copies the whole cluster JSON).
+            // A restore is an independent full copy: it gets its own
+            // resource id and belongs to no clone group. Inheriting
+            // either makes `db-cluster-resource-id` / `clone-group-id`
+            // return two clusters for what AWS scopes to one.
+            obj.insert(
+                "DbClusterResourceId".to_string(),
+                json!(crate::extras::new_cluster_resource_id()),
+            );
+            obj.remove("CloneGroupId");
             if let Some(engine) = optional_query_param(request, "Engine") {
                 obj.insert("Engine".to_string(), json!(engine));
             }
@@ -379,6 +390,14 @@ impl RdsService {
             );
             obj.remove("DBClusterMembers");
             obj.remove("WriterDBInstanceIdentifier");
+            // The restored cluster is a new resource: the immutable
+            // resource id must not be inherited from the source, or
+            // `db-cluster-resource-id` (a unique match on AWS) selects
+            // both clusters.
+            obj.insert(
+                "DbClusterResourceId".to_string(),
+                json!(crate::extras::new_cluster_resource_id()),
+            );
             // Only a `copy-on-write` restore is a clone: AWS puts the
             // clone and its source in the same clone group, which is
             // what `DescribeDBClusters --filters Name=clone-group-id`
