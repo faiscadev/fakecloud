@@ -78,6 +78,22 @@ pub(crate) fn sibling_rds_arn(arn: &str, resource_type: &str, id: &str) -> Optio
     Some(format!("{}:{resource_type}:{id}", prefix.join(":")))
 }
 
+/// Normalize an identifier request parameter: an explicitly-empty value
+/// means "absent" (AWS ignores it rather than matching the empty string),
+/// and an ARN is reduced to its resource segment because clients pass
+/// either form — the Terraform provider stores full ARNs in
+/// `snapshot_identifier`, and `CopyDBClusterSnapshot` already reduces the
+/// same way.
+///
+/// Note this is the opposite of a filter *value*, where an explicit empty
+/// string is a legitimate member to match on (see `present_param`).
+pub(crate) fn normalized_identifier(param: Option<String>) -> Option<String> {
+    param
+        .filter(|value| !value.is_empty())
+        .map(|value| value.rsplit(':').next().unwrap_or(&value).to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Parse `Filters.Filter.N.Name` + `Filters.Filter.N.Values.Value.M` (and
 /// the `member` spelling of either element) into filter entries.
 ///
@@ -260,6 +276,23 @@ mod tests {
             Some("arn:aws:rds:us-east-1:000000000000:db:mydb"),
         ]));
         assert!(!filter.matches_any([Some("mydb-other"), None]));
+    }
+
+    #[test]
+    fn normalized_identifier_drops_empty_and_reduces_arns() {
+        assert_eq!(normalized_identifier(None), None);
+        // `Key=` reaches handlers as Some("") and means "not supplied".
+        assert_eq!(normalized_identifier(Some(String::new())), None);
+        assert_eq!(
+            normalized_identifier(Some("snap-1".to_string())),
+            Some("snap-1".to_string())
+        );
+        assert_eq!(
+            normalized_identifier(Some(
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1".to_string()
+            )),
+            Some("snap-1".to_string())
+        );
     }
 
     #[test]

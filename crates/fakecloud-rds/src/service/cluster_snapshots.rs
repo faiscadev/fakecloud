@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::filters::normalized_identifier;
+
 impl RdsService {
     /// Real CreateDBClusterSnapshot: locates the cluster's writer
     /// member, dumps its database synchronously via the runtime, and
@@ -142,19 +144,25 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         use serde_json::json;
         let target = required_query_param(request, "DBClusterIdentifier")?;
-        let snapshot_id = optional_query_param(request, "SnapshotIdentifier")
-            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"))
-            .ok_or_else(|| {
-                // Without a snapshot id there's no snapshot to look up,
-                // so surface the same declared `*NotFound` shape we'd
-                // emit for a non-existent id. Smithy doesn't declare a
-                // generic `MissingParameter` on this op.
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "DBClusterSnapshotNotFoundFault",
-                    "SnapshotIdentifier is required",
-                )
-            })?;
+        // The Terraform provider stores a full snapshot ARN in
+        // `snapshot_identifier`, and DescribeDBClusterSnapshots /
+        // CopyDBClusterSnapshot both resolve that form, so this lookup
+        // has to as well.
+        let snapshot_id = normalized_identifier(
+            optional_query_param(request, "SnapshotIdentifier")
+                .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier")),
+        )
+        .ok_or_else(|| {
+            // Without a snapshot id there's no snapshot to look up,
+            // so surface the same declared `*NotFound` shape we'd
+            // emit for a non-existent id. Smithy doesn't declare a
+            // generic `MissingParameter` on this op.
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBClusterSnapshotNotFoundFault",
+                "SnapshotIdentifier is required",
+            )
+        })?;
         let arn = format!(
             "arn:aws:rds:{}:{}:cluster:{}",
             request.region, request.account_id, target

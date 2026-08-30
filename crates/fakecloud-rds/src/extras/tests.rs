@@ -2516,6 +2516,70 @@ fn describe_db_cluster_snapshots_accepts_an_arn_identifier() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_treats_empty_identifiers_as_absent() {
+    // `DBClusterSnapshotIdentifier=` on the wire reaches the handler as
+    // Some(""); AWS ignores an empty parameter rather than matching the
+    // empty string, so this must list, not raise NotFound.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", ""),
+            ("DBClusterIdentifier", ""),
+            ("SnapshotType", ""),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_defaults_missing_snapshot_type_to_manual() {
+    // A stored entry written before SnapshotType was persisted renders
+    // as `manual`, so it must also be selected by `manual` -- renderer
+    // and matcher have to share the default.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("000000000000");
+        s.extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "legacy-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "legacy-snap",
+                    "DBClusterIdentifier": "clu-1",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &[]);
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "renderer default changed: {body}"
+    );
+
+    for params in [
+        vec![("SnapshotType", "manual")],
+        vec![
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "manual"),
+        ],
+    ] {
+        let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &params);
+        assert!(
+            body.contains("<DBClusterSnapshotIdentifier>legacy-snap</DBClusterSnapshotIdentifier>"),
+            "entry rendered as manual but excluded by {params:?}: {body}"
+        );
+    }
+}
+
+#[test]
 fn describe_db_clusters_reports_clone_group_id() {
     // A copy-on-write restore puts source and clone in one clone group,
     // which is what the `clone-group-id` filter selects on.

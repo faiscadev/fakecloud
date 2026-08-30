@@ -20,7 +20,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{RdsService, RdsSourceType};
 
-use crate::filters::{parse_filters, sibling_rds_arn, RdsFilter};
+use crate::filters::{normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter};
 
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 
@@ -70,7 +70,11 @@ fn cluster_snapshot_matches_filters(entry: &Value, filters: &[RdsFilter]) -> boo
             entry_str(entry, "DBClusterSnapshotIdentifier"),
             entry_str(entry, "DBClusterSnapshotArn"),
         ]),
-        "snapshot-type" => filter.matches(entry_str(entry, "SnapshotType")),
+        // Defaulted to match the renderer, which reports a stored entry
+        // carrying no SnapshotType as `manual`.
+        "snapshot-type" => {
+            filter.matches(Some(entry_str(entry, "SnapshotType").unwrap_or("manual")))
+        }
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
@@ -422,15 +426,17 @@ impl RdsService {
                 // SnapshotType and Filters — all AND-ed, as on real AWS.
                 // Returning every snapshot regardless makes clients that
                 // expect a unique match (Terraform) fail to resolve one.
-                // Clients pass the snapshot's ARN here as readily as its
-                // plain id (CopyDBClusterSnapshot already normalizes the
-                // same way), so reduce an ARN to its resource segment
-                // before matching -- otherwise ARN input would 404 below.
-                let snapshot_id = get_param(req, "DBClusterSnapshotIdentifier")
-                    .map(|id| id.rsplit(':').next().unwrap_or(&id).to_string());
-                let cluster_id = get_param(req, "DBClusterIdentifier")
-                    .map(|id| id.rsplit(':').next().unwrap_or(&id).to_string());
-                let snapshot_type = get_param(req, "SnapshotType");
+                // `normalized_identifier` reduces an ARN to its resource
+                // segment (clients pass either form, and
+                // CopyDBClusterSnapshot already normalizes the same way)
+                // and treats an explicitly-empty parameter as absent --
+                // `get_param` keeps `DBClusterSnapshotIdentifier=`, which
+                // would otherwise match nothing and 404 below.
+                let snapshot_id =
+                    normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"));
+                let cluster_id = normalized_identifier(get_param(req, "DBClusterIdentifier"));
+                let snapshot_type =
+                    get_param(req, "SnapshotType").filter(|value| !value.is_empty());
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
                 // A named snapshot that doesn't exist is the declared
@@ -466,7 +472,11 @@ impl RdsService {
                                 }) && cluster_id.as_deref().is_none_or(|wanted| {
                                     entry_str(v, "DBClusterIdentifier") == Some(wanted)
                                 }) && snapshot_type.as_deref().is_none_or(|wanted| {
-                                    entry_str(v, "SnapshotType") == Some(wanted)
+                                    // Same default the renderer emits, so a
+                                    // stored entry without the field can't
+                                    // read back as `manual` yet be excluded
+                                    // by `--snapshot-type manual`.
+                                    entry_str(v, "SnapshotType").unwrap_or("manual") == wanted
                                 }) && cluster_snapshot_matches_filters(v, &filters)
                             })
                             .cloned()

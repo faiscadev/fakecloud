@@ -2400,6 +2400,47 @@ async fn restore_db_cluster_to_point_in_time_clone_group_follows_restore_type() 
 }
 
 #[tokio::test]
+async fn restore_db_cluster_from_snapshot_accepts_an_arn_snapshot_identifier() {
+    // The Terraform provider stores a full ARN in `snapshot_identifier`.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "postgres",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            (
+                "SnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1",
+            ),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req)
+        .await
+        .expect("ARN-form snapshot identifier should resolve");
+    assert_eq!(
+        cluster_entry(&svc, "restored-cluster")["DBClusterIdentifier"].as_str(),
+        Some("restored-cluster")
+    );
+}
+
+#[tokio::test]
 async fn restore_db_cluster_from_snapshot_drops_inherited_identity() {
     // CreateDBClusterSnapshot copies the whole cluster JSON, so the
     // snapshot carries the source's resource id and clone group. A
