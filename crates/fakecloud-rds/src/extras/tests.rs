@@ -1461,6 +1461,49 @@ fn restore_db_cluster_to_point_in_time_clones_source() {
 }
 
 #[test]
+fn restore_db_cluster_to_point_in_time_clone_group_matches_the_async_handler() {
+    // The metadata-only fallback must apply the same clone-group rule as
+    // the async handler the dispatcher routes to, or identical requests
+    // would give different clone-group-id results.
+    let svc = svc();
+    create_cluster(&svc, "src");
+
+    svc.handle_extra_action(&req(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "clone"),
+            ("SourceDBClusterIdentifier", "src"),
+            ("RestoreType", "copy-on-write"),
+        ],
+    ))
+    .expect("copy-on-write restore");
+    let group = cluster_value(&svc, "clone")["CloneGroupId"]
+        .as_str()
+        .expect("clone carries a clone group")
+        .to_string();
+    assert_eq!(
+        cluster_value(&svc, "src")["CloneGroupId"].as_str(),
+        Some(group.as_str()),
+        "source was not stamped with the shared clone group"
+    );
+
+    svc.handle_extra_action(&req(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "full-copy"),
+            ("SourceDBClusterIdentifier", "src"),
+        ],
+    ))
+    .expect("full-copy restore");
+    assert!(
+        cluster_value(&svc, "full-copy")
+            .get("CloneGroupId")
+            .is_none(),
+        "full-copy restore inherited the source clone group"
+    );
+}
+
+#[test]
 fn restore_db_cluster_to_point_in_time_unknown_source_errors() {
     let svc = svc();
     let err = svc

@@ -687,6 +687,23 @@ impl RdsState {
         }
     }
 
+    /// Fix up state loaded from an older persistence snapshot.
+    ///
+    /// Final snapshots (`FinalDBSnapshotIdentifier` on DeleteDBInstance)
+    /// were once recorded as `automated`; AWS types them `manual`,
+    /// because they outlive the instance. Nothing else in the crate ever
+    /// produced `automated`, so every such persisted row is a final
+    /// snapshot. Left alone, it would silently disappear from
+    /// `DescribeDBSnapshots --snapshot-type manual` now that
+    /// SnapshotType actually narrows the result.
+    pub fn migrate_loaded(&mut self) {
+        for snapshot in self.snapshots.values_mut() {
+            if snapshot.snapshot_type == "automated" {
+                snapshot.snapshot_type = "manual".to_string();
+            }
+        }
+    }
+
     pub fn reset(&mut self) {
         self.instances.clear();
         self.in_progress_instance_ids.clear();

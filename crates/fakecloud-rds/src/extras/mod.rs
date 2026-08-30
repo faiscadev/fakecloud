@@ -2295,6 +2295,28 @@ impl RdsService {
                             format!("DBCluster {source} not found."),
                         )
                     })?;
+
+                // A copy-on-write restore clones the source: both join one
+                // clone group, so stamp the source if it isn't in one.
+                let clone_group_id =
+                    if get_param(req, "RestoreType").as_deref() == Some("copy-on-write") {
+                        let group_id = entry
+                            .get("CloneGroupId")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                        if let Some(source_entry) = state
+                            .extras
+                            .get_mut("clusters")
+                            .and_then(|m| m.get_mut(&source))
+                            .and_then(|v| v.as_object_mut())
+                        {
+                            source_entry.insert("CloneGroupId".to_string(), json!(group_id));
+                        }
+                        group_id
+                    } else {
+                        String::new()
+                    };
                 if let Some(obj) = entry.as_object_mut() {
                     obj.insert("DBClusterIdentifier".to_string(), json!(target));
                     obj.insert("DBClusterArn".to_string(), json!(arn));
@@ -2313,12 +2335,17 @@ impl RdsService {
                     );
                     obj.remove("DBClusterMembers");
                     obj.remove("WriterDBInstanceIdentifier");
-                    // Only a copy-on-write restore is a clone; this
-                    // metadata-only fallback doesn't stamp the source, so
-                    // it never joins a group. Drop any inherited one
-                    // rather than putting an independent full copy in the
-                    // source's clone group (mirrors the async handler).
-                    obj.remove("CloneGroupId");
+                    // Same clone-group rule as the async handler: only a
+                    // copy-on-write restore joins the source's group; a
+                    // full copy is independent and must not inherit one.
+                    match get_param(req, "RestoreType").as_deref() {
+                        Some("copy-on-write") => {
+                            obj.insert("CloneGroupId".to_string(), json!(clone_group_id));
+                        }
+                        _ => {
+                            obj.remove("CloneGroupId");
+                        }
+                    }
                     if let Some(restore_time) = get_param(req, "RestoreToTime") {
                         obj.insert("RestoreToTime".to_string(), json!(restore_time));
                     }

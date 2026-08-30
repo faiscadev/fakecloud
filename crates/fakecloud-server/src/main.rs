@@ -3052,6 +3052,10 @@ async fn main() {
                                     // DBInstanceAlreadyExists forever (bug-audit
                                     // 2026-06-26, 4.2).
                                     state.in_progress_instance_ids.clear();
+                                    // Bring older rows in line with the current
+                                    // field semantics (e.g. final snapshots typed
+                                    // `automated` before they were `manual`).
+                                    state.migrate_loaded();
                                 }
                             }
                         }

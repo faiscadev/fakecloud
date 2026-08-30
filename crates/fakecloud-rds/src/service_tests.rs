@@ -2106,6 +2106,30 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
 }
 
 #[test]
+fn migrate_loaded_retypes_persisted_final_snapshots() {
+    // Final snapshots were once persisted as `automated`; AWS types them
+    // `manual`. SnapshotType now actually narrows the result, so without
+    // a migration a pre-existing row would silently vanish from
+    // `--snapshot-type manual` after an upgrade.
+    let svc = make_service();
+    seed_snapshot(&svc, "final-snap", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("final-snap")
+            .expect("seeded snapshot")
+            .snapshot_type = "automated".to_string();
+        state.migrate_loaded();
+    }
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "manual")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>final-snap</DBSnapshotIdentifier>"));
+}
+
+#[test]
 fn describe_db_snapshots_accepts_an_arn_identifier() {
     let svc = make_service();
     seed_snapshot(&svc, "snap1", "db1");
