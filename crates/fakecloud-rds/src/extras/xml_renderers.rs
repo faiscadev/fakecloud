@@ -295,13 +295,30 @@ pub(super) fn db_cluster_member_xml(v: &Value) -> String {
 }
 
 pub(super) fn cluster_snapshot_member_xml(v: &Value) -> String {
-    format!(
+    let mut out = format!(
         "          <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n          <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <Status>{}</Status>",
         xml_escape(v["DBClusterSnapshotIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["DBClusterSnapshotArn"].as_str().unwrap_or("")),
         xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["Status"].as_str().unwrap_or("available")),
-    )
+    );
+    // Echo the fields DescribeDBClusterSnapshots filters on, so a client
+    // that narrowed by snapshot-type / engine can read those values back
+    // off the result instead of getting blanks.
+    out.push_str(&format!(
+        "\n          <SnapshotType>{}</SnapshotType>",
+        xml_escape(v["SnapshotType"].as_str().unwrap_or("manual"))
+    ));
+    if let Some(s) = v["Engine"].as_str() {
+        out.push_str(&format!("\n          <Engine>{}</Engine>", xml_escape(s)));
+    }
+    if let Some(s) = v["EngineVersion"].as_str() {
+        out.push_str(&format!(
+            "\n          <EngineVersion>{}</EngineVersion>",
+            xml_escape(s)
+        ));
+    }
+    out
 }
 
 pub(super) fn cluster_pg_xml(name: &str, arn: &str, family: &str, description: &str) -> String {

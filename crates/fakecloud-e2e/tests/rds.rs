@@ -487,6 +487,94 @@ async fn create_instance(
     create_instance_with_deletion_protection(client, db_instance_identifier, false).await
 }
 
+/// The DBClusterSnapshots list must use named `<DBClusterSnapshot>`
+/// member tags: the AWS SDK unmarshals an empty list from the generic
+/// `<member>` form, which would make the filtering below invisible to
+/// every real client even though the XML body carries the right rows.
+/// Only an SDK-driven test catches that — raw-XML assertions pass either
+/// way.
+#[tokio::test]
+async fn rds_describe_db_cluster_snapshots_filters_through_the_sdk() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    for cluster in ["e2e-filter-clu-1", "e2e-filter-clu-2"] {
+        client
+            .create_db_cluster()
+            .db_cluster_identifier(cluster)
+            .engine("aurora-postgresql")
+            .master_username("admin")
+            .master_user_password("secret123")
+            .send()
+            .await
+            .unwrap();
+        client
+            .create_db_cluster_snapshot()
+            .db_cluster_identifier(cluster)
+            .db_cluster_snapshot_identifier(format!("{cluster}-snap"))
+            .send()
+            .await
+            .unwrap();
+    }
+
+    // Unfiltered: the SDK sees both snapshots (proves the list is
+    // unmarshalled at all).
+    let all = client.describe_db_cluster_snapshots().send().await.unwrap();
+    assert!(
+        all.db_cluster_snapshots().len() >= 2,
+        "SDK unmarshalled {} cluster snapshots",
+        all.db_cluster_snapshots().len()
+    );
+
+    // Filtered by cluster: exactly the one snapshot.
+    let filtered = client
+        .describe_db_cluster_snapshots()
+        .filters(
+            aws_sdk_rds::types::Filter::builder()
+                .name("db-cluster-id")
+                .values("e2e-filter-clu-2")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let snapshots = filtered.db_cluster_snapshots();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "filter returned {} rows",
+        snapshots.len()
+    );
+    assert_eq!(
+        snapshots[0].db_cluster_snapshot_identifier(),
+        Some("e2e-filter-clu-2-snap")
+    );
+    // The fields the filters select on come back populated.
+    assert_eq!(snapshots[0].snapshot_type(), Some("manual"));
+    assert_eq!(snapshots[0].engine(), Some("aurora-postgresql"));
+
+    // Narrowing by identifier works, and an unknown one is the declared
+    // fault rather than a silent full list.
+    let by_id = client
+        .describe_db_cluster_snapshots()
+        .db_cluster_snapshot_identifier("e2e-filter-clu-1-snap")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(by_id.db_cluster_snapshots().len(), 1);
+
+    let error = client
+        .describe_db_cluster_snapshots()
+        .db_cluster_snapshot_identifier("e2e-filter-ghost")
+        .send()
+        .await
+        .expect_err("unknown cluster snapshot should fault");
+    assert_eq!(
+        error.into_service_error().meta().code(),
+        Some("DBClusterSnapshotNotFoundFault")
+    );
+}
+
 /// Regression for #2481: with more than one DB instance, the Terraform /
 /// OpenTofu AWS provider reads an instance back through the
 /// `dbi-resource-id` filter. Ignoring the filter returns every instance

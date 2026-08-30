@@ -473,10 +473,22 @@ impl RdsService {
                             .collect()
                     })
                     .unwrap_or_default();
-                let inner = format!(
-                    "    <DBClusterSnapshots>\n{}\n    </DBClusterSnapshots>",
-                    members(&items, cluster_snapshot_member_xml)
-                );
+                // Named member tags, not the generic `<member>`: the
+                // Smithy list carries xmlName `DBClusterSnapshot`, and the
+                // AWS SDK unmarshals an empty list from `<member>` (see
+                // `list_extras_named_xml`) -- which would make the filtering
+                // above invisible to every real client.
+                let body = items
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            "        <DBClusterSnapshot>\n{}\n        </DBClusterSnapshot>",
+                            cluster_snapshot_member_xml(v)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let inner = format!("    <DBClusterSnapshots>\n{body}\n    </DBClusterSnapshots>");
                 Ok(xml_response("DescribeDBClusterSnapshots", inner, &rid))
             }
             "DescribeDBClusterSnapshotAttributes" | "ModifyDBClusterSnapshotAttribute" => {
@@ -2178,6 +2190,9 @@ impl RdsService {
                     obj.remove("DBClusterSnapshotIdentifier");
                     obj.remove("DBClusterSnapshotArn");
                     obj.remove("DumpDataB64");
+                    // A restore is an independent full copy, never a
+                    // member of the source's clone group.
+                    obj.remove("CloneGroupId");
                     if let Some(engine) = get_param(req, "Engine") {
                         obj.insert("Engine".to_string(), json!(engine));
                     }
@@ -2254,6 +2269,12 @@ impl RdsService {
                     );
                     obj.remove("DBClusterMembers");
                     obj.remove("WriterDBInstanceIdentifier");
+                    // Only a copy-on-write restore is a clone; this
+                    // metadata-only fallback doesn't stamp the source, so
+                    // it never joins a group. Drop any inherited one
+                    // rather than putting an independent full copy in the
+                    // source's clone group (mirrors the async handler).
+                    obj.remove("CloneGroupId");
                     if let Some(restore_time) = get_param(req, "RestoreToTime") {
                         obj.insert("RestoreToTime".to_string(), json!(restore_time));
                     }
