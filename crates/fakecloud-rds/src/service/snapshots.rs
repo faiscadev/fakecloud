@@ -344,11 +344,16 @@ impl RdsService {
         let db_instance_identifier =
             normalized_identifier(optional_query_param(request, "DBInstanceIdentifier"));
         let snapshot_type = optional_query_param(request, "SnapshotType");
+        // A junk boolean is treated as absent rather than rejected:
+        // `InvalidParameterValue` isn't declared on this operation (see
+        // the module docs on `crate::filters`).
         let include_shared =
-            parse_optional_bool(optional_query_param(request, "IncludeShared").as_deref())?
+            parse_optional_bool(optional_query_param(request, "IncludeShared").as_deref())
+                .unwrap_or(None)
                 .unwrap_or(false);
         let include_public =
-            parse_optional_bool(optional_query_param(request, "IncludePublic").as_deref())?
+            parse_optional_bool(optional_query_param(request, "IncludePublic").as_deref())
+                .unwrap_or(None)
                 .unwrap_or(false);
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
@@ -390,15 +395,24 @@ impl RdsService {
             // AWS AND-s the identifier with SnapshotType and any
             // filters: the snapshot exists, so a non-match is an empty
             // result rather than `DBSnapshotNotFound`.
-            // A foreign snapshot answers to `shared` / `public` rather
-            // than to its own stored type.
+            // A foreign snapshot answers to `shared` / `public` (or to
+            // IncludeShared / IncludePublic on an unqualified read) rather
+            // than to its own stored type -- the same rule the list path
+            // applies, so a row the list reported can be re-read by id.
             let owned = state
                 .snapshots
                 .contains_key(&snapshot.db_snapshot_identifier);
-            let type_ok = match snapshot_type.as_deref() {
-                Some("shared") => !owned && snapshot_shared_with(&snapshot, &request.account_id),
-                Some("public") => !owned && snapshot_is_public(&snapshot),
-                other => owned && snapshot_matches_type(&snapshot, other),
+            let shared_with_caller = snapshot_shared_with(&snapshot, &request.account_id);
+            let public = snapshot_is_public(&snapshot);
+            let type_ok = if owned {
+                snapshot_matches_type(&snapshot, snapshot_type.as_deref())
+            } else {
+                match snapshot_type.as_deref() {
+                    Some("shared") => shared_with_caller,
+                    Some("public") => public,
+                    None => (include_shared && shared_with_caller) || (include_public && public),
+                    Some(_) => false,
+                }
             };
             let body = if type_ok && snapshot_matches_filters(&snapshot, &filters) {
                 format!(
@@ -435,17 +449,15 @@ impl RdsService {
         // ModifyDBSnapshotAttribute's `restore` attribute -- AWS reports
         // them here, and IncludeShared / IncludePublic add them to an
         // otherwise-unqualified listing.
-        // AWS: IncludeShared / IncludePublic do not apply when
-        // SnapshotType selects an owned type (`manual`, `automated`,
-        // `awsbackup`) -- only an unqualified listing is widened by them.
-        let owned_type_selected = matches!(
-            snapshot_type.as_deref(),
-            Some(other) if other != "shared" && other != "public"
-        );
-        let want_shared =
-            snapshot_type.as_deref() == Some("shared") || (include_shared && !owned_type_selected);
-        let want_public =
-            snapshot_type.as_deref() == Some("public") || (include_public && !owned_type_selected);
+        // AWS: IncludeShared / IncludePublic apply only to an
+        // unqualified listing -- neither applies when SnapshotType picks
+        // an owned type (`manual` / `automated` / `awsbackup`), and
+        // IncludePublic doesn't apply to `shared` (nor IncludeShared to
+        // `public`).
+        let want_shared = snapshot_type.as_deref() == Some("shared")
+            || (include_shared && snapshot_type.is_none());
+        let want_public = snapshot_type.as_deref() == Some("public")
+            || (include_public && snapshot_type.is_none());
         if want_shared || want_public {
             for (owner, other) in accounts.iter() {
                 if owner == request.account_id {

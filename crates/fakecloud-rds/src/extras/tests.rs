@@ -2710,6 +2710,118 @@ fn describe_db_cluster_snapshots_reports_shared_and_public() {
 }
 
 #[test]
+fn cluster_snapshot_sharing_does_not_leak_through_copy_or_restore() {
+    // A copy and a restore are fresh surfaces: inheriting the source's
+    // `restore` list would publish snapshots nobody shared, and
+    // CreateDBClusterSnapshot copies the whole cluster row forward.
+    let svc = svc();
+    create_cluster(&svc, "src");
+    ok_on(
+        &svc,
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "s1"),
+            ("DBClusterIdentifier", "src"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            ("DBClusterSnapshotIdentifier", "s1"),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "all"),
+        ],
+    );
+
+    // Copy: the target must not inherit the share list.
+    ok_on(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "s1"),
+            ("TargetDBClusterSnapshotIdentifier", "s2"),
+        ],
+    );
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "s2")],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotAttributes/>"),
+        "copied snapshot inherited the share list: {body}"
+    );
+
+    // Restore then re-snapshot: sharing must not propagate forward.
+    ok_on(
+        &svc,
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "s1"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "s3"),
+            ("DBClusterIdentifier", "restored"),
+        ],
+    );
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "s3")],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotAttributes/>"),
+        "sharing propagated through restore: {body}"
+    );
+}
+
+#[test]
+fn describe_db_cluster_snapshots_honors_include_shared() {
+    // The modeled IncludeShared / IncludePublic members widen an
+    // unqualified listing, as on DescribeDBSnapshots.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "mine", "clu-1", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &[]);
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("IncludeShared", "true")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>mine</DBClusterSnapshotIdentifier>"));
+    assert!(body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
 fn describe_db_cluster_snapshots_accepts_an_arn_identifier() {
     // Clients pass the snapshot ARN here as readily as the plain id
     // (CopyDBClusterSnapshot normalizes the same way), so an ARN must

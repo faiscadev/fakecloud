@@ -2308,6 +2308,75 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
         &[("DBSnapshotIdentifier", "private-snap")],
     );
     assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // IncludeShared on an unqualified read resolves it too -- the list
+    // path reports it under the same flag.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "shared-snap"),
+            ("IncludeShared", "true"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "IncludeShared read-back returned nothing: {body}"
+    );
+
+    // Without the flag and without SnapshotType, a foreign snapshot stays
+    // invisible (AWS defaults IncludeShared to false).
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", "shared-snap")],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+}
+
+#[test]
+fn include_public_does_not_apply_to_snapshot_type_shared() {
+    // AWS: "The IncludePublic parameter doesn't apply when SnapshotType
+    // is set to shared" (and IncludeShared doesn't apply to `public`).
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+
+        let mut public = other_account_snapshot("public-snap");
+        public
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+        other.snapshots.insert("public-snap".to_string(), public);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("SnapshotType", "shared"), ("IncludePublic", "true")],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>public-snap</DBSnapshotIdentifier>"),
+        "IncludePublic applied to SnapshotType=shared: {body}"
+    );
+}
+
+#[test]
+fn describe_db_snapshots_tolerates_a_junk_include_flag() {
+    // InvalidParameterValue isn't declared on this op, so an unparsable
+    // boolean is treated as absent rather than rejected.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "db1");
+
+    let req = request("DescribeDBSnapshots", &[("IncludeShared", "yes-please")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
 }
 
 #[test]

@@ -223,6 +223,9 @@ impl RdsService {
             obj.remove("SnapshotType");
             obj.remove("SnapshotCreateTime");
             obj.remove("PercentProgress");
+            // Sharing must not propagate forward either: the restored
+            // cluster is snapshotted whole by CreateDBClusterSnapshot.
+            obj.remove("SnapshotAttributes");
             // The snapshot carries the source cluster's identity fields
             // (CreateDBClusterSnapshot copies the whole cluster JSON).
             // A restore is an independent full copy: it gets its own

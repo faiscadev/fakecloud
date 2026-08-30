@@ -409,6 +409,10 @@ impl RdsService {
                     obj.insert("Status".to_string(), json!("available"));
                     obj.insert("SnapshotType".to_string(), json!("manual"));
                     obj.insert("SourceDBClusterSnapshotArn".to_string(), json!(source_id));
+                    // A copy is a fresh sharing surface -- inheriting the
+                    // source's `restore` list would publish a snapshot
+                    // nobody shared.
+                    obj.remove("SnapshotAttributes");
                 }
                 store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
                 Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
@@ -464,6 +468,12 @@ impl RdsService {
                 let cluster_id = normalized_identifier(get_param(req, "DBClusterIdentifier"));
                 let snapshot_type =
                     get_param(req, "SnapshotType").filter(|value| !value.is_empty());
+                // A junk boolean is treated as absent: InvalidParameterValue
+                // isn't declared on this operation.
+                let include_shared =
+                    get_param(req, "IncludeShared").is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                let include_public =
+                    get_param(req, "IncludePublic").is_some_and(|v| v.eq_ignore_ascii_case("true"));
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
                 // A named snapshot that doesn't exist is the declared
@@ -515,8 +525,12 @@ impl RdsService {
                 // `shared` / `public` select cluster snapshots another
                 // account shared through ModifyDBClusterSnapshotAttribute,
                 // exactly as on DescribeDBSnapshots.
-                let want_shared = snapshot_type.as_deref() == Some("shared");
-                let want_public = snapshot_type.as_deref() == Some("public");
+                // IncludeShared / IncludePublic widen an unqualified
+                // listing, exactly as on DescribeDBSnapshots.
+                let want_shared = snapshot_type.as_deref() == Some("shared")
+                    || (include_shared && snapshot_type.is_none());
+                let want_public = snapshot_type.as_deref() == Some("public")
+                    || (include_public && snapshot_type.is_none());
                 let mut items = items;
                 if want_shared || want_public {
                     for (owner, other) in accounts.iter() {
@@ -2349,6 +2363,9 @@ impl RdsService {
                     obj.remove("SnapshotType");
                     obj.remove("SnapshotCreateTime");
                     obj.remove("PercentProgress");
+                    // Sharing must not propagate: CreateDBClusterSnapshot
+                    // copies the whole cluster row into the next snapshot.
+                    obj.remove("SnapshotAttributes");
                     // A restore is an independent full copy, never a
                     // member of the source's clone group.
                     obj.remove("CloneGroupId");
