@@ -2064,6 +2064,43 @@ fn modify_db_instance_cloudwatch_disable_log_types_removes_existing() {
 
 // ── Snapshots (sync ops only) ────────────────────────────────────
 
+/// A snapshot record owned by an account other than the default one,
+/// for the shared / public listing paths.
+fn other_account_snapshot(snapshot_id: &str) -> crate::state::DbSnapshot {
+    crate::state::DbSnapshot {
+        db_snapshot_identifier: snapshot_id.to_string(),
+        db_snapshot_arn: format!("arn:aws:rds:us-east-1:999999999999:snapshot:{snapshot_id}"),
+        db_instance_identifier: "other-db".to_string(),
+        snapshot_create_time: Utc::now(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        allocated_storage: 20,
+        status: "available".to_string(),
+        port: 5432,
+        master_username: "admin".to_string(),
+        db_name: Some("appdb".to_string()),
+        dbi_resource_id: format!("db-{}", Uuid::new_v4().simple()),
+        snapshot_type: "manual".to_string(),
+        master_user_password: "secret".to_string(),
+        tags: Vec::new(),
+        dump_data: Vec::new(),
+        availability_zone: None,
+        vpc_id: None,
+        instance_create_time: None,
+        license_model: None,
+        iops: None,
+        option_group_name: None,
+        percent_progress: None,
+        storage_type: None,
+        encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        timezone: None,
+        storage_throughput: None,
+        snapshot_attributes: std::collections::BTreeMap::new(),
+    }
+}
+
 fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
     let mut __a = svc.state.write();
     let state = __a.default_mut();
@@ -2121,12 +2158,105 @@ fn migrate_loaded_retypes_persisted_final_snapshots() {
             .get_mut("final-snap")
             .expect("seeded snapshot")
             .snapshot_type = "automated".to_string();
-        state.migrate_loaded();
+        state.migrate_loaded(crate::state::RDS_FINAL_SNAPSHOT_AUTOMATED_SCHEMA);
     }
 
     let req = request("DescribeDBSnapshots", &[("SnapshotType", "manual")]);
     let body = body_of(svc.describe_db_snapshots(&req).unwrap());
     assert!(body.contains("<DBSnapshotIdentifier>final-snap</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn migrate_loaded_leaves_newer_state_alone() {
+    // The rewrite is only sound while nothing produces genuine automated
+    // snapshots; a file written at a newer schema must pass through.
+    let svc = make_service();
+    seed_snapshot(&svc, "auto-snap", "db1");
+    let mut accounts = svc.state.write();
+    let state = accounts.default_mut();
+    state
+        .snapshots
+        .get_mut("auto-snap")
+        .expect("seeded snapshot")
+        .snapshot_type = "automated".to_string();
+
+    state.migrate_loaded(crate::state::RDS_SNAPSHOT_SCHEMA_VERSION);
+
+    assert_eq!(state.snapshots["auto-snap"].snapshot_type, "automated");
+}
+
+#[test]
+fn describe_db_snapshots_reports_shared_and_public_snapshots() {
+    // `shared` / `public` select snapshots another account shared via
+    // ModifyDBSnapshotAttribute's `restore` attribute; they are not the
+    // caller's own snapshots, so an owned-type match would return
+    // nothing.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+
+        let mut public = other_account_snapshot("public-snap");
+        public
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+        other.snapshots.insert("public-snap".to_string(), public);
+
+        let unshared = other_account_snapshot("private-snap");
+        other.snapshots.insert("private-snap".to_string(), unshared);
+    }
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "shared")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>private-snap</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "public")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>public-snap</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    // IncludeShared / IncludePublic widen an otherwise-unqualified list.
+    let req = request("DescribeDBSnapshots", &[]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[("IncludeShared", "true")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[("IncludePublic", "true")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>public-snap</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn delete_db_snapshot_accepts_an_arn_identifier() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    let arn = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap1")
+        .expect("seeded snapshot")
+        .db_snapshot_arn
+        .clone();
+
+    let req = request("DeleteDBSnapshot", &[("DBSnapshotIdentifier", &arn)]);
+    svc.delete_db_snapshot(&req)
+        .expect("ARN-form identifier should resolve");
+    assert!(svc.state.read().default_ref().snapshots.is_empty());
 }
 
 #[test]

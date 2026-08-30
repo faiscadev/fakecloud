@@ -227,7 +227,7 @@ aws rds describe-db-instances \
   --filters "Name=dbi-resource-id,Values=db-1b8e439e59564e849b38b04191c40b8e"
 ```
 
-`DescribeDBSnapshots` and `DescribeDBClusterSnapshots` also honor the top-level `SnapshotType` parameter, and `DescribeDBClusterSnapshots` honors `DBClusterSnapshotIdentifier` / `DBClusterIdentifier`. A named resource that doesn't exist raises the operation's declared fault (`DBInstanceNotFound`, `DBSnapshotNotFound`, `DBClusterNotFoundFault`, `DBClusterSnapshotNotFoundFault`) rather than returning an empty list, so a client can tell "gone" from "no match".
+`DescribeDBSnapshots` honors `SnapshotType` including `shared` and `public`, which report snapshots another account shared with the caller (or with everyone) through `ModifyDBSnapshotAttribute`'s `restore` attribute; `IncludeShared` / `IncludePublic` add those to an otherwise-unqualified listing. `DescribeDBClusterSnapshots` also honors the top-level `SnapshotType` parameter, and `DescribeDBClusterSnapshots` honors `DBClusterSnapshotIdentifier` / `DBClusterIdentifier`. A named resource that doesn't exist raises the operation's declared fault (`DBInstanceNotFound`, `DBSnapshotNotFound`, `DBClusterNotFoundFault`, `DBClusterSnapshotNotFoundFault`) rather than returning an empty list, so a client can tell "gone" from "no match".
 
 Identifier parameters accept an ARN as well as a plain id (`DBInstanceIdentifier`, `DBSnapshotIdentifier`, `DBClusterIdentifier`, `DBClusterSnapshotIdentifier`, and the `SnapshotIdentifier` on the restore operations), matching what the Terraform provider stores in `snapshot_identifier`.
 

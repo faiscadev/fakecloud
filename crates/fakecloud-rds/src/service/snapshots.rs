@@ -4,10 +4,38 @@ use super::*;
 
 use crate::filters::{normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter};
 
-/// True when `snapshot` satisfies the `SnapshotType` request parameter.
-/// AWS returns every snapshot type when the parameter is absent.
+/// The account ids a snapshot's `restore` attribute is shared with.
+/// `ModifyDBSnapshotAttribute` writes it; the literal `all` marks the
+/// snapshot public.
+fn snapshot_restore_targets(snapshot: &DbSnapshot) -> &[String] {
+    snapshot
+        .snapshot_attributes
+        .get("restore")
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+}
+
+/// True when `snapshot` is shared with `account_id`.
+fn snapshot_shared_with(snapshot: &DbSnapshot, account_id: &str) -> bool {
+    snapshot_restore_targets(snapshot)
+        .iter()
+        .any(|target| target == account_id)
+}
+
+/// True when `snapshot` is public (`restore` shared with `all`).
+fn snapshot_is_public(snapshot: &DbSnapshot) -> bool {
+    snapshot_restore_targets(snapshot)
+        .iter()
+        .any(|target| target == "all")
+}
+
+/// True when a snapshot the caller owns satisfies the `SnapshotType`
+/// request parameter. AWS returns every owned type when the parameter is
+/// absent; `shared` and `public` select other accounts' snapshots instead
+/// and are handled separately.
 fn snapshot_matches_type(snapshot: &DbSnapshot, snapshot_type: Option<&str>) -> bool {
     match snapshot_type {
+        Some("shared") | Some("public") => false,
         Some(wanted) => snapshot.snapshot_type == wanted,
         None => true,
     }
@@ -316,6 +344,12 @@ impl RdsService {
         let db_instance_identifier =
             normalized_identifier(optional_query_param(request, "DBInstanceIdentifier"));
         let snapshot_type = optional_query_param(request, "SnapshotType");
+        let include_shared =
+            parse_optional_bool(optional_query_param(request, "IncludeShared").as_deref())?
+                .unwrap_or(false);
+        let include_public =
+            parse_optional_bool(optional_query_param(request, "IncludePublic").as_deref())?
+                .unwrap_or(false);
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
         let filters = parse_filters(request);
@@ -372,6 +406,36 @@ impl RdsService {
             .cloned()
             .collect();
 
+        // `shared` / `public` select snapshots OTHER accounts have shared
+        // with this caller (or with everyone) via
+        // ModifyDBSnapshotAttribute's `restore` attribute -- AWS reports
+        // them here, and IncludeShared / IncludePublic add them to an
+        // otherwise-unqualified listing.
+        let want_shared = snapshot_type.as_deref() == Some("shared") || include_shared;
+        let want_public = snapshot_type.as_deref() == Some("public") || include_public;
+        if want_shared || want_public {
+            for (owner, other) in accounts.iter() {
+                if owner == request.account_id {
+                    continue;
+                }
+                snapshots.extend(
+                    other
+                        .snapshots
+                        .values()
+                        .filter(|snapshot| {
+                            (want_shared && snapshot_shared_with(snapshot, &request.account_id))
+                                || (want_public && snapshot_is_public(snapshot))
+                        })
+                        .filter(|snapshot| {
+                            db_instance_identifier.as_deref().is_none_or(|instance_id| {
+                                snapshot.db_instance_identifier == instance_id
+                            }) && snapshot_matches_filters(snapshot, &filters)
+                        })
+                        .cloned(),
+                );
+            }
+        }
+
         // Sort by creation time, then identifier
         snapshots.sort_by(|a, b| {
             a.snapshot_create_time
@@ -416,7 +480,12 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_snapshot_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
+        // Resolve the ARN form here too: describe, restore and copy all
+        // accept it, and a delete that doesn't would report success (or
+        // NotFound) while leaving the snapshot in place.
+        let db_snapshot_identifier =
+            normalized_identifier(Some(required_query_param(request, "DBSnapshotIdentifier")?))
+                .ok_or_else(|| db_snapshot_not_found("(none)"))?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);

@@ -687,16 +687,24 @@ impl RdsState {
         }
     }
 
-    /// Fix up state loaded from an older persistence snapshot.
+    /// Fix up state loaded from an older persistence snapshot, given the
+    /// schema version the file declared.
     ///
     /// Final snapshots (`FinalDBSnapshotIdentifier` on DeleteDBInstance)
-    /// were once recorded as `automated`; AWS types them `manual`,
-    /// because they outlive the instance. Nothing else in the crate ever
-    /// produced `automated`, so every such persisted row is a final
-    /// snapshot. Left alone, it would silently disappear from
-    /// `DescribeDBSnapshots --snapshot-type manual` now that
-    /// SnapshotType actually narrows the result.
-    pub fn migrate_loaded(&mut self) {
+    /// were recorded as `automated` up to schema v2; AWS types them
+    /// `manual`, because they outlive the instance, unlike automated
+    /// backups. Left alone such a row would silently disappear from
+    /// `DescribeDBSnapshots --snapshot-type manual` now that SnapshotType
+    /// actually narrows the result.
+    ///
+    /// Version-gated on purpose: this rewrite is only sound while nothing
+    /// produces genuine `automated` snapshots. Once automated backups
+    /// become real they are written at a newer schema version and are
+    /// left untouched here.
+    pub fn migrate_loaded(&mut self, from_schema_version: u32) {
+        if from_schema_version > RDS_FINAL_SNAPSHOT_AUTOMATED_SCHEMA {
+            return;
+        }
         for snapshot in self.snapshots.values_mut() {
             if snapshot.snapshot_type == "automated" {
                 snapshot.snapshot_type = "manual".to_string();
@@ -1046,7 +1054,13 @@ pub fn default_parameter_groups(
     groups
 }
 
-pub const RDS_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// v3 retyped final snapshots from `automated` to `manual`; a v2 file
+/// still carries the old type and is migrated on load.
+pub const RDS_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+
+/// Last schema version whose final snapshots were persisted as
+/// `automated`. Files at or below this need [`RdsState::migrate_loaded`].
+pub const RDS_FINAL_SNAPSHOT_AUTOMATED_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RdsSnapshot {

@@ -2065,7 +2065,7 @@ impl RdsService {
                 Ok(xml_response("DescribeEngineDefaultParameters", body, &rid))
             }
             "DescribeDBSnapshotAttributes" => {
-                let id = get_param(req, "DBSnapshotIdentifier")
+                let id = normalized_identifier(get_param(req, "DBSnapshotIdentifier"))
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let attrs = {
                     let accounts = self.state_handle().read();
@@ -2082,7 +2082,7 @@ impl RdsService {
                 ))
             }
             "ModifyDBSnapshotAttribute" => {
-                let id = get_param(req, "DBSnapshotIdentifier")
+                let id = normalized_identifier(get_param(req, "DBSnapshotIdentifier"))
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let attribute_name = get_param(req, "AttributeName")
                     .ok_or_else(|| missing("AttributeName"))?;
@@ -2128,7 +2128,7 @@ impl RdsService {
                 ))
             }
             "ModifyDBSnapshot" => {
-                let id = get_param(req, "DBSnapshotIdentifier")
+                let id = normalized_identifier(get_param(req, "DBSnapshotIdentifier"))
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let engine_version = get_param(req, "EngineVersion");
                 let option_group_name = get_param(req, "OptionGroupName");

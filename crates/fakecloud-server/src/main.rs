@@ -3008,6 +3008,7 @@ async fn main() {
                 Ok(Some(bytes)) => {
                     match serde_json::from_slice::<fakecloud_rds::RdsSnapshot>(&bytes) {
                         Ok(snapshot) => {
+                            let loaded_schema_version = snapshot.schema_version;
                             if snapshot.schema_version > fakecloud_rds::RDS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
@@ -3055,7 +3056,9 @@ async fn main() {
                                     // Bring older rows in line with the current
                                     // field semantics (e.g. final snapshots typed
                                     // `automated` before they were `manual`).
-                                    state.migrate_loaded();
+                                    // Gated on the version the file declared, so
+                                    // it can't keep rewriting newer state.
+                                    state.migrate_loaded(loaded_schema_version);
                                 }
                             }
                         }
