@@ -2651,6 +2651,25 @@ fn describe_db_clusters_identifier_accepts_arn_and_ignores_empty() {
 }
 
 #[test]
+fn describe_db_clusters_unknown_identifier_is_not_found() {
+    // `DBClusterNotFoundFault` is declared on the operation, so a named
+    // cluster that doesn't exist errors rather than returning an empty
+    // list -- a client polling a deleted cluster needs to tell "gone"
+    // from "no match".
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusters",
+        &[("DBClusterIdentifier", "ghost")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("unknown cluster should be a fault"),
+    }
+}
+
+#[test]
 fn describe_db_clusters_reports_clone_group_id() {
     // A copy-on-write restore puts source and clone in one clone group,
     // which is what the `clone-group-id` filter selects on.

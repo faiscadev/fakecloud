@@ -289,6 +289,26 @@ impl RdsService {
                 let id_filter = normalized_identifier(get_param(req, "DBClusterIdentifier"));
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
+                // A named cluster that doesn't exist is the declared
+                // `DBClusterNotFoundFault`; an empty list would tell a
+                // client that distinguishes "gone" from "no match" the
+                // wrong thing.
+                if let Some(wanted) = id_filter.as_deref() {
+                    let known = accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("clusters"))
+                        .is_some_and(|m| {
+                            m.values()
+                                .any(|v| entry_str(v, "DBClusterIdentifier") == Some(wanted))
+                        });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterNotFoundFault",
+                            format!("DBCluster {wanted} not found."),
+                        ));
+                    }
+                }
                 let items: Vec<Value> = accounts.get(&aid)
                     .and_then(|s| s.extras.get("clusters"))
                     .map(|m| {
@@ -1904,7 +1924,7 @@ impl RdsService {
                     .ok_or_else(|| missing("SourceDBSnapshotIdentifier"))?;
                 // Source may be passed as a bare id or a full ARN; key state
                 // by the trailing identifier segment either way.
-                let source_key = source_id.rsplit(':').next().unwrap_or(&source_id).to_string();
+                let source_key = normalized_identifier(Some(source_id.clone())).unwrap_or_else(|| source_id.clone());
                 let option_group_name = get_param(req, "OptionGroupName");
                 let kms_key_id = get_param(req, "KmsKeyId");
                 let (snapshot, arn) = {

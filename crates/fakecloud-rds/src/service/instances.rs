@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::filters::{parse_filters, sibling_rds_arn, RdsFilter};
+use crate::filters::{normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter};
 
 /// True when `instance` satisfies every filter. Filters are AND-ed with
 /// each other; the values within one filter are OR-ed. The names come
@@ -1258,7 +1258,10 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        // "The user-supplied instance identifier or the Amazon Resource
+        // Name (ARN) of the DB instance" -- resolve either form.
+        let db_instance_identifier =
+            normalized_identifier(optional_query_param(request, "DBInstanceIdentifier"));
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
         let filters = parse_filters(request);

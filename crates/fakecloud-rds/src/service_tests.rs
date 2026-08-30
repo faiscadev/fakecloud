@@ -1656,6 +1656,20 @@ fn describe_db_instances_filters_by_dbi_resource_id() {
 }
 
 #[test]
+fn describe_db_instances_identifier_accepts_an_arn() {
+    // The Smithy doc: "The user-supplied instance identifier or the
+    // Amazon Resource Name (ARN) of the DB instance".
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+
+    let req = request("DescribeDBInstances", &[("DBInstanceIdentifier", &arn)]);
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
 fn describe_db_instances_filter_accepts_member_element_spelling() {
     let svc = make_service();
     seed_instance(&svc, "db1");
