@@ -427,6 +427,28 @@ impl RdsService {
                 let snapshot_type = get_param(req, "SnapshotType");
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
+                // A named snapshot that doesn't exist is the declared
+                // `DBClusterSnapshotNotFoundFault`, same as the instance
+                // and DB-snapshot describes. (Unknown *filter* names
+                // can't error the same way — `InvalidParameterValue`
+                // isn't declared here; see `crate::filters`.)
+                if let Some(wanted) = snapshot_id.as_deref() {
+                    let known = accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("cluster_snapshots"))
+                        .is_some_and(|m| {
+                            m.values().any(|v| {
+                                entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                            })
+                        });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {wanted} not found."),
+                        ));
+                    }
+                }
                 let items: Vec<Value> = accounts
                     .get(&aid)
                     .and_then(|s| s.extras.get("cluster_snapshots"))

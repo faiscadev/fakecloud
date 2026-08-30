@@ -321,6 +321,7 @@ impl RdsService {
         // source writer and stages it as `PendingRestoreDumpB64` on the target
         // cluster, which the first attached CreateDBInstance replays. Mirrors
         // the instance-restore path's `spawn_finalize_restored_instance`.
+        let restore_type = optional_query_param(request, "RestoreType");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
         let mut entry = state
@@ -335,6 +336,29 @@ impl RdsService {
                     format!("DBCluster {source} not found."),
                 )
             })?;
+
+        // A `copy-on-write` restore clones the source: both clusters join
+        // one clone group, so stamp the source with a group id if it
+        // isn't already in one.
+        let clone_group_id = if restore_type.as_deref() == Some("copy-on-write") {
+            let existing = entry
+                .get("CloneGroupId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            let group_id =
+                existing.unwrap_or_else(|| format!("{}", uuid::Uuid::new_v4().as_simple()));
+            if let Some(source_entry) = state
+                .extras
+                .get_mut("clusters")
+                .and_then(|m| m.get_mut(&source))
+                .and_then(|v| v.as_object_mut())
+            {
+                source_entry.insert("CloneGroupId".to_string(), json!(group_id));
+            }
+            group_id
+        } else {
+            String::new()
+        };
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("DBClusterIdentifier".to_string(), json!(target));
             obj.insert("DBClusterArn".to_string(), json!(arn));
@@ -355,6 +379,19 @@ impl RdsService {
             );
             obj.remove("DBClusterMembers");
             obj.remove("WriterDBInstanceIdentifier");
+            // Only a `copy-on-write` restore is a clone: AWS puts the
+            // clone and its source in the same clone group, which is
+            // what `DescribeDBClusters --filters Name=clone-group-id`
+            // selects on. A full-copy restore is an independent cluster,
+            // so it must not inherit the source's group.
+            match restore_type.as_deref() {
+                Some("copy-on-write") => {
+                    obj.insert("CloneGroupId".to_string(), json!(clone_group_id));
+                }
+                _ => {
+                    obj.remove("CloneGroupId");
+                }
+            }
             if let Some(restore_time) = optional_query_param(request, "RestoreToTime") {
                 obj.insert("RestoreToTime".to_string(), json!(restore_time));
             }

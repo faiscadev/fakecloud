@@ -113,7 +113,12 @@ impl RdsService {
                 master_username: instance.master_username.clone(),
                 db_name: instance.db_name.clone(),
                 dbi_resource_id: instance.dbi_resource_id.clone(),
-                snapshot_type: "automated".to_string(),
+                // AWS reports a `FinalDBSnapshotIdentifier` snapshot as
+                // `manual`: it outlives the instance, unlike automated
+                // backups, which are deleted with it. This matters now
+                // that SnapshotType and the `snapshot-type` filter
+                // actually narrow the result.
+                snapshot_type: "manual".to_string(),
                 master_user_password: instance.master_user_password.clone(),
                 tags: Vec::new(),
                 dump_data: Vec::new(),

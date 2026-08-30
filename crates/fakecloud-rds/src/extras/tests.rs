@@ -2474,6 +2474,90 @@ fn describe_db_cluster_snapshots_honors_the_identifier_params() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_unknown_identifier_is_not_found() {
+    // `DBClusterSnapshotNotFoundFault` is declared on this operation, so
+    // an unknown named snapshot errors rather than returning an empty
+    // list -- matching DescribeDBInstances / DescribeDBSnapshots.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "ghost")],
+    ));
+    match result {
+        Err(err) => assert!(
+            format!("{err:?}").contains("DBClusterSnapshotNotFoundFault"),
+            "unexpected error: {err:?}"
+        ),
+        Ok(_) => panic!("unknown snapshot should be a fault"),
+    }
+}
+
+#[test]
+fn describe_db_clusters_reports_clone_group_id() {
+    // A copy-on-write restore puts source and clone in one clone group,
+    // which is what the `clone-group-id` filter selects on.
+    let svc = svc();
+    seed_cluster(&svc, "source-clu", "cluster-AAAA", "aurora-postgresql");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("000000000000");
+        for (id, resource_id) in [
+            ("source-clu", "cluster-AAAA"),
+            ("clone-clu", "cluster-BBBB"),
+        ] {
+            let entry = s
+                .extras
+                .entry("clusters".to_string())
+                .or_default()
+                .entry(id.to_string())
+                .or_insert_with(|| {
+                    json!({
+                        "DBClusterIdentifier": id,
+                        "DBClusterArn":
+                            format!("arn:aws:rds:us-east-1:000000000000:cluster:{id}"),
+                        "DbClusterResourceId": resource_id,
+                        "Status": "available",
+                        "Engine": "aurora-postgresql",
+                    })
+                });
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("CloneGroupId".to_string(), json!("clone-group-1"));
+            }
+        }
+    }
+
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains("<CloneGroupId>clone-group-1</CloneGroupId>"),
+        "clone group id not rendered: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "clone-group-id"),
+            ("Filters.Filter.1.Values.Value.1", "clone-group-1"),
+        ],
+    );
+    assert!(body.contains("<DBClusterIdentifier>source-clu</DBClusterIdentifier>"));
+    assert!(body.contains("<DBClusterIdentifier>clone-clu</DBClusterIdentifier>"));
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "clone-group-id"),
+            ("Filters.Filter.1.Values.Value.1", "other-group"),
+        ],
+    );
+    assert!(!body.contains("<DBClusterIdentifier>"), "body: {body}");
+}
+
+#[test]
 fn describe_db_cluster_snapshots_filters_by_snapshot_type_and_cluster() {
     let svc = svc();
     seed_cluster_snapshot(&svc, "manual-snap", "clu-1", "manual");

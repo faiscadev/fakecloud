@@ -227,7 +227,9 @@ aws rds describe-db-instances \
   --filters "Name=dbi-resource-id,Values=db-1b8e439e59564e849b38b04191c40b8e"
 ```
 
-`DescribeDBSnapshots` and `DescribeDBClusterSnapshots` also honor the top-level `SnapshotType` parameter, and `DescribeDBClusterSnapshots` honors `DBClusterSnapshotIdentifier` / `DBClusterIdentifier`.
+`DescribeDBSnapshots` and `DescribeDBClusterSnapshots` also honor the top-level `SnapshotType` parameter, and `DescribeDBClusterSnapshots` honors `DBClusterSnapshotIdentifier` / `DBClusterIdentifier` (an unknown snapshot id raises `DBClusterSnapshotNotFoundFault`).
+
+`clone-group-id` is populated by `RestoreDBClusterToPointInTime` with `RestoreType=copy-on-write`, which puts the clone and its source in one clone group; a full-copy restore is an independent cluster and carries no group.
 
 Real RDS rejects a filter name an operation doesn't support with `InvalidParameterValue`. fakecloud can't: that error isn't declared on any of these operations in the Smithy model, so returning it would emit an undeclared error shape. An unrecognized filter name matches no resource instead, so a caller that asked to narrow gets an empty result rather than the full list.
 

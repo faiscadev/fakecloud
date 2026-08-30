@@ -111,6 +111,12 @@ pub(super) fn db_cluster_member_xml(v: &Value) -> String {
             xml_escape(s)
         ));
     }
+    if let Some(s) = v["CloneGroupId"].as_str() {
+        out.push_str(&format!(
+            "          <CloneGroupId>{}</CloneGroupId>\n",
+            xml_escape(s)
+        ));
+    }
     if let Some(s) = v["ClusterCreateTime"].as_str() {
         out.push_str(&format!(
             "          <ClusterCreateTime>{}</ClusterCreateTime>\n",

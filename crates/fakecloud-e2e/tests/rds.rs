@@ -1098,6 +1098,23 @@ async fn final_snapshot_on_delete() {
         "final snapshot never became available before restore"
     );
 
+    // A final snapshot outlives the instance, so AWS types it `manual`
+    // (automated backups are deleted with the instance). SnapshotType
+    // narrows the result, so a client scoped to manual must see it.
+    let manual = client
+        .describe_db_snapshots()
+        .snapshot_type("manual")
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        manual
+            .db_snapshots()
+            .iter()
+            .any(|s| s.db_snapshot_identifier() == Some("e2e-final-snap")),
+        "final snapshot missing from SnapshotType=manual results"
+    );
+
     // Restore from snapshot and verify data
     let response = client
         .restore_db_instance_from_db_snapshot()

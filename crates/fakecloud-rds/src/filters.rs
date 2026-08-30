@@ -27,8 +27,18 @@
 //! per-operation matchers below do — a caller filtering on something we
 //! don't recognise gets an empty result rather than the whole list.
 
-use fakecloud_core::query::optional_query_param;
 use fakecloud_core::service::AwsRequest;
+
+/// Look a parameter up by presence, keeping an explicitly-empty value.
+///
+/// `optional_query_param` treats `Key=` as absent, which would truncate a
+/// filter's value list at a blank member (`Values.Value.1=` followed by
+/// `Values.Value.2=mysql` would parse as no values at all, and the filter
+/// would then match nothing). AWS keeps the non-empty siblings, so the
+/// list walk has to distinguish "present but empty" from "absent".
+fn present_param(req: &AwsRequest, key: &str) -> Option<String> {
+    req.query_params.get(key).cloned()
+}
 
 /// One `Filters.Filter.N` entry: a name plus the values it accepts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,7 +89,7 @@ pub(crate) fn parse_filters(req: &AwsRequest) -> Vec<RdsFilter> {
     for index in 1.. {
         let Some((prefix, name)) = ["Filter", "member"].iter().find_map(|element| {
             let prefix = format!("Filters.{element}.{index}");
-            optional_query_param(req, &format!("{prefix}.Name")).map(|name| (prefix, name))
+            present_param(req, &format!("{prefix}.Name")).map(|name| (prefix, name))
         }) else {
             break;
         };
@@ -88,7 +98,7 @@ pub(crate) fn parse_filters(req: &AwsRequest) -> Vec<RdsFilter> {
         for element in ["Value", "member"] {
             for value_index in 1.. {
                 let key = format!("{prefix}.Values.{element}.{value_index}");
-                match optional_query_param(req, &key) {
+                match present_param(req, &key) {
                     Some(value) => values.push(value),
                     None => break,
                 }
@@ -174,6 +184,26 @@ mod tests {
             vec![RdsFilter {
                 name: "engine".to_string(),
                 values: vec!["postgres".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn keeps_an_explicitly_empty_value() {
+        // `Value.1=` is a legitimate member (filtering for a blank
+        // attribute); dropping it must not truncate the list and lose
+        // `Value.2`.
+        let filters = parse_filters(&request(&[
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", ""),
+            ("Filters.Filter.1.Values.Value.2", "mysql"),
+        ]));
+
+        assert_eq!(
+            filters,
+            vec![RdsFilter {
+                name: "engine".to_string(),
+                values: vec![String::new(), "mysql".to_string()],
             }]
         );
     }
