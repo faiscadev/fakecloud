@@ -522,6 +522,21 @@ fn build_instance_describe(inst: &StoredInstance) -> Value {
     m.insert("CreatedDate".into(), json!(inst.created_date));
     m.insert("Status".into(), json!(inst.status));
     opt_str(&mut m, "Name", &inst.name);
+    m.insert(
+        "PermissionSetsEnabled".into(),
+        json!(inst.permission_sets_enabled),
+    );
+    // Every instance is encrypted; absent an explicit `UpdateInstance` the key
+    // is the AWS-owned one, which carries no ARN.
+    let key_type = inst
+        .encryption_key_type
+        .clone()
+        .unwrap_or_else(|| "AWS_OWNED_KMS_KEY".to_string());
+    let mut enc = serde_json::Map::new();
+    enc.insert("KeyType".into(), json!(key_type));
+    opt_str(&mut enc, "KmsKeyArn", &inst.encryption_kms_key_arn);
+    enc.insert("EncryptionStatus".into(), json!("ENABLED"));
+    m.insert("EncryptionConfigurationDetails".into(), Value::Object(enc));
     Value::Object(m)
 }
 
@@ -670,6 +685,9 @@ impl SsoAdminService {
             primary_region: Some(req.region.clone()),
             attr_config: None,
             attr_config_status: None,
+            permission_sets_enabled: false,
+            encryption_key_type: None,
+            encryption_kms_key_arn: None,
         };
         {
             let mut guard = self.state.write();
@@ -707,6 +725,9 @@ impl SsoAdminService {
             primary_region: Some(req.region.clone()),
             attr_config: None,
             attr_config_status: None,
+            permission_sets_enabled: false,
+            encryption_key_type: None,
+            encryption_kms_key_arn: None,
         };
         ok(build_instance_describe(&synth))
     }
@@ -723,6 +744,50 @@ impl SsoAdminService {
             .ok_or_else(|| not_found("Instance not found."))?;
         if let Some(name) = b.get("Name").and_then(Value::as_str) {
             inst.name = Some(name.to_string());
+        }
+        if let Some(enabled) = b.get("PermissionSetsEnabled") {
+            // Documented on the member: the only accepted value is `true`, and
+            // it can't be combined with an encryption change in one call.
+            if b.get("EncryptionConfiguration").is_some() {
+                return Err(validation(
+                    "EncryptionConfiguration and PermissionSetsEnabled cannot be set in the same request.",
+                ));
+            }
+            match enabled.as_bool() {
+                Some(true) => inst.permission_sets_enabled = true,
+                _ => {
+                    return Err(validation(
+                        "PermissionSetsEnabled only accepts the value true.",
+                    ))
+                }
+            }
+        }
+        if let Some(cfg) = b.get("EncryptionConfiguration") {
+            let key_type = cfg
+                .get("KeyType")
+                .and_then(Value::as_str)
+                .ok_or_else(|| validation("EncryptionConfiguration.KeyType must be specified."))?;
+            let kms_key_arn = cfg.get("KmsKeyArn").and_then(Value::as_str);
+            match key_type {
+                "AWS_OWNED_KMS_KEY" => {
+                    inst.encryption_key_type = Some(key_type.to_string());
+                    inst.encryption_kms_key_arn = None;
+                }
+                "CUSTOMER_MANAGED_KEY" => {
+                    let arn = kms_key_arn.filter(|a| !a.is_empty()).ok_or_else(|| {
+                        validation(
+                            "EncryptionConfiguration.KmsKeyArn must be specified for a CUSTOMER_MANAGED_KEY.",
+                        )
+                    })?;
+                    inst.encryption_key_type = Some(key_type.to_string());
+                    inst.encryption_kms_key_arn = Some(arn.to_string());
+                }
+                other => {
+                    return Err(validation(&format!(
+                        "EncryptionConfiguration.KeyType must be one of AWS_OWNED_KMS_KEY, CUSTOMER_MANAGED_KEY; got {other}."
+                    )))
+                }
+            }
         }
         ok(json!({}))
     }
@@ -2145,6 +2210,9 @@ impl SsoAdminService {
                 primary_region: Some(req.region.clone()),
                 attr_config: None,
                 attr_config_status: None,
+                permission_sets_enabled: false,
+                encryption_key_type: None,
+                encryption_kms_key_arn: None,
             });
         if !inst.regions.iter().any(|r| r.region_name == region_name) {
             let is_primary = inst.regions.is_empty();

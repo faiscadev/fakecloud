@@ -896,6 +896,13 @@ pub(crate) fn get_spot_placement_scores(
         &["vcpu", "memory-mib", "units"],
     )?;
     validate_max_results(&req.query_params, 10, 1000)?;
+    // `IncludeLocalZones` widens the scored set to Local Zones. fakecloud
+    // models only the three standard availability zones per region (see
+    // `DescribeAvailabilityZones`, which reports `zoneType`
+    // `availability-zone` for all of them), so there is no Local Zone capacity
+    // to score and the result set is the same either way — but the flag is
+    // still a boolean and a non-boolean value is rejected as AWS would.
+    validate_enum(&req.query_params, "IncludeLocalZones", &["true", "false"])?;
     let region = if req.region.is_empty() {
         "us-east-1"
     } else {
@@ -1419,5 +1426,52 @@ mod capacity_tests {
             desc.contains("<targetCapacity>7</targetCapacity>"),
             "{desc}"
         );
+    }
+}
+
+#[cfg(test)]
+mod spot_placement_score_tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    #[test]
+    fn include_local_zones_is_boolean_and_does_not_change_the_scored_set() {
+        let svc = Ec2Service::new();
+        let base = body(
+            get_spot_placement_scores(
+                &svc,
+                &req("GetSpotPlacementScores", &[("TargetCapacity", "5")]),
+            )
+            .unwrap(),
+        );
+
+        // fakecloud models no Local Zones, so the scored set is identical.
+        for flag in ["true", "false"] {
+            let scored = body(
+                get_spot_placement_scores(
+                    &svc,
+                    &req(
+                        "GetSpotPlacementScores",
+                        &[("TargetCapacity", "5"), ("IncludeLocalZones", flag)],
+                    ),
+                )
+                .unwrap(),
+            );
+            assert_eq!(scored, base, "IncludeLocalZones={flag}");
+        }
+
+        // A non-boolean value is still rejected rather than silently ignored.
+        let err = err_of(get_spot_placement_scores(
+            &svc,
+            &req(
+                "GetSpotPlacementScores",
+                &[("TargetCapacity", "5"), ("IncludeLocalZones", "yes")],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
     }
 }
