@@ -2018,6 +2018,14 @@ impl OpenSearchService {
         if !options.get("workspace").is_some_and(Value::is_object) {
             return Err(validation("migrationOptions.workspace is required."));
         }
+        // `ClientToken` is bounded 1..64; it was read past without a check, so
+        // an empty or oversized token still returned 200.
+        if let Some(token) = b.get("clientToken").and_then(Value::as_str) {
+            let len = token.chars().count();
+            if !(1..=64).contains(&len) {
+                return Err(validation("clientToken must be 1..64 characters."));
+            }
+        }
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let migration_id = short_id();
@@ -3363,18 +3371,47 @@ fn has_domain_name(v: &Value) -> bool {
     }
 }
 
+/// Render a stored connection endpoint in the shape the calling API models.
+///
+/// The two APIs disagree: `es` models `SourceDomainInfo` /
+/// `DestinationDomainInfo` as a flat `DomainInformation`
+/// (`OwnerId`/`DomainName`/`Region`), while `opensearch` models
+/// `LocalDomainInfo` / `RemoteDomainInfo` as a `DomainInformationContainer`
+/// that wraps the same members under `AWSDomainInformation`. Connections were
+/// stored exactly as the creating request spelled them and echoed back
+/// verbatim, so a connection created through one API described through the
+/// other came back in the wrong shape.
+fn render_domain_info(api: Api, v: &Value) -> Value {
+    // Accept either spelling on the way in.
+    let inner = v
+        .get("AWSDomainInformation")
+        .filter(|x| x.is_object())
+        .unwrap_or(v);
+    let mut flat = serde_json::Map::new();
+    for key in ["OwnerId", "DomainName", "Region"] {
+        if let Some(x) = inner.get(key) {
+            flat.insert(key.to_string(), x.clone());
+        }
+    }
+    let flat = Value::Object(flat);
+    match api {
+        Api::Es => flat,
+        Api::OpenSearch => json!({ "AWSDomainInformation": flat }),
+    }
+}
+
 fn connection_create_json(api: Api, c: &Connection) -> Value {
     match api {
         Api::Es => json!({
-            "SourceDomainInfo": c.source,
-            "DestinationDomainInfo": c.destination,
+            "SourceDomainInfo": render_domain_info(api, &c.source),
+            "DestinationDomainInfo": render_domain_info(api, &c.destination),
             "ConnectionAlias": c.alias,
             "ConnectionStatus": {"StatusCode": c.status_code, "Message": c.status_message},
             "CrossClusterSearchConnectionId": c.id,
         }),
         Api::OpenSearch => json!({
-            "LocalDomainInfo": c.source,
-            "RemoteDomainInfo": c.destination,
+            "LocalDomainInfo": render_domain_info(api, &c.source),
+            "RemoteDomainInfo": render_domain_info(api, &c.destination),
             "ConnectionAlias": c.alias,
             "ConnectionMode": c.mode,
             "ConnectionProperties": c.properties,
@@ -3387,15 +3424,15 @@ fn connection_create_json(api: Api, c: &Connection) -> Value {
 fn outbound_connection_json(api: Api, c: &Connection) -> Value {
     match api {
         Api::Es => json!({
-            "SourceDomainInfo": c.source,
-            "DestinationDomainInfo": c.destination,
+            "SourceDomainInfo": render_domain_info(api, &c.source),
+            "DestinationDomainInfo": render_domain_info(api, &c.destination),
             "ConnectionAlias": c.alias,
             "ConnectionStatus": {"StatusCode": c.status_code, "Message": c.status_message},
             "CrossClusterSearchConnectionId": c.id,
         }),
         Api::OpenSearch => json!({
-            "LocalDomainInfo": c.source,
-            "RemoteDomainInfo": c.destination,
+            "LocalDomainInfo": render_domain_info(api, &c.source),
+            "RemoteDomainInfo": render_domain_info(api, &c.destination),
             "ConnectionAlias": c.alias,
             "ConnectionMode": c.mode,
             "ConnectionProperties": c.properties,
@@ -3408,14 +3445,14 @@ fn outbound_connection_json(api: Api, c: &Connection) -> Value {
 fn inbound_connection_json(api: Api, c: &Connection) -> Value {
     match api {
         Api::Es => json!({
-            "SourceDomainInfo": c.source,
-            "DestinationDomainInfo": c.destination,
+            "SourceDomainInfo": render_domain_info(api, &c.source),
+            "DestinationDomainInfo": render_domain_info(api, &c.destination),
             "ConnectionStatus": {"StatusCode": c.status_code, "Message": c.status_message},
             "CrossClusterSearchConnectionId": c.id,
         }),
         Api::OpenSearch => json!({
-            "LocalDomainInfo": c.source,
-            "RemoteDomainInfo": c.destination,
+            "LocalDomainInfo": render_domain_info(api, &c.source),
+            "RemoteDomainInfo": render_domain_info(api, &c.destination),
             "ConnectionMode": c.mode,
             "ConnectionStatus": {"StatusCode": c.status_code, "Message": c.status_message},
             "ConnectionId": c.id,
@@ -3820,5 +3857,65 @@ mod is_mutating_tests {
         for action in ["ListScheduledActions", "ListDataSourceAttachments"] {
             assert!(!is_mutating(action), "{action} must not be mutating");
         }
+    }
+}
+
+#[cfg(test)]
+mod domain_info_tests {
+    use super::*;
+
+    /// The two APIs model a connection endpoint differently: `es` uses a flat
+    /// `DomainInformation`, `opensearch` wraps the same members in a
+    /// `DomainInformationContainer` under `AWSDomainInformation`. A connection
+    /// used to be echoed back in whatever shape created it, so one created
+    /// through `es` and described through `opensearch` (or the reverse) came
+    /// back malformed.
+    #[test]
+    fn domain_info_renders_in_the_calling_apis_shape() {
+        let flat = json!({
+            "OwnerId": "123456789012",
+            "DomainName": "logs",
+            "Region": "us-east-1",
+        });
+        let wrapped = json!({ "AWSDomainInformation": flat });
+
+        // Either stored spelling renders flat for `es` ...
+        for stored in [&flat, &wrapped] {
+            assert_eq!(
+                render_domain_info(Api::Es, stored),
+                flat,
+                "es from {stored}"
+            );
+        }
+        // ... and wrapped for `opensearch`.
+        for stored in [&flat, &wrapped] {
+            assert_eq!(
+                render_domain_info(Api::OpenSearch, stored),
+                wrapped,
+                "opensearch from {stored}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_info_drops_members_the_shape_does_not_model() {
+        // `DomainInformation` models exactly OwnerId / DomainName / Region;
+        // anything else a caller sends must not survive into the response.
+        let noisy = json!({
+            "OwnerId": "123456789012",
+            "DomainName": "logs",
+            "Region": "us-east-1",
+            "Bogus": "x",
+        });
+        let rendered = render_domain_info(Api::Es, &noisy);
+        assert!(rendered.get("Bogus").is_none());
+        assert_eq!(rendered.get("DomainName").unwrap(), "logs");
+
+        // A partial endpoint keeps only what it carried.
+        let partial = json!({ "DomainName": "logs" });
+        assert_eq!(
+            render_domain_info(Api::OpenSearch, &partial),
+            json!({ "AWSDomainInformation": { "DomainName": "logs" } })
+        );
     }
 }

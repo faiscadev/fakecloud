@@ -4151,12 +4151,13 @@ fn describe_user_pool() {
     let b = resp_json(&resp);
     assert_eq!(b["UserPool"]["Id"], pool_id);
     assert_eq!(b["UserPool"]["Name"], "test-pool");
-    // Endpoint must be present for Terraform's OIDC issuer/JWKS wiring (1.4).
-    let endpoint = b["UserPool"]["Endpoint"]
-        .as_str()
-        .expect("Endpoint present");
-    assert!(endpoint.starts_with("cognito-idp."), "{endpoint}");
-    assert!(endpoint.ends_with(&pool_id), "{endpoint}");
+    // `UserPoolType` has no `Endpoint` member — it models `Domain` and
+    // `CustomDomain` only, and Terraform derives the OIDC issuer / JWKS URL
+    // from the region and pool id rather than reading it off the response.
+    assert!(
+        b["UserPool"].get("Endpoint").is_none(),
+        "UserPoolType models no Endpoint member"
+    );
 }
 
 #[test]

@@ -1439,11 +1439,11 @@ fn user_pool_to_json(pool: &UserPool) -> Value {
         }).collect::<Vec<Value>>(),
     });
 
-    // AWS always returns the pool's Endpoint (without scheme); Terraform reads
-    // it to wire the OIDC issuer / JWKS URL. The region is embedded in the pool
-    // id (`<region>_<random>`). Previously omitted (bug-audit 2026-06-20, 1.4).
-    let region = pool.id.split('_').next().unwrap_or("us-east-1");
-    obj["Endpoint"] = json!(format!("cognito-idp.{region}.amazonaws.com/{}", pool.id));
+    // No `Endpoint` member here: `UserPoolType` models `Domain` and
+    // `CustomDomain` only. A 2026-06-20 audit added `Endpoint` believing
+    // Terraform read it for the OIDC issuer / JWKS URL, but the provider
+    // derives that itself from the region and pool id — it never reads the
+    // field — and emitting it failed every `CreateUserPool` shape check.
 
     if let Some(ref v) = pool.email_verification_message {
         obj["EmailVerificationMessage"] = json!(v);
