@@ -1080,6 +1080,9 @@ const ALL_DISPATCHED_LAMBDA_OPS: &[&str] = &[
     "AddPermission",
     "RemovePermission",
     "GetPolicy",
+    "PutResourcePolicy",
+    "GetResourcePolicy",
+    "DeleteResourcePolicy",
     "CreateAlias",
     "GetAlias",
     "UpdateAlias",
@@ -3650,4 +3653,418 @@ fn qualifier_from_function_ref_extracts_embedded_qualifier() {
     assert_eq!(q("123456789012:function:MyFn:1"), Some("1".to_string()));
     assert_eq!(q("MyFn:PROD"), Some("PROD".to_string()));
     assert_eq!(q("MyFn"), None);
+}
+
+// ---------------------------------------------------------------------
+// Resource-policy document API (Put/Get/DeleteResourcePolicy)
+// ---------------------------------------------------------------------
+
+fn resource_policy_doc(sid: &str) -> String {
+    json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Sid": sid,
+            "Effect": "Allow",
+            "Principal": { "Service": "s3.amazonaws.com" },
+            "Action": "lambda:InvokeFunction",
+            "Resource": "arn:aws:lambda:us-east-1:123456789012:function:f",
+        }],
+    })
+    .to_string()
+}
+
+fn resource_policy_path(name: &str) -> String {
+    format!(
+        "/2026-07-09/resource-policy/arn%3Aaws%3Alambda%3Aus-east-1%3A123456789012%3Afunction%3A{name}"
+    )
+}
+
+#[tokio::test]
+async fn resource_policy_put_get_delete_round_trip() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let path = resource_policy_path("f");
+
+    let resp = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({ "Policy": resource_policy_doc("s3") }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let revision = out["RevisionId"].as_str().unwrap().to_string();
+    let stored: Value = serde_json::from_str(out["Policy"].as_str().unwrap()).unwrap();
+    assert_eq!(stored["Statement"][0]["Sid"], "s3");
+
+    let resp = svc
+        .handle(make_request(Method::GET, &path, ""))
+        .await
+        .unwrap();
+    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(out["RevisionId"], revision.as_str());
+
+    // The document API and the statement API address one policy, so
+    // GetPolicy reads back what PutResourcePolicy wrote.
+    let resp = svc
+        .handle(make_request(
+            Method::GET,
+            "/2015-03-31/functions/f/policy",
+            "",
+        ))
+        .await
+        .unwrap();
+    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let stored: Value = serde_json::from_str(out["Policy"].as_str().unwrap()).unwrap();
+    assert_eq!(stored["Statement"][0]["Sid"], "s3");
+
+    let resp = svc
+        .handle(make_request(Method::DELETE, &path, ""))
+        .await
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::NO_CONTENT);
+
+    let err = svc
+        .handle(make_request(Method::GET, &path, ""))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn resource_policy_put_bumps_revision_and_enforces_precondition() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let path = resource_policy_path("f");
+
+    let resp = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({ "Policy": resource_policy_doc("a") }).to_string(),
+        ))
+        .await
+        .unwrap();
+    let first: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let revision = first["RevisionId"].as_str().unwrap().to_string();
+
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({ "Policy": resource_policy_doc("b"), "RevisionId": "stale" }).to_string(),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.status(), StatusCode::PRECONDITION_FAILED);
+    assert_eq!(err.code(), "PreconditionFailedException");
+
+    let resp = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({ "Policy": resource_policy_doc("b"), "RevisionId": revision }).to_string(),
+        ))
+        .await
+        .unwrap();
+    let second: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_ne!(second["RevisionId"], first["RevisionId"]);
+}
+
+#[tokio::test]
+async fn resource_policy_delete_honors_revision_query() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let path = resource_policy_path("f");
+    svc.handle(make_request(
+        Method::PUT,
+        &path,
+        &json!({ "Policy": resource_policy_doc("a") }).to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let mut req = make_request(Method::DELETE, &path, "");
+    req.query_params
+        .insert("RevisionId".to_string(), "stale".to_string());
+    let err = svc.handle(req).await.err().unwrap();
+    assert_eq!(err.code(), "PreconditionFailedException");
+
+    let resp = svc
+        .handle(make_request(Method::GET, &path, ""))
+        .await
+        .unwrap();
+    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let current = out["RevisionId"].as_str().unwrap().to_string();
+
+    let mut req = make_request(Method::DELETE, &path, "");
+    req.query_params.insert("RevisionId".to_string(), current);
+    assert_eq!(
+        svc.handle(req).await.unwrap().status,
+        StatusCode::NO_CONTENT
+    );
+}
+
+#[tokio::test]
+async fn resource_policy_rejects_public_and_malformed_documents() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let path = resource_policy_path("f");
+
+    let public = json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": "*",
+            "Action": "lambda:InvokeFunction",
+            "Resource": "arn:aws:lambda:us-east-1:123456789012:function:f",
+        }],
+    })
+    .to_string();
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({ "Policy": public }).to_string(),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(err.code(), "PublicPolicyException");
+
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({ "Policy": "not json" }).to_string(),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "InvalidParameterValueException");
+
+    let err = svc
+        .handle(make_request(Method::PUT, &path, "{}"))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "InvalidParameterValueException");
+}
+
+#[tokio::test]
+async fn resource_policy_on_missing_function_is_not_found() {
+    let svc = LambdaService::new(make_state());
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &resource_policy_path("ghost"),
+            &json!({ "Policy": resource_policy_doc("a") }).to_string(),
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn resource_policy_targets_the_qualifier_in_the_arn() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    svc.handle(make_request(
+        Method::POST,
+        "/2015-03-31/functions/f/versions",
+        "{}",
+    ))
+    .await
+    .unwrap();
+
+    let qualified = format!("{}%3A1", resource_policy_path("f"));
+    svc.handle(make_request(
+        Method::PUT,
+        &qualified,
+        &json!({ "Policy": resource_policy_doc("v1-only") }).to_string(),
+    ))
+    .await
+    .unwrap();
+
+    // $LATEST keeps no policy of its own.
+    let err = svc
+        .handle(make_request(Method::GET, &resource_policy_path("f"), ""))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+
+    let resp = svc
+        .handle(make_request(Method::GET, &qualified, ""))
+        .await
+        .unwrap();
+    let out: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let stored: Value = serde_json::from_str(out["Policy"].as_str().unwrap()).unwrap();
+    assert_eq!(stored["Statement"][0]["Sid"], "v1-only");
+}
+
+#[tokio::test]
+async fn resource_policy_rejects_documents_without_a_statement_array() {
+    // A scalar or bare-array document used to be stored verbatim, which then
+    // made RemovePermission's `Statement` lookup fail with a 500.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let path = resource_policy_path("f");
+
+    for bad in ["[]", "123", "\"x\"", "{\"Version\":\"2012-10-17\"}"] {
+        let err = svc
+            .handle(make_request(
+                Method::PUT,
+                &path,
+                &json!({ "Policy": bad }).to_string(),
+            ))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("policy {bad} should be rejected"));
+        assert_eq!(err.code(), "InvalidParameterValueException");
+        assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // Nothing was stored, so RemovePermission still reports the honest 404
+    // rather than an InternalError from a poisoned document.
+    let err = svc
+        .handle(make_request(
+            Method::DELETE,
+            "/2015-03-31/functions/f/policy/sid",
+            "",
+        ))
+        .await
+        .err()
+        .unwrap();
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn resource_policy_rejects_wildcard_principal_in_every_form() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let path = resource_policy_path("f");
+
+    for principal in [
+        json!("*"),
+        json!(["*"]),
+        json!({ "AWS": "*" }),
+        json!({ "AWS": ["*"] }),
+        json!({ "AWS": ["123456789012", "*"] }),
+    ] {
+        let policy = json!({
+            "Version": "2012-10-17",
+            "Statement": [{
+                "Effect": "Allow",
+                "Principal": principal,
+                "Action": "lambda:InvokeFunction",
+                "Resource": "arn:aws:lambda:us-east-1:123456789012:function:f",
+            }],
+        })
+        .to_string();
+        let err = svc
+            .handle(make_request(
+                Method::PUT,
+                &path,
+                &json!({ "Policy": policy }).to_string(),
+            ))
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("public principal {principal} should be rejected"));
+        assert_eq!(err.code(), "PublicPolicyException");
+    }
+
+    // A wildcard narrowed by a Condition is still allowed.
+    let policy = json!({
+        "Version": "2012-10-17",
+        "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "AWS": ["*"] },
+            "Action": "lambda:InvokeFunction",
+            "Resource": "arn:aws:lambda:us-east-1:123456789012:function:f",
+            "Condition": { "StringEquals": { "aws:SourceAccount": "123456789012" } },
+        }],
+    })
+    .to_string();
+    svc.handle(make_request(
+        Method::PUT,
+        &path,
+        &json!({ "Policy": policy }).to_string(),
+    ))
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn statement_level_writes_bump_the_policy_revision() {
+    // The RevisionId precondition is only meaningful if AddPermission and
+    // RemovePermission move it too — otherwise a PutResourcePolicy holding a
+    // pre-AddPermission revision silently discards the added statement.
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "f").await;
+    let path = resource_policy_path("f");
+
+    svc.handle(make_request(
+        Method::PUT,
+        &path,
+        &json!({ "Policy": resource_policy_doc("base") }).to_string(),
+    ))
+    .await
+    .unwrap();
+    let resp = svc
+        .handle(make_request(Method::GET, &path, ""))
+        .await
+        .unwrap();
+    let before: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let stale = before["RevisionId"].as_str().unwrap().to_string();
+
+    svc.handle(make_request(
+        Method::POST,
+        "/2015-03-31/functions/f/policy",
+        &json!({
+            "StatementId": "added",
+            "Action": "lambda:InvokeFunction",
+            "Principal": "s3.amazonaws.com",
+        })
+        .to_string(),
+    ))
+    .await
+    .unwrap();
+
+    let err = svc
+        .handle(make_request(
+            Method::PUT,
+            &path,
+            &json!({ "Policy": resource_policy_doc("overwrite"), "RevisionId": stale }).to_string(),
+        ))
+        .await
+        .err()
+        .expect("stale revision must not overwrite the added statement");
+    assert_eq!(err.code(), "PreconditionFailedException");
+
+    // RemovePermission moves it as well.
+    let resp = svc
+        .handle(make_request(Method::GET, &path, ""))
+        .await
+        .unwrap();
+    let mid: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    svc.handle(make_request(
+        Method::DELETE,
+        "/2015-03-31/functions/f/policy/added",
+        "",
+    ))
+    .await
+    .unwrap();
+    let resp = svc
+        .handle(make_request(Method::GET, &path, ""))
+        .await
+        .unwrap();
+    let after: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_ne!(mid["RevisionId"], after["RevisionId"]);
 }

@@ -197,7 +197,7 @@ async fn ses_template_lifecycle() {
 
 // -- SendEmail --
 
-#[test_action("ses", "SendEmail", checksum = "364cd183")]
+#[test_action("ses", "SendEmail", checksum = "dea961bd")]
 #[tokio::test]
 async fn ses_send_email() {
     let server = TestServer::start().await;
@@ -306,7 +306,7 @@ async fn ses_send_email_with_template() {
 
 // -- SendBulkEmail --
 
-#[test_action("ses", "SendBulkEmail", checksum = "a88f124e")]
+#[test_action("ses", "SendBulkEmail", checksum = "712ba3be")]
 #[tokio::test]
 async fn ses_send_bulk_email() {
     let server = TestServer::start().await;

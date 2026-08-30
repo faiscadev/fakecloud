@@ -46,6 +46,18 @@ impl LambdaService {
             ));
         }
 
+        // Resource-based policy document API (`/{prefix}/resource-policy/{arn}`),
+        // distinct from the statement-level `/functions/{name}/policy` routes.
+        if segs.get(1).map(|s| s.as_str()) == Some("resource-policy") {
+            let res = Some(segs.get(2).filter(|s| !s.is_empty())?.to_string());
+            return match req.method {
+                Method::PUT => Some(("PutResourcePolicy", res)),
+                Method::GET => Some(("GetResourcePolicy", res)),
+                Method::DELETE => Some(("DeleteResourcePolicy", res)),
+                _ => None,
+            };
+        }
+
         // Concurrency (reserved + provisioned) — any prefix.
         if segs.get(1).map(|s| s.as_str()) == Some("functions")
             && segs.get(3).map(|s| s.as_str()) == Some("concurrency")

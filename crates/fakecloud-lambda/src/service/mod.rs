@@ -190,6 +190,9 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
             | "AddPermission"
             | "RemovePermission"
             | "GetPolicy"
+            | "PutResourcePolicy"
+            | "GetResourcePolicy"
+            | "DeleteResourcePolicy"
             | "GetFunctionConfiguration"
             | "UpdateFunctionConfiguration"
             | "UpdateFunctionCode"
@@ -280,6 +283,9 @@ pub(crate) fn iam_action_name_for(op: &str) -> Option<&'static str> {
         "AddPermission" => "AddPermission",
         "RemovePermission" => "RemovePermission",
         "GetPolicy" => "GetPolicy",
+        "PutResourcePolicy" => "PutResourcePolicy",
+        "GetResourcePolicy" => "GetResourcePolicy",
+        "DeleteResourcePolicy" => "DeleteResourcePolicy",
 
         // --- aliases ---
         "CreateAlias" => "CreateAlias",
@@ -1147,6 +1153,7 @@ impl AwsService for LambdaService {
                 "tags",
                 "account-settings",
                 "code-signing-configs",
+                "resource-policy",
             ];
             let is_known_collection = req
                 .path_segments
@@ -1315,6 +1322,8 @@ impl AwsService for LambdaService {
                 | "PublishVersion"
                 | "AddPermission"
                 | "RemovePermission"
+                | "PutResourcePolicy"
+                | "DeleteResourcePolicy"
                 | "CreateEventSourceMapping"
                 | "DeleteEventSourceMapping"
                 | "UpdateEventSourceMapping"
@@ -1436,6 +1445,26 @@ impl AwsService for LambdaService {
                 self.publish_version(resource_name.as_deref().unwrap_or(""), aid, &req)
             }
             "AddPermission" => self.add_permission(resource_name.as_deref().unwrap_or(""), &req),
+            "PutResourcePolicy" => self.put_resource_policy(
+                resource_name.as_deref().unwrap_or(""),
+                aid,
+                req.region.as_str(),
+                arn_embedded_qualifier.as_deref(),
+                &req,
+            ),
+            "GetResourcePolicy" => self.get_resource_policy(
+                resource_name.as_deref().unwrap_or(""),
+                aid,
+                req.region.as_str(),
+                arn_embedded_qualifier.as_deref(),
+            ),
+            "DeleteResourcePolicy" => self.delete_resource_policy(
+                resource_name.as_deref().unwrap_or(""),
+                aid,
+                req.region.as_str(),
+                arn_embedded_qualifier.as_deref(),
+                &req,
+            ),
             "GetPolicy" => self.get_policy(
                 resource_name.as_deref().unwrap_or(""),
                 aid,
@@ -1576,6 +1605,9 @@ impl AwsService for LambdaService {
             "AddPermission",
             "RemovePermission",
             "GetPolicy",
+            "PutResourcePolicy",
+            "GetResourcePolicy",
+            "DeleteResourcePolicy",
             "CreateEventSourceMapping",
             "ListEventSourceMappings",
             "GetEventSourceMapping",
@@ -1691,6 +1723,9 @@ impl AwsService for LambdaService {
             | "AddPermission"
             | "RemovePermission"
             | "GetPolicy"
+            | "PutResourcePolicy"
+            | "GetResourcePolicy"
+            | "DeleteResourcePolicy"
             | "GetFunctionConfiguration"
             | "UpdateFunctionConfiguration"
             | "UpdateFunctionCode"

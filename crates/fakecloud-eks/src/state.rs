@@ -312,6 +312,34 @@ pub struct Capability {
     pub delete_propagation_policy: Option<String>,
 }
 
+/// A cluster certificate authority. EKS seeds one CUSTOMER-signable CA per
+/// cluster at create time (`createdBy: EKS`, already `IN_USE`); callers add
+/// further CAs with `CreateCertificateAuthority` and promote one with
+/// `ActivateCertificateAuthority`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CertificateAuthority {
+    pub id: String,
+    pub cluster_name: String,
+    /// `CertificateAuthorityCreatedBy` (EKS | CUSTOMER).
+    pub created_by: String,
+    pub created_at: DateTime<Utc>,
+    pub activated_at: Option<DateTime<Utc>>,
+    /// `CertificateAuthorityActivatedBy` (EKS | CUSTOMER), set on activation.
+    pub activated_by: Option<String>,
+    /// `CertificateAuthoritySigningStatus` (NOT_USED | ACTIVATING | IN_USE).
+    pub signing_status: String,
+    /// `CertificateAuthorityDistributionStatus`
+    /// (IN_PROGRESS | COMPLETE | FAILED | DELETING).
+    pub distribution_status: String,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
+    /// True once this CA has been superseded by a later activation, so a
+    /// rollback to it is still possible.
+    pub rollback_available: bool,
+    /// Base64 PEM blob, the same shape as `cluster.certificateAuthority.data`.
+    pub data: String,
+}
+
 /// An EKS Anywhere subscription, an account-scoped (not cluster-scoped)
 /// resource keyed by its generated id.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -369,6 +397,9 @@ pub struct EksState {
     /// Capabilities nested as cluster name -> capability name -> capability.
     #[serde(default)]
     pub capabilities: BTreeMap<String, BTreeMap<String, Capability>>,
+    /// Cluster certificate authorities nested as cluster name -> CA id -> CA.
+    #[serde(default)]
+    pub certificate_authorities: BTreeMap<String, BTreeMap<String, CertificateAuthority>>,
     /// EKS Anywhere subscriptions (account-scoped) keyed by subscription id.
     #[serde(default)]
     pub eks_anywhere_subscriptions: BTreeMap<String, EksAnywhereSubscription>,

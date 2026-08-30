@@ -14,6 +14,7 @@ pub(super) fn rest_request_config(
     const KEY: &str = "test-key";
     const FUNC: &str = "test-conformance-function";
     const LAMBDA_PREFIX: &str = "/2015-03-31";
+    const RBP_ARN: &str = "arn:aws:lambda:us-east-1:000000000000:function:test-rbp-function";
 
     match service_name {
         "lambda" => match operation_name {
@@ -435,6 +436,25 @@ pub(super) fn rest_request_config(
                 "/2025-12-01/durable-execution-callbacks/test-callback/heartbeat".to_string(),
                 None,
             ),
+            // Resource-policy document API (2026-07-09). `ResourceArn` is a
+            // full function ARN in the path, so keep the placeholder distinct
+            // from `FUNC` — the `FunctionName` substitution below would
+            // otherwise rewrite the middle of the ARN.
+            "PutResourcePolicy" => (
+                reqwest::Method::PUT,
+                format!("/2026-07-09/resource-policy/{}", RBP_ARN),
+                None,
+            ),
+            "GetResourcePolicy" => (
+                reqwest::Method::GET,
+                format!("/2026-07-09/resource-policy/{}", RBP_ARN),
+                None,
+            ),
+            "DeleteResourcePolicy" => (
+                reqwest::Method::DELETE,
+                format!("/2026-07-09/resource-policy/{}", RBP_ARN),
+                None,
+            ),
             // Default: POST to functions path
             _ => (
                 reqwest::Method::POST,
@@ -750,6 +770,12 @@ pub(super) fn legacy_substitute_identifiers(
     let mut out = path.to_string();
     let subs: &[(&str, &str)] = match service_name {
         "lambda" => &[
+            // `ResourceArn` first: it spans a whole ARN, and the
+            // `FunctionName` entry below would otherwise rewrite part of it.
+            (
+                "arn:aws:lambda:us-east-1:000000000000:function:test-rbp-function",
+                "ResourceArn",
+            ),
             ("test-conformance-function", "FunctionName"),
             // Layer ops route on `LayerName` (and an optional
             // numeric `VersionNumber`). Substitute from the variant

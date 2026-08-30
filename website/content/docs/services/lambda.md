@@ -4,7 +4,7 @@ description = "Real code execution in Docker containers across 23 runtimes. Even
 weight = 5
 +++
 
-fakecloud implements **70 of 70** Lambda operations at 100% Smithy conformance. Unlike most emulators, **Lambda functions actually execute** — fakecloud runs your code inside real Docker containers.
+fakecloud implements **73 of 73** Lambda operations at 100% Smithy conformance. Unlike most emulators, **Lambda functions actually execute** — fakecloud runs your code inside real Docker containers.
 
 ## Supported features
 
@@ -18,6 +18,7 @@ fakecloud implements **70 of 70** Lambda operations at 100% Smithy conformance. 
 - **Concurrency controls** — reserved concurrency enforced at invocation time: per-function reservation caps in-flight invocations and excess requests are rejected with `TooManyRequestsException` (HTTP 429) and `Reason=ReservedFunctionConcurrentInvocationLimitExceeded`
 - **`UpdateFunctionCode` from S3** — `S3Bucket`/`S3Key`/`S3ObjectVersion` fetches the ZIP from the fakecloud S3 implementation; the stored `CodeSha256` is the real SHA-256 of the fetched bytes
 - **CloudWatch metrics** — every invoke publishes `Invocations`, `Errors`, `Duration`, `Throttles`, and `ConcurrentExecutions` to the `AWS/Lambda` namespace, queryable via `GetMetricStatistics` / `GetMetricData`
+- **Resource-based policies** — the statement API (`AddPermission` / `RemovePermission` / `GetPolicy`) and the document API (`PutResourcePolicy` / `GetResourcePolicy` / `DeleteResourcePolicy`) address one policy per function or qualifier: a `RevisionId` acts as an optimistic-concurrency precondition (`PreconditionFailedException` on mismatch) and an `Allow` open to every principal with no `Condition` is rejected with `PublicPolicyException`
 - **`GetAccountSettings`** — returns real `AccountUsage` counters (`FunctionCount`, `TotalCodeSize`) and `AccountLimit` so SDKs that pre-flight account quotas see live values
 - **Warm container reuse** — subsequent invocations of the same function reuse the container
 - **Async invoke destinations** — `OnSuccess` / `OnFailure` routes the invocation result to SQS, SNS, EventBridge, or another Lambda by ARN scheme; record matches the AWS destinations schema (`requestContext`, `requestPayload`, `responseContext`, `responsePayload`)

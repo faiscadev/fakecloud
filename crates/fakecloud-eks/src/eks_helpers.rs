@@ -1306,3 +1306,84 @@ pub(crate) fn subscription_json(s: &EksAnywhereSubscription) -> Value {
         "tags": s.tags,
     })
 }
+
+pub(crate) fn not_found_certificate_authority(id: &str) -> impl Fn() -> AwsServiceError + 'static {
+    let id = id.to_string();
+    move || {
+        AwsServiceError::aws_error(
+            StatusCode::NOT_FOUND,
+            "ResourceNotFoundException",
+            format!("No certificate authority found for id: {id}."),
+        )
+    }
+}
+
+/// Build a fresh CA record for `cluster`, valid for one year from now.
+/// `created_by` is `EKS` for the CA seeded with the cluster and `CUSTOMER`
+/// for one added through `CreateCertificateAuthority`.
+pub(crate) fn new_certificate_authority(cluster: &str, created_by: &str) -> CertificateAuthority {
+    let now = Utc::now();
+    CertificateAuthority {
+        id: uuid::Uuid::new_v4().to_string(),
+        cluster_name: cluster.to_string(),
+        created_by: created_by.to_string(),
+        created_at: now,
+        activated_at: None,
+        activated_by: None,
+        signing_status: "NOT_USED".to_string(),
+        distribution_status: "IN_PROGRESS".to_string(),
+        not_before: now,
+        not_after: now + chrono::Duration::days(365),
+        rollback_available: false,
+        data: default_ca_data(),
+    }
+}
+
+/// The `CertificateAuthoritySummary` members shared by both response shapes.
+fn certificate_authority_summary_members(
+    ca: &CertificateAuthority,
+) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    out.insert("id".to_string(), Value::String(ca.id.clone()));
+    out.insert("createdAt".to_string(), timestamp_to_number(ca.created_at));
+    out.insert(
+        "createdBy".to_string(),
+        Value::String(ca.created_by.clone()),
+    );
+    if let Some(at) = ca.activated_at {
+        out.insert("activatedAt".to_string(), timestamp_to_number(at));
+    }
+    if let Some(by) = &ca.activated_by {
+        out.insert("activatedBy".to_string(), Value::String(by.clone()));
+    }
+    out.insert(
+        "signingStatus".to_string(),
+        Value::String(ca.signing_status.clone()),
+    );
+    out.insert(
+        "distributionStatus".to_string(),
+        Value::String(ca.distribution_status.clone()),
+    );
+    out
+}
+
+pub(crate) fn certificate_authority_summary_json(ca: &CertificateAuthority) -> Value {
+    Value::Object(certificate_authority_summary_members(ca))
+}
+
+pub(crate) fn certificate_authority_json(ca: &CertificateAuthority) -> Value {
+    let mut out = certificate_authority_summary_members(ca);
+    out.insert(
+        "validity".to_string(),
+        json!({
+            "notBefore": timestamp_to_number(ca.not_before),
+            "notAfter": timestamp_to_number(ca.not_after),
+        }),
+    );
+    out.insert(
+        "rollbackAvailable".to_string(),
+        Value::Bool(ca.rollback_available),
+    );
+    out.insert("data".to_string(), Value::String(ca.data.clone()));
+    Value::Object(out)
+}
