@@ -25,7 +25,10 @@ fn instance_matches_filters(instance: &DbInstance, filters: &[RdsFilter]) -> boo
         }
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        _ => false,
+        other => {
+            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
     })
 }
 

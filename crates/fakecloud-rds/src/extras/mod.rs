@@ -46,7 +46,10 @@ fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        _ => false,
+        other => {
+            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
     })
 }
 
@@ -78,7 +81,10 @@ fn cluster_snapshot_matches_filters(entry: &Value, filters: &[RdsFilter]) -> boo
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        _ => false,
+        other => {
+            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
     })
 }
 
@@ -122,17 +128,6 @@ fn xml_response_no_result(action: &str, request_id: &str) -> AwsResponse {
         rid = xml_escape(request_id),
     );
     AwsResponse::xml(StatusCode::OK, body)
-}
-
-fn members<F>(items: &[Value], render: F) -> String
-where
-    F: Fn(&Value) -> String,
-{
-    items
-        .iter()
-        .map(|v| format!("        <member>\n{}\n        </member>", render(v)))
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn store<'a>(
@@ -789,7 +784,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("cluster_endpoints") { m.remove(&id); }
                 Ok(xml_response("DeleteDBClusterEndpoint", format!("    <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>", xml_escape(&id)), &rid))
             }
-            "DescribeDBClusterEndpoints" => list_extras_xml(self, &aid, "cluster_endpoints", "DBClusterEndpoints", "DescribeDBClusterEndpoints", cluster_endpoint_xml, &rid),
+            "DescribeDBClusterEndpoints" => list_extras_xml(self, &aid, "cluster_endpoints", "DBClusterEndpoints", "DBClusterEndpointList", "DescribeDBClusterEndpoints", cluster_endpoint_xml, &rid),
 
             // ── DB Proxies ──
             "CreateDBProxy" => {
@@ -880,7 +875,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("proxies") { m.remove(&name); }
                 Ok(xml_response("DeleteDBProxy", "    <DBProxy/>".to_string(), &rid))
             }
-            "DescribeDBProxies" => list_extras_xml(self, &aid, "proxies", "DBProxies", "DescribeDBProxies", proxy_xml, &rid),
+            "DescribeDBProxies" => list_extras_xml(self, &aid, "proxies", "DBProxies", "member", "DescribeDBProxies", proxy_xml, &rid),
             "CreateDBProxyEndpoint" => {
                 let name = get_param(req, "DBProxyEndpointName").ok_or_else(|| missing("DBProxyEndpointName"))?;
                 let entry = json!({"DBProxyEndpointName": name, "Status": "available"});
@@ -1107,7 +1102,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("security_groups") { m.remove(&name); }
                 xml_empty_action(&action, &rid)
             }
-            "DescribeDBSecurityGroups" => list_extras_xml(self, &aid, "security_groups", "DBSecurityGroups", "DescribeDBSecurityGroups", security_group_xml, &rid),
+            "DescribeDBSecurityGroups" => list_extras_xml(self, &aid, "security_groups", "DBSecurityGroups", "DBSecurityGroup", "DescribeDBSecurityGroups", security_group_xml, &rid),
 
             // ── Option groups ──
             "CreateOptionGroup" | "CopyOptionGroup" => {
@@ -1456,7 +1451,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("integrations") { m.remove(&name); }
                 Ok(xml_response("DeleteIntegration", "    <Integration/>".to_string(), &rid))
             }
-            "DescribeIntegrations" => list_extras_xml(self, &aid, "integrations", "Integrations", "DescribeIntegrations", integration_xml, &rid),
+            "DescribeIntegrations" => list_extras_xml(self, &aid, "integrations", "Integrations", "Integration", "DescribeIntegrations", integration_xml, &rid),
 
             // ── Blue/Green deployments ──
             "CreateBlueGreenDeployment" => {
@@ -1646,7 +1641,7 @@ impl RdsService {
                     &rid,
                 ))
             }
-            "DescribeBlueGreenDeployments" => list_extras_xml(self, &aid, "blue_green", "BlueGreenDeployments", "DescribeBlueGreenDeployments", blue_green_xml, &rid),
+            "DescribeBlueGreenDeployments" => list_extras_xml(self, &aid, "blue_green", "BlueGreenDeployments", "member", "DescribeBlueGreenDeployments", blue_green_xml, &rid),
 
             // ── Shard groups ──
             "CreateDBShardGroup" => {
@@ -1705,7 +1700,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("shard_groups") { m.remove(&id); }
                 Ok(xml_response("DeleteDBShardGroup", "    <DBShardGroup/>".to_string(), &rid))
             }
-            "DescribeDBShardGroups" => list_extras_xml(self, &aid, "shard_groups", "DBShardGroups", "DescribeDBShardGroups", shard_group_xml, &rid),
+            "DescribeDBShardGroups" => list_extras_xml(self, &aid, "shard_groups", "DBShardGroups", "DBShardGroup", "DescribeDBShardGroups", shard_group_xml, &rid),
 
             // ── Custom engine versions ──
             "CreateCustomDBEngineVersion" | "ModifyCustomDBEngineVersion" => {
@@ -1764,7 +1759,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("tenant_dbs") { m.remove(&name); }
                 Ok(xml_response("DeleteTenantDatabase", "    <TenantDatabase/>".to_string(), &rid))
             }
-            "DescribeTenantDatabases" => list_extras_xml(self, &aid, "tenant_dbs", "TenantDatabases", "DescribeTenantDatabases", tenant_db_xml, &rid),
+            "DescribeTenantDatabases" => list_extras_xml(self, &aid, "tenant_dbs", "TenantDatabases", "TenantDatabase", "DescribeTenantDatabases", tenant_db_xml, &rid),
             "DescribeDBSnapshotTenantDatabases" => Ok(xml_response("DescribeDBSnapshotTenantDatabases", "    <DBSnapshotTenantDatabases/>".to_string(), &rid)),
 
             // ── Export tasks ──
@@ -1777,7 +1772,7 @@ impl RdsService {
                 Ok(xml_response("StartExportTask", export_task_xml(&entry), &rid))
             }
             "CancelExportTask" => Ok(xml_response("CancelExportTask", "    <ExportTask/>".to_string(), &rid)),
-            "DescribeExportTasks" => list_extras_xml(self, &aid, "export_tasks", "ExportTasks", "DescribeExportTasks", export_task_xml, &rid),
+            "DescribeExportTasks" => list_extras_xml(self, &aid, "export_tasks", "ExportTasks", "ExportTask", "DescribeExportTasks", export_task_xml, &rid),
 
             // ── Activity stream ──
             // ResourceArn names either an Aurora DB cluster or an RDS DB
@@ -2234,6 +2229,12 @@ impl RdsService {
                     obj.remove("DBClusterSnapshotIdentifier");
                     obj.remove("DBClusterSnapshotArn");
                     obj.remove("DumpDataB64");
+                    // Snapshot-only bookkeeping has no meaning on a
+                    // cluster row, and CreateDBClusterSnapshot copies the
+                    // whole row into the next snapshot.
+                    obj.remove("SnapshotType");
+                    obj.remove("SnapshotCreateTime");
+                    obj.remove("PercentProgress");
                     // A restore is an independent full copy, never a
                     // member of the source's clone group.
                     obj.remove("CloneGroupId");

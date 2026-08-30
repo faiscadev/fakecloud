@@ -217,6 +217,12 @@ impl RdsService {
             obj.remove("DBClusterSnapshotIdentifier");
             obj.remove("DBClusterSnapshotArn");
             obj.remove("DumpDataB64");
+            // Snapshot-only bookkeeping has no meaning on a cluster row,
+            // and CreateDBClusterSnapshot copies the whole row into the
+            // next snapshot, so leaving it would propagate forward.
+            obj.remove("SnapshotType");
+            obj.remove("SnapshotCreateTime");
+            obj.remove("PercentProgress");
             // The snapshot carries the source cluster's identity fields
             // (CreateDBClusterSnapshot copies the whole cluster JSON).
             // A restore is an independent full copy: it gets its own

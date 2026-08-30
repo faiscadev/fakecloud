@@ -149,11 +149,20 @@ pub(super) fn format_kms_arn(input: &str, region: &str, account_id: &str) -> Str
     Arn::new("kms", region, account_id, &format!("key/{input}")).to_string()
 }
 
+/// Render a whole extras category as a Describe list response.
+///
+/// `member_tag` is the element each entry is wrapped in: the list's
+/// Smithy `xmlName` where the model declares one (the AWS SDKs unmarshal
+/// an empty list from the generic `<member>`, so getting this wrong makes
+/// the rows invisible to every real client), or `"member"` for the few
+/// lists that genuinely have no member xmlName.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn list_extras_xml(
     svc: &RdsService,
     aid: &str,
     category: &str,
     wrapper: &str,
+    member_tag: &str,
     action: &str,
     render: impl Fn(&Value) -> String,
     rid: &str,
@@ -164,10 +173,17 @@ pub(super) fn list_extras_xml(
         .and_then(|s| s.extras.get(category))
         .map(|m| m.values().cloned().collect())
         .unwrap_or_default();
-    let inner = format!(
-        "    <{wrapper}>\n{}\n    </{wrapper}>",
-        members(&items, render)
-    );
+    let body = items
+        .iter()
+        .map(|v| {
+            format!(
+                "        <{member_tag}>\n{}\n        </{member_tag}>",
+                render(v)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let inner = format!("    <{wrapper}>\n{body}\n    </{wrapper}>");
     Ok(xml_response(action, inner, rid))
 }
 

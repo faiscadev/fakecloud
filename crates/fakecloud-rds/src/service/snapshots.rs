@@ -42,7 +42,10 @@ fn snapshot_matches_filters(snapshot: &DbSnapshot, filters: &[RdsFilter]) -> boo
         "snapshot-type" => filter.matches(Some(snapshot.snapshot_type.as_str())),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        _ => false,
+        other => {
+            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
     })
 }
 

@@ -2538,6 +2538,53 @@ fn describe_db_cluster_snapshots_unknown_identifier_is_not_found() {
 }
 
 #[test]
+fn describe_lists_use_the_smithy_member_tag() {
+    // The AWS SDKs unmarshal an empty list from the generic `<member>`
+    // element, so every list whose Smithy member declares an `xmlName`
+    // has to emit that name -- otherwise the rows are on the wire but
+    // invisible to real clients. Names verified against aws-models.
+    let cases = [
+        (
+            "cluster_endpoints",
+            "DescribeDBClusterEndpoints",
+            "DBClusterEndpointList",
+        ),
+        (
+            "security_groups",
+            "DescribeDBSecurityGroups",
+            "DBSecurityGroup",
+        ),
+        ("integrations", "DescribeIntegrations", "Integration"),
+        ("shard_groups", "DescribeDBShardGroups", "DBShardGroup"),
+        ("tenant_dbs", "DescribeTenantDatabases", "TenantDatabase"),
+        ("export_tasks", "DescribeExportTasks", "ExportTask"),
+    ];
+
+    for (category, action, member_tag) in cases {
+        let svc = svc();
+        {
+            let state = svc.state_handle();
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("000000000000");
+            s.extras
+                .entry(category.to_string())
+                .or_default()
+                .insert("entry-1".to_string(), json!({"Status": "available"}));
+        }
+
+        let body = body_of_action(&svc, action, &[]);
+        assert!(
+            body.contains(&format!("<{member_tag}>")),
+            "{action} did not use <{member_tag}>: {body}"
+        );
+        assert!(
+            !body.contains("<member>"),
+            "{action} still emits the generic <member>: {body}"
+        );
+    }
+}
+
+#[test]
 fn describe_db_cluster_snapshots_accepts_an_arn_identifier() {
     // Clients pass the snapshot ARN here as readily as the plain id
     // (CopyDBClusterSnapshot normalizes the same way), so an ARN must

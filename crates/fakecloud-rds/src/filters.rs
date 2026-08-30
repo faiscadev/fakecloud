@@ -71,6 +71,12 @@ impl RdsFilter {
 /// AWS documents as accepting "identifiers and ARNs" can be matched
 /// against the ARN form too. Returns `None` for a malformed ARN.
 pub(crate) fn sibling_rds_arn(arn: &str, resource_type: &str, id: &str) -> Option<String> {
+    // Guarded on the `arn:` prefix like `normalized_identifier`: without
+    // it any 5-field string would be turned into a fabricated ARN that a
+    // filter could then match on.
+    if !arn.starts_with("arn:") {
+        return None;
+    }
     let prefix: Vec<&str> = arn.splitn(7, ':').take(5).collect();
     if prefix.len() < 5 {
         return None;
@@ -339,5 +345,7 @@ mod tests {
     #[test]
     fn sibling_arn_rejects_malformed_input() {
         assert_eq!(sibling_rds_arn("not-an-arn", "db", "mydb"), None);
+        // A 5-field non-ARN must not be turned into a fabricated ARN.
+        assert_eq!(sibling_rds_arn("a:b:c:d:e", "cluster", "x"), None);
     }
 }
