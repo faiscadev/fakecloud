@@ -84,10 +84,12 @@ pub(crate) fn sibling_rds_arn(arn: &str, resource_type: &str, id: &str) -> Optio
 /// either form — the Terraform provider stores full ARNs in
 /// `snapshot_identifier`.
 ///
-/// The reduction is guarded on the `arn:` prefix rather than splitting on
-/// the last colon of any value: AWS's own automated-snapshot identifiers
-/// carry one (`rds:mydb-2026-08-30-06-00`), and blindly trimming would
-/// turn a real id into a lookup miss.
+/// The reduction is guarded on the `arn:` prefix, and takes everything
+/// after the resource-type field rather than the last colon segment:
+/// AWS's automated-snapshot identifiers themselves contain a colon
+/// (`rds:mydb-2026-08-30-06-00`), both bare and inside an ARN
+/// (`arn:aws:rds:us-east-1:123456789012:snapshot:rds:mydb-...`), so
+/// either kind of blind trimming turns a real id into a lookup miss.
 ///
 /// Note this is the opposite of a filter *value*, where an explicit empty
 /// string is a legitimate member to match on (see `present_param`).
@@ -95,7 +97,13 @@ pub(crate) fn normalized_identifier(param: Option<String>) -> Option<String> {
     param
         .filter(|value| !value.is_empty())
         .map(|value| match value.starts_with("arn:") {
-            true => value.rsplit(':').next().unwrap_or(&value).to_string(),
+            // arn:partition:service:region:account:type:id -- `id` is
+            // field 7 and keeps any colons of its own.
+            true => value
+                .splitn(7, ':')
+                .nth(6)
+                .map(str::to_string)
+                .unwrap_or(value),
             false => value,
         })
         .filter(|value| !value.is_empty())
@@ -304,6 +312,14 @@ mod tests {
         // trimming at the last colon would turn a real id into a miss.
         assert_eq!(
             normalized_identifier(Some("rds:mydb-2026-08-30-06-00".to_string())),
+            Some("rds:mydb-2026-08-30-06-00".to_string())
+        );
+        // ...and the id keeps its colon inside an ARN too, so the
+        // reduction takes the whole resource field, not the last segment.
+        assert_eq!(
+            normalized_identifier(Some(
+                "arn:aws:rds:us-east-1:123456789012:snapshot:rds:mydb-2026-08-30-06-00".to_string()
+            )),
             Some("rds:mydb-2026-08-30-06-00".to_string())
         );
     }

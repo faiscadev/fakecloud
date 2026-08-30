@@ -2092,6 +2092,61 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
 }
 
 #[test]
+fn describe_db_snapshots_accepts_an_arn_identifier() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+    let arn = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap1")
+        .expect("seeded snapshot")
+        .db_snapshot_arn
+        .clone();
+
+    let req = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", &arn)]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_db_snapshot_accepts_an_arn_identifier() {
+    // `aws_db_instance.snapshot_identifier` in the Terraform provider
+    // holds a full snapshot ARN. Without a container runtime the restore
+    // fails after the lookup, so assert on the error we get: anything
+    // other than DBSnapshotNotFound proves the ARN resolved.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    let arn = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap1")
+        .expect("seeded snapshot")
+        .db_snapshot_arn
+        .clone();
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBSnapshotIdentifier", &arn),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => {}
+        Err(err) => assert!(
+            !format!("{err:?}").contains("DBSnapshotNotFound"),
+            "ARN-form snapshot identifier did not resolve: {err:?}"
+        ),
+    }
+}
+
+#[test]
 fn describe_db_snapshots_filters_by_dbi_resource_id() {
     let svc = make_service();
     seed_snapshot(&svc, "snap1", "db1");

@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::filters::{parse_filters, sibling_rds_arn, RdsFilter};
+use crate::filters::{normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter};
 
 /// True when `snapshot` satisfies the `SnapshotType` request parameter.
 /// AWS returns every snapshot type when the parameter is absent.
@@ -306,8 +306,12 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier");
-        let db_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        // Snapshot / instance identifiers are accepted in ARN form here
+        // the same way DescribeDBClusterSnapshots accepts them.
+        let db_snapshot_identifier =
+            normalized_identifier(optional_query_param(request, "DBSnapshotIdentifier"));
+        let db_instance_identifier =
+            normalized_identifier(optional_query_param(request, "DBInstanceIdentifier"));
         let snapshot_type = optional_query_param(request, "SnapshotType");
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
@@ -449,9 +453,13 @@ impl RdsService {
         // Smithy doesn't mark `DBSnapshotIdentifier` required —
         // omitting it surfaces as `DBSnapshotNotFoundFault` (declared)
         // rather than `MissingParameter` (undeclared).
-        let db_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier")
-            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"))
-            .ok_or_else(|| db_snapshot_not_found("(none)"))?;
+        // `aws_db_instance.snapshot_identifier` in the Terraform provider
+        // holds a full snapshot ARN, so resolve that form here too.
+        let db_snapshot_identifier = normalized_identifier(
+            optional_query_param(request, "DBSnapshotIdentifier")
+                .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier")),
+        )
+        .ok_or_else(|| db_snapshot_not_found("(none)"))?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
         let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");

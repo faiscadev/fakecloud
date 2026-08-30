@@ -364,8 +364,10 @@ impl RdsService {
                 .get("CloneGroupId")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            let group_id =
-                existing.unwrap_or_else(|| format!("{}", uuid::Uuid::new_v4().as_simple()));
+            // AWS reports CloneGroupId as a hyphenated UUID (the bare-hex
+            // `.simple()` form this crate uses elsewhere is always
+            // prefixed, e.g. `db-`/`cluster-`).
+            let group_id = existing.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             if let Some(source_entry) = state
                 .extras
                 .get_mut("clusters")

@@ -399,7 +399,12 @@ impl RdsService {
                 Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
             }
             "DeleteDBClusterSnapshot" => {
-                let id = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                // Resolve the ARN form, as Describe and Restore do -- an
+                // unnormalized delete would report success while leaving
+                // the entry in place, so a Terraform destroy never
+                // converges.
+                let id = normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"))
+                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 // Recover the source cluster id from stored state before
                 // remove — emitting a hardcoded "default" would corrupt

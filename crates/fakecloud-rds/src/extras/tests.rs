@@ -2597,6 +2597,36 @@ fn describe_db_cluster_snapshots_keeps_colon_bearing_identifiers() {
 }
 
 #[test]
+fn delete_db_cluster_snapshot_accepts_an_arn_identifier() {
+    // A delete that doesn't resolve the ARN reports success while
+    // leaving the entry behind, so the following Describe keeps
+    // reporting the snapshot and a destroy never converges.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    ok_on(
+        &svc,
+        "DeleteDBClusterSnapshot",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:snap-1",
+        )],
+    );
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap-1")],
+    ));
+    match result {
+        Err(err) => assert!(
+            format!("{err:?}").contains("DBClusterSnapshotNotFoundFault"),
+            "unexpected error: {err:?}"
+        ),
+        Ok(_) => panic!("snapshot still present after ARN-form delete"),
+    }
+}
+
+#[test]
 fn describe_db_clusters_identifier_accepts_arn_and_ignores_empty() {
     let svc = svc();
     seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
