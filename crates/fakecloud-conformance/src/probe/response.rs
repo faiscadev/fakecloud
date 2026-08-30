@@ -156,6 +156,26 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "InvalidBucketName",
             "AccessDenied",
             "NotFound",
+            // The XML-body and argument-validation codes from the same
+            // reference. S3 takes XML request bodies, so a body that isn't
+            // well-formed XML (or doesn't match the published schema) is
+            // MalformedXML on any op that reads one — CompleteMultipartUpload,
+            // DeleteObjects, PutBucketCors and friends. InvalidArgument is
+            // S3's catch-all for a bad query/header argument, e.g. a
+            // continuation token that isn't valid base64 or a `max-buckets`
+            // outside 1..10000.
+            "MalformedXML",
+            "InvalidArgument",
+            // Sub-resource "not configured" codes. AWS returns each of these
+            // when the bucket exists but the named configuration was never
+            // set, which is the state most probe variants find a bucket in.
+            "NoSuchBucketPolicy",
+            "NoSuchCORSConfiguration",
+            "NoSuchLifecycleConfiguration",
+            "NoSuchTagSet",
+            // A multipart upload id that does not exist (or was already
+            // completed/aborted).
+            "NoSuchUpload",
         ],
         // EC2's Smithy model declares no per-operation `errors:` lists at all,
         // yet the EC2 Query API has a large, well-documented set of client

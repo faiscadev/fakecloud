@@ -795,6 +795,55 @@ mod tests {
     // -- error-shape-driven 4xx classification --
 
     #[test]
+    fn classify_s3_common_error_codes_pass_on_any_op() {
+        // S3's Smithy file enumerates almost no per-operation errors, but the
+        // published "Error Responses" reference documents these as responses
+        // any op can give. A handler returning one ran correctly, so the
+        // classifier must not read it as an undeclared error.
+        for (status, code) in [
+            (400, "MalformedXML"),
+            (400, "InvalidArgument"),
+            (404, "NoSuchBucketPolicy"),
+            (404, "NoSuchCORSConfiguration"),
+            (404, "NoSuchLifecycleConfiguration"),
+            (404, "NoSuchTagSet"),
+            (404, "NoSuchUpload"),
+        ] {
+            let body = format!("<Error><Code>{code}</Code><Message>m</Message></Error>");
+            let result = classify_response(
+                "v1",
+                status,
+                &body,
+                &Expectation::Success,
+                0,
+                Some(&["SomethingElse".to_string()]),
+                "s3",
+            );
+            assert_eq!(
+                result.status,
+                ProbeStatus::Pass,
+                "{code} should pass for s3"
+            );
+
+            // The same code from a service with no shared-error list stays
+            // undeclared — the allowlist is per service, not global.
+            let result = classify_response(
+                "v1",
+                status,
+                &body,
+                &Expectation::Success,
+                0,
+                Some(&["SomethingElse".to_string()]),
+                "dynamodb",
+            );
+            assert!(
+                matches!(result.status, ProbeStatus::UnexpectedResult(_)),
+                "{code} must not pass for a service without it in its list"
+            );
+        }
+    }
+
+    #[test]
     fn classify_404_with_no_aws_error_shape_fails() {
         // Mirrors #817: routing miss returns 404 with a body that has no
         // AWS error code. Must NOT pass — that's the gaming we're closing.
