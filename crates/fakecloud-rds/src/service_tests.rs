@@ -2240,6 +2240,77 @@ fn describe_db_snapshots_reports_shared_and_public_snapshots() {
 }
 
 #[test]
+fn include_shared_does_not_widen_an_owned_snapshot_type() {
+    // AWS: IncludeShared / IncludePublic don't apply when SnapshotType
+    // selects an owned type, and a foreign row must never slip past the
+    // type selector.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared.snapshot_type = "automated".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("SnapshotType", "manual"), ("IncludeShared", "true")],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "IncludeShared widened an owned SnapshotType: {body}"
+    );
+}
+
+#[test]
+fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
+    // The list path reports it, so re-reading it by id (the Terraform
+    // read-back pattern) must not 404.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "shared-snap"),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    // A snapshot nobody shared stays invisible.
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        other.snapshots.insert(
+            "private-snap".to_string(),
+            other_account_snapshot("private-snap"),
+        );
+    }
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", "private-snap")],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+}
+
+#[test]
 fn delete_db_snapshot_accepts_an_arn_identifier() {
     let svc = make_service();
     seed_snapshot(&svc, "snap1", "db1");

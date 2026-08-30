@@ -472,14 +472,22 @@ impl RdsService {
                 // can't error the same way — `InvalidParameterValue`
                 // isn't declared here; see `crate::filters`.)
                 if let Some(wanted) = snapshot_id.as_deref() {
-                    let known = accounts
-                        .get(&aid)
-                        .and_then(|s| s.extras.get("cluster_snapshots"))
-                        .is_some_and(|m| {
+                    let known = accounts.iter().any(|(owner, s)| {
+                        s.extras.get("cluster_snapshots").is_some_and(|m| {
                             m.values().any(|v| {
                                 entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                    && (owner == aid || {
+                                        // Another account's snapshot only
+                                        // exists for this caller when it
+                                        // was shared with them.
+                                        let attrs = cluster_snapshot_attributes(v);
+                                        attrs.get("restore").is_some_and(|targets| {
+                                            targets.contains(&aid) || targets.iter().any(|t| t == "all")
+                                        })
+                                    })
                             })
-                        });
+                        })
+                    });
                     if !known {
                         return Err(AwsServiceError::aws_error(
                             StatusCode::NOT_FOUND,
@@ -498,18 +506,51 @@ impl RdsService {
                                     entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
                                 }) && cluster_id.as_deref().is_none_or(|wanted| {
                                     entry_str(v, "DBClusterIdentifier") == Some(wanted)
-                                }) && snapshot_type.as_deref().is_none_or(|wanted| {
-                                    // Same default the renderer emits, so a
-                                    // stored entry without the field can't
-                                    // read back as `manual` yet be excluded
-                                    // by `--snapshot-type manual`.
-                                    entry_str(v, "SnapshotType").unwrap_or("manual") == wanted
-                                }) && cluster_snapshot_matches_filters(v, &filters)
+                                }) && owned_snapshot_type_matches(v, snapshot_type.as_deref()) && cluster_snapshot_matches_filters(v, &filters)
                             })
                             .cloned()
                             .collect()
                     })
                     .unwrap_or_default();
+                // `shared` / `public` select cluster snapshots another
+                // account shared through ModifyDBClusterSnapshotAttribute,
+                // exactly as on DescribeDBSnapshots.
+                let want_shared = snapshot_type.as_deref() == Some("shared");
+                let want_public = snapshot_type.as_deref() == Some("public");
+                let mut items = items;
+                if want_shared || want_public {
+                    for (owner, other) in accounts.iter() {
+                        if owner == aid {
+                            continue;
+                        }
+                        let Some(bucket) = other.extras.get("cluster_snapshots") else {
+                            continue;
+                        };
+                        items.extend(
+                            bucket
+                                .values()
+                                .filter(|v| {
+                                    let attrs = cluster_snapshot_attributes(v);
+                                    let restore = attrs.get("restore");
+                                    (want_shared
+                                        && restore
+                                            .is_some_and(|targets| targets.contains(&aid)))
+                                        || (want_public
+                                            && restore.is_some_and(|targets| {
+                                                targets.iter().any(|t| t == "all")
+                                            }))
+                                })
+                                .filter(|v| {
+                                    snapshot_id.as_deref().is_none_or(|wanted| {
+                                        entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                    }) && cluster_id.as_deref().is_none_or(|wanted| {
+                                        entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                                    }) && cluster_snapshot_matches_filters(v, &filters)
+                                })
+                                .cloned(),
+                        );
+                    }
+                }
                 // Named member tags, not the generic `<member>`: the
                 // Smithy list carries xmlName `DBClusterSnapshot`, and the
                 // AWS SDK unmarshals an empty list from `<member>` (see
@@ -528,9 +569,82 @@ impl RdsService {
                 let inner = format!("    <DBClusterSnapshots>\n{body}\n    </DBClusterSnapshots>");
                 Ok(xml_response("DescribeDBClusterSnapshots", inner, &rid))
             }
-            "DescribeDBClusterSnapshotAttributes" | "ModifyDBClusterSnapshotAttribute" => {
-                let id = get_param(req, "DBClusterSnapshotIdentifier").unwrap_or_default();
-                Ok(xml_response(action.as_str(), format!("    <DBClusterSnapshotAttributesResult>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotAttributes/>\n    </DBClusterSnapshotAttributesResult>", xml_escape(&id)), &rid))
+            "DescribeDBClusterSnapshotAttributes" => {
+                let id = normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"))
+                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                let accounts = self.state_handle().read();
+                let entry = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .and_then(|m| m.get(&id))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {id} not found."),
+                        )
+                    })?;
+                Ok(xml_response(
+                    action.as_str(),
+                    cluster_snapshot_attributes_result_xml(&id, &cluster_snapshot_attributes(entry)),
+                    &rid,
+                ))
+            }
+            "ModifyDBClusterSnapshotAttribute" => {
+                // Mirrors ModifyDBSnapshotAttribute: the `restore`
+                // attribute records the accounts (or `all`) a snapshot is
+                // shared with, which is what SnapshotType=shared/public
+                // selects on.
+                let id = normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"))
+                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                let attribute_name =
+                    get_param(req, "AttributeName").ok_or_else(|| missing("AttributeName"))?;
+                let to_add = parse_attribute_values(req, "ValuesToAdd");
+                let to_remove = parse_attribute_values(req, "ValuesToRemove");
+                if let Some(dup) = to_add.iter().find(|v| to_remove.contains(v)) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidParameterCombination",
+                        format!("The value {dup} is present in both ValuesToAdd and ValuesToRemove."),
+                    ));
+                }
+                let attrs = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let entry = state
+                        .extras
+                        .get_mut("cluster_snapshots")
+                        .and_then(|m| m.get_mut(&id))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterSnapshotNotFoundFault",
+                                format!("DBClusterSnapshot {id} not found."),
+                            )
+                        })?;
+                    let mut attrs = cluster_snapshot_attributes(entry);
+                    let values = attrs.entry(attribute_name.clone()).or_default();
+                    values.retain(|v| !to_remove.contains(v));
+                    for v in to_add {
+                        if !values.contains(&v) {
+                            values.push(v);
+                        }
+                    }
+                    // An attribute with no values reads back as unshared,
+                    // matching AWS, so drop it rather than storing [].
+                    if values.is_empty() {
+                        attrs.remove(&attribute_name);
+                    }
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("SnapshotAttributes".to_string(), json!(attrs));
+                    }
+                    attrs
+                };
+                Ok(xml_response(
+                    "ModifyDBClusterSnapshotAttribute",
+                    cluster_snapshot_attributes_result_xml(&id, &attrs),
+                    &rid,
+                ))
             }
             "DescribeDBClusterAutomatedBackups" => Ok(xml_response("DescribeDBClusterAutomatedBackups", "    <DBClusterAutomatedBackups/>".to_string(), &rid)),
             "DeleteDBClusterAutomatedBackup" => Ok(xml_response("DeleteDBClusterAutomatedBackup", "    <DBClusterAutomatedBackup/>".to_string(), &rid)),
@@ -2671,6 +2785,91 @@ fn apply_shard_group_capacity(obj: &mut serde_json::Map<String, Value>, req: &Aw
 
 /// Render the `DBSnapshotAttributesResult` block shared by
 /// `DescribeDBSnapshotAttributes` and `ModifyDBSnapshotAttribute`.
+/// The stored share attributes of a cluster snapshot entry
+/// (`ModifyDBClusterSnapshotAttribute` writes them under
+/// `SnapshotAttributes`), keyed by attribute name.
+fn cluster_snapshot_attributes(entry: &Value) -> BTreeMap<String, Vec<String>> {
+    entry
+        .get("SnapshotAttributes")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .map(|(name, values)| {
+                    let values = values
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (name.clone(), values)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when a cluster snapshot the caller owns satisfies `SnapshotType`.
+/// `shared` / `public` select other accounts' snapshots instead and are
+/// handled separately.
+fn owned_snapshot_type_matches(entry: &Value, snapshot_type: Option<&str>) -> bool {
+    match snapshot_type {
+        Some("shared") | Some("public") => false,
+        // Same default the renderer emits, so a stored entry without the
+        // field can't read back as `manual` yet be excluded by
+        // `--snapshot-type manual`.
+        Some(wanted) => entry_str(entry, "SnapshotType").unwrap_or("manual") == wanted,
+        None => true,
+    }
+}
+
+/// `DBClusterSnapshotAttributesResult`, the cluster-snapshot twin of
+/// [`snapshot_attributes_result_xml`].
+fn cluster_snapshot_attributes_result_xml(
+    id: &str,
+    attrs: &BTreeMap<String, Vec<String>>,
+) -> String {
+    let attributes = if attrs.is_empty() {
+        "      <DBClusterSnapshotAttributes/>".to_string()
+    } else {
+        let members = attrs
+            .iter()
+            .map(|(name, values)| {
+                let value_members = if values.is_empty() {
+                    "            <AttributeValues/>".to_string()
+                } else {
+                    let inner = values
+                        .iter()
+                        .map(|v| {
+                            format!(
+                                "              <AttributeValue>{}</AttributeValue>",
+                                xml_escape(v)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("            <AttributeValues>\n{inner}\n            </AttributeValues>")
+                };
+                format!(
+                    "        <DBClusterSnapshotAttribute>\n          <AttributeName>{}</AttributeName>\n{}\n        </DBClusterSnapshotAttribute>",
+                    xml_escape(name),
+                    value_members,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "      <DBClusterSnapshotAttributes>\n{members}\n      </DBClusterSnapshotAttributes>"
+        )
+    };
+    format!(
+        "    <DBClusterSnapshotAttributesResult>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n{}\n    </DBClusterSnapshotAttributesResult>",
+        xml_escape(id),
+        attributes,
+    )
+}
+
 fn snapshot_attributes_result_xml(id: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
     let attributes = if attrs.is_empty() {
         "      <DBSnapshotAttributes/>".to_string()

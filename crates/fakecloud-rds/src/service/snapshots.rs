@@ -369,14 +369,38 @@ impl RdsService {
                 .snapshots
                 .get(&snapshot_id)
                 .cloned()
+                // A snapshot another account shared with this caller is
+                // listed by SnapshotType=shared / IncludeShared, so
+                // re-reading it by id or ARN has to resolve too --
+                // otherwise the emulator 404s a row it just reported.
+                .or_else(|| {
+                    accounts
+                        .iter()
+                        .filter(|(owner, _)| *owner != request.account_id)
+                        .find_map(|(_, other)| {
+                            other.snapshots.get(&snapshot_id).filter(|snapshot| {
+                                snapshot_shared_with(snapshot, &request.account_id)
+                                    || snapshot_is_public(snapshot)
+                            })
+                        })
+                        .cloned()
+                })
                 .ok_or_else(|| db_snapshot_not_found(&snapshot_id))?;
 
             // AWS AND-s the identifier with SnapshotType and any
             // filters: the snapshot exists, so a non-match is an empty
             // result rather than `DBSnapshotNotFound`.
-            let body = if snapshot_matches_type(&snapshot, snapshot_type.as_deref())
-                && snapshot_matches_filters(&snapshot, &filters)
-            {
+            // A foreign snapshot answers to `shared` / `public` rather
+            // than to its own stored type.
+            let owned = state
+                .snapshots
+                .contains_key(&snapshot.db_snapshot_identifier);
+            let type_ok = match snapshot_type.as_deref() {
+                Some("shared") => !owned && snapshot_shared_with(&snapshot, &request.account_id),
+                Some("public") => !owned && snapshot_is_public(&snapshot),
+                other => owned && snapshot_matches_type(&snapshot, other),
+            };
+            let body = if type_ok && snapshot_matches_filters(&snapshot, &filters) {
                 format!(
                     "<DBSnapshots><DBSnapshot>{}</DBSnapshot></DBSnapshots>",
                     db_snapshot_xml(&snapshot)
@@ -411,8 +435,17 @@ impl RdsService {
         // ModifyDBSnapshotAttribute's `restore` attribute -- AWS reports
         // them here, and IncludeShared / IncludePublic add them to an
         // otherwise-unqualified listing.
-        let want_shared = snapshot_type.as_deref() == Some("shared") || include_shared;
-        let want_public = snapshot_type.as_deref() == Some("public") || include_public;
+        // AWS: IncludeShared / IncludePublic do not apply when
+        // SnapshotType selects an owned type (`manual`, `automated`,
+        // `awsbackup`) -- only an unqualified listing is widened by them.
+        let owned_type_selected = matches!(
+            snapshot_type.as_deref(),
+            Some(other) if other != "shared" && other != "public"
+        );
+        let want_shared =
+            snapshot_type.as_deref() == Some("shared") || (include_shared && !owned_type_selected);
+        let want_public =
+            snapshot_type.as_deref() == Some("public") || (include_public && !owned_type_selected);
         if want_shared || want_public {
             for (owner, other) in accounts.iter() {
                 if owner == request.account_id {
@@ -440,13 +473,14 @@ impl RdsService {
         snapshots.sort_by(|a, b| {
             a.snapshot_create_time
                 .cmp(&b.snapshot_create_time)
-                .then_with(|| a.db_snapshot_identifier.cmp(&b.db_snapshot_identifier))
+                // Tie-break on the ARN, which is what pagination keys on.
+                .then_with(|| a.db_snapshot_arn.cmp(&b.db_snapshot_arn))
         });
 
-        // Apply pagination
-        let paginated = paginate(snapshots, marker, max_records, |snap| {
-            &snap.db_snapshot_identifier
-        })?;
+        // Paginate on the ARN, not the identifier: a listing widened with
+        // shared / public rows spans accounts, where an identifier is no
+        // longer unique and a marker could resolve back to the wrong row.
+        let paginated = paginate(snapshots, marker, max_records, |snap| &snap.db_snapshot_arn)?;
 
         let marker_xml = paginated
             .next_marker

@@ -234,10 +234,16 @@ fn cluster_snapshot_lifecycle() {
         "DescribeDBClusterSnapshotAttributes",
         &[("DBClusterSnapshotIdentifier", "cs1")],
     );
+    // AttributeName is @required in the model; the handler now stores
+    // the share list rather than echoing an empty attribute set.
     ok_on(
         &svc,
         "ModifyDBClusterSnapshotAttribute",
-        &[("DBClusterSnapshotIdentifier", "cs1")],
+        &[
+            ("DBClusterSnapshotIdentifier", "cs1"),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "999999999999"),
+        ],
     );
     ok_on(&svc, "DescribeDBClusterAutomatedBackups", &[]);
     ok_on(&svc, "DeleteDBClusterAutomatedBackup", &[]);
@@ -2582,6 +2588,125 @@ fn describe_lists_use_the_smithy_member_tag() {
             "{action} still emits the generic <member>: {body}"
         );
     }
+}
+
+#[test]
+fn cluster_snapshot_attributes_round_trip_and_drive_shared() {
+    // ModifyDBClusterSnapshotAttribute used to be a no-op that always
+    // rendered an empty attribute set, so no cluster snapshot could ever
+    // appear under SnapshotType=shared.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "111111111111"),
+        ],
+    );
+    assert!(body.contains("<AttributeName>restore</AttributeName>"));
+    assert!(body.contains("<AttributeValue>111111111111</AttributeValue>"));
+
+    // Describe reads the stored value back.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "snap-1")],
+    );
+    assert!(body.contains("<AttributeValue>111111111111</AttributeValue>"));
+
+    // Removing the last value reads back as unshared, matching AWS.
+    let body = body_of_action(
+        &svc,
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("AttributeName", "restore"),
+            ("ValuesToRemove.AttributeValue.1", "111111111111"),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotAttributes/>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_reports_shared_and_public() {
+    // A snapshot another account shared with this caller is selected by
+    // SnapshotType=shared; one shared with `all` by SnapshotType=public.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        let bucket = other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default();
+        bucket.insert(
+            "shared-snap".to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": "shared-snap",
+                "DBClusterIdentifier": "other-clu",
+                "Status": "available",
+                "SnapshotType": "manual",
+                "SnapshotAttributes": {"restore": ["000000000000"]},
+            }),
+        );
+        bucket.insert(
+            "public-snap".to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": "public-snap",
+                "DBClusterIdentifier": "other-clu",
+                "Status": "available",
+                "SnapshotType": "manual",
+                "SnapshotAttributes": {"restore": ["all"]},
+            }),
+        );
+        bucket.insert(
+            "private-snap".to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": "private-snap",
+                "DBClusterIdentifier": "other-clu",
+                "Status": "available",
+                "SnapshotType": "manual",
+            }),
+        );
+    }
+    seed_cluster_snapshot(&svc, "mine", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("SnapshotType", "shared")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>private-snap</DBClusterSnapshotIdentifier>")
+    );
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>mine</DBClusterSnapshotIdentifier>"));
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("SnapshotType", "public")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>public-snap</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+    );
+
+    // An owned type still lists only the caller's own snapshots.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("SnapshotType", "manual")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>mine</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+    );
 }
 
 #[test]
