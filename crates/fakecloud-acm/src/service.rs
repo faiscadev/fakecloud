@@ -37,6 +37,9 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "AddTagsToCertificate",
     "RemoveTagsFromCertificate",
     "ListTagsForCertificate",
+    "TagResource",
+    "UntagResource",
+    "ListTagsForResource",
     "GetAccountConfiguration",
     "PutAccountConfiguration",
     "UpdateCertificateOptions",
@@ -54,6 +57,8 @@ const MUTATING_ACTIONS: &[&str] = &[
     "RevokeCertificate",
     "AddTagsToCertificate",
     "RemoveTagsFromCertificate",
+    "TagResource",
+    "UntagResource",
     "PutAccountConfiguration",
     "UpdateCertificateOptions",
 ];
@@ -413,6 +418,9 @@ impl AwsService for AcmService {
             "AddTagsToCertificate" => self.add_tags_to_certificate(&req),
             "RemoveTagsFromCertificate" => self.remove_tags_from_certificate(&req),
             "ListTagsForCertificate" => self.list_tags_for_certificate(&req),
+            "TagResource" => self.tag_resource(&req),
+            "UntagResource" => self.untag_resource(&req),
+            "ListTagsForResource" => self.list_tags_for_resource(&req),
             "GetAccountConfiguration" => self.get_account_configuration(&req),
             "PutAccountConfiguration" => self.put_account_configuration(&req),
             "UpdateCertificateOptions" => self.update_certificate_options(&req),
@@ -1116,6 +1124,99 @@ impl AcmService {
         Ok(AwsResponse::ok_json(json!({ "Tags": tag_list })))
     }
 
+    // -----------------------------------------------------------------------
+    // Generic resource tagging
+    //
+    // The `TagResource` / `UntagResource` / `ListTagsForResource` trio is the
+    // newer, ARN-keyed tagging API. It addresses the same tag set as the
+    // certificate-scoped `AddTagsToCertificate` family — AWS keeps one tag set
+    // per resource — but takes `ResourceArn` (not `CertificateArn`), removes by
+    // `TagKeys` rather than by full tag, and declares `ValidationException`
+    // where the older ops declare `InvalidParameterException`.
+    // -----------------------------------------------------------------------
+
+    fn require_resource_arn(req: &AwsRequest) -> Result<String, AwsServiceError> {
+        req.json_body()
+            .get("ResourceArn")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .ok_or_else(|| validation_error("ResourceArn is required"))
+    }
+
+    fn tag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = Self::require_resource_arn(req)?;
+        let body = req.json_body();
+        let tags = parse_tags(body.get("Tags")).map_err(|e| validation_error(e.message()))?;
+        if tags.is_empty() {
+            return Err(validation_error("Tags must contain at least one entry"));
+        }
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cert = account
+            .certificates
+            .get_mut(&arn)
+            .ok_or_else(|| no_such_resource(&arn))?;
+        for (k, v) in tags {
+            cert.tags.insert(k, v);
+        }
+        // ACM caps a resource at 50 tags; adding past that is a quota error,
+        // not a validation one.
+        if cert.tags.len() > 50 {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ServiceQuotaExceededException",
+                format!("Resource {arn} cannot carry more than 50 tags"),
+            ));
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn untag_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = Self::require_resource_arn(req)?;
+        let body = req.json_body();
+        let keys: Vec<String> = body
+            .get("TagKeys")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        if keys.is_empty() {
+            return Err(validation_error("TagKeys must contain at least one entry"));
+        }
+        let mut state = self.state.write();
+        let account = account_mut(&mut state, &req.account_id);
+        let cert = account
+            .certificates
+            .get_mut(&arn)
+            .ok_or_else(|| no_such_resource(&arn))?;
+        // AWS removes the keys that are present and ignores the rest.
+        for key in keys {
+            cert.tags.remove(&key);
+        }
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+
+    fn list_tags_for_resource(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let arn = Self::require_resource_arn(req)?;
+        let state = self.state.read();
+        let cert = state
+            .accounts
+            .get(&req.account_id)
+            .and_then(|a| a.certificates.get(&arn))
+            .ok_or_else(|| no_such_resource(&arn))?;
+        let tag_list: Vec<Value> = cert
+            .tags
+            .iter()
+            .map(|(k, v)| json!({ "Key": k, "Value": v }))
+            .collect();
+        Ok(AwsResponse::ok_json(json!({ "Tags": tag_list })))
+    }
+
     fn get_account_configuration(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let state = self.state.read();
         let cfg = state
@@ -1550,6 +1651,16 @@ fn no_such_certificate(arn: &str) -> AwsServiceError {
         StatusCode::BAD_REQUEST,
         "ResourceNotFoundException",
         format!("Could not find certificate with arn {arn}"),
+    )
+}
+
+/// The ARN-keyed tagging ops report a missing resource with the same code as
+/// the certificate ops, but phrased for any resource rather than a certificate.
+fn no_such_resource(arn: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "ResourceNotFoundException",
+        format!("Could not find resource with arn {arn}"),
     )
 }
 
@@ -2088,6 +2199,152 @@ fn is_pem_private_key(pem: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn acm_request(action: &str, body: Value) -> AwsRequest {
+        AwsRequest {
+            service: "acm".to_string(),
+            action: action.to_string(),
+            region: "us-east-1".to_string(),
+            account_id: "123456789012".to_string(),
+            request_id: "rid".to_string(),
+            headers: http::HeaderMap::new(),
+            query_params: std::collections::HashMap::new(),
+            body: bytes::Bytes::from(serde_json::to_vec(&body).unwrap()),
+            body_stream: parking_lot::Mutex::new(None),
+            path_segments: vec![],
+            raw_path: "/".to_string(),
+            raw_query: String::new(),
+            method: http::Method::POST,
+            is_query_protocol: false,
+            access_key_id: None,
+            principal: None,
+        }
+    }
+
+    async fn request_cert(svc: &AcmService, domain: &str) -> String {
+        let resp = svc
+            .handle(acm_request(
+                "RequestCertificate",
+                json!({ "DomainName": domain }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        body["CertificateArn"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn resource_tagging_shares_the_certificate_tag_set() {
+        let svc = AcmService::default();
+        let arn = request_cert(&svc, "tags.example.com").await;
+
+        svc.handle(acm_request(
+            "TagResource",
+            json!({ "ResourceArn": arn, "Tags": [{ "Key": "team", "Value": "core" }] }),
+        ))
+        .await
+        .unwrap();
+
+        // The ARN-keyed and certificate-keyed views address one tag set.
+        let resp = svc
+            .handle(acm_request(
+                "ListTagsForCertificate",
+                json!({ "CertificateArn": arn }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["Tags"][0]["Key"], "team");
+
+        let resp = svc
+            .handle(acm_request(
+                "ListTagsForResource",
+                json!({ "ResourceArn": arn }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["Tags"][0]["Value"], "core");
+
+        // UntagResource removes by key, and ignores keys that aren't set.
+        svc.handle(acm_request(
+            "UntagResource",
+            json!({ "ResourceArn": arn, "TagKeys": ["team", "absent"] }),
+        ))
+        .await
+        .unwrap();
+        let resp = svc
+            .handle(acm_request(
+                "ListTagsForResource",
+                json!({ "ResourceArn": arn }),
+            ))
+            .await
+            .unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert!(body["Tags"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn resource_tagging_validates_input_and_unknown_arns() {
+        let svc = AcmService::default();
+        let arn = request_cert(&svc, "validate.example.com").await;
+
+        // ResourceArn is required, and these ops report ValidationException
+        // where the certificate-scoped ops report InvalidParameterException.
+        for (action, body) in [
+            ("TagResource", json!({ "Tags": [{ "Key": "k" }] })),
+            ("UntagResource", json!({ "TagKeys": ["k"] })),
+            ("ListTagsForResource", json!({})),
+        ] {
+            let err = svc
+                .handle(acm_request(action, body))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{action} without ResourceArn should fail"));
+            assert_eq!(err.code(), "ValidationException", "{action}");
+        }
+
+        // An empty tag / key list is rejected rather than silently accepted.
+        let err = svc
+            .handle(acm_request(
+                "TagResource",
+                json!({ "ResourceArn": arn, "Tags": [] }),
+            ))
+            .await
+            .err()
+            .expect("empty Tags should fail");
+        assert_eq!(err.code(), "ValidationException");
+        let err = svc
+            .handle(acm_request(
+                "UntagResource",
+                json!({ "ResourceArn": arn, "TagKeys": [] }),
+            ))
+            .await
+            .err()
+            .expect("empty TagKeys should fail");
+        assert_eq!(err.code(), "ValidationException");
+
+        // An unknown ARN is ResourceNotFoundException on all three.
+        let ghost = "arn:aws:acm:us-east-1:123456789012:certificate/ghost";
+        for (action, body) in [
+            (
+                "TagResource",
+                json!({ "ResourceArn": ghost, "Tags": [{ "Key": "k", "Value": "v" }] }),
+            ),
+            (
+                "UntagResource",
+                json!({ "ResourceArn": ghost, "TagKeys": ["k"] }),
+            ),
+            ("ListTagsForResource", json!({ "ResourceArn": ghost })),
+        ] {
+            let err = svc
+                .handle(acm_request(action, body))
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{action} on an unknown ARN should fail"));
+            assert_eq!(err.code(), "ResourceNotFoundException", "{action}");
+        }
+    }
 
     #[test]
     fn generate_self_signed_cert_returns_real_pem() {
