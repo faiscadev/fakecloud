@@ -2397,6 +2397,9 @@ pub(crate) fn extract_user_metadata(
     meta
 }
 
+/// Every value of the Smithy `StorageClass` enum. Keep this in step with
+/// `aws-models/s3.json` — a class AWS models but this list omits is rejected
+/// with `InvalidStorageClass` on a request AWS accepts.
 pub(crate) fn is_valid_storage_class(class: &str) -> bool {
     matches!(
         class,
@@ -2411,6 +2414,10 @@ pub(crate) fn is_valid_storage_class(class: &str) -> bool {
             | "OUTPOSTS"
             | "SNOW"
             | "EXPRESS_ONEZONE"
+            | "FSX_OPENZFS"
+            | "FSX_ONTAP"
+            | "AWS_BACKUP_WARM"
+            | "AWS_BACKUP_LOW_COST_WARM"
     )
 }
 

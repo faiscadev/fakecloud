@@ -22,8 +22,14 @@ impl S3Service {
         // a reachable, unauthenticated-input DoS (bug-audit 2026-06-13 2.1/2.2).
         if let Some(algo) = extract_xml_value(&body_str, "SSEAlgorithm") {
             // SSEAlgorithm is a closed enum; AWS returns MalformedXML for
-            // anything outside it.
-            if algo != "AES256" && algo != "aws:kms" && algo != "aws:kms:dsse" {
+            // anything outside it. The full set is the Smithy
+            // `ServerSideEncryption` enum in `aws-models/s3.json` — which
+            // includes the managed-service algorithms `aws:fsx` and
+            // `aws:backup` alongside the three customer-facing ones.
+            if !matches!(
+                algo.as_str(),
+                "AES256" | "aws:kms" | "aws:kms:dsse" | "aws:fsx" | "aws:backup"
+            ) {
                 return Err(malformed_encryption("SSEAlgorithm", &algo));
             }
         }
