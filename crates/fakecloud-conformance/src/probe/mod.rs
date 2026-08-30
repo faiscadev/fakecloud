@@ -844,6 +844,37 @@ mod tests {
     }
 
     #[test]
+    fn classify_ec2_notfound_codes_pass_on_any_op() {
+        // EC2's Smithy model declares no per-operation `errors:` at all, so
+        // every `.NotFound` a handler returns for a synthetic id has to come
+        // from the service-wide list or it reads as an undeclared error.
+        for code in [
+            "InvalidVpcEndpointServiceId.NotFound",
+            "InvalidVerifiedAccessEndpointId.NotFound",
+            "InvalidPublicIpv4PoolID.NotFound",
+            "InvalidVpcID.NotFound",
+            "InvalidSubnetID.NotFound",
+        ] {
+            let body =
+                format!("<Response><Errors><Error><Code>{code}</Code></Error></Errors></Response>");
+            let result = classify_response(
+                "v1",
+                400,
+                &body,
+                &Expectation::Success,
+                0,
+                Some(&["SomethingElse".to_string()]),
+                "ec2",
+            );
+            assert_eq!(
+                result.status,
+                ProbeStatus::Pass,
+                "{code} should pass for ec2"
+            );
+        }
+    }
+
+    #[test]
     fn classify_404_with_no_aws_error_shape_fails() {
         // Mirrors #817: routing miss returns 404 with a body that has no
         // AWS error code. Must NOT pass — that's the gaming we're closing.

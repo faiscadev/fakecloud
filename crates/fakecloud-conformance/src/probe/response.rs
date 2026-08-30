@@ -218,6 +218,17 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "InvalidCapacityReservationFleetId.NotFound",
             "InvalidTransitGatewayAttachmentID.NotFound",
             "InvalidVpcEndpointId.NotFound",
+            // Same `.NotFound` family, for resources whose handlers were
+            // hardened after the list above was written. Each is emitted by a
+            // real handler for a synthetic id: VPC endpoint services
+            // (`service/endpoint.rs`), Verified Access endpoints
+            // (`service/va.rs`), public IPv4 pools (`service/eip.rs`), and the
+            // VPC / subnet describes (`service/vpc.rs`, `service/subnet.rs`).
+            "InvalidVpcEndpointServiceId.NotFound",
+            "InvalidVerifiedAccessEndpointId.NotFound",
+            "InvalidPublicIpv4PoolID.NotFound",
+            "InvalidVpcID.NotFound",
+            "InvalidSubnetID.NotFound",
             "InvalidID",
         ],
         // EKS under-declares two client errors that the real API returns for
