@@ -487,6 +487,86 @@ async fn create_instance(
     create_instance_with_deletion_protection(client, db_instance_identifier, false).await
 }
 
+/// Regression for #2481: with more than one DB instance, the Terraform /
+/// OpenTofu AWS provider reads an instance back through the
+/// `dbi-resource-id` filter. Ignoring the filter returns every instance
+/// and the provider can't resolve the one it just created, failing the
+/// apply with "couldn't find resource". Driven through the AWS SDK so
+/// the exact `Filters.Filter.N.Values.Value.M` wire form is exercised.
+#[tokio::test]
+async fn rds_describe_db_instances_honors_dbi_resource_id_filter() {
+    let server = TestServer::start().await;
+    let client = server.rds_client().await;
+
+    let first = create_instance(&client, "mydb-01-default").await;
+    let second = create_instance(&client, "mydb-02-default").await;
+
+    let first_resource_id = first
+        .db_instance()
+        .and_then(|i| i.dbi_resource_id())
+        .expect("first resource id")
+        .to_string();
+    let second_resource_id = second
+        .db_instance()
+        .and_then(|i| i.dbi_resource_id())
+        .expect("second resource id")
+        .to_string();
+    assert_ne!(first_resource_id, second_resource_id);
+
+    for (resource_id, expected) in [
+        (&first_resource_id, "mydb-01-default"),
+        (&second_resource_id, "mydb-02-default"),
+    ] {
+        let response = client
+            .describe_db_instances()
+            .filters(
+                aws_sdk_rds::types::Filter::builder()
+                    .name("dbi-resource-id")
+                    .values(resource_id)
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap();
+
+        let instances = response.db_instances();
+        assert_eq!(
+            instances.len(),
+            1,
+            "filter {resource_id} returned {} instances",
+            instances.len()
+        );
+        assert_eq!(instances[0].db_instance_identifier(), Some(expected));
+        assert_eq!(instances[0].dbi_resource_id(), Some(resource_id.as_str()));
+    }
+
+    // `db-instance-id` accepts identifiers and ARNs, and values within
+    // one filter are OR-ed.
+    let response = client
+        .describe_db_instances()
+        .filters(
+            aws_sdk_rds::types::Filter::builder()
+                .name("db-instance-id")
+                .values("mydb-01-default")
+                .values("mydb-02-default")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.db_instances().len(), 2);
+
+    for identifier in ["mydb-01-default", "mydb-02-default"] {
+        client
+            .delete_db_instance()
+            .db_instance_identifier(identifier)
+            .skip_final_snapshot(true)
+            .send()
+            .await
+            .unwrap();
+    }
+}
+
 #[tokio::test]
 async fn rds_create_describe_delete_snapshot() {
     let server = TestServer::start().await;

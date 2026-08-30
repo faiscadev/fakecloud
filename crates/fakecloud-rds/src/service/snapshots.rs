@@ -2,6 +2,50 @@
 
 use super::*;
 
+use crate::filters::{parse_filters, sibling_rds_arn, RdsFilter};
+
+/// True when `snapshot` satisfies the `SnapshotType` request parameter.
+/// AWS returns every snapshot type when the parameter is absent.
+fn snapshot_matches_type(snapshot: &DbSnapshot, snapshot_type: Option<&str>) -> bool {
+    match snapshot_type {
+        Some(wanted) => snapshot.snapshot_type == wanted,
+        None => true,
+    }
+}
+
+/// True when `snapshot` satisfies every filter. Filters are AND-ed with
+/// each other; the values within one filter are OR-ed. The names come
+/// from the `DescribeDBSnapshots` docs: `db-instance-id`,
+/// `db-snapshot-id`, `dbi-resource-id`, `engine` and `snapshot-type`.
+fn snapshot_matches_filters(snapshot: &DbSnapshot, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        // Accepts DB instance identifiers and DB instance ARNs; the
+        // snapshot ARN supplies the partition/region/account needed to
+        // rebuild the source instance ARN.
+        "db-instance-id" => {
+            let instance_arn = sibling_rds_arn(
+                &snapshot.db_snapshot_arn,
+                "db",
+                &snapshot.db_instance_identifier,
+            );
+            filter.matches_any([
+                Some(snapshot.db_instance_identifier.as_str()),
+                instance_arn.as_deref(),
+            ])
+        }
+        "db-snapshot-id" => filter.matches_any([
+            Some(snapshot.db_snapshot_identifier.as_str()),
+            Some(snapshot.db_snapshot_arn.as_str()),
+        ]),
+        "dbi-resource-id" => filter.matches(Some(snapshot.dbi_resource_id.as_str())),
+        "engine" => filter.matches(Some(snapshot.engine.as_str())),
+        "snapshot-type" => filter.matches(Some(snapshot.snapshot_type.as_str())),
+        // A filter name AWS doesn't document for this operation
+        // matches nothing — see the module docs on `crate::filters`.
+        _ => false,
+    })
+}
+
 impl RdsService {
     /// Take a final snapshot of an instance that is about to be deleted,
     /// persisting the dumped database into `state.snapshots`. The DLQ-style
@@ -259,8 +303,10 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let db_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier");
         let db_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        let snapshot_type = optional_query_param(request, "SnapshotType");
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
+        let filters = parse_filters(request);
 
         // Specifying both DBSnapshotIdentifier and DBInstanceIdentifier
         // is tolerated — the snapshot id wins below. Real AWS rejects
@@ -279,31 +325,40 @@ impl RdsService {
                 .cloned()
                 .ok_or_else(|| db_snapshot_not_found(&snapshot_id))?;
 
+            // AWS AND-s the identifier with SnapshotType and any
+            // filters: the snapshot exists, so a non-match is an empty
+            // result rather than `DBSnapshotNotFound`.
+            let body = if snapshot_matches_type(&snapshot, snapshot_type.as_deref())
+                && snapshot_matches_filters(&snapshot, &filters)
+            {
+                format!(
+                    "<DBSnapshots><DBSnapshot>{}</DBSnapshot></DBSnapshots>",
+                    db_snapshot_xml(&snapshot)
+                )
+            } else {
+                "<DBSnapshots></DBSnapshots>".to_string()
+            };
+
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
-                query_response_xml(
-                    "DescribeDBSnapshots",
-                    RDS_NS,
-                    &format!(
-                        "<DBSnapshots><DBSnapshot>{}</DBSnapshot></DBSnapshots>",
-                        db_snapshot_xml(&snapshot)
-                    ),
-                    &request.request_id,
-                ),
+                query_response_xml("DescribeDBSnapshots", RDS_NS, &body, &request.request_id),
             ));
         }
 
-        // Get snapshots, filtered by instance identifier if provided
-        let mut snapshots: Vec<DbSnapshot> = if let Some(instance_id) = db_instance_identifier {
-            state
-                .snapshots
-                .values()
-                .filter(|s| s.db_instance_identifier == instance_id)
-                .cloned()
-                .collect()
-        } else {
-            state.snapshots.values().cloned().collect()
-        };
+        // Get snapshots, narrowed by instance identifier, SnapshotType
+        // and Filters — all AND-ed together, as on real AWS.
+        let mut snapshots: Vec<DbSnapshot> = state
+            .snapshots
+            .values()
+            .filter(|snapshot| {
+                db_instance_identifier
+                    .as_deref()
+                    .is_none_or(|instance_id| snapshot.db_instance_identifier == instance_id)
+                    && snapshot_matches_type(snapshot, snapshot_type.as_deref())
+                    && snapshot_matches_filters(snapshot, &filters)
+            })
+            .cloned()
+            .collect();
 
         // Sort by creation time, then identifier
         snapshots.sort_by(|a, b| {

@@ -2,6 +2,33 @@
 
 use super::*;
 
+use crate::filters::{parse_filters, sibling_rds_arn, RdsFilter};
+
+/// True when `instance` satisfies every filter. Filters are AND-ed with
+/// each other; the values within one filter are OR-ed. The names come
+/// from the `DescribeDBInstances` docs: `db-cluster-id`,
+/// `db-instance-id`, `dbi-resource-id`, `domain` and `engine`.
+fn instance_matches_filters(instance: &DbInstance, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-instance-id" => filter.matches_any([
+            Some(instance.db_instance_identifier.as_str()),
+            Some(instance.db_instance_arn.as_str()),
+        ]),
+        "dbi-resource-id" => filter.matches(Some(instance.dbi_resource_id.as_str())),
+        "engine" => filter.matches(Some(instance.engine.as_str())),
+        "domain" => filter.matches(instance.domain.as_deref()),
+        "db-cluster-id" => {
+            let cluster = instance.db_cluster_identifier.as_deref();
+            let cluster_arn =
+                cluster.and_then(|id| sibling_rds_arn(&instance.db_instance_arn, "cluster", id));
+            filter.matches_any([cluster, cluster_arn.as_deref()])
+        }
+        // A filter name AWS doesn't document for this operation
+        // matches nothing — see the module docs on `crate::filters`.
+        _ => false,
+    })
+}
+
 impl RdsService {
     pub(super) async fn create_db_instance(
         &self,
@@ -1234,6 +1261,7 @@ impl RdsService {
         let db_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
+        let filters = parse_filters(request);
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -1247,22 +1275,32 @@ impl RdsService {
                 .cloned()
                 .ok_or_else(|| db_instance_not_found(&identifier))?;
 
+            // AWS AND-s the identifier with any filters: the instance
+            // exists, so this is an empty result rather than
+            // `DBInstanceNotFound`.
+            let body = if instance_matches_filters(&instance, &filters) {
+                format!(
+                    "<DBInstances><DBInstance>{}</DBInstance></DBInstances>",
+                    db_instance_xml(&instance, None, instance_subnet_group(state, &instance))
+                )
+            } else {
+                "<DBInstances></DBInstances>".to_string()
+            };
+
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
-                query_response_xml(
-                    "DescribeDBInstances",
-                    RDS_NS,
-                    &format!(
-                        "<DBInstances><DBInstance>{}</DBInstance></DBInstances>",
-                        db_instance_xml(&instance, None, instance_subnet_group(state, &instance))
-                    ),
-                    &request.request_id,
-                ),
+                query_response_xml("DescribeDBInstances", RDS_NS, &body, &request.request_id),
             ));
         }
 
-        // Get all instances sorted by created_at, then identifier
-        let mut instances: Vec<DbInstance> = state.instances.values().cloned().collect();
+        // Get all instances matching the filters, sorted by created_at,
+        // then identifier
+        let mut instances: Vec<DbInstance> = state
+            .instances
+            .values()
+            .filter(|instance| instance_matches_filters(instance, &filters))
+            .cloned()
+            .collect();
         instances.sort_by(|a, b| {
             a.created_at
                 .cmp(&b.created_at)

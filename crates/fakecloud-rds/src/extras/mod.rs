@@ -20,7 +20,63 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{RdsService, RdsSourceType};
 
+use crate::filters::{parse_filters, sibling_rds_arn, RdsFilter};
+
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
+
+/// Read a string field off an extras entry, treating an absent or
+/// non-string value as "the resource doesn't carry this attribute".
+fn entry_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
+    entry.get(key).and_then(|v| v.as_str())
+}
+
+/// True when a stored cluster satisfies every filter. Filters are AND-ed
+/// with each other; the values within one filter are OR-ed. The names
+/// come from the `DescribeDBClusters` docs: `clone-group-id`,
+/// `db-cluster-id`, `db-cluster-resource-id`, `domain` and `engine`.
+fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => filter.matches_any([
+            entry_str(entry, "DBClusterIdentifier"),
+            entry_str(entry, "DBClusterArn"),
+        ]),
+        "db-cluster-resource-id" => filter.matches(entry_str(entry, "DbClusterResourceId")),
+        "clone-group-id" => filter.matches(entry_str(entry, "CloneGroupId")),
+        "domain" => filter.matches(entry_str(entry, "Domain")),
+        "engine" => filter.matches(entry_str(entry, "Engine")),
+        // A filter name AWS doesn't document for this operation
+        // matches nothing — see the module docs on `crate::filters`.
+        _ => false,
+    })
+}
+
+/// True when a stored cluster snapshot satisfies every filter. The names
+/// come from the `DescribeDBClusterSnapshots` docs: `db-cluster-id`,
+/// `db-cluster-snapshot-id`, `engine` and `snapshot-type`.
+fn cluster_snapshot_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        // Accepts DB cluster identifiers and DB cluster ARNs; the
+        // snapshot ARN supplies the partition/region/account needed to
+        // rebuild the source cluster ARN.
+        "db-cluster-id" => {
+            let cluster = entry_str(entry, "DBClusterIdentifier");
+            let cluster_arn = match (entry_str(entry, "DBClusterSnapshotArn"), cluster) {
+                (Some(arn), Some(id)) => sibling_rds_arn(arn, "cluster", id),
+                _ => None,
+            };
+            filter.matches_any([cluster, cluster_arn.as_deref()])
+        }
+        "db-cluster-snapshot-id" => filter.matches_any([
+            entry_str(entry, "DBClusterSnapshotIdentifier"),
+            entry_str(entry, "DBClusterSnapshotArn"),
+        ]),
+        "snapshot-type" => filter.matches(entry_str(entry, "SnapshotType")),
+        "engine" => filter.matches(entry_str(entry, "Engine")),
+        // A filter name AWS doesn't document for this operation
+        // matches nothing — see the module docs on `crate::filters`.
+        _ => false,
+    })
+}
 
 fn rand_id() -> String {
     format!(
@@ -224,6 +280,7 @@ impl RdsService {
             }
             "DescribeDBClusters" => {
                 let id_filter = get_param(req, "DBClusterIdentifier");
+                let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
                 let items: Vec<Value> = accounts.get(&aid)
                     .and_then(|s| s.extras.get("clusters"))
@@ -234,6 +291,7 @@ impl RdsService {
                                     .as_deref()
                                     .map(|filter| v["DBClusterIdentifier"].as_str() == Some(filter))
                                     .unwrap_or(true)
+                                    && cluster_matches_filters(v, &filters)
                             })
                             .cloned()
                             .collect()
@@ -359,7 +417,40 @@ impl RdsService {
                 );
                 Ok(xml_response("DeleteDBClusterSnapshot", cluster_snapshot_xml(&id, &arn, &cluster), &rid))
             }
-            "DescribeDBClusterSnapshots" => list_extras_xml(self, &aid, "cluster_snapshots", "DBClusterSnapshots", "DescribeDBClusterSnapshots", cluster_snapshot_member_xml, &rid),
+            "DescribeDBClusterSnapshots" => {
+                // Narrow by the request's own identifier parameters,
+                // SnapshotType and Filters — all AND-ed, as on real AWS.
+                // Returning every snapshot regardless makes clients that
+                // expect a unique match (Terraform) fail to resolve one.
+                let snapshot_id = get_param(req, "DBClusterSnapshotIdentifier");
+                let cluster_id = get_param(req, "DBClusterIdentifier");
+                let snapshot_type = get_param(req, "SnapshotType");
+                let filters = parse_filters(req);
+                let accounts = self.state_handle().read();
+                let items: Vec<Value> = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .map(|m| {
+                        m.values()
+                            .filter(|v| {
+                                snapshot_id.as_deref().is_none_or(|wanted| {
+                                    entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                }) && cluster_id.as_deref().is_none_or(|wanted| {
+                                    entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                                }) && snapshot_type.as_deref().is_none_or(|wanted| {
+                                    entry_str(v, "SnapshotType") == Some(wanted)
+                                }) && cluster_snapshot_matches_filters(v, &filters)
+                            })
+                            .cloned()
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let inner = format!(
+                    "    <DBClusterSnapshots>\n{}\n    </DBClusterSnapshots>",
+                    members(&items, cluster_snapshot_member_xml)
+                );
+                Ok(xml_response("DescribeDBClusterSnapshots", inner, &rid))
+            }
             "DescribeDBClusterSnapshotAttributes" | "ModifyDBClusterSnapshotAttribute" => {
                 let id = get_param(req, "DBClusterSnapshotIdentifier").unwrap_or_default();
                 Ok(xml_response(action.as_str(), format!("    <DBClusterSnapshotAttributesResult>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotAttributes/>\n    </DBClusterSnapshotAttributesResult>", xml_escape(&id)), &rid))

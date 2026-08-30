@@ -206,6 +206,31 @@ Override knobs (env vars, both optional):
 - `FAKECLOUD_POSTGRES_REGISTRY=registry.example.com/team` — point at a private mirror (default `ghcr.io/faiscadev`).
 - `FAKECLOUD_REBUILD_POSTGRES_IMAGE=1` — skip inspect + pull and force a fresh local build. Use after editing the embedded Dockerfile or extension SQL during development.
 
+## Describe filters
+
+The `Filters` parameter is honored on the Describe operations AWS documents it for. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Names and values are case-sensitive, and wildcards are not supported (same as AWS).
+
+| Operation | Supported filter names |
+| --- | --- |
+| `DescribeDBInstances` | `db-cluster-id`, `db-instance-id`, `dbi-resource-id`, `domain`, `engine` |
+| `DescribeDBSnapshots` | `db-instance-id`, `db-snapshot-id`, `dbi-resource-id`, `engine`, `snapshot-type` |
+| `DescribeDBClusters` | `clone-group-id`, `db-cluster-id`, `db-cluster-resource-id`, `domain`, `engine` |
+| `DescribeDBClusterSnapshots` | `db-cluster-id`, `db-cluster-snapshot-id`, `engine`, `snapshot-type` |
+
+Filters documented as accepting "identifiers and ARNs" (`db-instance-id`, `db-cluster-id`, `db-snapshot-id`, `db-cluster-snapshot-id`) match either form.
+
+```bash
+# Only the instance with this resource id -- what the Terraform/OpenTofu
+# AWS provider uses to read a DB instance back after creating it.
+aws rds describe-db-instances \
+  --endpoint-url http://localhost:4566 \
+  --filters "Name=dbi-resource-id,Values=db-1b8e439e59564e849b38b04191c40b8e"
+```
+
+`DescribeDBSnapshots` and `DescribeDBClusterSnapshots` also honor the top-level `SnapshotType` parameter, and `DescribeDBClusterSnapshots` honors `DBClusterSnapshotIdentifier` / `DBClusterIdentifier`.
+
+Real RDS rejects a filter name an operation doesn't support with `InvalidParameterValue`. fakecloud can't: that error isn't declared on any of these operations in the Smithy model, so returning it would emit an undeclared error shape. An unrecognized filter name matches no resource instead, so a caller that asked to narrow gets an empty result rather than the full list.
+
 ## Gotchas
 
 - **Requires a Docker socket.** RDS needs access to `/var/run/docker.sock` to start and stop containers.

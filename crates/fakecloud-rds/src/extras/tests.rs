@@ -2342,3 +2342,167 @@ fn create_db_cluster_persists_safety_fields() {
         "describe missing DatabaseName: {dbody}"
     );
 }
+
+// ── Describe* Filters ────────────────────────────────────────────
+
+/// Body of a successful extras action.
+fn body_of_action(svc: &RdsService, action: &str, params: &[(&str, &str)]) -> String {
+    let resp = svc
+        .handle_extra_action(&req(action, params))
+        .unwrap_or_else(|e| panic!("{action} failed: {e:?}"));
+    assert!(resp.status.is_success(), "{action} status: {}", resp.status);
+    String::from_utf8(resp.body.expect_bytes().to_vec()).expect("utf8")
+}
+
+fn seed_cluster(svc: &RdsService, id: &str, resource_id: &str, engine: &str) {
+    let state = svc.state_handle();
+    let mut accounts = state.write();
+    let s = accounts.get_or_create("000000000000");
+    s.extras.entry("clusters".to_string()).or_default().insert(
+        id.to_string(),
+        json!({
+            "DBClusterIdentifier": id,
+            "DBClusterArn": format!("arn:aws:rds:us-east-1:000000000000:cluster:{id}"),
+            "DbClusterResourceId": resource_id,
+            "Status": "available",
+            "Engine": engine,
+        }),
+    );
+}
+
+fn seed_cluster_snapshot(svc: &RdsService, id: &str, cluster: &str, snapshot_type: &str) {
+    let state = svc.state_handle();
+    let mut accounts = state.write();
+    let s = accounts.get_or_create("000000000000");
+    s.extras
+        .entry("cluster_snapshots".to_string())
+        .or_default()
+        .insert(
+            id.to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": id,
+                "DBClusterSnapshotArn":
+                    format!("arn:aws:rds:us-east-1:000000000000:cluster-snapshot:{id}"),
+                "DBClusterIdentifier": cluster,
+                "Status": "available",
+                "SnapshotType": snapshot_type,
+                "Engine": "aurora-postgresql",
+            }),
+        );
+}
+
+#[test]
+fn describe_db_clusters_filters_by_db_cluster_resource_id() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-resource-id"),
+            ("Filters.Filter.1.Values.Value.1", "cluster-BBBB"),
+        ],
+    );
+
+    assert!(body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+    assert!(!body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+}
+
+#[test]
+fn describe_db_clusters_filters_by_db_cluster_id_and_arn() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+
+    for value in ["clu-1", "arn:aws:rds:us-east-1:000000000000:cluster:clu-1"] {
+        let body = body_of_action(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        );
+        assert!(
+            body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"),
+            "value {value} body: {body}"
+        );
+        assert!(!body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+    }
+}
+
+#[test]
+fn describe_db_clusters_unrecognized_filter_matches_nothing() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "not-a-real-filter"),
+            ("Filters.Filter.1.Values.Value.1", "whatever"),
+        ],
+    );
+
+    assert!(!body.contains("<DBClusterIdentifier>"), "body: {body}");
+}
+
+#[test]
+fn describe_db_cluster_snapshots_honors_the_identifier_params() {
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap-2")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_filters_by_snapshot_type_and_cluster() {
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "manual-snap", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "auto-snap", "clu-1", "automated");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "automated"),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>auto-snap</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>manual-snap</DBClusterSnapshotIdentifier>")
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:000000000000:cluster:clu-1",
+            ),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>auto-snap</DBClusterSnapshotIdentifier>"));
+    assert!(body.contains("<DBClusterSnapshotIdentifier>manual-snap</DBClusterSnapshotIdentifier>"));
+}

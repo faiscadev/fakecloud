@@ -1618,6 +1618,224 @@ fn describe_db_instances_lists_all_when_unbounded() {
     }
 }
 
+// ── DescribeDBInstances Filters ──────────────────────────────────
+
+/// Read back the generated resource id of a seeded instance.
+fn resource_id_of(svc: &RdsService, identifier: &str) -> String {
+    svc.state
+        .read()
+        .default_ref()
+        .instances
+        .get(identifier)
+        .expect("seeded instance")
+        .dbi_resource_id
+        .clone()
+}
+
+#[test]
+fn describe_db_instances_filters_by_dbi_resource_id() {
+    // Regression for #2481: the Terraform/OpenTofu AWS provider reads a
+    // DB instance back by `dbi-resource-id`. Ignoring the filter returns
+    // every instance, so the provider can't resolve the one it created.
+    let svc = make_service();
+    seed_instance(&svc, "mydb-01-default");
+    seed_instance(&svc, "mydb-02-default");
+    let wanted = resource_id_of(&svc, "mydb-02-default");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "dbi-resource-id"),
+            ("Filters.Filter.1.Values.Value.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>mydb-02-default</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>mydb-01-default</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_filter_accepts_member_element_spelling() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    let wanted = resource_id_of(&svc, "db1");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.member.1.Name", "dbi-resource-id"),
+            ("Filters.member.1.Values.member.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_filter_values_are_ored() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    seed_instance(&svc, "db3");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            ("Filters.Filter.1.Values.Value.1", "db1"),
+            ("Filters.Filter.1.Values.Value.2", "db3"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(body.contains("<DBInstanceIdentifier>db3</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_db_instance_id_filter_accepts_an_arn() {
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            ("Filters.Filter.1.Values.Value.1", &arn),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_separate_filters_are_anded() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    let wanted = resource_id_of(&svc, "db1");
+
+    // engine matches both instances, the resource id only db1.
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "postgres"),
+            ("Filters.Filter.2.Name", "dbi-resource-id"),
+            ("Filters.Filter.2.Values.Value.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+
+    // A filter no instance satisfies yields an empty list, not an error.
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "mysql"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(!body.contains("<DBInstanceIdentifier>"), "body: {body}");
+}
+
+#[test]
+fn describe_db_instances_filters_by_db_cluster_id() {
+    let svc = make_service();
+    seed_instance(&svc, "writer");
+    seed_instance(&svc, "standalone");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .instances
+            .get_mut("writer")
+            .expect("seeded instance")
+            .db_cluster_identifier = Some("aurora-1".to_string());
+    }
+
+    for value in [
+        "aurora-1",
+        "arn:aws:rds:us-east-1:123456789012:cluster:aurora-1",
+    ] {
+        let req = request(
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        );
+        let body = body_of(svc.describe_db_instances(&req).unwrap());
+        assert!(
+            body.contains("<DBInstanceIdentifier>writer</DBInstanceIdentifier>"),
+            "value {value} body: {body}"
+        );
+        assert!(!body.contains("<DBInstanceIdentifier>standalone</DBInstanceIdentifier>"));
+    }
+}
+
+#[test]
+fn describe_db_instances_filter_is_anded_with_the_identifier() {
+    // The instance exists, so a filter it doesn't satisfy yields an
+    // empty list rather than DBInstanceNotFound.
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "mysql"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(!body.contains("<DBInstanceIdentifier>"), "body: {body}");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "postgres"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_unrecognized_filter_matches_nothing() {
+    // `InvalidParameterValue` isn't declared on DescribeDBInstances, so
+    // an unknown filter name can't be rejected the way AWS does; an
+    // empty result is the closest in-shape behaviour, and is safer than
+    // returning every instance to a caller that asked to narrow.
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "not-a-real-filter"),
+            ("Filters.Filter.1.Values.Value.1", "whatever"),
+        ],
+    );
+    let resp = svc.describe_db_instances(&req).unwrap();
+    assert!(resp.status.is_success());
+    assert!(!body_of(resp).contains("<DBInstanceIdentifier>"));
+}
+
 // ── ModifyDBInstance ─────────────────────────────────────────────
 
 #[test]
@@ -1871,6 +2089,103 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
             snapshot_attributes: std::collections::BTreeMap::new(),
         },
     );
+}
+
+#[test]
+fn describe_db_snapshots_filters_by_dbi_resource_id() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+    let wanted = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap2")
+        .expect("seeded snapshot")
+        .dbi_resource_id
+        .clone();
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "dbi-resource-id"),
+            ("Filters.Filter.1.Values.Value.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+
+    assert!(body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_snapshots_filters_by_db_instance_id() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            ("Filters.Filter.1.Values.Value.1", "db1"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+
+    assert!(body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_snapshots_honors_snapshot_type() {
+    let svc = make_service();
+    seed_snapshot(&svc, "manual-snap", "db1");
+    seed_snapshot(&svc, "auto-snap", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("auto-snap")
+            .expect("seeded snapshot")
+            .snapshot_type = "automated".to_string();
+    }
+
+    // Both the SnapshotType parameter and the snapshot-type filter
+    // narrow the result the same way.
+    for params in [
+        vec![("SnapshotType", "automated")],
+        vec![
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "automated"),
+        ],
+    ] {
+        let req = request("DescribeDBSnapshots", &params);
+        let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+        assert!(
+            body.contains("<DBSnapshotIdentifier>auto-snap</DBSnapshotIdentifier>"),
+            "body: {body}"
+        );
+        assert!(!body.contains("<DBSnapshotIdentifier>manual-snap</DBSnapshotIdentifier>"));
+    }
+}
+
+#[test]
+fn describe_db_snapshots_snapshot_type_is_anded_with_the_identifier() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "snap1"),
+            ("SnapshotType", "automated"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
 }
 
 #[test]
