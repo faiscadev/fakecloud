@@ -283,7 +283,10 @@ impl RdsService {
                 ))
             }
             "DescribeDBClusters" => {
-                let id_filter = get_param(req, "DBClusterIdentifier");
+                // Same normalization as DescribeDBClusterSnapshots: an
+                // empty parameter means "absent", and AWS documents this
+                // one as accepting a cluster ARN too.
+                let id_filter = normalized_identifier(get_param(req, "DBClusterIdentifier"));
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
                 let items: Vec<Value> = accounts.get(&aid)
@@ -363,7 +366,11 @@ impl RdsService {
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
-                let source_key = source_id.rsplit(':').next().unwrap_or(&source_id).to_string();
+                // Guarded ARN reduction: AWS automated-snapshot ids carry
+                // a colon (`rds:mydb-...`), so only an `arn:` value is
+                // trimmed.
+                let source_key = normalized_identifier(Some(source_id.clone()))
+                    .unwrap_or_else(|| source_id.clone());
                 let mut entry = state
                     .extras
                     .get("cluster_snapshots")
@@ -2132,8 +2139,10 @@ impl RdsService {
             "RestoreDBClusterFromSnapshot" => {
                 let target = get_param(req, "DBClusterIdentifier")
                     .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let snapshot_id = get_param(req, "SnapshotIdentifier")
-                    .or_else(|| get_param(req, "DBClusterSnapshotIdentifier"))
+                let snapshot_id = normalized_identifier(
+                    get_param(req, "SnapshotIdentifier")
+                        .or_else(|| get_param(req, "DBClusterSnapshotIdentifier")),
+                )
                     .ok_or_else(|| missing("SnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
                 let mut accounts = write_state!();

@@ -2580,6 +2580,47 @@ fn describe_db_cluster_snapshots_defaults_missing_snapshot_type_to_manual() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_keeps_colon_bearing_identifiers() {
+    // `rds:mydb-...` is a real AWS identifier, not an ARN: it must be
+    // looked up verbatim rather than trimmed at the last colon.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "rds:clu-1-2026-08-30-06-00", "clu-1", "automated");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "rds:clu-1-2026-08-30-06-00")],
+    );
+    assert!(body.contains(
+        "<DBClusterSnapshotIdentifier>rds:clu-1-2026-08-30-06-00</DBClusterSnapshotIdentifier>"
+    ));
+}
+
+#[test]
+fn describe_db_clusters_identifier_accepts_arn_and_ignores_empty() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+
+    // Empty parameter means "not supplied", so everything lists.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[("DBClusterIdentifier", "")]);
+    assert!(body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+    assert!(body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+
+    // AWS documents this parameter as accepting a cluster ARN.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster:clu-1",
+        )],
+    );
+    assert!(body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+    assert!(!body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+}
+
+#[test]
 fn describe_db_clusters_reports_clone_group_id() {
     // A copy-on-write restore puts source and clone in one clone group,
     // which is what the `clone-group-id` filter selects on.

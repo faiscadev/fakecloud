@@ -82,15 +82,22 @@ pub(crate) fn sibling_rds_arn(arn: &str, resource_type: &str, id: &str) -> Optio
 /// means "absent" (AWS ignores it rather than matching the empty string),
 /// and an ARN is reduced to its resource segment because clients pass
 /// either form — the Terraform provider stores full ARNs in
-/// `snapshot_identifier`, and `CopyDBClusterSnapshot` already reduces the
-/// same way.
+/// `snapshot_identifier`.
+///
+/// The reduction is guarded on the `arn:` prefix rather than splitting on
+/// the last colon of any value: AWS's own automated-snapshot identifiers
+/// carry one (`rds:mydb-2026-08-30-06-00`), and blindly trimming would
+/// turn a real id into a lookup miss.
 ///
 /// Note this is the opposite of a filter *value*, where an explicit empty
 /// string is a legitimate member to match on (see `present_param`).
 pub(crate) fn normalized_identifier(param: Option<String>) -> Option<String> {
     param
         .filter(|value| !value.is_empty())
-        .map(|value| value.rsplit(':').next().unwrap_or(&value).to_string())
+        .map(|value| match value.starts_with("arn:") {
+            true => value.rsplit(':').next().unwrap_or(&value).to_string(),
+            false => value,
+        })
         .filter(|value| !value.is_empty())
 }
 
@@ -292,6 +299,12 @@ mod tests {
                 "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1".to_string()
             )),
             Some("snap-1".to_string())
+        );
+        // AWS's automated-snapshot ids carry a colon and are NOT ARNs;
+        // trimming at the last colon would turn a real id into a miss.
+        assert_eq!(
+            normalized_identifier(Some("rds:mydb-2026-08-30-06-00".to_string())),
+            Some("rds:mydb-2026-08-30-06-00".to_string())
         );
     }
 
