@@ -37,10 +37,16 @@ impl SsmService {
             .as_str()
             .ok_or_else(|| missing("RoleArn"))?
             .to_string();
+        // `CloudConnectorIamRoleArn` is bounded 20..2048 in the model; without
+        // this an empty or oversized ARN was stored and echoed back on
+        // GetCloudConnector.
+        validate_string_length("RoleArn", &role_arn, 20, 2048)?;
         let config_connector_arn = body["ConfigConnectorArn"]
             .as_str()
             .ok_or_else(|| missing("ConfigConnectorArn"))?
             .to_string();
+        // `ConfigConnectorArn` is bounded 1..512.
+        validate_string_length("ConfigConnectorArn", &config_connector_arn, 1, 512)?;
         let configuration = body
             .get("Configuration")
             .filter(|v| v.is_object())
@@ -58,6 +64,10 @@ impl SsmService {
             ));
         }
         let description = body["Description"].as_str().map(str::to_string);
+        if let Some(ref d) = description {
+            // `CloudConnectorDescription` is bounded 0..1024.
+            validate_string_length("Description", d, 0, 1024)?;
+        }
         if let Some(ref d) = description {
             validate_string_length("Description", d, 0, 1024)?;
         }

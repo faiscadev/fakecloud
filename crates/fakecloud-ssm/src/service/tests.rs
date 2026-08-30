@@ -5682,3 +5682,75 @@ async fn rearm_in_flight_commands_settles_restored_pending() {
         "re-armed completion must persist the terminal status"
     );
 }
+
+#[test]
+fn create_cloud_connector_enforces_modeled_string_bounds() {
+    // `RoleArn` (20..2048), `ConfigConnectorArn` (1..512) and `Description`
+    // (0..1024) were read straight off the body with no length check, so an
+    // empty or oversized value was stored and echoed back on a 200.
+    let svc = make_service();
+    let ok_role = "arn:aws:iam::123456789012:role/connector";
+    let ok_config = "arn:aws:config:us-east-1:123456789012:connector/azure-1";
+    let base = |role: &str, config: &str, description: Value| {
+        let mut body = json!({
+            "DisplayName": "conn",
+            "RoleArn": role,
+            "ConfigConnectorArn": config,
+            "Configuration": { "AzureConfiguration": { "TenantId": "t" } },
+        });
+        if !description.is_null() {
+            body["Description"] = description;
+        }
+        body
+    };
+
+    // Baseline: a well-formed request still succeeds.
+    let req = make_request(
+        "CreateCloudConnector",
+        base(ok_role, ok_config, Value::Null),
+    );
+    svc.create_cloud_connector(&req).expect("valid request");
+
+    for (role, config, description, what) in [
+        ("", ok_config, Value::Null, "empty RoleArn"),
+        ("arn:aws:iam::1", ok_config, Value::Null, "short RoleArn"),
+        (ok_role, "", Value::Null, "empty ConfigConnectorArn"),
+    ] {
+        let req = make_request("CreateCloudConnector", base(role, config, description));
+        let err = svc
+            .create_cloud_connector(&req)
+            .err()
+            .unwrap_or_else(|| panic!("{what} should be rejected"));
+        assert_eq!(err.status(), http::StatusCode::BAD_REQUEST, "{what}");
+    }
+
+    // Oversized values are rejected at the documented ceilings.
+    let long_role = format!("arn:aws:iam::123456789012:role/{}", "r".repeat(2048));
+    let req = make_request(
+        "CreateCloudConnector",
+        base(&long_role, ok_config, Value::Null),
+    );
+    assert!(svc.create_cloud_connector(&req).is_err(), "long RoleArn");
+
+    let long_config = format!(
+        "arn:aws:config:us-east-1:123456789012:connector/{}",
+        "c".repeat(512)
+    );
+    let req = make_request(
+        "CreateCloudConnector",
+        base(ok_role, &long_config, Value::Null),
+    );
+    assert!(
+        svc.create_cloud_connector(&req).is_err(),
+        "long ConfigConnectorArn"
+    );
+
+    let req = make_request(
+        "CreateCloudConnector",
+        base(ok_role, ok_config, json!("d".repeat(1025))),
+    );
+    assert!(
+        svc.create_cloud_connector(&req).is_err(),
+        "long Description"
+    );
+}

@@ -875,6 +875,30 @@ mod tests {
     }
 
     #[test]
+    fn classify_ssm_shared_errors_pass_on_under_declared_ops() {
+        // SSM's paginated `Describe*` ops declare only InternalServerError even
+        // though AWS documents InvalidNextToken for them, and ValidationException
+        // is SSM's modeled input-validation error across the service.
+        for code in ["InvalidNextToken", "ValidationException"] {
+            let body = format!(r#"{{"__type":"{code}","message":"m"}}"#);
+            let result = classify_response(
+                "v1",
+                400,
+                &body,
+                &Expectation::Success,
+                0,
+                Some(&["InternalServerError".to_string()]),
+                "ssm",
+            );
+            assert_eq!(
+                result.status,
+                ProbeStatus::Pass,
+                "{code} should pass for ssm"
+            );
+        }
+    }
+
+    #[test]
     fn classify_404_with_no_aws_error_shape_fails() {
         // Mirrors #817: routing miss returns 404 with a body that has no
         // AWS error code. Must NOT pass — that's the gaming we're closing.
