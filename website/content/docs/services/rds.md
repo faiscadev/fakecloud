@@ -237,6 +237,8 @@ Real RDS rejects a filter name an operation doesn't support with `InvalidParamet
 
 ## Gotchas
 
+- **Persistence snapshots are one-way across the v3 bump.** RDS state written by this version declares snapshot schema v3 (final snapshots are typed `manual`, matching AWS; earlier builds wrote `automated`). An older fakecloud refuses to load a v3 file and exits, so downgrade by removing `<data-path>/rds/snapshot.json` first.
+
 - **Requires a Docker socket.** RDS needs access to `/var/run/docker.sock` to start and stop containers.
 - **First use pulls the image.** Expect a slower first run while the database image downloads. Heavy engines (Oracle/SQL Server/Db2) can pull 1-3 GB on first use. The PostgreSQL image is custom (`ghcr.io/faiscadev/fakecloud-postgres:<major>-<version>`) and is pulled from the registry when available; otherwise it's built locally (~60 s).
 - **Aurora is partially supported.** Aurora-specific features (Global Database, Serverless v2, I/O-optimized) are recorded but don't affect the real container.

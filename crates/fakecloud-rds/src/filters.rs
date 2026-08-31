@@ -27,6 +27,8 @@
 //! per-operation matchers below do — a caller filtering on something we
 //! don't recognise gets an empty result rather than the whole list.
 
+use std::collections::HashMap;
+
 use fakecloud_core::service::AwsRequest;
 
 /// Look a parameter up by presence, keeping an explicitly-empty value.
@@ -36,8 +38,18 @@ use fakecloud_core::service::AwsRequest;
 /// `Values.Value.2=mysql` would parse as no values at all, and the filter
 /// would then match nothing). AWS keeps the non-empty siblings, so the
 /// list walk has to distinguish "present but empty" from "absent".
-fn present_param(req: &AwsRequest, key: &str) -> Option<String> {
-    req.query_params.get(key).cloned()
+///
+/// Dispatch merges the form body into `query_params` for the Query
+/// protocol, so `body` is normally empty here; it is consulted as a
+/// fallback (parsed once by the caller) so a request built with only a
+/// body -- an in-process caller, a future entry point -- can't silently
+/// see zero filters and get the whole unfiltered list back.
+fn present_param<'a>(
+    req: &'a AwsRequest,
+    body: &'a HashMap<String, String>,
+    key: &str,
+) -> Option<String> {
+    req.query_params.get(key).or_else(|| body.get(key)).cloned()
 }
 
 /// One `Filters.Filter.N` entry: a name plus the values it accepts.
@@ -176,11 +188,17 @@ pub(crate) fn addresses_own_account(param: &str, account_id: &str) -> bool {
 /// matching how the SDKs serialize the list.
 pub(crate) fn parse_filters(req: &AwsRequest) -> Vec<RdsFilter> {
     let mut filters = Vec::new();
+    // Parsed once, not per lookup: see `present_param`.
+    let body = if req.query_params.is_empty() && !req.body.is_empty() {
+        fakecloud_core::protocol::parse_query_body(&req.body)
+    } else {
+        HashMap::new()
+    };
 
     for index in 1.. {
         let Some((prefix, name)) = ["Filter", "member"].iter().find_map(|element| {
             let prefix = format!("Filters.{element}.{index}");
-            present_param(req, &format!("{prefix}.Name")).map(|name| (prefix, name))
+            present_param(req, &body, &format!("{prefix}.Name")).map(|name| (prefix, name))
         }) else {
             break;
         };
@@ -189,7 +207,7 @@ pub(crate) fn parse_filters(req: &AwsRequest) -> Vec<RdsFilter> {
         for element in ["Value", "member"] {
             for value_index in 1.. {
                 let key = format!("{prefix}.Values.{element}.{value_index}");
-                match present_param(req, &key) {
+                match present_param(req, &body, &key) {
                     Some(value) => values.push(value),
                     None => break,
                 }
@@ -295,6 +313,27 @@ mod tests {
             vec![RdsFilter {
                 name: "engine".to_string(),
                 values: vec![String::new(), "mysql".to_string()],
+            }]
+        );
+    }
+
+    #[test]
+    fn parses_filters_from_a_form_body() {
+        // Dispatch normally merges the body into `query_params`; a
+        // request carrying only a body must not silently parse as "no
+        // filters" and return the whole unfiltered list.
+        let mut req = request(&[]);
+        req.query_params.clear();
+        req.body = Bytes::from(
+            "Action=DescribeDBInstances&Filters.Filter.1.Name=dbi-resource-id\
+             &Filters.Filter.1.Values.Value.1=db-a",
+        );
+
+        assert_eq!(
+            parse_filters(&req),
+            vec![RdsFilter {
+                name: "dbi-resource-id".to_string(),
+                values: vec!["db-a".to_string()],
             }]
         );
     }

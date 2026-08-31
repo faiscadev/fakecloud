@@ -635,7 +635,9 @@ impl RdsService {
         let snapshot = state
             .snapshots
             .remove(&db_snapshot_identifier)
-            .ok_or_else(|| db_snapshot_not_found(&db_snapshot_identifier))?;
+            // Echo what the caller passed (the ARN, when they used one),
+            // as the describe and restore paths do.
+            .ok_or_else(|| db_snapshot_not_found(&raw_identifier))?;
         let snapshot_arn = snapshot.db_snapshot_arn.clone();
         drop(accounts);
 
