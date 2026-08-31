@@ -5365,3 +5365,247 @@ fn put_bucket_encryption_accepts_every_modeled_sse_algorithm() {
         "MalformedXML",
     );
 }
+
+// ---------------------------------------------------------------------
+// Object annotations
+// ---------------------------------------------------------------------
+
+fn put_annotation(
+    svc: &S3Service,
+    bucket: &str,
+    key: &str,
+    name: &str,
+    payload: &[u8],
+) -> Result<AwsResponse, AwsServiceError> {
+    let req = make_request(
+        Method::PUT,
+        &format!("/{bucket}/{key}"),
+        &[("annotation", ""), ("AnnotationName", name)],
+        payload,
+    );
+    svc.put_object_annotation("123456789012", &req, bucket, key)
+}
+
+#[test]
+fn object_annotations_round_trip_independently_of_the_object() {
+    let svc = make_service();
+    seed_bucket(&svc, "annot");
+    seed_object(&svc, "annot", "doc.txt", b"the object body");
+
+    put_annotation(&svc, "annot", "doc.txt", "review", b"looks good").unwrap();
+    put_annotation(&svc, "annot", "doc.txt", "summary", b"a summary").unwrap();
+
+    // Get returns the payload verbatim, with its own ETag and length.
+    let req = make_request(
+        Method::GET,
+        "/annot/doc.txt",
+        &[("annotation", ""), ("AnnotationName", "review")],
+        b"",
+    );
+    let resp = svc
+        .get_object_annotation("123456789012", &req, "annot", "doc.txt")
+        .unwrap();
+    assert_eq!(resp.body.expect_bytes(), b"looks good");
+    assert_eq!(resp.headers.get("Content-Length").unwrap(), "10");
+    assert!(resp.headers.get("ETag").is_some());
+
+    // The object itself is untouched.
+    let req = make_request(Method::GET, "/annot/doc.txt", &[], b"");
+    let resp = svc
+        .get_object("123456789012", &req, "annot", "doc.txt")
+        .unwrap();
+    assert_eq!(resp.body.expect_bytes(), b"the object body");
+
+    // Overwriting replaces the payload rather than adding a second entry.
+    put_annotation(&svc, "annot", "doc.txt", "review", b"revised").unwrap();
+    let req = make_request(
+        Method::GET,
+        "/annot/doc.txt",
+        &[("annotation", ""), ("AnnotationName", "review")],
+        b"",
+    );
+    let resp = svc
+        .get_object_annotation("123456789012", &req, "annot", "doc.txt")
+        .unwrap();
+    assert_eq!(resp.body.expect_bytes(), b"revised");
+
+    // Delete is idempotent, and a deleted annotation then 404s.
+    for _ in 0..2 {
+        let req = make_request(
+            Method::DELETE,
+            "/annot/doc.txt",
+            &[("annotation", ""), ("AnnotationName", "review")],
+            b"",
+        );
+        let resp = svc
+            .delete_object_annotation("123456789012", &req, "annot", "doc.txt")
+            .unwrap();
+        assert_eq!(resp.status, StatusCode::NO_CONTENT);
+    }
+    let req = make_request(
+        Method::GET,
+        "/annot/doc.txt",
+        &[("annotation", ""), ("AnnotationName", "review")],
+        b"",
+    );
+    assert_aws_err(
+        svc.get_object_annotation("123456789012", &req, "annot", "doc.txt"),
+        "NoSuchAnnotation",
+    );
+}
+
+#[test]
+fn list_object_annotations_filters_by_prefix_and_pages() {
+    let svc = make_service();
+    seed_bucket(&svc, "annot");
+    seed_object(&svc, "annot", "k", b"body");
+    for name in ["a-one", "a-two", "a-three", "b-one"] {
+        put_annotation(&svc, "annot", "k", name, name.as_bytes()).unwrap();
+    }
+
+    let list = |query: &[(&str, &str)]| -> String {
+        let mut q = vec![("annotation", "")];
+        q.extend_from_slice(query);
+        let req = make_request(Method::GET, "/annot/k", &q, b"");
+        let resp = svc
+            .list_object_annotations("123456789012", &req, "annot", "k")
+            .unwrap();
+        String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap()
+    };
+
+    let all = list(&[]);
+    assert!(
+        all.contains("<AnnotationCount>4</AnnotationCount>"),
+        "{all}"
+    );
+    assert!(all.contains("<AnnotationName>b-one</AnnotationName>"));
+    // Size is the payload length, not the object's.
+    assert!(all.contains("<Size>5</Size>"), "{all}");
+
+    let prefixed = list(&[("AnnotationPrefix", "a-")]);
+    assert!(prefixed.contains("<AnnotationCount>3</AnnotationCount>"));
+    assert!(!prefixed.contains("b-one"));
+
+    // A short page reports a continuation token; following it returns the rest
+    // without repeating an entry.
+    let page1 = list(&[("MaxAnnotationResults", "2")]);
+    assert!(
+        page1.contains("<AnnotationCount>2</AnnotationCount>"),
+        "{page1}"
+    );
+    let token = page1
+        .split("<NextContinuationToken>")
+        .nth(1)
+        .and_then(|s| s.split("</NextContinuationToken>").next())
+        .expect("continuation token")
+        .to_string();
+    let page2 = list(&[("MaxAnnotationResults", "2"), ("ContinuationToken", &token)]);
+    assert!(
+        page2.contains("<AnnotationCount>2</AnnotationCount>"),
+        "{page2}"
+    );
+    // Names sort, so page 1 is a-one/a-three and page 2 is a-two/b-one.
+    assert!(
+        !page2.contains("<AnnotationName>a-one</AnnotationName>"),
+        "{page2}"
+    );
+    assert!(
+        page2.contains("<AnnotationName>b-one</AnnotationName>"),
+        "{page2}"
+    );
+}
+
+#[test]
+fn object_annotations_validate_names_and_missing_resources() {
+    let svc = make_service();
+    seed_bucket(&svc, "annot");
+    seed_object(&svc, "annot", "k", b"body");
+
+    // AnnotationName is required, length-bounded, and control-char free.
+    let req = make_request(Method::PUT, "/annot/k", &[("annotation", "")], b"x");
+    assert_aws_err(
+        svc.put_object_annotation("123456789012", &req, "annot", "k"),
+        "InvalidAnnotationName",
+    );
+    let long = "n".repeat(256);
+    assert_aws_err(
+        put_annotation(&svc, "annot", "k", &long, b"x"),
+        "AnnotationNameTooLong",
+    );
+    assert_aws_err(
+        put_annotation(&svc, "annot", "k", "bad\nname", b"x"),
+        "InvalidAnnotationName",
+    );
+
+    // Missing bucket / key report the object-level codes.
+    assert_aws_err(
+        put_annotation(&svc, "ghost", "k", "n", b"x"),
+        "NoSuchBucket",
+    );
+    assert_aws_err(
+        put_annotation(&svc, "annot", "missing", "n", b"x"),
+        "NoSuchKey",
+    );
+
+    // The 50-annotation ceiling is enforced, and overwriting stays allowed.
+    for i in 0..50 {
+        put_annotation(&svc, "annot", "k", &format!("a{i:02}"), b"x").unwrap();
+    }
+    assert_aws_err(
+        put_annotation(&svc, "annot", "k", "one-too-many", b"x"),
+        "AnnotationLimitExceeded",
+    );
+    put_annotation(&svc, "annot", "k", "a00", b"replaced").unwrap();
+}
+
+#[test]
+fn update_bucket_metadata_annotation_table_configuration_round_trips() {
+    let svc = make_service();
+    seed_bucket(&svc, "annot");
+    let body = b"<AnnotationTableConfigurationUpdates><Annotations><Annotation>review</Annotation></Annotations></AnnotationTableConfigurationUpdates>";
+    let req = make_request(
+        Method::PUT,
+        "/annot",
+        &[("metadataAnnotationTable", "")],
+        body,
+    );
+    let resp = svc
+        .update_bucket_metadata_annotation_table_configuration("123456789012", &req, "annot")
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+    {
+        let state = svc.state.read();
+        let stored = state
+            .get("123456789012")
+            .unwrap()
+            .buckets
+            .get("annot")
+            .unwrap()
+            .annotation_table_config
+            .as_deref()
+            .expect("configuration stored");
+        assert!(stored.contains("review"));
+    }
+
+    // An empty payload is MalformedXML, and an unknown bucket is NoSuchBucket.
+    let req = make_request(
+        Method::PUT,
+        "/annot",
+        &[("metadataAnnotationTable", "")],
+        b"",
+    );
+    assert_aws_err(
+        svc.update_bucket_metadata_annotation_table_configuration("123456789012", &req, "annot"),
+        "MalformedXML",
+    );
+    let req = make_request(
+        Method::PUT,
+        "/ghost",
+        &[("metadataAnnotationTable", "")],
+        body,
+    );
+    assert_aws_err(
+        svc.update_bucket_metadata_annotation_table_configuration("123456789012", &req, "ghost"),
+        "NoSuchBucket",
+    );
+}

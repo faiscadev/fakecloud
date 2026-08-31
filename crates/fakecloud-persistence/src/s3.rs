@@ -161,6 +161,10 @@ pub struct ObjectMeta {
     pub lock_retain_until: Option<DateTime<Utc>>,
     #[serde(default)]
     pub lock_legal_hold: Option<String>,
+    /// Named annotations attached to this object version. Base64 is avoided —
+    /// the payload rides as raw bytes so a restart restores it verbatim.
+    #[serde(default)]
+    pub annotations: Vec<AnnotationSnapshot>,
     #[serde(default)]
     pub content_encoding: Option<String>,
     #[serde(default)]
@@ -173,6 +177,22 @@ pub struct ObjectMeta {
     pub expires: Option<String>,
     #[serde(default)]
     pub website_redirect_location: Option<String>,
+}
+
+/// One `PutObjectAnnotation` payload, persisted alongside its object so
+/// annotations survive a restart like the object body does.
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct AnnotationSnapshot {
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub payload: Vec<u8>,
+    #[serde(default)]
+    pub etag: String,
+    #[serde(default = "default_time")]
+    pub last_modified: DateTime<Utc>,
+    #[serde(default)]
+    pub checksum_algorithm: Option<String>,
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]

@@ -2109,3 +2109,91 @@ async fn s3_create_session() {
         .await
         .unwrap();
 }
+
+/// Object annotations: named payloads attached to an object version, listed
+/// and paged independently of the object. The vendored `aws-sdk-s3` predates
+/// these operations, so drive them over raw HTTP.
+#[test_action("s3", "PutObjectAnnotation", checksum = "eb87b59f")]
+#[test_action("s3", "GetObjectAnnotation", checksum = "6305fa7d")]
+#[test_action("s3", "ListObjectAnnotations", checksum = "b5824aab")]
+#[test_action("s3", "DeleteObjectAnnotation", checksum = "983883fb")]
+#[test_action(
+    "s3",
+    "UpdateBucketMetadataAnnotationTableConfiguration",
+    checksum = "83f11cf2"
+)]
+#[tokio::test]
+async fn s3_object_annotations_round_trip() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket().bucket("annot-bkt").send().await.unwrap();
+    s3.put_object()
+        .bucket("annot-bkt")
+        .key("doc.txt")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"body"))
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let base = format!("{}/annot-bkt/doc.txt?annotation", server.endpoint());
+
+    let resp = http
+        .put(format!("{base}&AnnotationName=review"))
+        .header("Authorization", S3_AUTH)
+        .body("looks good")
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "put: {}", resp.status());
+
+    let resp = http
+        .get(format!("{base}&AnnotationName=review"))
+        .header("Authorization", S3_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "get: {}", resp.status());
+    assert_eq!(resp.text().await.unwrap(), "looks good");
+
+    let resp = http
+        .get(&base)
+        .header("Authorization", S3_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert!(resp.status().is_success(), "list: {}", resp.status());
+    let body = resp.text().await.unwrap();
+    assert!(
+        body.contains("<AnnotationName>review</AnnotationName>"),
+        "{body}"
+    );
+
+    let resp = http
+        .delete(format!("{base}&AnnotationName=review"))
+        .header("Authorization", S3_AUTH)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.status().as_u16(), 204, "delete");
+
+    // The object itself is untouched by any of that.
+    let obj = s3
+        .get_object()
+        .bucket("annot-bkt")
+        .key("doc.txt")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        obj.body.collect().await.unwrap().into_bytes().as_ref(),
+        b"body"
+    );
+
+    raw_put(
+        &server,
+        "/annot-bkt?metadataAnnotationTable",
+        "<AnnotationTableConfigurationUpdates><Annotations><Annotation>review</Annotation></Annotations></AnnotationTableConfigurationUpdates>",
+    )
+    .await;
+}

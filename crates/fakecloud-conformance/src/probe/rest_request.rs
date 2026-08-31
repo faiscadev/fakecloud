@@ -601,6 +601,35 @@ pub(super) fn rest_request_config(
                 None,
             ),
             "CopyObject" => (reqwest::Method::PUT, format!("/{}/{}", BUCKET, KEY), None),
+            // Object annotations. `AnnotationName` is an `@httpQuery` member,
+            // so `append_http_query_from_model` supplies it from the variant —
+            // which is also what separates GetObjectAnnotation (name present)
+            // from ListObjectAnnotations (name absent) on the shared URI.
+            "PutObjectAnnotation" => (
+                reqwest::Method::PUT,
+                format!("/{}/{}", BUCKET, KEY),
+                Some("annotation".to_string()),
+            ),
+            "GetObjectAnnotation" => (
+                reqwest::Method::GET,
+                format!("/{}/{}", BUCKET, KEY),
+                Some("annotation".to_string()),
+            ),
+            "DeleteObjectAnnotation" => (
+                reqwest::Method::DELETE,
+                format!("/{}/{}", BUCKET, KEY),
+                Some("annotation".to_string()),
+            ),
+            "ListObjectAnnotations" => (
+                reqwest::Method::GET,
+                format!("/{}/{}", BUCKET, KEY),
+                Some("annotation".to_string()),
+            ),
+            "UpdateBucketMetadataAnnotationTableConfiguration" => (
+                reqwest::Method::PUT,
+                format!("/{}", BUCKET),
+                Some("metadataAnnotationTable".to_string()),
+            ),
             "GetObjectTagging" => (
                 reqwest::Method::GET,
                 format!("/{}/{}", BUCKET, KEY),
