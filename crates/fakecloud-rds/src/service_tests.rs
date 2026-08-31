@@ -2600,6 +2600,25 @@ fn describe_db_snapshots_filters_by_dbi_resource_id() {
 }
 
 #[test]
+fn describe_db_snapshots_ignores_another_accounts_instance_arn() {
+    // A DB instance is never cross-account, so an ARN naming another
+    // account must not list this account's same-named instance's
+    // snapshots.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "mydb");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBInstanceIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:db:mydb",
+        )],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+}
+
+#[test]
 fn describe_db_snapshots_filters_by_db_instance_id() {
     let svc = make_service();
     seed_snapshot(&svc, "snap1", "db1");

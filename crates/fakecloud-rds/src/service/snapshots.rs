@@ -349,8 +349,24 @@ impl RdsService {
         // the same way DescribeDBClusterSnapshots accepts them.
         let raw_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier");
         let db_snapshot_identifier = normalized_identifier(raw_snapshot_identifier.clone());
-        let db_instance_identifier =
-            normalized_identifier(optional_query_param(request, "DBInstanceIdentifier"));
+        // A DB instance is never shared across accounts, so an ARN
+        // naming a different account matches nothing here rather than
+        // listing this account's same-named instance's snapshots.
+        let raw_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        if let Some(raw) = raw_instance_identifier.as_deref() {
+            if !addresses_own_account(raw, &request.account_id) {
+                return Ok(AwsResponse::xml(
+                    StatusCode::OK,
+                    query_response_xml(
+                        "DescribeDBSnapshots",
+                        RDS_NS,
+                        "<DBSnapshots></DBSnapshots>",
+                        &request.request_id,
+                    ),
+                ));
+            }
+        }
+        let db_instance_identifier = normalized_identifier(raw_instance_identifier);
         let snapshot_type = optional_query_param(request, "SnapshotType");
         // A junk boolean is treated as absent rather than rejected:
         // `InvalidParameterValue` isn't declared on this operation (see

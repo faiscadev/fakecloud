@@ -491,9 +491,24 @@ impl RdsService {
                 // and treats an explicitly-empty parameter as absent --
                 // `get_param` keeps `DBClusterSnapshotIdentifier=`, which
                 // would otherwise match nothing and 404 below.
-                let snapshot_id =
-                    normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"));
-                let cluster_id = normalized_identifier(get_param(req, "DBClusterIdentifier"));
+                // The ARN's account is kept, not dropped: a foreign ARN
+                // must not resolve against this account's same-named
+                // snapshot (nor against a third account that happens to
+                // have shared one under the same id).
+                let raw_snapshot_id = get_param(req, "DBClusterSnapshotIdentifier");
+                let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
+                let snapshot_id = normalized_identifier(raw_snapshot_id);
+                let raw_cluster_id = get_param(req, "DBClusterIdentifier");
+                let cluster_owner = raw_cluster_id.as_deref().and_then(identifier_account);
+                let cluster_id = normalized_identifier(raw_cluster_id);
+                // An identifier naming another account can never match a
+                // snapshot this account owns.
+                let owner_is_caller = snapshot_owner
+                    .as_deref()
+                    .is_none_or(|account| account == aid)
+                    && cluster_owner
+                        .as_deref()
+                        .is_none_or(|account| account == aid);
                 let snapshot_type =
                     get_param(req, "SnapshotType").filter(|value| !value.is_empty());
                 // A junk boolean is treated as absent: InvalidParameterValue
@@ -511,7 +526,10 @@ impl RdsService {
                 // isn't declared here; see `crate::filters`.)
                 if let Some(wanted) = snapshot_id.as_deref() {
                     let known = accounts.iter().any(|(owner, s)| {
-                        s.extras.get("cluster_snapshots").is_some_and(|m| {
+                        snapshot_owner
+                            .as_deref()
+                            .is_none_or(|account| account == owner)
+                            && s.extras.get("cluster_snapshots").is_some_and(|m| {
                             m.values().any(|v| {
                                 entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
                                     && (owner == aid || {
@@ -537,6 +555,7 @@ impl RdsService {
                 let items: Vec<Value> = accounts
                     .get(&aid)
                     .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .filter(|_| owner_is_caller)
                     .map(|m| {
                         m.values()
                             .filter(|v| {
@@ -558,12 +577,26 @@ impl RdsService {
                 // A caller that named a snapshot explicitly resolves it
                 // without IncludeShared as well -- AWS resolves a shared
                 // snapshot addressed by ARN.
-                // A named lookup that already matched an owned row must
-                // not also pull in another account's identical id: AWS
-                // resolves a named snapshot uniquely, and two rows are
-                // the "couldn't resolve a single result" failure this
-                // branch exists to avoid.
-                let named = snapshot_id.is_some() && items.is_empty();
+                // A named lookup the caller OWNS must not also pull in
+                // another account's identical id: AWS resolves a named
+                // snapshot uniquely, and two rows are the "couldn't
+                // resolve a single result" failure this branch exists to
+                // avoid. Keyed on whether an owned row with that id
+                // exists at all, not on whether it survived the filters --
+                // otherwise a filtered-out owned row would be replaced by
+                // a foreign one.
+                let owns_named = snapshot_id.as_deref().is_some_and(|wanted| {
+                    owner_is_caller
+                        && accounts
+                            .get(&aid)
+                            .and_then(|s| s.extras.get("cluster_snapshots"))
+                            .is_some_and(|m| {
+                                m.values().any(|v| {
+                                    entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                })
+                            })
+                });
+                let named = snapshot_id.is_some() && !owns_named;
                 let want_shared = snapshot_type.as_deref() == Some("shared")
                     || ((include_shared || named) && snapshot_type.is_none());
                 let want_public = snapshot_type.as_deref() == Some("public")
@@ -572,6 +605,14 @@ impl RdsService {
                 if want_shared || want_public {
                     for (owner, other) in accounts.iter() {
                         if owner == aid {
+                            continue;
+                        }
+                        // An ARN names its owner: never resolve it
+                        // against a different account's identical id.
+                        if snapshot_owner
+                            .as_deref()
+                            .is_some_and(|account| account != owner)
+                        {
                             continue;
                         }
                         let Some(bucket) = other.extras.get("cluster_snapshots") else {

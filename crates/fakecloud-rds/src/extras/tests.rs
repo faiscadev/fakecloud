@@ -3017,6 +3017,115 @@ fn describe_db_clusters_rejects_another_accounts_arn() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_honors_the_arn_account() {
+    // A foreign ARN must resolve against the account it names -- not
+    // this account's same-named snapshot, and not a third account that
+    // happens to have shared one under the same id.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "my-clu", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let sharer = accounts.get_or_create("333333333333");
+        sharer
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "sharer-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    // An ARN naming account 111 matches neither the local row nor 333's.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:111111111111:cluster-snapshot:snap-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(resp) => {
+            let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+            panic!("a foreign ARN resolved: {body}");
+        }
+    }
+
+    // The sharer's own ARN resolves to the sharer's row.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:333333333333:cluster-snapshot:snap-1",
+        )],
+    );
+    assert!(body.contains("<DBClusterIdentifier>sharer-clu</DBClusterIdentifier>"));
+    assert!(!body.contains("<DBClusterIdentifier>my-clu</DBClusterIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_filtered_owned_row_is_not_replaced() {
+    // An owned row excluded by a filter must yield an empty result, not
+    // fall through to another account's identically-named snapshot.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "my-clu", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        // The owned row is aurora-postgresql...
+        if let Some(entry) = accounts
+            .get_or_create("000000000000")
+            .extras
+            .get_mut("cluster_snapshots")
+            .and_then(|m| m.get_mut("snap-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-postgresql"));
+        }
+        // ...while a shared one with the same id is aurora-mysql.
+        accounts
+            .get_or_create("999999999999")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "Engine": "aurora-mysql",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "aurora-mysql"),
+        ],
+    );
+    assert!(
+        !body.contains("<DBClusterIdentifier>other-clu</DBClusterIdentifier>"),
+        "a filtered-out owned row was replaced by a foreign one: {body}"
+    );
+}
+
+#[test]
 fn describe_db_cluster_snapshots_honors_include_shared() {
     // The modeled IncludeShared / IncludePublic members widen an
     // unqualified listing, as on DescribeDBSnapshots.
