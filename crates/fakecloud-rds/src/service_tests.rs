@@ -3265,6 +3265,37 @@ async fn restore_db_cluster_from_snapshot_drops_inherited_identity() {
 }
 
 #[tokio::test]
+async fn create_db_cluster_snapshot_reports_an_unknown_cluster_first() {
+    // A duplicate id against a cluster that doesn't exist is a
+    // DBClusterNotFoundFault, not AlreadyExists.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({"DBClusterSnapshotIdentifier": "snap-1"}),
+            );
+    }
+
+    let req = request(
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-2"),
+            ("DBClusterIdentifier", "ghost-cluster"),
+        ],
+    );
+    match svc.create_db_cluster_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("snapshot of a nonexistent cluster accepted"),
+    }
+}
+
+#[tokio::test]
 async fn create_db_cluster_snapshot_rejects_a_duplicate_identifier() {
     let svc = make_service();
     seed_cluster_entry(&svc, "clu-1", serde_json::json!({}));

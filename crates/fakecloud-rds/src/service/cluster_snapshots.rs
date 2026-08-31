@@ -23,6 +23,9 @@ impl RdsService {
 
         // A duplicate identifier is the declared AlreadyExists fault, not
         // a silent overwrite of the existing snapshot's dump and sharing.
+        // Checked here to fail before paying for the dump, and AGAIN
+        // under the write lock below -- the dump is awaited in between,
+        // so two concurrent calls would otherwise both pass this one.
         if self
             .state
             .read()
@@ -94,9 +97,12 @@ impl RdsService {
             None
         };
 
-        {
+        let stored = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            // The cluster is validated before the duplicate check, so a
+            // duplicate id against a cluster that doesn't exist reports
+            // DBClusterNotFoundFault rather than AlreadyExists.
             let mut entry = state
                 .extras
                 .get("clusters")
@@ -109,6 +115,17 @@ impl RdsService {
                         format!("DBCluster {cluster_id} not found."),
                     )
                 })?;
+            if state
+                .extras
+                .get("cluster_snapshots")
+                .is_some_and(|m| m.contains_key(&snapshot_id))
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::CONFLICT,
+                    "DBClusterSnapshotAlreadyExistsFault",
+                    format!("DBClusterSnapshot {snapshot_id} already exists."),
+                ));
+            }
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert(
                     "DBClusterSnapshotIdentifier".to_string(),
@@ -126,8 +143,9 @@ impl RdsService {
                 .extras
                 .entry("cluster_snapshots".to_string())
                 .or_default()
-                .insert(snapshot_id.clone(), entry);
-        }
+                .insert(snapshot_id.clone(), entry.clone());
+            entry
+        };
 
         self.emit_event(
             RdsSourceType::DbClusterSnapshot,
@@ -143,7 +161,13 @@ impl RdsService {
             query_response_xml(
                 "CreateDBClusterSnapshot",
                 RDS_NS,
-                &crate::extras::cluster_snapshot_xml(&snapshot_id, &arn, &cluster_id),
+                &crate::extras::cluster_snapshot_status_detail_xml(
+                    &snapshot_id,
+                    &arn,
+                    &cluster_id,
+                    "available",
+                    crate::extras::cluster_snapshot_detail_xml(Some(&stored)),
+                ),
                 &request.request_id,
             ),
         ))

@@ -3216,6 +3216,76 @@ fn delete_db_cluster_snapshot_unknown_identifier_is_not_found() {
 }
 
 #[test]
+fn a_named_owned_cluster_snapshot_is_never_shadowed_by_a_shared_one() {
+    // `data.aws_db_cluster_snapshot` sets include_shared, so the flag
+    // must not append another account's row for an id the caller owns --
+    // two rows is the "couldn't resolve a single result" failure.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "my-clu", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("999999999999")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("IncludeShared", "true"),
+        ],
+    );
+    assert_eq!(
+        body.matches("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>")
+            .count(),
+        1,
+        "IncludeShared shadowed the owned row: {body}"
+    );
+    assert!(body.contains("<DBClusterIdentifier>my-clu</DBClusterIdentifier>"));
+}
+
+#[test]
+fn copy_db_cluster_snapshot_response_reports_the_snapshot_type() {
+    // The Describe path reports SnapshotType/Engine, so the copy
+    // response must too -- otherwise the client reads a blank off the
+    // copy it just made.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+        ],
+    );
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<Engine>aurora-postgresql</Engine>"),
+        "{body}"
+    );
+}
+
+#[test]
 fn copy_db_cluster_snapshot_rejects_an_existing_target() {
     // Overwriting would silently replace the target's dump and revoke
     // its sharing on a retried copy.

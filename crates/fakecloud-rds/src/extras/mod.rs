@@ -472,8 +472,18 @@ impl RdsService {
                     // nobody shared.
                     obj.remove("SnapshotAttributes");
                 }
-                store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
-                Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
+                store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry.clone());
+                Ok(xml_response(
+                    action.as_str(),
+                    cluster_snapshot_status_detail_xml(
+                        &id,
+                        &arn,
+                        &cluster,
+                        "available",
+                        cluster_snapshot_detail_xml(Some(&entry)),
+                    ),
+                    &rid,
+                ))
             }
             "DeleteDBClusterSnapshot" => {
                 // Resolve the ARN form, as Describe and Restore do -- an
@@ -694,10 +704,18 @@ impl RdsService {
                 // (AWS requires it, and a bare id could match several
                 // accounts at once and return duplicate rows).
                 let named = snapshot_id.is_some() && !owns_named && snapshot_owner.is_some();
-                let want_shared = snapshot_type.as_deref() == Some("shared")
-                    || ((include_shared || named) && snapshot_type.is_none());
-                let want_public = snapshot_type.as_deref() == Some("public")
-                    || ((include_public || named) && snapshot_type.is_none());
+                // Owning the named row suppresses the cross-account scan
+                // outright, not just the implicit widening: with
+                // IncludeShared set (which `data.aws_db_cluster_snapshot`
+                // does), another account's snapshot of the same bare id
+                // would otherwise be appended and the lookup would return
+                // two rows.
+                let want_shared = !owns_named
+                    && (snapshot_type.as_deref() == Some("shared")
+                        || ((include_shared || named) && snapshot_type.is_none()));
+                let want_public = !owns_named
+                    && (snapshot_type.as_deref() == Some("public")
+                        || ((include_public || named) && snapshot_type.is_none()));
                 let mut items = items;
                 if want_shared || want_public {
                     for (owner, other) in accounts.iter() {
@@ -3066,6 +3084,32 @@ pub(crate) fn cluster_snapshot_xml(id: &str, arn: &str, cluster: &str) -> String
     cluster_snapshot_status_xml(id, arn, cluster, "available")
 }
 
+/// Snapshot-type / engine fields for a single-object response, read off
+/// the stored entry. The Describe path reports these, so the create /
+/// copy / delete responses have to as well -- otherwise a client reads a
+/// blank `SnapshotType` off the copy it just made.
+pub(crate) fn cluster_snapshot_detail_xml(entry: Option<&Value>) -> String {
+    let mut out = String::new();
+    let entry = match entry {
+        Some(entry) => entry,
+        None => return out,
+    };
+    out.push_str(&format!(
+        "\n      <SnapshotType>{}</SnapshotType>",
+        xml_escape(entry_str(entry, "SnapshotType").unwrap_or("manual"))
+    ));
+    if let Some(engine) = entry_str(entry, "Engine") {
+        out.push_str(&format!("\n      <Engine>{}</Engine>", xml_escape(engine)));
+    }
+    if let Some(version) = entry_str(entry, "EngineVersion") {
+        out.push_str(&format!(
+            "\n      <EngineVersion>{}</EngineVersion>",
+            xml_escape(version)
+        ));
+    }
+    out
+}
+
 /// Same as `cluster_snapshot_xml` but with an explicit status, so the
 /// CreateDBClusterSnapshot response can report `creating` while the writer
 /// dump runs in the background.
@@ -3075,9 +3119,25 @@ pub(crate) fn cluster_snapshot_status_xml(
     cluster: &str,
     status: &str,
 ) -> String {
+    cluster_snapshot_status_detail_xml(id, arn, cluster, status, String::new())
+}
+
+/// [`cluster_snapshot_status_xml`] plus the extra fields a caller read
+/// off the stored entry (see [`cluster_snapshot_detail_xml`]).
+pub(crate) fn cluster_snapshot_status_detail_xml(
+    id: &str,
+    arn: &str,
+    cluster: &str,
+    status: &str,
+    detail: String,
+) -> String {
     format!(
-        "    <DBClusterSnapshot>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <Status>{}</Status>\n    </DBClusterSnapshot>",
-        xml_escape(id), xml_escape(arn), xml_escape(cluster), xml_escape(status),
+        "    <DBClusterSnapshot>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <Status>{}</Status>{}\n    </DBClusterSnapshot>",
+        xml_escape(id),
+        xml_escape(arn),
+        xml_escape(cluster),
+        xml_escape(status),
+        detail,
     )
 }
 

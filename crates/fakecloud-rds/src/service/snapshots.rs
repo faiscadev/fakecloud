@@ -744,7 +744,9 @@ impl RdsService {
                         None => {
                             let state = accounts.get_or_create(&request.account_id);
                             state.cancel_instance_creation(&db_instance_identifier);
-                            return Err(db_snapshot_not_found(&db_snapshot_identifier));
+                            // The caller's own identifier, not the id it
+                            // reduced to.
+                            return Err(db_snapshot_not_found(&reported_identifier));
                         }
                     }
                 }

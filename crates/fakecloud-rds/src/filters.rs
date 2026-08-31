@@ -112,12 +112,10 @@ pub(crate) fn normalized_identifier(param: Option<String>, resource_type: &str) 
             // field has to match, or a cluster ARN would address a DB
             // instance of the same name; `id` is field 7 and keeps any
             // colons of its own.
-            let mut fields = value.splitn(7, ':');
-            let kind = fields.nth(5)?;
-            if kind != resource_type {
+            if !identifier_matches_type(&value, resource_type) {
                 return None;
             }
-            fields.next().map(str::to_string)
+            value.splitn(7, ':').nth(6).map(str::to_string)
         })
         .filter(|value| !value.is_empty())
 }
@@ -133,12 +131,15 @@ pub(crate) fn identifier_matches_type(param: &str, resource_type: &str) -> bool 
     if !param.starts_with("arn:") {
         return true;
     }
-    let mut fields = param.splitn(7, ':').skip(5);
-    // The type has to match AND the resource id has to be non-empty:
-    // `arn:aws:rds:us-east-1:1234:db:` would otherwise pass the type
-    // check, normalize to `None`, and read as "no identifier" -- widening
-    // a targeted read into a full listing.
-    fields.next() == Some(resource_type) && fields.next().is_some_and(|id| !id.is_empty())
+    let mut fields = param.splitn(7, ':').skip(2);
+    // The service has to be `rds` (an `arn:aws:ec2:...:db:mydb` names
+    // nothing here), the type has to match, AND the resource id has to be
+    // non-empty: `arn:aws:rds:us-east-1:1234:db:` would otherwise pass,
+    // normalize to `None`, and read as "no identifier" -- widening a
+    // targeted read into a full listing.
+    fields.next() == Some("rds")
+        && fields.nth(2) == Some(resource_type)
+        && fields.next().is_some_and(|id| !id.is_empty())
 }
 
 /// The account an ARN-form identifier names, or `None` for a bare id.
