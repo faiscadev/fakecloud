@@ -1382,195 +1382,6 @@ fn cluster_lifecycle_op_missing_identifier_errors() {
     assert_eq!(err.code(), "InvalidParameterValue");
 }
 
-#[test]
-fn restore_db_cluster_from_snapshot_clones_source_cluster_fields() {
-    let svc = svc();
-    create_cluster(&svc, "src");
-    // Mutate source so we can verify it carries through.
-    svc.handle_extra_action(&req(
-        "ModifyDBCluster",
-        &[
-            ("DBClusterIdentifier", "src"),
-            ("EngineVersion", "16.1"),
-            ("BackupRetentionPeriod", "21"),
-        ],
-    ))
-    .expect("ModifyDBCluster");
-    // Snapshot the source.
-    svc.handle_extra_action(&req(
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "snap1"),
-            ("DBClusterIdentifier", "src"),
-        ],
-    ))
-    .expect("CreateDBClusterSnapshot");
-    svc.handle_extra_action(&req(
-        "RestoreDBClusterFromSnapshot",
-        &[
-            ("DBClusterIdentifier", "restored"),
-            ("SnapshotIdentifier", "snap1"),
-        ],
-    ))
-    .expect("RestoreDBClusterFromSnapshot");
-    let v = cluster_value(&svc, "restored");
-    assert_eq!(v["DBClusterIdentifier"].as_str(), Some("restored"));
-    assert_eq!(v["EngineVersion"].as_str(), Some("16.1"));
-    // Coerced to integer in ModifyDBCluster, carried verbatim through the snapshot/restore.
-    assert_eq!(v["BackupRetentionPeriod"].as_i64(), Some(21));
-    assert_eq!(v["Status"].as_str(), Some("available"));
-    assert!(v["DBClusterArn"]
-        .as_str()
-        .unwrap_or_default()
-        .ends_with(":cluster:restored"));
-}
-
-#[test]
-fn restore_db_cluster_from_snapshot_hydrates_from_the_snapshot() {
-    // Reading the caller's `clusters` map by the snapshot's source id
-    // would restore an unrelated local cluster of the same name -- or,
-    // for a shared snapshot, fall back to the postgres defaults.
-    let svc = svc();
-    create_cluster(&svc, "src");
-    svc.handle_extra_action(&req(
-        "ModifyDBCluster",
-        &[("DBClusterIdentifier", "src"), ("EngineVersion", "16.9")],
-    ))
-    .expect("ModifyDBCluster");
-    svc.handle_extra_action(&req(
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "snap1"),
-            ("DBClusterIdentifier", "src"),
-        ],
-    ))
-    .expect("CreateDBClusterSnapshot");
-
-    // The source cluster changes after the snapshot was taken: the
-    // restore must reflect the snapshot, not the live cluster.
-    svc.handle_extra_action(&req(
-        "ModifyDBCluster",
-        &[("DBClusterIdentifier", "src"), ("EngineVersion", "17.1")],
-    ))
-    .expect("ModifyDBCluster");
-
-    svc.handle_extra_action(&req(
-        "RestoreDBClusterFromSnapshot",
-        &[
-            ("DBClusterIdentifier", "restored"),
-            ("SnapshotIdentifier", "snap1"),
-        ],
-    ))
-    .expect("RestoreDBClusterFromSnapshot");
-
-    let v = cluster_value(&svc, "restored");
-    assert_eq!(
-        v["EngineVersion"].as_str(),
-        Some("16.9"),
-        "restore read the live cluster instead of the snapshot"
-    );
-}
-
-#[test]
-fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
-    let svc = svc();
-    let err = svc
-        .handle_extra_action(&req(
-            "RestoreDBClusterFromSnapshot",
-            &[
-                ("DBClusterIdentifier", "restored"),
-                ("SnapshotIdentifier", "ghost"),
-            ],
-        ))
-        .err()
-        .expect("missing snapshot should error");
-    assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
-}
-
-#[test]
-fn restore_db_cluster_to_point_in_time_clones_source() {
-    let svc = svc();
-    create_cluster(&svc, "src");
-    svc.handle_extra_action(&req(
-        "ModifyDBCluster",
-        &[("DBClusterIdentifier", "src"), ("EngineVersion", "16.2")],
-    ))
-    .expect("ModifyDBCluster");
-    svc.handle_extra_action(&req(
-        "RestoreDBClusterToPointInTime",
-        &[
-            ("DBClusterIdentifier", "pit"),
-            ("SourceDBClusterIdentifier", "src"),
-            ("UseLatestRestorableTime", "true"),
-        ],
-    ))
-    .expect("RestoreDBClusterToPointInTime");
-    let v = cluster_value(&svc, "pit");
-    assert_eq!(v["DBClusterIdentifier"].as_str(), Some("pit"));
-    assert_eq!(v["EngineVersion"].as_str(), Some("16.2"));
-    assert_eq!(v["Status"].as_str(), Some("available"));
-    assert_eq!(v["UseLatestRestorableTime"].as_str(), Some("true"));
-}
-
-#[test]
-fn restore_db_cluster_to_point_in_time_clone_group_matches_the_async_handler() {
-    // The metadata-only fallback must apply the same clone-group rule as
-    // the async handler the dispatcher routes to, or identical requests
-    // would give different clone-group-id results.
-    let svc = svc();
-    create_cluster(&svc, "src");
-
-    svc.handle_extra_action(&req(
-        "RestoreDBClusterToPointInTime",
-        &[
-            ("DBClusterIdentifier", "clone"),
-            ("SourceDBClusterIdentifier", "src"),
-            ("RestoreType", "copy-on-write"),
-        ],
-    ))
-    .expect("copy-on-write restore");
-    let group = cluster_value(&svc, "clone")["CloneGroupId"]
-        .as_str()
-        .expect("clone carries a clone group")
-        .to_string();
-    assert_eq!(
-        cluster_value(&svc, "src")["CloneGroupId"].as_str(),
-        Some(group.as_str()),
-        "source was not stamped with the shared clone group"
-    );
-
-    svc.handle_extra_action(&req(
-        "RestoreDBClusterToPointInTime",
-        &[
-            ("DBClusterIdentifier", "full-copy"),
-            ("SourceDBClusterIdentifier", "src"),
-        ],
-    ))
-    .expect("full-copy restore");
-    assert!(
-        cluster_value(&svc, "full-copy")
-            .get("CloneGroupId")
-            .is_none(),
-        "full-copy restore inherited the source clone group"
-    );
-}
-
-#[test]
-fn restore_db_cluster_to_point_in_time_unknown_source_errors() {
-    let svc = svc();
-    let err = svc
-        .handle_extra_action(&req(
-            "RestoreDBClusterToPointInTime",
-            &[
-                ("DBClusterIdentifier", "pit"),
-                ("SourceDBClusterIdentifier", "ghost"),
-            ],
-        ))
-        .err()
-        .expect("missing source should error");
-    assert_eq!(err.code(), "DBClusterNotFoundFault");
-}
-
 fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
     use crate::state::DbInstance;
     use chrono::Utc;
@@ -2791,10 +2602,9 @@ fn describe_db_cluster_snapshots_reports_shared_and_public() {
 }
 
 #[test]
-fn cluster_snapshot_sharing_does_not_leak_through_copy_or_restore() {
-    // A copy and a restore are fresh surfaces: inheriting the source's
-    // `restore` list would publish snapshots nobody shared, and
-    // CreateDBClusterSnapshot copies the whole cluster row forward.
+fn copy_db_cluster_snapshot_does_not_inherit_the_share_list() {
+    // A copy is a fresh sharing surface: inheriting the source's
+    // `restore` list would publish a snapshot nobody shared.
     let svc = svc();
     create_cluster(&svc, "src");
     ok_on(
@@ -2814,8 +2624,6 @@ fn cluster_snapshot_sharing_does_not_leak_through_copy_or_restore() {
             ("ValuesToAdd.AttributeValue.1", "all"),
         ],
     );
-
-    // Copy: the target must not inherit the share list.
     ok_on(
         &svc,
         "CopyDBClusterSnapshot",
@@ -2824,6 +2632,7 @@ fn cluster_snapshot_sharing_does_not_leak_through_copy_or_restore() {
             ("TargetDBClusterSnapshotIdentifier", "s2"),
         ],
     );
+
     let body = body_of_action(
         &svc,
         "DescribeDBClusterSnapshotAttributes",
@@ -2832,33 +2641,6 @@ fn cluster_snapshot_sharing_does_not_leak_through_copy_or_restore() {
     assert!(
         body.contains("<DBClusterSnapshotAttributes/>"),
         "copied snapshot inherited the share list: {body}"
-    );
-
-    // Restore then re-snapshot: sharing must not propagate forward.
-    ok_on(
-        &svc,
-        "RestoreDBClusterFromSnapshot",
-        &[
-            ("DBClusterIdentifier", "restored"),
-            ("SnapshotIdentifier", "s1"),
-        ],
-    );
-    ok_on(
-        &svc,
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "s3"),
-            ("DBClusterIdentifier", "restored"),
-        ],
-    );
-    let body = body_of_action(
-        &svc,
-        "DescribeDBClusterSnapshotAttributes",
-        &[("DBClusterSnapshotIdentifier", "s3")],
-    );
-    assert!(
-        body.contains("<DBClusterSnapshotAttributes/>"),
-        "sharing propagated through restore: {body}"
     );
 }
 

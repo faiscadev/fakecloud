@@ -372,7 +372,8 @@ impl RdsService {
         // Snapshot / instance identifiers are accepted in ARN form here
         // the same way DescribeDBClusterSnapshots accepts them.
         let raw_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier");
-        let db_snapshot_identifier = normalized_identifier(raw_snapshot_identifier.clone());
+        let db_snapshot_identifier =
+            normalized_identifier(raw_snapshot_identifier.clone(), "snapshot");
         // A DB instance is never shared across accounts, so an ARN
         // naming a different account matches nothing here rather than
         // listing this account's same-named instance's snapshots.
@@ -390,7 +391,7 @@ impl RdsService {
                 ));
             }
         }
-        let db_instance_identifier = normalized_identifier(raw_instance_identifier);
+        let db_instance_identifier = normalized_identifier(raw_instance_identifier, "db");
         let snapshot_type = optional_query_param(request, "SnapshotType");
         // A junk boolean is treated as absent rather than rejected:
         // `InvalidParameterValue` isn't declared on this operation (see
@@ -437,17 +438,16 @@ impl RdsService {
                 // re-reading it by id or ARN has to resolve too --
                 // otherwise the emulator 404s a row it just reported.
                 .or_else(|| {
-                    let named_account = named_owner.clone();
+                    // AWS requires the ARN to address a snapshot another
+                    // account shared with you -- and without one, a bare
+                    // id could match several accounts' snapshots, so the
+                    // scan would return an arbitrary (HashMap-ordered)
+                    // row.
+                    let named_account = named_owner.clone()?;
                     accounts
                         .iter()
                         .filter(|(owner, _)| *owner != request.account_id)
-                        // An ARN names its owner: don't resolve it
-                        // against a different account's identical id.
-                        .filter(|(owner, _)| {
-                            named_account
-                                .as_deref()
-                                .is_none_or(|account| account == *owner)
-                        })
+                        .filter(|(owner, _)| *owner == named_account)
                         .find_map(|(_, other)| {
                             other.snapshots.get(&snapshot_id).filter(|snapshot| {
                                 snapshot_shared_with(snapshot, &request.account_id)
@@ -607,8 +607,9 @@ impl RdsService {
         if !addresses_own_account(&raw_identifier, &request.account_id) {
             return Err(db_snapshot_not_found(&raw_identifier));
         }
-        let db_snapshot_identifier = normalized_identifier(Some(raw_identifier))
-            .ok_or_else(|| db_snapshot_not_found("(none)"))?;
+        let db_snapshot_identifier =
+            normalized_identifier(Some(raw_identifier.clone()), "snapshot")
+                .ok_or_else(|| db_snapshot_not_found(&raw_identifier))?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -655,7 +656,7 @@ impl RdsService {
         let snapshot_owner = raw_snapshot_identifier
             .as_deref()
             .and_then(identifier_account);
-        let db_snapshot_identifier = normalized_identifier(raw_snapshot_identifier)
+        let db_snapshot_identifier = normalized_identifier(raw_snapshot_identifier, "snapshot")
             .ok_or_else(|| db_snapshot_not_found("(none)"))?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
@@ -687,16 +688,15 @@ impl RdsService {
                     // shared with this caller, so restoring from one has
                     // to work as well -- otherwise the sharing surface is
                     // listable but unusable.
+                    // AWS requires the ARN of a shared snapshot to
+                    // restore from it; a bare id would also make the scan
+                    // pick an arbitrary account when several shared one
+                    // under the same name.
                     let shared = accounts.iter().find_map(|(owner, other)| {
                         if owner == request.account_id {
                             return None;
                         }
-                        // An ARN names its owner: don't resolve it
-                        // against a different account's identical id.
-                        if snapshot_owner
-                            .as_deref()
-                            .is_some_and(|account| account != owner)
-                        {
+                        if snapshot_owner.as_deref() != Some(owner) {
                             return None;
                         }
                         other

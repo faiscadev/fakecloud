@@ -151,17 +151,18 @@ impl RdsService {
         let raw_snapshot_id = optional_query_param(request, "SnapshotIdentifier")
             .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"));
         let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
-        let snapshot_id = normalized_identifier(raw_snapshot_id).ok_or_else(|| {
-            // Without a snapshot id there's no snapshot to look up,
-            // so surface the same declared `*NotFound` shape we'd
-            // emit for a non-existent id. Smithy doesn't declare a
-            // generic `MissingParameter` on this op.
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "DBClusterSnapshotNotFoundFault",
-                "SnapshotIdentifier is required",
-            )
-        })?;
+        let snapshot_id =
+            normalized_identifier(raw_snapshot_id, "cluster-snapshot").ok_or_else(|| {
+                // Without a snapshot id there's no snapshot to look up,
+                // so surface the same declared `*NotFound` shape we'd
+                // emit for a non-existent id. Smithy doesn't declare a
+                // generic `MissingParameter` on this op.
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "DBClusterSnapshotNotFoundFault",
+                    "SnapshotIdentifier is required",
+                )
+            })?;
         let arn = format!(
             "arn:aws:rds:{}:{}:cluster:{}",
             request.region, request.account_id, target

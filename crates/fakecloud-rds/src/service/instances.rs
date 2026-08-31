@@ -1275,7 +1275,7 @@ impl RdsService {
                 return Err(db_instance_not_found(raw));
             }
         }
-        let db_instance_identifier = normalized_identifier(raw_instance_identifier);
+        let db_instance_identifier = normalized_identifier(raw_instance_identifier, "db");
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
         let filters = parse_filters(request);

@@ -86,9 +86,11 @@ pub(crate) fn sibling_rds_arn(arn: &str, resource_type: &str, id: &str) -> Optio
 
 /// Normalize an identifier request parameter: an explicitly-empty value
 /// means "absent" (AWS ignores it rather than matching the empty string),
-/// and an ARN is reduced to its resource segment because clients pass
-/// either form — the Terraform provider stores full ARNs in
-/// `snapshot_identifier`.
+/// and an ARN of `resource_type` is reduced to its resource segment
+/// because clients pass either form — the Terraform provider stores full
+/// ARNs in `snapshot_identifier`. An ARN of any OTHER type resolves to
+/// nothing rather than aliasing onto a same-named resource of the type
+/// the caller actually asked about.
 ///
 /// The reduction is guarded on the `arn:` prefix, and takes everything
 /// after the resource-type field rather than the last colon segment:
@@ -99,18 +101,23 @@ pub(crate) fn sibling_rds_arn(arn: &str, resource_type: &str, id: &str) -> Optio
 ///
 /// Note this is the opposite of a filter *value*, where an explicit empty
 /// string is a legitimate member to match on (see `present_param`).
-pub(crate) fn normalized_identifier(param: Option<String>) -> Option<String> {
+pub(crate) fn normalized_identifier(param: Option<String>, resource_type: &str) -> Option<String> {
     param
         .filter(|value| !value.is_empty())
-        .map(|value| match value.starts_with("arn:") {
-            // arn:partition:service:region:account:type:id -- `id` is
-            // field 7 and keeps any colons of its own.
-            true => value
-                .splitn(7, ':')
-                .nth(6)
-                .map(str::to_string)
-                .unwrap_or(value),
-            false => value,
+        .and_then(|value| {
+            if !value.starts_with("arn:") {
+                return Some(value);
+            }
+            // arn:partition:service:region:account:type:id -- the type
+            // field has to match, or a cluster ARN would address a DB
+            // instance of the same name; `id` is field 7 and keeps any
+            // colons of its own.
+            let mut fields = value.splitn(7, ':');
+            let kind = fields.nth(5)?;
+            if kind != resource_type {
+                return None;
+            }
+            fields.next().map(str::to_string)
         })
         .filter(|value| !value.is_empty())
 }
@@ -328,32 +335,53 @@ mod tests {
 
     #[test]
     fn normalized_identifier_drops_empty_and_reduces_arns() {
-        assert_eq!(normalized_identifier(None), None);
+        assert_eq!(normalized_identifier(None, "snapshot"), None);
         // `Key=` reaches handlers as Some("") and means "not supplied".
-        assert_eq!(normalized_identifier(Some(String::new())), None);
+        assert_eq!(normalized_identifier(Some(String::new()), "snapshot"), None);
         assert_eq!(
-            normalized_identifier(Some("snap-1".to_string())),
+            normalized_identifier(Some("snap-1".to_string()), "snapshot"),
             Some("snap-1".to_string())
         );
         assert_eq!(
-            normalized_identifier(Some(
-                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1".to_string()
-            )),
+            normalized_identifier(
+                Some("arn:aws:rds:us-east-1:123456789012:snapshot:snap-1".to_string()),
+                "snapshot"
+            ),
             Some("snap-1".to_string())
         );
         // AWS's automated-snapshot ids carry a colon and are NOT ARNs;
         // trimming at the last colon would turn a real id into a miss.
         assert_eq!(
-            normalized_identifier(Some("rds:mydb-2026-08-30-06-00".to_string())),
+            normalized_identifier(Some("rds:mydb-2026-08-30-06-00".to_string()), "snapshot"),
             Some("rds:mydb-2026-08-30-06-00".to_string())
         );
         // ...and the id keeps its colon inside an ARN too, so the
         // reduction takes the whole resource field, not the last segment.
         assert_eq!(
-            normalized_identifier(Some(
-                "arn:aws:rds:us-east-1:123456789012:snapshot:rds:mydb-2026-08-30-06-00".to_string()
-            )),
+            normalized_identifier(
+                Some(
+                    "arn:aws:rds:us-east-1:123456789012:snapshot:rds:mydb-2026-08-30-06-00"
+                        .to_string()
+                ),
+                "snapshot"
+            ),
             Some("rds:mydb-2026-08-30-06-00".to_string())
+        );
+        // An ARN of a DIFFERENT resource type resolves to nothing rather
+        // than aliasing onto a same-named resource of the asked-for type.
+        assert_eq!(
+            normalized_identifier(
+                Some("arn:aws:rds:us-east-1:123456789012:cluster:foo".to_string()),
+                "db"
+            ),
+            None
+        );
+        assert_eq!(
+            normalized_identifier(
+                Some("arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1".to_string()),
+                "snapshot"
+            ),
+            None
         );
     }
 

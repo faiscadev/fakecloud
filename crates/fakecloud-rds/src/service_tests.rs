@@ -2301,6 +2301,21 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
         other.snapshots.insert("shared-snap".to_string(), shared);
     }
 
+    // AWS requires the ARN to address a snapshot another account shared
+    // with you; a bare id would also be ambiguous once two accounts have
+    // shared one under the same name.
+    let shared_arn = "arn:aws:rds:us-east-1:999999999999:snapshot:shared-snap";
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", shared_arn),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    // The bare id resolves nothing: this account owns no such snapshot.
     let req = request(
         "DescribeDBSnapshots",
         &[
@@ -2308,8 +2323,7 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
             ("SnapshotType", "shared"),
         ],
     );
-    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
-    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
 
     // A snapshot nobody shared stays invisible.
     {
@@ -2331,7 +2345,7 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
     let req = request(
         "DescribeDBSnapshots",
         &[
-            ("DBSnapshotIdentifier", "shared-snap"),
+            ("DBSnapshotIdentifier", shared_arn),
             ("IncludeShared", "true"),
         ],
     );
@@ -2346,7 +2360,7 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
     // still gates whether it appears in an unqualified *list*.)
     let req = request(
         "DescribeDBSnapshots",
-        &[("DBSnapshotIdentifier", "shared-snap")],
+        &[("DBSnapshotIdentifier", shared_arn)],
     );
     let body = body_of(svc.describe_db_snapshots(&req).unwrap());
     assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
@@ -3149,6 +3163,162 @@ async fn restore_db_cluster_from_snapshot_drops_inherited_identity() {
         restored.get("CloneGroupId").is_none(),
         "restored cluster inherited the source clone group"
     );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_carries_the_snapshot_fields() {
+    // CreateDBClusterSnapshot copies the whole cluster row in, so the
+    // restore reflects the snapshot -- including changes made to the
+    // source cluster only BEFORE the snapshot was taken.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                    "BackupRetentionPeriod": 21,
+                }),
+            );
+        // A same-named local cluster with different settings must not be
+        // what the restore reads.
+        state
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(
+                "src-cluster".to_string(),
+                serde_json::json!({
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "aurora-postgresql",
+                    "EngineVersion": "16.9",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored");
+    assert_eq!(restored["Engine"].as_str(), Some("aurora-mysql"));
+    assert_eq!(restored["BackupRetentionPeriod"].as_i64(), Some(21));
+    assert_eq!(restored["Status"].as_str(), Some("available"));
+    assert!(restored["DBClusterArn"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with(":cluster:restored"));
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "ghost"),
+        ],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("unknown snapshot should fault"),
+    }
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_does_not_inherit_sharing() {
+    // Sharing must not propagate: CreateDBClusterSnapshot copies the
+    // restored cluster's whole row into the next snapshot.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "SnapshotAttributes": {"restore": ["all"]},
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    assert!(
+        cluster_entry(&svc, "restored")
+            .get("SnapshotAttributes")
+            .is_none(),
+        "restored cluster inherited the snapshot's share list"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_unknown_source_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SourceDBClusterIdentifier", "ghost"),
+        ],
+    );
+    match svc.restore_db_cluster_to_point_in_time(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("unknown source should fault"),
+    }
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_carries_source_fields() {
+    let svc = make_service();
+    seed_cluster_entry(
+        &svc,
+        "src-cluster",
+        serde_json::json!({"EngineVersion": "16.2"}),
+    );
+
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "pit"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "pit");
+    assert_eq!(restored["EngineVersion"].as_str(), Some("16.2"));
+    assert_eq!(restored["Status"].as_str(), Some("available"));
+    assert_eq!(restored["UseLatestRestorableTime"].as_str(), Some("true"));
 }
 
 #[tokio::test]

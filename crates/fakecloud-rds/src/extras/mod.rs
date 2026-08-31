@@ -321,7 +321,7 @@ impl RdsService {
                         ));
                     }
                 }
-                let id_filter = normalized_identifier(raw_cluster_identifier);
+                let id_filter = normalized_identifier(raw_cluster_identifier, "cluster");
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
                 // A named cluster that doesn't exist is the declared
@@ -423,7 +423,7 @@ impl RdsService {
                 // Guarded ARN reduction: AWS automated-snapshot ids carry
                 // a colon (`rds:mydb-...`), so only an `arn:` value is
                 // trimmed.
-                let source_key = normalized_identifier(Some(source_id.clone()))
+                let source_key = normalized_identifier(Some(source_id.clone()), "cluster-snapshot")
                     .unwrap_or_else(|| source_id.clone());
                 // AWS supports copying a snapshot another account shared
                 // with you, so resolve cross-account -- but only against
@@ -474,7 +474,7 @@ impl RdsService {
                         format!("DBClusterSnapshot {raw} not found."),
                     ));
                 }
-                let id = normalized_identifier(Some(raw))
+                let id = normalized_identifier(Some(raw), "cluster-snapshot")
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 // Recover the source cluster id from stored state before
@@ -521,10 +521,10 @@ impl RdsService {
                 // have shared one under the same id).
                 let raw_snapshot_id = get_param(req, "DBClusterSnapshotIdentifier");
                 let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
-                let snapshot_id = normalized_identifier(raw_snapshot_id);
+                let snapshot_id = normalized_identifier(raw_snapshot_id, "cluster-snapshot");
                 let raw_cluster_id = get_param(req, "DBClusterIdentifier");
                 let cluster_owner = raw_cluster_id.as_deref().and_then(identifier_account);
-                let cluster_id = normalized_identifier(raw_cluster_id);
+                let cluster_id = normalized_identifier(raw_cluster_id, "cluster");
                 // An identifier naming another account can never match a
                 // snapshot this account owns.
                 let owner_is_caller = snapshot_owner
@@ -698,7 +698,7 @@ impl RdsService {
                         format!("DBClusterSnapshot {raw} not found."),
                     ));
                 }
-                let id = normalized_identifier(Some(raw))
+                let id = normalized_identifier(Some(raw), "cluster-snapshot")
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let accounts = self.state_handle().read();
                 let entry = accounts
@@ -732,7 +732,7 @@ impl RdsService {
                         format!("DBClusterSnapshot {raw} not found."),
                     ));
                 }
-                let id = normalized_identifier(Some(raw))
+                let id = normalized_identifier(Some(raw), "cluster-snapshot")
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let attribute_name =
                     get_param(req, "AttributeName").ok_or_else(|| missing("AttributeName"))?;
@@ -2172,7 +2172,7 @@ impl RdsService {
                 // by the trailing identifier segment either way, and keep
                 // the ARN's account so a foreign ARN can't alias onto this
                 // account's same-named snapshot.
-                let source_key = normalized_identifier(Some(source_id.clone()))
+                let source_key = normalized_identifier(Some(source_id.clone()), "snapshot")
                     .unwrap_or_else(|| source_id.clone());
                 let source_owner = identifier_account(&source_id);
                 let option_group_name = get_param(req, "OptionGroupName");
@@ -2199,13 +2199,13 @@ impl RdsService {
                         .flatten();
                     let mut snapshot = match owned {
                         Some(snapshot) => snapshot,
+                        // The ARN form is required to reach another
+                        // account's shared snapshot, here as elsewhere.
                         None => accounts
                             .iter()
                             .filter(|(owner, _)| *owner != aid)
                             .filter(|(owner, _)| {
-                                source_owner
-                                    .as_deref()
-                                    .is_none_or(|account| account == *owner)
+                                source_owner.as_deref() == Some(*owner)
                             })
                             .find_map(|(_, other)| {
                                 other
@@ -2361,7 +2361,7 @@ impl RdsService {
                 if !addresses_own_account(&raw, &aid) {
                     return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
                 }
-                let id = normalized_identifier(Some(raw))
+                let id = normalized_identifier(Some(raw), "snapshot")
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let attrs = {
                     let accounts = self.state_handle().read();
@@ -2386,7 +2386,7 @@ impl RdsService {
                 if !addresses_own_account(&raw, &aid) {
                     return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
                 }
-                let id = normalized_identifier(Some(raw))
+                let id = normalized_identifier(Some(raw), "snapshot")
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let attribute_name = get_param(req, "AttributeName")
                     .ok_or_else(|| missing("AttributeName"))?;
@@ -2440,7 +2440,7 @@ impl RdsService {
                 if !addresses_own_account(&raw, &aid) {
                     return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
                 }
-                let id = normalized_identifier(Some(raw))
+                let id = normalized_identifier(Some(raw), "snapshot")
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let engine_version = get_param(req, "EngineVersion");
                 let option_group_name = get_param(req, "OptionGroupName");
@@ -2464,218 +2464,6 @@ impl RdsService {
                     format!(
                         "    <DBSnapshot>{}</DBSnapshot>",
                         crate::service::service_helpers::db_snapshot_xml(&snapshot)
-                    ),
-                    &rid,
-                ))
-            }
-            "RestoreDBClusterFromSnapshot" => {
-                let target = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let raw_snapshot_id = get_param(req, "SnapshotIdentifier")
-                    .or_else(|| get_param(req, "DBClusterSnapshotIdentifier"));
-                let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
-                let snapshot_id = normalized_identifier(raw_snapshot_id)
-                    .ok_or_else(|| missing("SnapshotIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
-                let mut accounts = write_state!();
-                // A snapshot another account shared with this caller is
-                // listable, so it has to be restorable too. Resolved
-                // before the mutable borrow below.
-                let snapshot =
-                    find_cluster_snapshot(&accounts, &aid, snapshot_owner.as_deref(), &snapshot_id)
-                        .ok_or_else(|| {
-                            AwsServiceError::aws_error(
-                                StatusCode::NOT_FOUND,
-                                "DBClusterSnapshotNotFoundFault",
-                                format!("DBClusterSnapshot {snapshot_id} not found."),
-                            )
-                        })?;
-                let state = accounts.get_or_create(&aid);
-                let pending_dump_b64 = snapshot
-                    .get("DumpDataB64")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                // Hydrate from the snapshot itself, like the async
-                // handler: CreateDBClusterSnapshot copies the whole
-                // cluster row in, so the snapshot is the point in time
-                // the caller asked for. Reading the caller's `clusters`
-                // map by the snapshot's source id would restore an
-                // unrelated local cluster of the same name (or fall back
-                // to the postgres defaults for a shared aurora-mysql
-                // snapshot).
-                let mut entry = snapshot.clone();
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("DBClusterIdentifier".to_string(), json!(target));
-                    obj.insert("DBClusterArn".to_string(), json!(arn));
-                    obj.insert("Status".to_string(), json!("available"));
-                    obj.insert(
-                        "Endpoint".to_string(),
-                        json!(format!("{target}.cluster-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    obj.insert(
-                        "ReaderEndpoint".to_string(),
-                        json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    // Restored cluster is a distinct resource: mint a fresh
-                    // immutable resource id rather than reuse the source's.
-                    obj.insert(
-                        "DbClusterResourceId".to_string(),
-                        json!(new_cluster_resource_id()),
-                    );
-                    obj.remove("ReplicationSourceIdentifier");
-                    // The new cluster starts empty; the user is expected
-                    // to call CreateDBInstance with DBClusterIdentifier
-                    // pointing here, at which point we replay the dump.
-                    obj.remove("DBClusterMembers");
-                    obj.remove("WriterDBInstanceIdentifier");
-                    // Drop snapshot bookkeeping that leaked in via the
-                    // source-cluster clone path.
-                    obj.remove("DBClusterSnapshotIdentifier");
-                    obj.remove("DBClusterSnapshotArn");
-                    obj.remove("DumpDataB64");
-                    // Snapshot-only bookkeeping has no meaning on a
-                    // cluster row, and CreateDBClusterSnapshot copies the
-                    // whole row into the next snapshot.
-                    obj.remove("SnapshotType");
-                    obj.remove("SnapshotCreateTime");
-                    obj.remove("PercentProgress");
-                    // Sharing must not propagate: CreateDBClusterSnapshot
-                    // copies the whole cluster row into the next snapshot.
-                    obj.remove("SnapshotAttributes");
-                    // A restore is an independent full copy, never a
-                    // member of the source's clone group.
-                    obj.remove("CloneGroupId");
-                    if let Some(engine) = get_param(req, "Engine") {
-                        obj.insert("Engine".to_string(), json!(engine));
-                    }
-                    if let Some(version) = get_param(req, "EngineVersion") {
-                        obj.insert("EngineVersion".to_string(), json!(version));
-                    }
-                    if let Some(port) = get_param(req, "Port").and_then(|p| p.parse::<i64>().ok()) {
-                        obj.insert("Port".to_string(), json!(port));
-                    }
-                    // Stage the snapshot dump so the next CreateDBInstance
-                    // joining this cluster replays the data into its
-                    // fresh container.
-                    if let Some(b64) = pending_dump_b64 {
-                        obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
-                    }
-                }
-                store(&mut state.extras, "clusters").insert(target.clone(), entry.clone());
-                drop(accounts);
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &target,
-                    &arn,
-                    "RDS-EVENT-0170",
-                    &["creation"],
-                    "DB cluster restored from snapshot",
-                );
-                Ok(xml_response(
-                    "RestoreDBClusterFromSnapshot",
-                    format!(
-                        "    <DBCluster>\n{}\n    </DBCluster>",
-                        db_cluster_member_xml(&entry)
-                    ),
-                    &rid,
-                ))
-            }
-            // Sync metadata-only fallback for RestoreDBClusterToPointInTime;
-            // the dispatcher in `handle_request` routes the action to the
-            // async path that also dumps and stages the source writer.
-            "RestoreDBClusterToPointInTime" => {
-                let target = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let source = get_param(req, "SourceDBClusterIdentifier")
-                    .ok_or_else(|| missing("SourceDBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                let mut entry = state
-                    .extras
-                    .get("clusters")
-                    .and_then(|m| m.get(&source))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBClusterNotFoundFault",
-                            format!("DBCluster {source} not found."),
-                        )
-                    })?;
-
-                // A copy-on-write restore clones the source: both join one
-                // clone group, so stamp the source if it isn't in one.
-                let clone_group_id =
-                    if get_param(req, "RestoreType").as_deref() == Some("copy-on-write") {
-                        let group_id = entry
-                            .get("CloneGroupId")
-                            .and_then(|v| v.as_str())
-                            .map(str::to_string)
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-                        if let Some(source_entry) = state
-                            .extras
-                            .get_mut("clusters")
-                            .and_then(|m| m.get_mut(&source))
-                            .and_then(|v| v.as_object_mut())
-                        {
-                            source_entry.insert("CloneGroupId".to_string(), json!(group_id));
-                        }
-                        group_id
-                    } else {
-                        String::new()
-                    };
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("DBClusterIdentifier".to_string(), json!(target));
-                    obj.insert("DBClusterArn".to_string(), json!(arn));
-                    obj.insert("Status".to_string(), json!("available"));
-                    obj.insert(
-                        "Endpoint".to_string(),
-                        json!(format!("{target}.cluster-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    obj.insert(
-                        "ReaderEndpoint".to_string(),
-                        json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    obj.insert(
-                        "DbClusterResourceId".to_string(),
-                        json!(new_cluster_resource_id()),
-                    );
-                    obj.remove("DBClusterMembers");
-                    obj.remove("WriterDBInstanceIdentifier");
-                    // Same clone-group rule as the async handler: only a
-                    // copy-on-write restore joins the source's group; a
-                    // full copy is independent and must not inherit one.
-                    match get_param(req, "RestoreType").as_deref() {
-                        Some("copy-on-write") => {
-                            obj.insert("CloneGroupId".to_string(), json!(clone_group_id));
-                        }
-                        _ => {
-                            obj.remove("CloneGroupId");
-                        }
-                    }
-                    if let Some(restore_time) = get_param(req, "RestoreToTime") {
-                        obj.insert("RestoreToTime".to_string(), json!(restore_time));
-                    }
-                    if let Some(latest) = get_param(req, "UseLatestRestorableTime") {
-                        obj.insert("UseLatestRestorableTime".to_string(), json!(latest));
-                    }
-                }
-                store(&mut state.extras, "clusters").insert(target.clone(), entry.clone());
-                drop(accounts);
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &target,
-                    &arn,
-                    "RDS-EVENT-0171",
-                    &["creation"],
-                    "DB cluster restored to point in time",
-                );
-                Ok(xml_response(
-                    "RestoreDBClusterToPointInTime",
-                    format!(
-                        "    <DBCluster>\n{}\n    </DBCluster>",
-                        db_cluster_member_xml(&entry)
                     ),
                     &rid,
                 ))
@@ -2996,10 +2784,14 @@ pub(crate) fn find_cluster_snapshot(
             return Some(entry.clone());
         }
     }
+    // AWS requires the ARN to reach another account's shared snapshot,
+    // and a bare id could match several accounts at once -- the scan
+    // would then return an arbitrary (HashMap-ordered) row.
+    let named_account = named_account?;
     accounts
         .iter()
         .filter(|(owner, _)| *owner != caller)
-        .filter(|(owner, _)| named_account.is_none_or(|account| account == *owner))
+        .filter(|(owner, _)| *owner == named_account)
         .find_map(|(_, other)| {
             other
                 .extras
