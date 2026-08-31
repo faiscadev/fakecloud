@@ -318,6 +318,34 @@ pub(super) fn cluster_snapshot_member_xml(v: &Value) -> String {
             xml_escape(s)
         ));
     }
+    // The rest of what a client reads off a cluster snapshot
+    // (`aws_db_cluster_snapshot` reads every one of these). The entry is
+    // a clone of the cluster row, so it carries them.
+    for (key, tag) in [
+        ("SnapshotCreateTime", "SnapshotCreateTime"),
+        ("ClusterCreateTime", "ClusterCreateTime"),
+        ("MasterUsername", "MasterUsername"),
+        ("VpcId", "VpcId"),
+        ("KmsKeyId", "KmsKeyId"),
+        ("LicenseModel", "LicenseModel"),
+    ] {
+        if let Some(value) = v[key].as_str() {
+            out.push_str(&format!("\n          <{tag}>{}</{tag}>", xml_escape(value)));
+        }
+    }
+    for (key, tag) in [
+        ("Port", "Port"),
+        ("AllocatedStorage", "AllocatedStorage"),
+        ("PercentProgress", "PercentProgress"),
+    ] {
+        if let Some(value) = v[key].as_i64() {
+            out.push_str(&format!("\n          <{tag}>{value}</{tag}>"));
+        }
+    }
+    out.push_str(&format!(
+        "\n          <StorageEncrypted>{}</StorageEncrypted>",
+        v["StorageEncrypted"].as_bool().unwrap_or(false)
+    ));
     out
 }
 

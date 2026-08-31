@@ -159,6 +159,11 @@ impl RdsService {
                 obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
                 obj.insert("Status".to_string(), json!("available"));
                 obj.insert("SnapshotType".to_string(), json!("manual"));
+                obj.insert(
+                    "SnapshotCreateTime".to_string(),
+                    json!(Utc::now().to_rfc3339()),
+                );
+                obj.insert("PercentProgress".to_string(), json!(100));
                 if let Some((engine, username, password, db_name, engine_version)) =
                     writer_source.as_ref()
                 {

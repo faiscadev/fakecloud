@@ -204,11 +204,14 @@ pub(crate) fn addresses_own_account(param: &str, account_id: &str) -> bool {
 /// matching how the SDKs serialize the list.
 pub(crate) fn parse_filters(req: &AwsRequest) -> Vec<RdsFilter> {
     let mut filters = Vec::new();
-    // Parsed once, not per lookup: see `present_param`.
-    let body = if req.query_params.is_empty() && !req.body.is_empty() {
-        fakecloud_core::protocol::parse_query_body(&req.body)
-    } else {
+    // Parsed once, not per lookup, and consulted whenever a body is
+    // present -- `extras::get_param` falls back unconditionally, and
+    // gating on an empty `query_params` would miss a request that
+    // carries `Action` in the query string and the rest in the body.
+    let body = if req.body.is_empty() {
         HashMap::new()
+    } else {
+        fakecloud_core::protocol::parse_query_body(&req.body)
     };
 
     for index in 1.. {
@@ -338,8 +341,9 @@ mod tests {
         // Dispatch normally merges the body into `query_params`; a
         // request carrying only a body must not silently parse as "no
         // filters" and return the whole unfiltered list.
+        // `Action` stays in the query string, the filters only in the
+        // body -- the shape a gated fallback would miss.
         let mut req = request(&[]);
-        req.query_params.clear();
         req.body = Bytes::from(
             "Action=DescribeDBInstances&Filters.Filter.1.Name=dbi-resource-id\
              &Filters.Filter.1.Values.Value.1=db-a",

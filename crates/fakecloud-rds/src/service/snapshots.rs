@@ -604,7 +604,16 @@ impl RdsService {
                     Some(_) => false,
                 }
             };
+            // AWS AND-s every narrowing parameter with the identifier,
+            // so a non-matching DBInstanceIdentifier excludes the named
+            // snapshot rather than being dropped on this path.
+            let instance_ok = !instance_wrong_type
+                && !foreign_instance_owner
+                && db_instance_identifier
+                    .as_deref()
+                    .is_none_or(|instance_id| snapshot.db_instance_identifier == instance_id);
             let body = if type_ok
+                && instance_ok
                 && snapshot_matches_filters(&snapshot, &filters, &request.account_id, owned)
             {
                 format!(
