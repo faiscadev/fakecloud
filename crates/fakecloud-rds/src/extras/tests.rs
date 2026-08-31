@@ -212,14 +212,7 @@ fn cluster_lifecycle() {
 #[test]
 fn cluster_snapshot_lifecycle() {
     let svc = svc();
-    ok_on(
-        &svc,
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "cs1"),
-            ("DBClusterIdentifier", "c1"),
-        ],
-    );
+    snapshot_cluster(&svc, "cs1", "c1");
     ok_on(
         &svc,
         "CopyDBClusterSnapshot",
@@ -2057,14 +2050,7 @@ fn copy_db_cluster_snapshot_carries_source_engine() {
             ("EngineVersion", "8.0.32"),
         ],
     );
-    ok_on(
-        &svc,
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "snap-src"),
-            ("DBClusterIdentifier", "src"),
-        ],
-    );
+    snapshot_cluster(&svc, "snap-src", "src");
     ok_on(
         &svc,
         "CopyDBClusterSnapshot",
@@ -2309,6 +2295,40 @@ fn seed_cluster(svc: &RdsService, id: &str, resource_id: &str, engine: &str) {
             "Engine": engine,
         }),
     );
+}
+
+/// Snapshot a seeded cluster the way `CreateDBClusterSnapshot` does --
+/// clone the cluster row, stamp the snapshot fields -- without needing a
+/// container runtime to dump a writer.
+fn snapshot_cluster(svc: &RdsService, snapshot_id: &str, cluster_id: &str) {
+    let state = svc.state_handle();
+    let mut accounts = state.write();
+    let s = accounts.get_or_create("000000000000");
+    let mut entry = s
+        .extras
+        .get("clusters")
+        .and_then(|m| m.get(cluster_id))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert(
+            "DBClusterSnapshotIdentifier".to_string(),
+            json!(snapshot_id),
+        );
+        obj.insert(
+            "DBClusterSnapshotArn".to_string(),
+            json!(format!(
+                "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:{snapshot_id}"
+            )),
+        );
+        obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
+        obj.insert("Status".to_string(), json!("available"));
+        obj.insert("SnapshotType".to_string(), json!("manual"));
+    }
+    s.extras
+        .entry("cluster_snapshots".to_string())
+        .or_default()
+        .insert(snapshot_id.to_string(), entry);
 }
 
 fn seed_cluster_snapshot(svc: &RdsService, id: &str, cluster: &str, snapshot_type: &str) {
@@ -2607,14 +2627,7 @@ fn copy_db_cluster_snapshot_does_not_inherit_the_share_list() {
     // `restore` list would publish a snapshot nobody shared.
     let svc = svc();
     create_cluster(&svc, "src");
-    ok_on(
-        &svc,
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "s1"),
-            ("DBClusterIdentifier", "src"),
-        ],
-    );
+    snapshot_cluster(&svc, "s1", "src");
     ok_on(
         &svc,
         "ModifyDBClusterSnapshotAttribute",

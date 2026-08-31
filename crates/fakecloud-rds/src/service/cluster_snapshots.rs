@@ -308,6 +308,16 @@ impl RdsService {
             // Sharing must not propagate forward either: the restored
             // cluster is snapshotted whole by CreateDBClusterSnapshot.
             obj.remove("SnapshotAttributes");
+            // The writer settings the snapshot captured describe the
+            // SOURCE cluster's writer, not this one. Left in place they
+            // would survive into a later snapshot of the restored cluster
+            // (taken while it has no instance attached) and make an
+            // instance restore start with the old credentials and
+            // database.
+            obj.remove("SourceEngine");
+            obj.remove("SourceMasterUsername");
+            obj.remove("SourceMasterUserPassword");
+            obj.remove("SourceDBName");
             // The snapshot carries the source cluster's identity fields
             // (CreateDBClusterSnapshot copies the whole cluster JSON).
             // A restore is an independent full copy: it gets its own

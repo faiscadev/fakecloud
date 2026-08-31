@@ -387,46 +387,6 @@ impl RdsService {
                 Ok(xml_response("DescribeDBClusters", inner, &rid))
             }
 
-            // ── DB Cluster snapshots ──
-            // CreateDBClusterSnapshot is implemented in service.rs because
-            // the real path needs the async runtime to dump the writer's
-            // database. We keep a metadata-only fallback here for unit
-            // tests that exercise the extras handler directly without a
-            // runtime wired up; the dispatcher in `RdsService::handle_request`
-            // routes the action through the async path before reaching us.
-            "CreateDBClusterSnapshot" => {
-                let id = get_param(req, "DBClusterSnapshotIdentifier")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
-                let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_else(|| "default".to_string());
-                {
-                    let mut accounts = write_state!();
-                    let state = accounts.get_or_create(&aid);
-                    let mut entry = state
-                        .extras
-                        .get("clusters")
-                        .and_then(|m| m.get(&cluster))
-                        .cloned()
-                        .unwrap_or_else(|| json!({}));
-                    if let Some(obj) = entry.as_object_mut() {
-                        obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
-                        obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
-                        obj.insert("DBClusterIdentifier".to_string(), json!(cluster));
-                        obj.insert("Status".to_string(), json!("available"));
-                        obj.insert("SnapshotType".to_string(), json!("manual"));
-                    }
-                    store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
-                }
-                self.emit_event(
-                    RdsSourceType::DbClusterSnapshot,
-                    &id,
-                    &arn,
-                    "RDS-EVENT-0074",
-                    &["backup"],
-                    "DB cluster snapshot created",
-                );
-                Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
-            }
             "CopyDBClusterSnapshot" => {
                 let id = get_param(req, "TargetDBClusterSnapshotIdentifier")
                     .ok_or_else(|| missing("TargetDBClusterSnapshotIdentifier"))?;

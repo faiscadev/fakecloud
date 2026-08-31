@@ -2388,6 +2388,89 @@ async fn cluster_snapshot_restore_uses_the_writers_engine_and_credentials() {
 }
 
 #[tokio::test]
+async fn restored_cluster_does_not_carry_the_sources_writer_settings() {
+    // The writer settings describe the SOURCE cluster's writer. Left on
+    // the restored row they survive into a later snapshot of it (taken
+    // before an instance attaches) and an instance restore then starts
+    // with the old credentials and database.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "SourceEngine": "postgres",
+                    "SourceMasterUsername": "old-admin",
+                    "SourceMasterUserPassword": "old-pw",
+                    "SourceDBName": "olddb",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored");
+    for key in [
+        "SourceEngine",
+        "SourceMasterUsername",
+        "SourceMasterUserPassword",
+        "SourceDBName",
+    ] {
+        assert!(
+            restored.get(key).is_none(),
+            "restored cluster kept {key} from the source"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_replays_a_staged_dump() {
+    // A cluster restored from a snapshot stages its data under
+    // PendingRestoreDumpB64 until an instance attaches; a snapshot taken
+    // in that window carries the key verbatim. The cluster restore
+    // replays it, so the instance restore must too.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let dump = base64::engine::general_purpose::STANDARD.encode(b"-- staged --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "staged-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "staged-snap",
+                    "DBClusterIdentifier": "restored-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-postgresql",
+                    "PendingRestoreDumpB64": dump,
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "staged-snap");
+    assert_eq!(source.dump_data, b"-- staged --".to_vec());
+}
+
+#[tokio::test]
 async fn cluster_snapshot_restore_maps_an_aurora_family_to_its_engine() {
     // A metadata-only snapshot (no writer recorded) still must not hand
     // the runtime an `aurora-*` engine it cannot start.

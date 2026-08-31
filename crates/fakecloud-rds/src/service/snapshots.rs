@@ -142,6 +142,13 @@ pub(super) fn cluster_snapshot_as_source(
     // reports `available` with an empty database.
     let dump_data = entry
         .get("DumpDataB64")
+        // A cluster restored from a snapshot stages its data under
+        // `PendingRestoreDumpB64` until an instance attaches, and a
+        // snapshot taken in that window clones the key verbatim.
+        // RestoreDBClusterFromSnapshot carries it forward, so an instance
+        // restore has to read it too or the two paths disagree about the
+        // same snapshot.
+        .or_else(|| entry.get("PendingRestoreDumpB64"))
         .and_then(|v| v.as_str())
         .and_then(|b64| {
             use base64::Engine;
