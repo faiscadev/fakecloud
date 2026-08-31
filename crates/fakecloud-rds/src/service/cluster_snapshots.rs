@@ -235,6 +235,22 @@ impl RdsService {
             )
         })?;
         let state = accounts.get_or_create(&request.account_id);
+        // Restoring onto an existing cluster would replace a live
+        // row whose members were just stripped, orphaning its writer
+        // instance -- and for a self-targeted PITR, destroying the
+        // very cluster being read. That is the declared
+        // DBClusterAlreadyExistsFault.
+        if state
+            .extras
+            .get("clusters")
+            .is_some_and(|m| m.contains_key(&target))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBClusterAlreadyExistsFault",
+                format!("DBCluster {target} already exists."),
+            ));
+        }
         let pending_dump_b64 = snapshot
             .get("DumpDataB64")
             .and_then(|v| v.as_str())
@@ -405,6 +421,23 @@ impl RdsService {
         let restore_type = optional_query_param(request, "RestoreType");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
+        // Restoring onto an existing cluster would replace a live
+        // row whose members were just stripped, orphaning its writer
+        // instance -- and for a self-targeted PITR, destroying the
+        // very cluster being read. That is the declared
+        // DBClusterAlreadyExistsFault.
+        if state
+            .extras
+            .get("clusters")
+            .is_some_and(|m| m.contains_key(&target))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBClusterAlreadyExistsFault",
+                format!("DBCluster {target} already exists."),
+            ));
+        }
+
         let mut entry = state
             .extras
             .get("clusters")

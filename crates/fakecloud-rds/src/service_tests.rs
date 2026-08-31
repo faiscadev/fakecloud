@@ -3576,6 +3576,68 @@ async fn restore_db_cluster_from_snapshot_carries_the_snapshot_fields() {
 }
 
 #[tokio::test]
+async fn cluster_restores_refuse_an_existing_target() {
+    // Overwriting would replace a live cluster row whose members were
+    // just stripped, orphaning its writer instance -- and a
+    // self-targeted PITR would destroy the very cluster it reads.
+    let svc = make_service();
+    seed_cluster_entry(
+        &svc,
+        "prod",
+        serde_json::json!({"WriterDBInstanceIdentifier": "writer-1"}),
+    );
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "prod",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "prod"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterAlreadyExistsFault"),
+        Ok(_) => panic!("restore overwrote an existing cluster"),
+    }
+
+    // A self-targeted PITR is the destructive case.
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "prod"),
+            ("SourceDBClusterIdentifier", "prod"),
+            ("RestoreType", "copy-on-write"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    match svc.restore_db_cluster_to_point_in_time(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterAlreadyExistsFault"),
+        Ok(_) => panic!("PITR overwrote its own source"),
+    }
+
+    // The live cluster still has its writer registration.
+    assert_eq!(
+        cluster_entry(&svc, "prod")["WriterDBInstanceIdentifier"].as_str(),
+        Some("writer-1")
+    );
+}
+
+#[tokio::test]
 async fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
     let svc = make_service();
     let req = request(
