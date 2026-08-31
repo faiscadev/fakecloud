@@ -109,6 +109,18 @@ fn snapshot_matches_filters(
     })
 }
 
+/// The container engine an Aurora family maps onto. Aurora clusters run
+/// their data on a normal engine (that is why fakecloud attaches an
+/// `engine=postgres` writer to an `aurora-postgresql` cluster), and the
+/// runtime only knows the concrete engines.
+fn container_engine_for(engine: &str) -> &str {
+    match engine {
+        "aurora-mysql" | "aurora" => "mysql",
+        "aurora-postgresql" => "postgres",
+        other => other,
+    }
+}
+
 /// Build the source-snapshot record a restore needs from a stored DB
 /// cluster snapshot. AWS lets RestoreDBInstanceFromDBSnapshot take a
 /// Multi-AZ DB cluster snapshot, whose metadata lives in the cluster
@@ -136,7 +148,14 @@ pub(super) fn cluster_snapshot_as_source(
             base64::engine::general_purpose::STANDARD.decode(b64).ok()
         })
         .unwrap_or_default();
-    let engine = field("Engine").unwrap_or_else(|| "aurora-postgresql".to_string());
+    // Prefer the writer's engine, recorded when the dump was taken: the
+    // cluster's own `aurora-*` family is not a container engine, and
+    // handing it to the runtime fails the instance with "Unsupported
+    // engine". Fall back to mapping the family onto the engine its
+    // writer would have run.
+    let engine = field("SourceEngine")
+        .or_else(|| field("Engine").map(|engine| container_engine_for(&engine).to_string()))
+        .unwrap_or_else(|| "postgres".to_string());
     let engine_version = field("EngineVersion")
         .unwrap_or_else(|| service_helpers::default_engine_version(&engine).to_string());
     let port = entry
@@ -158,14 +177,20 @@ pub(super) fn cluster_snapshot_as_source(
             .unwrap_or(20),
         status: "available".to_string(),
         port,
-        master_username: field("MasterUsername").unwrap_or_else(|| "admin".to_string()),
-        db_name: field("DatabaseName"),
+        // Credentials and database come from the writer too: the dump was
+        // taken with them, so replaying it under the cluster row's values
+        // would restore into the wrong database or refuse to connect.
+        master_username: field("SourceMasterUsername")
+            .or_else(|| field("MasterUsername"))
+            .unwrap_or_else(|| "admin".to_string()),
+        db_name: field("SourceDBName").or_else(|| field("DatabaseName")),
         dbi_resource_id: field("DbClusterResourceId").unwrap_or_default(),
         snapshot_type: field("SnapshotType").unwrap_or_else(|| "manual".to_string()),
         // The engines refuse to start with an empty password; a cluster
         // created before the password was persisted falls back to the
         // same default CreateDBCluster records now.
-        master_user_password: field("MasterUserPassword")
+        master_user_password: field("SourceMasterUserPassword")
+            .or_else(|| field("MasterUserPassword"))
             .filter(|password| !password.is_empty())
             .unwrap_or_else(|| crate::extras::DEFAULT_CLUSTER_MASTER_PASSWORD.to_string()),
         tags: Vec::new(),

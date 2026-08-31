@@ -81,6 +81,13 @@ impl RdsService {
             })
         };
 
+        // The writer's own settings, kept alongside the dump: it was taken
+        // with these credentials and database, and its engine is the
+        // container engine (`postgres` / `mysql`), not the cluster's
+        // `aurora-*` family which no runtime can start.
+        let writer_source = writer_info
+            .as_ref()
+            .map(|(_, eng, user, pass, db)| (eng.clone(), user.clone(), pass.clone(), db.clone()));
         let dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
             if let Some(runtime) = self.runtime_ref() {
                 match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
@@ -143,6 +150,12 @@ impl RdsService {
                 obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
                 obj.insert("Status".to_string(), json!("available"));
                 obj.insert("SnapshotType".to_string(), json!("manual"));
+                if let Some((engine, username, password, db_name)) = writer_source.as_ref() {
+                    obj.insert("SourceEngine".to_string(), json!(engine));
+                    obj.insert("SourceMasterUsername".to_string(), json!(username));
+                    obj.insert("SourceMasterUserPassword".to_string(), json!(password));
+                    obj.insert("SourceDBName".to_string(), json!(db_name));
+                }
                 if let Some(b64) = dump_b64.as_ref() {
                     obj.insert("DumpDataB64".to_string(), json!(b64));
                 }

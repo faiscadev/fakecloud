@@ -2347,6 +2347,79 @@ async fn restore_db_instance_from_a_cluster_snapshot() {
 }
 
 #[tokio::test]
+async fn cluster_snapshot_restore_uses_the_writers_engine_and_credentials() {
+    // The dump was taken from the writer with ITS engine, credentials and
+    // database. Rebuilding the source from the cluster row instead hands
+    // the runtime `aurora-postgresql` (which no engine match accepts, so
+    // the instance fails) and replays the dump into the wrong database
+    // under the wrong password.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    // The cluster's own family, which is not a container engine.
+                    "Engine": "aurora-postgresql",
+                    "MasterUsername": "cluster-admin",
+                    "MasterUserPassword": "cluster-pw",
+                    // What the writer actually ran when the dump was taken.
+                    "SourceEngine": "postgres",
+                    "SourceMasterUsername": "writer-admin",
+                    "SourceMasterUserPassword": "writer-pw",
+                    "SourceDBName": "appdb",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "clu-snap");
+    assert_eq!(source.engine, "postgres");
+    assert_eq!(source.master_username, "writer-admin");
+    assert_eq!(source.master_user_password, "writer-pw");
+    assert_eq!(source.db_name.as_deref(), Some("appdb"));
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_maps_an_aurora_family_to_its_engine() {
+    // A metadata-only snapshot (no writer recorded) still must not hand
+    // the runtime an `aurora-*` engine it cannot start.
+    let svc = make_service();
+    for (snapshot_id, family, expected) in [
+        ("aurora-pg", "aurora-postgresql", "postgres"),
+        ("aurora-my", "aurora-mysql", "mysql"),
+    ] {
+        {
+            let mut accounts = svc.state.write();
+            accounts
+                .default_mut()
+                .extras
+                .entry("cluster_snapshots".to_string())
+                .or_default()
+                .insert(
+                    snapshot_id.to_string(),
+                    serde_json::json!({
+                        "DBClusterSnapshotIdentifier": snapshot_id,
+                        "DBClusterIdentifier": "src-cluster",
+                        "Status": "available",
+                        "Engine": family,
+                    }),
+                );
+        }
+
+        let source = cluster_snapshot_source_for_test(&svc, snapshot_id);
+        assert_eq!(source.engine, expected, "family {family}");
+    }
+}
+
+#[tokio::test]
 async fn cluster_snapshot_restore_carries_the_dump_and_credentials() {
     // A restore that reports available with an empty database, or that
     // hands the container an empty password (which the engines reject),
