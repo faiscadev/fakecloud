@@ -56,9 +56,6 @@ fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
     })
 }
 
-/// True when a stored cluster snapshot satisfies every filter. The names
-/// come from the `DescribeDBClusterSnapshots` docs: `db-cluster-id`,
-/// `db-cluster-snapshot-id`, `engine` and `snapshot-type`.
 /// The `snapshot-type` values a cluster snapshot answers to for
 /// `caller`: its stored type, plus `public` / `shared` when it is shared
 /// that way. Keeps the filter speaking the same vocabulary as the
@@ -80,6 +77,9 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
     labels
 }
 
+/// True when a stored cluster snapshot satisfies every filter. The names
+/// come from the `DescribeDBClusterSnapshots` docs: `db-cluster-id`,
+/// `db-cluster-snapshot-id`, `engine` and `snapshot-type`.
 fn cluster_snapshot_matches_filters(
     entry: &Value,
     filters: &[RdsFilter],

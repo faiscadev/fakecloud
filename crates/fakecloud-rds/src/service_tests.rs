@@ -1688,6 +1688,21 @@ fn a_wrong_type_arn_never_widens_a_targeted_read() {
     let body = body_of(svc.describe_db_snapshots(&req).unwrap());
     assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
 
+    // A snapshot id wins over the instance filter, as on AWS: an
+    // unmatchable instance ARN must not blank out a targeted read.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "snap-1"),
+            ("DBInstanceIdentifier", cluster_arn),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>snap-1</DBSnapshotIdentifier>"),
+        "the instance filter overrode the snapshot id: {body}"
+    );
+
     // Right type, EMPTY resource id: still an identifier that names
     // nothing, not an absent parameter.
     let req = request(

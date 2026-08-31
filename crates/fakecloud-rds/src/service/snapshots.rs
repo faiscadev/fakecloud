@@ -49,10 +49,6 @@ fn snapshot_matches_type(snapshot: &DbSnapshot, snapshot_type: Option<&str>) -> 
     }
 }
 
-/// True when `snapshot` satisfies every filter. Filters are AND-ed with
-/// each other; the values within one filter are OR-ed. The names come
-/// from the `DescribeDBSnapshots` docs: `db-instance-id`,
-/// `db-snapshot-id`, `dbi-resource-id`, `engine` and `snapshot-type`.
 /// The `snapshot-type` values a snapshot answers to for `caller`: its
 /// stored type, plus `public` / `shared` when it is shared that way.
 /// Keeps the `snapshot-type` FILTER speaking the same vocabulary as the
@@ -70,6 +66,10 @@ fn snapshot_type_labels(snapshot: &DbSnapshot, caller: &str, owned: bool) -> Vec
     labels
 }
 
+/// True when `snapshot` satisfies every filter. Filters are AND-ed with
+/// each other; the values within one filter are OR-ed. The names come
+/// from the `DescribeDBSnapshots` docs: `db-instance-id`,
+/// `db-snapshot-id`, `dbi-resource-id`, `engine` and `snapshot-type`.
 fn snapshot_matches_filters(
     snapshot: &DbSnapshot,
     filters: &[RdsFilter],
@@ -383,24 +383,14 @@ impl RdsService {
         let db_snapshot_identifier =
             normalized_identifier(raw_snapshot_identifier.clone(), "snapshot");
         // A DB instance is never shared across accounts, so an ARN
-        // naming a different account matches nothing here rather than
-        // listing this account's same-named instance's snapshots.
+        // naming a different account (or another resource type) matches
+        // nothing here rather than listing this account's same-named
+        // instance's snapshots. Applied only when no snapshot id was
+        // given: AWS lets DBSnapshotIdentifier win over this filter.
         let raw_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
-        if let Some(raw) = raw_instance_identifier.as_deref() {
-            if !addresses_own_account(raw, &request.account_id)
-                || !identifier_matches_type(raw, "db")
-            {
-                return Ok(AwsResponse::xml(
-                    StatusCode::OK,
-                    query_response_xml(
-                        "DescribeDBSnapshots",
-                        RDS_NS,
-                        "<DBSnapshots></DBSnapshots>",
-                        &request.request_id,
-                    ),
-                ));
-            }
-        }
+        let instance_filter_unmatchable = raw_instance_identifier.as_deref().is_some_and(|raw| {
+            !addresses_own_account(raw, &request.account_id) || !identifier_matches_type(raw, "db")
+        });
         let db_instance_identifier = normalized_identifier(raw_instance_identifier, "db");
         let snapshot_type = optional_query_param(request, "SnapshotType");
         // A junk boolean is treated as absent rather than rejected:
@@ -503,6 +493,18 @@ impl RdsService {
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
                 query_response_xml("DescribeDBSnapshots", RDS_NS, &body, &request.request_id),
+            ));
+        }
+
+        if instance_filter_unmatchable {
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                query_response_xml(
+                    "DescribeDBSnapshots",
+                    RDS_NS,
+                    "<DBSnapshots></DBSnapshots>",
+                    &request.request_id,
+                ),
             ));
         }
 
