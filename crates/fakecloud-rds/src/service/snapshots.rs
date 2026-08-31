@@ -53,7 +53,29 @@ fn snapshot_matches_type(snapshot: &DbSnapshot, snapshot_type: Option<&str>) -> 
 /// each other; the values within one filter are OR-ed. The names come
 /// from the `DescribeDBSnapshots` docs: `db-instance-id`,
 /// `db-snapshot-id`, `dbi-resource-id`, `engine` and `snapshot-type`.
-fn snapshot_matches_filters(snapshot: &DbSnapshot, filters: &[RdsFilter]) -> bool {
+/// The `snapshot-type` values a snapshot answers to for `caller`: its
+/// stored type, plus `public` / `shared` when it is shared that way.
+/// Keeps the `snapshot-type` FILTER speaking the same vocabulary as the
+/// `SnapshotType` PARAMETER -- otherwise a snapshot reported by
+/// `--snapshot-type public` would be missed by
+/// `--filters Name=snapshot-type,Values=public`.
+fn snapshot_type_labels(snapshot: &DbSnapshot, caller: &str, owned: bool) -> Vec<String> {
+    let mut labels = vec![snapshot.snapshot_type.clone()];
+    if snapshot_is_public(snapshot) {
+        labels.push("public".to_string());
+    }
+    if !owned && snapshot_shared_with(snapshot, caller) {
+        labels.push("shared".to_string());
+    }
+    labels
+}
+
+fn snapshot_matches_filters(
+    snapshot: &DbSnapshot,
+    filters: &[RdsFilter],
+    caller: &str,
+    owned: bool,
+) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         // Accepts DB instance identifiers and DB instance ARNs; the
         // snapshot ARN supplies the partition/region/account needed to
@@ -75,7 +97,9 @@ fn snapshot_matches_filters(snapshot: &DbSnapshot, filters: &[RdsFilter]) -> boo
         ]),
         "dbi-resource-id" => filter.matches(Some(snapshot.dbi_resource_id.as_str())),
         "engine" => filter.matches(Some(snapshot.engine.as_str())),
-        "snapshot-type" => filter.matches(Some(snapshot.snapshot_type.as_str())),
+        "snapshot-type" => snapshot_type_labels(snapshot, caller, owned)
+            .iter()
+            .any(|label| filter.matches(Some(label.as_str()))),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
         other => {
@@ -394,18 +418,20 @@ impl RdsService {
 
         // If specific snapshot requested, return just that one (no pagination)
         if let Some(snapshot_id) = db_snapshot_identifier {
-            let snapshot = state
-                .snapshots
-                .get(&snapshot_id)
-                .cloned()
+            let named_owner = raw_snapshot_identifier
+                .as_deref()
+                .and_then(identifier_account);
+            let snapshot = named_owner
+                .as_deref()
+                .is_none_or(|account| account == request.account_id)
+                .then(|| state.snapshots.get(&snapshot_id).cloned())
+                .flatten()
                 // A snapshot another account shared with this caller is
                 // listed by SnapshotType=shared / IncludeShared, so
                 // re-reading it by id or ARN has to resolve too --
                 // otherwise the emulator 404s a row it just reported.
                 .or_else(|| {
-                    let named_account = raw_snapshot_identifier
-                        .as_deref()
-                        .and_then(identifier_account);
+                    let named_account = named_owner.clone();
                     accounts
                         .iter()
                         .filter(|(owner, _)| *owner != request.account_id)
@@ -450,7 +476,9 @@ impl RdsService {
                     Some(_) => false,
                 }
             };
-            let body = if type_ok && snapshot_matches_filters(&snapshot, &filters) {
+            let body = if type_ok
+                && snapshot_matches_filters(&snapshot, &filters, &request.account_id, owned)
+            {
                 format!(
                     "<DBSnapshots><DBSnapshot>{}</DBSnapshot></DBSnapshots>",
                     db_snapshot_xml(&snapshot)
@@ -475,7 +503,7 @@ impl RdsService {
                     .as_deref()
                     .is_none_or(|instance_id| snapshot.db_instance_identifier == instance_id)
                     && snapshot_matches_type(snapshot, snapshot_type.as_deref())
-                    && snapshot_matches_filters(snapshot, &filters)
+                    && snapshot_matches_filters(snapshot, &filters, &request.account_id, true)
             })
             .cloned()
             .collect();
@@ -510,7 +538,12 @@ impl RdsService {
                         .filter(|snapshot| {
                             db_instance_identifier.as_deref().is_none_or(|instance_id| {
                                 snapshot.db_instance_identifier == instance_id
-                            }) && snapshot_matches_filters(snapshot, &filters)
+                            }) && snapshot_matches_filters(
+                                snapshot,
+                                &filters,
+                                &request.account_id,
+                                false,
+                            )
                         })
                         .cloned(),
                 );
@@ -637,7 +670,14 @@ impl RdsService {
                 ));
             }
 
-            let snapshot = match state.snapshots.get(&db_snapshot_identifier).cloned() {
+            // The ARN names its owner: a foreign one must not hydrate the
+            // new instance from this account's same-named snapshot.
+            let owned = snapshot_owner
+                .as_deref()
+                .is_none_or(|account| account == request.account_id)
+                .then(|| state.snapshots.get(&db_snapshot_identifier).cloned())
+                .flatten();
+            let snapshot = match owned {
                 Some(s) => s,
                 None => {
                     // DescribeDBSnapshots reports snapshots other accounts

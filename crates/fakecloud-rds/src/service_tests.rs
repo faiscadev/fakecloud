@@ -2405,6 +2405,109 @@ fn describe_db_snapshots_tolerates_a_junk_include_flag() {
 }
 
 #[test]
+fn describe_db_snapshots_arn_account_wins_over_a_local_namesake() {
+    // Resolving the local row first would return B's own `prod-snap` for
+    // an ARN that named account A -- the same aliasing the delete path
+    // guards against.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "my-db");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("prod-snap");
+        shared.db_instance_identifier = "their-db".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("prod-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:snapshot:prod-snap",
+        )],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBInstanceIdentifier>their-db</DBInstanceIdentifier>"),
+        "a foreign ARN resolved to the local namesake: {body}"
+    );
+    assert!(!body.contains("<DBInstanceIdentifier>my-db</DBInstanceIdentifier>"));
+}
+
+#[tokio::test]
+async fn restore_db_instance_refuses_a_local_namesake_for_a_foreign_arn() {
+    // Hydrating from the local snapshot would silently restore the wrong
+    // data (engine, credentials, dump) and report success.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "my-db");
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:prod-snap",
+            ),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => panic!("restored from the local namesake of a foreign ARN"),
+        Err(err) => assert!(
+            format!("{err:?}").contains("DBSnapshotNotFound"),
+            "unexpected error: {err:?}"
+        ),
+    }
+}
+
+#[test]
+fn snapshot_type_filter_speaks_the_same_vocabulary_as_the_parameter() {
+    // A snapshot reported by `--snapshot-type public` must also match
+    // `--filters Name=snapshot-type,Values=public`.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine-public", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("mine-public")
+            .expect("seeded snapshot")
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+    }
+
+    for params in [
+        vec![("SnapshotType", "public")],
+        vec![
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "public"),
+        ],
+    ] {
+        let req = request("DescribeDBSnapshots", &params);
+        let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+        assert!(
+            body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"),
+            "public snapshot missed by {params:?}: {body}"
+        );
+    }
+
+    // The stored type still matches too.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "manual"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"));
+}
+
+#[test]
 fn delete_db_snapshot_refuses_another_accounts_arn() {
     // Reducing a foreign ARN to its bare id would delete THIS account's
     // same-named snapshot while the client believes it addressed the

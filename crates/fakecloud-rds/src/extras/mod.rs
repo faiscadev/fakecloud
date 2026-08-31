@@ -59,7 +59,33 @@ fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
 /// True when a stored cluster snapshot satisfies every filter. The names
 /// come from the `DescribeDBClusterSnapshots` docs: `db-cluster-id`,
 /// `db-cluster-snapshot-id`, `engine` and `snapshot-type`.
-fn cluster_snapshot_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+/// The `snapshot-type` values a cluster snapshot answers to for
+/// `caller`: its stored type, plus `public` / `shared` when it is shared
+/// that way. Keeps the filter speaking the same vocabulary as the
+/// `SnapshotType` parameter.
+fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec<String> {
+    // Defaulted to match the renderer, which reports a stored entry
+    // carrying no SnapshotType as `manual`.
+    let mut labels = vec![entry_str(entry, "SnapshotType")
+        .unwrap_or("manual")
+        .to_string()];
+    let attrs = cluster_snapshot_attributes(entry);
+    let targets = attrs.get("restore");
+    if targets.is_some_and(|targets| targets.iter().any(|t| t == "all")) {
+        labels.push("public".to_string());
+    }
+    if !owned && targets.is_some_and(|targets| targets.iter().any(|t| t == caller)) {
+        labels.push("shared".to_string());
+    }
+    labels
+}
+
+fn cluster_snapshot_matches_filters(
+    entry: &Value,
+    filters: &[RdsFilter],
+    caller: &str,
+    owned: bool,
+) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         // Accepts DB cluster identifiers and DB cluster ARNs; the
         // snapshot ARN supplies the partition/region/account needed to
@@ -76,11 +102,9 @@ fn cluster_snapshot_matches_filters(entry: &Value, filters: &[RdsFilter]) -> boo
             entry_str(entry, "DBClusterSnapshotIdentifier"),
             entry_str(entry, "DBClusterSnapshotArn"),
         ]),
-        // Defaulted to match the renderer, which reports a stored entry
-        // carrying no SnapshotType as `manual`.
-        "snapshot-type" => {
-            filter.matches(Some(entry_str(entry, "SnapshotType").unwrap_or("manual")))
-        }
+        "snapshot-type" => cluster_snapshot_type_labels(entry, caller, owned)
+            .iter()
+            .any(|label| filter.matches(Some(label.as_str()))),
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
@@ -563,7 +587,8 @@ impl RdsService {
                                     entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
                                 }) && cluster_id.as_deref().is_none_or(|wanted| {
                                     entry_str(v, "DBClusterIdentifier") == Some(wanted)
-                                }) && owned_snapshot_type_matches(v, snapshot_type.as_deref()) && cluster_snapshot_matches_filters(v, &filters)
+                                }) && owned_snapshot_type_matches(v, snapshot_type.as_deref())
+                                    && cluster_snapshot_matches_filters(v, &filters, &aid, true)
                             })
                             .cloned()
                             .collect()
@@ -637,7 +662,9 @@ impl RdsService {
                                         entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
                                     }) && cluster_id.as_deref().is_none_or(|wanted| {
                                         entry_str(v, "DBClusterIdentifier") == Some(wanted)
-                                    }) && cluster_snapshot_matches_filters(v, &filters)
+                                    }) && cluster_snapshot_matches_filters(
+                                        v, &filters, &aid, false,
+                                    )
                                 })
                                 .cloned(),
                         );
