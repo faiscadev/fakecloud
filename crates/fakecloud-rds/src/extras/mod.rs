@@ -475,8 +475,20 @@ impl RdsService {
                         format!("DBClusterSnapshot {raw} not found."),
                     ));
                 }
-                let id = normalized_identifier(Some(raw), "cluster-snapshot")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                // A wrong-type ARN names no cluster snapshot. That is the
+                // declared DBClusterSnapshotNotFoundFault, not the
+                // undeclared InvalidParameterValue `missing()` raises --
+                // an unmodeled error hard-fails a Terraform destroy that
+                // would otherwise treat the snapshot as gone.
+                let id = normalized_identifier(Some(raw.clone()), "cluster-snapshot").ok_or_else(
+                    || {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        )
+                    },
+                )?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 // Recover the source cluster id from stored state before
                 // remove — emitting a hardcoded "default" would corrupt
@@ -737,8 +749,20 @@ impl RdsService {
                         format!("DBClusterSnapshot {raw} not found."),
                     ));
                 }
-                let id = normalized_identifier(Some(raw), "cluster-snapshot")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                // A wrong-type ARN names no cluster snapshot. That is the
+                // declared DBClusterSnapshotNotFoundFault, not the
+                // undeclared InvalidParameterValue `missing()` raises --
+                // an unmodeled error hard-fails a Terraform destroy that
+                // would otherwise treat the snapshot as gone.
+                let id = normalized_identifier(Some(raw.clone()), "cluster-snapshot").ok_or_else(
+                    || {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        )
+                    },
+                )?;
                 let accounts = self.state_handle().read();
                 let entry = accounts
                     .get(&aid)
@@ -771,8 +795,20 @@ impl RdsService {
                         format!("DBClusterSnapshot {raw} not found."),
                     ));
                 }
-                let id = normalized_identifier(Some(raw), "cluster-snapshot")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                // A wrong-type ARN names no cluster snapshot. That is the
+                // declared DBClusterSnapshotNotFoundFault, not the
+                // undeclared InvalidParameterValue `missing()` raises --
+                // an unmodeled error hard-fails a Terraform destroy that
+                // would otherwise treat the snapshot as gone.
+                let id = normalized_identifier(Some(raw.clone()), "cluster-snapshot").ok_or_else(
+                    || {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        )
+                    },
+                )?;
                 let attribute_name =
                     get_param(req, "AttributeName").ok_or_else(|| missing("AttributeName"))?;
                 let to_add = parse_attribute_values(req, "ValuesToAdd");
@@ -2400,8 +2436,12 @@ impl RdsService {
                 if !addresses_own_account(&raw, &aid) {
                     return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
                 }
-                let id = normalized_identifier(Some(raw), "snapshot")
-                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // A wrong-type ARN names no DB snapshot: the declared
+                // DBSnapshotNotFoundFault, not an undeclared
+                // InvalidParameterValue.
+                let id = normalized_identifier(Some(raw.clone()), "snapshot").ok_or_else(|| {
+                    crate::service::service_helpers::db_snapshot_not_found(&raw)
+                })?;
                 let attrs = {
                     let accounts = self.state_handle().read();
                     let snapshot = accounts
@@ -2425,8 +2465,12 @@ impl RdsService {
                 if !addresses_own_account(&raw, &aid) {
                     return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
                 }
-                let id = normalized_identifier(Some(raw), "snapshot")
-                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // A wrong-type ARN names no DB snapshot: the declared
+                // DBSnapshotNotFoundFault, not an undeclared
+                // InvalidParameterValue.
+                let id = normalized_identifier(Some(raw.clone()), "snapshot").ok_or_else(|| {
+                    crate::service::service_helpers::db_snapshot_not_found(&raw)
+                })?;
                 let attribute_name = get_param(req, "AttributeName")
                     .ok_or_else(|| missing("AttributeName"))?;
                 let to_add = parse_attribute_values(req, "ValuesToAdd");
@@ -2479,8 +2523,12 @@ impl RdsService {
                 if !addresses_own_account(&raw, &aid) {
                     return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
                 }
-                let id = normalized_identifier(Some(raw), "snapshot")
-                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // A wrong-type ARN names no DB snapshot: the declared
+                // DBSnapshotNotFoundFault, not an undeclared
+                // InvalidParameterValue.
+                let id = normalized_identifier(Some(raw.clone()), "snapshot").ok_or_else(|| {
+                    crate::service::service_helpers::db_snapshot_not_found(&raw)
+                })?;
                 let engine_version = get_param(req, "EngineVersion");
                 let option_group_name = get_param(req, "OptionGroupName");
                 let snapshot = {

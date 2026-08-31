@@ -1687,6 +1687,26 @@ fn a_wrong_type_arn_never_widens_a_targeted_read() {
     );
     let body = body_of(svc.describe_db_snapshots(&req).unwrap());
     assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+
+    // Right type, EMPTY resource id: still an identifier that names
+    // nothing, not an absent parameter.
+    let req = request(
+        "DescribeDBInstances",
+        &[(
+            "DBInstanceIdentifier",
+            "arn:aws:rds:us-east-1:123456789012:db:",
+        )],
+    );
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:123456789012:snapshot:",
+        )],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
 }
 
 #[tokio::test]

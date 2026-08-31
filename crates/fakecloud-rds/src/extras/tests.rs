@@ -2890,6 +2890,45 @@ fn wrong_type_arns_do_not_widen_the_cluster_describes() {
 }
 
 #[test]
+fn wrong_type_arns_raise_the_declared_fault_not_invalid_parameter() {
+    // `InvalidParameterValue` isn't declared on any of these ops, so an
+    // unmodeled error would hard-fail a Terraform destroy that should
+    // simply treat the snapshot as gone.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    let wrong_type = "arn:aws:rds:us-east-1:000000000000:snapshot:snap-1";
+
+    for action in [
+        "DeleteDBClusterSnapshot",
+        "DescribeDBClusterSnapshotAttributes",
+    ] {
+        let result =
+            svc.handle_extra_action(&req(action, &[("DBClusterSnapshotIdentifier", wrong_type)]));
+        match result {
+            Err(err) => assert_eq!(
+                err.code(),
+                "DBClusterSnapshotNotFoundFault",
+                "{action} raised {}",
+                err.code()
+            ),
+            Ok(_) => panic!("{action} accepted a wrong-type ARN"),
+        }
+    }
+
+    let result = svc.handle_extra_action(&req(
+        "ModifyDBSnapshot",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:snap-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBSnapshotNotFound"),
+        Ok(_) => panic!("ModifyDBSnapshot accepted a wrong-type ARN"),
+    }
+}
+
+#[test]
 fn describe_db_clusters_rejects_another_accounts_arn() {
     let svc = svc();
     seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");

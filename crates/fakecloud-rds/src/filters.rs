@@ -133,7 +133,12 @@ pub(crate) fn identifier_matches_type(param: &str, resource_type: &str) -> bool 
     if !param.starts_with("arn:") {
         return true;
     }
-    param.split(':').nth(5) == Some(resource_type)
+    let mut fields = param.splitn(7, ':').skip(5);
+    // The type has to match AND the resource id has to be non-empty:
+    // `arn:aws:rds:us-east-1:1234:db:` would otherwise pass the type
+    // check, normalize to `None`, and read as "no identifier" -- widening
+    // a targeted read into a full listing.
+    fields.next() == Some(resource_type) && fields.next().is_some_and(|id| !id.is_empty())
 }
 
 /// The account an ARN-form identifier names, or `None` for a bare id.
@@ -408,6 +413,15 @@ mod tests {
         ));
         assert!(!identifier_matches_type(
             "arn:aws:rds:us-east-1:123456789012:cluster:mycl",
+            "db"
+        ));
+        // Right type, empty resource id: still not an identifier.
+        assert!(!identifier_matches_type(
+            "arn:aws:rds:us-east-1:123456789012:db:",
+            "db"
+        ));
+        assert!(!identifier_matches_type(
+            "arn:aws:rds:us-east-1:123456789012:db",
             "db"
         ));
     }
