@@ -2,7 +2,10 @@
 
 use super::*;
 
-use crate::filters::{normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter};
+use crate::filters::{
+    addresses_own_account, identifier_account, normalized_identifier, parse_filters,
+    sibling_rds_arn, RdsFilter,
+};
 
 /// The account ids a snapshot's `restore` attribute is shared with.
 /// `ModifyDBSnapshotAttribute` writes it; the literal `all` marks the
@@ -35,7 +38,12 @@ fn snapshot_is_public(snapshot: &DbSnapshot) -> bool {
 /// and are handled separately.
 fn snapshot_matches_type(snapshot: &DbSnapshot, snapshot_type: Option<&str>) -> bool {
     match snapshot_type {
-        Some("shared") | Some("public") => false,
+        // "Return all DB snapshots that have been marked as public" --
+        // not scoped to other accounts, so an owned public snapshot
+        // counts. `shared` is "shared TO my account", which an owned
+        // snapshot never is.
+        Some("public") => snapshot_is_public(snapshot),
+        Some("shared") => false,
         Some(wanted) => snapshot.snapshot_type == wanted,
         None => true,
     }
@@ -339,8 +347,8 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         // Snapshot / instance identifiers are accepted in ARN form here
         // the same way DescribeDBClusterSnapshots accepts them.
-        let db_snapshot_identifier =
-            normalized_identifier(optional_query_param(request, "DBSnapshotIdentifier"));
+        let raw_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier");
+        let db_snapshot_identifier = normalized_identifier(raw_snapshot_identifier.clone());
         let db_instance_identifier =
             normalized_identifier(optional_query_param(request, "DBInstanceIdentifier"));
         let snapshot_type = optional_query_param(request, "SnapshotType");
@@ -379,9 +387,19 @@ impl RdsService {
                 // re-reading it by id or ARN has to resolve too --
                 // otherwise the emulator 404s a row it just reported.
                 .or_else(|| {
+                    let named_account = raw_snapshot_identifier
+                        .as_deref()
+                        .and_then(identifier_account);
                     accounts
                         .iter()
                         .filter(|(owner, _)| *owner != request.account_id)
+                        // An ARN names its owner: don't resolve it
+                        // against a different account's identical id.
+                        .filter(|(owner, _)| {
+                            named_account
+                                .as_deref()
+                                .is_none_or(|account| account == *owner)
+                        })
                         .find_map(|(_, other)| {
                             other.snapshots.get(&snapshot_id).filter(|snapshot| {
                                 snapshot_shared_with(snapshot, &request.account_id)
@@ -410,7 +428,9 @@ impl RdsService {
                 match snapshot_type.as_deref() {
                     Some("shared") => shared_with_caller,
                     Some("public") => public,
-                    None => (include_shared && shared_with_caller) || (include_public && public),
+                    // The caller named this snapshot explicitly, so AWS
+                    // resolves it without needing IncludeShared as well.
+                    None => shared_with_caller || public,
                     Some(_) => false,
                 }
             };
@@ -528,10 +548,15 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         // Resolve the ARN form here too: describe, restore and copy all
         // accept it, and a delete that doesn't would report success (or
-        // NotFound) while leaving the snapshot in place.
-        let db_snapshot_identifier =
-            normalized_identifier(Some(required_query_param(request, "DBSnapshotIdentifier")?))
-                .ok_or_else(|| db_snapshot_not_found("(none)"))?;
+        // NotFound) while leaving the snapshot in place. An ARN naming
+        // ANOTHER account is not deletable here -- resolving it by bare
+        // id would delete this account's same-named snapshot instead.
+        let raw_identifier = required_query_param(request, "DBSnapshotIdentifier")?;
+        if !addresses_own_account(&raw_identifier, &request.account_id) {
+            return Err(db_snapshot_not_found(&raw_identifier));
+        }
+        let db_snapshot_identifier = normalized_identifier(Some(raw_identifier))
+            .ok_or_else(|| db_snapshot_not_found("(none)"))?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
@@ -573,11 +598,13 @@ impl RdsService {
         // rather than `MissingParameter` (undeclared).
         // `aws_db_instance.snapshot_identifier` in the Terraform provider
         // holds a full snapshot ARN, so resolve that form here too.
-        let db_snapshot_identifier = normalized_identifier(
-            optional_query_param(request, "DBSnapshotIdentifier")
-                .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier")),
-        )
-        .ok_or_else(|| db_snapshot_not_found("(none)"))?;
+        let raw_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier")
+            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"));
+        let snapshot_owner = raw_snapshot_identifier
+            .as_deref()
+            .and_then(identifier_account);
+        let db_snapshot_identifier = normalized_identifier(raw_snapshot_identifier)
+            .ok_or_else(|| db_snapshot_not_found("(none)"))?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
         let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");
@@ -597,10 +624,42 @@ impl RdsService {
             let snapshot = match state.snapshots.get(&db_snapshot_identifier).cloned() {
                 Some(s) => s,
                 None => {
-                    state.cancel_instance_creation(&db_instance_identifier);
-                    return Err(db_snapshot_not_found(&db_snapshot_identifier));
+                    // DescribeDBSnapshots reports snapshots other accounts
+                    // shared with this caller, so restoring from one has
+                    // to work as well -- otherwise the sharing surface is
+                    // listable but unusable.
+                    let shared = accounts.iter().find_map(|(owner, other)| {
+                        if owner == request.account_id {
+                            return None;
+                        }
+                        // An ARN names its owner: don't resolve it
+                        // against a different account's identical id.
+                        if snapshot_owner
+                            .as_deref()
+                            .is_some_and(|account| account != owner)
+                        {
+                            return None;
+                        }
+                        other
+                            .snapshots
+                            .get(&db_snapshot_identifier)
+                            .filter(|snapshot| {
+                                snapshot_shared_with(snapshot, &request.account_id)
+                                    || snapshot_is_public(snapshot)
+                            })
+                            .cloned()
+                    });
+                    match shared {
+                        Some(s) => s,
+                        None => {
+                            let state = accounts.get_or_create(&request.account_id);
+                            state.cancel_instance_creation(&db_instance_identifier);
+                            return Err(db_snapshot_not_found(&db_snapshot_identifier));
+                        }
+                    }
                 }
             };
+            let state = accounts.get_or_create(&request.account_id);
 
             // Reject an explicit-but-unknown subnet group before provisioning,
             // rolling back the reservation (mirrors CreateDBInstance).

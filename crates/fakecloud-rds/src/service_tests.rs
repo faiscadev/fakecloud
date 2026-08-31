@@ -2324,14 +2324,22 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
         "IncludeShared read-back returned nothing: {body}"
     );
 
-    // Without the flag and without SnapshotType, a foreign snapshot stays
-    // invisible (AWS defaults IncludeShared to false).
+    // Naming the snapshot explicitly resolves it without IncludeShared:
+    // AWS resolves a shared snapshot addressed by id or ARN. (The flag
+    // still gates whether it appears in an unqualified *list*.)
     let req = request(
         "DescribeDBSnapshots",
         &[("DBSnapshotIdentifier", "shared-snap")],
     );
     let body = body_of(svc.describe_db_snapshots(&req).unwrap());
-    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "unqualified list leaked a shared snapshot: {body}"
+    );
 }
 
 #[test]
@@ -2377,6 +2385,98 @@ fn describe_db_snapshots_tolerates_a_junk_include_flag() {
     let req = request("DescribeDBSnapshots", &[("IncludeShared", "yes-please")]);
     let body = body_of(svc.describe_db_snapshots(&req).unwrap());
     assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn delete_db_snapshot_refuses_another_accounts_arn() {
+    // Reducing a foreign ARN to its bare id would delete THIS account's
+    // same-named snapshot while the client believes it addressed the
+    // other account's.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "db1");
+
+    let req = request(
+        "DeleteDBSnapshot",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:snapshot:prod-snap",
+        )],
+    );
+    assert_code(svc.delete_db_snapshot(&req), "DBSnapshotNotFound");
+    assert!(
+        svc.state
+            .read()
+            .default_ref()
+            .snapshots
+            .contains_key("prod-snap"),
+        "a foreign ARN deleted the local snapshot"
+    );
+}
+
+#[test]
+fn describe_db_snapshots_reports_an_owned_public_snapshot() {
+    // AWS: "public - Return all DB snapshots that have been marked as
+    // public" -- not scoped to other accounts.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine-public", "db1");
+    seed_snapshot(&svc, "mine-private", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("mine-public")
+            .expect("seeded snapshot")
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+    }
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "public")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>mine-private</DBSnapshotIdentifier>"));
+
+    // `shared` is "shared TO me", which an owned snapshot never is.
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "shared")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"));
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_a_shared_snapshot() {
+    // DescribeDBSnapshots reports snapshots other accounts shared with
+    // the caller, so restoring from one must work -- otherwise the
+    // sharing surface is listable but unusable. Without a container
+    // runtime the restore fails after the lookup, so anything other than
+    // DBSnapshotNotFound proves the snapshot resolved.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:shared-snap",
+            ),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => {}
+        Err(err) => assert!(
+            !format!("{err:?}").contains("DBSnapshotNotFound"),
+            "shared snapshot did not resolve for restore: {err:?}"
+        ),
+    }
 }
 
 #[test]

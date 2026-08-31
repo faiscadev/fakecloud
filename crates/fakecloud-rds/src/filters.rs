@@ -115,6 +115,33 @@ pub(crate) fn normalized_identifier(param: Option<String>) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// The account an ARN-form identifier names, or `None` for a bare id.
+///
+/// [`normalized_identifier`] reduces an ARN to its resource id, which is
+/// what the per-account state is keyed on -- but the account field can't
+/// just be dropped: with cross-account sharing, account B passing account
+/// A's full ARN must not silently resolve to B's own same-named resource
+/// (on `DeleteDBSnapshot` that would delete the wrong snapshot).
+pub(crate) fn identifier_account(param: &str) -> Option<String> {
+    if !param.starts_with("arn:") {
+        return None;
+    }
+    param
+        .split(':')
+        .nth(4)
+        .map(str::to_string)
+        .filter(|account| !account.is_empty())
+}
+
+/// True when an identifier addresses a resource the caller owns: a bare
+/// id, or an ARN naming the caller's own account. Operations that only
+/// act on owned resources (delete, copy source, attribute changes) use
+/// this to reject another account's ARN instead of aliasing it onto a
+/// same-named local resource.
+pub(crate) fn addresses_own_account(param: &str, account_id: &str) -> bool {
+    identifier_account(param).is_none_or(|account| account == account_id)
+}
+
 /// Parse `Filters.Filter.N.Name` + `Filters.Filter.N.Values.Value.M` (and
 /// the `member` spelling of either element) into filter entries.
 ///
@@ -328,6 +355,25 @@ mod tests {
             )),
             Some("rds:mydb-2026-08-30-06-00".to_string())
         );
+    }
+
+    #[test]
+    fn identifier_account_reads_the_arn_owner() {
+        assert_eq!(
+            identifier_account("arn:aws:rds:us-east-1:111111111111:snapshot:snap-1").as_deref(),
+            Some("111111111111")
+        );
+        assert_eq!(identifier_account("snap-1"), None);
+        assert!(addresses_own_account("snap-1", "222222222222"));
+        assert!(addresses_own_account(
+            "arn:aws:rds:us-east-1:222222222222:snapshot:snap-1",
+            "222222222222"
+        ));
+        // Another account's ARN must not alias onto a local resource.
+        assert!(!addresses_own_account(
+            "arn:aws:rds:us-east-1:111111111111:snapshot:snap-1",
+            "222222222222"
+        ));
     }
 
     #[test]

@@ -2782,6 +2782,73 @@ fn cluster_snapshot_sharing_does_not_leak_through_copy_or_restore() {
 }
 
 #[test]
+fn modify_db_cluster_snapshot_attribute_refuses_another_accounts_arn() {
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "prod-snap", "clu-1", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            (
+                "DBClusterSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:prod-snap",
+            ),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "all"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a foreign ARN modified the local snapshot"),
+    }
+
+    // The local snapshot is untouched.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "prod-snap")],
+    );
+    assert!(body.contains("<DBClusterSnapshotAttributes/>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
+    // Addressing a shared snapshot by identifier resolves it without
+    // IncludeShared; previously the existence check accepted it but the
+    // listing dropped it, yielding 200 with an empty list.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "shared-snap")],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
+        "named shared snapshot returned an empty list: {body}"
+    );
+}
+
+#[test]
 fn describe_db_cluster_snapshots_honors_include_shared() {
     // The modeled IncludeShared / IncludePublic members widen an
     // unqualified listing, as on DescribeDBSnapshots.

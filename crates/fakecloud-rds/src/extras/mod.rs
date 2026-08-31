@@ -20,7 +20,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{RdsService, RdsSourceType};
 
-use crate::filters::{normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter};
+use crate::filters::{
+    addresses_own_account, normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter,
+};
 
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 
@@ -422,7 +424,16 @@ impl RdsService {
                 // unnormalized delete would report success while leaving
                 // the entry in place, so a Terraform destroy never
                 // converges.
-                let id = normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"))
+                let raw = get_param(req, "DBClusterSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {raw} not found."),
+                    ));
+                }
+                let id = normalized_identifier(Some(raw))
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 // Recover the source cluster id from stored state before
@@ -527,10 +538,14 @@ impl RdsService {
                 // exactly as on DescribeDBSnapshots.
                 // IncludeShared / IncludePublic widen an unqualified
                 // listing, exactly as on DescribeDBSnapshots.
+                // A caller that named a snapshot explicitly resolves it
+                // without IncludeShared as well -- AWS resolves a shared
+                // snapshot addressed by ARN.
+                let named = snapshot_id.is_some();
                 let want_shared = snapshot_type.as_deref() == Some("shared")
-                    || (include_shared && snapshot_type.is_none());
+                    || ((include_shared || named) && snapshot_type.is_none());
                 let want_public = snapshot_type.as_deref() == Some("public")
-                    || (include_public && snapshot_type.is_none());
+                    || ((include_public || named) && snapshot_type.is_none());
                 let mut items = items;
                 if want_shared || want_public {
                     for (owner, other) in accounts.iter() {
@@ -584,7 +599,16 @@ impl RdsService {
                 Ok(xml_response("DescribeDBClusterSnapshots", inner, &rid))
             }
             "DescribeDBClusterSnapshotAttributes" => {
-                let id = normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"))
+                let raw = get_param(req, "DBClusterSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {raw} not found."),
+                    ));
+                }
+                let id = normalized_identifier(Some(raw))
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let accounts = self.state_handle().read();
                 let entry = accounts
@@ -609,7 +633,16 @@ impl RdsService {
                 // attribute records the accounts (or `all`) a snapshot is
                 // shared with, which is what SnapshotType=shared/public
                 // selects on.
-                let id = normalized_identifier(get_param(req, "DBClusterSnapshotIdentifier"))
+                let raw = get_param(req, "DBClusterSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {raw} not found."),
+                    ));
+                }
+                let id = normalized_identifier(Some(raw))
                     .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
                 let attribute_name =
                     get_param(req, "AttributeName").ok_or_else(|| missing("AttributeName"))?;
@@ -2193,7 +2226,15 @@ impl RdsService {
                 Ok(xml_response("DescribeEngineDefaultParameters", body, &rid))
             }
             "DescribeDBSnapshotAttributes" => {
-                let id = normalized_identifier(get_param(req, "DBSnapshotIdentifier"))
+                let raw = get_param(req, "DBSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // An ARN naming another account addresses THEIR snapshot,
+                // which this op cannot act on; resolving it by bare id
+                // would silently hit this account's same-named one.
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
+                }
+                let id = normalized_identifier(Some(raw))
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let attrs = {
                     let accounts = self.state_handle().read();
@@ -2210,7 +2251,15 @@ impl RdsService {
                 ))
             }
             "ModifyDBSnapshotAttribute" => {
-                let id = normalized_identifier(get_param(req, "DBSnapshotIdentifier"))
+                let raw = get_param(req, "DBSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // An ARN naming another account addresses THEIR snapshot,
+                // which this op cannot act on; resolving it by bare id
+                // would silently hit this account's same-named one.
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
+                }
+                let id = normalized_identifier(Some(raw))
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let attribute_name = get_param(req, "AttributeName")
                     .ok_or_else(|| missing("AttributeName"))?;
@@ -2256,7 +2305,15 @@ impl RdsService {
                 ))
             }
             "ModifyDBSnapshot" => {
-                let id = normalized_identifier(get_param(req, "DBSnapshotIdentifier"))
+                let raw = get_param(req, "DBSnapshotIdentifier")
+                    .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // An ARN naming another account addresses THEIR snapshot,
+                // which this op cannot act on; resolving it by bare id
+                // would silently hit this account's same-named one.
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
+                }
+                let id = normalized_identifier(Some(raw))
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
                 let engine_version = get_param(req, "EngineVersion");
                 let option_group_name = get_param(req, "OptionGroupName");
@@ -2832,7 +2889,12 @@ fn cluster_snapshot_attributes(entry: &Value) -> BTreeMap<String, Vec<String>> {
 /// handled separately.
 fn owned_snapshot_type_matches(entry: &Value, snapshot_type: Option<&str>) -> bool {
     match snapshot_type {
-        Some("shared") | Some("public") => false,
+        // An owned snapshot marked public is still public; `shared`
+        // means "shared TO me", which an owned snapshot never is.
+        Some("public") => cluster_snapshot_attributes(entry)
+            .get("restore")
+            .is_some_and(|targets| targets.iter().any(|t| t == "all")),
+        Some("shared") => false,
         // Same default the renderer emits, so a stored entry without the
         // field can't read back as `manual` yet be excluded by
         // `--snapshot-type manual`.
