@@ -3,8 +3,8 @@
 use super::*;
 
 use crate::filters::{
-    addresses_own_account, identifier_account, normalized_identifier, parse_filters,
-    sibling_rds_arn, RdsFilter,
+    addresses_own_account, identifier_account, identifier_matches_type, normalized_identifier,
+    parse_filters, sibling_rds_arn, RdsFilter,
 };
 
 /// The account ids a snapshot's `restore` attribute is shared with.
@@ -372,6 +372,14 @@ impl RdsService {
         // Snapshot / instance identifiers are accepted in ARN form here
         // the same way DescribeDBClusterSnapshots accepts them.
         let raw_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier");
+        // An ARN of another resource type is not a DB snapshot: report
+        // not-found rather than letting a `None` identifier read as "no
+        // filter" and list everything.
+        if let Some(raw) = raw_snapshot_identifier.as_deref() {
+            if !identifier_matches_type(raw, "snapshot") {
+                return Err(db_snapshot_not_found(raw));
+            }
+        }
         let db_snapshot_identifier =
             normalized_identifier(raw_snapshot_identifier.clone(), "snapshot");
         // A DB instance is never shared across accounts, so an ARN
@@ -379,7 +387,9 @@ impl RdsService {
         // listing this account's same-named instance's snapshots.
         let raw_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
         if let Some(raw) = raw_instance_identifier.as_deref() {
-            if !addresses_own_account(raw, &request.account_id) {
+            if !addresses_own_account(raw, &request.account_id)
+                || !identifier_matches_type(raw, "db")
+            {
                 return Ok(AwsResponse::xml(
                     StatusCode::OK,
                     query_response_xml(
@@ -651,13 +661,26 @@ impl RdsService {
         // rather than `MissingParameter` (undeclared).
         // `aws_db_instance.snapshot_identifier` in the Terraform provider
         // holds a full snapshot ARN, so resolve that form here too.
-        let raw_snapshot_identifier = optional_query_param(request, "DBSnapshotIdentifier")
-            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"));
+        // The cluster-snapshot parameter is accepted as an alias, so an
+        // ARN of either type resolves; the caller's own identifier is
+        // echoed in the error rather than a bare "(none)".
+        let (raw_snapshot_identifier, snapshot_arn_type) =
+            match optional_query_param(request, "DBSnapshotIdentifier") {
+                Some(raw) => (Some(raw), "snapshot"),
+                None => (
+                    optional_query_param(request, "DBClusterSnapshotIdentifier"),
+                    "cluster-snapshot",
+                ),
+            };
         let snapshot_owner = raw_snapshot_identifier
             .as_deref()
             .and_then(identifier_account);
-        let db_snapshot_identifier = normalized_identifier(raw_snapshot_identifier, "snapshot")
-            .ok_or_else(|| db_snapshot_not_found("(none)"))?;
+        let reported_identifier = raw_snapshot_identifier
+            .clone()
+            .unwrap_or_else(|| "(none)".to_string());
+        let db_snapshot_identifier =
+            normalized_identifier(raw_snapshot_identifier, snapshot_arn_type)
+                .ok_or_else(|| db_snapshot_not_found(&reported_identifier))?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
         let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");

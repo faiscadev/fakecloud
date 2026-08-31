@@ -3,7 +3,8 @@
 use super::*;
 
 use crate::filters::{
-    addresses_own_account, normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter,
+    addresses_own_account, identifier_matches_type, normalized_identifier, parse_filters,
+    sibling_rds_arn, RdsFilter,
 };
 
 /// True when `instance` satisfies every filter. Filters are AND-ed with
@@ -1271,7 +1272,13 @@ impl RdsService {
         // make a cross-account misconfiguration look like success.
         let raw_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
         if let Some(raw) = raw_instance_identifier.as_deref() {
-            if !addresses_own_account(raw, &request.account_id) {
+            // An ARN of another account, or of another resource TYPE,
+            // names something that is not a DB instance here. Both are
+            // not-found: a `None` identifier would otherwise read as "no
+            // filter" and list every instance in the account.
+            if !addresses_own_account(raw, &request.account_id)
+                || !identifier_matches_type(raw, "db")
+            {
                 return Err(db_instance_not_found(raw));
             }
         }

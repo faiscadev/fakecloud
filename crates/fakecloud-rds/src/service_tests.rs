@@ -1656,6 +1656,70 @@ fn describe_db_instances_filters_by_dbi_resource_id() {
 }
 
 #[test]
+fn a_wrong_type_arn_never_widens_a_targeted_read() {
+    // A wrong-type ARN normalizes to "no identifier", and an absent
+    // identifier means "no filter" -- so without an explicit guard a
+    // misconfigured ARN turns a single-resource read into a full listing
+    // and a client expecting one row matches an arbitrary resource.
+    let svc = make_service();
+    seed_instance(&svc, "mydb");
+    seed_instance(&svc, "otherdb");
+    seed_snapshot(&svc, "snap-1", "mydb");
+
+    let cluster_arn = "arn:aws:rds:us-east-1:123456789012:cluster:mycl";
+    let req = request(
+        "DescribeDBInstances",
+        &[("DBInstanceIdentifier", cluster_arn)],
+    );
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+
+    let cluster_snapshot_arn = "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1";
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", cluster_snapshot_arn)],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // ...and the same for the instance filter on DescribeDBSnapshots.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBInstanceIdentifier", cluster_arn)],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+}
+
+#[tokio::test]
+async fn restore_db_instance_reports_the_identifier_it_was_given() {
+    // The cluster-snapshot parameter is an alias, so an ARN of that type
+    // resolves through it -- and an unknown one echoes the caller's own
+    // identifier instead of a bare "(none)".
+    let svc = make_service();
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            (
+                "DBClusterSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:ghost",
+            ),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(message.contains("DBSnapshotNotFound"), "{message}");
+            assert!(
+                message.contains("ghost"),
+                "the caller's identifier was dropped from the error: {message}"
+            );
+        }
+        Ok(_) => panic!("unknown snapshot should fault"),
+    }
+}
+
+#[test]
 fn describe_db_instances_rejects_another_accounts_arn() {
     // A DB instance is never shared across accounts, so a foreign ARN
     // must not report this account's same-named instance.

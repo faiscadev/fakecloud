@@ -21,8 +21,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::service::{RdsService, RdsSourceType};
 
 use crate::filters::{
-    addresses_own_account, identifier_account, normalized_identifier, parse_filters,
-    sibling_rds_arn, RdsFilter,
+    addresses_own_account, identifier_account, identifier_matches_type, normalized_identifier,
+    parse_filters, sibling_rds_arn, RdsFilter,
 };
 
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
@@ -313,7 +313,8 @@ impl RdsService {
                 // account's same-named cluster.
                 let raw_cluster_identifier = get_param(req, "DBClusterIdentifier");
                 if let Some(raw) = raw_cluster_identifier.as_deref() {
-                    if !addresses_own_account(raw, &aid) {
+                    if !addresses_own_account(raw, &aid) || !identifier_matches_type(raw, "cluster")
+                    {
                         return Err(AwsServiceError::aws_error(
                             StatusCode::NOT_FOUND,
                             "DBClusterNotFoundFault",
@@ -520,9 +521,33 @@ impl RdsService {
                 // snapshot (nor against a third account that happens to
                 // have shared one under the same id).
                 let raw_snapshot_id = get_param(req, "DBClusterSnapshotIdentifier");
+                // A wrong-type ARN is not a cluster snapshot; without
+                // this it would normalize to `None` and list everything.
+                if let Some(raw) = raw_snapshot_id.as_deref() {
+                    if !identifier_matches_type(raw, "cluster-snapshot") {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        ));
+                    }
+                }
                 let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
                 let snapshot_id = normalized_identifier(raw_snapshot_id, "cluster-snapshot");
                 let raw_cluster_id = get_param(req, "DBClusterIdentifier");
+                // A wrong-type ARN names no cluster, so nothing matches.
+                // Returning early beats dropping the parameter, which
+                // would read as "no filter" and list everything.
+                if raw_cluster_id
+                    .as_deref()
+                    .is_some_and(|raw| !identifier_matches_type(raw, "cluster"))
+                {
+                    return Ok(xml_response(
+                        "DescribeDBClusterSnapshots",
+                        "    <DBClusterSnapshots>\n\n    </DBClusterSnapshots>".to_string(),
+                        &rid,
+                    ));
+                }
                 let cluster_owner = raw_cluster_id.as_deref().and_then(identifier_account);
                 let cluster_id = normalized_identifier(raw_cluster_id, "cluster");
                 // An identifier naming another account can never match a
@@ -559,11 +584,17 @@ impl RdsService {
                                     && (owner == aid || {
                                         // Another account's snapshot only
                                         // exists for this caller when it
-                                        // was shared with them.
+                                        // was shared with them AND they
+                                        // addressed it by its ARN -- the
+                                        // same rule the listing applies,
+                                        // so the two can't disagree and
+                                        // produce a 200 with no rows.
                                         let attrs = cluster_snapshot_attributes(v);
-                                        attrs.get("restore").is_some_and(|targets| {
-                                            targets.contains(&aid) || targets.iter().any(|t| t == "all")
-                                        })
+                                        snapshot_owner.as_deref() == Some(owner)
+                                            && attrs.get("restore").is_some_and(|targets| {
+                                                targets.contains(&aid)
+                                                    || targets.iter().any(|t| t == "all")
+                                            })
                                     })
                             })
                         })
@@ -621,7 +652,10 @@ impl RdsService {
                                 })
                             })
                 });
-                let named = snapshot_id.is_some() && !owns_named;
+                // Only an ARN reaches another account's shared snapshot
+                // (AWS requires it, and a bare id could match several
+                // accounts at once and return duplicate rows).
+                let named = snapshot_id.is_some() && !owns_named && snapshot_owner.is_some();
                 let want_shared = snapshot_type.as_deref() == Some("shared")
                     || ((include_shared || named) && snapshot_type.is_none());
                 let want_public = snapshot_type.as_deref() == Some("public")
@@ -634,9 +668,14 @@ impl RdsService {
                         }
                         // An ARN names its owner: never resolve it
                         // against a different account's identical id.
+                        // The cluster ARN's account is honoured for
+                        // foreign rows too, not just owned ones.
                         if snapshot_owner
                             .as_deref()
                             .is_some_and(|account| account != owner)
+                            || cluster_owner
+                                .as_deref()
+                                .is_some_and(|account| account != owner)
                         {
                             continue;
                         }

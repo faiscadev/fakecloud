@@ -2700,15 +2700,30 @@ fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
             );
     }
 
+    // AWS requires the ARN to reach another account's shared snapshot;
+    // a bare id could match several accounts and return duplicate rows.
     let body = body_of_action(
         &svc,
         "DescribeDBClusterSnapshots",
-        &[("DBClusterSnapshotIdentifier", "shared-snap")],
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:shared-snap",
+        )],
     );
     assert!(
         body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
         "named shared snapshot returned an empty list: {body}"
     );
+
+    // The bare id names nothing this account owns.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "shared-snap")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a bare id reached another account's snapshot"),
+    }
 }
 
 #[test]
@@ -2824,6 +2839,54 @@ fn describe_db_cluster_snapshots_named_lookup_prefers_the_owned_row() {
         "named lookup returned more than one row: {body}"
     );
     assert!(body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+}
+
+#[test]
+fn wrong_type_arns_do_not_widen_the_cluster_describes() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    // A DB-instance ARN is not a cluster.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusters",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:db:clu-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("a db ARN resolved as a cluster"),
+    }
+
+    // A cluster ARN is not a cluster snapshot.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster:snap-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a cluster ARN resolved as a cluster snapshot"),
+    }
+
+    // A wrong-type cluster filter matches nothing rather than listing all.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:db:clu-1",
+        )],
+    );
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>"),
+        "wrong-type cluster filter widened the listing: {body}"
+    );
 }
 
 #[test]

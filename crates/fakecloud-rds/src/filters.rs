@@ -122,6 +122,20 @@ pub(crate) fn normalized_identifier(param: Option<String>, resource_type: &str) 
         .filter(|value| !value.is_empty())
 }
 
+/// True when an identifier is a bare id, or an ARN of `resource_type`.
+///
+/// [`normalized_identifier`] answers `None` both for "parameter absent"
+/// and for "ARN of the wrong resource type", and every Describe treats a
+/// `None` identifier as "no filter" -- so a wrong-type ARN would widen a
+/// targeted read into a full listing. Callers check this first and raise
+/// the operation's not-found instead.
+pub(crate) fn identifier_matches_type(param: &str, resource_type: &str) -> bool {
+    if !param.starts_with("arn:") {
+        return true;
+    }
+    param.split(':').nth(5) == Some(resource_type)
+}
+
 /// The account an ARN-form identifier names, or `None` for a bare id.
 ///
 /// [`normalized_identifier`] reduces an ARN to its resource id, which is
@@ -383,6 +397,19 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn identifier_matches_type_guards_the_resource_field() {
+        assert!(identifier_matches_type("snap-1", "snapshot"));
+        assert!(identifier_matches_type(
+            "arn:aws:rds:us-east-1:123456789012:snapshot:snap-1",
+            "snapshot"
+        ));
+        assert!(!identifier_matches_type(
+            "arn:aws:rds:us-east-1:123456789012:cluster:mycl",
+            "db"
+        ));
     }
 
     #[test]
