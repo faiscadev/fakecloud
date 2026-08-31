@@ -215,8 +215,15 @@ pub(super) fn cluster_snapshot_as_source(
         option_group_name: None,
         percent_progress: Some(100),
         storage_type: None,
-        encrypted: false,
-        kms_key_id: None,
+        // The cluster row carries these, and every other field here is
+        // read off the entry: reporting the restored instance as
+        // unencrypted contradicts the snapshot's own StorageEncrypted and
+        // gives Terraform a permanent storage_encrypted / kms_key_id diff.
+        encrypted: entry
+            .get("StorageEncrypted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        kms_key_id: field("KmsKeyId"),
         iam_database_authentication_enabled: false,
         timezone: None,
         storage_throughput: None,
@@ -528,9 +535,11 @@ impl RdsService {
         let filters = parse_filters(request);
 
         // Specifying both DBSnapshotIdentifier and DBInstanceIdentifier
-        // is tolerated — the snapshot id wins below. Real AWS rejects
-        // the combo with `InvalidParameterCombination` but that code
-        // isn't declared on DescribeDBSnapshots.
+        // is tolerated: they are AND-ed, like SnapshotType and Filters.
+        // Real AWS rejects the combo with `InvalidParameterCombination`,
+        // but that code isn't declared on DescribeDBSnapshots (it isn't
+        // a shape in the RDS model at all), so narrowing is the closest
+        // in-shape behaviour.
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -607,8 +616,23 @@ impl RdsService {
             // AWS AND-s every narrowing parameter with the identifier,
             // so a non-matching DBInstanceIdentifier excludes the named
             // snapshot rather than being dropped on this path.
+            // Same rule the cross-account scan applies: the instance
+            // ARN's account has to match the account the ROW came from,
+            // not simply differ from the caller's -- otherwise the named
+            // form of a query the list form answers returns nothing.
+            let row_owner = if owned {
+                request.account_id.as_str()
+            } else {
+                snapshot
+                    .db_snapshot_arn
+                    .split(':')
+                    .nth(4)
+                    .unwrap_or(request.account_id.as_str())
+            };
             let instance_ok = !instance_wrong_type
-                && !foreign_instance_owner
+                && instance_owner
+                    .as_deref()
+                    .is_none_or(|account| account == row_owner)
                 && db_instance_identifier
                     .as_deref()
                     .is_none_or(|instance_id| snapshot.db_instance_identifier == instance_id);

@@ -2425,6 +2425,98 @@ fn describe_db_instances_filters_by_domain() {
     assert!(!body.contains("<DBInstanceIdentifier>standalone</DBInstanceIdentifier>"));
 }
 
+#[test]
+fn restored_instance_inherits_the_snapshots_encryption() {
+    // The snapshot reports StorageEncrypted / KmsKeyId, so an instance
+    // restored from it must too -- otherwise the pair is internally
+    // inconsistent and Terraform diffs storage_encrypted forever. Both
+    // the synthesized source AND the instance builder have to carry it;
+    // fixing only one leaves the other dropping the value.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "enc-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "enc-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-postgresql",
+                    "StorageEncrypted": true,
+                    "KmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/abc",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "enc-snap");
+    assert!(source.encrypted);
+    assert_eq!(
+        source.kms_key_id.as_deref(),
+        Some("arn:aws:kms:us-east-1:123456789012:key/abc")
+    );
+
+    let instance = crate::service::service_helpers::build_restored_instance(
+        "restored-db",
+        "arn:aws:rds:us-east-1:123456789012:db:restored-db".to_string(),
+        "db-1".to_string(),
+        Utc::now(),
+        Vec::new(),
+        &source,
+        &crate::service::service_helpers::creating_placeholder_container(),
+        Vec::new(),
+    );
+    assert!(
+        instance.storage_encrypted,
+        "the instance builder dropped the snapshot's encryption"
+    );
+    assert_eq!(
+        instance.kms_key_id.as_deref(),
+        Some("arn:aws:kms:us-east-1:123456789012:key/abc")
+    );
+}
+
+#[test]
+fn a_shared_snapshot_resolves_with_its_owners_instance_arn() {
+    // The named form of a query the list form answers must not return
+    // nothing: the instance ARN's account is checked against the row's
+    // owner, not simply against the caller.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared.db_instance_identifier = "db-1".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:shared-snap",
+            ),
+            (
+                "DBInstanceIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:db:db-1",
+            ),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "the owner's instance ARN excluded their own shared snapshot: {body}"
+    );
+}
+
 #[tokio::test]
 async fn cluster_snapshot_restore_reports_the_writers_engine_version() {
     // Engine and EngineVersion must come from the same place: the

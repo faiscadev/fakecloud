@@ -634,8 +634,11 @@ pub(crate) fn build_restored_instance(
         db_subnet_group_name: None,
         availability_zone: None,
         storage_type: None,
-        storage_encrypted: false,
-        kms_key_id: None,
+        // Restoring an encrypted snapshot yields an encrypted instance:
+        // dropping these here would contradict the snapshot's own
+        // StorageEncrypted / KmsKeyId in DescribeDBSnapshots.
+        storage_encrypted: snapshot.encrypted,
+        kms_key_id: snapshot.kms_key_id.clone(),
         iam_database_authentication_enabled: false,
         iops: None,
         monitoring_interval: None,
