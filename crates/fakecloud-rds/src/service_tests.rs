@@ -3265,6 +3265,54 @@ async fn restore_db_cluster_from_snapshot_drops_inherited_identity() {
 }
 
 #[tokio::test]
+async fn create_db_cluster_snapshot_rejects_a_duplicate_identifier() {
+    let svc = make_service();
+    seed_cluster_entry(&svc, "clu-1", serde_json::json!({}));
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({"DBClusterSnapshotIdentifier": "snap-1"}),
+            );
+    }
+
+    let req = request(
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("DBClusterIdentifier", "clu-1"),
+        ],
+    );
+    match svc.create_db_cluster_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotAlreadyExistsFault"),
+        Ok(_) => panic!("duplicate snapshot identifier accepted"),
+    }
+}
+
+#[test]
+fn describe_db_snapshots_not_found_echoes_the_caller_identifier() {
+    let svc = make_service();
+    let arn = "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1";
+
+    let req = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", arn)]);
+    match svc.describe_db_snapshots(&req) {
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(
+                message.contains(arn),
+                "the error reported the reduced id, not the caller's ARN: {message}"
+            );
+        }
+        Ok(_) => panic!("unknown snapshot should fault"),
+    }
+}
+
+#[tokio::test]
 async fn restore_db_cluster_from_snapshot_carries_the_snapshot_fields() {
     // CreateDBClusterSnapshot copies the whole cluster row in, so the
     // restore reflects the snapshot -- including changes made to the

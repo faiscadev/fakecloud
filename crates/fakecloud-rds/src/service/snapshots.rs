@@ -456,7 +456,13 @@ impl RdsService {
                         })
                         .cloned()
                 })
-                .ok_or_else(|| db_snapshot_not_found(&snapshot_id))?;
+                // Echo what the caller passed (the ARN, when they used
+                // one), not the id it reduced to.
+                .ok_or_else(|| {
+                    db_snapshot_not_found(
+                        raw_snapshot_identifier.as_deref().unwrap_or(&snapshot_id),
+                    )
+                })?;
 
             // AWS AND-s the identifier with SnapshotType and any
             // filters: the snapshot exists, so a non-match is an empty

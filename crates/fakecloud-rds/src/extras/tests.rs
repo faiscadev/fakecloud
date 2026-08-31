@@ -3198,6 +3198,53 @@ fn describe_db_cluster_snapshots_keeps_colon_bearing_identifiers() {
 }
 
 #[test]
+fn delete_db_cluster_snapshot_unknown_identifier_is_not_found() {
+    // A 200 here would report success -- and emit a "snapshot deleted"
+    // event -- for a snapshot that never existed, while the sibling
+    // Describe raises the fault for the same id.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "DeleteDBClusterSnapshot",
+        &[("DBClusterSnapshotIdentifier", "ghost")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("deleting a nonexistent snapshot reported success"),
+    }
+}
+
+#[test]
+fn copy_db_cluster_snapshot_rejects_an_existing_target() {
+    // Overwriting would silently replace the target's dump and revoke
+    // its sharing on a retried copy.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-2"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotAlreadyExistsFault"),
+        Ok(_) => panic!("copy overwrote an existing snapshot"),
+    }
+
+    // The existing target is untouched.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap-2")],
+    );
+    assert!(body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+}
+
+#[test]
 fn delete_db_cluster_snapshot_accepts_an_arn_identifier() {
     // A delete that doesn't resolve the ARN reports success while
     // leaving the entry behind, so the following Describe keeps

@@ -432,6 +432,20 @@ impl RdsService {
                 // ARN onto this account's same-named snapshot. Resolved
                 // before the mutable borrow the insert below needs.
                 let source_owner = identifier_account(&source_id);
+                // An existing target is the declared AlreadyExists fault:
+                // overwriting would silently replace the target's dump
+                // and revoke its sharing on a retried copy.
+                if accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .is_some_and(|m| m.contains_key(&id))
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::CONFLICT,
+                        "DBClusterSnapshotAlreadyExistsFault",
+                        format!("DBClusterSnapshot {id} already exists."),
+                    ));
+                }
                 let mut entry =
                     find_cluster_snapshot(&accounts, &aid, source_owner.as_deref(), &source_key)
                         .ok_or_else(|| {
@@ -496,15 +510,27 @@ impl RdsService {
                 let cluster = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
+                    // Deleting a snapshot that doesn't exist is the
+                    // declared fault, not a 200 with an empty cluster id
+                    // and a spurious "snapshot deleted" event.
                     let prior = state
                         .extras
                         .get("cluster_snapshots")
                         .and_then(|m| m.get(&id))
-                        .and_then(|v| v.get("DBClusterIdentifier"))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterSnapshotNotFoundFault",
+                                format!("DBClusterSnapshot {id} not found."),
+                            )
+                        })?
+                        .get("DBClusterIdentifier")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default()
                         .to_string();
-                    if let Some(m) = state.extras.get_mut("cluster_snapshots") { m.remove(&id); }
+                    if let Some(m) = state.extras.get_mut("cluster_snapshots") {
+                        m.remove(&id);
+                    }
                     prior
                 };
                 self.emit_event(

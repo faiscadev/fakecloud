@@ -21,6 +21,22 @@ impl RdsService {
             request.region, request.account_id, snapshot_id
         );
 
+        // A duplicate identifier is the declared AlreadyExists fault, not
+        // a silent overwrite of the existing snapshot's dump and sharing.
+        if self
+            .state
+            .read()
+            .get(&request.account_id)
+            .and_then(|s| s.extras.get("cluster_snapshots"))
+            .is_some_and(|m| m.contains_key(&snapshot_id))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "DBClusterSnapshotAlreadyExistsFault",
+                format!("DBClusterSnapshot {snapshot_id} already exists."),
+            ));
+        }
+
         let writer_info = {
             let accounts = self.state.read();
             accounts.get(&request.account_id).and_then(|state| {
