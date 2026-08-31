@@ -34,7 +34,7 @@ impl RdsService {
             .is_some_and(|m| m.contains_key(&snapshot_id))
         {
             return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
+                StatusCode::BAD_REQUEST,
                 "DBClusterSnapshotAlreadyExistsFault",
                 format!("DBClusterSnapshot {snapshot_id} already exists."),
             ));
@@ -121,7 +121,7 @@ impl RdsService {
                 .is_some_and(|m| m.contains_key(&snapshot_id))
             {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::CONFLICT,
+                    StatusCode::BAD_REQUEST,
                     "DBClusterSnapshotAlreadyExistsFault",
                     format!("DBClusterSnapshot {snapshot_id} already exists."),
                 ));

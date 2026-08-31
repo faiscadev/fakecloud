@@ -1743,8 +1743,9 @@ async fn restore_db_instance_reports_the_identifier_it_was_given() {
     );
     match svc.restore_db_instance_from_db_snapshot(&req).await {
         Err(err) => {
+            // A Multi-AZ DB cluster snapshot has its own declared fault.
+            assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
             let message = format!("{err:?}");
-            assert!(message.contains("DBSnapshotNotFound"), "{message}");
             assert!(
                 message.contains("ghost"),
                 "the caller's identifier was dropped from the error: {message}"
@@ -2299,6 +2300,88 @@ fn migrate_loaded_leaves_newer_state_alone() {
     state.migrate_loaded(crate::state::RDS_SNAPSHOT_SCHEMA_VERSION);
 
     assert_eq!(state.snapshots["auto-snap"].snapshot_type, "automated");
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_a_cluster_snapshot() {
+    // AWS models DBClusterSnapshotIdentifier on this operation for
+    // Multi-AZ DB cluster snapshots; their metadata lives in the cluster
+    // snapshot store, so resolving only `snapshots` always 404'd.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                    "MasterUsername": "admin",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBClusterSnapshotIdentifier", "clu-snap"),
+        ],
+    );
+    // Without a container runtime the restore fails after the lookup, so
+    // any error other than a not-found proves the snapshot resolved.
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => {}
+        Err(err) => assert!(
+            !err.code().contains("NotFound"),
+            "cluster snapshot did not resolve: {err:?}"
+        ),
+    }
+}
+
+#[test]
+fn describe_db_snapshots_reports_a_foreign_instance_arns_shared_snapshots() {
+    // A DB instance ARN naming another account matches none of this
+    // account's snapshots -- but the owner may have shared snapshots OF
+    // that instance, and those must still be listed.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "src");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared.db_instance_identifier = "src".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            (
+                "DBInstanceIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:db:src",
+            ),
+            ("IncludeShared", "true"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "the owner's shared snapshots were suppressed: {body}"
+    );
+    // This account's own snapshot of a same-named instance is not the
+    // one the ARN named.
+    assert!(!body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
 }
 
 #[test]
@@ -5486,11 +5569,16 @@ fn modify_current_db_cluster_capacity_echoes_requested_capacity() {
 }
 
 #[test]
-fn modify_db_snapshot_attribute_rejects_value_in_add_and_remove() {
+fn modify_db_snapshot_attribute_resolves_a_value_in_add_and_remove() {
+    // AWS rejects this with InvalidParameterCombination, which is not
+    // even a shape in the RDS model -- emitting it would be an undeclared
+    // error. Resolve deterministically instead: removals first, then
+    // additions, so the value ends up shared.
     let svc = make_service();
     seed_snapshot(&svc, "snap-dup", "db1");
-    assert_code(
-        svc.handle_extra_action(&request(
+
+    let resp = svc
+        .handle_extra_action(&request(
             "ModifyDBSnapshotAttribute",
             &[
                 ("DBSnapshotIdentifier", "snap-dup"),
@@ -5498,8 +5586,12 @@ fn modify_db_snapshot_attribute_rejects_value_in_add_and_remove() {
                 ("ValuesToAdd.AttributeValue.1", "111111111111"),
                 ("ValuesToRemove.AttributeValue.1", "111111111111"),
             ],
-        )),
-        "InvalidParameterCombination",
+        ))
+        .expect("overlapping values should resolve, not fault");
+    let body = body_of(resp);
+    assert!(
+        body.contains("<AttributeValue>111111111111</AttributeValue>"),
+        "additions should win over removals: {body}"
     );
 }
 

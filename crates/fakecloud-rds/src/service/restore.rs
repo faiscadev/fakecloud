@@ -33,7 +33,7 @@ impl RdsService {
 
             if !state.begin_instance_creation(&target_id) {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::CONFLICT,
+                    StatusCode::BAD_REQUEST,
                     "DBInstanceAlreadyExists",
                     format!("DBInstance {target_id} already exists."),
                 ));
@@ -279,7 +279,7 @@ impl RdsService {
 
             if !state.begin_instance_creation(&db_instance_identifier) {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::CONFLICT,
+                    StatusCode::BAD_REQUEST,
                     "DBInstanceAlreadyExists",
                     format!("DBInstance {db_instance_identifier} already exists."),
                 ));

@@ -38,7 +38,7 @@ impl RdsService {
             .contains_key(&db_parameter_group_name)
         {
             return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
+                StatusCode::BAD_REQUEST,
                 "DBParameterGroupAlreadyExists",
                 format!("DBParameterGroup {db_parameter_group_name} already exists."),
             ));

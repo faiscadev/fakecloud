@@ -1282,7 +1282,7 @@ impl RdsService {
                 return Err(db_instance_not_found(raw));
             }
         }
-        let db_instance_identifier = normalized_identifier(raw_instance_identifier, "db");
+        let db_instance_identifier = normalized_identifier(raw_instance_identifier.clone(), "db");
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
         let filters = parse_filters(request);
@@ -1297,7 +1297,11 @@ impl RdsService {
                 .instances
                 .get(&identifier)
                 .cloned()
-                .ok_or_else(|| db_instance_not_found(&identifier))?;
+                // Echo what the caller passed (the ARN, when they used
+                // one), as the snapshot paths do.
+                .ok_or_else(|| {
+                    db_instance_not_found(raw_instance_identifier.as_deref().unwrap_or(&identifier))
+                })?;
 
             // AWS AND-s the identifier with any filters: the instance
             // exists, so this is an empty result rather than

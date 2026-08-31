@@ -443,7 +443,7 @@ impl RdsService {
                     .is_some_and(|m| m.contains_key(&id))
                 {
                     return Err(AwsServiceError::aws_error(
-                        StatusCode::CONFLICT,
+                        StatusCode::BAD_REQUEST,
                         "DBClusterSnapshotAlreadyExistsFault",
                         format!("DBClusterSnapshot {id} already exists."),
                     ));
@@ -863,13 +863,12 @@ impl RdsService {
                     get_param(req, "AttributeName").ok_or_else(|| missing("AttributeName"))?;
                 let to_add = parse_attribute_values(req, "ValuesToAdd");
                 let to_remove = parse_attribute_values(req, "ValuesToRemove");
-                if let Some(dup) = to_add.iter().find(|v| to_remove.contains(v)) {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterCombination",
-                        format!("The value {dup} is present in both ValuesToAdd and ValuesToRemove."),
-                    ));
-                }
+                // AWS rejects a value present in both lists, but
+                // `InvalidParameterCombination` is not even a shape in the
+                // RDS model, so emitting it here would be an undeclared
+                // error (see the module docs on `crate::filters`). Resolve
+                // it deterministically instead: removals first, then
+                // additions, so the value ends up added.
                 let attrs = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
@@ -2308,7 +2307,7 @@ impl RdsService {
                     let aid = aid.clone();
                     if state.snapshots.contains_key(&target_id) {
                         return Err(AwsServiceError::aws_error(
-                            StatusCode::CONFLICT,
+                            StatusCode::BAD_REQUEST,
                             "DBSnapshotAlreadyExists",
                             format!("DBSnapshot {target_id} already exists."),
                         ));
@@ -2399,7 +2398,7 @@ impl RdsService {
                     let state = accounts.get_or_create(&aid);
                     if state.parameter_groups.contains_key(&target) {
                         return Err(AwsServiceError::aws_error(
-                            StatusCode::CONFLICT,
+                            StatusCode::BAD_REQUEST,
                             "DBParameterGroupAlreadyExists",
                             format!("DBParameterGroup {target} already exists."),
                         ));
@@ -2526,13 +2525,12 @@ impl RdsService {
                 let to_add = parse_attribute_values(req, "ValuesToAdd");
                 let to_remove = parse_attribute_values(req, "ValuesToRemove");
                 // AWS rejects a value that appears in both add and remove lists.
-                if let Some(dup) = to_add.iter().find(|v| to_remove.contains(v)) {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterCombination",
-                        format!("The value {dup} is present in both ValuesToAdd and ValuesToRemove."),
-                    ));
-                }
+                // AWS rejects a value present in both lists, but
+                // `InvalidParameterCombination` is not even a shape in the
+                // RDS model, so emitting it here would be an undeclared
+                // error (see the module docs on `crate::filters`). Resolve
+                // it deterministically instead: removals first, then
+                // additions, so the value ends up added.
                 let attrs = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
