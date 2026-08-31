@@ -21,7 +21,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use crate::service::{RdsService, RdsSourceType};
 
 use crate::filters::{
-    addresses_own_account, normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter,
+    addresses_own_account, identifier_account, normalized_identifier, parse_filters,
+    sibling_rds_arn, RdsFilter,
 };
 
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
@@ -282,8 +283,21 @@ impl RdsService {
             "DescribeDBClusters" => {
                 // Same normalization as DescribeDBClusterSnapshots: an
                 // empty parameter means "absent", and AWS documents this
-                // one as accepting a cluster ARN too.
-                let id_filter = normalized_identifier(get_param(req, "DBClusterIdentifier"));
+                // one as accepting a cluster ARN too. A cluster is never
+                // shared across accounts, so an ARN naming a different
+                // account is not found rather than aliased onto this
+                // account's same-named cluster.
+                let raw_cluster_identifier = get_param(req, "DBClusterIdentifier");
+                if let Some(raw) = raw_cluster_identifier.as_deref() {
+                    if !addresses_own_account(raw, &aid) {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterNotFoundFault",
+                            format!("DBCluster {raw} not found."),
+                        ));
+                    }
+                }
+                let id_filter = normalized_identifier(raw_cluster_identifier);
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
                 // A named cluster that doesn't exist is the declared
@@ -382,24 +396,27 @@ impl RdsService {
                     .ok_or_else(|| missing("SourceDBClusterSnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
                 let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
                 // Guarded ARN reduction: AWS automated-snapshot ids carry
                 // a colon (`rds:mydb-...`), so only an `arn:` value is
                 // trimmed.
                 let source_key = normalized_identifier(Some(source_id.clone()))
                     .unwrap_or_else(|| source_id.clone());
-                let mut entry = state
-                    .extras
-                    .get("cluster_snapshots")
-                    .and_then(|m| m.get(&source_key))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBClusterSnapshotNotFoundFault",
-                            format!("DBClusterSnapshot {source_id} not found."),
-                        )
-                    })?;
+                // AWS supports copying a snapshot another account shared
+                // with you, so resolve cross-account -- but only against
+                // the account the ARN names, never by aliasing a foreign
+                // ARN onto this account's same-named snapshot. Resolved
+                // before the mutable borrow the insert below needs.
+                let source_owner = identifier_account(&source_id);
+                let mut entry =
+                    find_cluster_snapshot(&accounts, &aid, source_owner.as_deref(), &source_key)
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterSnapshotNotFoundFault",
+                                format!("DBClusterSnapshot {source_id} not found."),
+                            )
+                        })?;
+                let state = accounts.get_or_create(&aid);
                 let cluster = entry
                     .get("DBClusterIdentifier")
                     .and_then(|v| v.as_str())
@@ -541,7 +558,12 @@ impl RdsService {
                 // A caller that named a snapshot explicitly resolves it
                 // without IncludeShared as well -- AWS resolves a shared
                 // snapshot addressed by ARN.
-                let named = snapshot_id.is_some();
+                // A named lookup that already matched an owned row must
+                // not also pull in another account's identical id: AWS
+                // resolves a named snapshot uniquely, and two rows are
+                // the "couldn't resolve a single result" failure this
+                // branch exists to avoid.
+                let named = snapshot_id.is_some() && items.is_empty();
                 let want_shared = snapshot_type.as_deref() == Some("shared")
                     || ((include_shared || named) && snapshot_type.is_none());
                 let want_public = snapshot_type.as_deref() == Some("public")
@@ -2079,13 +2101,18 @@ impl RdsService {
                 let source_id = get_param(req, "SourceDBSnapshotIdentifier")
                     .ok_or_else(|| missing("SourceDBSnapshotIdentifier"))?;
                 // Source may be passed as a bare id or a full ARN; key state
-                // by the trailing identifier segment either way.
-                let source_key = normalized_identifier(Some(source_id.clone())).unwrap_or_else(|| source_id.clone());
+                // by the trailing identifier segment either way, and keep
+                // the ARN's account so a foreign ARN can't alias onto this
+                // account's same-named snapshot.
+                let source_key = normalized_identifier(Some(source_id.clone()))
+                    .unwrap_or_else(|| source_id.clone());
+                let source_owner = identifier_account(&source_id);
                 let option_group_name = get_param(req, "OptionGroupName");
                 let kms_key_id = get_param(req, "KmsKeyId");
                 let (snapshot, arn) = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
+                    let aid = aid.clone();
                     if state.snapshots.contains_key(&target_id) {
                         return Err(AwsServiceError::aws_error(
                             StatusCode::CONFLICT,
@@ -2093,11 +2120,43 @@ impl RdsService {
                             format!("DBSnapshot {target_id} already exists."),
                         ));
                     }
-                    let mut snapshot = state
-                        .snapshots
-                        .get(&source_key)
-                        .cloned()
-                        .ok_or_else(|| crate::service::service_helpers::db_snapshot_not_found(&source_id))?;
+                    // AWS supports copying a snapshot another account
+                    // shared with you, so fall back to a shared source --
+                    // only from the account the ARN names, and only when
+                    // it really was shared with this caller.
+                    let owned = source_owner
+                        .as_deref()
+                        .is_none_or(|account| account == aid)
+                        .then(|| state.snapshots.get(&source_key).cloned())
+                        .flatten();
+                    let mut snapshot = match owned {
+                        Some(snapshot) => snapshot,
+                        None => accounts
+                            .iter()
+                            .filter(|(owner, _)| *owner != aid)
+                            .filter(|(owner, _)| {
+                                source_owner
+                                    .as_deref()
+                                    .is_none_or(|account| account == *owner)
+                            })
+                            .find_map(|(_, other)| {
+                                other
+                                    .snapshots
+                                    .get(&source_key)
+                                    .filter(|snapshot| {
+                                        snapshot.snapshot_attributes.get("restore").is_some_and(
+                                            |targets| {
+                                                targets.iter().any(|t| *t == aid || t == "all")
+                                            },
+                                        )
+                                    })
+                                    .cloned()
+                            })
+                            .ok_or_else(|| {
+                                crate::service::service_helpers::db_snapshot_not_found(&source_id)
+                            })?,
+                    };
+                    let state = accounts.get_or_create(&aid);
                     let arn = state.db_snapshot_arn(region, &target_id);
                     snapshot.db_snapshot_identifier = target_id.clone();
                     snapshot.db_snapshot_arn = arn.clone();
@@ -2344,26 +2403,26 @@ impl RdsService {
             "RestoreDBClusterFromSnapshot" => {
                 let target = get_param(req, "DBClusterIdentifier")
                     .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let snapshot_id = normalized_identifier(
-                    get_param(req, "SnapshotIdentifier")
-                        .or_else(|| get_param(req, "DBClusterSnapshotIdentifier")),
-                )
+                let raw_snapshot_id = get_param(req, "SnapshotIdentifier")
+                    .or_else(|| get_param(req, "DBClusterSnapshotIdentifier"));
+                let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
+                let snapshot_id = normalized_identifier(raw_snapshot_id)
                     .ok_or_else(|| missing("SnapshotIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
                 let mut accounts = write_state!();
+                // A snapshot another account shared with this caller is
+                // listable, so it has to be restorable too. Resolved
+                // before the mutable borrow below.
+                let snapshot =
+                    find_cluster_snapshot(&accounts, &aid, snapshot_owner.as_deref(), &snapshot_id)
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterSnapshotNotFoundFault",
+                                format!("DBClusterSnapshot {snapshot_id} not found."),
+                            )
+                        })?;
                 let state = accounts.get_or_create(&aid);
-                let snapshot = state
-                    .extras
-                    .get("cluster_snapshots")
-                    .and_then(|m| m.get(&snapshot_id))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBClusterSnapshotNotFoundFault",
-                            format!("DBClusterSnapshot {snapshot_id} not found."),
-                        )
-                    })?;
                 let source_cluster_id = snapshot
                     .get("DBClusterIdentifier")
                     .and_then(|v| v.as_str())
@@ -2859,6 +2918,42 @@ fn apply_shard_group_capacity(obj: &mut serde_json::Map<String, Value>, req: &Aw
 
 /// Render the `DBSnapshotAttributesResult` block shared by
 /// `DescribeDBSnapshotAttributes` and `ModifyDBSnapshotAttribute`.
+/// Look a cluster snapshot up across accounts: the caller's own first,
+/// then any account that shared it with the caller (or with everyone).
+/// `named_account` is the owner an ARN named, when the caller used one.
+pub(crate) fn find_cluster_snapshot(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<crate::state::RdsState>,
+    caller: &str,
+    named_account: Option<&str>,
+    id: &str,
+) -> Option<Value> {
+    if named_account.is_none_or(|account| account == caller) {
+        if let Some(entry) = accounts
+            .get(caller)
+            .and_then(|s| s.extras.get("cluster_snapshots"))
+            .and_then(|m| m.get(id))
+        {
+            return Some(entry.clone());
+        }
+    }
+    accounts
+        .iter()
+        .filter(|(owner, _)| *owner != caller)
+        .filter(|(owner, _)| named_account.is_none_or(|account| account == *owner))
+        .find_map(|(_, other)| {
+            other
+                .extras
+                .get("cluster_snapshots")
+                .and_then(|m| m.get(id))
+                .filter(|entry| {
+                    cluster_snapshot_attributes(entry)
+                        .get("restore")
+                        .is_some_and(|targets| targets.iter().any(|t| t == caller || t == "all"))
+                })
+                .cloned()
+        })
+}
+
 /// The stored share attributes of a cluster snapshot entry
 /// (`ModifyDBClusterSnapshotAttribute` writes them under
 /// `SnapshotAttributes`), keyed by attribute name.

@@ -2,7 +2,9 @@
 
 use super::*;
 
-use crate::filters::{normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter};
+use crate::filters::{
+    addresses_own_account, normalized_identifier, parse_filters, sibling_rds_arn, RdsFilter,
+};
 
 /// True when `instance` satisfies every filter. Filters are AND-ed with
 /// each other; the values within one filter are OR-ed. The names come
@@ -1262,9 +1264,18 @@ impl RdsService {
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         // "The user-supplied instance identifier or the Amazon Resource
-        // Name (ARN) of the DB instance" -- resolve either form.
-        let db_instance_identifier =
-            normalized_identifier(optional_query_param(request, "DBInstanceIdentifier"));
+        // Name (ARN) of the DB instance" -- resolve either form. A DB
+        // instance is never shared across accounts, so an ARN naming a
+        // different account is simply not found here; resolving it by
+        // bare id would report this account's same-named instance and
+        // make a cross-account misconfiguration look like success.
+        let raw_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        if let Some(raw) = raw_instance_identifier.as_deref() {
+            if !addresses_own_account(raw, &request.account_id) {
+                return Err(db_instance_not_found(raw));
+            }
+        }
+        let db_instance_identifier = normalized_identifier(raw_instance_identifier);
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
         let filters = parse_filters(request);

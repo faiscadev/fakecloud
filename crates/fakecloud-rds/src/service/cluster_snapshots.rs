@@ -2,7 +2,7 @@
 
 use super::*;
 
-use crate::filters::normalized_identifier;
+use crate::filters::{identifier_account, normalized_identifier};
 
 impl RdsService {
     /// Real CreateDBClusterSnapshot: locates the cluster's writer
@@ -148,11 +148,10 @@ impl RdsService {
         // `snapshot_identifier`, and DescribeDBClusterSnapshots /
         // CopyDBClusterSnapshot both resolve that form, so this lookup
         // has to as well.
-        let snapshot_id = normalized_identifier(
-            optional_query_param(request, "SnapshotIdentifier")
-                .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier")),
-        )
-        .ok_or_else(|| {
+        let raw_snapshot_id = optional_query_param(request, "SnapshotIdentifier")
+            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"));
+        let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
+        let snapshot_id = normalized_identifier(raw_snapshot_id).ok_or_else(|| {
             // Without a snapshot id there's no snapshot to look up,
             // so surface the same declared `*NotFound` shape we'd
             // emit for a non-existent id. Smithy doesn't declare a
@@ -169,19 +168,24 @@ impl RdsService {
         );
 
         let mut accounts = self.state.write();
+        // Resolved before the mutable borrow the cluster insert needs.
+        // A snapshot another account shared with this caller is listable,
+        // so it has to be restorable too -- and an ARN names its owner,
+        // so it can't resolve against a different account's identical id.
+        let snapshot = crate::extras::find_cluster_snapshot(
+            &accounts,
+            &request.account_id,
+            snapshot_owner.as_deref(),
+            &snapshot_id,
+        )
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBClusterSnapshotNotFoundFault",
+                format!("DBClusterSnapshot {snapshot_id} not found."),
+            )
+        })?;
         let state = accounts.get_or_create(&request.account_id);
-        let snapshot = state
-            .extras
-            .get("cluster_snapshots")
-            .and_then(|m| m.get(&snapshot_id))
-            .cloned()
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "DBClusterSnapshotNotFoundFault",
-                    format!("DBClusterSnapshot {snapshot_id} not found."),
-                )
-            })?;
         let pending_dump_b64 = snapshot
             .get("DumpDataB64")
             .and_then(|v| v.as_str())

@@ -2403,6 +2403,41 @@ fn body_of_action(svc: &RdsService, action: &str, params: &[(&str, &str)]) -> St
     String::from_utf8(resp.body.expect_bytes().to_vec()).expect("utf8")
 }
 
+fn local_snapshot(snapshot_id: &str, instance_id: &str, account: &str) -> crate::state::DbSnapshot {
+    crate::state::DbSnapshot {
+        db_snapshot_identifier: snapshot_id.to_string(),
+        db_snapshot_arn: format!("arn:aws:rds:us-east-1:{account}:snapshot:{snapshot_id}"),
+        db_instance_identifier: instance_id.to_string(),
+        snapshot_create_time: chrono::Utc::now(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        allocated_storage: 20,
+        status: "available".to_string(),
+        port: 5432,
+        master_username: "admin".to_string(),
+        db_name: Some("appdb".to_string()),
+        dbi_resource_id: format!("db-{snapshot_id}"),
+        snapshot_type: "manual".to_string(),
+        master_user_password: "secret".to_string(),
+        tags: Vec::new(),
+        dump_data: Vec::new(),
+        availability_zone: None,
+        vpc_id: None,
+        instance_create_time: None,
+        license_model: None,
+        iops: None,
+        option_group_name: None,
+        percent_progress: None,
+        storage_type: None,
+        encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        timezone: None,
+        storage_throughput: None,
+        snapshot_attributes: std::collections::BTreeMap::new(),
+    }
+}
+
 fn seed_cluster(svc: &RdsService, id: &str, resource_id: &str, engine: &str) {
     let state = svc.state_handle();
     let mut accounts = state.write();
@@ -2846,6 +2881,139 @@ fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
         body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
         "named shared snapshot returned an empty list: {body}"
     );
+}
+
+#[test]
+fn copy_db_snapshot_prefers_the_account_the_arn_names() {
+    // A foreign ARN must not silently copy this account's same-named
+    // snapshot -- the caller would end up with the wrong data.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let mine = accounts.get_or_create("000000000000");
+        mine.snapshots.insert(
+            "snap-1".to_string(),
+            local_snapshot("snap-1", "my-db", "000000000000"),
+        );
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = local_snapshot("snap-1", "their-db", "999999999999");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["000000000000".to_string()]);
+        other.snapshots.insert("snap-1".to_string(), shared);
+    }
+
+    // AWS supports copying a snapshot shared with you: the ARN picks the
+    // other account's row, not the local one.
+    ok_on(
+        &svc,
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1",
+            ),
+            ("TargetDBSnapshotIdentifier", "copy-1"),
+        ],
+    );
+    let copied = svc
+        .state_handle()
+        .read()
+        .get("000000000000")
+        .and_then(|s| s.snapshots.get("copy-1").cloned())
+        .expect("copy recorded");
+    assert_eq!(
+        copied.db_instance_identifier, "their-db",
+        "copied the local snapshot instead of the shared one"
+    );
+}
+
+#[test]
+fn copy_db_snapshot_rejects_an_unshared_foreign_arn() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other.snapshots.insert(
+            "snap-1".to_string(),
+            local_snapshot("snap-1", "their-db", "999999999999"),
+        );
+    }
+
+    let result = svc.handle_extra_action(&req(
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1",
+            ),
+            ("TargetDBSnapshotIdentifier", "copy-1"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBSnapshotNotFound"),
+        Ok(_) => panic!("copied a snapshot nobody shared"),
+    }
+}
+
+#[test]
+fn describe_db_cluster_snapshots_named_lookup_prefers_the_owned_row() {
+    // Two rows for one named id is the "couldn't resolve a single
+    // result" failure this whole change set exists to avoid.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap", "clu-1", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap")],
+    );
+    assert_eq!(
+        body.matches("<DBClusterSnapshotIdentifier>snap</DBClusterSnapshotIdentifier>")
+            .count(),
+        1,
+        "named lookup returned more than one row: {body}"
+    );
+    assert!(body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+}
+
+#[test]
+fn describe_db_clusters_rejects_another_accounts_arn() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusters",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:cluster:clu-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("a foreign ARN resolved to the local cluster"),
+    }
 }
 
 #[test]

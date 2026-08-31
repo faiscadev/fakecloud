@@ -1656,6 +1656,23 @@ fn describe_db_instances_filters_by_dbi_resource_id() {
 }
 
 #[test]
+fn describe_db_instances_rejects_another_accounts_arn() {
+    // A DB instance is never shared across accounts, so a foreign ARN
+    // must not report this account's same-named instance.
+    let svc = make_service();
+    seed_instance(&svc, "mydb");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[(
+            "DBInstanceIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:db:mydb",
+        )],
+    );
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+}
+
+#[test]
 fn describe_db_instances_identifier_accepts_an_arn() {
     // The Smithy doc: "The user-supplied instance identifier or the
     // Amazon Resource Name (ARN) of the DB instance".
