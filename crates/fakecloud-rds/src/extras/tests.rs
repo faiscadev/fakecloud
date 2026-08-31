@@ -3299,6 +3299,49 @@ fn copy_db_cluster_snapshot_response_reports_the_snapshot_type() {
 }
 
 #[test]
+fn cluster_snapshot_responses_report_the_stored_fields() {
+    // A copied snapshot's source ARN and the cluster resource id are
+    // stored and modeled; `aws_db_cluster_snapshot` reads both, and the
+    // delete response reports the same detail as create / copy.
+    let svc = svc();
+    create_cluster(&svc, "src");
+    snapshot_cluster(&svc, "snap-1", "src");
+
+    let body = body_of_action(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+        ],
+    );
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "{body}"
+    );
+
+    let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &[]);
+    assert!(
+        body.contains("<SourceDBClusterSnapshotArn>"),
+        "copy source ARN not reported: {body}"
+    );
+    assert!(
+        body.contains("<DbClusterResourceId>"),
+        "cluster resource id not reported: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DeleteDBClusterSnapshot",
+        &[("DBClusterSnapshotIdentifier", "snap-copy")],
+    );
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "delete response dropped the detail fields: {body}"
+    );
+}
+
+#[test]
 fn copy_db_cluster_snapshot_rejects_an_existing_target() {
     // Overwriting would silently replace the target's dump and revoke
     // its sharing on a retried copy.

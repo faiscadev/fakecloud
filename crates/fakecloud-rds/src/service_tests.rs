@@ -4014,6 +4014,49 @@ async fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
 }
 
 #[tokio::test]
+async fn restore_db_cluster_from_snapshot_drops_a_stale_staged_dump() {
+    // A snapshot of a cluster that was itself restored carries the
+    // earlier restore's staged dump. Without a fresh one, replaying the
+    // stale bytes would restore data the caller never captured.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let stale = base64::engine::general_purpose::STANDARD.encode(b"-- stale --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "PendingRestoreDumpB64": stale,
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    assert!(
+        cluster_entry(&svc, "restored")
+            .get("PendingRestoreDumpB64")
+            .is_none(),
+        "restored cluster inherited a stale staged dump"
+    );
+}
+
+#[tokio::test]
 async fn restore_db_cluster_from_snapshot_does_not_inherit_sharing() {
     // Sharing must not propagate: CreateDBClusterSnapshot copies the
     // restored cluster's whole row into the next snapshot.

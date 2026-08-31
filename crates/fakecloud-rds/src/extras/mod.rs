@@ -488,32 +488,32 @@ impl RdsService {
                 // Recover the source cluster id from stored state before
                 // remove — emitting a hardcoded "default" would corrupt
                 // downstream consumers that key off DBClusterIdentifier.
-                let cluster = {
+                let deleted = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
                     // Deleting a snapshot that doesn't exist is the
                     // declared fault, not a 200 with an empty cluster id
                     // and a spurious "snapshot deleted" event.
-                    let prior = state
+                    let entry = state
                         .extras
                         .get("cluster_snapshots")
                         .and_then(|m| m.get(&id))
+                        .cloned()
                         .ok_or_else(|| {
                             AwsServiceError::aws_error(
                                 StatusCode::NOT_FOUND,
                                 "DBClusterSnapshotNotFoundFault",
                                 format!("DBClusterSnapshot {id} not found."),
                             )
-                        })?
-                        .get("DBClusterIdentifier")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
+                        })?;
                     if let Some(m) = state.extras.get_mut("cluster_snapshots") {
                         m.remove(&id);
                     }
-                    prior
+                    entry
                 };
+                let cluster = entry_str(&deleted, "DBClusterIdentifier")
+                    .unwrap_or_default()
+                    .to_string();
                 self.emit_event(
                     RdsSourceType::DbClusterSnapshot,
                     &id,
@@ -522,7 +522,20 @@ impl RdsService {
                     &["deletion"],
                     "DB cluster snapshot deleted",
                 );
-                Ok(xml_response("DeleteDBClusterSnapshot", cluster_snapshot_xml(&id, &arn, &cluster), &rid))
+                Ok(xml_response(
+                    "DeleteDBClusterSnapshot",
+                    // Same detail the create / copy responses report, as
+                    // `cluster_snapshot_detail_xml` documents: the entry
+                    // is in hand a few lines above.
+                    cluster_snapshot_status_detail_xml(
+                        &id,
+                        &arn,
+                        &cluster,
+                        "deleted",
+                        cluster_snapshot_detail_xml(Some(&deleted)),
+                    ),
+                    &rid,
+                ))
             }
             "DescribeDBClusterSnapshots" => {
                 // Narrow by the request's own identifier parameters,
@@ -3050,10 +3063,6 @@ pub(crate) fn db_cluster_xml(id: &str, arn: &str) -> String {
     )
 }
 
-pub(crate) fn cluster_snapshot_xml(id: &str, arn: &str, cluster: &str) -> String {
-    cluster_snapshot_status_xml(id, arn, cluster, "available")
-}
-
 /// Snapshot-type / engine fields for a single-object response, read off
 /// the stored entry. The Describe path reports these, so the create /
 /// copy / delete responses have to as well -- otherwise a client reads a
@@ -3080,20 +3089,10 @@ pub(crate) fn cluster_snapshot_detail_xml(entry: Option<&Value>) -> String {
     out
 }
 
-/// Same as `cluster_snapshot_xml` but with an explicit status, so the
-/// CreateDBClusterSnapshot response can report `creating` while the writer
-/// dump runs in the background.
-pub(crate) fn cluster_snapshot_status_xml(
-    id: &str,
-    arn: &str,
-    cluster: &str,
-    status: &str,
-) -> String {
-    cluster_snapshot_status_detail_xml(id, arn, cluster, status, String::new())
-}
-
-/// [`cluster_snapshot_status_xml`] plus the extra fields a caller read
-/// off the stored entry (see [`cluster_snapshot_detail_xml`]).
+/// A single `<DBClusterSnapshot>` element with an explicit status (so
+/// CreateDBClusterSnapshot can report `creating` while the writer dump
+/// runs) plus the extra fields the caller read off the stored entry (see
+/// [`cluster_snapshot_detail_xml`]).
 pub(crate) fn cluster_snapshot_status_detail_xml(
     id: &str,
     arn: &str,

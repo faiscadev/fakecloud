@@ -319,6 +319,11 @@ impl RdsService {
             obj.remove("DBClusterSnapshotIdentifier");
             obj.remove("DBClusterSnapshotArn");
             obj.remove("DumpDataB64");
+            // Also drop any staged dump inherited from an earlier
+            // restore: the fresh one is inserted below when there is one,
+            // and leaving this would silently replay stale data when
+            // there isn't (the create path tolerates a failed dump).
+            obj.remove("PendingRestoreDumpB64");
             // Snapshot-only bookkeeping has no meaning on a cluster row,
             // and CreateDBClusterSnapshot copies the whole row into the
             // next snapshot, so leaving it would propagate forward.

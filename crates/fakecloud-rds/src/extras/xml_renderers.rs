@@ -328,6 +328,10 @@ pub(super) fn cluster_snapshot_member_xml(v: &Value) -> String {
         ("VpcId", "VpcId"),
         ("KmsKeyId", "KmsKeyId"),
         ("LicenseModel", "LicenseModel"),
+        // Stored by CopyDBClusterSnapshot / CreateDBCluster and modeled
+        // on DBClusterSnapshot; `aws_db_cluster_snapshot` reads both.
+        ("SourceDBClusterSnapshotArn", "SourceDBClusterSnapshotArn"),
+        ("DbClusterResourceId", "DbClusterResourceId"),
     ] {
         if let Some(value) = v[key].as_str() {
             out.push_str(&format!("\n          <{tag}>{}</{tag}>", xml_escape(value)));
