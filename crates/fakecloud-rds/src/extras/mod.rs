@@ -29,6 +29,11 @@ use crate::filters::{
 
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
 
+/// Password recorded for a cluster created without one. The engines
+/// refuse to start with an empty password, so a restore from such a
+/// cluster's snapshot needs a non-empty value to hand the container.
+pub(crate) const DEFAULT_CLUSTER_MASTER_PASSWORD: &str = "fakecloud";
+
 /// Read a string field off an extras entry, treating an absent or
 /// non-string value as "the resource doesn't carry this attribute".
 fn entry_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
@@ -233,6 +238,12 @@ impl RdsService {
                     "Endpoint": format!("{id}.cluster-xxx.{region}.rds.amazonaws.com"),
                     "ReaderEndpoint": format!("{id}.cluster-ro-xxx.{region}.rds.amazonaws.com"),
                     "Port": port, "MasterUsername": get_param(req, "MasterUsername").unwrap_or_else(|| "postgres".to_string()),
+                    // Persisted so a snapshot of this cluster carries
+                    // usable credentials: RestoreDBInstanceFromDBSnapshot
+                    // takes no password and has to start a container with
+                    // the ones the snapshot captured.
+                    "MasterUserPassword": get_param(req, "MasterUserPassword")
+                        .unwrap_or_else(|| DEFAULT_CLUSTER_MASTER_PASSWORD.to_string()),
                 });
                 // Persist the remaining create-time input fields (safety flags
                 // like DeletionProtection / StorageEncrypted, KmsKeyId,

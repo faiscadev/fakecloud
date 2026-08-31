@@ -26,13 +26,21 @@ impl RdsService {
         // Checked here to fail before paying for the dump, and AGAIN
         // under the write lock below -- the dump is awaited in between,
         // so two concurrent calls would otherwise both pass this one.
-        if self
-            .state
-            .read()
-            .get(&request.account_id)
-            .and_then(|s| s.extras.get("cluster_snapshots"))
-            .is_some_and(|m| m.contains_key(&snapshot_id))
-        {
+        // Gated on the cluster existing, so a duplicate id against a
+        // cluster that doesn't exist still reports DBClusterNotFoundFault
+        // from the write block below rather than AlreadyExists here.
+        let duplicate_of_existing_cluster = {
+            let accounts = self.state.read();
+            let account = accounts.get(&request.account_id);
+            let cluster_exists = account
+                .and_then(|s| s.extras.get("clusters"))
+                .is_some_and(|m| m.contains_key(&cluster_id));
+            cluster_exists
+                && account
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .is_some_and(|m| m.contains_key(&snapshot_id))
+        };
+        if duplicate_of_existing_cluster {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "DBClusterSnapshotAlreadyExistsFault",

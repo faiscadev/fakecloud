@@ -113,13 +113,29 @@ fn snapshot_matches_filters(
 /// cluster snapshot. AWS lets RestoreDBInstanceFromDBSnapshot take a
 /// Multi-AZ DB cluster snapshot, whose metadata lives in the cluster
 /// snapshot store rather than in `snapshots`.
-fn cluster_snapshot_as_source(
+pub(super) fn cluster_snapshot_as_source(
     entry: &serde_json::Value,
     snapshot_id: &str,
     account_id: &str,
     region: &str,
 ) -> DbSnapshot {
     let field = |key: &str| entry.get(key).and_then(|v| v.as_str()).map(str::to_string);
+    // The snapshot's own ARN names its OWNER, which is not the caller for
+    // a snapshot shared with them.
+    let snapshot_arn = field("DBClusterSnapshotArn").unwrap_or_else(|| {
+        format!("arn:aws:rds:{region}:{account_id}:cluster-snapshot:{snapshot_id}")
+    });
+    // The captured database, base64 in the entry, exactly as
+    // RestoreDBClusterFromSnapshot replays it -- without this the restore
+    // reports `available` with an empty database.
+    let dump_data = entry
+        .get("DumpDataB64")
+        .and_then(|v| v.as_str())
+        .and_then(|b64| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+        })
+        .unwrap_or_default();
     let engine = field("Engine").unwrap_or_else(|| "aurora-postgresql".to_string());
     let engine_version = field("EngineVersion")
         .unwrap_or_else(|| service_helpers::default_engine_version(&engine).to_string());
@@ -130,9 +146,7 @@ fn cluster_snapshot_as_source(
         .unwrap_or_else(|| service_helpers::default_port_for_engine(&engine));
     DbSnapshot {
         db_snapshot_identifier: snapshot_id.to_string(),
-        db_snapshot_arn: format!(
-            "arn:aws:rds:{region}:{account_id}:cluster-snapshot:{snapshot_id}"
-        ),
+        db_snapshot_arn: snapshot_arn,
         db_instance_identifier: field("DBClusterIdentifier").unwrap_or_default(),
         snapshot_create_time: Utc::now(),
         engine,
@@ -148,9 +162,14 @@ fn cluster_snapshot_as_source(
         db_name: field("DatabaseName"),
         dbi_resource_id: field("DbClusterResourceId").unwrap_or_default(),
         snapshot_type: field("SnapshotType").unwrap_or_else(|| "manual".to_string()),
-        master_user_password: field("MasterUserPassword").unwrap_or_default(),
+        // The engines refuse to start with an empty password; a cluster
+        // created before the password was persisted falls back to the
+        // same default CreateDBCluster records now.
+        master_user_password: field("MasterUserPassword")
+            .filter(|password| !password.is_empty())
+            .unwrap_or_else(|| crate::extras::DEFAULT_CLUSTER_MASTER_PASSWORD.to_string()),
         tags: Vec::new(),
-        dump_data: Vec::new(),
+        dump_data,
         availability_zone: None,
         vpc_id: None,
         instance_create_time: None,
@@ -805,6 +824,14 @@ impl RdsService {
                     ));
                 };
                 let state = accounts.get_or_create(&request.account_id);
+                // Same subnet-group validation every other create/restore
+                // path applies; the name is stamped onto the instance
+                // below either way.
+                validate_subnet_group_or_cancel(
+                    state,
+                    &db_instance_identifier,
+                    db_subnet_group_name.as_deref(),
+                )?;
                 let dbi_resource_id = state.next_dbi_resource_id();
                 let db_instance_arn =
                     state.db_instance_arn(&request.region, &db_instance_identifier);

@@ -2346,6 +2346,79 @@ async fn restore_db_instance_from_a_cluster_snapshot() {
     }
 }
 
+#[tokio::test]
+async fn cluster_snapshot_restore_carries_the_dump_and_credentials() {
+    // A restore that reports available with an empty database, or that
+    // hands the container an empty password (which the engines reject),
+    // is a silent data-loss / failed-instance bug.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let dump = base64::engine::general_purpose::STANDARD.encode(b"-- dump --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "MasterUsername": "admin",
+                    "MasterUserPassword": "s3cret",
+                    "DumpDataB64": dump,
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "clu-snap");
+    assert_eq!(source.dump_data, b"-- dump --".to_vec());
+    assert_eq!(source.master_user_password, "s3cret");
+    // The ARN names the snapshot's owner, not the caller.
+    assert!(source.db_snapshot_arn.contains("999999999999"));
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_validates_the_subnet_group() {
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBClusterSnapshotIdentifier", "clu-snap"),
+            ("DBSubnetGroupName", "ghost-group"),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBSubnetGroupNotFoundFault"),
+        Ok(_) => panic!("restore accepted a nonexistent subnet group"),
+    }
+}
+
 #[test]
 fn describe_db_snapshots_reports_a_foreign_instance_arns_shared_snapshots() {
     // A DB instance ARN naming another account matches none of this
@@ -3146,6 +3219,23 @@ fn reconcile_ignores_available_snapshots() {
     assert!(rearm.is_empty());
     assert!(reap.is_empty());
     assert_eq!(snapshot_status(&svc, "snap1"), "available");
+}
+
+/// The source-snapshot record the cluster-snapshot restore synthesizes,
+/// for asserting on the dump / credentials / ARN it carries.
+fn cluster_snapshot_source_for_test(
+    svc: &RdsService,
+    snapshot_id: &str,
+) -> crate::state::DbSnapshot {
+    let accounts = svc.state.read();
+    let entry = accounts
+        .default_ref()
+        .extras
+        .get("cluster_snapshots")
+        .and_then(|m| m.get(snapshot_id))
+        .cloned()
+        .expect("seeded cluster snapshot");
+    super::snapshots::cluster_snapshot_as_source(&entry, snapshot_id, "123456789012", "us-east-1")
 }
 
 /// Seed a cluster entry with the identity fields a restore must not
