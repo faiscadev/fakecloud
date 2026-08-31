@@ -128,6 +128,10 @@ static KMS_ACTIONS: &[&str] = &[
     "UpdateCustomKeyStore",
 ];
 
+/// The DER halves of a generated keypair: `(private_pkcs8, public_spki)`,
+/// both `None` for a symmetric or HMAC `KeySpec`.
+type KeyMaterial = (Option<Vec<u8>>, Option<Vec<u8>>);
+
 pub struct KmsService {
     state: SharedKmsState,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
@@ -136,18 +140,6 @@ pub struct KmsService {
 
 impl KmsService {
     pub fn new(state: SharedKmsState) -> Self {
-        // Warm the RSA keypair cache in the background. Generation is
-        // CPU-bound (~20s for RSA-4096) and reused across every CreateKey
-        // with that bit width; doing it here off a blocking thread keeps
-        // the first concurrent CreateKey from racing N tokio workers into
-        // a 30s read-timeout cliff (see `asym::generate_keypair`).
-        if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::spawn_blocking(|| {
-                let _ = self::asym::generate_keypair("RSA_2048");
-                let _ = self::asym::generate_keypair("RSA_3072");
-                let _ = self::asym::generate_keypair("RSA_4096");
-            });
-        }
         Self {
             state,
             snapshot_store: None,
@@ -548,11 +540,62 @@ impl KmsService {
             })
     }
 
+    /// Generate `(private_pkcs8_der, public_spki_der)` for an asymmetric
+    /// `KeySpec`, or `(None, None)` for symmetric / HMAC specs.
+    ///
+    /// RSA generation is CPU-bound and would otherwise stall the tokio worker
+    /// that is driving the request, so on a multi-thread runtime it runs under
+    /// `block_in_place`, which hands the worker's other tasks off to a sibling
+    /// thread for the duration. `block_in_place` panics on a current-thread
+    /// runtime (and there is no runtime at all under `cargo test`), so those
+    /// cases call straight through.
+    fn generate_asymmetric_material(key_spec: &str) -> Result<KeyMaterial, AwsServiceError> {
+        fn generate(key_spec: &str) -> Result<KeyMaterial, AwsServiceError> {
+            if let Some((p, k)) = asym::generate_keypair(key_spec).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("failed to generate asymmetric key: {e}"),
+                )
+            })? {
+                return Ok((Some(p), Some(k)));
+            }
+            if let Some((p, k)) = asym_ecdsa::generate_keypair(key_spec).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "KMSInternalException",
+                    format!("failed to generate ecdsa key: {e}"),
+                )
+            })? {
+                return Ok((Some(p), Some(k)));
+            }
+            Ok((None, None))
+        }
+
+        let multi_thread = matches!(
+            tokio::runtime::Handle::try_current().map(|h| h.runtime_flavor()),
+            Ok(tokio::runtime::RuntimeFlavor::MultiThread)
+        );
+        if multi_thread {
+            tokio::task::block_in_place(|| generate(key_spec))
+        } else {
+            generate(key_spec)
+        }
+    }
+
     fn create_key(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let input = CreateKeyInput::from_body(&req.json_body())?;
         // Reject incompatible KeySpec/KeyUsage combinations (e.g. an HMAC spec
         // with ENCRYPT_DECRYPT) before minting a key no operation can use.
         validate_key_spec_usage(&input.key_spec, &input.key_usage)?;
+
+        // Mint the key material *before* taking the state lock. RSA generation
+        // is CPU-bound (seconds, and far worse for RSA-4096 in a debug build);
+        // doing it under `state.write()` stalled every other KMS request —
+        // including symmetric CreateKey and Encrypt — behind one RSA key, and
+        // blocked the tokio worker on top of that. It depends only on
+        // `key_spec`, so it does not need the lock at all.
+        let (asym_priv, asym_pub) = Self::generate_asymmetric_material(&input.key_spec)?;
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -584,28 +627,6 @@ impl KmsService {
         let key_policy = input
             .policy
             .unwrap_or_else(|| default_key_policy(&state.account_id));
-
-        let mut asym_priv: Option<Vec<u8>> = None;
-        let mut asym_pub: Option<Vec<u8>> = None;
-        if let Some((p, k)) = asym::generate_keypair(&input.key_spec).map_err(|e| {
-            AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "KMSInternalException",
-                format!("failed to generate asymmetric key: {e}"),
-            )
-        })? {
-            asym_priv = Some(p);
-            asym_pub = Some(k);
-        } else if let Some((p, k)) = asym_ecdsa::generate_keypair(&input.key_spec).map_err(|e| {
-            AwsServiceError::aws_error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "KMSInternalException",
-                format!("failed to generate ecdsa key: {e}"),
-            )
-        })? {
-            asym_priv = Some(p);
-            asym_pub = Some(k);
-        }
 
         // Refuse asymmetric specs we cannot really generate keys for
         // rather than store a no-DER key that would later fall through
