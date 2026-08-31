@@ -20,11 +20,9 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{RdsService, RdsSourceType};
 
-use crate::service::service_helpers::parse_optional_bool;
-
 use crate::filters::{
     addresses_own_account, identifier_account, identifier_matches_type, normalized_identifier,
-    parse_filters, sibling_rds_arn, RdsFilter,
+    optional_flag, parse_filters, sibling_rds_arn, RdsFilter,
 };
 
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
@@ -585,12 +583,10 @@ impl RdsService {
                 // ops can't drift on what counts as true. A junk boolean
                 // is treated as absent: InvalidParameterValue isn't
                 // declared on this operation.
-                let include_shared = parse_optional_bool(get_param(req, "IncludeShared").as_deref())
-                    .unwrap_or(None)
-                    .unwrap_or(false);
-                let include_public = parse_optional_bool(get_param(req, "IncludePublic").as_deref())
-                    .unwrap_or(None)
-                    .unwrap_or(false);
+                let include_shared =
+                    optional_flag(get_param(req, "IncludeShared").as_deref()).unwrap_or(false);
+                let include_public =
+                    optional_flag(get_param(req, "IncludePublic").as_deref()).unwrap_or(false);
                 let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
                 // A named snapshot that doesn't exist is the declared

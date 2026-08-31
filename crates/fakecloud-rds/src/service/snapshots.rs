@@ -4,7 +4,7 @@ use super::*;
 
 use crate::filters::{
     addresses_own_account, identifier_account, identifier_matches_type, normalized_identifier,
-    parse_filters, sibling_rds_arn, RdsFilter,
+    optional_flag, parse_filters, sibling_rds_arn, RdsFilter,
 };
 
 /// The account ids a snapshot's `restore` attribute is shared with.
@@ -165,10 +165,12 @@ pub(super) fn cluster_snapshot_as_source(
         .unwrap_or_else(|| "postgres".to_string());
     let engine_version = field("EngineVersion")
         .unwrap_or_else(|| service_helpers::default_engine_version(&engine).to_string());
+    // An out-of-range value is ignored rather than truncated: `as i32`
+    // would wrap a bogus stored port to something like 0.
     let port = entry
         .get("Port")
         .and_then(|v| v.as_i64())
-        .map(|p| p as i32)
+        .and_then(|p| i32::try_from(p).ok())
         .unwrap_or_else(|| service_helpers::default_port_for_engine(&engine));
     DbSnapshot {
         db_snapshot_identifier: snapshot_id.to_string(),
@@ -180,7 +182,7 @@ pub(super) fn cluster_snapshot_as_source(
         allocated_storage: entry
             .get("AllocatedStorage")
             .and_then(|v| v.as_i64())
-            .map(|v| v as i32)
+            .and_then(|v| i32::try_from(v).ok())
             .unwrap_or(20),
         status: "available".to_string(),
         port,
@@ -513,12 +515,10 @@ impl RdsService {
         // `InvalidParameterValue` isn't declared on this operation (see
         // the module docs on `crate::filters`).
         let include_shared =
-            parse_optional_bool(optional_query_param(request, "IncludeShared").as_deref())
-                .unwrap_or(None)
+            optional_flag(optional_query_param(request, "IncludeShared").as_deref())
                 .unwrap_or(false);
         let include_public =
-            parse_optional_bool(optional_query_param(request, "IncludePublic").as_deref())
-                .unwrap_or(None)
+            optional_flag(optional_query_param(request, "IncludePublic").as_deref())
                 .unwrap_or(false);
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");

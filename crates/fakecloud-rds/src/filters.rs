@@ -83,14 +83,15 @@ impl RdsFilter {
 /// AWS documents as accepting "identifiers and ARNs" can be matched
 /// against the ARN form too. Returns `None` for a malformed ARN.
 pub(crate) fn sibling_rds_arn(arn: &str, resource_type: &str, id: &str) -> Option<String> {
-    // Guarded on the `arn:` prefix like `normalized_identifier`: without
-    // it any 5-field string would be turned into a fabricated ARN that a
-    // filter could then match on.
+    // Guarded on the `arn:` prefix AND the `rds` service, like
+    // `identifier_matches_type`: otherwise any 5-field string -- or an
+    // ARN of another service -- would be turned into a fabricated ARN
+    // that a filter could then match on.
     if !arn.starts_with("arn:") {
         return None;
     }
     let prefix: Vec<&str> = arn.splitn(7, ':').take(5).collect();
-    if prefix.len() < 5 {
+    if prefix.len() < 5 || prefix[2] != "rds" {
         return None;
     }
     Some(format!("{}:{resource_type}:{id}", prefix.join(":")))
@@ -130,6 +131,21 @@ pub(crate) fn normalized_identifier(param: Option<String>, resource_type: &str) 
             value.splitn(7, ':').nth(6).map(str::to_string)
         })
         .filter(|value| !value.is_empty())
+}
+
+/// Parse a request flag leniently.
+///
+/// `parse_optional_bool` accepts only `true`/`false`, and these flags
+/// can't reject a junk value (`InvalidParameterValue` is undeclared on
+/// the Describe ops), so an unrecognized value would silently read as
+/// `false` -- a wrong answer rather than a tolerated one. `1`/`0` are
+/// honoured too; anything else is treated as absent.
+pub(crate) fn optional_flag(value: Option<&str>) -> Option<bool> {
+    match value?.trim() {
+        v if v.eq_ignore_ascii_case("true") || v == "1" => Some(true),
+        v if v.eq_ignore_ascii_case("false") || v == "0" => Some(false),
+        _ => None,
+    }
 }
 
 /// True when an identifier is a bare id, or an ARN of `resource_type`.
@@ -445,6 +461,18 @@ mod tests {
     }
 
     #[test]
+    fn optional_flag_accepts_the_forms_clients_send() {
+        assert_eq!(optional_flag(Some("true")), Some(true));
+        assert_eq!(optional_flag(Some("TRUE")), Some(true));
+        assert_eq!(optional_flag(Some("1")), Some(true));
+        assert_eq!(optional_flag(Some("false")), Some(false));
+        assert_eq!(optional_flag(Some("0")), Some(false));
+        // Junk is absent, not false.
+        assert_eq!(optional_flag(Some("yes-please")), None);
+        assert_eq!(optional_flag(None), None);
+    }
+
+    #[test]
     fn identifier_matches_type_guards_the_resource_field() {
         assert!(identifier_matches_type("snap-1", "snapshot"));
         assert!(identifier_matches_type(
@@ -502,5 +530,10 @@ mod tests {
         assert_eq!(sibling_rds_arn("not-an-arn", "db", "mydb"), None);
         // A 5-field non-ARN must not be turned into a fabricated ARN.
         assert_eq!(sibling_rds_arn("a:b:c:d:e", "cluster", "x"), None);
+        // Nor an ARN of another service.
+        assert_eq!(
+            sibling_rds_arn("arn:aws:ec2:us-east-1:123:instance:i-1", "cluster", "x"),
+            None
+        );
     }
 }
