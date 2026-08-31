@@ -1426,6 +1426,52 @@ fn restore_db_cluster_from_snapshot_clones_source_cluster_fields() {
 }
 
 #[test]
+fn restore_db_cluster_from_snapshot_hydrates_from_the_snapshot() {
+    // Reading the caller's `clusters` map by the snapshot's source id
+    // would restore an unrelated local cluster of the same name -- or,
+    // for a shared snapshot, fall back to the postgres defaults.
+    let svc = svc();
+    create_cluster(&svc, "src");
+    svc.handle_extra_action(&req(
+        "ModifyDBCluster",
+        &[("DBClusterIdentifier", "src"), ("EngineVersion", "16.9")],
+    ))
+    .expect("ModifyDBCluster");
+    svc.handle_extra_action(&req(
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap1"),
+            ("DBClusterIdentifier", "src"),
+        ],
+    ))
+    .expect("CreateDBClusterSnapshot");
+
+    // The source cluster changes after the snapshot was taken: the
+    // restore must reflect the snapshot, not the live cluster.
+    svc.handle_extra_action(&req(
+        "ModifyDBCluster",
+        &[("DBClusterIdentifier", "src"), ("EngineVersion", "17.1")],
+    ))
+    .expect("ModifyDBCluster");
+
+    svc.handle_extra_action(&req(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap1"),
+        ],
+    ))
+    .expect("RestoreDBClusterFromSnapshot");
+
+    let v = cluster_value(&svc, "restored");
+    assert_eq!(
+        v["EngineVersion"].as_str(),
+        Some("16.9"),
+        "restore read the live cluster instead of the snapshot"
+    );
+}
+
+#[test]
 fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
     let svc = svc();
     let err = svc

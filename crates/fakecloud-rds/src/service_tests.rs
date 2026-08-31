@@ -2405,6 +2405,68 @@ fn describe_db_snapshots_tolerates_a_junk_include_flag() {
 }
 
 #[test]
+fn a_foreign_arn_is_never_typed_as_owned() {
+    // Ownership must come from where the row resolved, not from a bare
+    // id probe: with a local namesake, a foreign row was typed "owned",
+    // so `--snapshot-type shared` dropped it while `--snapshot-type
+    // manual` wrongly returned another account's snapshot.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap-1", "my-db");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("snap-1");
+        shared.db_instance_identifier = "their-db".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("snap-1".to_string(), shared);
+    }
+
+    let foreign_arn = "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1";
+
+    // The shared row answers to `shared`...
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", foreign_arn),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBInstanceIdentifier>their-db</DBInstanceIdentifier>"),
+        "shared lookup dropped the foreign row: {body}"
+    );
+
+    // ...and not to an owned type.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", foreign_arn),
+            ("SnapshotType", "manual"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>"),
+        "a foreign row answered to an owned SnapshotType: {body}"
+    );
+
+    // The snapshot-type filter agrees with the parameter.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", foreign_arn),
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>their-db</DBInstanceIdentifier>"));
+}
+
+#[test]
 fn describe_db_snapshots_arn_account_wins_over_a_local_namesake() {
     // Resolving the local row first would return B's own `prod-snap` for
     // an ARN that named account A -- the same aliasing the delete path

@@ -421,11 +421,17 @@ impl RdsService {
             let named_owner = raw_snapshot_identifier
                 .as_deref()
                 .and_then(identifier_account);
-            let snapshot = named_owner
+            let owned_snapshot = named_owner
                 .as_deref()
                 .is_none_or(|account| account == request.account_id)
                 .then(|| state.snapshots.get(&snapshot_id).cloned())
-                .flatten()
+                .flatten();
+            // Ownership comes from where the row actually resolved.
+            // Re-probing `state.snapshots` by bare id would call a
+            // foreign row "owned" whenever the caller happens to hold a
+            // snapshot with the same identifier.
+            let owned = owned_snapshot.is_some();
+            let snapshot = owned_snapshot
                 // A snapshot another account shared with this caller is
                 // listed by SnapshotType=shared / IncludeShared, so
                 // re-reading it by id or ARN has to resolve too --
@@ -459,9 +465,6 @@ impl RdsService {
             // IncludeShared / IncludePublic on an unqualified read) rather
             // than to its own stored type -- the same rule the list path
             // applies, so a row the list reported can be re-read by id.
-            let owned = state
-                .snapshots
-                .contains_key(&snapshot.db_snapshot_identifier);
             let shared_with_caller = snapshot_shared_with(&snapshot, &request.account_id);
             let public = snapshot_is_public(&snapshot);
             let type_ok = if owned {

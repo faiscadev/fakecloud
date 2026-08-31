@@ -2491,27 +2491,19 @@ impl RdsService {
                             )
                         })?;
                 let state = accounts.get_or_create(&aid);
-                let source_cluster_id = snapshot
-                    .get("DBClusterIdentifier")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
                 let pending_dump_b64 = snapshot
                     .get("DumpDataB64")
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
-                let mut entry = state
-                    .extras
-                    .get("clusters")
-                    .and_then(|m| m.get(source_cluster_id))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        json!({
-                            "Engine": get_param(req, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
-                            "EngineVersion": get_param(req, "EngineVersion").unwrap_or_else(|| "15.3".to_string()),
-                            "MasterUsername": "postgres",
-                            "Port": 5432,
-                        })
-                    });
+                // Hydrate from the snapshot itself, like the async
+                // handler: CreateDBClusterSnapshot copies the whole
+                // cluster row in, so the snapshot is the point in time
+                // the caller asked for. Reading the caller's `clusters`
+                // map by the snapshot's source id would restore an
+                // unrelated local cluster of the same name (or fall back
+                // to the postgres defaults for a shared aurora-mysql
+                // snapshot).
+                let mut entry = snapshot.clone();
                 if let Some(obj) = entry.as_object_mut() {
                     obj.insert("DBClusterIdentifier".to_string(), json!(target));
                     obj.insert("DBClusterArn".to_string(), json!(arn));
