@@ -163,7 +163,10 @@ pub(super) fn cluster_snapshot_as_source(
     let engine = field("SourceEngine")
         .or_else(|| field("Engine").map(|engine| container_engine_for(&engine).to_string()))
         .unwrap_or_else(|| "postgres".to_string());
-    let engine_version = field("EngineVersion")
+    // Paired with the engine above: the cluster's own Aurora version
+    // against the writer's engine is a combination AWS never reports.
+    let engine_version = field("SourceEngineVersion")
+        .or_else(|| field("EngineVersion").filter(|_| field("SourceEngine").is_none()))
         .unwrap_or_else(|| service_helpers::default_engine_version(&engine).to_string());
     // An out-of-range value is ignored rather than truncated: `as i32`
     // would wrap a bogus stored port to something like 0.

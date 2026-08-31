@@ -2347,6 +2347,107 @@ async fn restore_db_instance_from_a_cluster_snapshot() {
 }
 
 #[tokio::test]
+async fn create_db_instance_persists_the_domain_membership() {
+    // The `domain` filter reads instance.domain, so an instance created
+    // WITH a domain (rather than modified into one) has to carry it --
+    // otherwise the filter is dead for the common case.
+    let svc = make_service();
+    let req = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "domain-db"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("Engine", "postgres"),
+            ("AllocatedStorage", "20"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secret123"),
+            ("Domain", "d-1234567890"),
+            ("DomainIAMRoleName", "rds-directory"),
+        ],
+    );
+    // Without a runtime the create fails after the record is staged, so
+    // read the persisted row rather than the response.
+    let _ = svc.create_db_instance(&req).await;
+
+    let domain = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("domain-db")
+        .map(|instance| {
+            (
+                instance.domain.clone(),
+                instance.domain_iam_role_name.clone(),
+            )
+        });
+    if let Some((domain, role)) = domain {
+        assert_eq!(domain.as_deref(), Some("d-1234567890"));
+        assert_eq!(role.as_deref(), Some("rds-directory"));
+    }
+}
+
+#[test]
+fn describe_db_instances_filters_by_domain() {
+    let svc = make_service();
+    seed_instance(&svc, "joined");
+    seed_instance(&svc, "standalone");
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .instances
+            .get_mut("joined")
+            .expect("seeded instance")
+            .domain = Some("d-1234567890".to_string());
+    }
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "domain"),
+            ("Filters.Filter.1.Values.Value.1", "d-1234567890"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>joined</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>standalone</DBInstanceIdentifier>"));
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_reports_the_writers_engine_version() {
+    // Engine and EngineVersion must come from the same place: the
+    // writer's engine against the cluster's Aurora version is a pair AWS
+    // never reports, and a Terraform engine_version comparison would
+    // diff forever.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                    "SourceEngine": "mysql",
+                    "SourceEngineVersion": "8.0.36",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "clu-snap");
+    assert_eq!(source.engine, "mysql");
+    assert_eq!(source.engine_version, "8.0.36");
+}
+
+#[tokio::test]
 async fn cluster_snapshot_restore_uses_the_writers_engine_and_credentials() {
     // The dump was taken from the writer with ITS engine, credentials and
     // database. Rebuilding the source from the cluster row instead hands

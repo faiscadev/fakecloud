@@ -77,6 +77,7 @@ impl RdsService {
                     inst.db_name
                         .clone()
                         .unwrap_or_else(|| default_db_name(&inst.engine).to_string()),
+                    inst.engine_version.clone(),
                 ))
             })
         };
@@ -87,8 +88,16 @@ impl RdsService {
         // `aurora-*` family which no runtime can start.
         let writer_source = writer_info
             .as_ref()
-            .map(|(_, eng, user, pass, db)| (eng.clone(), user.clone(), pass.clone(), db.clone()));
-        let dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
+            .map(|(_, eng, user, pass, db, version)| {
+                (
+                    eng.clone(),
+                    user.clone(),
+                    pass.clone(),
+                    db.clone(),
+                    version.clone(),
+                )
+            });
+        let dump_b64 = if let Some((wid, eng, user, pass, db, _version)) = writer_info {
             if let Some(runtime) = self.runtime_ref() {
                 match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
                     Ok(data) => {
@@ -150,11 +159,17 @@ impl RdsService {
                 obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
                 obj.insert("Status".to_string(), json!("available"));
                 obj.insert("SnapshotType".to_string(), json!("manual"));
-                if let Some((engine, username, password, db_name)) = writer_source.as_ref() {
+                if let Some((engine, username, password, db_name, engine_version)) =
+                    writer_source.as_ref()
+                {
                     obj.insert("SourceEngine".to_string(), json!(engine));
                     obj.insert("SourceMasterUsername".to_string(), json!(username));
                     obj.insert("SourceMasterUserPassword".to_string(), json!(password));
                     obj.insert("SourceDBName".to_string(), json!(db_name));
+                    // Paired with SourceEngine: reporting the cluster's
+                    // Aurora version against the writer's engine would be
+                    // an engine/version pair that doesn't exist on AWS.
+                    obj.insert("SourceEngineVersion".to_string(), json!(engine_version));
                 }
                 if let Some(b64) = dump_b64.as_ref() {
                     obj.insert("DumpDataB64".to_string(), json!(b64));
@@ -315,6 +330,7 @@ impl RdsService {
             // instance restore start with the old credentials and
             // database.
             obj.remove("SourceEngine");
+            obj.remove("SourceEngineVersion");
             obj.remove("SourceMasterUsername");
             obj.remove("SourceMasterUserPassword");
             obj.remove("SourceDBName");

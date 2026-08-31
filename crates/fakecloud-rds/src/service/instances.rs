@@ -242,12 +242,17 @@ impl RdsService {
                 tde_credential_arn: None,
                 delete_automated_backups: None,
                 db_security_groups: Vec::new(),
-                domain: None,
-                domain_fqdn: None,
-                domain_ou: None,
-                domain_iam_role_name: None,
-                domain_auth_secret_arn: None,
-                domain_dns_ips: Vec::new(),
+                // Active Directory membership is settable at create
+                // time, not only through ModifyDBInstance -- without
+                // this the `domain` filter is dead for every instance
+                // that was created with one (and DescribeDBInstances
+                // reports no DomainMembership).
+                domain: optional_query_param(request, "Domain"),
+                domain_fqdn: optional_query_param(request, "DomainFqdn"),
+                domain_ou: optional_query_param(request, "DomainOu"),
+                domain_iam_role_name: optional_query_param(request, "DomainIAMRoleName"),
+                domain_auth_secret_arn: optional_query_param(request, "DomainAuthSecretArn"),
+                domain_dns_ips: parse_string_member_list(request, "DomainDnsIps"),
                 db_cluster_identifier: db_cluster_identifier.clone(),
                 activity_stream: None,
             };

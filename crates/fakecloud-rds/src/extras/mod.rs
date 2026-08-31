@@ -2491,7 +2491,6 @@ impl RdsService {
                     .ok_or_else(|| missing("AttributeName"))?;
                 let to_add = parse_attribute_values(req, "ValuesToAdd");
                 let to_remove = parse_attribute_values(req, "ValuesToRemove");
-                // AWS rejects a value that appears in both add and remove lists.
                 // AWS rejects a value present in both lists, but
                 // `InvalidParameterCombination` is not even a shape in the
                 // RDS model, so emitting it here would be an undeclared
