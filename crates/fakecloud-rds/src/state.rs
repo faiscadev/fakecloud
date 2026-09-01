@@ -371,6 +371,16 @@ pub struct RdsTag {
 pub struct DbSnapshot {
     pub db_snapshot_identifier: String,
     pub db_snapshot_arn: String,
+    /// The ARN of the snapshot this one was copied from, when it is a
+    /// copy. AWS reports it as `SourceDBSnapshotIdentifier`.
+    ///
+    /// A copy's own ARN names the COPIER's account and region, while the
+    /// instance it records still belongs to the original owner -- so the
+    /// source ARN is the only thing that says where that instance lives,
+    /// and `db-instance-id` needs it to match a cross-account or
+    /// cross-region copy by ARN.
+    #[serde(default)]
+    pub source_db_snapshot_arn: Option<String>,
     pub db_instance_identifier: String,
     pub snapshot_create_time: DateTime<Utc>,
     pub engine: String,

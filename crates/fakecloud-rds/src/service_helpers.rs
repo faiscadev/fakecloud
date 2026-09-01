@@ -1728,6 +1728,12 @@ pub(crate) fn db_snapshot_xml(snapshot: &DbSnapshot) -> String {
     let kms_key_id_xml = opt("KmsKeyId", snapshot.kms_key_id.as_deref());
     let timezone_xml = opt("Timezone", snapshot.timezone.as_deref());
     let storage_throughput_xml = opt_int("StorageThroughput", snapshot.storage_throughput);
+    // AWS reports the source as an ARN on a copy, and omits it entirely
+    // on a snapshot that isn't one.
+    let source_snapshot_xml = opt(
+        "SourceDBSnapshotIdentifier",
+        snapshot.source_db_snapshot_arn.as_deref(),
+    );
 
     format!(
         "<DBSnapshotIdentifier>{}</DBSnapshotIdentifier>\
@@ -1755,6 +1761,7 @@ pub(crate) fn db_snapshot_xml(snapshot: &DbSnapshot) -> String {
          <IAMDatabaseAuthenticationEnabled>{iam_auth}</IAMDatabaseAuthenticationEnabled>\
          {timezone_xml}\
          {storage_throughput_xml}\
+         {source_snapshot_xml}\
          <ProcessorFeatures/>\
          <DBSnapshotArn>{}</DBSnapshotArn>",
         xml_escape(&snapshot.db_snapshot_identifier),

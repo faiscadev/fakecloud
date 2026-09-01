@@ -2250,6 +2250,7 @@ fn local_snapshot(snapshot_id: &str, instance_id: &str, account: &str) -> crate:
     crate::state::DbSnapshot {
         db_snapshot_identifier: snapshot_id.to_string(),
         db_snapshot_arn: format!("arn:aws:rds:us-east-1:{account}:snapshot:{snapshot_id}"),
+        source_db_snapshot_arn: None,
         db_instance_identifier: instance_id.to_string(),
         snapshot_create_time: chrono::Utc::now(),
         engine: "postgres".to_string(),
@@ -2890,16 +2891,165 @@ fn shared_cluster_snapshots_with_one_name_paginate_apart() {
         }
     }
 
-    // Both accounts' rows, each exactly once -- not the same row twice.
-    seen.sort();
+    // The paged walk must reproduce the unpaginated listing EXACTLY --
+    // same rows, same order. Sorting first would only prove membership,
+    // and a paginator that reordered or repeated rows would still pass.
+    let unpaged = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("IncludeShared", "true")],
+    );
+    let expected: Vec<String> = unpaged
+        .split("<DBClusterSnapshotArn>")
+        .skip(1)
+        .filter_map(|rest| rest.split("</DBClusterSnapshotArn>").next())
+        .map(str::to_string)
+        .collect();
     assert_eq!(
-        seen,
+        seen, expected,
+        "paginating a shared listing did not reproduce the unpaginated order"
+    );
+
+    // And that listing is the three distinct rows -- so the comparison
+    // above can't be satisfied by two identical sequences of one row.
+    let mut unique = expected.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique,
         vec![
             "arn:aws:rds:us-east-1:777777777777:cluster-snapshot:dup-snap".to_string(),
             "arn:aws:rds:us-east-1:888888888888:cluster-snapshot:dup-snap".to_string(),
             "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:dup-snap".to_string(),
         ],
-        "paginating a shared listing repeated or dropped a row"
+        "the shared listing itself lost a row"
+    );
+}
+
+/// A row persisted or seeded without an ARN still matches an ARN-valued
+/// filter, and the ARN it gets carries the region's own partition.
+#[test]
+fn cluster_snapshot_without_an_arn_is_stamped_before_filtering() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("000000000000")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "bare-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "bare-snap",
+                    "DBClusterIdentifier": "clu-1",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                }),
+            );
+    }
+
+    // Filtering by the snapshot's ARN: the row carries none in state, so
+    // stamping has to happen BEFORE the filter runs or it is filtered
+    // out before it can be stamped.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-snapshot-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:bare-snap",
+            ),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>bare-snap</DBClusterSnapshotIdentifier>"),
+        "an ARN filter missed a row that had no stored ARN: {body}"
+    );
+}
+
+/// `Arn::new` hardcodes the `aws` partition, so a synthesized ARN in a
+/// China or GovCloud region would be wrong on the wire -- and, since
+/// pagination keys on it, inconsistent with a stored one.
+#[test]
+fn synthesized_cluster_snapshot_arn_uses_the_regions_partition() {
+    for (region, partition) in [
+        ("us-east-1", "aws"),
+        ("cn-north-1", "aws-cn"),
+        ("us-gov-west-1", "aws-us-gov"),
+    ] {
+        let arn = super::cluster_snapshot_arn(region, "000000000000", "snap-1");
+        assert_eq!(
+            arn,
+            format!("arn:{partition}:rds:{region}:000000000000:cluster-snapshot:snap-1")
+        );
+    }
+}
+
+/// A copy's own ARN names the copier, so the cluster it records is only
+/// reachable by ARN through the SOURCE snapshot's ARN.
+#[test]
+fn db_cluster_id_filter_matches_a_cross_account_copys_source_cluster() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("000000000000")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "mycopy".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "mycopy",
+                    "DBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:mycopy",
+                    // The cluster belongs to the account that shared the
+                    // source, not to the copier.
+                    "DBClusterIdentifier": "cluB",
+                    "SourceDBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:222222222222:cluster-snapshot:snapB",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:222222222222:cluster:cluB",
+            ),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>mycopy</DBClusterSnapshotIdentifier>"),
+        "the source cluster's ARN did not match a copy: {body}"
+    );
+
+    // The copier's own account does NOT own that cluster, so the ARN
+    // rebuilt from the copy's own ARN must not match.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:000000000000:cluster:cluB",
+            ),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>mycopy</DBClusterSnapshotIdentifier>"),
+        "the copy's own account ARN stopped matching: {body}"
     );
 }
 
@@ -2946,6 +3096,62 @@ fn copy_db_snapshot_prefers_the_account_the_arn_names() {
     assert_eq!(
         copied.db_instance_identifier, "their-db",
         "copied the local snapshot instead of the shared one"
+    );
+}
+
+/// A copy records where it came from, and `db-instance-id` uses that to
+/// reach the source instance by ARN.
+#[test]
+fn copy_db_snapshot_records_the_source_and_filters_on_it() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = local_snapshot("snap-1", "their-db", "999999999999");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["000000000000".to_string()]);
+        other.snapshots.insert("snap-1".to_string(), shared);
+    }
+
+    let body = body_of_action(
+        &svc,
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1",
+            ),
+            ("TargetDBSnapshotIdentifier", "mycopy"),
+        ],
+    );
+    // AWS reports the source as an ARN on a copy.
+    assert!(
+        body.contains(
+            "<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:999999999999:snapshot:snap-1</SourceDBSnapshotIdentifier>"
+        ),
+        "the copy didn't report its source: {body}"
+    );
+
+    // And it is recorded in state, which is what `db-instance-id`
+    // matches the source instance's ARN against.
+    let state = svc.state_handle();
+    let accounts = state.read();
+    let copy = accounts
+        .get("000000000000")
+        .and_then(|s| s.snapshots.get("mycopy"))
+        .expect("copy not stored");
+    assert_eq!(
+        copy.source_db_snapshot_arn.as_deref(),
+        Some("arn:aws:rds:us-east-1:999999999999:snapshot:snap-1")
+    );
+    // The instance still belongs to the original owner, which is why the
+    // copy's own ARN can't be used to rebuild that instance's ARN.
+    assert_eq!(copy.db_instance_identifier, "their-db");
+    assert_eq!(
+        copy.db_snapshot_arn,
+        "arn:aws:rds:us-east-1:000000000000:snapshot:mycopy"
     );
 }
 

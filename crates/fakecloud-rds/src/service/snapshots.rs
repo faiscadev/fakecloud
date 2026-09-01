@@ -86,9 +86,20 @@ fn snapshot_matches_filters(
                 "db",
                 &snapshot.db_instance_identifier,
             );
+            // A copy's own ARN names the COPIER, while the instance it
+            // records still belongs to the original owner -- so for a
+            // cross-account or cross-region copy the ARN rebuilt from it
+            // names an instance that doesn't exist. The source
+            // snapshot's ARN names the account and region that one
+            // really is in.
+            let source_instance_arn = snapshot
+                .source_db_snapshot_arn
+                .as_deref()
+                .and_then(|arn| sibling_rds_arn(arn, "db", &snapshot.db_instance_identifier));
             filter.matches_any([
                 Some(snapshot.db_instance_identifier.as_str()),
                 instance_arn.as_deref(),
+                source_instance_arn.as_deref(),
             ])
         }
         "db-snapshot-id" => filter.matches_any([
@@ -103,7 +114,13 @@ fn snapshot_matches_filters(
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
         other => {
-            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            // Warn, not debug: the result is an EMPTY list where the
+            // caller expected a narrowed one, and nothing on the wire
+            // says why (InvalidParameterValue isn't declared on these
+            // operations, so it can't be returned). A silent empty
+            // result is the hardest failure to diagnose, so the reason
+            // has to reach a default log level.
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
             false
         }
     })
@@ -206,6 +223,7 @@ pub(super) fn cluster_snapshot_as_source(
     DbSnapshot {
         db_snapshot_identifier: snapshot_id.to_string(),
         db_snapshot_arn: snapshot_arn,
+        source_db_snapshot_arn: None,
         db_instance_identifier: field("DBClusterIdentifier").unwrap_or_default(),
         snapshot_create_time: Utc::now(),
         engine,
@@ -330,6 +348,7 @@ impl RdsService {
             let snapshot = DbSnapshot {
                 db_snapshot_identifier: snapshot_id.to_string(),
                 db_snapshot_arn: snapshot_arn,
+                source_db_snapshot_arn: None,
                 db_instance_identifier: db_instance_identifier.to_string(),
                 snapshot_create_time: Utc::now(),
                 engine: instance.engine.clone(),
@@ -458,6 +477,7 @@ impl RdsService {
                 db_snapshot_identifier: db_snapshot_identifier.clone(),
                 db_snapshot_arn: state
                     .db_snapshot_arn(request.region.as_str(), &db_snapshot_identifier),
+                source_db_snapshot_arn: None,
                 db_instance_identifier: instance.db_instance_identifier.clone(),
                 snapshot_create_time: Utc::now(),
                 engine: instance.engine.clone(),
@@ -945,9 +965,26 @@ impl RdsService {
         let reported_identifier = raw_snapshot_identifier
             .clone()
             .unwrap_or_else(|| "(none)".to_string());
+        // The fault follows the parameter the caller used. An identifier
+        // that doesn't resolve at all (wrong resource type, an ARN with
+        // no account) reported DBSnapshotNotFound even for
+        // DBClusterSnapshotIdentifier, while a cluster snapshot that
+        // merely doesn't exist reports DBClusterSnapshotNotFoundFault
+        // below -- so a client branching on the fault (Terraform telling
+        // a cluster-snapshot source from an instance-snapshot one) saw
+        // two different shapes for the same parameter.
         let db_snapshot_identifier =
-            normalized_identifier(raw_snapshot_identifier, snapshot_arn_type)
-                .ok_or_else(|| db_snapshot_not_found(&reported_identifier))?;
+            normalized_identifier(raw_snapshot_identifier, snapshot_arn_type).ok_or_else(|| {
+                if from_cluster_snapshot {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {reported_identifier} not found."),
+                    )
+                } else {
+                    db_snapshot_not_found(&reported_identifier)
+                }
+            })?;
         let vpc_security_group_ids = parse_vpc_security_group_ids(request);
         let tags = parse_tags(request)?;
         let db_subnet_group_name = optional_query_param(request, "DBSubnetGroupName");

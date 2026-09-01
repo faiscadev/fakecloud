@@ -237,7 +237,9 @@ Reaching a snapshot another account shared with you takes the ARN, which names i
 
 `ModifyDBSnapshotAttribute` and `ModifyDBClusterSnapshotAttribute` resolve a value listed in both `ValuesToAdd` and `ValuesToRemove` by removing it (AWS rejects the request outright, but that error shape isn't in the RDS model). The response echoes the resulting attribute set, so a caller can confirm what was actually applied.
 
-Real RDS rejects a filter name an operation doesn't support with `InvalidParameterValue`. fakecloud can't: that error isn't declared on any of these operations in the Smithy model, so returning it would emit an undeclared error shape. An unrecognized filter name matches no resource instead, so a caller that asked to narrow gets an empty result rather than the full list.
+Real RDS rejects a filter name an operation doesn't support with `InvalidParameterValue`. fakecloud can't: that error isn't declared on any of these operations in the Smithy model, so returning it would emit an undeclared error shape. An unrecognized filter name matches no resource instead, so a caller that asked to narrow gets an empty result rather than the full list. Because nothing on the wire explains that, the name is logged at `warn` level.
+
+`CopyDBSnapshot` records the source it copied from and reports it as `SourceDBSnapshotIdentifier` (an ARN, as AWS does); a snapshot that isn't a copy omits the field. That ARN is also what `db-instance-id` matches a copy's source instance against: a copy's own ARN names the account that made the copy, while the instance it records still belongs to the original owner, so for a cross-account or cross-region copy only the source ARN says where that instance lives. `db-cluster-id` does the same through `SourceDBClusterSnapshotArn`.
 
 ## Gotchas
 

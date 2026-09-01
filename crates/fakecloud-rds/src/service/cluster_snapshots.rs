@@ -567,6 +567,14 @@ impl RdsService {
             );
             obj.remove("DBClusterMembers");
             obj.remove("WriterDBInstanceIdentifier");
+            // A PITR target is an independent cluster, never a replica --
+            // the from-snapshot path above already drops this. Inherited,
+            // a PITR restore of an Aurora read replica would report the
+            // source's writer as its replication source, so
+            // DescribeDBClusters shows an independent cluster as a
+            // replica and PromoteReadReplicaDBCluster becomes meaningful
+            // on a cluster that never was one.
+            obj.remove("ReplicationSourceIdentifier");
             // The restored cluster is a new resource: the immutable
             // resource id must not be inherited from the source, or
             // `db-cluster-resource-id` (a unique match on AWS) selects

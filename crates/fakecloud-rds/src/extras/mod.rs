@@ -14,7 +14,7 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-use fakecloud_aws::arn::Arn;
+use fakecloud_aws::arn::{partition_for, Arn};
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
@@ -55,7 +55,13 @@ fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
         other => {
-            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            // Warn, not debug: the result is an EMPTY list where the
+            // caller expected a narrowed one, and nothing on the wire
+            // says why (InvalidParameterValue isn't declared on these
+            // operations, so it can't be returned). A silent empty
+            // result is the hardest failure to diagnose, so the reason
+            // has to reach a default log level.
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
             false
         }
     })
@@ -97,11 +103,22 @@ fn cluster_snapshot_matches_filters(
         // rebuild the source cluster ARN.
         "db-cluster-id" => {
             let cluster = entry_str(entry, "DBClusterIdentifier");
-            let cluster_arn = match (entry_str(entry, "DBClusterSnapshotArn"), cluster) {
+            let sibling = |arn: Option<&str>| match (arn, cluster) {
                 (Some(arn), Some(id)) => sibling_rds_arn(arn, "cluster", id),
                 _ => None,
             };
-            filter.matches_any([cluster, cluster_arn.as_deref()])
+            let cluster_arn = sibling(entry_str(entry, "DBClusterSnapshotArn"));
+            // A copy's own ARN names the COPIER, while the cluster it
+            // records still belongs to the original owner -- so for a
+            // cross-account or cross-region copy the ARN rebuilt from it
+            // names a cluster that doesn't exist. The source snapshot's
+            // ARN names the account and region that one really is in.
+            let source_cluster_arn = sibling(entry_str(entry, "SourceDBClusterSnapshotArn"));
+            filter.matches_any([
+                cluster,
+                cluster_arn.as_deref(),
+                source_cluster_arn.as_deref(),
+            ])
         }
         "db-cluster-snapshot-id" => filter.matches_any([
             entry_str(entry, "DBClusterSnapshotIdentifier"),
@@ -114,7 +131,13 @@ fn cluster_snapshot_matches_filters(
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
         other => {
-            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            // Warn, not debug: the result is an EMPTY list where the
+            // caller expected a narrowed one, and nothing on the wire
+            // says why (InvalidParameterValue isn't declared on these
+            // operations, so it can't be returned). A silent empty
+            // result is the hardest failure to diagnose, so the reason
+            // has to reach a default log level.
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
             false
         }
     })
@@ -190,6 +213,18 @@ fn missing(name: &str) -> AwsServiceError {
 /// `ModifyActivityStream` (which take a `ResourceArn` rather than a typed
 /// cluster/instance id, so the typed `DBClusterNotFoundFault` isn't in their
 /// Smithy error set).
+/// Builds a cluster snapshot's ARN in the region's own partition.
+///
+/// `Arn::new` hardcodes `aws`, so a China or GovCloud region would
+/// otherwise get an `arn:aws:` ARN -- wrong on the wire, and, since
+/// pagination keys on this string, inconsistent with the ARN a row
+/// stored at create time if the two were built differently.
+fn cluster_snapshot_arn(region: &str, account_id: &str, id: &str) -> String {
+    Arn::new("rds", region, account_id, &format!("cluster-snapshot:{id}"))
+        .with_partition(partition_for(region))
+        .to_string()
+}
+
 /// Stamps the owning account's ARN onto a cluster-snapshot row that
 /// lacks one.
 ///
@@ -210,9 +245,7 @@ fn with_owner_arn(mut entry: Value, owner: &str, region: &str) -> Value {
     if let Some(object) = entry.as_object_mut() {
         object.insert(
             "DBClusterSnapshotArn".to_string(),
-            Value::String(
-                Arn::new("rds", region, owner, &format!("cluster-snapshot:{id}")).to_string(),
-            ),
+            Value::String(cluster_snapshot_arn(region, owner, &id)),
         );
     }
     entry
@@ -418,7 +451,7 @@ impl RdsService {
                     .ok_or_else(|| missing("TargetDBClusterSnapshotIdentifier"))?;
                 let source_id = get_param(req, "SourceDBClusterSnapshotIdentifier")
                     .ok_or_else(|| missing("SourceDBClusterSnapshotIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
+                let arn = cluster_snapshot_arn(region, &aid, &id);
                 let mut accounts = write_state!();
                 // Guarded ARN reduction: AWS automated-snapshot ids carry
                 // a colon (`rds:mydb-...`), so only an `arn:` value is
@@ -540,7 +573,7 @@ impl RdsService {
                         )
                     },
                 )?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
+                let arn = cluster_snapshot_arn(region, &aid, &id);
                 // Recover the source cluster id from stored state before
                 // remove — emitting a hardcoded "default" would corrupt
                 // downstream consumers that key off DBClusterIdentifier.
@@ -717,6 +750,11 @@ impl RdsService {
                     .filter(|_| owner_is_caller)
                     .map(|m| {
                         m.values()
+                            // Normalized BEFORE the filters run: an
+                            // ARN-valued filter matches against the row's
+                            // ARN, so a row that lacks one would be
+                            // filtered out before it could be stamped.
+                            .map(|v| with_owner_arn(v.clone(), &aid, region))
                             .filter(|v| {
                                 snapshot_id.as_deref().is_none_or(|wanted| {
                                     entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
@@ -727,7 +765,6 @@ impl RdsService {
                                 }) && owned_snapshot_type_matches(v, snapshot_type.as_deref())
                                     && cluster_snapshot_matches_filters(v, &filters, &aid, true)
                             })
-                            .map(|v| with_owner_arn(v.clone(), &aid, region))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -804,6 +841,9 @@ impl RdsService {
                         foreign.extend(
                             bucket
                                 .values()
+                                // Stamped first, for the same reason the
+                                // owned rows are.
+                                .map(|v| with_owner_arn(v.clone(), owner, region))
                                 .filter(|v| {
                                     let attrs = cluster_snapshot_attributes(v);
                                     let restore = attrs.get("restore");
@@ -825,8 +865,7 @@ impl RdsService {
                                     }) && cluster_snapshot_matches_filters(
                                         v, &filters, &aid, false,
                                     )
-                                })
-                                .map(|v| with_owner_arn(v.clone(), owner, region)),
+                                }),
                         );
                     }
                 }
@@ -2510,6 +2549,11 @@ impl RdsService {
                     };
                     let state = accounts.get_or_create(&aid);
                     let arn = state.db_snapshot_arn(region, &target_id);
+                    // Recorded before the copy's own ARN overwrites it:
+                    // the source ARN is the only thing that still says
+                    // which account and region the recorded instance
+                    // lives in once this is a cross-account copy.
+                    snapshot.source_db_snapshot_arn = Some(snapshot.db_snapshot_arn.clone());
                     snapshot.db_snapshot_identifier = target_id.clone();
                     snapshot.db_snapshot_arn = arn.clone();
                     snapshot.snapshot_create_time = chrono::Utc::now();

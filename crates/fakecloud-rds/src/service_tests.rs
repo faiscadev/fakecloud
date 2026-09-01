@@ -289,6 +289,7 @@ fn db_snapshot_xml_emits_extended_fields() {
     let snapshot = crate::state::DbSnapshot {
         db_snapshot_identifier: "snap-1".to_string(),
         db_snapshot_arn: "arn:aws:rds:us-east-1:123:snapshot:snap-1".to_string(),
+        source_db_snapshot_arn: None,
         db_instance_identifier: "src-db".to_string(),
         snapshot_create_time: Utc::now(),
         engine: "postgres".to_string(),
@@ -2198,6 +2199,7 @@ fn other_account_snapshot(snapshot_id: &str) -> crate::state::DbSnapshot {
     crate::state::DbSnapshot {
         db_snapshot_identifier: snapshot_id.to_string(),
         db_snapshot_arn: format!("arn:aws:rds:us-east-1:999999999999:snapshot:{snapshot_id}"),
+        source_db_snapshot_arn: None,
         db_instance_identifier: "other-db".to_string(),
         snapshot_create_time: Utc::now(),
         engine: "postgres".to_string(),
@@ -2238,6 +2240,7 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
         crate::state::DbSnapshot {
             db_snapshot_identifier: snapshot_id.to_string(),
             db_snapshot_arn: arn,
+            source_db_snapshot_arn: None,
             db_instance_identifier: instance_id.to_string(),
             snapshot_create_time: Utc::now(),
             engine: "postgres".to_string(),
@@ -2774,6 +2777,120 @@ async fn a_restored_cluster_is_not_reported_as_a_copy() {
             .get("SourceDBClusterSnapshotArn")
             .is_none(),
         "the restored cluster claims to be a copy of an unrelated snapshot"
+    );
+}
+
+/// The fault follows the parameter the caller used.
+///
+/// An identifier that doesn't resolve at all reported DBSnapshotNotFound
+/// even for DBClusterSnapshotIdentifier, while a cluster snapshot that
+/// merely doesn't exist reports DBClusterSnapshotNotFoundFault -- two
+/// shapes for one parameter, which breaks a client that branches on the
+/// fault to tell a cluster-snapshot source from an instance one.
+#[tokio::test]
+async fn restore_reports_the_fault_for_the_parameter_the_caller_used() {
+    let svc = make_service();
+
+    // Unresolvable (an ARN of the wrong resource type).
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "target-1"),
+            (
+                "DBClusterSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:snapshot:s1",
+            ),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "DBClusterSnapshotNotFoundFault",
+    );
+
+    // Resolvable but absent: the same fault, so the two agree.
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "target-2"),
+            ("DBClusterSnapshotIdentifier", "ghost-cluster-snap"),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "DBClusterSnapshotNotFoundFault",
+    );
+
+    // The instance-snapshot parameter keeps its own fault.
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "target-3"),
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:s1",
+            ),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "DBSnapshotNotFound",
+    );
+}
+
+/// `db-instance-id` reaches a cross-account copy's source instance.
+///
+/// A copy's own ARN names the COPIER, while the instance it records
+/// still belongs to the original owner -- so the ARN rebuilt from the
+/// copy's own ARN names an instance that doesn't exist, and only the
+/// recorded source ARN says where the real one lives.
+#[tokio::test]
+async fn db_instance_id_filter_matches_a_copys_source_instance_arn() {
+    let svc = make_service();
+    seed_snapshot(&svc, "mycopy", "their-db");
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .snapshots
+            .get_mut("mycopy")
+            .expect("seeded")
+            .source_db_snapshot_arn =
+            Some("arn:aws:rds:us-east-1:999999999999:snapshot:snap-1".to_string());
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:999999999999:db:their-db",
+            ),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>mycopy</DBSnapshotIdentifier>"),
+        "the source instance's ARN did not match the copy: {body}"
+    );
+
+    // A different account's ARN for the same instance name still must
+    // not match -- the fallback widens by one real source, not to any
+    // account.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:888888888888:db:their-db",
+            ),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>mycopy</DBSnapshotIdentifier>"),
+        "an unrelated account's ARN matched: {body}"
     );
 }
 
@@ -4027,6 +4144,48 @@ fn cluster_entry(svc: &RdsService, id: &str) -> serde_json::Value {
         .and_then(|m| m.get(id))
         .cloned()
         .unwrap_or_else(|| panic!("cluster {id} not recorded"))
+}
+
+/// A PITR target is an independent cluster, never a replica.
+///
+/// The from-snapshot path already drops `ReplicationSourceIdentifier`.
+/// Inherited here, PITR-restoring an Aurora read replica would report
+/// the restored cluster as a replica of the original writer, and
+/// PromoteReadReplicaDBCluster would become meaningful on a cluster that
+/// never was one.
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_clears_the_replication_source() {
+    let svc = make_service();
+    seed_cluster_entry(
+        &svc,
+        "replica-cluster",
+        serde_json::json!({
+            "ReplicationSourceIdentifier":
+                "arn:aws:rds:us-east-1:123456789012:cluster:writer-cluster",
+        }),
+    );
+
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            ("SourceDBClusterIdentifier", "replica-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored-cluster");
+    assert!(
+        restored.get("ReplicationSourceIdentifier").is_none(),
+        "the PITR target inherited its source's replication source: {restored}"
+    );
+    // The source itself is untouched -- it really is a replica.
+    let source = cluster_entry(&svc, "replica-cluster");
+    assert_eq!(
+        source["ReplicationSourceIdentifier"],
+        "arn:aws:rds:us-east-1:123456789012:cluster:writer-cluster"
+    );
 }
 
 #[tokio::test]
@@ -5388,6 +5547,7 @@ async fn restore_db_instance_from_db_snapshot_persists_tags() {
     let snapshot = crate::state::DbSnapshot {
         db_snapshot_identifier: "snap".to_string(),
         db_snapshot_arn: "arn:aws:rds:us-east-1:123456789012:snapshot:snap".to_string(),
+        source_db_snapshot_arn: None,
         db_instance_identifier: "src".to_string(),
         snapshot_create_time: Utc::now(),
         engine: "postgres".to_string(),
@@ -6096,6 +6256,7 @@ fn apply_snapshot_dump_result_transitions_status() {
             crate::state::DbSnapshot {
                 db_snapshot_identifier: id.to_string(),
                 db_snapshot_arn: format!("arn:aws:rds:us-east-1:123456789012:snapshot:{id}"),
+                source_db_snapshot_arn: None,
                 db_instance_identifier: "src".to_string(),
                 snapshot_create_time: Utc::now(),
                 engine: "postgres".to_string(),
