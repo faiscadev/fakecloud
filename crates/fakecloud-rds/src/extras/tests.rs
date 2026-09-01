@@ -3342,6 +3342,53 @@ fn cluster_snapshot_responses_report_the_stored_fields() {
 }
 
 #[test]
+fn copy_db_cluster_snapshot_stamps_its_own_creation_time() {
+    // The copy is created now, not when its source was -- CopyDBSnapshot
+    // already behaves this way, and a stale time sorts the copy wrongly
+    // in a time-ordered listing.
+    let svc = svc();
+    create_cluster(&svc, "src");
+    snapshot_cluster(&svc, "snap-1", "src");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .get_or_create("000000000000")
+            .extras
+            .get_mut("cluster_snapshots")
+            .and_then(|m| m.get_mut("snap-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert(
+                "SnapshotCreateTime".to_string(),
+                json!("2020-01-01T00:00:00+00:00"),
+            );
+        }
+    }
+
+    ok_on(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+        ],
+    );
+
+    let copied = extras_value(&svc, "cluster_snapshots", "snap-copy");
+    assert_ne!(
+        copied["SnapshotCreateTime"].as_str(),
+        Some("2020-01-01T00:00:00+00:00"),
+        "the copy kept its source's creation time"
+    );
+    // And it records where it was copied from, as an ARN.
+    assert!(copied["SourceDBClusterSnapshotArn"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("arn:aws:rds:"));
+}
+
+#[test]
 fn copy_db_cluster_snapshot_rejects_an_existing_target() {
     // Overwriting would silently replace the target's dump and revoke
     // its sharing on a retried copy.

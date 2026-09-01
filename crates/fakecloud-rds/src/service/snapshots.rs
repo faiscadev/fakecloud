@@ -164,9 +164,15 @@ pub(super) fn cluster_snapshot_as_source(
         .or_else(|| field("Engine").map(|engine| container_engine_for(&engine).to_string()))
         .unwrap_or_else(|| "postgres".to_string());
     // Paired with the engine above: the cluster's own Aurora version
-    // against the writer's engine is a combination AWS never reports.
+    // against a remapped container engine is a combination AWS never
+    // reports. Keyed on whether the engine WAS remapped -- not on
+    // whether SourceEngine happened to be recorded -- so a snapshot
+    // taken before any writer attached doesn't pair `mysql` with
+    // `8.0.mysql_aurora.3.04.0`.
+    let engine_was_remapped = field("SourceEngine").is_none()
+        && field("Engine").is_some_and(|family| container_engine_for(&family) != family);
     let engine_version = field("SourceEngineVersion")
-        .or_else(|| field("EngineVersion").filter(|_| field("SourceEngine").is_none()))
+        .or_else(|| field("EngineVersion").filter(|_| !engine_was_remapped))
         .unwrap_or_else(|| service_helpers::default_engine_version(&engine).to_string());
     // An out-of-range value is ignored rather than truncated: `as i32`
     // would wrap a bogus stored port to something like 0.

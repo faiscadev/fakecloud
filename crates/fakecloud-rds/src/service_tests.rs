@@ -2675,6 +2675,105 @@ async fn cluster_snapshot_restore_replays_a_staged_dump() {
 }
 
 #[tokio::test]
+async fn a_remapped_engine_never_keeps_the_aurora_version() {
+    // A snapshot taken before any writer attached records no
+    // SourceEngine, so the family is remapped to a container engine --
+    // and the cluster's Aurora version must not ride along with it.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "no-writer".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "no-writer",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "no-writer");
+    assert_eq!(source.engine, "mysql");
+    assert_ne!(
+        source.engine_version, "8.0.mysql_aurora.3.04.0",
+        "a remapped engine kept the cluster's Aurora version"
+    );
+
+    // A non-Aurora cluster keeps its own version, since nothing was
+    // remapped.
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "plain".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "plain",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "postgres",
+                    "EngineVersion": "16.3",
+                }),
+            );
+    }
+    let source = cluster_snapshot_source_for_test(&svc, "plain");
+    assert_eq!(source.engine, "postgres");
+    assert_eq!(source.engine_version, "16.3");
+}
+
+#[tokio::test]
+async fn a_restored_cluster_is_not_reported_as_a_copy() {
+    // SourceDBClusterSnapshotArn describes the snapshot a COPY came
+    // from. Left on a restored cluster row it propagates into the next
+    // snapshot of that cluster, which the renderer now reports.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "SourceDBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:unrelated",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    assert!(
+        cluster_entry(&svc, "restored")
+            .get("SourceDBClusterSnapshotArn")
+            .is_none(),
+        "the restored cluster claims to be a copy of an unrelated snapshot"
+    );
+}
+
+#[tokio::test]
 async fn cluster_snapshot_restore_maps_an_aurora_family_to_its_engine() {
     // A metadata-only snapshot (no writer recorded) still must not hand
     // the runtime an `aurora-*` engine it cannot start.
@@ -6176,8 +6275,9 @@ fn modify_current_db_cluster_capacity_echoes_requested_capacity() {
 fn modify_db_snapshot_attribute_resolves_a_value_in_add_and_remove() {
     // AWS rejects this with InvalidParameterCombination, which is not
     // even a shape in the RDS model -- emitting it would be an undeclared
-    // error. Resolve deterministically instead: removals first, then
-    // additions, so the value ends up shared.
+    // error. Resolve deterministically instead, and fail CLOSED: this is
+    // a permission surface, so a contradictory request must leave the
+    // snapshot unshared rather than shared.
     let svc = make_service();
     seed_snapshot(&svc, "snap-dup", "db1");
 
@@ -6194,8 +6294,23 @@ fn modify_db_snapshot_attribute_resolves_a_value_in_add_and_remove() {
         .expect("overlapping values should resolve, not fault");
     let body = body_of(resp);
     assert!(
-        body.contains("<AttributeValue>111111111111</AttributeValue>"),
-        "additions should win over removals: {body}"
+        !body.contains("<AttributeValue>111111111111</AttributeValue>"),
+        "an ambiguous sharing request left the snapshot shared: {body}"
+    );
+
+    // The snapshot really is unshared, so the shared listing can't see it.
+    let shared_with = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap-dup")
+        .expect("seeded snapshot")
+        .snapshot_attributes
+        .contains_key("restore");
+    assert!(
+        !shared_with,
+        "an empty attribute should be dropped entirely"
     );
 }
 

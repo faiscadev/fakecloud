@@ -450,6 +450,13 @@ impl RdsService {
                     obj.insert("Status".to_string(), json!("available"));
                     obj.insert("SnapshotType".to_string(), json!("manual"));
                     obj.insert("SourceDBClusterSnapshotArn".to_string(), json!(source_arn));
+                    // The copy is created now; CopyDBSnapshot does the
+                    // same, and a stale time sorts it wrongly in a
+                    // time-ordered listing.
+                    obj.insert(
+                        "SnapshotCreateTime".to_string(),
+                        json!(chrono::Utc::now().to_rfc3339()),
+                    );
                     // A copy is a fresh sharing surface -- inheriting the
                     // source's `restore` list would publish a snapshot
                     // nobody shared.
@@ -859,8 +866,10 @@ impl RdsService {
                 // `InvalidParameterCombination` is not even a shape in the
                 // RDS model, so emitting it here would be an undeclared
                 // error (see the module docs on `crate::filters`). Resolve
-                // it deterministically instead: removals first, then
-                // additions, so the value ends up added.
+                // it deterministically instead -- additions first, then
+                // removals, so a contradictory request leaves the snapshot
+                // UNSHARED. This is a permission surface: the ambiguous
+                // case has to fail closed.
                 let attrs = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
@@ -877,12 +886,12 @@ impl RdsService {
                         })?;
                     let mut attrs = cluster_snapshot_attributes(entry);
                     let values = attrs.entry(attribute_name.clone()).or_default();
-                    values.retain(|v| !to_remove.contains(v));
                     for v in to_add {
                         if !values.contains(&v) {
                             values.push(v);
                         }
                     }
+                    values.retain(|v| !to_remove.contains(v));
                     // An attribute with no values reads back as unshared,
                     // matching AWS, so drop it rather than storing [].
                     if values.is_empty() {
@@ -2520,8 +2529,10 @@ impl RdsService {
                 // `InvalidParameterCombination` is not even a shape in the
                 // RDS model, so emitting it here would be an undeclared
                 // error (see the module docs on `crate::filters`). Resolve
-                // it deterministically instead: removals first, then
-                // additions, so the value ends up added.
+                // it deterministically instead -- additions first, then
+                // removals, so a contradictory request leaves the snapshot
+                // UNSHARED. This is a permission surface: the ambiguous
+                // case has to fail closed.
                 let attrs = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
@@ -2533,12 +2544,12 @@ impl RdsService {
                         .snapshot_attributes
                         .entry(attribute_name.clone())
                         .or_default();
-                    values.retain(|v| !to_remove.contains(v));
                     for v in to_add {
                         if !values.contains(&v) {
                             values.push(v);
                         }
                     }
+                    values.retain(|v| !to_remove.contains(v));
                     // Drop the attribute entirely once it has no values so
                     // Describe reports an empty (unshared) snapshot rather
                     // than an empty `restore` list, matching AWS.
@@ -2890,8 +2901,6 @@ fn apply_shard_group_capacity(obj: &mut serde_json::Map<String, Value>, req: &Aw
     }
 }
 
-/// Render the `DBSnapshotAttributesResult` block shared by
-/// `DescribeDBSnapshotAttributes` and `ModifyDBSnapshotAttribute`.
 /// Look a cluster snapshot up across accounts: the caller's own first,
 /// then any account that shared it with the caller (or with everyone).
 /// `named_account` is the owner an ARN named, when the caller used one.
@@ -3022,6 +3031,8 @@ fn cluster_snapshot_attributes_result_xml(
     )
 }
 
+/// Render the `DBSnapshotAttributesResult` block shared by
+/// `DescribeDBSnapshotAttributes` and `ModifyDBSnapshotAttribute`.
 fn snapshot_attributes_result_xml(id: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
     let attributes = if attrs.is_empty() {
         "      <DBSnapshotAttributes/>".to_string()

@@ -346,6 +346,11 @@ impl RdsService {
             // (taken while it has no instance attached) and make an
             // instance restore start with the old credentials and
             // database.
+            // A restored cluster is not a copy of the snapshot's source:
+            // leaving this would make a later snapshot OF the restored
+            // cluster report an unrelated copy source, now that the
+            // renderer emits the field.
+            obj.remove("SourceDBClusterSnapshotArn");
             obj.remove("SourceEngine");
             obj.remove("SourceEngineVersion");
             obj.remove("SourceMasterUsername");
