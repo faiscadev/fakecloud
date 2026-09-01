@@ -2367,19 +2367,38 @@ impl CloudFormationService {
         // update-stack --use-previous-template` is ordinary usage, so this is
         // reachable without a malformed template at all.
         if input.template_body.trim().is_empty() {
-            if let Some(body) = Self::get_param(req, "TemplateURL")
-                .and_then(|url| self.fetch_template_from_url(&req.account_id, &url))
-            {
-                input.template_body = body;
-            } else {
-                input.template_body = previous_template;
+            match Self::get_param(req, "TemplateURL") {
+                // A URL was given: it has to resolve. Falling back to the
+                // stored template would re-apply the old one and report
+                // UPDATE_COMPLETE for an update that never happened.
+                Some(url) => {
+                    input.template_body = self
+                        .fetch_template_from_url(&req.account_id, &url)
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationError",
+                                format!("Template not found at {url}"),
+                            )
+                        })?;
+                }
+                // No URL: `UsePreviousTemplate`, whose meaning is the
+                // stack's stored template.
+                None => input.template_body = previous_template,
             }
+            // The body was empty when `UpdateStackInput::from_params` merged
+            // parameter defaults, so nothing was merged. Redo it now that the
+            // real template (and its `Parameters` block) is in hand, or a
+            // `Ref` to an omitted-but-defaulted parameter resolves to the bare
+            // parameter name and silently renames resources.
+            Self::merge_parameter_defaults(&mut input.parameters, &input.template_body);
         }
 
-        // Still nothing to apply (no such stack, or a stack whose stored
-        // template is itself empty): treat the update as a no-op rather than
-        // an implicit "delete everything".
-        if input.template_body.trim().is_empty() {
+        // A stack that exists but has nothing to apply is a no-op, never an
+        // implicit "delete everything". When the stack does NOT exist, fall
+        // through to the not-found handling below, which synthesizes a proper
+        // stack ARN for the response.
+        if input.template_body.trim().is_empty() && !found_stack_id.is_empty() {
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
                 xml_responses::update_stack_response(&found_stack_id, &req.request_id),

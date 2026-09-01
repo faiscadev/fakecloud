@@ -113,8 +113,14 @@ pub fn is_template_document(body: &str) -> bool {
 /// section CloudFormation requires.
 fn looks_like_template_text(body: &str) -> bool {
     if body.trim_start().starts_with('{') {
-        // Both spellings: JSON quotes the key, YAML flow style does not.
-        return body.contains("\"Resources\"") || body.contains("Resources:");
+        // A `{`-leading body that parses as neither JSON nor YAML is a broken
+        // document, not a placeholder — the synthetic scalars are bare strings
+        // (`test`), never braced. Substring-matching `Resources` here would be
+        // wrong in both directions: a JSON template truncated before its
+        // `"Resources"` key would be judged a placeholder and silently produce
+        // an empty stack, while `"Description": "Resources: see docs"` would be
+        // force-failed.
+        return true;
     }
     // A top-level YAML key sits at column zero. It may be quoted, and may
     // carry whitespace before its colon — both legal, and both emitted by
@@ -475,6 +481,12 @@ Resources:
         let bad_json = "{\"Resources\": [oops";
         assert!(parse_template_body(bad_json).is_err());
         assert!(is_template_document(bad_json));
+
+        // Truncated before the `Resources` key ever appears. A substring test
+        // would call this a placeholder and silently build an empty stack.
+        let truncated = "{\"AWSTemplateFormatVersion\": \"2010-09-09\", \"Desc";
+        assert!(parse_template_body(truncated).is_err());
+        assert!(is_template_document(truncated));
     }
 
     #[test]
