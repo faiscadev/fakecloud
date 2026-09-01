@@ -284,3 +284,77 @@ async fn acm_search_certificates() {
     let acm = server.acm_client().await;
     acm.search_certificates().send().await.unwrap();
 }
+
+/// The ARN-keyed tagging trio (`TagResource` / `UntagResource` /
+/// `ListTagsForResource`). The vendored `aws-sdk-acm` predates these
+/// operations, so drive them over raw HTTP.
+#[test_action("acm", "TagResource", checksum = "0dd309e2")]
+#[test_action("acm", "UntagResource", checksum = "11cc21cb")]
+#[test_action("acm", "ListTagsForResource", checksum = "88b17fef")]
+#[tokio::test]
+async fn acm_resource_tagging_round_trip() {
+    let server = TestServer::start().await;
+    let arn = make_cert(&server, "conf-resourcetag.example.com").await;
+
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/acm/aws4_request, SignedHeaders=host, Signature=0";
+    let http = reqwest::Client::new();
+    let call = |target: &str, body: String| {
+        let url = server.endpoint().to_string();
+        let target = format!("CertificateManager.{target}");
+        let http = http.clone();
+        async move {
+            http.post(&url)
+                .header("Authorization", auth)
+                .header("X-Amz-Target", target)
+                .header("Content-Type", "application/x-amz-json-1.1")
+                .body(body)
+                .send()
+                .await
+                .unwrap()
+        }
+    };
+
+    let resp = call(
+        "TagResource",
+        serde_json::json!({ "ResourceArn": arn, "Tags": [{ "Key": "team", "Value": "core" }] })
+            .to_string(),
+    )
+    .await;
+    assert!(resp.status().is_success(), "TagResource: {}", resp.status());
+
+    let resp = call(
+        "ListTagsForResource",
+        serde_json::json!({ "ResourceArn": arn }).to_string(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["Tags"][0]["Key"], "team");
+    assert_eq!(body["Tags"][0]["Value"], "core");
+
+    let resp = call(
+        "UntagResource",
+        serde_json::json!({ "ResourceArn": arn, "TagKeys": ["team"] }).to_string(),
+    )
+    .await;
+    assert!(resp.status().is_success());
+
+    let resp = call(
+        "ListTagsForResource",
+        serde_json::json!({ "ResourceArn": arn }).to_string(),
+    )
+    .await;
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert!(body["Tags"].as_array().unwrap().is_empty());
+
+    // An unknown ARN is ResourceNotFoundException, not a 200.
+    let resp = call(
+        "ListTagsForResource",
+        serde_json::json!({ "ResourceArn": "arn:aws:acm:us-east-1:000000000000:certificate/nope" })
+            .to_string(),
+    )
+    .await;
+    assert_eq!(resp.status().as_u16(), 400);
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["__type"], "ResourceNotFoundException");
+}
