@@ -639,15 +639,25 @@ impl RdsService {
                             m.values().any(|v| {
                                 entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
                                     && (owner == aid || {
-                                        // Another account's snapshot only
+                                        // Another account's snapshot
                                         // exists for this caller when it
-                                        // was shared with them AND they
-                                        // addressed it by its ARN -- the
-                                        // same rule the listing applies,
-                                        // so the two can't disagree and
-                                        // produce a 200 with no rows.
+                                        // was shared with them AND the
+                                        // request reaches foreign rows at
+                                        // all: by its ARN, or through
+                                        // SnapshotType=shared/public or
+                                        // IncludeShared/IncludePublic --
+                                        // the same rule the listing
+                                        // applies, so the two can't
+                                        // disagree and 404 a row the
+                                        // listing would have returned.
                                         let attrs = cluster_snapshot_attributes(v);
-                                        snapshot_owner.as_deref() == Some(owner)
+                                        (snapshot_owner.as_deref() == Some(owner)
+                                            || matches!(
+                                                snapshot_type.as_deref(),
+                                                Some("shared") | Some("public")
+                                            )
+                                            || include_shared
+                                            || include_public)
                                             && attrs.get("restore").is_some_and(|targets| {
                                                 targets.contains(&aid)
                                                     || targets.iter().any(|t| t == "all")

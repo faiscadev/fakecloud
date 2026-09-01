@@ -3185,6 +3185,60 @@ fn copy_db_parameter_group_refuses_a_foreign_or_wrong_type_arn() {
 }
 
 #[test]
+fn a_shared_cluster_snapshot_resolves_by_bare_id_when_the_request_widens() {
+    // The existence check and the listing have to agree: with
+    // SnapshotType=shared (or IncludeShared) a bare id reaches foreign
+    // rows, so 404-ing it here would reject a row the listing returns.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("999999999999")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    for params in [
+        vec![
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("SnapshotType", "shared"),
+        ],
+        vec![
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("IncludeShared", "true"),
+        ],
+    ] {
+        let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &params);
+        assert!(
+            body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
+            "existence check rejected a row the listing returns, for {params:?}: {body}"
+        );
+    }
+
+    // Without either, a bare id still names nothing this account owns.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "shared-snap")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a bare id reached another account without widening"),
+    }
+}
+
+#[test]
 fn describe_db_cluster_snapshots_honors_include_shared() {
     // The modeled IncludeShared / IncludePublic members widen an
     // unqualified listing, as on DescribeDBSnapshots.

@@ -3504,6 +3504,52 @@ fn describe_db_snapshots_honors_the_dbi_resource_id_parameter() {
 }
 
 #[tokio::test]
+async fn an_explicit_domain_replaces_every_source_field() {
+    // Keeping the source's DNS IPs beside a different domain name is an
+    // incoherent DomainMembership; all six fields move together.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "source-db");
+    {
+        let mut accounts = svc.state.write();
+        let source = accounts
+            .default_mut()
+            .instances
+            .get_mut("source-db")
+            .expect("seeded instance");
+        source.domain = Some("d-old".to_string());
+        source.domain_dns_ips = vec!["10.0.0.1".to_string()];
+    }
+
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "source-db"),
+            ("TargetDBInstanceIdentifier", "pit-db"),
+            ("UseLatestRestorableTime", "true"),
+            ("Domain", "d-new"),
+        ],
+    );
+    svc.restore_db_instance_to_point_in_time(&req)
+        .await
+        .expect("PITR with the stub runtime");
+
+    let restored = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("pit-db")
+        .map(|i| (i.domain.clone(), i.domain_dns_ips.clone()))
+        .expect("the restored instance is recorded");
+    assert_eq!(restored.0.as_deref(), Some("d-new"));
+    assert!(
+        restored.1.is_empty(),
+        "the new domain kept the source's DNS IPs: {:?}",
+        restored.1
+    );
+}
+
+#[tokio::test]
 async fn point_in_time_restore_carries_the_requested_domain() {
     // Modeled on the request, and an explicit Domain overrides whatever
     // the source carried -- otherwise the new instance is invisible to

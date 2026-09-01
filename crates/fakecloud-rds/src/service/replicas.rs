@@ -111,10 +111,11 @@ impl RdsService {
             replica.domain_ou = optional_query_param(request, "DomainOu");
             replica.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
             replica.domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
-            let dns_ips = parse_string_member_list(request, "DomainDnsIps");
-            if !dns_ips.is_empty() {
-                replica.domain_dns_ips = dns_ips;
-            }
+            // Every field moves together: keeping the source's DNS IPs
+            // beside a different domain name is an incoherent
+            // DomainMembership, and the snapshot-restore path already
+            // assigns all six unconditionally.
+            replica.domain_dns_ips = parse_string_member_list(request, "DomainDnsIps");
         }
 
         replica.db_instance_status = "creating".to_string();

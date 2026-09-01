@@ -173,10 +173,11 @@ impl RdsService {
             instance.domain_ou = optional_query_param(request, "DomainOu");
             instance.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
             instance.domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
-            let dns_ips = parse_string_member_list(request, "DomainDnsIps");
-            if !dns_ips.is_empty() {
-                instance.domain_dns_ips = dns_ips;
-            }
+            // Every field moves together: keeping the source's DNS IPs
+            // beside a different domain name is an incoherent
+            // DomainMembership, and the snapshot-restore path already
+            // assigns all six unconditionally.
+            instance.domain_dns_ips = parse_string_member_list(request, "DomainDnsIps");
         }
 
         // An explicit DBSubnetGroupName places the restored instance in that
