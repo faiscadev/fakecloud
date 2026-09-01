@@ -190,6 +190,34 @@ fn missing(name: &str) -> AwsServiceError {
 /// `ModifyActivityStream` (which take a `ResourceArn` rather than a typed
 /// cluster/instance id, so the typed `DBClusterNotFoundFault` isn't in their
 /// Smithy error set).
+/// Stamps the owning account's ARN onto a cluster-snapshot row that
+/// lacks one.
+///
+/// Pagination keys on the ARN, and the identifier alone is NOT a unique
+/// key: a shared listing can hold same-named rows from several accounts,
+/// so a cursor built from one would resolve to whichever came first and
+/// hand the client that page again forever. Every insert path sets the
+/// ARN today; this keeps a row that somehow missed it -- an older
+/// persisted file, a hand-seeded entry -- from poisoning the cursor, and
+/// renders the field the SDK expects while it's at it.
+fn with_owner_arn(mut entry: Value, owner: &str, region: &str) -> Value {
+    if entry_str(&entry, "DBClusterSnapshotArn").is_some() {
+        return entry;
+    }
+    let Some(id) = entry_str(&entry, "DBClusterSnapshotIdentifier").map(str::to_string) else {
+        return entry;
+    };
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(
+            "DBClusterSnapshotArn".to_string(),
+            Value::String(
+                Arn::new("rds", region, owner, &format!("cluster-snapshot:{id}")).to_string(),
+            ),
+        );
+    }
+    entry
+}
+
 fn resource_not_found(arn: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::NOT_FOUND,
@@ -699,7 +727,7 @@ impl RdsService {
                                 }) && owned_snapshot_type_matches(v, snapshot_type.as_deref())
                                     && cluster_snapshot_matches_filters(v, &filters, &aid, true)
                             })
-                            .cloned()
+                            .map(|v| with_owner_arn(v.clone(), &aid, region))
                             .collect()
                     })
                     .unwrap_or_default();
@@ -798,7 +826,7 @@ impl RdsService {
                                         v, &filters, &aid, false,
                                     )
                                 })
-                                .cloned(),
+                                .map(|v| with_owner_arn(v.clone(), owner, region)),
                         );
                     }
                 }
@@ -853,19 +881,15 @@ impl RdsService {
                 // The cursor is the last row's key, so a row with no key
                 // would encode the EMPTY marker -- which this handler
                 // reads back as "no marker" and answers with page one,
-                // leaving a paginating client looping forever. Every
-                // insert path sets the ARN; fall back to the identifier
-                // so a row that somehow lacks one still yields a usable
-                // cursor rather than a silently poisoned one.
+                // leaving a paginating client looping forever.
+                // `with_owner_arn` has stamped the owning account's ARN
+                // onto every row that reached here, so the key is both
+                // present and unique across accounts.
                 let paginated = crate::service::service_helpers::paginate(
                     items,
                     get_param(req, "Marker").filter(|value| !value.is_empty()),
                     get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
-                    |entry| {
-                        entry_str(entry, "DBClusterSnapshotArn")
-                            .or_else(|| entry_str(entry, "DBClusterSnapshotIdentifier"))
-                            .unwrap_or_default()
-                    },
+                    |entry| entry_str(entry, "DBClusterSnapshotArn").unwrap_or_default(),
                 )?;
                 // Named member tags, not the generic `<member>`: the
                 // Smithy list carries xmlName `DBClusterSnapshot`, and the

@@ -2724,8 +2724,10 @@ fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
         )],
     );
     assert!(
-        body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
-        "named shared snapshot returned an empty list: {body}"
+        body.matches("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+            .count()
+            == 1,
+        "named shared snapshot did not return exactly one row: {body}"
     );
 
     // The bare id names nothing this account owns.
@@ -2749,9 +2751,14 @@ fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
             ("IncludeShared", "true"),
         ],
     );
-    assert!(
-        body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
-        "IncludeShared dropped the only shared row: {body}"
+    // Exactly one row, not merely "present": two accounts sharing the
+    // same name is the duplicate this branch exists to prevent, and a
+    // `contains` check would pass on it.
+    assert_eq!(
+        body.matches("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+            .count(),
+        1,
+        "IncludeShared did not return exactly one shared row: {body}"
     );
 
     // Once a SECOND account shares a snapshot of the same name, the bare
@@ -2803,11 +2810,97 @@ fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
             "DescribeDBClusterSnapshots",
             &[("DBClusterSnapshotIdentifier", &arn)],
         );
+        assert_eq!(
+            body.matches("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+                .count(),
+            1,
+            "ARN for {owner} did not return exactly one row: {body}"
+        );
+        // And it is the row that account owns, not the other one.
         assert!(
-            body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
-            "ARN for {owner} returned an empty list: {body}"
+            body.contains(&format!(
+                "<DBClusterSnapshotArn>arn:aws:rds:us-east-1:{owner}:cluster-snapshot:shared-snap</DBClusterSnapshotArn>"
+            )),
+            "ARN for {owner} resolved another account's row: {body}"
         );
     }
+}
+
+/// Same-named rows from different accounts must page apart.
+///
+/// The cursor is the last row's key. Keyed on the identifier, two
+/// accounts sharing `dup-snap` would produce the same cursor for both
+/// rows, and the lookup for page two would find the first one again --
+/// so a paginating client would re-read the same row forever and never
+/// see the second. The account-qualified ARN is what makes the key
+/// unique.
+#[test]
+fn shared_cluster_snapshots_with_one_name_paginate_apart() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        for owner in ["999999999999", "888888888888", "777777777777"] {
+            accounts
+                .get_or_create(owner)
+                .extras
+                .entry("cluster_snapshots".to_string())
+                .or_default()
+                .insert(
+                    "dup-snap".to_string(),
+                    json!({
+                        "DBClusterSnapshotIdentifier": "dup-snap",
+                        "DBClusterIdentifier": format!("clu-{owner}"),
+                        "Status": "available",
+                        "SnapshotType": "manual",
+                        "SnapshotCreateTime": "2026-01-01T00:00:00Z",
+                        "SnapshotAttributes": {"restore": ["000000000000"]},
+                    }),
+                );
+        }
+    }
+
+    // Unqualified listing, one row per page: walk every page and collect
+    // the ARNs in order.
+    let mut seen: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    for _ in 0..6 {
+        let mut params: Vec<(&str, &str)> = vec![("IncludeShared", "true"), ("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &params);
+        for arn in body.split("<DBClusterSnapshotArn>").skip(1) {
+            let arn = arn
+                .split("</DBClusterSnapshotArn>")
+                .next()
+                .unwrap_or_default();
+            seen.push(arn.to_string());
+        }
+        marker = body
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if marker.is_none() {
+            break;
+        }
+    }
+
+    // Both accounts' rows, each exactly once -- not the same row twice.
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![
+            "arn:aws:rds:us-east-1:777777777777:cluster-snapshot:dup-snap".to_string(),
+            "arn:aws:rds:us-east-1:888888888888:cluster-snapshot:dup-snap".to_string(),
+            "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:dup-snap".to_string(),
+        ],
+        "paginating a shared listing repeated or dropped a row"
+    );
 }
 
 #[test]
