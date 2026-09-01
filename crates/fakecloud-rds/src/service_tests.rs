@@ -4097,6 +4097,36 @@ async fn cluster_restores_refuse_an_existing_target() {
 }
 
 #[tokio::test]
+async fn restore_db_cluster_from_snapshot_reports_a_wrong_type_arn_as_not_found() {
+    // A DB-snapshot ARN names no cluster snapshot, so it reduces to
+    // None -- but the parameter WAS supplied, and "is required" would
+    // send the caller looking for the wrong problem.
+    let svc = make_service();
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            (
+                "SnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:snapshot:s1",
+            ),
+        ],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => {
+            assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
+            let message = format!("{err:?}");
+            assert!(message.contains("s1"), "identifier dropped: {message}");
+            assert!(
+                !message.contains("is required"),
+                "a supplied identifier was reported as missing: {message}"
+            );
+        }
+        Ok(_) => panic!("a DB-snapshot ARN resolved as a cluster snapshot"),
+    }
+}
+
+#[tokio::test]
 async fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
     let svc = make_service();
     let req = request(

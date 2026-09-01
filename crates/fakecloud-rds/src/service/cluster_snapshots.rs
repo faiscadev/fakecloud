@@ -232,16 +232,20 @@ impl RdsService {
         let raw_snapshot_id = optional_query_param(request, "SnapshotIdentifier")
             .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"));
         let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
+        let reported_snapshot_id = raw_snapshot_id
+            .clone()
+            .unwrap_or_else(|| "(none)".to_string());
         let snapshot_id =
             normalized_identifier(raw_snapshot_id, "cluster-snapshot").ok_or_else(|| {
-                // Without a snapshot id there's no snapshot to look up,
-                // so surface the same declared `*NotFound` shape we'd
-                // emit for a non-existent id. Smithy doesn't declare a
-                // generic `MissingParameter` on this op.
+                // Covers both "not supplied" and "supplied but names no
+                // cluster snapshot" (a wrong-type ARN reduces to None):
+                // report the declared *NotFound shape with the caller's
+                // own value rather than a misleading "is required".
+                // Smithy declares no generic MissingParameter here.
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "DBClusterSnapshotNotFoundFault",
-                    "SnapshotIdentifier is required",
+                    format!("DBClusterSnapshot {reported_snapshot_id} not found."),
                 )
             })?;
         let arn = format!(
