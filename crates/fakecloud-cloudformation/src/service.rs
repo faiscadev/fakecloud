@@ -1625,9 +1625,14 @@ impl CloudFormationService {
         // is a synthetic probe input and keeps the lenient path.
         let url_param = Self::get_param(req, "TemplateURL")
             .filter(|url| crate::extras::parse_s3_url(url).is_some());
+        // An object that exists but is empty (a truncated `aws s3 cp`, a
+        // `sam package` that wrote nothing) counts as a failed fetch: taking
+        // it as the template would parse cleanly to no resources and rebuild
+        // the #2480 empty CREATE_COMPLETE.
         let resolved_from_url = url_param
             .as_ref()
-            .and_then(|url| self.fetch_template_from_url(&req.account_id, url));
+            .and_then(|url| self.fetch_template_from_url(&req.account_id, url))
+            .filter(|body| !body.trim().is_empty());
         // A well-formed URL that resolves to nothing (uploaded to another
         // account, a public AWS-hosted quickstart, a key mismatch) must fail
         // the stack rather than fall back to an empty body and produce the
@@ -2444,8 +2449,13 @@ impl CloudFormationService {
             // success), so it takes the same lenient path as a placeholder
             // body rather than an undeclared error.
             let from_url = match Self::get_param(req, "TemplateURL") {
+                // An object that exists but is empty counts as a failed fetch:
+                // taking it would leave the body empty and fall into the
+                // metadata-only branch, reporting UPDATE_COMPLETE for an
+                // update that applied nothing.
                 Some(url) if crate::extras::parse_s3_url(&url).is_some() => Some(
                     self.fetch_template_from_url(&req.account_id, &url)
+                        .filter(|body| !body.trim().is_empty())
                         .ok_or_else(|| {
                             AwsServiceError::aws_error(
                                 StatusCode::BAD_REQUEST,

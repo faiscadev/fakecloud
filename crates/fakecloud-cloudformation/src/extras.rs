@@ -327,15 +327,27 @@ impl CloudFormationService {
                     let inline = params.get("TemplateBody").cloned().unwrap_or_default();
                     if !inline.trim().is_empty() {
                         inline
-                    } else if let Some(url) = params.get("TemplateURL") {
-                        // A URL was given, so it has to resolve. Falling back
+                    } else if let Some(url) = params
+                        .get("TemplateURL")
+                        .filter(|u| parse_s3_url(u).is_some())
+                    {
+                        // A *recognisable* S3 URL has to resolve. Falling back
                         // to the stored template would diff against the old
                         // one, report zero changes, and let ExecuteChangeSet
                         // claim success having applied nothing — `sam deploy`
                         // against a key that doesn't round-trip would print
                         // "no changes to deploy". CreateStack and UpdateStack
                         // both hard-fail this condition.
-                        match self.fetch_template_from_url(&aid, url) {
+                        //
+                        // The shape guard matters: the probe's
+                        // `optional_TemplateURL` variant sends `"t"` and
+                        // expects success, and `ValidationError` is not in
+                        // CreateChangeSet's Smithy `errors`. A value that
+                        // isn't URL-shaped takes the lenient path below.
+                        match self
+                            .fetch_template_from_url(&aid, url)
+                            .filter(|body| !body.trim().is_empty())
+                        {
                             Some(body) => body,
                             None => {
                                 return Err(AwsServiceError::aws_error(
