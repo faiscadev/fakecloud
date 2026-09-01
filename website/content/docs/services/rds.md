@@ -231,6 +231,8 @@ aws rds describe-db-instances \
 
 Identifier parameters accept an ARN as well as a plain id (`DBInstanceIdentifier`, `DBSnapshotIdentifier`, `DBClusterIdentifier`, `DBClusterSnapshotIdentifier`, and the `SnapshotIdentifier` on the restore operations), matching what the Terraform provider stores in `snapshot_identifier`.
 
+Reaching a snapshot another account shared with you takes the ARN, which names its owner. A plain id resolves a shared snapshot only while exactly one account shares one under that name; once two do, the id is ambiguous and `DescribeDBSnapshots` / `DescribeDBClusterSnapshots` raise the not-found fault rather than picking one of them, so a lookup can't quietly return the wrong account's snapshot or two rows for one name.
+
 `clone-group-id` is populated by `RestoreDBClusterToPointInTime` with `RestoreType=copy-on-write`, which puts the clone and its source in one clone group; a full-copy restore is an independent cluster and carries no group.
 
 `ModifyDBSnapshotAttribute` and `ModifyDBClusterSnapshotAttribute` resolve a value listed in both `ValuesToAdd` and `ValuesToRemove` by removing it (AWS rejects the request outright, but that error shape isn't in the RDS model). The response echoes the resulting attribute set, so a caller can confirm what was actually applied.

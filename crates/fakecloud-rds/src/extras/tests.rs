@@ -2737,6 +2737,77 @@ fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
         Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
         Ok(_) => panic!("a bare id reached another account's snapshot"),
     }
+
+    // IncludeShared widens to foreign rows, which is exactly what
+    // `data.aws_db_cluster_snapshot` sends. With one sharer the bare id
+    // still resolves to that single row.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("IncludeShared", "true"),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
+        "IncludeShared dropped the only shared row: {body}"
+    );
+
+    // Once a SECOND account shares a snapshot of the same name, the bare
+    // id names two rows. Returning both would hand the data source two
+    // results for one lookup, so an ambiguous bare id resolves to
+    // nothing and the caller has to pin the owner with an ARN.
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let third = accounts.get_or_create("888888888888");
+        third
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:888888888888:cluster-snapshot:shared-snap",
+                    "DBClusterIdentifier": "third-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("IncludeShared", "true"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(response) => panic!(
+            "an ambiguous bare id resolved: {}",
+            String::from_utf8_lossy(response.body.expect_bytes())
+        ),
+    }
+
+    // Each ARN still resolves -- ambiguity is a property of the bare id,
+    // not of the snapshots.
+    for owner in ["999999999999", "888888888888"] {
+        let arn = format!("arn:aws:rds:us-east-1:{owner}:cluster-snapshot:shared-snap");
+        let body = body_of_action(
+            &svc,
+            "DescribeDBClusterSnapshots",
+            &[("DBClusterSnapshotIdentifier", &arn)],
+        );
+        assert!(
+            body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
+            "ARN for {owner} returned an empty list: {body}"
+        );
+    }
 }
 
 #[test]

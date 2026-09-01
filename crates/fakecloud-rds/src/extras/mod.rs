@@ -746,6 +746,12 @@ impl RdsService {
                 let want_public = !owns_named
                     && (snapshot_type.as_deref() == Some("public")
                         || ((include_public || named) && snapshot_type.is_none()));
+                // Collected separately from the owned rows: a bare id
+                // can name a shared snapshot in several accounts at once,
+                // and appending them all would hand
+                // `data.aws_db_cluster_snapshot` two rows for one lookup.
+                // Counting them requires them apart from the owned rows.
+                let mut foreign = Vec::new();
                 if want_shared || want_public {
                     for (owner, other) in accounts.iter() {
                         if owner == aid {
@@ -767,7 +773,7 @@ impl RdsService {
                         let Some(bucket) = other.extras.get("cluster_snapshots") else {
                             continue;
                         };
-                        items.extend(
+                        foreign.extend(
                             bucket
                                 .values()
                                 .filter(|v| {
@@ -796,6 +802,34 @@ impl RdsService {
                         );
                     }
                 }
+                // An ARN pins the owner, so it can only ever match one
+                // account. A bare id can't: exactly one shared row
+                // resolves it, several are ambiguous and resolve to
+                // nothing, and the caller has to pin the owner with an
+                // ARN -- the same rule `DescribeDBSnapshots` applies, so
+                // the two paths can't disagree.
+                let ambiguous = snapshot_owner.is_none() && foreign.len() > 1;
+                if let Some(wanted) = snapshot_id.as_deref().filter(|_| ambiguous) {
+                    tracing::debug!(
+                        snapshot = wanted,
+                        accounts = foreign.len(),
+                        "bare cluster snapshot id is shared by several accounts; \
+                         address it by ARN"
+                    );
+                    // Not-found rather than an empty 200: a named lookup
+                    // that answers with an empty list is the failure this
+                    // handler already guards against elsewhere -- the SDK
+                    // reports "no rows" and the caller can't tell it from
+                    // a snapshot that was deleted. This is also what the
+                    // `DescribeDBSnapshots` sibling returns for the same
+                    // ambiguity.
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {wanted} not found."),
+                    ));
+                }
+                items.extend(foreign);
                 // The cross-account scan walks a HashMap, so without an
                 // explicit order two identical requests can return the
                 // rows in different orders. Sort by creation time then
@@ -816,11 +850,22 @@ impl RdsService {
                 // to a position no row matches and returns an EMPTY page
                 // instead of the first one. Every other parameter in this
                 // handler already treats an explicit empty as absent.
+                // The cursor is the last row's key, so a row with no key
+                // would encode the EMPTY marker -- which this handler
+                // reads back as "no marker" and answers with page one,
+                // leaving a paginating client looping forever. Every
+                // insert path sets the ARN; fall back to the identifier
+                // so a row that somehow lacks one still yields a usable
+                // cursor rather than a silently poisoned one.
                 let paginated = crate::service::service_helpers::paginate(
                     items,
                     get_param(req, "Marker").filter(|value| !value.is_empty()),
                     get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
-                    |entry| entry_str(entry, "DBClusterSnapshotArn").unwrap_or_default(),
+                    |entry| {
+                        entry_str(entry, "DBClusterSnapshotArn")
+                            .or_else(|| entry_str(entry, "DBClusterSnapshotIdentifier"))
+                            .unwrap_or_default()
+                    },
                 )?;
                 // Named member tags, not the generic `<member>`: the
                 // Smithy list carries xmlName `DBClusterSnapshot`, and the
