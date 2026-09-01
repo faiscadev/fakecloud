@@ -208,7 +208,7 @@ Override knobs (env vars, both optional):
 
 ## Describe filters
 
-The `Filters` parameter is honored on the Describe operations AWS documents it for. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Names and values are case-sensitive, and wildcards are not supported (same as AWS).
+The `Filters` parameter is honored on the four Describe operations in the table below. Other operations that AWS documents filters for (`DescribeDBClusterEndpoints`, `DescribeDBShardGroups`, `DescribeDBClusterBacktracks`, `DescribePendingMaintenanceActions`) accept the parameter and currently return the unfiltered list. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Names and values are case-sensitive, and wildcards are not supported (same as AWS).
 
 | Operation | Supported filter names |
 | --- | --- |

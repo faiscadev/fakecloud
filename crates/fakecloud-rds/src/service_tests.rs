@@ -3469,6 +3469,78 @@ async fn restore_db_instance_from_db_snapshot_accepts_an_arn_identifier() {
 }
 
 #[test]
+fn describe_db_snapshots_honors_the_dbi_resource_id_parameter() {
+    // The modeled parameter, not the filter: ignoring it returns every
+    // snapshot to a client that asked for one instance's -- the same
+    // failure #2481 reported for the filter form.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+    let wanted = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap2")
+        .expect("seeded snapshot")
+        .dbi_resource_id
+        .clone();
+
+    let req = request("DescribeDBSnapshots", &[("DbiResourceId", &wanted)]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+
+    // AND-ed with a named snapshot, like every other narrowing parameter.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "snap1"),
+            ("DbiResourceId", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+}
+
+#[tokio::test]
+async fn restore_db_instance_carries_the_requested_domain() {
+    // Settable on the restore request as it is on create; dropping it
+    // leaves the instance invisible to the `domain` filter.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_snapshot(&svc, "snap1", "db1");
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBSnapshotIdentifier", "snap1"),
+            ("Domain", "d-1234567890"),
+            ("DomainIAMRoleName", "rds-directory"),
+        ],
+    );
+    svc.restore_db_instance_from_db_snapshot(&req)
+        .await
+        .expect("restore with the stub runtime");
+
+    let (domain, role) = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("restored-db")
+        .map(|instance| {
+            (
+                instance.domain.clone(),
+                instance.domain_iam_role_name.clone(),
+            )
+        })
+        .expect("the restored instance is recorded");
+    assert_eq!(domain.as_deref(), Some("d-1234567890"));
+    assert_eq!(role.as_deref(), Some("rds-directory"));
+}
+
+#[test]
 fn describe_db_snapshots_filters_by_dbi_resource_id() {
     let svc = make_service();
     seed_snapshot(&svc, "snap1", "db1");

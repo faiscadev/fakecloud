@@ -526,6 +526,10 @@ impl RdsService {
             .as_deref()
             .is_some_and(|account| account != request.account_id);
         let db_instance_identifier = normalized_identifier(raw_instance_identifier.clone(), "db");
+        // Modeled narrowing parameter, and the same failure this branch
+        // exists to fix: ignoring it returns every snapshot to a client
+        // that asked for one instance's.
+        let dbi_resource_id = optional_query_param(request, "DbiResourceId");
         let snapshot_type = optional_query_param(request, "SnapshotType");
         // A junk boolean is treated as absent rather than rejected:
         // `InvalidParameterValue` isn't declared on this operation (see
@@ -635,6 +639,9 @@ impl RdsService {
                     .nth(4)
                     .unwrap_or(request.account_id.as_str())
             };
+            let resource_ok = dbi_resource_id
+                .as_deref()
+                .is_none_or(|wanted| snapshot.dbi_resource_id == wanted);
             let instance_ok = !instance_wrong_type
                 && instance_owner
                     .as_deref()
@@ -643,6 +650,7 @@ impl RdsService {
                     .as_deref()
                     .is_none_or(|instance_id| snapshot.db_instance_identifier == instance_id);
             let body = if type_ok
+                && resource_ok
                 && instance_ok
                 && snapshot_matches_filters(&snapshot, &filters, &request.account_id, owned)
             {
@@ -681,6 +689,9 @@ impl RdsService {
                 // An instance ARN naming another account matches none of
                 // this account's snapshots.
                 !foreign_instance_owner
+                    && dbi_resource_id
+                        .as_deref()
+                        .is_none_or(|wanted| snapshot.dbi_resource_id == wanted)
                     && db_instance_identifier
                         .as_deref()
                         .is_none_or(|instance_id| snapshot.db_instance_identifier == instance_id)
@@ -720,9 +731,12 @@ impl RdsService {
                         .filter(|snapshot| {
                             // The instance ARN's owner is the account
                             // that shared these, so honour it here.
-                            instance_owner
+                            dbi_resource_id
                                 .as_deref()
-                                .is_none_or(|account| account == owner)
+                                .is_none_or(|wanted| snapshot.dbi_resource_id == wanted)
+                                && instance_owner
+                                    .as_deref()
+                                    .is_none_or(|account| account == owner)
                                 && db_instance_identifier.as_deref().is_none_or(|instance_id| {
                                     snapshot.db_instance_identifier == instance_id
                                 })
@@ -1017,6 +1031,17 @@ impl RdsService {
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
         instance.port = 0;
+        // Active Directory membership is settable on the restore
+        // request, as it is on create: dropping it leaves the restored
+        // instance reporting no DomainMembership and invisible to the
+        // `domain` filter. (The PITR and read-replica paths already
+        // carry the source's.)
+        instance.domain = optional_query_param(request, "Domain");
+        instance.domain_fqdn = optional_query_param(request, "DomainFqdn");
+        instance.domain_ou = optional_query_param(request, "DomainOu");
+        instance.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
+        instance.domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
+        instance.domain_dns_ips = parse_string_member_list(request, "DomainDnsIps");
         // An explicit DBSubnetGroupName places the restored instance in that
         // group (validated above); the builder hardcodes None otherwise.
         if let Some(ref name) = db_subnet_group_name {

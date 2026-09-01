@@ -3069,6 +3069,37 @@ fn describe_db_cluster_snapshots_filtered_owned_row_is_not_replaced() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_honors_the_cluster_resource_id_parameter() {
+    // Modeled narrowing parameter; ignoring it returns the whole list.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("000000000000");
+        for (id, resource) in [("snap-1", "cluster-AAAA"), ("snap-2", "cluster-BBBB")] {
+            if let Some(entry) = s
+                .extras
+                .get_mut("cluster_snapshots")
+                .and_then(|m| m.get_mut(id))
+                .and_then(|v| v.as_object_mut())
+            {
+                entry.insert("DbClusterResourceId".to_string(), json!(resource));
+            }
+        }
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DbClusterResourceId", "cluster-BBBB")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
 fn describe_db_cluster_snapshots_honors_include_shared() {
     // The modeled IncludeShared / IncludePublic members widen an
     // unqualified listing, as on DescribeDBSnapshots.

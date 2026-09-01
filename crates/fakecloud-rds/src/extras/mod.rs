@@ -609,6 +609,10 @@ impl RdsService {
                     && cluster_owner
                         .as_deref()
                         .is_none_or(|account| account == aid);
+                // Modeled narrowing parameter; ignoring it returns the
+                // whole list to a client that named one cluster.
+                let cluster_resource_id =
+                    get_param(req, "DbClusterResourceId").filter(|value| !value.is_empty());
                 let snapshot_type =
                     get_param(req, "SnapshotType").filter(|value| !value.is_empty());
                 // Parsed exactly as DescribeDBSnapshots does, so the two
@@ -671,6 +675,8 @@ impl RdsService {
                                     entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
                                 }) && cluster_id.as_deref().is_none_or(|wanted| {
                                     entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                                }) && cluster_resource_id.as_deref().is_none_or(|wanted| {
+                                    entry_str(v, "DbClusterResourceId") == Some(wanted)
                                 }) && owned_snapshot_type_matches(v, snapshot_type.as_deref())
                                     && cluster_snapshot_matches_filters(v, &filters, &aid, true)
                             })
@@ -762,6 +768,8 @@ impl RdsService {
                                         entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
                                     }) && cluster_id.as_deref().is_none_or(|wanted| {
                                         entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                                    }) && cluster_resource_id.as_deref().is_none_or(|wanted| {
+                                        entry_str(v, "DbClusterResourceId") == Some(wanted)
                                     }) && cluster_snapshot_matches_filters(
                                         v, &filters, &aid, false,
                                     )
