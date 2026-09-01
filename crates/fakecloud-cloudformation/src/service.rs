@@ -2343,7 +2343,7 @@ impl CloudFormationService {
         let mut input = UpdateStackInput::from_params(req)?;
 
         // Get stack_id before write lock for the provisioner
-        let found_stack_id = {
+        let (found_stack_id, previous_template) = {
             let accounts = self.state.read();
             let empty = CloudFormationState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -2354,9 +2354,37 @@ impl CloudFormationService {
                     (s.name == input.stack_name || s.stack_id == input.stack_name)
                         && s.status != "DELETE_COMPLETE"
                 })
-                .map(|s| s.stack_id.clone())
+                .map(|s| (s.stack_id.clone(), s.template.clone()))
                 .unwrap_or_default()
         };
+
+        // `UsePreviousTemplate=true` and `TemplateURL` both arrive with an
+        // empty `TemplateBody`. Resolve them to a real template before
+        // anything else looks at the body: an empty body parses to no
+        // resources, and `apply_resource_updates` deletes every resource
+        // absent from the new definitions, so leaving it empty tears the whole
+        // stack down and reports UPDATE_COMPLETE. `aws cloudformation
+        // update-stack --use-previous-template` is ordinary usage, so this is
+        // reachable without a malformed template at all.
+        if input.template_body.trim().is_empty() {
+            if let Some(body) = Self::get_param(req, "TemplateURL")
+                .and_then(|url| self.fetch_template_from_url(&req.account_id, &url))
+            {
+                input.template_body = body;
+            } else {
+                input.template_body = previous_template;
+            }
+        }
+
+        // Still nothing to apply (no such stack, or a stack whose stored
+        // template is itself empty): treat the update as a no-op rather than
+        // an implicit "delete everything".
+        if input.template_body.trim().is_empty() {
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                xml_responses::update_stack_response(&found_stack_id, &req.request_id),
+            ));
+        }
 
         // Seed pseudo-parameters before parsing — the StackId is now known
         // (after the read above) so resolve_refs sees the same values that

@@ -134,8 +134,11 @@ fn declares_resources(line: &str) -> bool {
         .strip_prefix('"')
         .or_else(|| rest.strip_prefix('\''))
         .unwrap_or(rest);
-    let rest = rest.trim_start();
-    rest.is_empty() || rest.starts_with(':')
+    // Require the colon. A real top-level key always has one, and without it
+    // any unparseable body that merely contains a `Resources` line (a pasted
+    // log, a CSV header) would be classified as a template — turning a lenient
+    // degrade into a hard error.
+    rest.trim_start().starts_with(':')
 }
 
 /// Convenience wrapper for callers that only want a template-shaped object and
@@ -600,6 +603,13 @@ Resources:
         }
         // A parseable document with no Resources section isn't one either.
         assert!(!is_template_document("Description: just a description\n"));
+
+        // An unparseable body that merely mentions `Resources` without making
+        // it a key (a pasted log, a CSV header) must stay lenient — the hard
+        // failure paths would otherwise reject it outright.
+        assert!(!is_template_document(
+            "Name\tResources\tOwner\n\tbad\ttabs\there\n"
+        ));
     }
 
     #[test]

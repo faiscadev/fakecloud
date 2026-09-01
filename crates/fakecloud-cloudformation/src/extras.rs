@@ -271,7 +271,7 @@ impl CloudFormationService {
     /// template to S3 and pass its URL; the object is in fakecloud's S3 by
     /// the time the change set is created, so read it back. Returns `None`
     /// if the URL can't be parsed or the object isn't present.
-    fn fetch_template_from_url(&self, account_id: &str, url: &str) -> Option<String> {
+    pub(crate) fn fetch_template_from_url(&self, account_id: &str, url: &str) -> Option<String> {
         let (bucket, key) = parse_s3_url(url)?;
         let mut accounts = self.deps.s3.write();
         let state = accounts.get_or_create(account_id);

@@ -379,6 +379,59 @@ async fn unparseable_update_does_not_delete_the_stacks_resources() {
         .expect("a valid update must still work");
 }
 
+/// `update-stack --use-previous-template` sends an empty `TemplateBody`. That
+/// used to parse to zero resources, and `apply_resource_updates` deletes every
+/// resource absent from the new definitions — so ordinary, documented usage
+/// silently deleted the whole stack and reported UPDATE_COMPLETE.
+#[tokio::test]
+async fn use_previous_template_does_not_delete_the_stacks_resources() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+
+    cfn.create_stack()
+        .stack_name("prev-template")
+        .template_body(UPDATE_BASE_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    cfn.update_stack()
+        .stack_name("prev-template")
+        .use_previous_template(true)
+        .send()
+        .await
+        .expect("update_stack with the previous template");
+
+    let after = cfn
+        .describe_stack_resources()
+        .stack_name("prev-template")
+        .send()
+        .await
+        .expect("describe_stack_resources");
+    let mut ids: Vec<&str> = after
+        .stack_resources()
+        .iter()
+        .filter_map(|r| r.logical_resource_id())
+        .collect();
+    ids.sort_unstable();
+    assert_eq!(
+        ids,
+        ["KeepMe", "KeepMeToo"],
+        "--use-previous-template must re-apply the stored template, not an empty one"
+    );
+
+    let sqs = server.sqs_client().await;
+    let queues = sqs.list_queues().send().await.expect("list_queues");
+    assert!(
+        queues
+            .queue_urls()
+            .iter()
+            .any(|u| u.ends_with("/keep-me-on-bad-update")),
+        "the queue must survive, got {:?}",
+        queues.queue_urls()
+    );
+}
+
 /// A placeholder `TemplateBody` (what the conformance probe sends) keeps the
 /// lenient path: an empty stack that still reaches CREATE_COMPLETE, because
 /// `ValidationError` is not in CreateStack's Smithy `errors` list.
