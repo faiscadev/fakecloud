@@ -101,22 +101,49 @@ fn parse_yaml(body: &str) -> Result<Json, String> {
     yaml_to_json(yaml).map_err(|e| format!("Invalid YAML template: {e}"))
 }
 
-/// Cheap pre-scan for pathological nesting. Counts flow-collection openers, so
-/// it catches the `[[[[...` / `{{{{...` shapes that drive the recursion without
-/// having to parse first. Quoted content is not tracked: over-counting inside a
-/// string can only reject a body already far past any real template's depth.
+/// Cheap pre-scan for pathological nesting, covering both YAML styles.
+///
+/// *Flow* collections nest with `[` / `{`. *Block* collections nest with
+/// indentation and with compact sequence markers -- `- - - - a` is two bytes
+/// per level, so a few hundred KB reaches a depth that overflows the parser's
+/// stack. Counting only the flow openers would leave the cheaper shape wide
+/// open on an unauthenticated CreateStack.
+///
+/// Quoted content is not tracked: over-counting inside a string can only
+/// reject a body already far past any real template's depth.
 fn exceeds_nesting_limit(body: &str) -> bool {
-    let mut depth = 0usize;
-    for b in body.bytes() {
-        match b {
-            b'[' | b'{' => {
-                depth += 1;
-                if depth > MAX_NESTING_DEPTH {
-                    return true;
+    let mut flow_depth = 0usize;
+    for line in body.lines() {
+        // Block depth: the line's indentation plus its compact `- ` markers.
+        // Each level of block nesting costs at least one column, so the
+        // indentation is itself an upper bound on the depth reached here.
+        let indent = line.len() - line.trim_start().len();
+        let mut block_depth = indent;
+        let mut rest = line.trim_start();
+        while let Some(tail) = rest.strip_prefix("- ") {
+            block_depth += 1;
+            rest = tail.trim_start();
+        }
+        if rest == "-" {
+            block_depth += 1;
+        }
+        if block_depth > MAX_NESTING_DEPTH {
+            return true;
+        }
+
+        // Flow depth carries across lines, since a flow collection may span
+        // them.
+        for b in line.bytes() {
+            match b {
+                b'[' | b'{' => {
+                    flow_depth += 1;
+                    if flow_depth > MAX_NESTING_DEPTH {
+                        return true;
+                    }
                 }
+                b']' | b'}' => flow_depth = flow_depth.saturating_sub(1),
+                _ => {}
             }
-            b']' | b'}' => depth = depth.saturating_sub(1),
-            _ => {}
         }
     }
     false
@@ -495,6 +522,12 @@ Resources:
         for bomb in [
             format!("{}{}", "{", "[".repeat(100_000)),
             "[".repeat(100_000),
+            // Compact block sequences nest with no brackets at all, two bytes
+            // per level — the cheaper shape, and the one a flow-only guard
+            // misses.
+            "- ".repeat(100_000),
+            // Pure indentation nesting.
+            format!("{}a: 1", " ".repeat(100_000)),
         ] {
             let err = parse_template_body(&bomb).expect_err("must be refused");
             assert!(err.contains("nesting deeper than"), "{err}");
@@ -599,6 +632,21 @@ Resources:
             asserts[5]["Assert"],
             json!({"Fn::RefAll": "AWS::EC2::VPC::Id"})
         );
+    }
+
+    #[test]
+    fn double_bang_tags_pass_through() {
+        // A non-standard `!!`-prefixed tag DOES reach `tagged_to_json` (the
+        // resolved `tag:yaml.org,2002:*` ones do not), so the passthrough
+        // branch is live and must not be mistaken for a CloudFormation typo.
+        let parsed = parse_template_body(
+            "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      A: !!custom 5\n",
+        )
+        .expect("a `!!` tag is not a CloudFormation intrinsic");
+        // The scalar keeps its unresolved (string) form, which is what a
+        // non-standard tag means; the point is that it is not rejected as a
+        // misspelled intrinsic.
+        assert_eq!(parsed["Resources"]["Q"]["Properties"]["A"], json!("5"));
     }
 
     #[test]

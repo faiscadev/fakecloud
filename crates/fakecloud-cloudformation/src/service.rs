@@ -1327,12 +1327,18 @@ impl CloudFormationService {
         let mut result = BTreeMap::new();
         for i in 1.. {
             let key_param = format!("Parameters.member.{i}.ParameterKey");
-            let value_param = format!("Parameters.member.{i}.ParameterValue");
-            match (params.get(&key_param), params.get(&value_param)) {
-                (Some(k), Some(v)) => {
-                    result.insert(k.clone(), v.clone());
-                }
-                _ => break,
+            let Some(k) = params.get(&key_param) else {
+                // No key at this index: the list is exhausted.
+                break;
+            };
+            // `ParameterKey=X,UsePreviousValue=true` carries no
+            // `ParameterValue`. Skipping the entry is right (the stored value
+            // is carried forward by the caller), but `break`ing here dropped
+            // every parameter AFTER it too, and the truncated map then
+            // overwrote the stack's stored parameters. That pairing is the
+            // normal way `update-stack --use-previous-template` is invoked.
+            if let Some(v) = params.get(&format!("Parameters.member.{i}.ParameterValue")) {
+                result.insert(k.clone(), v.clone());
             }
         }
         result
@@ -1617,9 +1623,21 @@ impl CloudFormationService {
         // produces a CREATE_COMPLETE stack holding nothing -- the #2480 no-op,
         // reached without any malformed template. A value that isn't URL-shaped
         // is a synthetic probe input and keeps the lenient path.
-        let resolved_from_url = Self::get_param(req, "TemplateURL")
-            .filter(|url| crate::extras::parse_s3_url(url).is_some())
-            .and_then(|url| self.fetch_template_from_url(&req.account_id, &url));
+        let url_param = Self::get_param(req, "TemplateURL")
+            .filter(|url| crate::extras::parse_s3_url(url).is_some());
+        let resolved_from_url = url_param
+            .as_ref()
+            .and_then(|url| self.fetch_template_from_url(&req.account_id, url));
+        // A well-formed URL that resolves to nothing (uploaded to another
+        // account, a public AWS-hosted quickstart, a key mismatch) must fail
+        // the stack rather than fall back to an empty body and produce the
+        // #2480 empty CREATE_COMPLETE. UpdateStack raises this synchronously;
+        // here the stack is already async, so it rolls to CREATE_FAILED with
+        // the same message.
+        let url_fetch_error = match (&url_param, &resolved_from_url) {
+            (Some(url), None) => Some(format!("Template not found at {url}")),
+            _ => None,
+        };
         let empty = String::new();
         let template_body = match (params.get("TemplateBody"), &resolved_from_url) {
             (Some(body), _) if !body.trim().is_empty() => body,
@@ -1713,6 +1731,9 @@ impl CloudFormationService {
                 )
             }
         };
+        // An unresolvable TemplateURL outranks the parse result: the body is
+        // empty only because the fetch failed, so report that instead.
+        let template_error = url_fetch_error.or(template_error);
 
         // Refuse if any Fn::ImportValue references an unknown export. CFN
         // checks this before provisioning; we mirror that so callers get
@@ -2357,7 +2378,7 @@ impl CloudFormationService {
         let mut input = UpdateStackInput::from_params(req)?;
 
         // Get stack_id before write lock for the provisioner
-        let (found_stack_id, previous_template) = {
+        let (found_stack_id, previous_template, previous_parameters) = {
             let accounts = self.state.read();
             let empty = CloudFormationState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -2368,9 +2389,31 @@ impl CloudFormationService {
                     (s.name == input.stack_name || s.stack_id == input.stack_name)
                         && s.status != "DELETE_COMPLETE"
                 })
-                .map(|s| (s.stack_id.clone(), s.template.clone()))
+                .map(|s| (s.stack_id.clone(), s.template.clone(), s.parameters.clone()))
                 .unwrap_or_default()
         };
+
+        // `ParameterKey=X,UsePreviousValue=true` carries no value on the wire;
+        // its meaning is "keep what the stack already has". `extract_parameters`
+        // skips those entries, so fill them in here — otherwise the stack's
+        // stored parameters are overwritten with a map missing them, and a
+        // `Ref` to one resolves to the bare parameter name.
+        {
+            let raw = Self::get_all_params(req);
+            for i in 1.. {
+                let Some(key) = raw.get(&format!("Parameters.member.{i}.ParameterKey")) else {
+                    break;
+                };
+                let use_previous = raw
+                    .get(&format!("Parameters.member.{i}.UsePreviousValue"))
+                    .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                if use_previous && !input.parameters.contains_key(key) {
+                    if let Some(prev) = previous_parameters.get(key) {
+                        input.parameters.insert(key.clone(), prev.clone());
+                    }
+                }
+            }
+        }
 
         // `UsePreviousTemplate=true` and `TemplateURL` both arrive with an
         // empty `TemplateBody`. Resolve them to a real template before
@@ -2444,6 +2487,15 @@ impl CloudFormationService {
                 .find(|s| s.stack_id == found_stack_id)
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| input.stack_name.clone());
+            // Emit the same IN_PROGRESS -> COMPLETE pair the normal update
+            // path does, so a poller sees a well-formed transition.
+            record_stack_status_event(
+                state,
+                &found_stack_id,
+                &stack_name_owned,
+                "AWS::CloudFormation::Stack",
+                "UPDATE_IN_PROGRESS",
+            );
             record_stack_status_event(
                 state,
                 &found_stack_id,
@@ -2452,6 +2504,16 @@ impl CloudFormationService {
                 "UPDATE_COMPLETE",
             );
             drop(accounts);
+            // ... and notify, using the ARNs just stored. Returning without
+            // this would leave a caller waiting on the stack's SNS topic
+            // hanging, even though both other update outcomes notify.
+            Self::send_stack_notification(
+                &self.deps.delivery,
+                &input.notification_arns,
+                &stack_name_owned,
+                &found_stack_id,
+                "UPDATE_COMPLETE",
+            );
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
                 xml_responses::update_stack_response(&found_stack_id, &req.request_id),
