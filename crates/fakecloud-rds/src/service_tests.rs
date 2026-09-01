@@ -2362,7 +2362,10 @@ async fn create_db_instance_persists_the_domain_membership() {
     // The `domain` filter reads instance.domain, so an instance created
     // WITH a domain (rather than modified into one) has to carry it --
     // otherwise the filter is dead for the common case.
-    let svc = make_service();
+    // The stub runtime lets the create reach the point where the record
+    // is staged; without one it fails before that and the assertions
+    // below would never run.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
     let req = request(
         "CreateDBInstance",
         &[
@@ -2376,11 +2379,11 @@ async fn create_db_instance_persists_the_domain_membership() {
             ("DomainIAMRoleName", "rds-directory"),
         ],
     );
-    // Without a runtime the create fails after the record is staged, so
-    // read the persisted row rather than the response.
-    let _ = svc.create_db_instance(&req).await;
+    svc.create_db_instance(&req)
+        .await
+        .expect("create with the stub runtime");
 
-    let domain = svc
+    let (domain, role) = svc
         .state
         .read()
         .default_ref()
@@ -2391,11 +2394,12 @@ async fn create_db_instance_persists_the_domain_membership() {
                 instance.domain.clone(),
                 instance.domain_iam_role_name.clone(),
             )
-        });
-    if let Some((domain, role)) = domain {
-        assert_eq!(domain.as_deref(), Some("d-1234567890"));
-        assert_eq!(role.as_deref(), Some("rds-directory"));
-    }
+        })
+        // Requiring the row is the point: an `if let` here would let a
+        // regression in create-time domain persistence pass silently.
+        .expect("the created instance is recorded");
+    assert_eq!(domain.as_deref(), Some("d-1234567890"));
+    assert_eq!(role.as_deref(), Some("rds-directory"));
 }
 
 #[test]

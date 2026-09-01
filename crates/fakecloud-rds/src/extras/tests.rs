@@ -3376,9 +3376,15 @@ fn copy_db_cluster_snapshot_stamps_its_own_creation_time() {
     );
 
     let copied = extras_value(&svc, "cluster_snapshots", "snap-copy");
+    // Require the field: `as_str()` on a missing key is None, which
+    // would satisfy an inequality against the source's time and let a
+    // copy that reports NO creation time pass.
+    let copied_time = copied["SnapshotCreateTime"]
+        .as_str()
+        .expect("the copy records its own creation time")
+        .to_string();
     assert_ne!(
-        copied["SnapshotCreateTime"].as_str(),
-        Some("2020-01-01T00:00:00+00:00"),
+        copied_time, "2020-01-01T00:00:00+00:00",
         "the copy kept its source's creation time"
     );
     // And it records where it was copied from, as an ARN.
