@@ -1634,29 +1634,26 @@ impl CloudFormationService {
         // the #2480 empty CREATE_COMPLETE.
         let resolved_from_url = url_param
             .as_ref()
-            .and_then(|url| crate::extras::parse_s3_url(url).map(|_| url))
-            .and_then(|url| self.fetch_template_from_url(&req.account_id, url))
-            .filter(|body| !body.trim().is_empty());
-        // A well-formed URL that resolves to nothing (uploaded to another
-        // account, a public AWS-hosted quickstart, a key mismatch) must fail
-        // the stack rather than fall back to an empty body and produce the
-        // #2480 empty CREATE_COMPLETE. UpdateStack raises this synchronously;
-        // here the stack is already async, so it rolls to CREATE_FAILED with
-        // the same message.
+            .map(|url| self.resolve_template_url(&req.account_id, url));
+        // A URL that resolves to nothing (uploaded to another account, a
+        // public AWS-hosted quickstart, a key mismatch) must fail the stack
+        // rather than fall back to an empty body and produce the #2480 empty
+        // CREATE_COMPLETE. UpdateStack raises this synchronously; here the
+        // stack is already async, so it rolls to CREATE_FAILED.
         let empty = String::new();
         let inline_body = params
             .get("TemplateBody")
             .filter(|body| !body.trim().is_empty());
         let template_body = match (inline_body, &resolved_from_url) {
             (Some(body), _) => body,
-            (None, Some(body)) => body,
-            (None, None) => params.get("TemplateBody").unwrap_or(&empty),
+            (None, Some(Ok(body))) => body,
+            _ => params.get("TemplateBody").unwrap_or(&empty),
         };
         // Only when the URL body is the one that would have been used: a
         // request carrying a good inline TemplateBody alongside a stale or
         // foreign TemplateURL is served by the body and must not fail.
-        let url_fetch_error = match (&url_param, &resolved_from_url, inline_body) {
-            (Some(url), None, None) => Some(format!("Template not found at {url}")),
+        let url_fetch_error = match (&resolved_from_url, inline_body) {
+            (Some(Err(err)), None) => Some(err.clone()),
             _ => None,
         };
 
@@ -2464,14 +2461,12 @@ impl CloudFormationService {
                 // template and discard it. Only a value that isn't meant as a
                 // URL at all -- the probe's `"t"` -- takes the lenient path.
                 Some(url) if crate::extras::looks_like_url(&url) => Some(
-                    crate::extras::parse_s3_url(&url)
-                        .and_then(|_| self.fetch_template_from_url(&req.account_id, &url))
-                        .filter(|body| !body.trim().is_empty())
-                        .ok_or_else(|| {
+                    self.resolve_template_url(&req.account_id, &url)
+                        .map_err(|err| {
                             AwsServiceError::aws_error(
                                 StatusCode::BAD_REQUEST,
                                 "ValidationError",
-                                format!("Template not found at {url}"),
+                                err,
                             )
                         })?,
                 ),

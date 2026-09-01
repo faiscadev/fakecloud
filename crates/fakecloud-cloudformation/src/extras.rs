@@ -301,6 +301,30 @@ impl CloudFormationService {
     /// template to S3 and pass its URL; the object is in fakecloud's S3 by
     /// the time the change set is created, so read it back. Returns `None`
     /// if the URL can't be parsed or the object isn't present.
+    /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
+    /// it can fail. AWS reports an unusable URL shape and a missing object
+    /// differently, and collapsing them into one message sends the caller
+    /// looking for a missing key when the URL itself is the problem.
+    ///
+    /// The caller is expected to have already decided the value is meant as a
+    /// URL (`looks_like_url`); a synthetic non-URL scalar must not reach here.
+    pub(crate) fn resolve_template_url(
+        &self,
+        account_id: &str,
+        url: &str,
+    ) -> Result<String, String> {
+        if parse_s3_url(url).is_none() {
+            return Err(format!("TemplateURL must be a supported URL: {url}"));
+        }
+        // An object that exists but is empty (a truncated `aws s3 cp`, a
+        // `sam package` that wrote nothing) counts as absent: an empty body
+        // parses to no resources and would report success having built
+        // nothing.
+        self.fetch_template_from_url(account_id, url)
+            .filter(|body| !body.trim().is_empty())
+            .ok_or_else(|| format!("Template not found at {url}"))
+    }
+
     pub(crate) fn fetch_template_from_url(&self, account_id: &str, url: &str) -> Option<String> {
         let (bucket, key) = parse_s3_url(url)?;
         let mut accounts = self.deps.s3.write();
@@ -374,16 +398,13 @@ impl CloudFormationService {
                         // CreateChangeSet's Smithy `errors`. A value that
                         // isn't meant as a URL takes the lenient path below;
                         // one that is but cannot be read is reported.
-                        match parse_s3_url(url)
-                            .and_then(|_| self.fetch_template_from_url(&aid, url))
-                            .filter(|body| !body.trim().is_empty())
-                        {
-                            Some(body) => body,
-                            None => {
+                        match self.resolve_template_url(&aid, url) {
+                            Ok(body) => body,
+                            Err(err) => {
                                 return Err(AwsServiceError::aws_error(
                                     StatusCode::BAD_REQUEST,
                                     "ValidationError",
-                                    format!("Template not found at {url}"),
+                                    err,
                                 ))
                             }
                         }
@@ -2663,6 +2684,25 @@ mod tests {
         );
         // Not an object URL (no key).
         assert_eq!(parse_s3_url("https://s3.amazonaws.com/bucket-only"), None);
+    }
+
+    #[test]
+    fn resolve_template_url_distinguishes_bad_shape_from_missing_object() {
+        let svc = svc();
+        // Unusable URL shape (no key) -> the URL itself is the problem.
+        let err = svc
+            .resolve_template_url("000000000000", "https://s3.amazonaws.com/bucket-only")
+            .expect_err("no key");
+        assert!(
+            err.starts_with("TemplateURL must be a supported URL"),
+            "{err}"
+        );
+        // Well-formed URL, no such object -> a different message, so the
+        // caller isn't sent hunting for a key when the URL was fine.
+        let err = svc
+            .resolve_template_url("000000000000", "https://s3.amazonaws.com/b/missing.yaml")
+            .expect_err("missing object");
+        assert!(err.starts_with("Template not found at"), "{err}");
     }
 
     #[test]
