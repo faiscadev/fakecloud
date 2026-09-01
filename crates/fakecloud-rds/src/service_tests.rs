@@ -3054,6 +3054,52 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
     );
     assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
 
+    // Once a SECOND account shares a snapshot under the same name, the
+    // bare id names two rows. Resolving it to whichever the account map
+    // happened to yield first would answer the same request differently
+    // between calls, so an ambiguous bare id resolves to nothing and the
+    // caller has to pin the owner with an ARN.
+    {
+        let mut accounts = svc.state.write();
+        let third = accounts.get_or_create("888888888888");
+        let mut also_shared = other_account_snapshot("shared-snap");
+        also_shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        third
+            .snapshots
+            .insert("shared-snap".to_string(), also_shared);
+    }
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "shared-snap"),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // Both ARNs still resolve -- ambiguity is a property of the bare id,
+    // not of the snapshots.
+    for owner in ["999999999999", "888888888888"] {
+        let arn = format!("arn:aws:rds:us-east-1:{owner}:snapshot:shared-snap");
+        let req = request(
+            "DescribeDBSnapshots",
+            &[("DBSnapshotIdentifier", &arn), ("SnapshotType", "shared")],
+        );
+        let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+        assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+    }
+
+    // Drop the duplicate so the rest of the test sees one sharer again.
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create("888888888888")
+            .snapshots
+            .remove("shared-snap");
+    }
+
     // A snapshot nobody shared stays invisible.
     {
         let mut accounts = svc.state.write();

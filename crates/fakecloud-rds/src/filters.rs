@@ -228,16 +228,28 @@ pub(crate) fn parse_filters(req: &AwsRequest) -> Vec<RdsFilter> {
     // Dispatch merges the form body into `query_params` for the Query
     // protocol, so the fallback is only for a request built without that
     // merge. Parsing the body on every Describe just to service a path
-    // production never takes allocates a map of every request parameter
-    // on a hot path -- so only do it when no filter is visible at all.
+    // production never takes would allocate a map of every request
+    // parameter on a hot path -- and every unfiltered Describe carries a
+    // body, so "the body is non-empty" is not a discriminating gate. Scan
+    // the raw bytes for the parameter prefix first: a substring search
+    // allocates nothing, and it decides the common case (no filters
+    // anywhere) without building the map. `Filters.` also can't appear in
+    // a Query request except as a parameter name -- values are
+    // percent-encoded, so a `.` in one arrives as `%2E`.
     let filters_in_query = req
         .query_params
         .keys()
         .any(|key| key.starts_with("Filters."));
-    let body = if filters_in_query || req.body.is_empty() {
-        HashMap::new()
-    } else {
+    const FILTER_PREFIX: &[u8] = b"Filters.";
+    let filters_in_body = !filters_in_query
+        && req
+            .body
+            .windows(FILTER_PREFIX.len())
+            .any(|window| window == FILTER_PREFIX);
+    let body = if filters_in_body {
         fakecloud_core::protocol::parse_query_body(&req.body)
+    } else {
+        HashMap::new()
     };
 
     for index in 1.. {
@@ -299,6 +311,50 @@ mod tests {
             access_key_id: None,
             principal: None,
         }
+    }
+
+    /// The body fallback exists for a caller that puts the parameters in
+    /// the form body without dispatch's merge -- including one that keeps
+    /// `Action` in the query string, so an "empty query_params" gate
+    /// would miss it. And an ordinary unfiltered Describe must not pay
+    /// for a parse it has no use for.
+    #[test]
+    fn reads_filters_from_an_unmerged_form_body() {
+        let mut req = request(&[]);
+        req.body = Bytes::from_static(
+            b"Action=DescribeDBInstances&Filters.Filter.1.Name=engine&Filters.Filter.1.Values.Value.1=mysql",
+        );
+
+        assert_eq!(
+            parse_filters(&req),
+            vec![RdsFilter {
+                name: "engine".to_string(),
+                values: vec!["mysql".to_string()],
+            }]
+        );
+
+        // A body with no filter parameter at all yields none -- the
+        // common path, and the one the byte scan short-circuits.
+        let mut req = request(&[]);
+        req.body = Bytes::from_static(b"Action=DescribeDBInstances&MaxRecords=20");
+        assert!(parse_filters(&req).is_empty());
+
+        // A filter already visible in the query wins; the body is not
+        // consulted, so a stale duplicate there can't double it up.
+        let mut req = request(&[
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "postgres"),
+        ]);
+        req.body = Bytes::from_static(
+            b"Filters.Filter.1.Name=engine&Filters.Filter.1.Values.Value.1=mysql",
+        );
+        assert_eq!(
+            parse_filters(&req),
+            vec![RdsFilter {
+                name: "engine".to_string(),
+                values: vec!["postgres".to_string()],
+            }]
+        );
     }
 
     #[test]

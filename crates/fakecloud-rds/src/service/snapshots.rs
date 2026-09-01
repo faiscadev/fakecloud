@@ -628,7 +628,15 @@ impl RdsService {
                         return None;
                     }
                     let named_account = named_owner.clone();
-                    accounts
+                    // Collected, not first-match: a bare id can name
+                    // snapshots in several accounts, and `find_map` over
+                    // a HashMap would return an arbitrary one that varies
+                    // between calls -- and silently drop the others that
+                    // the unqualified listing shows. Exactly one match
+                    // resolves; several are ambiguous and name nothing,
+                    // which is why AWS wants the ARN for a shared
+                    // snapshot.
+                    let mut shared_matches: Vec<DbSnapshot> = accounts
                         .iter()
                         .filter(|(owner, _)| *owner != request.account_id)
                         .filter(|(owner, _)| {
@@ -636,13 +644,30 @@ impl RdsService {
                                 .as_deref()
                                 .is_none_or(|account| account == *owner)
                         })
-                        .find_map(|(_, other)| {
-                            other.snapshots.get(&snapshot_id).filter(|snapshot| {
-                                snapshot_shared_with(snapshot, &request.account_id)
-                                    || snapshot_is_public(snapshot)
-                            })
+                        .filter_map(|(_, other)| {
+                            other
+                                .snapshots
+                                .get(&snapshot_id)
+                                .filter(|snapshot| {
+                                    snapshot_shared_with(snapshot, &request.account_id)
+                                        || snapshot_is_public(snapshot)
+                                })
+                                .cloned()
                         })
-                        .cloned()
+                        .collect();
+                    match shared_matches.len() {
+                        1 => shared_matches.pop(),
+                        0 => None,
+                        ambiguous => {
+                            tracing::debug!(
+                                snapshot = %snapshot_id,
+                                accounts = ambiguous,
+                                "bare snapshot id is shared by several accounts; \
+                                 address it by ARN"
+                            );
+                            None
+                        }
+                    }
                 })
                 // Echo what the caller passed (the ARN, when they used
                 // one), not the id it reduced to.
