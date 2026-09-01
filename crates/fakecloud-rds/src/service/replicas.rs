@@ -101,6 +101,22 @@ impl RdsService {
             &source_instance,
             &creating_placeholder_container(),
         );
+        // Active Directory membership is settable on this request too
+        // (all six members are modeled): an explicit Domain overrides
+        // whatever the source carried, and dropping it would leave the
+        // new instance invisible to the `domain` filter.
+        if let Some(domain) = optional_query_param(request, "Domain") {
+            replica.domain = Some(domain);
+            replica.domain_fqdn = optional_query_param(request, "DomainFqdn");
+            replica.domain_ou = optional_query_param(request, "DomainOu");
+            replica.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
+            replica.domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
+            let dns_ips = parse_string_member_list(request, "DomainDnsIps");
+            if !dns_ips.is_empty() {
+                replica.domain_dns_ips = dns_ips;
+            }
+        }
+
         replica.db_instance_status = "creating".to_string();
         replica.endpoint_address = String::new();
         replica.port = 0;

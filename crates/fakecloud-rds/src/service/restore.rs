@@ -163,6 +163,22 @@ impl RdsService {
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
         instance.port = 0;
+        // Active Directory membership is settable on this request too
+        // (all six members are modeled): an explicit Domain overrides
+        // whatever the source carried, and dropping it would leave the
+        // new instance invisible to the `domain` filter.
+        if let Some(domain) = optional_query_param(request, "Domain") {
+            instance.domain = Some(domain);
+            instance.domain_fqdn = optional_query_param(request, "DomainFqdn");
+            instance.domain_ou = optional_query_param(request, "DomainOu");
+            instance.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
+            instance.domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
+            let dns_ips = parse_string_member_list(request, "DomainDnsIps");
+            if !dns_ips.is_empty() {
+                instance.domain_dns_ips = dns_ips;
+            }
+        }
+
         // An explicit DBSubnetGroupName places the restored instance in that
         // group (validated above); the builder hardcodes None otherwise.
         if let Some(ref name) = db_subnet_group_name {

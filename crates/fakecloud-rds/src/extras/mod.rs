@@ -664,7 +664,7 @@ impl RdsService {
                         ));
                     }
                 }
-                let items: Vec<Value> = accounts
+                let mut items: Vec<Value> = accounts
                     .get(&aid)
                     .and_then(|s| s.extras.get("cluster_snapshots"))
                     .filter(|_| owner_is_caller)
@@ -727,7 +727,6 @@ impl RdsService {
                 let want_public = !owns_named
                     && (snapshot_type.as_deref() == Some("public")
                         || ((include_public || named) && snapshot_type.is_none()));
-                let mut items = items;
                 if want_shared || want_public {
                     for (owner, other) in accounts.iter() {
                         if owner == aid {
@@ -778,12 +777,35 @@ impl RdsService {
                         );
                     }
                 }
+                // The cross-account scan walks a HashMap, so without an
+                // explicit order two identical requests can return the
+                // rows in different orders. Sort by creation time then
+                // ARN, as the DB-snapshot path does -- the ARN is unique
+                // across accounts and is what pagination keys on.
+                items.sort_by(|a, b| {
+                    entry_str(a, "SnapshotCreateTime")
+                        .cmp(&entry_str(b, "SnapshotCreateTime"))
+                        .then_with(|| {
+                            entry_str(a, "DBClusterSnapshotArn")
+                                .cmp(&entry_str(b, "DBClusterSnapshotArn"))
+                        })
+                });
+                // MaxRecords / Marker are modeled here, and sharing makes
+                // an unqualified listing unbounded: a paginating client
+                // would otherwise re-read page one forever.
+                let paginated = crate::service::service_helpers::paginate(
+                    items,
+                    get_param(req, "Marker"),
+                    get_param(req, "MaxRecords"),
+                    |entry| entry_str(entry, "DBClusterSnapshotArn").unwrap_or_default(),
+                )?;
                 // Named member tags, not the generic `<member>`: the
                 // Smithy list carries xmlName `DBClusterSnapshot`, and the
                 // AWS SDK unmarshals an empty list from `<member>` (see
                 // `list_extras_named_xml`) -- which would make the filtering
                 // above invisible to every real client.
-                let body = items
+                let body = paginated
+                    .items
                     .iter()
                     .map(|v| {
                         format!(
@@ -793,7 +815,14 @@ impl RdsService {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                let inner = format!("    <DBClusterSnapshots>\n{body}\n    </DBClusterSnapshots>");
+                let marker_xml = paginated
+                    .next_marker
+                    .as_ref()
+                    .map(|m| format!("\n    <Marker>{}</Marker>", xml_escape(m)))
+                    .unwrap_or_default();
+                let inner = format!(
+                    "    <DBClusterSnapshots>\n{body}\n    </DBClusterSnapshots>{marker_xml}"
+                );
                 Ok(xml_response("DescribeDBClusterSnapshots", inner, &rid))
             }
             "DescribeDBClusterSnapshotAttributes" => {
@@ -894,10 +923,17 @@ impl RdsService {
                         })?;
                     let mut attrs = cluster_snapshot_attributes(entry);
                     let values = attrs.entry(attribute_name.clone()).or_default();
-                    for v in to_add {
-                        if !values.contains(&v) {
-                            values.push(v);
+                    for v in &to_add {
+                        if !values.contains(v) {
+                            values.push(v.clone());
                         }
+                    }
+                    for dup in to_add.iter().filter(|v| to_remove.contains(v)) {
+                        tracing::warn!(
+                            value = %dup,
+                            "value present in both ValuesToAdd and ValuesToRemove; \
+                             resolving to removed (AWS would reject the request)"
+                        );
                     }
                     values.retain(|v| !to_remove.contains(v));
                     // An attribute with no values reads back as unshared,
@@ -2552,10 +2588,17 @@ impl RdsService {
                         .snapshot_attributes
                         .entry(attribute_name.clone())
                         .or_default();
-                    for v in to_add {
-                        if !values.contains(&v) {
-                            values.push(v);
+                    for v in &to_add {
+                        if !values.contains(v) {
+                            values.push(v.clone());
                         }
+                    }
+                    for dup in to_add.iter().filter(|v| to_remove.contains(v)) {
+                        tracing::warn!(
+                            value = %dup,
+                            "value present in both ValuesToAdd and ValuesToRemove; \
+                             resolving to removed (AWS would reject the request)"
+                        );
                     }
                     values.retain(|v| !to_remove.contains(v));
                     // Drop the attribute entirely once it has no values so

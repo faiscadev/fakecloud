@@ -3100,6 +3100,49 @@ fn describe_db_cluster_snapshots_honors_the_cluster_resource_id_parameter() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_paginates_and_orders_stably() {
+    // Sharing makes an unqualified listing unbounded, and the
+    // cross-account scan walks a HashMap -- so the rows need an explicit
+    // order and the modeled MaxRecords / Marker have to work.
+    let svc = svc();
+    for i in 1..=5 {
+        seed_cluster_snapshot(&svc, &format!("snap-{i}"), "clu-1", "manual");
+    }
+
+    let first = body_of_action(&svc, "DescribeDBClusterSnapshots", &[("MaxRecords", "2")]);
+    assert_eq!(
+        first.matches("<DBClusterSnapshotIdentifier>").count(),
+        2,
+        "MaxRecords ignored: {first}"
+    );
+    let marker = first
+        .split("<Marker>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Marker>").next())
+        .expect("a next-page marker")
+        .to_string();
+
+    let second = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("MaxRecords", "2"), ("Marker", &marker)],
+    );
+    assert_eq!(second.matches("<DBClusterSnapshotIdentifier>").count(), 2);
+    // The second page does not repeat the first.
+    for id in ["snap-1", "snap-2", "snap-3", "snap-4", "snap-5"] {
+        let tag = format!("<DBClusterSnapshotIdentifier>{id}</DBClusterSnapshotIdentifier>");
+        assert!(
+            !(first.contains(&tag) && second.contains(&tag)),
+            "{id} appeared on both pages"
+        );
+    }
+
+    // Identical requests return identical order.
+    let again = body_of_action(&svc, "DescribeDBClusterSnapshots", &[("MaxRecords", "2")]);
+    assert_eq!(first, again, "listing order is not stable");
+}
+
+#[test]
 fn describe_db_cluster_snapshots_honors_include_shared() {
     // The modeled IncludeShared / IncludePublic members widen an
     // unqualified listing, as on DescribeDBSnapshots.

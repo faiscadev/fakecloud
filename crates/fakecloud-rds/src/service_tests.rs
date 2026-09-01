@@ -3504,6 +3504,45 @@ fn describe_db_snapshots_honors_the_dbi_resource_id_parameter() {
 }
 
 #[tokio::test]
+async fn point_in_time_restore_carries_the_requested_domain() {
+    // Modeled on the request, and an explicit Domain overrides whatever
+    // the source carried -- otherwise the new instance is invisible to
+    // the `domain` filter.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "source-db");
+
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "source-db"),
+            ("TargetDBInstanceIdentifier", "pit-db"),
+            ("UseLatestRestorableTime", "true"),
+            ("Domain", "d-1234567890"),
+            ("DomainIAMRoleName", "rds-directory"),
+        ],
+    );
+    svc.restore_db_instance_to_point_in_time(&req)
+        .await
+        .expect("PITR with the stub runtime");
+
+    let (domain, role) = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("pit-db")
+        .map(|instance| {
+            (
+                instance.domain.clone(),
+                instance.domain_iam_role_name.clone(),
+            )
+        })
+        .expect("the restored instance is recorded");
+    assert_eq!(domain.as_deref(), Some("d-1234567890"));
+    assert_eq!(role.as_deref(), Some("rds-directory"));
+}
+
+#[tokio::test]
 async fn restore_db_instance_carries_the_requested_domain() {
     // Settable on the restore request as it is on create; dropping it
     // leaves the instance invisible to the `domain` filter.
