@@ -1623,14 +1623,18 @@ impl CloudFormationService {
         // produces a CREATE_COMPLETE stack holding nothing -- the #2480 no-op,
         // reached without any malformed template. A value that isn't URL-shaped
         // is a synthetic probe input and keeps the lenient path.
-        let url_param = Self::get_param(req, "TemplateURL")
-            .filter(|url| crate::extras::parse_s3_url(url).is_some());
+        // URL-shaped, not necessarily readable: an unreadable one is reported
+        // below rather than ignored. A value that isn't meant as a URL (the
+        // probe's `"t"`) is filtered out here and keeps the lenient path.
+        let url_param =
+            Self::get_param(req, "TemplateURL").filter(|url| crate::extras::looks_like_url(url));
         // An object that exists but is empty (a truncated `aws s3 cp`, a
         // `sam package` that wrote nothing) counts as a failed fetch: taking
         // it as the template would parse cleanly to no resources and rebuild
         // the #2480 empty CREATE_COMPLETE.
         let resolved_from_url = url_param
             .as_ref()
+            .and_then(|url| crate::extras::parse_s3_url(url).map(|_| url))
             .and_then(|url| self.fetch_template_from_url(&req.account_id, url))
             .filter(|body| !body.trim().is_empty());
         // A well-formed URL that resolves to nothing (uploaded to another
@@ -2453,8 +2457,15 @@ impl CloudFormationService {
                 // taking it would leave the body empty and fall into the
                 // metadata-only branch, reporting UPDATE_COMPLETE for an
                 // update that applied nothing.
-                Some(url) if crate::extras::parse_s3_url(&url).is_some() => Some(
-                    self.fetch_template_from_url(&req.account_id, &url)
+                //
+                // A value that is URL-shaped but that `parse_s3_url` cannot
+                // read (a host with no key, say) is reported too. Falling back
+                // to the stored template there would accept the caller's new
+                // template and discard it. Only a value that isn't meant as a
+                // URL at all -- the probe's `"t"` -- takes the lenient path.
+                Some(url) if crate::extras::looks_like_url(&url) => Some(
+                    crate::extras::parse_s3_url(&url)
+                        .and_then(|_| self.fetch_template_from_url(&req.account_id, &url))
                         .filter(|body| !body.trim().is_empty())
                         .ok_or_else(|| {
                             AwsServiceError::aws_error(

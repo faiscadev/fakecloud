@@ -245,6 +245,18 @@ fn require_collection(
 /// fakecloud endpoint `http://127.0.0.1:4566/bucket/key`) and
 /// virtual-hosted (`https://bucket.s3.amazonaws.com/key`) forms, and
 /// drops any query string. Returns `None` if the shape isn't recognized.
+/// Whether a `TemplateURL` value is *meant* as a URL, as opposed to the
+/// synthetic scalar the conformance probe sends (`"t"`).
+///
+/// The distinction matters because an unusable URL has to be reported rather
+/// than silently ignored -- falling back to the stack's stored template
+/// re-applies the old one and reports success for an update that never
+/// happened -- while erroring on the probe's placeholder would return an
+/// undeclared `ValidationError` and drop conformance.
+pub(crate) fn looks_like_url(value: &str) -> bool {
+    value.contains("://")
+}
+
 pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let (host, after) = rest.split_once('/')?;
@@ -327,14 +339,13 @@ impl CloudFormationService {
                     let inline = params.get("TemplateBody").cloned().unwrap_or_default();
                     if !inline.trim().is_empty() {
                         inline
-                    } else if let Some(url) = params
-                        .get("TemplateURL")
-                        .filter(|u| parse_s3_url(u).is_some())
+                    } else if let Some(url) =
+                        params.get("TemplateURL").filter(|u| looks_like_url(u))
                     {
-                        // A *recognisable* S3 URL has to resolve. Falling back
-                        // to the stored template would diff against the old
-                        // one, report zero changes, and let ExecuteChangeSet
-                        // claim success having applied nothing — `sam deploy`
+                        // A URL that was given has to resolve. Falling back to
+                        // the stored template would diff against the old one,
+                        // report zero changes, and let ExecuteChangeSet claim
+                        // success having applied nothing — `sam deploy`
                         // against a key that doesn't round-trip would print
                         // "no changes to deploy". CreateStack and UpdateStack
                         // both hard-fail this condition.
@@ -343,9 +354,10 @@ impl CloudFormationService {
                         // `optional_TemplateURL` variant sends `"t"` and
                         // expects success, and `ValidationError` is not in
                         // CreateChangeSet's Smithy `errors`. A value that
-                        // isn't URL-shaped takes the lenient path below.
-                        match self
-                            .fetch_template_from_url(&aid, url)
+                        // isn't meant as a URL takes the lenient path below;
+                        // one that is but cannot be read is reported.
+                        match parse_s3_url(url)
+                            .and_then(|_| self.fetch_template_from_url(&aid, url))
                             .filter(|body| !body.trim().is_empty())
                         {
                             Some(body) => body,

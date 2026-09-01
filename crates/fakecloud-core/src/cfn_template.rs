@@ -93,6 +93,14 @@ pub fn parse_template_body(body: &str) -> Result<Json, String> {
 /// on an unauthenticated CreateStack could exhaust the stack. Real templates
 /// nest a handful of levels; CloudFormation's own documented ceiling is far
 /// below this.
+///
+/// This bounds *depth* only. It does not bound alias *expansion*: a YAML
+/// "billion laughs" body (`a: &a [x,x,x]` / `b: &b [*a,*a,*a]` / ...) is only
+/// two levels deep and passes this check, while `serde_yaml` re-deserializes
+/// at each alias and blows up the allocation. That vector predates this guard
+/// (every non-`{`-leading body already reached `serde_yaml`) and closing it
+/// needs a real scanner — a textual anchor/alias scan would reject the very
+/// common `Resource: "*"` — so it is deliberately out of scope here.
 const MAX_NESTING_DEPTH: usize = 512;
 
 fn parse_yaml(body: &str) -> Result<Json, String> {
