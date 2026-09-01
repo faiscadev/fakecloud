@@ -793,10 +793,14 @@ impl RdsService {
                 // MaxRecords / Marker are modeled here, and sharing makes
                 // an unqualified listing unbounded: a paginating client
                 // would otherwise re-read page one forever.
+                // `get_param` keeps `Marker=` as Some(""), which decodes
+                // to a position no row matches and returns an EMPTY page
+                // instead of the first one. Every other parameter in this
+                // handler already treats an explicit empty as absent.
                 let paginated = crate::service::service_helpers::paginate(
                     items,
-                    get_param(req, "Marker"),
-                    get_param(req, "MaxRecords"),
+                    get_param(req, "Marker").filter(|value| !value.is_empty()),
+                    get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
                     |entry| entry_str(entry, "DBClusterSnapshotArn").unwrap_or_default(),
                 )?;
                 // Named member tags, not the generic `<member>`: the
@@ -2436,7 +2440,21 @@ impl RdsService {
                     .ok_or_else(|| missing("TargetDBParameterGroupIdentifier"))?;
                 let source = get_param(req, "SourceDBParameterGroupIdentifier")
                     .ok_or_else(|| missing("SourceDBParameterGroupIdentifier"))?;
-                let source_key = source.rsplit(':').next().unwrap_or(&source).to_string();
+                // Same guarded reduction as the snapshot copies: an
+                // unconditional rsplit lets an ARN of another account --
+                // or of another resource type -- silently copy THIS
+                // account's parameter group of that name.
+                if !addresses_own_account(&source, &aid)
+                    || !identifier_matches_type(&source, "pg")
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBParameterGroupNotFound",
+                        format!("DBParameterGroup {source} not found."),
+                    ));
+                }
+                let source_key = normalized_identifier(Some(source.clone()), "pg")
+                    .unwrap_or_else(|| source.clone());
                 let description = get_param(req, "TargetDBParameterGroupDescription");
                 let group = {
                     let mut accounts = write_state!();

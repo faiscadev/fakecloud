@@ -3143,6 +3143,48 @@ fn describe_db_cluster_snapshots_paginates_and_orders_stably() {
 }
 
 #[test]
+fn describe_db_cluster_snapshots_treats_an_empty_marker_as_page_one() {
+    // `Marker=` decodes to a position no row matches, which would return
+    // an empty page rather than the first one.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("Marker", ""), ("MaxRecords", "")],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"),
+        "an empty marker returned an empty page: {body}"
+    );
+}
+
+#[test]
+fn copy_db_parameter_group_refuses_a_foreign_or_wrong_type_arn() {
+    // An unconditional rsplit would trim either ARN to `mypg` and copy
+    // THIS account's parameter group of that name, reporting success.
+    let svc = svc();
+
+    for source in [
+        "arn:aws:rds:us-east-1:999999999999:pg:mypg",
+        "arn:aws:rds:us-east-1:000000000000:cluster-pg:mypg",
+    ] {
+        let result = svc.handle_extra_action(&req(
+            "CopyDBParameterGroup",
+            &[
+                ("SourceDBParameterGroupIdentifier", source),
+                ("TargetDBParameterGroupIdentifier", "copy-pg"),
+            ],
+        ));
+        match result {
+            Err(err) => assert_eq!(err.code(), "DBParameterGroupNotFound", "source {source}"),
+            Ok(_) => panic!("copied from {source}"),
+        }
+    }
+}
+
+#[test]
 fn describe_db_cluster_snapshots_honors_include_shared() {
     // The modeled IncludeShared / IncludePublic members widen an
     // unqualified listing, as on DescribeDBSnapshots.
