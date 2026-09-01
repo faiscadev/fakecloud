@@ -61,6 +61,7 @@ const BARE_TAGS: &[&str] = &["Ref", "Condition"];
 /// JSON — unquoted keys), and committing to JSON on the first character would
 /// silently drop such a template.
 pub fn parse_template_body(body: &str) -> Result<Json, String> {
+    let body = strip_bom(body);
     // Before either dialect: the `{`-leading branch falls back to serde_yaml
     // directly, so a guard living only in `parse_yaml` would not cover it.
     if exceeds_nesting_limit(body) {
@@ -168,7 +169,16 @@ fn exceeds_nesting_limit(body: &str) -> bool {
 /// the parser here would answer "not a template" for every syntax error and
 /// send it down the lenient degrade-to-empty path, which is the silent no-op
 /// #2480 is about. So fall back to a shape check on the raw text.
+/// Strip a UTF-8 byte-order mark. `str::trim_start` does not remove U+FEFF,
+/// and PowerShell's `Out-File` / `Set-Content` write one by default — so a
+/// BOM'd template's first line reads `\u{FEFF}Resources:`, which fails every
+/// prefix check and sends the body down the lenient path (#2480 again).
+fn strip_bom(body: &str) -> &str {
+    body.strip_prefix('\u{FEFF}').unwrap_or(body)
+}
+
 pub fn is_template_document(body: &str) -> bool {
+    let body = strip_bom(body);
     if let Ok(value) = parse_template_body(body) {
         // Presence, not shape: `Resources:` holding a sequence instead of a
         // mapping is a common YAML slip that the template parser rejects. It
@@ -713,6 +723,29 @@ Resources:
         assert!(is_template_document(
             "Resources:\n  Q:\n    Timeout: .nan\n"
         ));
+    }
+
+    #[test]
+    fn bom_prefixed_templates_are_recognised() {
+        // PowerShell's Out-File / Set-Content write a UTF-8 BOM by default,
+        // and `trim_start` does not strip U+FEFF.
+        let good = "\u{FEFF}Resources:\n  Q:\n    Type: AWS::SQS::Queue\n";
+        assert_eq!(
+            parse_template_body(good).expect("BOM'd template parses")["Resources"]["Q"]["Type"],
+            "AWS::SQS::Queue"
+        );
+        assert!(is_template_document(good));
+
+        // The case that mattered: BOM + a syntax error must still be
+        // classified as a template, or it degrades to an empty stack.
+        let broken = "\u{FEFF}Resources:\n\tQ:\n\t\tType: AWS::SQS::Queue\n";
+        assert!(parse_template_body(broken).is_err());
+        assert!(is_template_document(broken));
+
+        // BOM in front of a JSON body too.
+        let json = "\u{FEFF}{\"Resources\": {\"Q\": {\"Type\": \"AWS::SQS::Queue\"}}}";
+        assert!(parse_template_body(json).is_ok());
+        assert!(is_template_document(json));
     }
 
     #[test]

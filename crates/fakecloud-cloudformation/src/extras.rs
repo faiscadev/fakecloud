@@ -240,11 +240,6 @@ fn require_collection(
     }
 }
 
-/// Extract `(bucket, key)` from a CloudFormation `TemplateURL`. Handles
-/// both path-style (`https://s3.us-east-1.amazonaws.com/bucket/key`, or a
-/// fakecloud endpoint `http://127.0.0.1:4566/bucket/key`) and
-/// virtual-hosted (`https://bucket.s3.amazonaws.com/key`) forms, and
-/// drops any query string. Returns `None` if the shape isn't recognized.
 /// Whether a `TemplateURL` value is *meant* as a URL, as opposed to the
 /// synthetic scalar the conformance probe sends (`"t"`).
 ///
@@ -257,8 +252,31 @@ pub(crate) fn looks_like_url(value: &str) -> bool {
     value.contains("://")
 }
 
+/// Extract `(bucket, key)` from a CloudFormation `TemplateURL`. Handles the
+/// `s3://bucket/key` scheme, path-style
+/// (`https://s3.us-east-1.amazonaws.com/bucket/key`, or a fakecloud endpoint
+/// `http://127.0.0.1:4566/bucket/key`) and virtual-hosted
+/// (`https://bucket.s3.amazonaws.com/key`) forms, and drops any query string.
+/// Returns `None` if the shape isn't recognized.
 pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, url),
+    };
+    // `s3://bucket/prefix/key`: the authority IS the bucket and the whole
+    // path is the key. Falling through to the path-style branch below would
+    // read the first *path* segment as the bucket -- dropping the real one,
+    // and resolving a different object entirely if a bucket happens to be
+    // named after that prefix (`s3://mybucket/templates/app.yaml` ->
+    // bucket `templates`).
+    if scheme.is_some_and(|s| s.eq_ignore_ascii_case("s3")) {
+        let (bucket, key) = rest.split_once('/')?;
+        let key = key.split(['?', '#']).next().unwrap_or(key);
+        if bucket.is_empty() || key.is_empty() {
+            return None;
+        }
+        return Some((bucket.to_string(), key.to_string()));
+    }
     let (host, after) = rest.split_once('/')?;
     let path = after.split(['?', '#']).next().unwrap_or(after);
     // Virtual-hosted: `<bucket>.s3...`. The `.s3` guard avoids treating a
@@ -2645,6 +2663,25 @@ mod tests {
         );
         // Not an object URL (no key).
         assert_eq!(parse_s3_url("https://s3.amazonaws.com/bucket-only"), None);
+    }
+
+    #[test]
+    fn parse_s3_url_handles_the_s3_scheme() {
+        // The authority is the bucket and the WHOLE path is the key. Reading
+        // the first path segment as the bucket would drop `mybucket` and, if
+        // a bucket named `templates` existed, silently resolve a different
+        // object.
+        assert_eq!(
+            parse_s3_url("s3://mybucket/templates/app.yaml"),
+            Some(("mybucket".to_string(), "templates/app.yaml".to_string()))
+        );
+        assert_eq!(
+            parse_s3_url("s3://mybucket/key.yaml?versionId=abc"),
+            Some(("mybucket".to_string(), "key.yaml".to_string()))
+        );
+        // No key.
+        assert_eq!(parse_s3_url("s3://mybucket"), None);
+        assert_eq!(parse_s3_url("s3://mybucket/"), None);
     }
 
     use crate::template::ResourceDefinition;

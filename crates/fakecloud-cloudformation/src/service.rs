@@ -2495,6 +2495,34 @@ impl CloudFormationService {
         // the metadata and record the transition, then return. When the stack
         // does NOT exist, fall through to the not-found handling below, which
         // synthesizes a proper stack ARN for the response.
+        //
+        // A `REVIEW_IN_PROGRESS` shell (minted by `CreateChangeSet` with
+        // ChangeSetType=CREATE, which stores an empty template) is excluded:
+        // flipping it to UPDATE_COMPLETE would make a stack that was never
+        // created look updated, and the later ExecuteChangeSet would then
+        // report UPDATE_* where it owes CREATE_*.
+        let in_review = !found_stack_id.is_empty() && {
+            let accounts = self.state.read();
+            accounts.get(&req.account_id).is_some_and(|s| {
+                s.stacks
+                    .values()
+                    .any(|st| st.stack_id == found_stack_id && st.status == "REVIEW_IN_PROGRESS")
+            })
+        };
+        if in_review {
+            // Skipping the metadata branch is not enough: the normal path
+            // would also land on UPDATE_COMPLETE, since the shell has no
+            // resources to diff. A stack that only ever existed as a change-set
+            // shell has not been created, so an update on it is invalid.
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                format!(
+                    "Stack [{}] is in REVIEW_IN_PROGRESS state and can not be updated.",
+                    input.stack_name
+                ),
+            ));
+        }
         if input.template_body.trim().is_empty() && !found_stack_id.is_empty() {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
