@@ -244,6 +244,17 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // A handler returning either to the probes' synthetic inputs ran
         // correctly. Source: EKS API reference (CreateNodegroup /
         // CreateFargateProfile "Errors").
+        // SSM declares `InvalidNextToken` on 36 operations but omits it from
+        // several paginated `Describe*` ops that return it just the same
+        // (DescribeMaintenanceWindows, DescribeOpsItems, DescribePatchBaselines,
+        // DescribePatchGroups, DescribePatchProperties,
+        // DescribeMaintenanceWindowExecutions). `ValidationException` is SSM's
+        // modeled input-validation error — the shape exists and the newer op
+        // families declare it — and it is what the shared
+        // `fakecloud_core::validation` helpers emit for an out-of-range or
+        // malformed member on any SSM op. Source: SSM API reference "Errors"
+        // per operation.
+        "ssm" => &["InvalidNextToken", "ValidationException"],
         "eks" => &["ResourceNotFoundException", "ResourceInUseException"],
         // STS returns AccessDenied (HTTP 403) whenever a role can't be assumed
         // -- the role doesn't exist, or its trust policy rejects the caller --
