@@ -2908,3 +2908,201 @@ fn rts_for_list(s: &RestoreTestingSelectionRecord, plan_name: &str) -> Value {
         "ValidationWindowHours": s.selection.get("ValidationWindowHours"),
     })
 }
+
+// ===================== Backup access points =====================
+
+/// Project an [`AccessPointRecord`] into the members `DescribeBackupAccessPoint`
+/// and the three list operations share.
+fn access_point_json(ap: &AccessPointRecord) -> Value {
+    let mut out = json!({
+        "AccessPointArn": ap.arn,
+        "Name": ap.name,
+        "RecoveryPointArn": ap.recovery_point_arn,
+        "BackupVaultName": ap.backup_vault_name,
+        "BackupVaultArn": ap.backup_vault_arn,
+        "ResourceArn": ap.resource_arn,
+        "ResourceType": ap.resource_type,
+        "CreationTime": ts(ap.creation_time),
+        "Status": ap.status,
+    });
+    if !ap.metadata.is_empty() {
+        out["AccessPointMetadata"] = json!(ap.metadata);
+    }
+    if let Some(m) = &ap.status_message {
+        out["StatusMessage"] = json!(m);
+    }
+    out
+}
+
+fn parse_string_map(v: Option<&Value>) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    if let Some(Value::Object(m)) = v {
+        for (k, val) in m {
+            if let Some(s) = val.as_str() {
+                out.insert(k.clone(), s.to_string());
+            }
+        }
+    }
+    out
+}
+
+impl BackupService {
+    fn create_backup_access_point(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let body = req_body(req);
+        let name = str_field(&body, "Name")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| missing_param("Name is required"))?;
+        // `AccessPointName` is bounded 3..50 and lower-case alphanumeric with
+        // interior hyphens.
+        let len = name.chars().count();
+        if !(3..=50).contains(&len) {
+            return Err(invalid_param("Name must be 3..50 characters"));
+        }
+        if !name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+            || name.starts_with('-')
+            || name.ends_with('-')
+        {
+            return Err(invalid_param(
+                "Name must be lower-case alphanumeric with interior hyphens",
+            ));
+        }
+        let recovery_point_arn = str_field(&body, "RecoveryPointArn")
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| missing_param("RecoveryPointArn is required"))?;
+
+        let region = req.region.clone();
+        let account_id = req.account_id.clone();
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+
+        // The access point hangs off a real recovery point, so resolve it —
+        // and the vault and resource it belongs to — rather than inventing one.
+        let (vault_name, point) = st
+            .vaults
+            .iter()
+            .find_map(|(vname, v)| {
+                v.recovery_points
+                    .get(&recovery_point_arn)
+                    .map(|p| (vname.clone(), p.clone()))
+            })
+            .ok_or_else(|| {
+                not_found(format!(
+                    "Recovery point not found: {recovery_point_arn}"
+                ))
+            })?;
+
+        let arn = access_point_arn(&region, &account_id, &name);
+        if st.access_points.contains_key(&arn) {
+            return Err(already_exists(format!(
+                "Backup access point already exists: {name}"
+            )));
+        }
+
+        let record = AccessPointRecord {
+            arn: arn.clone(),
+            name,
+            recovery_point_arn,
+            backup_vault_arn: vault_arn(&region, &account_id, &vault_name),
+            backup_vault_name: vault_name,
+            resource_arn: point
+                .get("ResourceArn")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            resource_type: point
+                .get("ResourceType")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            creation_time: Utc::now(),
+            // Creation is synchronous here, so the access point is usable as
+            // soon as the call returns.
+            status: "AVAILABLE".to_string(),
+            status_message: None,
+            metadata: parse_string_map(body.get("AccessPointMetadata")),
+            policy: str_field(&body, "AccessPointPolicy"),
+            tags: parse_string_map(body.get("Tags")),
+        };
+        let status = record.status.clone();
+        st.access_points.insert(arn.clone(), record);
+
+        let mut resp = ok(json!({ "AccessPointArn": arn, "Status": status }));
+        resp.status = StatusCode::CREATED;
+        Ok(resp)
+    }
+
+    fn describe_backup_access_point(
+        &self,
+        req: &AwsRequest,
+        arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let ap = accounts
+            .get(&req.account_id)
+            .and_then(|s| s.access_points.get(arn))
+            .ok_or_else(|| not_found(format!("Backup access point not found: {arn}")))?;
+        Ok(ok(access_point_json(ap)))
+    }
+
+    fn delete_backup_access_point(
+        &self,
+        req: &AwsRequest,
+        arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let mut accounts = self.state.write();
+        let st = accounts.get_or_create(&req.account_id);
+        st.access_points
+            .remove(arn)
+            .ok_or_else(|| not_found(format!("Backup access point not found: {arn}")))?;
+        Ok(empty(204))
+    }
+
+    fn list_backup_access_points(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|s| s.access_points.values().map(access_point_json).collect())
+            .unwrap_or_default();
+        page_response(items, "BackupAccessPoints", req, &[])
+    }
+
+    fn list_backup_access_points_by_recovery_point(
+        &self,
+        req: &AwsRequest,
+        recovery_point_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|s| {
+                s.access_points
+                    .values()
+                    .filter(|ap| ap.recovery_point_arn == recovery_point_arn)
+                    .map(access_point_json)
+                    .collect()
+            })
+            .unwrap_or_default();
+        page_response(items, "BackupAccessPoints", req, &[])
+    }
+
+    fn list_backup_access_points_by_resource(
+        &self,
+        req: &AwsRequest,
+        resource_arn: &str,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let accounts = self.state.read();
+        let items: Vec<Value> = accounts
+            .get(&req.account_id)
+            .map(|s| {
+                s.access_points
+                    .values()
+                    .filter(|ap| ap.resource_arn == resource_arn)
+                    .map(access_point_json)
+                    .collect()
+            })
+            .unwrap_or_default();
+        page_response(items, "BackupAccessPoints", req, &[])
+    }
+}
