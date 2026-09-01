@@ -844,6 +844,7 @@ impl CloudFormationService {
                         {
                             if stack.status == "REVIEW_IN_PROGRESS" {
                                 stack.status = "CREATE_COMPLETE".to_string();
+                                stack.status_reason = None;
                                 stack.updated_at = Some(Utc::now());
                             }
                         }
@@ -975,6 +976,10 @@ impl CloudFormationService {
                         (false, true) => "UPDATE_ROLLBACK_COMPLETE",
                     }
                     .to_string();
+                    // Track the reason alongside the status: a success must
+                    // clear any reason left by an earlier failure, and a
+                    // rollback must say why it rolled back.
+                    stack.status_reason = result.as_ref().err().map(ToString::to_string);
                     stack.parameters = cs_params.clone();
                     if !cs_tags.is_empty() {
                         stack.tags = cs_tags;

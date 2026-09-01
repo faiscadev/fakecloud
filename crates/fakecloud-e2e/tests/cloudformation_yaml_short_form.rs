@@ -244,3 +244,69 @@ async fn unparseable_template_document_fails_the_stack() {
         "the status reason should name the offending resource, got {reason:?}"
     );
 }
+
+/// A template broken by a *syntax* error (a tab where YAML demands spaces) is
+/// the most common way a real template fails, and it must fail as loudly as a
+/// semantic error. Classifying it by re-parsing would answer "not a template"
+/// for every syntax error and send it back down the silent-empty-stack path.
+const TAB_INDENTED_TEMPLATE: &str =
+    "AWSTemplateFormatVersion: '2010-09-09'\nResources:\n\tQueue:\n\t\tType: AWS::SQS::Queue\n";
+
+#[tokio::test]
+async fn syntactically_broken_template_fails_the_stack() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+
+    cfn.create_stack()
+        .stack_name("tab-indented")
+        .template_body(TAB_INDENTED_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack returns a StackId; the failure is asynchronous");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("tab-indented")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().expect("stack present");
+    assert_eq!(
+        stack.stack_status().unwrap().as_str(),
+        "CREATE_FAILED",
+        "a template with a YAML syntax error must not report CREATE_COMPLETE"
+    );
+    assert!(
+        stack.stack_status_reason().is_some_and(|r| !r.is_empty()),
+        "the parser's message should reach StackStatusReason"
+    );
+}
+
+/// A placeholder `TemplateBody` (what the conformance probe sends) keeps the
+/// lenient path: an empty stack that still reaches CREATE_COMPLETE, because
+/// `ValidationError` is not in CreateStack's Smithy `errors` list.
+#[tokio::test]
+async fn placeholder_template_body_still_completes() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+
+    cfn.create_stack()
+        .stack_name("placeholder-body")
+        .template_body("test")
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("placeholder-body")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().expect("stack present");
+    assert_eq!(
+        stack.stack_status().unwrap().as_str(),
+        "CREATE_COMPLETE",
+        "a non-template placeholder body must keep the lenient path"
+    );
+}

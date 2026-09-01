@@ -319,18 +319,6 @@ async fn persist_touched_services<I>(
 /// keep a pathological (or cyclic) child-stack graph from recursing forever.
 const MAX_NESTED_STACK_DEPTH: usize = 50;
 
-/// Whether a template body is a CloudFormation template *document* -- a
-/// JSON/YAML object carrying a `Resources` mapping -- as opposed to a
-/// placeholder scalar (the conformance probe sends `"test"`-style strings for
-/// `TemplateBody`) or something that isn't parseable at all.
-///
-/// Only a real template document is worth failing a stack over; anything else
-/// keeps the long-standing lenient degrade-to-empty behaviour.
-fn is_template_document(body: &str) -> bool {
-    fakecloud_core::cfn_template::parse_template_object(body)
-        .is_some_and(|v| v.get("Resources").is_some_and(serde_json::Value::is_object))
-}
-
 /// Collect the resource types a stack op touched, recursing into nested
 /// `AWS::CloudFormation::Stack` children so every owning service's snapshot
 /// hook fires — not just the parent's top-level types.
@@ -1704,7 +1692,11 @@ impl CloudFormationService {
                     resources: Vec::new(),
                     outputs: Vec::new(),
                 };
-                (empty, is_template_document(template_body).then_some(err))
+                (
+                    empty,
+                    fakecloud_core::cfn_template::is_template_document(template_body)
+                        .then_some(err),
+                )
             }
         };
 
@@ -2182,6 +2174,10 @@ impl CloudFormationService {
                 let state = accounts.get_or_create(&req.account_id);
                 if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) {
                     stack.status = "DELETE_COMPLETE".to_string();
+                    // The reason belonged to the previous status (a failed
+                    // create/update); carrying it into DELETE_COMPLETE would
+                    // report a stale failure on a cleanly deleted stack.
+                    stack.status_reason = None;
                     stack.resources.clear();
                     stack.outputs.clear();
                 }
