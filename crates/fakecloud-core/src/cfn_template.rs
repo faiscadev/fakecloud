@@ -61,6 +61,13 @@ const BARE_TAGS: &[&str] = &["Ref", "Condition"];
 /// JSON — unquoted keys), and committing to JSON on the first character would
 /// silently drop such a template.
 pub fn parse_template_body(body: &str) -> Result<Json, String> {
+    // Before either dialect: the `{`-leading branch falls back to serde_yaml
+    // directly, so a guard living only in `parse_yaml` would not cover it.
+    if exceeds_nesting_limit(body) {
+        return Err(format!(
+            "Invalid template: nesting deeper than {MAX_NESTING_DEPTH} levels"
+        ));
+    }
     if body.trim_start().starts_with('{') {
         return match serde_json::from_str(body) {
             Ok(value) => Ok(value),
@@ -80,10 +87,39 @@ pub fn parse_template_body(body: &str) -> Result<Json, String> {
     parse_yaml(body)
 }
 
+/// Nesting depth past which a body is refused before it reaches the parser.
+/// `serde_json` enforces its own recursion limit; `serde_yaml` does not, and
+/// both it and the `yaml_to_json` walk below recurse, so a deeply-nested body
+/// on an unauthenticated CreateStack could exhaust the stack. Real templates
+/// nest a handful of levels; CloudFormation's own documented ceiling is far
+/// below this.
+const MAX_NESTING_DEPTH: usize = 512;
+
 fn parse_yaml(body: &str) -> Result<Json, String> {
     let yaml: Yaml =
         serde_yaml::from_str(body).map_err(|e| format!("Invalid YAML template: {e}"))?;
     yaml_to_json(yaml).map_err(|e| format!("Invalid YAML template: {e}"))
+}
+
+/// Cheap pre-scan for pathological nesting. Counts flow-collection openers, so
+/// it catches the `[[[[...` / `{{{{...` shapes that drive the recursion without
+/// having to parse first. Quoted content is not tracked: over-counting inside a
+/// string can only reject a body already far past any real template's depth.
+fn exceeds_nesting_limit(body: &str) -> bool {
+    let mut depth = 0usize;
+    for b in body.bytes() {
+        match b {
+            b'[' | b'{' => {
+                depth += 1;
+                if depth > MAX_NESTING_DEPTH {
+                    return true;
+                }
+            }
+            b']' | b'}' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    false
 }
 
 /// Whether a body is meant to be a CloudFormation template *document*, as
@@ -448,6 +484,28 @@ Resources:
     fn json_body_that_is_neither_reports_the_json_error() {
         let err = parse_template_body("{\"Resources\": [oops").expect_err("must fail");
         assert!(err.starts_with("Invalid JSON template:"), "{err}");
+    }
+
+    #[test]
+    fn pathological_nesting_is_refused_before_parsing() {
+        // serde_yaml has no recursion limit of its own, and this path is
+        // reachable unauthenticated via CreateStack.
+        // Both entry shapes: a `{`-leading body reaches serde_yaml through the
+        // JSON-failure fallback, so the guard cannot live in `parse_yaml`.
+        for bomb in [
+            format!("{}{}", "{", "[".repeat(100_000)),
+            "[".repeat(100_000),
+        ] {
+            let err = parse_template_body(&bomb).expect_err("must be refused");
+            assert!(err.contains("nesting deeper than"), "{err}");
+        }
+        // A realistically-nested template is unaffected.
+        assert!(parse_template_body(&format!(
+            "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      V: {}{}\n",
+            "[".repeat(20),
+            "]".repeat(20)
+        ))
+        .is_ok());
     }
 
     #[test]

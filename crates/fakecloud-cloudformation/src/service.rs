@@ -1610,8 +1610,22 @@ impl CloudFormationService {
         // TemplateBody isn't `@required` in Smithy (TemplateURL is the alternative).
         // Accept an empty body and parse it as an empty template so the probe's
         // Success variants with `TemplateBody="test"` still land on the happy path.
+        //
+        // Resolve `TemplateURL` first, though: `aws cloudformation create-stack
+        // --template-url` (what `aws cloudformation deploy`, SAM and CDK send
+        // once a bucket is configured) otherwise arrives with an empty body and
+        // produces a CREATE_COMPLETE stack holding nothing -- the #2480 no-op,
+        // reached without any malformed template. A value that isn't URL-shaped
+        // is a synthetic probe input and keeps the lenient path.
+        let resolved_from_url = Self::get_param(req, "TemplateURL")
+            .filter(|url| crate::extras::parse_s3_url(url).is_some())
+            .and_then(|url| self.fetch_template_from_url(&req.account_id, &url));
         let empty = String::new();
-        let template_body = params.get("TemplateBody").unwrap_or(&empty);
+        let template_body = match (params.get("TemplateBody"), &resolved_from_url) {
+            (Some(body), _) if !body.trim().is_empty() => body,
+            (_, Some(body)) => body,
+            _ => params.get("TemplateBody").unwrap_or(&empty),
+        };
 
         // Check if stack already exists and is not deleted
         {
@@ -2367,25 +2381,29 @@ impl CloudFormationService {
         // update-stack --use-previous-template` is ordinary usage, so this is
         // reachable without a malformed template at all.
         if input.template_body.trim().is_empty() {
-            match Self::get_param(req, "TemplateURL") {
-                // A URL was given: it has to resolve. Falling back to the
-                // stored template would re-apply the old one and report
-                // UPDATE_COMPLETE for an update that never happened.
-                Some(url) => {
-                    input.template_body = self
-                        .fetch_template_from_url(&req.account_id, &url)
+            // A *recognisable* S3 URL has to resolve: falling back to the
+            // stored template would re-apply the old one and report
+            // UPDATE_COMPLETE for an update that never happened. A value that
+            // isn't URL-shaped at all is a synthetic conformance input (the
+            // probe's `optional_TemplateURL` variant sends `"t"` and expects
+            // success), so it takes the same lenient path as a placeholder
+            // body rather than an undeclared error.
+            let from_url = match Self::get_param(req, "TemplateURL") {
+                Some(url) if crate::extras::parse_s3_url(&url).is_some() => Some(
+                    self.fetch_template_from_url(&req.account_id, &url)
                         .ok_or_else(|| {
                             AwsServiceError::aws_error(
                                 StatusCode::BAD_REQUEST,
                                 "ValidationError",
                                 format!("Template not found at {url}"),
                             )
-                        })?;
-                }
-                // No URL: `UsePreviousTemplate`, whose meaning is the
-                // stack's stored template.
-                None => input.template_body = previous_template,
-            }
+                        })?,
+                ),
+                _ => None,
+            };
+            // No usable URL: `UsePreviousTemplate`, whose meaning is the
+            // stack's stored template.
+            input.template_body = from_url.unwrap_or(previous_template);
             // The body was empty when `UpdateStackInput::from_params` merged
             // parameter defaults, so nothing was merged. Redo it now that the
             // real template (and its `Parameters` block) is in hand, or a
@@ -2394,11 +2412,46 @@ impl CloudFormationService {
             Self::merge_parameter_defaults(&mut input.parameters, &input.template_body);
         }
 
-        // A stack that exists but has nothing to apply is a no-op, never an
-        // implicit "delete everything". When the stack does NOT exist, fall
-        // through to the not-found handling below, which synthesizes a proper
-        // stack ARN for the response.
+        // A stack that exists but has no template to apply (its stored
+        // template is itself empty) has no resources to diff — but the request
+        // may still carry parameters, tags or notification ARNs, and returning
+        // success while dropping them would be an accept-and-discard. Apply
+        // the metadata and record the transition, then return. When the stack
+        // does NOT exist, fall through to the not-found handling below, which
+        // synthesizes a proper stack ARN for the response.
         if input.template_body.trim().is_empty() && !found_stack_id.is_empty() {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            if let Some(stack) = state
+                .stacks
+                .values_mut()
+                .find(|s| s.stack_id == found_stack_id)
+            {
+                stack.parameters = input.parameters.clone();
+                if !input.tags.is_empty() {
+                    stack.tags = input.tags.clone();
+                }
+                if !input.notification_arns.is_empty() {
+                    stack.notification_arns = input.notification_arns.clone();
+                }
+                stack.status = "UPDATE_COMPLETE".to_string();
+                stack.status_reason = None;
+                stack.updated_at = Some(Utc::now());
+            }
+            let stack_name_owned = state
+                .stacks
+                .values()
+                .find(|s| s.stack_id == found_stack_id)
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| input.stack_name.clone());
+            record_stack_status_event(
+                state,
+                &found_stack_id,
+                &stack_name_owned,
+                "AWS::CloudFormation::Stack",
+                "UPDATE_COMPLETE",
+            );
+            drop(accounts);
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
                 xml_responses::update_stack_response(&found_stack_id, &req.request_id),

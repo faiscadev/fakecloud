@@ -245,7 +245,7 @@ fn require_collection(
 /// fakecloud endpoint `http://127.0.0.1:4566/bucket/key`) and
 /// virtual-hosted (`https://bucket.s3.amazonaws.com/key`) forms, and
 /// drops any query string. Returns `None` if the shape isn't recognized.
-fn parse_s3_url(url: &str) -> Option<(String, String)> {
+pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
     let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let (host, after) = rest.split_once('/')?;
     let path = after.split(['?', '#']).next().unwrap_or(after);
@@ -315,7 +315,29 @@ impl CloudFormationService {
                         params
                             .get("TemplateURL")
                             .and_then(|url| self.fetch_template_from_url(&aid, url))
-                            .unwrap_or(inline)
+                            .unwrap_or_else(|| {
+                                // `UsePreviousTemplate=true` sends neither a
+                                // body nor a URL. Leaving it empty skips the
+                                // diff entirely, so the change set records
+                                // zero changes and ExecuteChangeSet's
+                                // empty-body short-circuit marks it
+                                // EXECUTE_COMPLETE without applying anything —
+                                // a parameter-only deploy accepted and
+                                // discarded.
+                                let accounts = self.state.read();
+                                accounts
+                                    .get(&aid)
+                                    .and_then(|s| {
+                                        s.stacks
+                                            .values()
+                                            .find(|st| {
+                                                (st.name == stack_name || st.stack_id == stack_name)
+                                                    && st.status != "DELETE_COMPLETE"
+                                            })
+                                            .map(|st| st.template.clone())
+                                    })
+                                    .unwrap_or(inline)
+                            })
                     } else {
                         inline
                     }
