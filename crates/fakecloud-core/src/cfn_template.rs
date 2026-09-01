@@ -273,11 +273,6 @@ fn tagged_to_json(tagged: TaggedValue) -> Result<Json, String> {
         name.to_string()
     } else if FN_TAGS.contains(&name) {
         format!("Fn::{name}")
-    } else if name.starts_with('!') {
-        // A YAML *standard* tag (`!!str`, `!!int`, ...) — the second `!`
-        // survives the strip above. Not a CloudFormation intrinsic, and the
-        // value it decorates is what matters.
-        return Ok(arg);
     } else {
         // An unrecognised single-`!` tag. CloudFormation defines a closed set
         // of short forms, so this is a typo (`!GettAtt`) or an unsupported
@@ -636,17 +631,20 @@ Resources:
 
     #[test]
     fn double_bang_tags_pass_through() {
-        // A non-standard `!!`-prefixed tag DOES reach `tagged_to_json` (the
-        // resolved `tag:yaml.org,2002:*` ones do not), so the passthrough
-        // branch is live and must not be mistaken for a CloudFormation typo.
+        // `!!`-prefixed tags never reach `tagged_to_json` at all: libyaml
+        // expands the `!!` handle and serde_yaml resolves the result, so the
+        // node arrives already plain. Verified for `!!binary`, `!!timestamp`,
+        // `!!custom` and `!!str` — all come back as values, never
+        // `Value::Tagged`. That is why the unknown-intrinsic check below can
+        // reject every tag it sees without special-casing them.
         let parsed = parse_template_body(
-            "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      A: !!custom 5\n",
+            "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      A: !!custom 5\n      B: !!binary aGk=\n      C: !!timestamp 2024-01-01\n",
         )
-        .expect("a `!!` tag is not a CloudFormation intrinsic");
-        // The scalar keeps its unresolved (string) form, which is what a
-        // non-standard tag means; the point is that it is not rejected as a
-        // misspelled intrinsic.
-        assert_eq!(parsed["Resources"]["Q"]["Properties"]["A"], json!("5"));
+        .expect("`!!` tags resolve before reaching the intrinsic check");
+        let props = &parsed["Resources"]["Q"]["Properties"];
+        assert_eq!(props["A"], json!("5"));
+        assert_eq!(props["B"], json!("aGk="));
+        assert_eq!(props["C"], json!("2024-01-01"));
     }
 
     #[test]

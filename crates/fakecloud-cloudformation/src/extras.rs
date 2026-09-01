@@ -309,37 +309,53 @@ impl CloudFormationService {
                 // fakecloud's own S3 at this point, so fetch it back instead
                 // of storing an empty template and silently no-op'ing at
                 // execute time (issue #1646).
+                // The stack's stored template + parameters, for
+                // `UsePreviousTemplate` / `UsePreviousValue`.
+                let previous: Option<(String, BTreeMap<String, String>)> = {
+                    let accounts = self.state.read();
+                    accounts.get(&aid).and_then(|s| {
+                        s.stacks
+                            .values()
+                            .find(|st| {
+                                (st.name == stack_name || st.stack_id == stack_name)
+                                    && st.status != "DELETE_COMPLETE"
+                            })
+                            .map(|st| (st.template.clone(), st.parameters.clone()))
+                    })
+                };
                 let template_body = {
                     let inline = params.get("TemplateBody").cloned().unwrap_or_default();
-                    if inline.trim().is_empty() {
-                        params
-                            .get("TemplateURL")
-                            .and_then(|url| self.fetch_template_from_url(&aid, url))
-                            .unwrap_or_else(|| {
-                                // `UsePreviousTemplate=true` sends neither a
-                                // body nor a URL. Leaving it empty skips the
-                                // diff entirely, so the change set records
-                                // zero changes and ExecuteChangeSet's
-                                // empty-body short-circuit marks it
-                                // EXECUTE_COMPLETE without applying anything —
-                                // a parameter-only deploy accepted and
-                                // discarded.
-                                let accounts = self.state.read();
-                                accounts
-                                    .get(&aid)
-                                    .and_then(|s| {
-                                        s.stacks
-                                            .values()
-                                            .find(|st| {
-                                                (st.name == stack_name || st.stack_id == stack_name)
-                                                    && st.status != "DELETE_COMPLETE"
-                                            })
-                                            .map(|st| st.template.clone())
-                                    })
-                                    .unwrap_or(inline)
-                            })
-                    } else {
+                    if !inline.trim().is_empty() {
                         inline
+                    } else if let Some(url) = params.get("TemplateURL") {
+                        // A URL was given, so it has to resolve. Falling back
+                        // to the stored template would diff against the old
+                        // one, report zero changes, and let ExecuteChangeSet
+                        // claim success having applied nothing — `sam deploy`
+                        // against a key that doesn't round-trip would print
+                        // "no changes to deploy". CreateStack and UpdateStack
+                        // both hard-fail this condition.
+                        match self.fetch_template_from_url(&aid, url) {
+                            Some(body) => body,
+                            None => {
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "ValidationError",
+                                    format!("Template not found at {url}"),
+                                ))
+                            }
+                        }
+                    } else {
+                        // `UsePreviousTemplate=true` sends neither a body nor
+                        // a URL. Leaving it empty skips the diff entirely, so
+                        // the change set records zero changes and
+                        // ExecuteChangeSet's empty-body short-circuit marks it
+                        // EXECUTE_COMPLETE without applying anything — a
+                        // parameter-only deploy accepted and discarded.
+                        previous
+                            .as_ref()
+                            .map(|(tpl, _)| tpl.clone())
+                            .unwrap_or(inline)
                     }
                 };
                 // `ChangeSetType` is `CREATE` for first-time deploys (the
@@ -352,6 +368,29 @@ impl CloudFormationService {
 
                 let mut cs_params = CloudFormationService::extract_parameters(&params);
                 CloudFormationService::merge_parameter_defaults(&mut cs_params, &template_body);
+                // `ParameterKey=X,UsePreviousValue=true` carries no value, so
+                // `extract_parameters` skips it. ExecuteChangeSet assigns
+                // `stack.parameters = cs_params`, so without this refill the
+                // parameter is dropped (or reset to its template default) and
+                // every `Ref` to it resolves wrong. `aws cloudformation
+                // deploy` sends this pairing routinely. Unconditional, since
+                // the default merge above may already have filled the key.
+                if let Some((_, prev_params)) = &previous {
+                    for i in 1.. {
+                        let Some(key) = params.get(&format!("Parameters.member.{i}.ParameterKey"))
+                        else {
+                            break;
+                        };
+                        let use_previous = params
+                            .get(&format!("Parameters.member.{i}.UsePreviousValue"))
+                            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+                        if use_previous {
+                            if let Some(prev) = prev_params.get(key) {
+                                cs_params.insert(key.clone(), prev.clone());
+                            }
+                        }
+                    }
+                }
                 let cs_tags = CloudFormationService::extract_tags(&params);
                 let cs_notif = CloudFormationService::extract_notification_arns(&params);
 

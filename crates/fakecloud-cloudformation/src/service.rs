@@ -1634,15 +1634,21 @@ impl CloudFormationService {
         // #2480 empty CREATE_COMPLETE. UpdateStack raises this synchronously;
         // here the stack is already async, so it rolls to CREATE_FAILED with
         // the same message.
-        let url_fetch_error = match (&url_param, &resolved_from_url) {
-            (Some(url), None) => Some(format!("Template not found at {url}")),
-            _ => None,
-        };
         let empty = String::new();
-        let template_body = match (params.get("TemplateBody"), &resolved_from_url) {
-            (Some(body), _) if !body.trim().is_empty() => body,
-            (_, Some(body)) => body,
-            _ => params.get("TemplateBody").unwrap_or(&empty),
+        let inline_body = params
+            .get("TemplateBody")
+            .filter(|body| !body.trim().is_empty());
+        let template_body = match (inline_body, &resolved_from_url) {
+            (Some(body), _) => body,
+            (None, Some(body)) => body,
+            (None, None) => params.get("TemplateBody").unwrap_or(&empty),
+        };
+        // Only when the URL body is the one that would have been used: a
+        // request carrying a good inline TemplateBody alongside a stale or
+        // foreign TemplateURL is served by the body and must not fail.
+        let url_fetch_error = match (&url_param, &resolved_from_url, inline_body) {
+            (Some(url), None, None) => Some(format!("Template not found at {url}")),
+            _ => None,
         };
 
         // Check if stack already exists and is not deleted
@@ -2407,7 +2413,13 @@ impl CloudFormationService {
                 let use_previous = raw
                     .get(&format!("Parameters.member.{i}.UsePreviousValue"))
                     .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                if use_previous && !input.parameters.contains_key(key) {
+                // Unconditional: `UpdateStackInput::from_params` has already
+                // merged template defaults, so a parameter that declares one
+                // is present here and a `contains_key` guard would skip it —
+                // silently reverting an explicitly-set value to the default.
+                // `UsePreviousValue` and `ParameterValue` are mutually
+                // exclusive on the wire, so nothing user-supplied is lost.
+                if use_previous {
                     if let Some(prev) = previous_parameters.get(key) {
                         input.parameters.insert(key.clone(), prev.clone());
                     }
@@ -2481,12 +2493,18 @@ impl CloudFormationService {
                 stack.status_reason = None;
                 stack.updated_at = Some(Utc::now());
             }
-            let stack_name_owned = state
+            // Read the stack's ARNs back, post-merge. Notifying with
+            // `input.notification_arns` would be a no-op on the common
+            // metadata-only update that omits NotificationARNs -- exactly the
+            // case this branch exists to serve -- since the send is skipped on
+            // an empty list. The normal update path reads them off the stack
+            // for the same reason.
+            let (stack_name_owned, notify_arns) = state
                 .stacks
                 .values()
                 .find(|s| s.stack_id == found_stack_id)
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| input.stack_name.clone());
+                .map(|s| (s.name.clone(), s.notification_arns.clone()))
+                .unwrap_or_else(|| (input.stack_name.clone(), input.notification_arns.clone()));
             // Emit the same IN_PROGRESS -> COMPLETE pair the normal update
             // path does, so a poller sees a well-formed transition.
             record_stack_status_event(
@@ -2509,7 +2527,7 @@ impl CloudFormationService {
             // hanging, even though both other update outcomes notify.
             Self::send_stack_notification(
                 &self.deps.delivery,
-                &input.notification_arns,
+                &notify_arns,
                 &stack_name_owned,
                 &found_stack_id,
                 "UPDATE_COMPLETE",
