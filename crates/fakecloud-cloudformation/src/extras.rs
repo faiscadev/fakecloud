@@ -1045,12 +1045,16 @@ impl CloudFormationService {
                     }
                     Err(_) => failed,
                 };
-                crate::service::record_stack_status_event(
+                // Carry the failure reason onto the terminal event, so
+                // DescribeStackEvents explains a failed execution instead of
+                // reporting a bare ROLLBACK_COMPLETE.
+                crate::service::record_stack_status_event_with_reason(
                     state,
                     &sid,
                     &stack_name_owned,
                     "AWS::CloudFormation::Stack",
                     final_status,
+                    update_result.as_ref().err().map(String::as_str),
                 );
 
                 if let Some(m) = state.extras.get_mut("change_sets") {

@@ -2597,12 +2597,18 @@ impl CloudFormationService {
                     Ok(touched_types)
                 }
                 Err(e) => {
-                    record_stack_status_event(
+                    // Attach the reason: DescribeStackEvents is what `sam
+                    // deploy`, CDK and the CLI poll to explain a failure, so a
+                    // bare UPDATE_ROLLBACK_COMPLETE tells the user nothing.
+                    // The CreateStack path already does this in
+                    // `mark_create_failed`.
+                    record_stack_status_event_with_reason(
                         state,
                         &stack_id,
                         &stack_name_owned,
                         "AWS::CloudFormation::Stack",
                         "UPDATE_ROLLBACK_COMPLETE",
+                        Some(&e),
                     );
                     Err(e)
                 }
@@ -3399,6 +3405,41 @@ mod tests {
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    /// `DescribeStackEvents` is what `sam deploy`, CDK and the CLI poll to
+    /// explain a failure, so a terminal failure event has to carry
+    /// `ResourceStatusReason`. A successful transition must NOT invent one.
+    #[test]
+    fn status_events_carry_a_reason_only_on_failure() {
+        let mut state = crate::state::CloudFormationState::new("123456789012", "us-east-1");
+        record_stack_status_event(
+            &mut state,
+            "stack-id",
+            "s",
+            "AWS::CloudFormation::Stack",
+            "UPDATE_COMPLETE",
+        );
+        record_stack_status_event_with_reason(
+            &mut state,
+            "stack-id",
+            "s",
+            "AWS::CloudFormation::Stack",
+            "UPDATE_ROLLBACK_COMPLETE",
+            Some("Failed to create resource Fn: boom"),
+        );
+
+        let log = state.events.get("stack-id").expect("events recorded");
+        assert_eq!(log.len(), 2);
+        assert!(
+            log[0].get("ResourceStatusReason").is_none(),
+            "a successful transition must not carry a reason: {:?}",
+            log[0]
+        );
+        assert_eq!(
+            log[1]["ResourceStatusReason"],
+            serde_json::json!("Failed to create resource Fn: boom")
+        );
+    }
 
     #[test]
     fn merge_parameter_defaults_fills_omitted_params() {

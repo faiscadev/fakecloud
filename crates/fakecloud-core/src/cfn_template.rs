@@ -64,11 +64,17 @@ pub fn parse_template_body(body: &str) -> Result<Json, String> {
     if body.trim_start().starts_with('{') {
         return match serde_json::from_str(body) {
             Ok(value) => Ok(value),
-            // Report the JSON error, not the YAML one: for a `{`-leading body
-            // that is the diagnostic the author needs.
-            Err(json_err) => {
-                parse_yaml(body).map_err(|_| format!("Invalid JSON template: {json_err}"))
-            }
+            Err(json_err) => match serde_yaml::from_str::<Yaml>(body) {
+                // It is valid YAML after all, so any remaining problem is a
+                // YAML-stage one (an unknown intrinsic tag, a non-finite
+                // number) and that message is the actionable diagnostic.
+                // Reporting the JSON error here would point at syntax that is
+                // legal in the dialect actually being used.
+                Ok(yaml) => yaml_to_json(yaml).map_err(|e| format!("Invalid YAML template: {e}")),
+                // Neither dialect parses. For a `{`-leading body the JSON
+                // error is what the author needs.
+                Err(_) => Err(format!("Invalid JSON template: {json_err}")),
+            },
         };
     }
     parse_yaml(body)
@@ -433,6 +439,19 @@ Resources:
     fn json_body_that_is_neither_reports_the_json_error() {
         let err = parse_template_body("{\"Resources\": [oops").expect_err("must fail");
         assert!(err.starts_with("Invalid JSON template:"), "{err}");
+    }
+
+    #[test]
+    fn flow_style_body_reports_the_yaml_stage_error() {
+        // Valid YAML, invalid JSON. The real problem is the misspelled
+        // intrinsic, so reporting the JSON parse error would point the author
+        // at syntax that is legal in the dialect they actually used.
+        let err = parse_template_body(
+            "{Resources: {Q: {Type: AWS::SQS::Queue, Properties: {V: !GettAtt A.B}}}}",
+        )
+        .expect_err("must fail");
+        assert!(err.contains("unknown intrinsic tag !GettAtt"), "{err}");
+        assert!(!err.contains("Invalid JSON template"), "{err}");
     }
 
     #[test]
