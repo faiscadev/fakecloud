@@ -3262,6 +3262,30 @@ fn a_shared_cluster_snapshot_resolves_by_bare_id_when_the_request_widens() {
 }
 
 #[test]
+fn cluster_snapshot_attribute_ops_use_a_declared_fault_for_a_missing_param() {
+    // `missing()` raises InvalidParameterValue, which is not a shape
+    // anywhere in the RDS model -- an SDK client would see an unmodeled
+    // failure.
+    let svc = svc();
+    for action in [
+        "DescribeDBClusterSnapshotAttributes",
+        "ModifyDBClusterSnapshotAttribute",
+        "DeleteDBClusterSnapshot",
+    ] {
+        let result = svc.handle_extra_action(&req(action, &[]));
+        match result {
+            Err(err) => assert_eq!(
+                err.code(),
+                "DBClusterSnapshotNotFoundFault",
+                "{action} raised {}",
+                err.code()
+            ),
+            Ok(_) => panic!("{action} accepted a missing identifier"),
+        }
+    }
+}
+
+#[test]
 fn describe_db_cluster_snapshots_honors_include_shared() {
     // The modeled IncludeShared / IncludePublic members widen an
     // unqualified listing, as on DescribeDBSnapshots.

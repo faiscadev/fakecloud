@@ -480,8 +480,17 @@ impl RdsService {
                 // unnormalized delete would report success while leaving
                 // the entry in place, so a Terraform destroy never
                 // converges.
-                let raw = get_param(req, "DBClusterSnapshotIdentifier")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                // `missing()` raises InvalidParameterValue, which is not
+                // a shape anywhere in the RDS model -- the same objection
+                // this branch applies to the wrong-type-ARN path. Use the
+                // operation's declared fault instead.
+                let raw = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshotIdentifier is required",
+                    )
+                })?;
                 if !addresses_own_account(&raw, &aid) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
@@ -840,8 +849,17 @@ impl RdsService {
                 Ok(xml_response("DescribeDBClusterSnapshots", inner, &rid))
             }
             "DescribeDBClusterSnapshotAttributes" => {
-                let raw = get_param(req, "DBClusterSnapshotIdentifier")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                // `missing()` raises InvalidParameterValue, which is not
+                // a shape anywhere in the RDS model -- the same objection
+                // this branch applies to the wrong-type-ARN path. Use the
+                // operation's declared fault instead.
+                let raw = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshotIdentifier is required",
+                    )
+                })?;
                 if !addresses_own_account(&raw, &aid) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
@@ -886,8 +904,17 @@ impl RdsService {
                 // attribute records the accounts (or `all`) a snapshot is
                 // shared with, which is what SnapshotType=shared/public
                 // selects on.
-                let raw = get_param(req, "DBClusterSnapshotIdentifier")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
+                // `missing()` raises InvalidParameterValue, which is not
+                // a shape anywhere in the RDS model -- the same objection
+                // this branch applies to the wrong-type-ARN path. Use the
+                // operation's declared fault instead.
+                let raw = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshotIdentifier is required",
+                    )
+                })?;
                 if !addresses_own_account(&raw, &aid) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::NOT_FOUND,
@@ -909,8 +936,13 @@ impl RdsService {
                         )
                     },
                 )?;
-                let attribute_name =
-                    get_param(req, "AttributeName").ok_or_else(|| missing("AttributeName"))?;
+                let attribute_name = get_param(req, "AttributeName").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "AttributeName is required",
+                    )
+                })?;
                 let to_add = parse_attribute_values(req, "ValuesToAdd");
                 let to_remove = parse_attribute_values(req, "ValuesToRemove");
                 // AWS rejects a value present in both lists, but

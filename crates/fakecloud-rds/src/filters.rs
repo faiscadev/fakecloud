@@ -215,7 +215,16 @@ pub(crate) fn parse_filters(req: &AwsRequest) -> Vec<RdsFilter> {
     // present -- `extras::get_param` falls back unconditionally, and
     // gating on an empty `query_params` would miss a request that
     // carries `Action` in the query string and the rest in the body.
-    let body = if req.body.is_empty() {
+    // Dispatch merges the form body into `query_params` for the Query
+    // protocol, so the fallback is only for a request built without that
+    // merge. Parsing the body on every Describe just to service a path
+    // production never takes allocates a map of every request parameter
+    // on a hot path -- so only do it when no filter is visible at all.
+    let filters_in_query = req
+        .query_params
+        .keys()
+        .any(|key| key.starts_with("Filters."));
+    let body = if filters_in_query || req.body.is_empty() {
         HashMap::new()
     } else {
         fakecloud_core::protocol::parse_query_body(&req.body)

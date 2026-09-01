@@ -162,7 +162,16 @@ pub(super) fn cluster_snapshot_as_source(
     // writer would have run.
     let engine = field("SourceEngine")
         .or_else(|| field("Engine").map(|engine| container_engine_for(&engine).to_string()))
-        .unwrap_or_else(|| "postgres".to_string());
+        .unwrap_or_else(|| {
+            // The container really is started with this, so a silent
+            // substitution leaves the caller with an instance that is
+            // `available` but not what they snapshotted.
+            tracing::warn!(
+                snapshot = %snapshot_id,
+                "cluster snapshot records no engine; restoring as postgres"
+            );
+            "postgres".to_string()
+        });
     // Paired with the engine above: the cluster's own Aurora version
     // against a remapped container engine is a combination AWS never
     // reports. Keyed on whether the engine WAS remapped -- not on
@@ -207,10 +216,24 @@ pub(super) fn cluster_snapshot_as_source(
         // The engines refuse to start with an empty password; a cluster
         // created before the password was persisted falls back to the
         // same default CreateDBCluster records now.
+        // Each candidate is emptiness-checked BEFORE the fallback, so a
+        // stored empty SourceMasterUserPassword falls through to
+        // MasterUserPassword instead of skipping straight to the default.
         master_user_password: field("SourceMasterUserPassword")
-            .or_else(|| field("MasterUserPassword"))
             .filter(|password| !password.is_empty())
-            .unwrap_or_else(|| crate::extras::DEFAULT_CLUSTER_MASTER_PASSWORD.to_string()),
+            .or_else(|| field("MasterUserPassword").filter(|p| !p.is_empty()))
+            .unwrap_or_else(|| {
+                // The engines refuse to start with an empty password, so
+                // a cluster recorded before the password was persisted
+                // gets the default -- and the caller's real credentials
+                // will not connect, which is worth saying out loud.
+                tracing::warn!(
+                    snapshot = %snapshot_id,
+                    "cluster snapshot records no master password; \
+                     restoring with the default -- the original credentials will not connect"
+                );
+                crate::extras::DEFAULT_CLUSTER_MASTER_PASSWORD.to_string()
+            }),
         tags: Vec::new(),
         dump_data,
         availability_zone: None,
