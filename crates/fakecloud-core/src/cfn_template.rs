@@ -15,11 +15,17 @@ use serde_json::{Map, Value as Json};
 use serde_yaml::value::TaggedValue;
 use serde_yaml::Value as Yaml;
 
-/// Short-form tags that expand to `{"Fn::<Tag>": <arg>}`.
+/// Short-form tags that expand to `{"Fn::<Tag>": <arg>}`. Covers the template
+/// intrinsics, the condition functions, and the `Rules`-section functions —
+/// CloudFormation defines no others, which is what lets an unrecognised tag be
+/// treated as an error rather than quietly unwrapped.
 const FN_TAGS: &[&str] = &[
     "And",
     "Base64",
     "Cidr",
+    "Contains",
+    "EachMemberEquals",
+    "EachMemberIn",
     "Equals",
     "FindInMap",
     "GetAZs",
@@ -30,11 +36,14 @@ const FN_TAGS: &[&str] = &[
     "Length",
     "Not",
     "Or",
+    "RefAll",
     "Select",
     "Split",
     "Sub",
     "ToJsonString",
     "Transform",
+    "ValueOf",
+    "ValueOfAll",
 ];
 
 /// Short-form tags that expand to a bare `{"<Tag>": <arg>}` key. `Ref` and
@@ -101,9 +110,26 @@ fn looks_like_template_text(body: &str) -> bool {
         // Both spellings: JSON quotes the key, YAML flow style does not.
         return body.contains("\"Resources\"") || body.contains("Resources:");
     }
-    // A top-level YAML key sits at column zero.
-    body.lines()
-        .any(|line| line.starts_with("Resources:") || line.trim_end() == "Resources")
+    // A top-level YAML key sits at column zero. It may be quoted, and may
+    // carry whitespace before its colon — both legal, and both emitted by
+    // real generators.
+    body.lines().any(declares_resources)
+}
+
+fn declares_resources(line: &str) -> bool {
+    let rest = line
+        .strip_prefix('"')
+        .or_else(|| line.strip_prefix('\''))
+        .unwrap_or(line);
+    let Some(rest) = rest.strip_prefix("Resources") else {
+        return false;
+    };
+    let rest = rest
+        .strip_prefix('"')
+        .or_else(|| rest.strip_prefix('\''))
+        .unwrap_or(rest);
+    let rest = rest.trim_start();
+    rest.is_empty() || rest.starts_with(':')
 }
 
 /// Convenience wrapper for callers that only want a template-shaped object and
@@ -169,10 +195,19 @@ fn tagged_to_json(tagged: TaggedValue) -> Result<Json, String> {
         name.to_string()
     } else if FN_TAGS.contains(&name) {
         format!("Fn::{name}")
-    } else {
-        // Not a CloudFormation intrinsic. Keeping the node's value is more
-        // useful than failing the whole document over an unrecognised tag.
+    } else if name.starts_with('!') {
+        // A YAML *standard* tag (`!!str`, `!!int`, ...) — the second `!`
+        // survives the strip above. Not a CloudFormation intrinsic, and the
+        // value it decorates is what matters.
         return Ok(arg);
+    } else {
+        // An unrecognised single-`!` tag. CloudFormation defines a closed set
+        // of short forms, so this is a typo (`!GettAtt`) or an unsupported
+        // function. Unwrapping it to its argument would turn `!GettAtt
+        // Topic.Arn` into the literal string "Topic.Arn" and provision a
+        // wrong-but-plausible value under a CREATE_COMPLETE stack — the same
+        // silent-wrong-value class this module exists to close.
+        return Err(format!("unknown intrinsic tag !{name}"));
     };
     let mut obj = Map::new();
     obj.insert(key, arg);
@@ -351,8 +386,12 @@ Resources:
     }
 
     #[test]
-    fn unknown_tags_keep_their_value() {
-        let parsed = parse_template_body(
+    fn unknown_tags_are_an_error() {
+        // This originally asserted the tag unwrapped to its value. That is
+        // precisely the silent-wrong-value behaviour the module exists to
+        // prevent: the property would provision as the string "hello" under a
+        // CREATE_COMPLETE stack, with nothing reported.
+        let err = parse_template_body(
             r"
 Resources:
   Thing:
@@ -361,10 +400,10 @@ Resources:
       Custom: !SomethingElse hello
 ",
         )
-        .expect("template parses");
-        assert_eq!(
-            parsed["Resources"]["Thing"]["Properties"]["Custom"],
-            json!("hello")
+        .expect_err("an unrecognised intrinsic must be reported");
+        assert!(
+            err.contains("unknown intrinsic tag !SomethingElse"),
+            "{err}"
         );
     }
 
@@ -414,6 +453,93 @@ Resources:
         let bad_json = "{\"Resources\": [oops";
         assert!(parse_template_body(bad_json).is_err());
         assert!(is_template_document(bad_json));
+    }
+
+    #[test]
+    fn unknown_tags_are_rejected_not_unwrapped() {
+        // A one-character typo used to unwrap to the literal string
+        // "Topic.Arn" and provision a wrong-but-plausible value under a
+        // CREATE_COMPLETE stack.
+        let err = parse_template_body(
+            "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      V: !GettAtt Topic.Arn\n",
+        )
+        .expect_err("a misspelled intrinsic must not be silently unwrapped");
+        assert!(err.contains("unknown intrinsic tag !GettAtt"), "{err}");
+    }
+
+    #[test]
+    fn rules_section_short_forms_expand() {
+        let parsed = parse_template_body(
+            r#"
+Rules:
+  R:
+    Assertions:
+      - Assert: !Contains [[a, b], !Ref Thing]
+      - Assert: !EachMemberEquals [[a], a]
+      - Assert: !EachMemberIn [[a], [a, b]]
+      - Assert: !ValueOf [Param, Tags]
+      - Assert: !ValueOfAll ["AWS::EC2::Subnet::Id", VpcId]
+      - Assert: !RefAll "AWS::EC2::VPC::Id"
+Resources:
+  Q:
+    Type: AWS::SQS::Queue
+"#,
+        )
+        .expect("Rules-section short forms are CloudFormation intrinsics");
+        let asserts = &parsed["Rules"]["R"]["Assertions"];
+        assert_eq!(
+            asserts[0]["Assert"],
+            json!({"Fn::Contains": [["a", "b"], {"Ref": "Thing"}]})
+        );
+        assert_eq!(
+            asserts[1]["Assert"],
+            json!({"Fn::EachMemberEquals": [["a"], "a"]})
+        );
+        assert_eq!(
+            asserts[2]["Assert"],
+            json!({"Fn::EachMemberIn": [["a"], ["a", "b"]]})
+        );
+        assert_eq!(
+            asserts[3]["Assert"],
+            json!({"Fn::ValueOf": ["Param", "Tags"]})
+        );
+        assert_eq!(
+            asserts[5]["Assert"],
+            json!({"Fn::RefAll": "AWS::EC2::VPC::Id"})
+        );
+    }
+
+    #[test]
+    fn yaml_standard_tags_still_pass_through() {
+        // `!!str` and friends are YAML's own tags, not CloudFormation's, and
+        // must not trip the unknown-intrinsic check.
+        let parsed = parse_template_body(
+            "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      A: !!str 5\n      B: !!int \"7\"\n",
+        )
+        .expect("standard YAML tags are not CloudFormation intrinsics");
+        let props = &parsed["Resources"]["Q"]["Properties"];
+        assert_eq!(props["A"], json!("5"));
+        assert_eq!(props["B"], json!(7));
+    }
+
+    #[test]
+    fn quoted_or_spaced_resources_key_is_recognised() {
+        // Legal YAML spellings of the top-level key, each paired with a
+        // syntax error elsewhere so classification runs on the raw text.
+        for body in [
+            "\"Resources\":\n\tQ:\n\t\tType: AWS::SQS::Queue\n",
+            "'Resources':\n\tQ:\n\t\tType: AWS::SQS::Queue\n",
+            "Resources :\n\tQ:\n\t\tType: AWS::SQS::Queue\n",
+        ] {
+            assert!(
+                parse_template_body(body).is_err(),
+                "{body:?} should not parse"
+            );
+            assert!(
+                is_template_document(body),
+                "{body:?} must be recognised as a template"
+            );
+        }
     }
 
     #[test]

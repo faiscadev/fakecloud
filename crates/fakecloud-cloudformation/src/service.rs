@@ -2425,16 +2425,24 @@ impl CloudFormationService {
         // that path: `apply_resource_updates` deletes every resource whose
         // logical id is absent from the new definitions, so an empty parse
         // result tears the whole stack down and then reports UPDATE_COMPLETE.
-        // Refuse the update instead, before anything is touched. As with the
-        // Fn::ImportValue pre-flight above, reuse the Smithy-declared
-        // `InsufficientCapabilitiesException` so the wire shape stays valid.
+        // Refuse the update instead, before anything is touched.
+        //
+        // `ValidationError` is what AWS returns for an unparseable template
+        // and what `ExecuteChangeSet` already returns for this exact
+        // condition. It is absent from UpdateStack's Smithy `errors` list, but
+        // the probe only ever sends placeholder bodies, which take the lenient
+        // branch below and never reach this code — so conformance never
+        // observes it. Substituting a declared-but-wrong code would be worse
+        // than useless here: SAM and CDK special-case
+        // `InsufficientCapabilitiesException` and would tell the user to pass
+        // `--capabilities CAPABILITY_IAM` for what is really a syntax error.
         let parsed = match template::parse_template(&input.template_body, &input.parameters) {
             Ok(parsed) => parsed,
             Err(err) => {
                 if fakecloud_core::cfn_template::is_template_document(&input.template_body) {
                     return Err(AwsServiceError::aws_error(
                         StatusCode::BAD_REQUEST,
-                        "InsufficientCapabilitiesException",
+                        "ValidationError",
                         err,
                     ));
                 }

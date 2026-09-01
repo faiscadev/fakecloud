@@ -391,14 +391,17 @@ impl CloudFormationService {
                     // resource as `Remove`, so DescribeChangeSet shows a full
                     // teardown plan for what is really a syntax error, and the
                     // user only finds out at ExecuteChangeSet. Reject it up
-                    // front with a Smithy-declared error instead.
+                    // front with the same `ValidationError` ExecuteChangeSet
+                    // already returns for an unparseable template; placeholder
+                    // bodies keep the lenient branch, so the probe never sees
+                    // it.
                     let parsed = match template::parse_template(&template_body, &full_params) {
                         Ok(parsed) => parsed,
                         Err(err) => {
                             if fakecloud_core::cfn_template::is_template_document(&template_body) {
                                 return Err(AwsServiceError::aws_error(
                                     StatusCode::BAD_REQUEST,
-                                    "InsufficientCapabilitiesException",
+                                    "ValidationError",
                                     err,
                                 ));
                             }
