@@ -152,7 +152,20 @@ pub(super) fn cluster_snapshot_as_source(
         .and_then(|v| v.as_str())
         .and_then(|b64| {
             use base64::Engine;
-            base64::engine::general_purpose::STANDARD.decode(b64).ok()
+            match base64::engine::general_purpose::STANDARD.decode(b64) {
+                Ok(data) => Some(data),
+                Err(error) => {
+                    // Collapsing this into "no dump" restores an EMPTY
+                    // database that still reports `available` -- the
+                    // caller loses their data with no diagnostic.
+                    tracing::warn!(
+                        snapshot = %snapshot_id,
+                        %error,
+                        "cluster snapshot dump did not decode; restoring an empty database"
+                    );
+                    None
+                }
+            }
         })
         .unwrap_or_default();
     // Prefer the writer's engine, recorded when the dump was taken: the

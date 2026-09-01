@@ -167,8 +167,22 @@ impl RdsService {
         // (all six members are modeled): an explicit Domain overrides
         // whatever the source carried, and dropping it would leave the
         // new instance invisible to the `domain` filter.
-        if let Some(domain) = optional_query_param(request, "Domain") {
-            instance.domain = Some(domain);
+        // Gated on ANY Domain member, not just `Domain`: AWS's
+        // self-managed AD flow sets DomainFqdn / DomainOu /
+        // DomainAuthSecretArn / DomainDnsIps without a directory id.
+        let domain_members = [
+            "Domain",
+            "DomainFqdn",
+            "DomainOu",
+            "DomainIAMRoleName",
+            "DomainAuthSecretArn",
+        ];
+        let joins_a_domain = domain_members
+            .iter()
+            .any(|member| optional_query_param(request, member).is_some())
+            || !parse_string_member_list(request, "DomainDnsIps").is_empty();
+        if joins_a_domain {
+            instance.domain = optional_query_param(request, "Domain");
             instance.domain_fqdn = optional_query_param(request, "DomainFqdn");
             instance.domain_ou = optional_query_param(request, "DomainOu");
             instance.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");

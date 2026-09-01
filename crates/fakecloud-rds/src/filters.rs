@@ -161,12 +161,18 @@ pub(crate) fn identifier_matches_type(param: &str, resource_type: &str) -> bool 
     }
     let mut fields = param.splitn(7, ':').skip(2);
     // The service has to be `rds` (an `arn:aws:ec2:...:db:mydb` names
-    // nothing here), the type has to match, AND the resource id has to be
-    // non-empty: `arn:aws:rds:us-east-1:1234:db:` would otherwise pass,
-    // normalize to `None`, and read as "no identifier" -- widening a
-    // targeted read into a full listing.
+    // nothing here), the ACCOUNT has to be non-empty (an ARN naming no
+    // account resolves to nothing rather than aliasing onto the caller's
+    // own resource -- `identifier_account` reports None for it, which
+    // the resolve paths cannot tell from a bare id), the type has to
+    // match, AND the resource id has to be non-empty:
+    // `arn:aws:rds:us-east-1:1234:db:` would otherwise pass, normalize
+    // to `None`, and read as "no identifier" -- widening a targeted read
+    // into a full listing.
     fields.next() == Some("rds")
-        && fields.nth(2) == Some(resource_type)
+        && fields.next().is_some()
+        && fields.next().is_some_and(|account| !account.is_empty())
+        && fields.next() == Some(resource_type)
         && fields.next().is_some_and(|id| !id.is_empty())
 }
 

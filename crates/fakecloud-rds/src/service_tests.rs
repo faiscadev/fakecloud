@@ -3550,6 +3550,85 @@ async fn an_explicit_domain_replaces_every_source_field() {
 }
 
 #[tokio::test]
+async fn self_managed_ad_fields_are_kept_without_a_directory_id() {
+    // AWS's self-managed AD flow sets DomainFqdn / DomainOu /
+    // DomainAuthSecretArn / DomainDnsIps and no `Domain`, so gating the
+    // block on `Domain` alone dropped all of them.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "source-db");
+
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "source-db"),
+            ("TargetDBInstanceIdentifier", "pit-db"),
+            ("UseLatestRestorableTime", "true"),
+            ("DomainFqdn", "corp.example.com"),
+            (
+                "DomainAuthSecretArn",
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:ad",
+            ),
+            ("DomainDnsIps.member.1", "10.0.0.1"),
+        ],
+    );
+    svc.restore_db_instance_to_point_in_time(&req)
+        .await
+        .expect("PITR with the stub runtime");
+
+    let restored = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("pit-db")
+        .map(|i| {
+            (
+                i.domain_fqdn.clone(),
+                i.domain_auth_secret_arn.clone(),
+                i.domain_dns_ips.clone(),
+            )
+        })
+        .expect("the restored instance is recorded");
+    assert_eq!(restored.0.as_deref(), Some("corp.example.com"));
+    assert!(restored.1.is_some(), "the auth secret ARN was dropped");
+    assert_eq!(restored.2, vec!["10.0.0.1".to_string()]);
+}
+
+#[test]
+fn an_arn_naming_no_account_resolves_to_nothing() {
+    // `identifier_account` reports None for it, which a resolve path
+    // can't tell from a bare id -- so without the guard it would alias
+    // onto this account's resource of that name.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "db1");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1::snapshot:prod-snap",
+        )],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // And it cannot be copied from either.
+    let result = svc.handle_extra_action(&request(
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1::snapshot:prod-snap",
+            ),
+            ("TargetDBSnapshotIdentifier", "copy-snap"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBSnapshotNotFound"),
+        Ok(_) => panic!("an account-less ARN copied the local snapshot"),
+    }
+}
+
+#[tokio::test]
 async fn point_in_time_restore_carries_the_requested_domain() {
     // Modeled on the request, and an explicit Domain overrides whatever
     // the source carried -- otherwise the new instance is invisible to
