@@ -29,11 +29,7 @@ pub fn resolve_resource_properties_with_attrs(
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
     imports: &BTreeMap<String, String>,
 ) -> Result<ResourceDefinition, String> {
-    let value: Value = if template_body.trim_start().starts_with('{') {
-        serde_json::from_str(template_body).map_err(|e| format!("Invalid JSON template: {e}"))?
-    } else {
-        serde_yaml::from_str(template_body).map_err(|e| format!("Invalid YAML template: {e}"))?
-    };
+    let value: Value = fakecloud_core::cfn_template::parse_template_body(template_body)?;
     // Re-expand ForEach so the resource we look up matches the post-
     // expansion logical IDs from the original parse.
     let value = expand_for_each(&value, &BTreeMap::new(), parameters)?;
@@ -112,14 +108,7 @@ pub fn dependency_order(
         return identity();
     }
 
-    let parse = |body: &str| -> Result<Value, ()> {
-        if body.trim_start().starts_with('{') {
-            serde_json::from_str(body).map_err(|_| ())
-        } else {
-            serde_yaml::from_str(body).map_err(|_| ())
-        }
-    };
-    let Ok(value) = parse(template_body) else {
+    let Ok(value) = fakecloud_core::cfn_template::parse_template_body(template_body) else {
         return identity();
     };
     // Match the logical ids the rest of provisioning sees (ForEach + SAM).

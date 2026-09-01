@@ -10,14 +10,15 @@ fakecloud implements **90 of 90** CloudFormation operations at 100% Smithy confo
 
 ## Protocol
 
-Query protocol. Form-encoded body, `Action` parameter, XML responses. Templates accepted as JSON or YAML on `CreateStack`, `UpdateStack`, `CreateChangeSet`, `ValidateTemplate`, etc.
+Query protocol. Form-encoded body, `Action` parameter, XML responses. Templates accepted as JSON or YAML on `CreateStack`, `UpdateStack`, `CreateChangeSet`, `ValidateTemplate`, etc. YAML templates may write intrinsics in either the long form (`Fn::Sub:`) or CloudFormation's short-form node tags (`!Sub`) — see below.
 
 ## Template engine
 
 - **Parameters** — typed, with `AllowedValues`, `AllowedPattern`, `MinLength`/`MaxLength`, `MinValue`/`MaxValue`, `NoEcho`, and default substitution.
 - **Mappings** — two-level lookup via `Fn::FindInMap`.
 - **Conditions** — top-level `Conditions` block evaluated to booleans, with cross-condition references resolved in dependency order (circular refs return `ValidationError`). Resources, outputs, and properties carrying a `Condition` key are pruned when the condition is false.
-- **Intrinsics** — `Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`, `Fn::Split`, `Fn::Select`, `Fn::FindInMap`, `Fn::Base64`, `Fn::Cidr`, `Fn::Length`, `Fn::ToJsonString`, `Fn::GetAZs`, `Fn::ImportValue`, and the condition intrinsics `Fn::If`, `Fn::Equals`, `Fn::And`, `Fn::Or`, `Fn::Not`.
+- **Intrinsics** — `Ref`, `Fn::GetAtt`, `Fn::Sub`, `Fn::Join`, `Fn::Split`, `Fn::Select`, `Fn::FindInMap`, `Fn::Base64`, `Fn::Cidr`, `Fn::Length`, `Fn::ToJsonString`, `Fn::GetAZs`, `Fn::ImportValue`, `Fn::Transform`, and the condition intrinsics `Fn::If`, `Fn::Equals`, `Fn::And`, `Fn::Or`, `Fn::Not`.
+- **YAML short-form tags** — every intrinsic above is also accepted in its short form (`!Ref`, `!GetAtt Res.Attr`, `!Sub`, `!Join`, `!Select`, `!Split`, `!Base64`, `!Cidr`, `!FindInMap`, `!GetAZs`, `!ImportValue`, `!Length`, `!ToJsonString`, `!Transform`, `!If`, `!Equals`, `!And`, `!Or`, `!Not`, `!Condition`), nested to any depth. Short and long forms are equivalent and can be mixed in one template.
 - **`Fn::If`** — evaluated inline anywhere a value can appear, including inside resource properties, output values, and nested intrinsics. The `AWS::NoValue` pseudo-parameter prunes the surrounding key.
 - **`Fn::And` / `Fn::Or`** — accept 1-10 sub-conditions and short-circuit on the first decisive value, matching AWS's documented evaluation order.
 - **Outputs** — `Outputs.*.Export.Name` registers entries in an account-wide exports registry; `Fn::ImportValue` substitutes them at provision time. Unknown export names fail the create/update with a `ValidationError` ("No export named X found"), and `DeleteStack` blocks while another live stack still imports an export.
@@ -26,7 +27,8 @@ Query protocol. Form-encoded body, `Action` parameter, XML responses. Templates 
 ## Stack lifecycle
 
 - **`CreateStack` / `UpdateStack` / `DeleteStack`** — drive real provisioning against the other fakecloud services. Resources are created in topological order based on `Ref` / `Fn::GetAtt` / `DependsOn` edges; updates compute a diff and call the per-type updater; deletes walk in reverse order and respect `DeletionPolicy: Retain` / `Snapshot` / `RetainExceptOnCreate` (the physical resource is left in place instead of being destroyed). A resource replaced by an update honors its `UpdateReplacePolicy` the same way, so the old physical resource is preserved when the policy is `Retain` / `Snapshot`. (`Snapshot` is treated as retain — the resource is preserved rather than snapshot-then-deleted.)
-- **Stack events** — each stage transition (`CREATE_IN_PROGRESS`, `CREATE_COMPLETE`, `UPDATE_ROLLBACK_*`, `DELETE_*`, etc.) emits a real `StackEvent` with timestamp, logical/physical IDs, resource type, and status reason. `DescribeStackEvents` returns them in reverse-chronological order, matching AWS.
+- **Stack events** — each stage transition (`CREATE_IN_PROGRESS`, `CREATE_COMPLETE`, `UPDATE_ROLLBACK_*`, `DELETE_*`, etc.) emits a real `StackEvent` with timestamp, logical/physical IDs, and resource type. A failing transition also carries `ResourceStatusReason`. `DescribeStackEvents` returns them in reverse-chronological order, matching AWS.
+- **Failure reporting** — a template that is a CloudFormation document but cannot be parsed (a resource with no `Type`, an unresolvable condition, malformed `Fn::ForEach`) rolls the stack to `CREATE_FAILED` with the parser's message in `StackStatusReason`, rather than reporting `CREATE_COMPLETE` with an empty stack. `DescribeStacks` and `ListStacks` surface `StackStatusReason` whenever a stack carries one.
 - **`DescribeStacks` / `DescribeStackResource` / `DescribeStackResources` / `ListStackResources`** — read from persisted state, including the resolved physical ID for every provisioned resource.
 - **`ContinueUpdateRollback` / `CancelUpdateStack` / `RollbackStack`** — accepted and transition the stack through the rollback states.
 - **`GetTemplate` / `GetTemplateSummary`** — round-trip the original body and surface declared parameters, capabilities, resource types, and the resolved transform list.

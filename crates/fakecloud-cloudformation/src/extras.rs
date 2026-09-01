@@ -525,6 +525,7 @@ impl CloudFormationService {
                                     stack_id: stack_id_str.clone(),
                                     template: String::new(),
                                     status: "REVIEW_IN_PROGRESS".to_string(),
+                                    status_reason: None,
                                     resources: Vec::new(),
                                     parameters: BTreeMap::new(),
                                     tags: BTreeMap::new(),
@@ -2127,7 +2128,7 @@ impl CloudFormationService {
                         "    <StackEvents>\n{}\n    </StackEvents>",
                         members_xml(&events, |v| {
                             format!(
-                            "        <EventId>{}</EventId>\n        <StackId>{}</StackId>\n        <StackName>{}</StackName>\n        <LogicalResourceId>{}</LogicalResourceId>\n        <PhysicalResourceId>{}</PhysicalResourceId>\n        <ResourceType>{}</ResourceType>\n        <ResourceStatus>{}</ResourceStatus>\n        <Timestamp>{}</Timestamp>",
+                            "        <EventId>{}</EventId>\n        <StackId>{}</StackId>\n        <StackName>{}</StackName>\n        <LogicalResourceId>{}</LogicalResourceId>\n        <PhysicalResourceId>{}</PhysicalResourceId>\n        <ResourceType>{}</ResourceType>\n        <ResourceStatus>{}</ResourceStatus>{}\n        <Timestamp>{}</Timestamp>",
                             xml_escape(v["EventId"].as_str().unwrap_or("")),
                             xml_escape(v["StackId"].as_str().unwrap_or("")),
                             xml_escape(v["StackName"].as_str().unwrap_or("")),
@@ -2135,6 +2136,10 @@ impl CloudFormationService {
                             xml_escape(v["PhysicalResourceId"].as_str().unwrap_or("")),
                             xml_escape(v["ResourceType"].as_str().unwrap_or("")),
                             xml_escape(v["ResourceStatus"].as_str().unwrap_or("")),
+                            v["ResourceStatusReason"].as_str().map_or_else(String::new, |r| format!(
+                                "\n        <ResourceStatusReason>{}</ResourceStatusReason>",
+                                xml_escape(r)
+                            )),
                             xml_escape(v["Timestamp"].as_str().unwrap_or("")),
                         )
                         }),

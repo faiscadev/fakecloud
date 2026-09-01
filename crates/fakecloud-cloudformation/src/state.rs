@@ -54,6 +54,12 @@ pub struct Stack {
     pub stack_id: String,
     pub template: String,
     pub status: String,
+    /// Why the stack is in `status`, when the status is a failure. Surfaced as
+    /// `StackStatusReason` on DescribeStacks/ListStacks; `None` for a healthy
+    /// stack. Without it a CREATE_FAILED stack gives the caller no clue what
+    /// went wrong.
+    #[serde(default)]
+    pub status_reason: Option<String>,
     pub resources: Vec<StackResource>,
     pub parameters: BTreeMap<String, String>,
     pub tags: BTreeMap<String, String>,
@@ -169,6 +175,7 @@ mod tests {
                 stack_id: "id".to_string(),
                 template: "{}".to_string(),
                 status: "CREATE_COMPLETE".to_string(),
+                status_reason: None,
                 resources: vec![],
                 parameters: BTreeMap::new(),
                 tags: BTreeMap::new(),

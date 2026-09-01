@@ -82,7 +82,6 @@ http = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 tokio = { workspace = true }

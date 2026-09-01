@@ -319,6 +319,18 @@ async fn persist_touched_services<I>(
 /// keep a pathological (or cyclic) child-stack graph from recursing forever.
 const MAX_NESTED_STACK_DEPTH: usize = 50;
 
+/// Whether a template body is a CloudFormation template *document* -- a
+/// JSON/YAML object carrying a `Resources` mapping -- as opposed to a
+/// placeholder scalar (the conformance probe sends `"test"`-style strings for
+/// `TemplateBody`) or something that isn't parseable at all.
+///
+/// Only a real template document is worth failing a stack over; anything else
+/// keeps the long-standing lenient degrade-to-empty behaviour.
+fn is_template_document(body: &str) -> bool {
+    fakecloud_core::cfn_template::parse_template_object(body)
+        .is_some_and(|v| v.get("Resources").is_some_and(serde_json::Value::is_object))
+}
+
 /// Collect the resource types a stack op touched, recursing into nested
 /// `AWS::CloudFormation::Stack` children so every owning service's snapshot
 /// hook fires — not just the parent's top-level types.
@@ -631,6 +643,10 @@ struct CreateStackContext {
     notification_arns: Vec<String>,
     imported_names: Vec<String>,
     resource_defs: Vec<template::ResourceDefinition>,
+    /// Set when the body was template-shaped but wouldn't parse. The stack is
+    /// already inserted by then, so the failure surfaces as CREATE_FAILED
+    /// rather than a synchronous error.
+    template_error: Option<String>,
 }
 
 /// Owned clones of the service-state + container-runtime handles a provisioner
@@ -1343,16 +1359,8 @@ impl CloudFormationService {
         parameters: &mut BTreeMap<String, String>,
         template_body: &str,
     ) {
-        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
-            match serde_json::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return,
-            }
-        } else {
-            match serde_yaml::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return,
-            }
+        let Ok(value) = fakecloud_core::cfn_template::parse_template_body(template_body) else {
+            return;
         };
         let Some(decls) = value.get("Parameters").and_then(|v| v.as_object()) else {
             return;
@@ -1441,16 +1449,8 @@ impl CloudFormationService {
         template_body: &str,
         parameters: &BTreeMap<String, String>,
     ) -> Result<Vec<String>, AwsServiceError> {
-        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
-            match serde_json::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Ok(Vec::new()),
-            }
-        } else {
-            match serde_yaml::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Ok(Vec::new()),
-            }
+        let Ok(value) = fakecloud_core::cfn_template::parse_template_body(template_body) else {
+            return Ok(Vec::new());
         };
         let names = template::collect_import_value_names(&value, parameters);
         let known = Self::collect_account_imports(state, account_id, Some(stack_name));
@@ -1528,16 +1528,8 @@ impl CloudFormationService {
         resources: &[StackResource],
         state: &SharedCloudFormationState,
     ) -> Vec<state::StackOutput> {
-        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
-            match serde_json::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Vec::new(),
-            }
-        } else {
-            match serde_yaml::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Vec::new(),
-            }
+        let Ok(value) = fakecloud_core::cfn_template::parse_template_body(template_body) else {
+            return Vec::new();
         };
 
         let resources_obj = match value.get("Resources").and_then(|v| v.as_object()) {
@@ -1698,15 +1690,23 @@ impl CloudFormationService {
 
         // First pass: parse to get resource definitions (without physical ID
         // resolution). Synthetic conformance inputs frequently arrive with a
-        // placeholder TemplateBody like `"test"`; degrade to an empty parsed
-        // template rather than rejecting with an undeclared error code.
-        let parsed = template::parse_template(template_body, &parameters).unwrap_or_else(|_| {
-            template::ParsedTemplate {
-                description: None,
-                resources: Vec::new(),
-                outputs: Vec::new(),
+        // placeholder TemplateBody like `"test"`; those aren't template-shaped
+        // and degrade to an empty parsed template rather than rejecting with an
+        // undeclared error code (`ValidationError` isn't in CreateStack's
+        // Smithy `errors`). A body that IS a template document but fails to
+        // parse is a real failure and must not masquerade as a CREATE_COMPLETE
+        // stack with no resources (#2480) -- it rolls to CREATE_FAILED below.
+        let (parsed, template_error) = match template::parse_template(template_body, &parameters) {
+            Ok(parsed) => (parsed, None),
+            Err(err) => {
+                let empty = template::ParsedTemplate {
+                    description: None,
+                    resources: Vec::new(),
+                    outputs: Vec::new(),
+                };
+                (empty, is_template_document(template_body).then_some(err))
             }
-        });
+        };
 
         // Refuse if any Fn::ImportValue references an unknown export. CFN
         // checks this before provisioning; we mirror that so callers get
@@ -1735,6 +1735,7 @@ impl CloudFormationService {
                     stack_id: stack_id.clone(),
                     template: template_body.clone(),
                     status: "CREATE_IN_PROGRESS".to_string(),
+                    status_reason: None,
                     resources: Vec::new(),
                     parameters: parameters.clone(),
                     tags: tags.clone(),
@@ -1770,6 +1771,7 @@ impl CloudFormationService {
             notification_arns,
             imported_names,
             resource_defs: parsed.resources,
+            template_error,
         };
 
         // Custom resources (`Custom::*` / `AWS::CloudFormation::CustomResource`)
@@ -1841,7 +1843,25 @@ impl CloudFormationService {
             notification_arns,
             imported_names,
             resource_defs,
+            template_error,
         } = ctx;
+
+        // The template didn't parse. Everything below would provision nothing
+        // and report CREATE_COMPLETE, which is exactly the silent no-op #2480
+        // reported; fail the stack with the parser's reason instead.
+        if let Some(reason) = template_error {
+            Self::mark_create_failed(
+                &state,
+                &delivery,
+                &account_id,
+                &stack_name,
+                &stack_id,
+                &notification_arns,
+                &reason,
+            );
+            save_snapshot_static(state.clone(), snapshot_store, snapshot_lock).await;
+            return;
+        }
 
         // Capture the container-spawn handles before the provisioner is moved
         // into spawn_blocking, so the post-provision drain (below) can back
@@ -1929,6 +1949,7 @@ impl CloudFormationService {
             let st = accounts.get_or_create(&account_id);
             if let Some(stack) = st.stacks.get_mut(&stack_name) {
                 stack.status = "CREATE_COMPLETE".to_string();
+                stack.status_reason = None;
                 stack.resources = resources.clone();
                 stack.outputs = outputs.clone();
             }
@@ -2012,13 +2033,15 @@ impl CloudFormationService {
             let st = accounts.get_or_create(account_id);
             if let Some(stack) = st.stacks.get_mut(stack_name) {
                 stack.status = "CREATE_FAILED".to_string();
+                stack.status_reason = Some(reason.to_string());
             }
-            record_stack_status_event(
+            record_stack_status_event_with_reason(
                 st,
                 stack_id,
                 stack_name,
                 "AWS::CloudFormation::Stack",
                 "CREATE_FAILED",
+                Some(reason),
             );
         }
         Self::send_stack_notification(
@@ -2493,6 +2516,7 @@ impl CloudFormationService {
                 } else {
                     "UPDATE_COMPLETE".to_string()
                 };
+                stack.status_reason = update_result.as_ref().err().map(ToString::to_string);
                 stack.parameters = input.parameters.clone();
                 if !input.tags.is_empty() {
                     stack.tags = input.tags;
@@ -3166,6 +3190,32 @@ pub(crate) fn record_event(
     resource_type: &str,
     status: &str,
 ) {
+    record_event_with_reason(
+        state,
+        stack_id,
+        stack_name,
+        logical_id,
+        physical_id,
+        resource_type,
+        status,
+        None,
+    );
+}
+
+/// `record_event` plus the `ResourceStatusReason` real CloudFormation attaches
+/// to a failure event. Without it a CREATE_FAILED event says only that
+/// something failed, never what.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_event_with_reason(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    stack_name: &str,
+    logical_id: &str,
+    physical_id: &str,
+    resource_type: &str,
+    status: &str,
+    reason: Option<&str>,
+) {
     use serde_json::json;
     let event_id = format!(
         "{}-{:x}",
@@ -3206,7 +3256,7 @@ pub(crate) fn record_event(
         None => now,
     };
 
-    log.push(json!({
+    let mut event = json!({
         "EventId": event_id,
         "StackId": stack_id,
         "StackName": stack_name,
@@ -3215,7 +3265,11 @@ pub(crate) fn record_event(
         "ResourceType": resource_type,
         "ResourceStatus": status,
         "Timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    }));
+    });
+    if let Some(reason) = reason {
+        event["ResourceStatusReason"] = json!(reason);
+    }
+    log.push(event);
 }
 
 /// Emits IN_PROGRESS + COMPLETE event pairs for every resource change
@@ -3290,7 +3344,20 @@ pub(crate) fn record_stack_status_event(
     resource_type: &str,
     status: &str,
 ) {
-    record_event(
+    record_stack_status_event_with_reason(state, stack_id, stack_name, resource_type, status, None);
+}
+
+/// `record_stack_status_event` carrying the `ResourceStatusReason` for a
+/// failed stack transition.
+pub(crate) fn record_stack_status_event_with_reason(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    stack_name: &str,
+    resource_type: &str,
+    status: &str,
+    reason: Option<&str>,
+) {
+    record_event_with_reason(
         state,
         stack_id,
         stack_name,
@@ -3298,6 +3365,7 @@ pub(crate) fn record_stack_status_event(
         stack_id,
         resource_type,
         status,
+        reason,
     );
 }
 

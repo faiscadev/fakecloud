@@ -50,7 +50,8 @@ deletes, and a stored SAM/CloudFormation template is really parsed so the
   (`CAPABILITY_IAM` / `CAPABILITY_NAMED_IAM` for IAM resources,
   `CAPABILITY_RESOURCE_POLICY`, `CAPABILITY_AUTO_EXPAND` for the SAM transform /
   nested applications). Both JSON and YAML (the usual SAM authoring format)
-  templates are parsed.
+  templates are parsed, including YAML short-form intrinsic tags (`!Ref`,
+  `!Sub`, `!GetAtt`, ...), which SAM templates use heavily.
 - **Sharing policy** - `PutApplicationPolicy`
   (`PUT /applications/{ApplicationId}/policy`) stores the sharing statements
   (`principals`, `actions`, `principalOrgIDs`), assigning a `statementId` to any
