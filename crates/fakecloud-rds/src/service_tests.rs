@@ -4014,13 +4014,60 @@ async fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
 }
 
 #[tokio::test]
-async fn restore_db_cluster_from_snapshot_drops_a_stale_staged_dump() {
-    // A snapshot of a cluster that was itself restored carries the
-    // earlier restore's staged dump. Without a fresh one, replaying the
-    // stale bytes would restore data the caller never captured.
+async fn restore_db_cluster_from_snapshot_carries_a_staged_dump_forward() {
+    // A snapshot of a cluster that was itself restored, taken before an
+    // instance attached, has no DumpDataB64 -- there was no writer to
+    // dump -- and holds the data under PendingRestoreDumpB64. That IS
+    // the snapshot's data: dropping it loses the database on a
+    // cluster -> snapshot -> cluster chain, while the instance restore
+    // reads it from the very same snapshot.
     let svc = make_service();
     {
         use base64::Engine;
+        let staged = base64::engine::general_purpose::STANDARD.encode(b"-- staged --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "PendingRestoreDumpB64": staged,
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    use base64::Engine;
+    let staged = base64::engine::general_purpose::STANDARD.encode(b"-- staged --");
+    assert_eq!(
+        cluster_entry(&svc, "restored")["PendingRestoreDumpB64"].as_str(),
+        Some(staged.as_str()),
+        "the snapshot's staged data was lost on restore"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_prefers_a_fresh_dump() {
+    // When the snapshot carries both, the writer's own dump wins over
+    // anything staged by an earlier restore.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let fresh = base64::engine::general_purpose::STANDARD.encode(b"-- fresh --");
         let stale = base64::engine::general_purpose::STANDARD.encode(b"-- stale --");
         let mut accounts = svc.state.write();
         accounts
@@ -4034,6 +4081,7 @@ async fn restore_db_cluster_from_snapshot_drops_a_stale_staged_dump() {
                     "DBClusterSnapshotIdentifier": "snap-1",
                     "DBClusterIdentifier": "src-cluster",
                     "Status": "available",
+                    "DumpDataB64": fresh,
                     "PendingRestoreDumpB64": stale,
                 }),
             );
@@ -4048,11 +4096,12 @@ async fn restore_db_cluster_from_snapshot_drops_a_stale_staged_dump() {
     );
     svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
 
-    assert!(
-        cluster_entry(&svc, "restored")
-            .get("PendingRestoreDumpB64")
-            .is_none(),
-        "restored cluster inherited a stale staged dump"
+    use base64::Engine;
+    let fresh = base64::engine::general_purpose::STANDARD.encode(b"-- fresh --");
+    assert_eq!(
+        cluster_entry(&svc, "restored")["PendingRestoreDumpB64"].as_str(),
+        Some(fresh.as_str()),
+        "the restore replayed the stale staged dump over the writer's own"
     );
 }
 

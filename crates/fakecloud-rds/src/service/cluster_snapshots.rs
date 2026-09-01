@@ -286,6 +286,13 @@ impl RdsService {
         }
         let pending_dump_b64 = snapshot
             .get("DumpDataB64")
+            // A snapshot of a cluster that was itself restored, taken
+            // before an instance attached, has no DumpDataB64 -- there
+            // was no writer to dump -- and carries the data staged under
+            // PendingRestoreDumpB64 instead. Without this fallback that
+            // chain loses the database here, while the instance restore
+            // (which does read it) recovers it from the same snapshot.
+            .or_else(|| snapshot.get("PendingRestoreDumpB64"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
 

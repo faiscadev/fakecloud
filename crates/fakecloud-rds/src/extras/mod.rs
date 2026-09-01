@@ -432,12 +432,24 @@ impl RdsService {
                     .and_then(|v| v.as_str())
                     .unwrap_or("default")
                     .to_string();
+                // The member is typed as an ARN, and the source may have
+                // been named by bare id: take the resolved entry's own
+                // ARN (which names its owner) rather than echoing the
+                // caller's input, now that DescribeDBClusterSnapshots
+                // reports this field. Read before the mutable borrow.
+                let source_arn = if source_id.starts_with("arn:") {
+                    source_id.clone()
+                } else {
+                    entry_str(&entry, "DBClusterSnapshotArn")
+                        .map(str::to_string)
+                        .unwrap_or_else(|| source_id.clone())
+                };
                 if let Some(obj) = entry.as_object_mut() {
                     obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
                     obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
                     obj.insert("Status".to_string(), json!("available"));
                     obj.insert("SnapshotType".to_string(), json!("manual"));
-                    obj.insert("SourceDBClusterSnapshotArn".to_string(), json!(source_id));
+                    obj.insert("SourceDBClusterSnapshotArn".to_string(), json!(source_arn));
                     // A copy is a fresh sharing surface -- inheriting the
                     // source's `restore` list would publish a snapshot
                     // nobody shared.
