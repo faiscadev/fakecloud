@@ -170,7 +170,11 @@ pub(crate) fn identifier_matches_type(param: &str, resource_type: &str) -> bool 
     // to `None`, and read as "no identifier" -- widening a targeted read
     // into a full listing.
     fields.next() == Some("rds")
-        && fields.next().is_some()
+        // Region and account both have to be real: RDS ARNs always carry
+        // them, and an empty field would let `arn:aws:rds::1234:db:mydb`
+        // resolve against this account's instance whatever the request
+        // region.
+        && fields.next().is_some_and(|region| !region.is_empty())
         && fields.next().is_some_and(|account| !account.is_empty())
         && fields.next() == Some(resource_type)
         && fields.next().is_some_and(|id| !id.is_empty())

@@ -612,16 +612,30 @@ impl RdsService {
                 // re-reading it by id or ARN has to resolve too --
                 // otherwise the emulator 404s a row it just reported.
                 .or_else(|| {
-                    // AWS requires the ARN to address a snapshot another
-                    // account shared with you -- and without one, a bare
-                    // id could match several accounts' snapshots, so the
-                    // scan would return an arbitrary (HashMap-ordered)
-                    // row.
-                    let named_account = named_owner.clone()?;
+                    // An ARN pins the owner. A bare id reaches foreign
+                    // rows only when the request widens to them
+                    // (SnapshotType=shared/public, IncludeShared/Public)
+                    // -- the same rule the list path applies, so the two
+                    // can't disagree and 404 a row the listing just
+                    // reported. Without widening a bare id could also
+                    // match several accounts and return an arbitrary
+                    // (HashMap-ordered) row.
+                    let widened =
+                        matches!(snapshot_type.as_deref(), Some("shared") | Some("public"))
+                            || include_shared
+                            || include_public;
+                    if named_owner.is_none() && !widened {
+                        return None;
+                    }
+                    let named_account = named_owner.clone();
                     accounts
                         .iter()
                         .filter(|(owner, _)| *owner != request.account_id)
-                        .filter(|(owner, _)| *owner == named_account)
+                        .filter(|(owner, _)| {
+                            named_account
+                                .as_deref()
+                                .is_none_or(|account| account == *owner)
+                        })
                         .find_map(|(_, other)| {
                             other.snapshots.get(&snapshot_id).filter(|snapshot| {
                                 snapshot_shared_with(snapshot, &request.account_id)

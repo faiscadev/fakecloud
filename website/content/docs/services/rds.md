@@ -233,6 +233,8 @@ Identifier parameters accept an ARN as well as a plain id (`DBInstanceIdentifier
 
 `clone-group-id` is populated by `RestoreDBClusterToPointInTime` with `RestoreType=copy-on-write`, which puts the clone and its source in one clone group; a full-copy restore is an independent cluster and carries no group.
 
+`ModifyDBSnapshotAttribute` and `ModifyDBClusterSnapshotAttribute` resolve a value listed in both `ValuesToAdd` and `ValuesToRemove` by removing it (AWS rejects the request outright, but that error shape isn't in the RDS model). The response echoes the resulting attribute set, so a caller can confirm what was actually applied.
+
 Real RDS rejects a filter name an operation doesn't support with `InvalidParameterValue`. fakecloud can't: that error isn't declared on any of these operations in the Smithy model, so returning it would emit an undeclared error shape. An unrecognized filter name matches no resource instead, so a caller that asked to narrow gets an empty result rather than the full list.
 
 ## Gotchas

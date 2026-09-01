@@ -3033,13 +3033,24 @@ fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
     let body = body_of(svc.describe_db_snapshots(&req).unwrap());
     assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
 
-    // The bare id resolves nothing: this account owns no such snapshot.
+    // A bare id resolves too WHEN the request widens to foreign rows --
+    // the list path returns that row under the same flags and reports it
+    // by its bare identifier, so 404-ing it here would reject a row the
+    // emulator just listed.
     let req = request(
         "DescribeDBSnapshots",
         &[
             ("DBSnapshotIdentifier", "shared-snap"),
             ("SnapshotType", "shared"),
         ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    // Without widening, a bare id still names nothing this account owns.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", "shared-snap")],
     );
     assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
 
