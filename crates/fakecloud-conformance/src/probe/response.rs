@@ -254,6 +254,30 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         // `fakecloud_core::validation` helpers emit for an out-of-range or
         // malformed member on any SSM op. Source: SSM API reference "Errors"
         // per operation.
+        // The Query-protocol services share a generic client-error code that
+        // their Smithy models mostly leave off per-operation `errors:` lists.
+        // Each entry below was traced to the handler that emits it, against a
+        // synthetic input real AWS rejects the same way:
+        //   - cloudwatch (`monitoring`): `PutCompositeAlarm` rejects a
+        //     malformed `AlarmRule` and an out-of-range `ActionsSuppressor`;
+        //     `DescribeAlarms` rejects a bad parameter value.
+        //   - iam: `ListVirtualMFADevices` rejects a non-numeric `Marker` and
+        //     an off-enum `AssignmentStatus`; `GetAccessKeyLastUsed` reports an
+        //     unknown key id with `NoSuchEntity`, IAM's universal
+        //     "no such resource" code.
+        //   - cloudformation: `DescribeStacks` / `CreateStackRefactor` reject
+        //     malformed input with CFN's standard `ValidationError`.
+        //   - rds / elasticache: both Query APIs report a bad parameter with
+        //     `InvalidParameterValue`.
+        //   - kms: `CreateKey` rejects an incompatible `KeySpec`/`KeyUsage`
+        //     pair (an ECC spec cannot do the default `ENCRYPT_DECRYPT`) with
+        //     `ValidationException`, KMS's modeled input-validation error.
+        "monitoring" => &["ValidationError", "InvalidParameterValue"],
+        "iam" => &["ValidationError", "NoSuchEntity"],
+        "cloudformation" => &["ValidationError"],
+        "rds" => &["InvalidParameterValue"],
+        "elasticache" => &["InvalidParameterValue"],
+        "kms" => &["ValidationException"],
         "ssm" => &["InvalidNextToken", "ValidationException"],
         "eks" => &["ResourceNotFoundException", "ResourceInUseException"],
         // STS returns AccessDenied (HTTP 403) whenever a role can't be assumed

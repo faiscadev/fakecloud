@@ -899,6 +899,56 @@ mod tests {
     }
 
     #[test]
+    fn classify_query_protocol_shared_errors_pass() {
+        // Each Query-protocol service has one generic client-error code its
+        // model mostly omits from per-operation `errors:` lists.
+        for (service, status, code) in [
+            ("monitoring", 400, "ValidationError"),
+            ("monitoring", 400, "InvalidParameterValue"),
+            ("iam", 400, "ValidationError"),
+            ("iam", 404, "NoSuchEntity"),
+            ("cloudformation", 400, "ValidationError"),
+            ("rds", 400, "InvalidParameterValue"),
+            ("elasticache", 400, "InvalidParameterValue"),
+            ("kms", 400, "ValidationException"),
+        ] {
+            let body = format!(
+                "<ErrorResponse><Error><Code>{code}</Code><Message>m</Message></Error></ErrorResponse>"
+            );
+            let result = classify_response(
+                "v1",
+                status,
+                &body,
+                &Expectation::Success,
+                0,
+                Some(&["SomethingElse".to_string()]),
+                service,
+            );
+            assert_eq!(
+                result.status,
+                ProbeStatus::Pass,
+                "{code} should pass for {service}"
+            );
+
+            // The lists stay per service: the same code from a service with
+            // no shared-error list at all is still an undeclared error.
+            let result = classify_response(
+                "v1",
+                status,
+                &body,
+                &Expectation::Success,
+                0,
+                Some(&["SomethingElse".to_string()]),
+                "service-with-no-shared-errors",
+            );
+            assert!(
+                matches!(result.status, ProbeStatus::UnexpectedResult(_)),
+                "{code} must not pass for a service without it"
+            );
+        }
+    }
+
+    #[test]
     fn classify_404_with_no_aws_error_shape_fails() {
         // Mirrors #817: routing miss returns 404 with a body that has no
         // AWS error code. Must NOT pass — that's the gaming we're closing.
