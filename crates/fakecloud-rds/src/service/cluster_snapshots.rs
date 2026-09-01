@@ -232,9 +232,12 @@ impl RdsService {
         let raw_snapshot_id = optional_query_param(request, "SnapshotIdentifier")
             .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"));
         let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
-        let reported_snapshot_id = raw_snapshot_id
-            .clone()
-            .unwrap_or_else(|| "(none)".to_string());
+        // Distinguish "never supplied" from "supplied but names no
+        // cluster snapshot": reporting `DBClusterSnapshot (none) not
+        // found.` for a missing parameter implies a snapshot by that
+        // name was looked up.
+        let missing_snapshot_id = raw_snapshot_id.is_none();
+        let reported_snapshot_id = raw_snapshot_id.clone().unwrap_or_default();
         let snapshot_id =
             normalized_identifier(raw_snapshot_id, "cluster-snapshot").ok_or_else(|| {
                 // Covers both "not supplied" and "supplied but names no
@@ -245,7 +248,11 @@ impl RdsService {
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "DBClusterSnapshotNotFoundFault",
-                    format!("DBClusterSnapshot {reported_snapshot_id} not found."),
+                    if missing_snapshot_id {
+                        "SnapshotIdentifier or DBClusterSnapshotIdentifier is required".to_string()
+                    } else {
+                        format!("DBClusterSnapshot {reported_snapshot_id} not found.")
+                    },
                 )
             })?;
         let arn = format!(

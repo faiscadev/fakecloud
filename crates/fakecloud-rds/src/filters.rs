@@ -194,7 +194,14 @@ pub(crate) fn identifier_account(param: &str) -> Option<String> {
 /// this to reject another account's ARN instead of aliasing it onto a
 /// same-named local resource.
 pub(crate) fn addresses_own_account(param: &str, account_id: &str) -> bool {
-    identifier_account(param).is_none_or(|account| account == account_id)
+    match identifier_account(param) {
+        Some(account) => account == account_id,
+        // A bare id is this account's. An ARN with an EMPTY account
+        // field names nothing resolvable -- treating it as a bare id
+        // would let `arn:aws:rds:us-east-1::pg:mypg` address the local
+        // resource of that name.
+        None => !param.starts_with("arn:"),
+    }
 }
 
 /// Parse `Filters.Filter.N.Name` + `Filters.Filter.N.Values.Value.M` (and
@@ -513,6 +520,11 @@ mod tests {
         // Another account's ARN must not alias onto a local resource.
         assert!(!addresses_own_account(
             "arn:aws:rds:us-east-1:111111111111:snapshot:snap-1",
+            "222222222222"
+        ));
+        // Nor an ARN whose account field is empty.
+        assert!(!addresses_own_account(
+            "arn:aws:rds:us-east-1::snapshot:snap-1",
             "222222222222"
         ));
     }

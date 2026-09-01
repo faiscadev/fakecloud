@@ -4277,13 +4277,34 @@ async fn restore_db_cluster_from_snapshot_reports_a_wrong_type_arn_as_not_found(
         Err(err) => {
             assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
             let message = format!("{err:?}");
-            assert!(message.contains("s1"), "identifier dropped: {message}");
+            // The WHOLE identifier, not a substring every ARN contains:
+            // asserting on "s1" alone would pass even if the value were
+            // reduced or dropped.
+            assert!(
+                message.contains("arn:aws:rds:us-east-1:123456789012:snapshot:s1"),
+                "the caller's identifier was not echoed: {message}"
+            );
             assert!(
                 !message.contains("is required"),
                 "a supplied identifier was reported as missing: {message}"
             );
         }
         Ok(_) => panic!("a DB-snapshot ARN resolved as a cluster snapshot"),
+    }
+
+    // And a genuinely absent parameter says so, rather than reporting a
+    // snapshot named "(none)".
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[("DBClusterIdentifier", "restored")],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(message.contains("is required"), "{message}");
+            assert!(!message.contains("(none)"), "{message}");
+        }
+        Ok(_) => panic!("a missing snapshot identifier should fault"),
     }
 }
 

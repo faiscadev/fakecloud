@@ -3122,20 +3122,40 @@ fn describe_db_cluster_snapshots_paginates_and_orders_stably() {
         .expect("a next-page marker")
         .to_string();
 
-    let second = body_of_action(
-        &svc,
-        "DescribeDBClusterSnapshots",
-        &[("MaxRecords", "2"), ("Marker", &marker)],
-    );
-    assert_eq!(second.matches("<DBClusterSnapshotIdentifier>").count(), 2);
-    // The second page does not repeat the first.
-    for id in ["snap-1", "snap-2", "snap-3", "snap-4", "snap-5"] {
-        let tag = format!("<DBClusterSnapshotIdentifier>{id}</DBClusterSnapshotIdentifier>");
-        assert!(
-            !(first.contains(&tag) && second.contains(&tag)),
-            "{id} appeared on both pages"
-        );
+    // Walk every page and compare the COMPLETE sequence: non-overlapping
+    // pages alone would still pass if the paginator skipped a row.
+    fn ids_of(body: &str) -> Vec<String> {
+        body.split("<DBClusterSnapshotIdentifier>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</DBClusterSnapshotIdentifier>").next())
+            .map(str::to_string)
+            .collect()
     }
+
+    let mut seen = ids_of(&first);
+    let mut next = Some(marker.clone());
+    while let Some(m) = next {
+        let page = body_of_action(
+            &svc,
+            "DescribeDBClusterSnapshots",
+            &[("MaxRecords", "2"), ("Marker", &m)],
+        );
+        seen.extend(ids_of(&page));
+        next = page
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .map(str::to_string);
+    }
+
+    let mut expected = ids_of(&body_of_action(&svc, "DescribeDBClusterSnapshots", &[]));
+    assert_eq!(expected.len(), 5, "the unpaginated listing lost rows");
+    assert_eq!(
+        seen, expected,
+        "paging did not reproduce the full listing in order"
+    );
+    expected.dedup();
+    assert_eq!(expected.len(), 5, "the listing repeated a row");
 
     // Identical requests return identical order.
     let again = body_of_action(&svc, "DescribeDBClusterSnapshots", &[("MaxRecords", "2")]);
@@ -3169,6 +3189,9 @@ fn copy_db_parameter_group_refuses_a_foreign_or_wrong_type_arn() {
     for source in [
         "arn:aws:rds:us-east-1:999999999999:pg:mypg",
         "arn:aws:rds:us-east-1:000000000000:cluster-pg:mypg",
+        // An empty account field names nothing resolvable; treating it
+        // as a bare id would copy the local group.
+        "arn:aws:rds:us-east-1::pg:mypg",
     ] {
         let result = svc.handle_extra_action(&req(
             "CopyDBParameterGroup",
