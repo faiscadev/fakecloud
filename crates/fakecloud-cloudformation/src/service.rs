@@ -2420,12 +2420,31 @@ impl CloudFormationService {
         // conformance probe's Success variants. Degrade to an empty parsed
         // template rather than rejecting with an undeclared error code —
         // `ValidationError` isn't in UpdateStack's Smithy `errors`.
-        let parsed = template::parse_template(&input.template_body, &input.parameters)
-            .unwrap_or_else(|_| template::ParsedTemplate {
-                description: None,
-                resources: Vec::new(),
-                outputs: Vec::new(),
-            });
+        //
+        // A body that IS a template document but won't parse must NOT take
+        // that path: `apply_resource_updates` deletes every resource whose
+        // logical id is absent from the new definitions, so an empty parse
+        // result tears the whole stack down and then reports UPDATE_COMPLETE.
+        // Refuse the update instead, before anything is touched. As with the
+        // Fn::ImportValue pre-flight above, reuse the Smithy-declared
+        // `InsufficientCapabilitiesException` so the wire shape stays valid.
+        let parsed = match template::parse_template(&input.template_body, &input.parameters) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                if fakecloud_core::cfn_template::is_template_document(&input.template_body) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InsufficientCapabilitiesException",
+                        err,
+                    ));
+                }
+                template::ParsedTemplate {
+                    description: None,
+                    resources: Vec::new(),
+                    outputs: Vec::new(),
+                }
+            }
+        };
 
         let imported_names = Self::validate_import_values(
             &self.state,

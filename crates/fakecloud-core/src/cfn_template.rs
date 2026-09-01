@@ -68,14 +68,14 @@ pub fn parse_template_body(body: &str) -> Result<Json, String> {
 fn parse_yaml(body: &str) -> Result<Json, String> {
     let yaml: Yaml =
         serde_yaml::from_str(body).map_err(|e| format!("Invalid YAML template: {e}"))?;
-    Ok(yaml_to_json(yaml))
+    yaml_to_json(yaml).map_err(|e| format!("Invalid YAML template: {e}"))
 }
 
 /// Whether a body is meant to be a CloudFormation template *document*, as
 /// opposed to a placeholder scalar (the conformance probe sends `"test"`-style
 /// strings for `TemplateBody`).
 ///
-/// A body that parses is judged on whether it carries a `Resources` mapping.
+/// A body that parses is judged on whether it carries a `Resources` section.
 /// One that does NOT parse still has to be classified — and it is exactly the
 /// interesting case, since a syntax error (a stray tab, a bad indent, an
 /// unbalanced bracket) is the most common way a real template breaks. Re-using
@@ -84,9 +84,11 @@ fn parse_yaml(body: &str) -> Result<Json, String> {
 /// #2480 is about. So fall back to a shape check on the raw text.
 pub fn is_template_document(body: &str) -> bool {
     if let Ok(value) = parse_template_body(body) {
-        return value
-            .get("Resources")
-            .is_some_and(serde_json::Value::is_object);
+        // Presence, not shape: `Resources:` holding a sequence instead of a
+        // mapping is a common YAML slip that the template parser rejects. It
+        // is still unmistakably someone's template, so it must fail loudly
+        // rather than degrade to an empty stack.
+        return value.get("Resources").is_some();
     }
     looks_like_template_text(body)
 }
@@ -96,7 +98,8 @@ pub fn is_template_document(body: &str) -> bool {
 /// section CloudFormation requires.
 fn looks_like_template_text(body: &str) -> bool {
     if body.trim_start().starts_with('{') {
-        return body.contains("\"Resources\"");
+        // Both spellings: JSON quotes the key, YAML flow style does not.
+        return body.contains("\"Resources\"") || body.contains("Resources:");
     }
     // A top-level YAML key sits at column zero.
     body.lines()
@@ -109,48 +112,59 @@ pub fn parse_template_object(body: &str) -> Option<Json> {
     parse_template_body(body).ok().filter(Json::is_object)
 }
 
-fn yaml_to_json(value: Yaml) -> Json {
-    match value {
+fn yaml_to_json(value: Yaml) -> Result<Json, String> {
+    Ok(match value {
         Yaml::Null => Json::Null,
         Yaml::Bool(b) => Json::Bool(b),
-        Yaml::Number(n) => number_to_json(&n),
+        Yaml::Number(n) => number_to_json(&n)?,
         Yaml::String(s) => Json::String(s),
-        Yaml::Sequence(seq) => Json::Array(seq.into_iter().map(yaml_to_json).collect()),
-        Yaml::Mapping(map) => Json::Object(
-            map.into_iter()
-                .map(|(k, v)| (mapping_key(k), yaml_to_json(v)))
-                .collect(),
+        Yaml::Sequence(seq) => Json::Array(
+            seq.into_iter()
+                .map(yaml_to_json)
+                .collect::<Result<Vec<_>, _>>()?,
         ),
-        Yaml::Tagged(tagged) => tagged_to_json(*tagged),
-    }
+        Yaml::Mapping(map) => {
+            let mut obj = Map::new();
+            for (k, v) in map {
+                obj.insert(mapping_key(k)?, yaml_to_json(v)?);
+            }
+            Json::Object(obj)
+        }
+        Yaml::Tagged(tagged) => tagged_to_json(*tagged)?,
+    })
 }
 
 /// JSON object keys are strings; a YAML mapping key that isn't one (`1: foo`)
 /// takes its JSON rendering, matching how the key would have been written in
 /// the equivalent JSON template.
-fn mapping_key(key: Yaml) -> String {
-    match yaml_to_json(key) {
+fn mapping_key(key: Yaml) -> Result<String, String> {
+    Ok(match yaml_to_json(key)? {
         Json::String(s) => s,
         other => other.to_string(),
-    }
+    })
 }
 
-fn number_to_json(n: &serde_yaml::Number) -> Json {
+fn number_to_json(n: &serde_yaml::Number) -> Result<Json, String> {
     if let Some(i) = n.as_i64() {
-        return Json::Number(i.into());
+        return Ok(Json::Number(i.into()));
     }
     if let Some(u) = n.as_u64() {
-        return Json::Number(u.into());
+        return Ok(Json::Number(u.into()));
     }
+    // YAML has `.nan` / `.inf`; JSON has no representation for either, and no
+    // CloudFormation property legitimately holds one. Surfacing the bad value
+    // beats silently rewriting it to `null`, which reads downstream as a
+    // deliberately-absent property.
     n.as_f64()
         .and_then(serde_json::Number::from_f64)
-        .map_or(Json::Null, Json::Number)
+        .map(Json::Number)
+        .ok_or_else(|| format!("number {n} has no JSON representation"))
 }
 
-fn tagged_to_json(tagged: TaggedValue) -> Json {
+fn tagged_to_json(tagged: TaggedValue) -> Result<Json, String> {
     let rendered = tagged.tag.to_string();
     let name = rendered.strip_prefix('!').unwrap_or(&rendered);
-    let arg = yaml_to_json(tagged.value);
+    let arg = yaml_to_json(tagged.value)?;
     let key = if BARE_TAGS.contains(&name) {
         name.to_string()
     } else if FN_TAGS.contains(&name) {
@@ -158,11 +172,11 @@ fn tagged_to_json(tagged: TaggedValue) -> Json {
     } else {
         // Not a CloudFormation intrinsic. Keeping the node's value is more
         // useful than failing the whole document over an unrecognised tag.
-        return arg;
+        return Ok(arg);
     };
     let mut obj = Map::new();
     obj.insert(key, arg);
-    Json::Object(obj)
+    Ok(Json::Object(obj))
 }
 
 #[cfg(test)]
@@ -400,6 +414,33 @@ Resources:
         let bad_json = "{\"Resources\": [oops";
         assert!(parse_template_body(bad_json).is_err());
         assert!(is_template_document(bad_json));
+    }
+
+    #[test]
+    fn wrong_shaped_resources_section_is_still_a_template_document() {
+        // `Resources` as a sequence instead of a mapping is a common YAML
+        // slip. The template parser rejects it, so it has to be classified as
+        // a template or it degrades to a silent empty stack.
+        let seq = "Resources:\n  - Type: AWS::SQS::Queue\n";
+        assert!(parse_template_body(seq).is_ok(), "parses as YAML");
+        assert!(is_template_document(seq));
+
+        // Unparseable flow-style YAML: the key is unquoted, so a check for
+        // the JSON spelling alone would miss it.
+        let broken_flow = "{Resources: {A: {Type: AWS::SQS::Queue}";
+        assert!(parse_template_body(broken_flow).is_err());
+        assert!(is_template_document(broken_flow));
+    }
+
+    #[test]
+    fn non_finite_numbers_are_reported_not_nulled() {
+        let err = parse_template_body("Resources:\n  Q:\n    Timeout: .nan\n")
+            .expect_err("NaN has no JSON representation");
+        assert!(err.contains("no JSON representation"), "{err}");
+        // Still classified as a template, so the caller fails loudly.
+        assert!(is_template_document(
+            "Resources:\n  Q:\n    Timeout: .nan\n"
+        ));
     }
 
     #[test]

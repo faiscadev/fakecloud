@@ -385,8 +385,26 @@ impl CloudFormationService {
                     // Treat parse failures here as an empty diff rather than
                     // emitting an undeclared `ValidationError` (CreateChangeSet's
                     // Smithy `errors` list doesn't include it).
-                    let parsed =
-                        template::parse_template(&template_body, &full_params).unwrap_or_default();
+                    //
+                    // A real template document that won't parse is different:
+                    // an empty parse result makes the diff list every existing
+                    // resource as `Remove`, so DescribeChangeSet shows a full
+                    // teardown plan for what is really a syntax error, and the
+                    // user only finds out at ExecuteChangeSet. Reject it up
+                    // front with a Smithy-declared error instead.
+                    let parsed = match template::parse_template(&template_body, &full_params) {
+                        Ok(parsed) => parsed,
+                        Err(err) => {
+                            if fakecloud_core::cfn_template::is_template_document(&template_body) {
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "InsufficientCapabilitiesException",
+                                    err,
+                                ));
+                            }
+                            template::ParsedTemplate::default()
+                        }
+                    };
 
                     let existing_resources = stack_lookup
                         .as_ref()

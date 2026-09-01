@@ -282,6 +282,103 @@ async fn syntactically_broken_template_fails_the_stack() {
     );
 }
 
+/// A stack whose resources an unparseable update must not destroy.
+const UPDATE_BASE_TEMPLATE: &str = r"
+AWSTemplateFormatVersion: '2010-09-09'
+Resources:
+  KeepMe:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: keep-me-on-bad-update
+  KeepMeToo:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: keep-me-too-on-bad-update
+";
+
+/// An unparseable UpdateStack must be refused outright. `apply_resource_updates`
+/// deletes every resource whose logical id is absent from the new definitions,
+/// so treating a parse failure as "an empty template" tore the entire stack
+/// down and then reported UPDATE_COMPLETE — a silent no-op on create, but
+/// destructive on update.
+#[tokio::test]
+async fn unparseable_update_does_not_delete_the_stacks_resources() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+
+    cfn.create_stack()
+        .stack_name("bad-update")
+        .template_body(UPDATE_BASE_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let logical_ids = |resp: &aws_sdk_cloudformation::operation::describe_stack_resources::DescribeStackResourcesOutput| {
+        let mut ids: Vec<String> = resp
+            .stack_resources()
+            .iter()
+            .filter_map(|r| r.logical_resource_id().map(str::to_string))
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    let before = cfn
+        .describe_stack_resources()
+        .stack_name("bad-update")
+        .send()
+        .await
+        .expect("describe_stack_resources");
+    assert_eq!(logical_ids(&before), ["KeepMe", "KeepMeToo"]);
+
+    // The update is rejected up front rather than silently emptying the stack.
+    let err = cfn
+        .update_stack()
+        .stack_name("bad-update")
+        .template_body(TAB_INDENTED_TEMPLATE)
+        .send()
+        .await
+        .expect_err("an unparseable template must be refused");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("Invalid YAML template"),
+        "the parse error should reach the caller, got {msg}"
+    );
+
+    // Nothing was torn down.
+    let after = cfn
+        .describe_stack_resources()
+        .stack_name("bad-update")
+        .send()
+        .await
+        .expect("describe_stack_resources");
+    assert_eq!(
+        logical_ids(&after),
+        ["KeepMe", "KeepMeToo"],
+        "a refused update must leave every resource in place"
+    );
+
+    // ... and the physical resources really still exist.
+    let sqs = server.sqs_client().await;
+    let queues = sqs.list_queues().send().await.expect("list_queues");
+    assert!(
+        queues
+            .queue_urls()
+            .iter()
+            .any(|u| u.ends_with("/keep-me-on-bad-update")),
+        "the queue must survive a refused update, got {:?}",
+        queues.queue_urls()
+    );
+
+    // A well-formed update still succeeds, so the guard isn't over-rejecting.
+    cfn.update_stack()
+        .stack_name("bad-update")
+        .template_body(UPDATE_BASE_TEMPLATE)
+        .send()
+        .await
+        .expect("a valid update must still work");
+}
+
 /// A placeholder `TemplateBody` (what the conformance probe sends) keeps the
 /// lenient path: an empty stack that still reaches CREATE_COMPLETE, because
 /// `ValidationError` is not in CreateStack's Smithy `errors` list.
