@@ -254,18 +254,21 @@ pub(crate) fn looks_like_url(value: &str) -> bool {
     }
     // A single-slash typo (`s3:/bucket/app.yaml`, `https:/...`) is still
     // plainly meant as a URL. Missing it would send the request down the
-    // lenient path and rebuild the #2480 silent no-op. Keyed on a real scheme
-    // prefix plus a slash, neither of which the probe's placeholders (`t`,
-    // `test`) contain.
-    let Some((scheme, rest)) = value.split_once(':') else {
-        return false;
-    };
-    !scheme.is_empty()
+    // lenient path and rebuild the #2480 silent no-op.
+    scheme_prefix(value).is_some_and(|rest| rest.contains('/'))
+}
+
+/// The remainder after a URL scheme prefix (`s3:`, `https:`), or `None` when
+/// the value doesn't start with one. The probe's placeholders (`t`, `test`)
+/// carry no colon, so they never look like a scheme.
+fn scheme_prefix(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once(':')?;
+    let looks_like_scheme = !scheme.is_empty()
         && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
         && scheme
             .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
-        && rest.contains('/')
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    looks_like_scheme.then_some(rest)
 }
 
 /// Extract `(bucket, key)` from a CloudFormation `TemplateURL`. Handles the
@@ -306,6 +309,13 @@ fn percent_decode_key(key: &str) -> String {
 }
 
 pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
+    // A scheme-bearing value has to spell out `://`. `https:/b/k` (one slash)
+    // carries no authority at all, so the path-style branch below would read
+    // `b` as the bucket -- and if a bucket by that name exists, fetch and
+    // provision a DIFFERENT object. Report it as an unusable URL instead.
+    if !url.contains("://") && scheme_prefix(url).is_some() {
+        return None;
+    }
     let (scheme, rest) = match url.split_once("://") {
         Some((scheme, rest)) => (Some(scheme), rest),
         None => (None, url),
@@ -2798,6 +2808,19 @@ mod tests {
         for placeholder in ["t", "test", "aaaaaaaa", "", "not-a-url"] {
             assert!(!looks_like_url(placeholder), "{placeholder}");
         }
+    }
+
+    #[test]
+    fn single_slash_scheme_typos_are_not_object_urls() {
+        // No authority: reading the first path segment as the bucket could
+        // fetch a completely different object.
+        assert_eq!(parse_s3_url("https:/b/k.yaml"), None);
+        assert_eq!(parse_s3_url("s3:/mybucket/app.yaml"), None);
+        // Still classified as URL-intent, so it is reported rather than
+        // silently ignored.
+        assert!(looks_like_url("https:/b/k.yaml"));
+        // A scheme-less path is not a URL at all and keeps the lenient path.
+        assert!(!looks_like_url("b/k.yaml"));
     }
 
     #[test]

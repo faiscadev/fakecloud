@@ -147,15 +147,18 @@ fn exceeds_nesting_limit(body: &str) -> bool {
         // of braces in one string -- so quotes are tracked and their contents
         // skipped. A `#` outside quotes starts a comment.
         //
-        // Quote state is per line, and a line that ends mid-quote is treated
-        // as unreadable: its contribution is rolled back rather than carried.
-        // YAML allows a bare apostrophe in a plain scalar (`baz: don't`), so
-        // neither carrying the state (a phantom quote would swallow the rest
-        // of the document) nor keeping the delta (the unmatched `{` would leak
-        // upward until a valid template trips the limit) is safe.
-        let depth_at_line_start = flow_depth;
+        // A quote only *opens* where a scalar can start — at the beginning of
+        // a line or straight after `:`/`,`/`[`/`{`/`-`/whitespace. YAML allows
+        // a bare apostrophe inside a plain scalar (`baz: don't`), and treating
+        // that as an opening quote would swallow the rest of the line. That
+        // matters for more than false rejections: if an unterminated quote
+        // could suppress a line's brackets, a body could disable this guard
+        // outright by putting an apostrophe on every line, which is exactly
+        // the stack exhaustion the guard exists to stop. Quote state is per
+        // line and is never allowed to suppress counting beyond it.
         let mut quote: Option<u8> = None;
         let mut escaped = false;
+        let mut prev = b'\n';
         for b in line.bytes() {
             match quote {
                 Some(q) => {
@@ -170,7 +173,14 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                     }
                 }
                 None => match b {
-                    b'"' | b'\'' => quote = Some(b),
+                    b'"' | b'\''
+                        if matches!(
+                            prev,
+                            b'\n' | b' ' | b'\t' | b':' | b',' | b'[' | b'{' | b'-'
+                        ) =>
+                    {
+                        quote = Some(b)
+                    }
                     b'#' => break,
                     b'[' | b'{' => {
                         flow_depth += 1;
@@ -182,9 +192,7 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                     _ => {}
                 },
             }
-        }
-        if quote.is_some() {
-            flow_depth = depth_at_line_start;
+            prev = b;
         }
     }
     false
@@ -805,6 +813,25 @@ Resources:
         // A real multi-line flow bomb is still caught.
         let bomb = "[\n".repeat(MAX_NESTING_DEPTH + 50);
         assert!(exceeds_nesting_limit(&bomb));
+    }
+
+    #[test]
+    fn an_apostrophe_cannot_disable_the_depth_guard() {
+        // Rolling back a line that ended mid-quote made the guard fail OPEN:
+        // an apostrophe on every line suppressed that line's brackets, so a
+        // genuine bomb sailed past the check it exists to enforce.
+        let bomb = "[ don't\n".repeat(MAX_NESTING_DEPTH + 50);
+        assert!(
+            exceeds_nesting_limit(&bomb),
+            "an apostrophe in a plain scalar must not suppress bracket counting"
+        );
+        // ... while a quoted scalar opened where a scalar legitimately starts
+        // still has its contents skipped.
+        let quoted = format!(
+            "Resources:\n  Q:\n    Policy: '{}'\n",
+            "{".repeat(MAX_NESTING_DEPTH + 50)
+        );
+        assert!(!exceeds_nesting_limit(&quoted));
     }
 
     #[test]
