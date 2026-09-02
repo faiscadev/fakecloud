@@ -3001,10 +3001,14 @@ impl CloudFormationService {
                     stack.template = previous_template.clone();
                     stack.parameters = previous_parameters.clone();
                 }
+                // The canonical name, not the caller's spelling: `StackName`
+                // on a StackEvent must match what every other event for this
+                // stack carries, or DescribeStackEvents interleaves an ARN
+                // among the names.
                 record_stack_status_event_with_reason(
                     state,
                     &stack_id,
-                    &input.stack_name,
+                    &export_owner_name,
                     "AWS::CloudFormation::Stack",
                     "UPDATE_ROLLBACK_COMPLETE",
                     Some(&reason),
