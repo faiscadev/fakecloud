@@ -1756,7 +1756,8 @@ impl CloudFormationService {
         // undeclared error code (`ValidationError` isn't in CreateStack's
         // Smithy `errors`). A body that IS a template document but fails to
         // parse is a real failure and must not masquerade as a CREATE_COMPLETE
-        // stack with no resources (#2480) -- it rolls to CREATE_FAILED below.
+        // stack with no resources (#2480) -- it is rejected synchronously just
+        // below, before any stack record is inserted.
         let (parsed, template_error) = match template::parse_template(template_body, &parameters) {
             Ok(parsed) => (parsed, None),
             Err(err) => {
@@ -2705,6 +2706,28 @@ impl CloudFormationService {
             &input.parameters,
         )?;
 
+        // Export-name collisions, checked BEFORE anything is mutated. The
+        // post-provision check further down still runs (an export name can
+        // depend on a resource attribute that only exists once provisioned),
+        // but catching the common case here means the usual collision never
+        // reaches a half-applied update: by the time the later check fires,
+        // resources have been created and backing services mutated, and
+        // restoring the stack's metadata does not undo those.
+        {
+            let pre_outputs = Self::resolve_template_outputs(
+                &input.template_body,
+                &input.parameters,
+                &[],
+                &self.state,
+            );
+            Self::ensure_export_uniqueness(
+                &self.state,
+                &req.account_id,
+                &input.stack_name,
+                &pre_outputs,
+            )?;
+        }
+
         // `provisioner_deferred`: apply_resource_updates runs inside the state
         // write lock below; a synchronous custom-resource Lambda invoke there
         // would stall every other CFN op behind the lock and could block the
@@ -2913,6 +2936,12 @@ impl CloudFormationService {
         // The stack was already flipped to UPDATE_COMPLETE above, so a
         // collision here would leave it reporting success with no reason while
         // the caller sees an error. Roll it back before returning.
+        //
+        // Only reachable now for an export name that could not be resolved
+        // before provisioning (one built from a resource attribute), since the
+        // pre-flight above catches the rest. Resources created by this update
+        // are NOT unwound here -- that needs a real rollback of the
+        // provisioners, which this path does not attempt.
         if let Err(err) = Self::ensure_export_uniqueness(
             &self.state,
             &req.account_id,

@@ -159,6 +159,12 @@ fn exceeds_nesting_limit(body: &str) -> bool {
         let mut quote: Option<u8> = None;
         let mut escaped = false;
         let mut prev = b'\n';
+        // Openers seen inside the current quoted run. If the quote closes, the
+        // run really was a scalar and they stay skipped; if the line ends with
+        // the quote still open, the "scalar" was never one, so they are added
+        // back. Failing closed matters: silently dropping them would let a
+        // body opt out of the guard by leaving a quote open on every line.
+        let mut suppressed = 0usize;
         for b in line.bytes() {
             match quote {
                 Some(q) => {
@@ -170,6 +176,9 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                         escaped = true;
                     } else if b == q {
                         quote = None;
+                        suppressed = 0;
+                    } else if matches!(b, b'[' | b'{') {
+                        suppressed += 1;
                     }
                 }
                 None => match b {
@@ -193,6 +202,12 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                 },
             }
             prev = b;
+        }
+        if quote.is_some() {
+            flow_depth += suppressed;
+            if flow_depth > MAX_NESTING_DEPTH {
+                return true;
+            }
         }
     }
     false
@@ -844,6 +859,25 @@ Resources:
             "{".repeat(MAX_NESTING_DEPTH + 50)
         );
         assert!(!exceeds_nesting_limit(&quoted));
+
+        // An UNTERMINATED quote must not suppress the brackets after it: the
+        // run was never a scalar, so leaving one open on every line would
+        // otherwise opt the body out of the guard entirely.
+        let unterminated = "a: x ', [\n".repeat(MAX_NESTING_DEPTH + 50);
+        assert!(
+            exceeds_nesting_limit(&unterminated),
+            "an unterminated quote must not disable bracket counting"
+        );
+    }
+
+    #[test]
+    fn indented_section_names_are_not_top_level_keys() {
+        // Only a column-zero key marks a template. An indented `Parameters:`
+        // (a nested property, a pasted fragment) must keep the lenient path,
+        // or a placeholder input would take the hard-failure route.
+        let indented = "  Parameters:\n\tbroken\n";
+        assert!(parse_template_body(indented).is_err());
+        assert!(!is_template_document(indented));
     }
 
     #[test]
