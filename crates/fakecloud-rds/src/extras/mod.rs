@@ -96,6 +96,20 @@ fn deleting(mut entry: Value) -> Value {
     entry
 }
 
+/// The shard-group identifier a request addresses, reduced from an ARN.
+///
+/// The read path reduces it, so the write paths have to as well: a group
+/// created with the ARN form was keyed by the ARN, and the very next
+/// `DescribeDBShardGroups` with that same ARN reduced it to the bare id,
+/// found nothing, and reported an existing group as missing.
+fn shard_group_identifier(req: &AwsRequest, account_id: &str) -> Option<String> {
+    let raw = get_param(req, "DBShardGroupIdentifier")?;
+    Some(
+        crate::filters::requested_identifier(Some(raw.clone()), "shard-group", account_id)
+            .unwrap_or(raw),
+    )
+}
+
 /// The endpoint identifier a request addresses, reduced from an ARN.
 ///
 /// Never fails: an absent or empty value falls through as `""`, which
@@ -180,9 +194,15 @@ fn built_in_cluster_endpoints(cluster_id: &str, cluster: &Value) -> Vec<(String,
                 "EndpointType": kind,
                 "Status": status,
             });
-            // Sorted ahead of any custom endpoint of the same cluster,
-            // and stable across calls.
-            Some((format!("\u{0}{cluster_id}:{kind}"), value))
+            // Keyed by the CLUSTER id, so a cluster's built-ins sort
+            // among the custom endpoints rather than ahead of all of
+            // them: with the global prefix, an account with enough
+            // clusters filled the whole first page with built-ins and a
+            // client that ignores `Marker` -- as every caller of this
+            // operation did before it paginated -- saw none of its own
+            // endpoints. The NUL keeps the pair distinct from a custom
+            // endpoint named exactly the cluster id.
+            Some((format!("{cluster_id}\u{0}{kind}"), value))
         })
         .collect()
 }
@@ -1588,8 +1608,14 @@ impl RdsService {
             "CreateDBClusterEndpoint" => {
                 // Reduced like Modify, Delete and Describe reduce it:
                 // a row keyed by the ARN form is one no later call can
-                // address.
+                // address. Unlike those, create still REQUIRES a name:
+                // `endpoint_identifier` never fails, and a row stored
+                // under "" renders with no identifier at all -- the very
+                // shape that marks a built-in, undeletable endpoint.
                 let id = endpoint_identifier(req, &aid);
+                if id.is_empty() {
+                    return Err(missing("DBClusterEndpointIdentifier"));
+                }
                 // The cluster identifier is reduced the same way: the
                 // Describe side normalizes it, so an endpoint created
                 // with the ARN form would otherwise never match a
@@ -2682,7 +2708,7 @@ impl RdsService {
 
             // ── Shard groups ──
             "CreateDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let mut entry = json!({"DBShardGroupIdentifier": id, "Status": "available"});
                 if let Some(obj) = entry.as_object_mut() {
                     if let Some(cluster) = get_param(req, "DBClusterIdentifier") {
@@ -2696,7 +2722,7 @@ impl RdsService {
                 Ok(xml_response("CreateDBShardGroup", shard_group_xml(&entry), &rid))
             }
             "ModifyDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let entry = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
@@ -2719,7 +2745,7 @@ impl RdsService {
                 Ok(xml_response("ModifyDBShardGroup", shard_group_xml(&entry), &rid))
             }
             "RebootDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let entry = self
                     .state_handle()
                     .read()
@@ -2731,7 +2757,7 @@ impl RdsService {
                 Ok(xml_response("RebootDBShardGroup", shard_group_xml(&entry), &rid))
             }
             "DeleteDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 if let Some(m) = state.extras.get_mut("shard_groups") { m.remove(&id); }

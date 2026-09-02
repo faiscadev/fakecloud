@@ -4370,6 +4370,108 @@ fn backtrack_db_cluster_accepts_an_arn_identifier() {
     );
 }
 
+/// Create still requires a name.
+///
+/// A row stored under "" renders with no identifier at all -- the same
+/// shape that marks a cluster's built-in, undeletable endpoints.
+#[test]
+fn create_cluster_endpoint_requires_an_identifier() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+
+    for params in [
+        vec![
+            ("DBClusterEndpointIdentifier", ""),
+            ("DBClusterIdentifier", "clu-1"),
+        ],
+        vec![("DBClusterIdentifier", "clu-1")],
+    ] {
+        assert!(
+            svc.handle_extra_action(&req("CreateDBClusterEndpoint", &params))
+                .is_err(),
+            "created a nameless endpoint with {params:?}"
+        );
+    }
+
+    // Only the cluster's two built-ins are listed; no nameless row
+    // joined them.
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert_eq!(
+        body.matches("<DBClusterEndpointList>").count(),
+        2,
+        "a nameless endpoint was stored: {body}"
+    );
+}
+
+/// The shard-group write paths reduce an ARN, like the read path.
+#[test]
+fn shard_group_lifecycle_accepts_the_arn_form() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let arn = "arn:aws:rds:us-east-1:000000000000:shard-group:sg-1";
+
+    ok_on(
+        &svc,
+        "CreateDBShardGroup",
+        &[
+            ("DBShardGroupIdentifier", arn),
+            ("DBClusterIdentifier", "clu-1"),
+        ],
+    );
+
+    // Created by ARN, addressable by the bare id the Describe reduces to.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBShardGroups",
+        &[("DBShardGroupIdentifier", "sg-1")],
+    );
+    assert!(
+        body.contains("<DBShardGroupIdentifier>sg-1</DBShardGroupIdentifier>"),
+        "a shard group created by ARN was filed under the ARN: {body}"
+    );
+
+    // And by the ARN itself, through the same reduction.
+    ok_on(
+        &svc,
+        "ModifyDBShardGroup",
+        &[("DBShardGroupIdentifier", arn)],
+    );
+    ok_on(
+        &svc,
+        "DeleteDBShardGroup",
+        &[("DBShardGroupIdentifier", arn)],
+    );
+}
+
+/// Built-in endpoints must not crowd every custom endpoint off page one.
+///
+/// Keyed with a global prefix they all sorted ahead of every custom
+/// endpoint, so an account with enough clusters filled the first page
+/// with built-ins -- and every caller of this operation predates its
+/// pagination, so none of them read `Marker`.
+#[test]
+fn built_in_endpoints_do_not_monopolize_the_first_page() {
+    let svc = svc();
+    for n in 0..4 {
+        create_cluster(&svc, &format!("clu-{n}"));
+    }
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "clu-0-ep"),
+            ("DBClusterIdentifier", "clu-0"),
+            ("EndpointType", "READER"),
+        ],
+    );
+
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[("MaxRecords", "4")]);
+    assert!(
+        body.contains("<DBClusterEndpointIdentifier>clu-0-ep</DBClusterEndpointIdentifier>"),
+        "the custom endpoint was pushed off the first page by built-ins: {body}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();
