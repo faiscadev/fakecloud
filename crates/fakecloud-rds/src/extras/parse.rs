@@ -181,10 +181,9 @@ pub(super) fn list_extras_xml(
 
 /// The rows of one extras category, in key order and passing `keep`.
 ///
-/// Key order rather than the backing map's iteration order: a `HashMap`
-/// walk means two identical requests can answer with the rows in
-/// different orders, which a client diffing a listing reads as churn --
-/// and it makes the key usable as a pagination cursor.
+/// `extras` is a `BTreeMap`, so iteration is already key-ordered -- two
+/// identical requests answer with the rows in the same order, which is
+/// what makes the key usable as a pagination cursor.
 fn sorted_entries(
     accounts: &fakecloud_core::multi_account::MultiAccountState<crate::state::RdsState>,
     aid: &str,
@@ -195,10 +194,7 @@ fn sorted_entries(
         .get(aid)
         .and_then(|s| s.extras.get(category))
         .map(|m| {
-            let mut entries: Vec<(&String, &Value)> = m.iter().collect();
-            entries.sort_by_key(|(key, _)| *key);
-            entries
-                .into_iter()
+            m.iter()
                 .filter(|(_, v)| keep(v))
                 .map(|(key, v)| (key.clone(), v.clone()))
                 .collect()

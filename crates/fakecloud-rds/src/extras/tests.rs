@@ -3786,6 +3786,143 @@ fn member_lists_are_read_from_an_unmerged_form_body() {
     );
 }
 
+/// An identifier the operation can't resolve must NARROW to nothing, not
+/// widen to everything.
+///
+/// `normalized_identifier` reports `None` both for "absent" and for "an
+/// ARN of the wrong type", so reading it as "no narrowing" answered a
+/// targeted request with the whole list -- and skipped the not-found
+/// check on the way.
+#[test]
+fn an_unresolvable_identifier_matches_nothing() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "CreateDBShardGroup",
+        &[
+            ("DBShardGroupIdentifier", "sg-1"),
+            ("DBClusterIdentifier", "clu-1"),
+        ],
+    );
+
+    // An ARN of the WRONG resource type.
+    match svc.handle_extra_action(&req(
+        "DescribeDBClusterEndpoints",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:db:mydb",
+        )],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(response) => panic!(
+            "a wrong-type ARN returned rows: {}",
+            String::from_utf8_lossy(response.body.expect_bytes())
+        ),
+    }
+
+    // ANOTHER account's ARN must not alias onto this account's resource.
+    match svc.handle_extra_action(&req(
+        "DescribeDBClusterEndpoints",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:cluster:clu-1",
+        )],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(response) => panic!(
+            "a foreign ARN resolved to this account's cluster: {}",
+            String::from_utf8_lossy(response.body.expect_bytes())
+        ),
+    }
+
+    // Same on the shard-group listing, which reports its own fault.
+    match svc.handle_extra_action(&req(
+        "DescribeDBShardGroups",
+        &[(
+            "DBShardGroupIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:shard-group:sg-1",
+        )],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBShardGroupNotFound"),
+        Ok(response) => panic!(
+            "a foreign shard-group ARN returned the list: {}",
+            String::from_utf8_lossy(response.body.expect_bytes())
+        ),
+    }
+
+    // And the endpoint's own identifier: no rows, rather than all of
+    // them.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[(
+            "DBClusterEndpointIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:cluster-endpoint:ep-1",
+        )],
+    );
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "a foreign endpoint ARN resolved to this account's endpoint: {body}"
+    );
+}
+
+/// A backtrack id with no cluster names nothing rather than reporting
+/// every backtrack as not found.
+#[test]
+fn a_backtrack_id_without_a_cluster_selects_nothing() {
+    let svc = svc();
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[("BacktrackIdentifier", "bt-anything")],
+    );
+    assert!(
+        !body.contains("<DBClusterBacktrack>"),
+        "a backtrack id with no cluster returned rows: {body}"
+    );
+}
+
+/// Modify applies the same rule Create does, against the type the
+/// request LEAVES the endpoint in.
+#[test]
+fn modify_cluster_endpoint_ignores_a_custom_type_on_a_reader() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "CUSTOM"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "ModifyDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("EndpointType", "READER"),
+            ("CustomEndpointType", "READER"),
+        ],
+    );
+
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        !body.contains("<CustomEndpointType>"),
+        "a modify stored a custom type on a READER endpoint: {body}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();

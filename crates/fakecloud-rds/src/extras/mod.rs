@@ -231,15 +231,13 @@ fn member_list_present(req: &AwsRequest, prefix: &str) -> bool {
         return true;
     }
     // `parse_member_list` reads through `get_param`, which falls back to
-    // the form body for a request whose body was never merged into
-    // `query_params`. Checking only the query params there would parse
-    // the members and then discard them as "never sent".
-    if req.query_params.is_empty() && !req.body.is_empty() {
-        return fakecloud_core::protocol::parse_query_body(&req.body)
+    // the form body whenever the key is absent from `query_params` --
+    // not only when they are empty. A narrower check here would let the
+    // members be parsed and then discarded as "never sent".
+    !req.body.is_empty()
+        && fakecloud_core::protocol::parse_query_body(&req.body)
             .keys()
-            .any(names);
-    }
-    false
+            .any(names)
 }
 
 pub(crate) fn xml_response(action: &str, inner: String, request_id: &str) -> AwsResponse {
@@ -1215,9 +1213,10 @@ impl RdsService {
                 // identifier would match nothing -- or, through
                 // `cluster_entry` below, report a cluster that exists as
                 // not found.
-                let cluster = crate::filters::normalized_identifier(
+                let cluster = crate::filters::requested_identifier(
                     get_param(req, "DBClusterIdentifier"),
                     "cluster",
+                    &aid,
                 )
                 .unwrap_or_default();
                 // A cluster that was named but doesn't exist gets the
@@ -1230,14 +1229,19 @@ impl RdsService {
                 // `normalized_identifier` also drops an explicitly
                 // empty value, which no stored record carries and which
                 // would otherwise trip the not-found check below.
-                let wanted = crate::filters::normalized_identifier(
+                let wanted = crate::filters::requested_identifier(
                     get_param(req, "BacktrackIdentifier"),
                     "cluster-backtrack",
+                    &aid,
                 );
                 // A named backtrack that doesn't exist gets the fault the
                 // model declares for it, not an empty list -- a caller
                 // can't tell "gone" from "no rows" otherwise.
-                if let Some(id) = wanted.as_deref() {
+                // Only when a cluster was named: the check below matches
+                // on the cluster too, so without one it would report
+                // every backtrack as not found rather than selecting
+                // none, which is what this handler says it does.
+                if let Some(id) = wanted.as_deref().filter(|_| !cluster.is_empty()) {
                     let known = self
                         .state_handle()
                         .read()
@@ -1536,7 +1540,16 @@ impl RdsService {
                     if let Some(kind) = get_param(req, "EndpointType") {
                         obj.insert("EndpointType".to_string(), json!(kind));
                     }
-                    if let Some(custom) = get_param(req, "CustomEndpointType") {
+                    // Against the RESULTING type, including a change made
+                    // by this same request: storing a custom type on a
+                    // READER endpoint is the state the branch below
+                    // exists to clean up.
+                    let is_custom = obj
+                        .get("EndpointType")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|kind| kind.eq_ignore_ascii_case("CUSTOM"));
+                    if let Some(custom) = get_param(req, "CustomEndpointType").filter(|_| is_custom)
+                    {
                         obj.insert("CustomEndpointType".to_string(), json!(custom));
                     } else if obj
                         .get("EndpointType")
@@ -1577,13 +1590,15 @@ impl RdsService {
                 // A named cluster that doesn't exist gets the fault the
                 // model declares on this operation, matching the sibling
                 // Describes rather than answering 200 with an empty list.
-                let wanted_endpoint = crate::filters::normalized_identifier(
+                let wanted_endpoint = crate::filters::requested_identifier(
                     get_param(req, "DBClusterEndpointIdentifier"),
                     "cluster-endpoint",
+                    &aid,
                 );
-                let wanted_cluster = crate::filters::normalized_identifier(
+                let wanted_cluster = crate::filters::requested_identifier(
                     get_param(req, "DBClusterIdentifier"),
                     "cluster",
+                    &aid,
                 );
                 if let Some(cluster) = wanted_cluster.as_deref() {
                     cluster_entry(self, &aid, cluster)?;
@@ -2524,9 +2539,10 @@ impl RdsService {
             }
             "DescribeDBShardGroups" => {
                 let filters = crate::filters::parse_filters(req);
-                let wanted = crate::filters::normalized_identifier(
+                let wanted = crate::filters::requested_identifier(
                     get_param(req, "DBShardGroupIdentifier"),
                     "shard-group",
+                    &aid,
                 );
                 // Declared on this operation, and the difference a
                 // polling caller needs: "deleted" rather than "exists

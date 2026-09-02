@@ -93,6 +93,33 @@ impl RdsFilter {
     }
 }
 
+/// The identifier a Describe was asked to narrow to, or `None` when it
+/// was asked to narrow at all.
+///
+/// `normalized_identifier` alone is not enough here: it returns `None`
+/// both for "absent" and for "an ARN this operation can't resolve"
+/// (wrong resource type, or another account's), and a caller reading
+/// `None` as "no narrowing" would answer a targeted request with the
+/// WHOLE list -- and skip the not-found check on the way. Failing
+/// closed, an unresolvable identifier stays as the caller wrote it: it
+/// matches no stored row, so the request selects nothing or raises the
+/// operation's declared not-found fault.
+pub(crate) fn requested_identifier(
+    raw: Option<String>,
+    resource_type: &str,
+    account_id: &str,
+) -> Option<String> {
+    // An explicitly empty value is not a request for a resource named
+    // "" -- every other parameter here treats it as absent.
+    let raw = raw.filter(|value| !value.is_empty())?;
+    if !addresses_own_account(&raw, account_id) {
+        // Another account's ARN must not alias onto this account's
+        // same-named resource.
+        return Some(raw);
+    }
+    Some(normalized_identifier(Some(raw.clone()), resource_type).unwrap_or(raw))
+}
+
 /// Rebuild an RDS ARN for a sibling resource of `arn` (same partition,
 /// region and account) with a different resource type and id, so filters
 /// AWS documents as accepting "identifiers and ARNs" can be matched
