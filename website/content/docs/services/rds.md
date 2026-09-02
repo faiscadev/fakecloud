@@ -262,6 +262,16 @@ Real RDS rejects a filter name an operation doesn't support with `InvalidParamet
 
 `CopyDBSnapshot` records the source it copied from and reports it as `SourceDBSnapshotIdentifier` (an ARN, as AWS does); a snapshot that isn't a copy omits the field. That ARN is also what `db-instance-id` matches a copy's source instance against: a copy's own ARN names the account that made the copy, while the instance it records still belongs to the original owner, so for a cross-account or cross-region copy only the source ARN says where that instance lives. `db-cluster-id` does the same through `SourceDBClusterSnapshotArn`.
 
+## IAM role associations
+
+`AddRoleToDBCluster`, `RemoveRoleFromDBCluster`, `AddRoleToDBInstance` and `RemoveRoleFromDBInstance` record the association and report it back as `AssociatedRoles` on `DescribeDBClusters` / `DescribeDBInstances`, with `Status: ACTIVE`. They previously accepted any request and answered 200 without storing anything, so a role could be attached to a cluster that did not exist and the listing never showed it.
+
+An association is keyed on the (role, feature) pair, as AWS keys it, so one role can be attached for both `s3Import` and `s3Export` and removing one feature leaves the other. Roles are capped at five per cluster and per instance.
+
+The faults the model declares are raised: the resource not existing (`DBClusterNotFoundFault` / `DBInstanceNotFound`), attaching a pair that is already attached (`DBClusterRoleAlreadyExists` / `DBInstanceRoleAlreadyExists`), removing one that is not (`DBClusterRoleNotFound` / `DBInstanceRoleNotFound`), and exceeding the cap (`DBClusterRoleQuotaExceeded` / `DBInstanceRoleQuotaExceeded`).
+
+A restored cluster carries no associations: neither `RestoreDBClusterFromSnapshot` nor `RestoreDBClusterToPointInTime` takes roles, and the snapshot holds a clone of the source cluster.
+
 ## Gotchas
 
 - **Persistence snapshots are one-way across the v3 bump.** RDS state written by this version declares snapshot schema v3 (final snapshots are typed `manual`, matching AWS; earlier builds wrote `automated`). An older fakecloud refuses to load a v3 file and exits, so downgrade by removing `<data-path>/rds/snapshot.json` first.

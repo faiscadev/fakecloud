@@ -158,6 +158,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
     let instance = DbInstance {
         db_instance_identifier: "test-db".to_string(),
         db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:test-db".to_string(),
+        associated_roles: Vec::new(),
         db_instance_class: "db.t3.micro".to_string(),
         engine: "postgres".to_string(),
         engine_version: "16.3".to_string(),
@@ -344,6 +345,7 @@ fn make_instance_with_defaults(id: &str) -> DbInstance {
     DbInstance {
         db_instance_identifier: id.to_string(),
         db_instance_arn: format!("arn:aws:rds:us-east-1:123:db:{id}"),
+        associated_roles: Vec::new(),
         db_instance_class: "db.t3.micro".to_string(),
         engine: "postgres".to_string(),
         engine_version: "16.3".to_string(),
@@ -624,6 +626,7 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
         DbInstance {
             db_instance_identifier: identifier.to_string(),
             db_instance_arn: arn.clone(),
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -2891,6 +2894,200 @@ async fn db_instance_id_filter_matches_a_copys_source_instance_arn() {
     assert!(
         !body.contains("<DBSnapshotIdentifier>mycopy</DBSnapshotIdentifier>"),
         "an unrelated account's ARN matched: {body}"
+    );
+}
+
+/// The instance side of role association: recorded, reported, and
+/// refusing the duplicates and absences the model declares faults for.
+#[tokio::test]
+async fn instance_roles_are_recorded_and_reported() {
+    let svc = make_service();
+    seed_instance(&svc, "db-1");
+    let role = "arn:aws:iam::123456789012:role/s3-export";
+
+    match svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "ghost"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBInstanceNotFound"),
+        Ok(_) => panic!("attached a role to an instance that does not exist"),
+    }
+
+    svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    ))
+    .expect("AddRoleToDBInstance");
+
+    let body = body_of(
+        svc.describe_db_instances(&request("DescribeDBInstances", &[]))
+            .unwrap(),
+    );
+    assert!(
+        body.contains(&format!("<RoleArn>{role}</RoleArn>")),
+        "the association was not reported: {body}"
+    );
+    assert!(
+        body.contains("<FeatureName>S3_INTEGRATION</FeatureName>"),
+        "{body}"
+    );
+
+    match svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBInstanceRoleAlreadyExists"),
+        Ok(_) => panic!("attached the same role twice"),
+    }
+
+    // An association with no feature reports no FeatureName ELEMENT: an
+    // empty one reads as a feature named "".
+    svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", "arn:aws:iam::123456789012:role/no-feature"),
+            ("FeatureName", ""),
+        ],
+    ))
+    .expect("AddRoleToDBInstance");
+    let body = body_of(
+        svc.describe_db_instances(&request("DescribeDBInstances", &[]))
+            .unwrap(),
+    );
+    assert!(
+        !body.contains("<FeatureName></FeatureName>"),
+        "an empty feature was rendered: {body}"
+    );
+    svc.handle_extra_action(&request(
+        "RemoveRoleFromDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", "arn:aws:iam::123456789012:role/no-feature"),
+            ("FeatureName", ""),
+        ],
+    ))
+    .expect("RemoveRoleFromDBInstance");
+
+    match svc.handle_extra_action(&request(
+        "RemoveRoleFromDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", "arn:aws:iam::123456789012:role/other"),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBInstanceRoleNotFound"),
+        Ok(_) => panic!("removed a role that was never attached"),
+    }
+
+    svc.handle_extra_action(&request(
+        "RemoveRoleFromDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    ))
+    .expect("RemoveRoleFromDBInstance");
+
+    let body = body_of(
+        svc.describe_db_instances(&request("DescribeDBInstances", &[]))
+            .unwrap(),
+    );
+    assert!(
+        !body.contains("<AssociatedRoles>"),
+        "the association outlived its removal: {body}"
+    );
+}
+
+/// A restore takes no IAM roles.
+///
+/// The snapshot carries a clone of the source cluster, and neither
+/// restore operation has a role member, so a restored cluster reporting
+/// the source's associations reads as a permanent diff against a config
+/// that declares none.
+#[tokio::test]
+async fn a_restored_cluster_inherits_no_roles() {
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-clu",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    // As CreateDBClusterSnapshot clones it off the
+                    // source cluster.
+                    "AssociatedRoles": [{
+                        "RoleArn": "arn:aws:iam::123456789012:role/s3-import",
+                        "FeatureName": "s3Import",
+                        "Status": "ACTIVE",
+                    }],
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored");
+    assert!(
+        restored.get("AssociatedRoles").is_none(),
+        "the restored cluster inherited the source's roles: {restored}"
+    );
+
+    // Same for a point-in-time restore, which clones the source cluster
+    // directly.
+    seed_cluster_entry(
+        &svc,
+        "pitr-src",
+        serde_json::json!({
+            "AssociatedRoles": [{
+                "RoleArn": "arn:aws:iam::123456789012:role/s3-import",
+                "FeatureName": "s3Import",
+                "Status": "ACTIVE",
+            }],
+        }),
+    );
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "pitr-restored"),
+            ("SourceDBClusterIdentifier", "pitr-src"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+    let restored = cluster_entry(&svc, "pitr-restored");
+    assert!(
+        restored.get("AssociatedRoles").is_none(),
+        "the PITR target inherited the source's roles: {restored}"
     );
 }
 
@@ -6070,6 +6267,7 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
         DbInstance {
             db_instance_identifier: id.to_string(),
             db_instance_arn: format!("arn:aws:rds:us-east-1:123456789012:db:{id}"),
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),

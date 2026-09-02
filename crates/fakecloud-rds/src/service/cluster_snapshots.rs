@@ -333,6 +333,13 @@ impl RdsService {
             );
             obj.remove("ReplicationSourceIdentifier");
             obj.remove("DBClusterMembers");
+            // A restore takes no IAM roles: RestoreDBClusterFromSnapshot
+            // and RestoreDBClusterToPointInTime have no role member, and
+            // the snapshot carries a clone of the source cluster. Left
+            // behind, the restored cluster reports associations the
+            // caller never asked for, which reads as a permanent diff
+            // against a config that declares none.
+            obj.remove("AssociatedRoles");
             obj.remove("WriterDBInstanceIdentifier");
             obj.remove("DBClusterSnapshotIdentifier");
             obj.remove("DBClusterSnapshotArn");
@@ -566,6 +573,13 @@ impl RdsService {
                 )),
             );
             obj.remove("DBClusterMembers");
+            // A restore takes no IAM roles: RestoreDBClusterFromSnapshot
+            // and RestoreDBClusterToPointInTime have no role member, and
+            // the snapshot carries a clone of the source cluster. Left
+            // behind, the restored cluster reports associations the
+            // caller never asked for, which reads as a permanent diff
+            // against a config that declares none.
+            obj.remove("AssociatedRoles");
             obj.remove("WriterDBInstanceIdentifier");
             // A PITR target is an independent cluster, never a replica --
             // the from-snapshot path above already drops this. Inherited,

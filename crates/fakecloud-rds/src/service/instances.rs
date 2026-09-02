@@ -192,6 +192,7 @@ impl RdsService {
                 db_instance_identifier: db_instance_identifier.clone(),
                 db_instance_arn: state
                     .db_instance_arn(request.region.as_str(), &db_instance_identifier),
+                associated_roles: Vec::new(),
                 db_instance_class: db_instance_class.clone(),
                 engine: engine.clone(),
                 engine_version: engine_version.clone(),

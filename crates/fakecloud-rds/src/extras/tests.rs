@@ -493,10 +493,25 @@ fn export_activity_replicas_recommendations_certs_pending() {
     ok("DescribeExportTasks", &[]);
     // StartActivityStream / ModifyActivityStream / StopActivityStream now
     // persist onto a real instance; see activity_stream_persists_on_instance.
-    ok("AddRoleToDBCluster", &[]);
-    ok("RemoveRoleFromDBCluster", &[]);
-    ok("AddRoleToDBInstance", &[]);
-    ok("RemoveRoleFromDBInstance", &[]);
+    // Role association is no longer a no-op: it needs a real cluster.
+    let svc = svc();
+    create_cluster(&svc, "role-clu");
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "role-clu"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/rds-role"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "role-clu"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/rds-role"),
+        ],
+    );
     ok(
         "ApplyPendingMaintenanceAction",
         &[
@@ -610,6 +625,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
         DbInstance {
             db_instance_identifier: source_id.to_string(),
             db_instance_arn: source_arn,
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -681,6 +697,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
         DbInstance {
             db_instance_identifier: replica_id.to_string(),
             db_instance_arn: arn,
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -1391,6 +1408,7 @@ fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
         DbInstance {
             db_instance_identifier: id.to_string(),
             db_instance_arn: arn,
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -4743,6 +4761,375 @@ fn deleting_a_cluster_removes_a_legacy_arn_keyed_endpoint() {
             ("EndpointType", "READER"),
         ],
     );
+}
+
+/// Role association is recorded, reported, and refuses the duplicates
+/// and absences the model declares faults for.
+///
+/// All four role operations were `xml_empty_action`: they accepted any
+/// request, stored nothing, and answered 200 -- so a caller could attach
+/// a role to a cluster that does not exist, and DescribeDBClusters never
+/// reported the roles it had been told about.
+#[test]
+fn cluster_roles_are_recorded_and_reported() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let role = "arn:aws:iam::000000000000:role/s3-import";
+
+    // A cluster that doesn't exist gets the declared fault, not a 200.
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "ghost"), ("RoleArn", role)],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("attached a role to a cluster that does not exist"),
+    }
+
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+
+    // Reported by the listing, which never saw these before.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains(&format!("<RoleArn>{role}</RoleArn>")),
+        "the association was not reported: {body}"
+    );
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "{body}"
+    );
+    assert!(body.contains("<Status>ACTIVE</Status>"), "{body}");
+
+    // The SAME pair twice is the declared conflict.
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleAlreadyExists"),
+        Ok(_) => panic!("attached the same role and feature twice"),
+    }
+
+    // The same role for a DIFFERENT feature is a different association,
+    // which is how one role gets attached for both import and export.
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Export"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert_eq!(
+        body.matches(&format!("<RoleArn>{role}</RoleArn>")).count(),
+        2,
+        "the second feature was rejected as a duplicate: {body}"
+    );
+
+    // Removing a role that was never attached is the declared absence.
+    match svc.handle_extra_action(&req(
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/other"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Ok(_) => panic!("removed a role that was never attached"),
+    }
+
+    // Removing one feature leaves the other: matching on the ARN alone
+    // deleted whichever entry came first.
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Export"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("<FeatureName>s3Export</FeatureName>"),
+        "the wrong association was removed: {body}"
+    );
+
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        !body.contains("<AssociatedRoles>"),
+        "the association outlived its removal: {body}"
+    );
+    // And the key is GONE, not left as an empty array: snapshots clone
+    // the cluster entry forward, so an empty key would ride along in
+    // every later snapshot.
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        stored.get("AssociatedRoles").is_none(),
+        "removing the last role left an empty key behind: {stored}"
+    );
+
+    // AWS caps roles per cluster at five, and the Add op declares the
+    // quota fault.
+    for n in 0..5 {
+        ok_on(
+            &svc,
+            "AddRoleToDBCluster",
+            &[
+                ("DBClusterIdentifier", "clu-1"),
+                ("RoleArn", &format!("arn:aws:iam::000000000000:role/r{n}")),
+            ],
+        );
+    }
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/one-too-many"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleQuotaExceeded"),
+        Ok(_) => panic!("attached a sixth role"),
+    }
+}
+
+/// A failed role request leaves the cluster untouched.
+///
+/// The roles array was materialized before the add/remove ran, so a
+/// remove against a cluster with no roles wrote `"AssociatedRoles": []`
+/// into the stored entry and THEN returned the fault --
+/// CreateDBClusterSnapshot cloned that key forward into every later
+/// snapshot.
+#[test]
+fn a_failed_role_request_does_not_write_to_the_cluster() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let before = extras_value(&svc, "clusters", "clu-1");
+    assert!(before.get("AssociatedRoles").is_none());
+
+    match svc.handle_extra_action(&req(
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/never-attached"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Ok(_) => panic!("removed a role that was never attached"),
+    }
+
+    let after = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        after.get("AssociatedRoles").is_none(),
+        "a failed remove wrote the key into the cluster: {after}"
+    );
+
+    // An empty RoleArn is not stored as an association either. Requests
+    // through `handle` never reach this -- prevalidate rejects the
+    // missing required parameter first -- but an in-process caller can.
+    // The Add path answers the way prevalidate answers the same request:
+    // DBClusterRoleNotFoundFault is declared on Remove, not on Add, so
+    // raising it here would put a shape on the wire that this operation
+    // never returns.
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", "")],
+    )) {
+        Err(err) => assert_eq!(err.code(), "InvalidParameterValue"),
+        Ok(_) => panic!("stored an association with no role"),
+    }
+    let after = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        after.get("AssociatedRoles").is_none(),
+        "an empty role was stored: {after}"
+    );
+}
+
+/// FeatureName is optional on the cluster operations, so a remove that
+/// names only the role works when that is unambiguous -- and refuses to
+/// guess when it isn't.
+#[test]
+fn removing_a_cluster_role_without_a_feature_resolves_only_when_unambiguous() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let role = "arn:aws:iam::000000000000:role/s3";
+
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+
+    // One association carries the ARN, so naming just the role is
+    // unambiguous.
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(stored.get("AssociatedRoles").is_none(), "{stored}");
+
+    // An explicitly EMPTY FeatureName is absent, not a feature named "":
+    // treated as present it blocks this path and stores an empty
+    // <FeatureName/> into the association.
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", ""),
+        ],
+    );
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        stored.get("AssociatedRoles").is_none(),
+        "an empty FeatureName blocked the remove: {stored}"
+    );
+
+    // Two features on one role: naming only the role is ambiguous, and
+    // guessing is how the ARN-only matching removed the wrong one.
+    for feature in ["s3Import", "s3Export"] {
+        ok_on(
+            &svc,
+            "AddRoleToDBCluster",
+            &[
+                ("DBClusterIdentifier", "clu-1"),
+                ("RoleArn", role),
+                ("FeatureName", feature),
+            ],
+        );
+    }
+    match svc.handle_extra_action(&req(
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Ok(_) => panic!("an ambiguous remove guessed an association"),
+    }
+    // Both survive it.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert_eq!(
+        body.matches(&format!("<RoleArn>{role}</RoleArn>")).count(),
+        2,
+        "an ambiguous remove deleted an association: {body}"
+    );
+
+    // Naming the feature still resolves exactly one.
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Export"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("<FeatureName>s3Export</FeatureName>"),
+        "{body}"
+    );
+}
+
+/// A feature-less association is an exact match, not a guess.
+///
+/// When a role is attached BOTH without a feature and with one, a remove
+/// that names no feature identifies the feature-less association
+/// exactly: (role, no feature) is a key one association carries. The
+/// ambiguity fallback is for when no exact match exists, so it must not
+/// fire here and must not touch the feature-bound association.
+#[test]
+fn removing_a_cluster_role_prefers_the_exact_feature_less_association() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let role = "arn:aws:iam::000000000000:role/s3";
+
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+
+    // The feature-bound one survives, and it is the only one left.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert_eq!(
+        body.matches(&format!("<RoleArn>{role}</RoleArn>")).count(),
+        1,
+        "the wrong association was removed: {body}"
+    );
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "the feature-bound association was removed: {body}"
+    );
+
+    // And now that it is the only one carrying the ARN, naming just the
+    // role resolves it through the unambiguous fallback.
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(stored.get("AssociatedRoles").is_none(), "{stored}");
 }
 
 #[test]

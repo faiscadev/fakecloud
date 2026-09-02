@@ -147,6 +147,11 @@ fn endpoint_identifier(req: &AwsRequest, account_id: &str) -> String {
         .unwrap_or(raw)
 }
 
+/// AWS caps IAM roles per cluster and per instance at five, and both Add
+/// operations declare the quota fault. Without the cap a client testing
+/// its quota handling never saw it.
+const MAX_ASSOCIATED_ROLES: usize = 5;
+
 /// A stored endpoint, in the shape a CUSTOM endpoint reports.
 ///
 /// Rows written before `CustomEndpointType` was derived carry the
@@ -3048,7 +3053,257 @@ impl RdsService {
             "DescribeDBInstanceAutomatedBackups" => Ok(xml_response("DescribeDBInstanceAutomatedBackups", "    <DBInstanceAutomatedBackups/>".to_string(), &rid)),
 
             // ── Roles ──
-            "AddRoleToDBCluster" | "RemoveRoleFromDBCluster" | "AddRoleToDBInstance" | "RemoveRoleFromDBInstance" => xml_empty_action(&action, &rid),
+            // These accepted anything and answered 200 without recording
+            // the association, so a caller could attach a role to a
+            // cluster that does not exist, and DescribeDBClusters never
+            // reported the roles it was told about.
+            "AddRoleToDBCluster" | "RemoveRoleFromDBCluster" => {
+                // An absent identifier reaches the declared
+                // DBClusterNotFoundFault rather than missing(), which
+                // emits InvalidParameterValue -- undeclared anywhere in
+                // the RDS model.
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                    &aid,
+                )
+                .unwrap_or_default();
+                let role_arn = get_param(req, "RoleArn")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default();
+                // An explicitly empty FeatureName is absent, as it is
+                // for RoleArn: treated as present it would block the
+                // remove-by-ARN path and store an empty <FeatureName/>
+                // into the association.
+                let feature_name = get_param(req, "FeatureName").filter(|value| !value.is_empty());
+                let adding = action == "AddRoleToDBCluster";
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let entry = state
+                        .extras
+                        .get_mut("clusters")
+                        .and_then(|m| m.get_mut(&id))
+                        .ok_or_else(|| cluster_not_found(&id))?;
+                    let object = entry
+                        .as_object_mut()
+                        .ok_or_else(|| cluster_not_found(&id))?;
+                    // Read WITHOUT creating the key: materializing it up
+                    // front wrote `"AssociatedRoles": []` into the stored
+                    // cluster even when the request went on to fail, and
+                    // CreateDBClusterSnapshot cloned that key forward
+                    // into every later snapshot.
+                    let mut roles: Vec<Value> = object
+                        .get("AssociatedRoles")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if role_arn.is_empty() {
+                        // `prevalidate` rejects a missing RoleArn before
+                        // this runs, so only an in-process caller gets
+                        // here -- but an empty ARN must not become a
+                        // stored association that renders as an empty
+                        // element and burns a quota slot.
+                        //
+                        // The fault has to be one the OPERATION declares:
+                        // DBClusterRoleNotFoundFault is declared on
+                        // Remove and not on Add, so Add answers the way
+                        // `prevalidate` answers the same request rather
+                        // than inventing a shape that operation never
+                        // returns.
+                        return Err(if adding {
+                            missing("RoleArn")
+                        } else {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterRoleNotFound",
+                                format!(
+                                    "No role is associated with DB cluster {id} under that name."
+                                ),
+                            )
+                        });
+                    }
+                    // Keyed on the (role, feature) PAIR, as AWS keys it:
+                    // one role is commonly attached for both s3Import and
+                    // s3Export, and matching on the ARN alone rejected
+                    // the second feature as a duplicate -- then removed
+                    // whichever entry came first when asked to detach
+                    // one of them.
+                    let exact = |role: &Value| {
+                        entry_str(role, "RoleArn") == Some(role_arn.as_str())
+                            && entry_str(role, "FeatureName") == feature_name.as_deref()
+                    };
+                    // The exact key first: (role, no feature) identifies a
+                    // feature-less association precisely, so removing it
+                    // is not a guess even when other associations carry
+                    // the same ARN under a feature. The fallback below is
+                    // only for when no association carries the key the
+                    // caller named.
+                    let position = roles.iter().position(&exact).or_else(|| {
+                        // FeatureName is OPTIONAL on the cluster
+                        // operations. A remove that names only the role
+                        // disassociates it when that is unambiguous --
+                        // exactly one association carries the ARN. With
+                        // several, the caller has to say which, because
+                        // guessing is how the ARN-only matching this
+                        // replaced removed the wrong one.
+                        if adding || feature_name.is_some() {
+                            return None;
+                        }
+                        let mut matching = roles
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, role)| {
+                                entry_str(role, "RoleArn") == Some(role_arn.as_str())
+                            })
+                            .map(|(index, _)| index);
+                        let only = matching.next()?;
+                        matching.next().is_none().then_some(only)
+                    });
+                    match (adding, position) {
+                        (true, Some(_)) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBClusterRoleAlreadyExists",
+                                format!(
+                                    "Role {role_arn} is already associated with DB cluster {id}."
+                                ),
+                            ));
+                        }
+                        (true, None) if roles.len() >= MAX_ASSOCIATED_ROLES => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBClusterRoleQuotaExceeded",
+                                format!(
+                                    "DB cluster {id} already has the maximum number of \
+                                     IAM roles associated with it."
+                                ),
+                            ));
+                        }
+                        (true, None) => {
+                            let mut role = json!({
+                                "RoleArn": role_arn,
+                                // AWS reports the association as ACTIVE
+                                // once it is usable; there is nothing to
+                                // wait for here.
+                                "Status": "ACTIVE",
+                            });
+                            if let (Some(feature), Some(object)) =
+                                (feature_name.as_ref(), role.as_object_mut())
+                            {
+                                object.insert("FeatureName".to_string(), json!(feature));
+                            }
+                            roles.push(role);
+                        }
+                        (false, Some(index)) => {
+                            roles.remove(index);
+                        }
+                        (false, None) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterRoleNotFound",
+                                format!("Role {role_arn} is not associated with DB cluster {id}."),
+                            ));
+                        }
+                    }
+                    // Written back only once the change succeeded, and
+                    // the key is dropped rather than left as an empty
+                    // array: that is the same key the read above avoids
+                    // materializing, and CreateDBClusterSnapshot would
+                    // clone it forward into every later snapshot.
+                    if roles.is_empty() {
+                        object.remove("AssociatedRoles");
+                    } else {
+                        object.insert("AssociatedRoles".to_string(), Value::Array(roles));
+                    }
+                }
+                xml_empty_action(&action, &rid)
+            }
+            "AddRoleToDBInstance" | "RemoveRoleFromDBInstance" => {
+                // Same: DBInstanceNotFoundFault is declared here.
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBInstanceIdentifier"),
+                    "db",
+                    &aid,
+                )
+                .unwrap_or_default();
+                // As above: `prevalidate` rejects a missing RoleArn or
+                // FeatureName first; an empty one must not be stored.
+                let role_arn = get_param(req, "RoleArn")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default();
+                let feature_name = get_param(req, "FeatureName")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default();
+                let adding = action == "AddRoleToDBInstance";
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let instance = state.instances.get_mut(&id).ok_or_else(|| {
+                        crate::service::service_helpers::db_instance_not_found(&id)
+                    })?;
+                    // The pair again -- and FeatureName is a REQUIRED
+                    // input here, so ignoring it was strictly wrong.
+                    if role_arn.is_empty() {
+                        // Same: DBInstanceRoleNotFound is declared on
+                        // Remove, not on Add.
+                        return Err(if adding {
+                            missing("RoleArn")
+                        } else {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBInstanceRoleNotFound",
+                                format!(
+                                    "No role is associated with DB instance {id} under that name."
+                                ),
+                            )
+                        });
+                    }
+                    let position = instance
+                        .associated_roles
+                        .iter()
+                        .position(|role| {
+                            role.role_arn == role_arn && role.feature_name == feature_name
+                        });
+                    match (adding, position) {
+                        (true, Some(_)) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBInstanceRoleAlreadyExists",
+                                format!(
+                                    "Role {role_arn} is already associated with DB instance {id}."
+                                ),
+                            ));
+                        }
+                        (true, None) if instance.associated_roles.len() >= MAX_ASSOCIATED_ROLES => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBInstanceRoleQuotaExceeded",
+                                format!(
+                                    "DB instance {id} already has the maximum number of \
+                                     IAM roles associated with it."
+                                ),
+                            ));
+                        }
+                        (true, None) => instance.associated_roles.push(crate::state::DbRole {
+                            role_arn: role_arn.clone(),
+                            feature_name: feature_name.clone(),
+                            status: "ACTIVE".to_string(),
+                        }),
+                        (false, Some(index)) => {
+                            instance.associated_roles.remove(index);
+                        }
+                        (false, None) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBInstanceRoleNotFound",
+                                format!("Role {role_arn} is not associated with DB instance {id}."),
+                            ));
+                        }
+                    }
+                }
+                xml_empty_action(&action, &rid)
+            }
 
             // ── Pending maintenance ──
             "ApplyPendingMaintenanceAction" => {
