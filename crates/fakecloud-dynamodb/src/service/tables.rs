@@ -14,7 +14,7 @@ use crate::state::{
     ProvisionedThroughput,
 };
 
-use super::parse_projection;
+use super::{parse_projection, parse_vector_index, parse_vector_indexes};
 
 use super::{
     build_table_description, build_table_description_json, find_table_by_arn,
@@ -248,6 +248,7 @@ impl DynamoDbService {
             deletion_protection_enabled,
             on_demand_throughput: on_demand_throughput.clone(),
             table_class,
+            vector_indexes: parse_vector_indexes(&body["VectorIndexes"], &arn)?,
         };
 
         // Build the response from the inserted table so CreateTable returns
@@ -450,6 +451,25 @@ impl DynamoDbService {
         // Handle GlobalSecondaryIndexUpdates: a list of {Create, Update, Delete}
         // operations. Real AWS supports all three; fakecloud now mirrors the
         // semantics so Terraform's `aws_dynamodb_table` GSI lifecycle works.
+        // Vector index updates: Create adds (or replaces) an index, Delete
+        // removes one. Same Create/Delete shape as the GSI updates below.
+        if let Some(updates) = body.get("VectorIndexUpdates").and_then(|v| v.as_array()) {
+            let table_arn = table.arn.clone();
+            for op in updates {
+                if let Some(create) = op.get("Create") {
+                    let index = parse_vector_index(create, &table_arn)?;
+                    table
+                        .vector_indexes
+                        .retain(|i| i.index_name != index.index_name);
+                    table.vector_indexes.push(index);
+                }
+                if let Some(delete) = op.get("Delete") {
+                    if let Some(name) = delete.get("IndexName").and_then(|v| v.as_str()) {
+                        table.vector_indexes.retain(|i| i.index_name != name);
+                    }
+                }
+            }
+        }
         if let Some(updates) = body
             .get("GlobalSecondaryIndexUpdates")
             .and_then(|v| v.as_array())
@@ -1145,6 +1165,7 @@ impl DynamoDbService {
             deletion_protection_enabled: false,
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
+            vector_indexes: Vec::new(),
         };
         table.recalculate_stats();
 
@@ -1250,6 +1271,7 @@ impl DynamoDbService {
             deletion_protection_enabled: false,
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
+            vector_indexes: Vec::new(),
         };
         table.recalculate_stats();
 
@@ -1776,6 +1798,7 @@ impl DynamoDbService {
             deletion_protection_enabled: false,
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
+            vector_indexes: Vec::new(),
         };
         table.recalculate_stats();
         state.tables.insert(table_name.to_string(), table);

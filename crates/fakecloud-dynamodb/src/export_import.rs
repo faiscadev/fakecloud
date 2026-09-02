@@ -308,6 +308,7 @@ fn build_table(
         deletion_protection_enabled: false,
         on_demand_throughput: None,
         table_class: "STANDARD".to_string(),
+        vector_indexes: Vec::new(),
     };
     table.recalculate_stats(); // fills item_count / size_bytes
     Ok(table)

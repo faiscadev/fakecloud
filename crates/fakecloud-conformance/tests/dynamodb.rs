@@ -1650,3 +1650,85 @@ async fn dynamodb_get_item_nonexistent_table_returns_error() {
         .await;
     assert!(result.is_err(), "GetItem on nonexistent table should fail");
 }
+
+/// Vector indexes and similarity search. The vendored `aws-sdk-dynamodb`
+/// predates `SearchVectors` and the `VectorIndexes` members, so drive them
+/// over a raw awsJson1.0 POST.
+#[test_action("dynamodb", "SearchVectors", checksum = "6cbe2a90")]
+#[tokio::test]
+async fn dynamodb_vector_search() {
+    let server = TestServer::start().await;
+    let auth = "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/dynamodb/aws4_request, SignedHeaders=host, Signature=0";
+    let http = reqwest::Client::new();
+    let call = |target: &str, body: String| {
+        let url = server.endpoint().to_string();
+        let target = format!("DynamoDB_20120810.{target}");
+        let http = http.clone();
+        async move {
+            let resp = http
+                .post(&url)
+                .header("Authorization", auth)
+                .header("X-Amz-Target", target)
+                .header("Content-Type", "application/x-amz-json-1.0")
+                .body(body)
+                .send()
+                .await
+                .unwrap();
+            assert!(resp.status().is_success(), "status {}", resp.status());
+            resp.json::<serde_json::Value>().await.unwrap()
+        }
+    };
+
+    let created = call(
+        "CreateTable",
+        serde_json::json!({
+            "TableName": "conf-vectors",
+            "KeySchema": [{ "AttributeName": "pk", "KeyType": "HASH" }],
+            "AttributeDefinitions": [{ "AttributeName": "pk", "AttributeType": "S" }],
+            "BillingMode": "PAY_PER_REQUEST",
+            "VectorIndexes": [{
+                "IndexName": "emb",
+                "VectorAttribute": { "AttributeName": "embedding" },
+                "Dimensions": 2,
+                "DistanceFunction": "COSINE",
+                "Projection": { "ProjectionType": "ALL" },
+            }],
+        })
+        .to_string(),
+    )
+    .await;
+    assert_eq!(
+        created["TableDescription"]["VectorIndexes"][0]["IndexName"],
+        "emb"
+    );
+
+    for (pk, x, y) in [("near", "1", "0"), ("far", "-1", "0")] {
+        call(
+            "PutItem",
+            serde_json::json!({
+                "TableName": "conf-vectors",
+                "Item": {
+                    "pk": { "S": pk },
+                    "embedding": { "L": [{ "N": x }, { "N": y }] },
+                },
+            })
+            .to_string(),
+        )
+        .await;
+    }
+
+    let searched = call(
+        "SearchVectors",
+        serde_json::json!({
+            "TableName": "conf-vectors",
+            "IndexName": "emb",
+            "SearchVector": [{ "N": "1" }, { "N": "0" }],
+            "TopK": 1,
+        })
+        .to_string(),
+    )
+    .await;
+    let results = searched["SearchResults"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["Item"]["pk"]["S"], "near");
+}

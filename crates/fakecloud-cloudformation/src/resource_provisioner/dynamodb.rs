@@ -229,6 +229,7 @@ impl ResourceProvisioner {
                 .and_then(|v| v.as_str())
                 .unwrap_or("STANDARD")
                 .to_string(),
+            vector_indexes: Vec::new(),
         };
 
         state.tables.insert(table_name.to_string(), table);

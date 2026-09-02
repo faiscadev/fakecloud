@@ -1772,6 +1772,7 @@ mod tests {
             deletion_protection_enabled: false,
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
+            vector_indexes: Vec::new(),
         };
         s.tables.insert(name.to_string(), table);
     }
