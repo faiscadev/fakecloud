@@ -1628,32 +1628,33 @@ impl CloudFormationService {
         // probe's `"t"`) is filtered out here and keeps the lenient path.
         let url_param =
             Self::get_param(req, "TemplateURL").filter(|url| crate::extras::looks_like_url(url));
-        // An object that exists but is empty (a truncated `aws s3 cp`, a
-        // `sam package` that wrote nothing) counts as a failed fetch: taking
-        // it as the template would parse cleanly to no resources and rebuild
-        // the #2480 empty CREATE_COMPLETE.
-        let resolved_from_url = url_param
-            .as_ref()
-            .map(|url| self.resolve_template_url(&req.account_id, url));
-        // A URL that resolves to nothing (uploaded to another account, a
-        // public AWS-hosted quickstart, a key mismatch) must fail the stack
-        // rather than fall back to an empty body and produce the #2480 empty
-        // CREATE_COMPLETE. UpdateStack raises this synchronously; here the
-        // stack is already async, so it rolls to CREATE_FAILED.
         let empty = String::new();
         let inline_body = params
             .get("TemplateBody")
             .filter(|body| !body.trim().is_empty());
+        // Resolved only when the URL would actually be used. An inline body
+        // wins, and `resolve_template_url` takes the S3 write lock, so
+        // resolving eagerly would lock and materialize account state for a
+        // result about to be discarded (including on a request that is about
+        // to be rejected as a duplicate stack).
+        //
+        // A URL that resolves to nothing (uploaded to another account, a
+        // public AWS-hosted quickstart, a key mismatch, an empty object) must
+        // fail the stack rather than fall back to an empty body and produce
+        // the #2480 empty CREATE_COMPLETE. UpdateStack raises this
+        // synchronously; here the stack is already async, so it rolls to
+        // CREATE_FAILED.
+        let resolved_from_url = match (&inline_body, &url_param) {
+            (None, Some(url)) => Some(self.resolve_template_url(&req.account_id, url)),
+            _ => None,
+        };
         let template_body = match (inline_body, &resolved_from_url) {
             (Some(body), _) => body,
             (None, Some(Ok(body))) => body,
             _ => params.get("TemplateBody").unwrap_or(&empty),
         };
-        // Only when the URL body is the one that would have been used: a
-        // request carrying a good inline TemplateBody alongside a stale or
-        // foreign TemplateURL is served by the body and must not fail.
-        let url_fetch_error = match (&resolved_from_url, inline_body) {
-            (Some(Err(err)), None) => Some(err.clone()),
+        let url_fetch_error = match &resolved_from_url {
+            Some(Err(err)) => Some(err.clone()),
             _ => None,
         };
 

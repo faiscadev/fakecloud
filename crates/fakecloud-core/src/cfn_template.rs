@@ -158,6 +158,14 @@ fn exceeds_nesting_limit(body: &str) -> bool {
     false
 }
 
+/// Strip a UTF-8 byte-order mark. `str::trim_start` does not remove U+FEFF,
+/// and PowerShell's `Out-File` / `Set-Content` write one by default — so a
+/// BOM'd template's first line reads `\u{FEFF}Resources:`, which fails every
+/// prefix check and sends the body down the lenient path (#2480 again).
+fn strip_bom(body: &str) -> &str {
+    body.strip_prefix('\u{FEFF}').unwrap_or(body)
+}
+
 /// Whether a body is meant to be a CloudFormation template *document*, as
 /// opposed to a placeholder scalar (the conformance probe sends `"test"`-style
 /// strings for `TemplateBody`).
@@ -169,14 +177,6 @@ fn exceeds_nesting_limit(body: &str) -> bool {
 /// the parser here would answer "not a template" for every syntax error and
 /// send it down the lenient degrade-to-empty path, which is the silent no-op
 /// #2480 is about. So fall back to a shape check on the raw text.
-/// Strip a UTF-8 byte-order mark. `str::trim_start` does not remove U+FEFF,
-/// and PowerShell's `Out-File` / `Set-Content` write one by default — so a
-/// BOM'd template's first line reads `\u{FEFF}Resources:`, which fails every
-/// prefix check and sends the body down the lenient path (#2480 again).
-fn strip_bom(body: &str) -> &str {
-    body.strip_prefix('\u{FEFF}').unwrap_or(body)
-}
-
 pub fn is_template_document(body: &str) -> bool {
     let body = strip_bom(body);
     if let Ok(value) = parse_template_body(body) {

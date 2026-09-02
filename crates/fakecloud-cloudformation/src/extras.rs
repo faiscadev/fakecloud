@@ -249,7 +249,23 @@ fn require_collection(
 /// happened -- while erroring on the probe's placeholder would return an
 /// undeclared `ValidationError` and drop conformance.
 pub(crate) fn looks_like_url(value: &str) -> bool {
-    value.contains("://")
+    if value.contains("://") {
+        return true;
+    }
+    // A single-slash typo (`s3:/bucket/app.yaml`, `https:/...`) is still
+    // plainly meant as a URL. Missing it would send the request down the
+    // lenient path and rebuild the #2480 silent no-op. Keyed on a real scheme
+    // prefix plus a slash, neither of which the probe's placeholders (`t`,
+    // `test`) contain.
+    let Some((scheme, rest)) = value.split_once(':') else {
+        return false;
+    };
+    !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        && rest.contains('/')
 }
 
 /// Extract `(bucket, key)` from a CloudFormation `TemplateURL`. Handles the
@@ -283,9 +299,13 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
     // path-style host like `s3.amazonaws.com` (no leading bucket) as one.
     if let Some(idx) = host.find(".s3") {
         let bucket = &host[..idx];
-        if !bucket.is_empty() {
+        // Both other branches reject an empty key; this one must too, or
+        // `https://bucket.s3.amazonaws.com/` "parses" with no key and the
+        // caller reports a missing object rather than an unusable URL.
+        if !bucket.is_empty() && !path.is_empty() {
             return Some((bucket.to_string(), path.to_string()));
         }
+        return None;
     }
     // Path-style: first path segment is the bucket, the rest is the key.
     let (bucket, key) = path.split_once('/')?;
@@ -296,15 +316,14 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
 }
 
 impl CloudFormationService {
-    /// Resolve a CloudFormation `TemplateURL` against fakecloud's own S3.
-    /// `sam deploy`, `aws cloudformation deploy`, and CDK upload the
-    /// template to S3 and pass its URL; the object is in fakecloud's S3 by
-    /// the time the change set is created, so read it back. Returns `None`
-    /// if the URL can't be parsed or the object isn't present.
     /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
     /// it can fail. AWS reports an unusable URL shape and a missing object
     /// differently, and collapsing them into one message sends the caller
     /// looking for a missing key when the URL itself is the problem.
+    ///
+    /// `Err` is either `TemplateURL must be a supported URL: <url>` (the shape
+    /// is unusable) or `Template not found at <url>` (well-formed, but no
+    /// object there — or an empty one).
     ///
     /// The caller is expected to have already decided the value is meant as a
     /// URL (`looks_like_url`); a synthetic non-URL scalar must not reach here.
@@ -325,6 +344,12 @@ impl CloudFormationService {
             .ok_or_else(|| format!("Template not found at {url}"))
     }
 
+    /// Read a CloudFormation `TemplateURL` out of fakecloud's own S3.
+    /// `sam deploy`, `aws cloudformation deploy`, and CDK upload the template
+    /// to S3 and pass its URL; the object is in fakecloud's S3 by the time the
+    /// stack or change set is created, so read it back. Returns `None` if the
+    /// URL can't be parsed or the object isn't present — callers that need to
+    /// tell those apart should use `resolve_template_url`.
     pub(crate) fn fetch_template_from_url(&self, account_id: &str, url: &str) -> Option<String> {
         let (bucket, key) = parse_s3_url(url)?;
         let mut accounts = self.deps.s3.write();
@@ -2648,7 +2673,7 @@ impl CloudFormationService {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_s3_url;
+    use super::{looks_like_url, parse_s3_url};
     use crate::service::{CloudFormationDeps, CloudFormationService};
     use crate::state::{CloudFormationState, SharedCloudFormationState};
     use fakecloud_core::delivery::DeliveryBus;
@@ -2703,6 +2728,35 @@ mod tests {
             .resolve_template_url("000000000000", "https://s3.amazonaws.com/b/missing.yaml")
             .expect_err("missing object");
         assert!(err.starts_with("Template not found at"), "{err}");
+    }
+
+    #[test]
+    fn virtual_hosted_url_without_a_key_is_not_an_object_url() {
+        // Both other branches reject an empty key; this one used to accept it,
+        // so a bad shape was reported as a missing object.
+        assert_eq!(parse_s3_url("https://mybucket.s3.amazonaws.com/"), None);
+        assert_eq!(parse_s3_url("https://mybucket.s3.amazonaws.com/?x=1"), None);
+        assert_eq!(
+            parse_s3_url("https://mybucket.s3.amazonaws.com/k.yaml"),
+            Some(("mybucket".to_string(), "k.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn looks_like_url_accepts_single_slash_typos_but_not_placeholders() {
+        // Plainly meant as a URL: must be reported, not silently ignored.
+        for url in [
+            "https://b.s3.amazonaws.com/k.yaml",
+            "s3://b/k.yaml",
+            "s3:/b/k.yaml",
+            "https:/b/k.yaml",
+        ] {
+            assert!(looks_like_url(url), "{url}");
+        }
+        // The conformance probe's synthetic values must stay lenient.
+        for placeholder in ["t", "test", "aaaaaaaa", "", "not-a-url"] {
+            assert!(!looks_like_url(placeholder), "{placeholder}");
+        }
     }
 
     #[test]
