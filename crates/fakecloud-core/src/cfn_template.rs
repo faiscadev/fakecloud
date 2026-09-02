@@ -214,8 +214,12 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                 },
             }
         }
-        // A new line is itself a value-start position.
+        // A new line is itself a value-start position. The escape state does
+        // NOT survive it: a trailing backslash in a double-quoted scalar
+        // escapes the line break itself, not the first byte of the next line,
+        // and carrying it could swallow the real closing quote.
         at_value_start = true;
+        escaped = false;
 
         if quote.is_some() {
             quote_lines += 1;
@@ -259,7 +263,8 @@ fn strip_bom(body: &str) -> &str {
 /// opposed to a placeholder scalar (the conformance probe sends `"test"`-style
 /// strings for `TemplateBody`).
 ///
-/// A body that parses is judged on whether it carries a `Resources` section.
+/// A body that parses is judged on its shape: only a string scalar or an
+/// absent/empty body is a placeholder.
 /// One that does NOT parse still has to be classified — and it is exactly the
 /// interesting case, since a syntax error (a stray tab, a bad indent, an
 /// unbalanced bracket) is the most common way a real template breaks. Re-using
@@ -282,27 +287,21 @@ pub fn is_template_document(body: &str) -> bool {
         // removing every existing resource. `Description` is deliberately not
         // in the list: on its own it is too generic to mark a body as a
         // template.
-        return match value {
-            // A mapping: judged on its sections, above.
-            Json::Object(_) => TEMPLATE_SECTIONS
-                .iter()
-                .any(|section| value.get(section).is_some()),
-            // A string scalar is the placeholder shape the probe sends
-            // (`TemplateBody="test"`), and `Null` is an absent or empty body.
-            // Both keep the lenient path.
-            Json::String(_) | Json::Null => false,
-            // A sequence, number or bool parses fine but is not a template of
-            // any kind — real CloudFormation rejects it as an unsupported
-            // structure. Treating it as a placeholder would accept an empty
-            // stack, or on update remove every existing resource.
-            _ => true,
-        };
+        // Only a string scalar and an absent/empty body stay lenient: the
+        // first is the placeholder shape the probe sends
+        // (`TemplateBody="test"`), the second is an omitted member. Anything
+        // else — a mapping (whatever sections it has, including none), a
+        // sequence, a number, a bool — is someone submitting a document, and
+        // real CloudFormation rejects the ones that aren't valid templates
+        // rather than building an empty stack from them.
+        return !matches!(value, Json::String(_) | Json::Null);
     }
     looks_like_template_text(body)
 }
 
-/// Top-level sections that mark a parsed object as someone's CloudFormation
-/// template, per the template anatomy AWS documents.
+/// Top-level sections that mark an *unparseable* body as someone's
+/// CloudFormation template, per the template anatomy AWS documents. A body
+/// that parses is judged by its shape instead (see `is_template_document`).
 const TEMPLATE_SECTIONS: &[&str] = &[
     "AWSTemplateFormatVersion",
     "Conditions",
@@ -922,6 +921,20 @@ Resources:
     }
 
     #[test]
+    fn a_trailing_backslash_does_not_swallow_the_closing_quote() {
+        // In a double-quoted scalar a trailing backslash escapes the line
+        // break, not the next line's first byte. Carrying the escape state
+        // across the newline consumed the real closing quote, leaving the
+        // scanner "inside" a quote for the rest of the template and
+        // mis-accounting every flow collection after it.
+        let body = "Resources:\n  Q:\n    A: \"wrapped \\\n\"\n    B: [1, 2]\n";
+        assert!(
+            !exceeds_nesting_limit(body),
+            "a shallow template must not trip the guard"
+        );
+    }
+
+    #[test]
     fn indented_section_names_are_not_top_level_keys() {
         // Only a column-zero key marks a template. An indented `Parameters:`
         // (a nested property, a pasted fragment) must keep the lenient path,
@@ -1017,8 +1030,12 @@ Resources:
                 "{placeholder:?} must not be treated as a template"
             );
         }
-        // A parseable document with no Resources section isn't one either.
-        assert!(!is_template_document("Description: just a description\n"));
+        // A mapping is always a submitted document, whatever it contains —
+        // real CloudFormation rejects one with no Resources rather than
+        // building an empty stack from it.
+        assert!(is_template_document("Description: just a description\n"));
+        assert!(is_template_document("{}"));
+        assert!(is_template_document("foo: 1\n"));
 
         // An empty / absent body parses to null and must stay lenient — the
         // probe omits TemplateBody entirely on some variants.
