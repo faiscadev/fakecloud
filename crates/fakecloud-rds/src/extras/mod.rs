@@ -1488,23 +1488,29 @@ impl RdsService {
             // ── DB Cluster endpoints ──
             "CreateDBClusterEndpoint" => {
                 let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
-                let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_default();
-                let kind = get_param(req, "EndpointType").unwrap_or_else(|| "READER".to_string());
-                let mut entry = json!({"DBClusterEndpointIdentifier": id, "DBClusterIdentifier": cluster, "Endpoint": format!("{id}.cluster-custom.{region}.rds.amazonaws.com"), "EndpointType": kind, "Status": "available", "DBClusterEndpointResourceIdentifier": format!("cluster-endpoint-{}", rand_id()), "DBClusterEndpointArn": Arn::new("rds", region, &aid, &format!("cluster-endpoint:{id}")).with_partition(partition_for(region)).to_string()});
+                // Reduced from an ARN before it is stored: the Describe
+                // side normalizes the request's identifier, so an
+                // endpoint created with the ARN form would otherwise
+                // never match a lookup by the bare id.
+                let cluster = crate::filters::normalized_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                )
+                .unwrap_or_default();
+                // AWS maps the REQUEST's EndpointType (READER / WRITER /
+                // ANY) onto the response's CustomEndpointType, and
+                // reports EndpointType as CUSTOM -- this operation only
+                // ever creates custom endpoints. CustomEndpointType is
+                // not an input member at all, so reading it from the
+                // request could never fire for an SDK, CLI or Terraform
+                // caller.
+                let custom_kind =
+                    get_param(req, "EndpointType").unwrap_or_else(|| "READER".to_string());
+                let mut entry = json!({"DBClusterEndpointIdentifier": id, "DBClusterIdentifier": cluster, "Endpoint": format!("{id}.cluster-custom.{region}.rds.amazonaws.com"), "EndpointType": "CUSTOM", "CustomEndpointType": custom_kind, "Status": "available", "DBClusterEndpointResourceIdentifier": format!("cluster-endpoint-{}", uuid::Uuid::new_v4().simple()), "DBClusterEndpointArn": Arn::new("rds", region, &aid, &format!("cluster-endpoint:{id}")).with_partition(partition_for(region)).to_string()});
                 // `db-cluster-endpoint-custom-type` filters on this, and
                 // the members define what a CUSTOM endpoint routes to --
                 // dropping them left the endpoint unreadable.
                 if let Some(obj) = entry.as_object_mut() {
-                    // Only a CUSTOM endpoint carries a custom type --
-                    // the same rule Modify applies. Stored on a READER
-                    // endpoint it would be rendered, be selectable by
-                    // `db-cluster-endpoint-custom-type`, and then vanish
-                    // on the next unrelated modify.
-                    if let Some(custom) = get_param(req, "CustomEndpointType")
-                        .filter(|_| kind.eq_ignore_ascii_case("CUSTOM"))
-                    {
-                        obj.insert("CustomEndpointType".to_string(), json!(custom));
-                    }
                     let static_members = parse_member_list(req, "StaticMembers");
                     if !static_members.is_empty() {
                         obj.insert("StaticMembers".to_string(), json!(static_members));
@@ -1537,31 +1543,13 @@ impl RdsService {
                         )
                     })?;
                 if let Some(obj) = entry.as_object_mut() {
+                    // The request's EndpointType retargets the custom
+                    // endpoint; the endpoint itself stays CUSTOM, which
+                    // is what AWS reports for one created through this
+                    // API.
                     if let Some(kind) = get_param(req, "EndpointType") {
-                        obj.insert("EndpointType".to_string(), json!(kind));
-                    }
-                    // Against the RESULTING type, including a change made
-                    // by this same request: storing a custom type on a
-                    // READER endpoint is the state the branch below
-                    // exists to clean up.
-                    let is_custom = obj
-                        .get("EndpointType")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|kind| kind.eq_ignore_ascii_case("CUSTOM"));
-                    if let Some(custom) = get_param(req, "CustomEndpointType").filter(|_| is_custom)
-                    {
-                        obj.insert("CustomEndpointType".to_string(), json!(custom));
-                    } else if obj
-                        .get("EndpointType")
-                        .and_then(|v| v.as_str())
-                        .is_some_and(|kind| !kind.eq_ignore_ascii_case("CUSTOM"))
-                    {
-                        // Only a CUSTOM endpoint carries a custom type.
-                        // Left behind when the endpoint is changed away
-                        // from CUSTOM, the stale value is now both
-                        // rendered and selectable by
-                        // `db-cluster-endpoint-custom-type`.
-                        obj.remove("CustomEndpointType");
+                        obj.insert("CustomEndpointType".to_string(), json!(kind));
+                        obj.insert("EndpointType".to_string(), json!("CUSTOM"));
                     }
                     // Presence, not emptiness: a request that sends the
                     // list empty is asking to clear it, and treating that
@@ -2292,7 +2280,7 @@ impl RdsService {
 
             // ── Blue/Green deployments ──
             "CreateBlueGreenDeployment" => {
-                let id = format!("bgd-{}", rand_id());
+                let id = format!("bgd-{}", uuid::Uuid::new_v4().simple());
                 let arn = Arn::new("rds", region, &aid, &format!("blue-green-deployment:{id}"))
                     .to_string();
                 let source_arn = get_param(req, "Source")

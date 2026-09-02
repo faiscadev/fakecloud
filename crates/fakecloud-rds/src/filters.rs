@@ -94,7 +94,7 @@ impl RdsFilter {
 }
 
 /// The identifier a Describe was asked to narrow to, or `None` when it
-/// was asked to narrow at all.
+/// was not asked to narrow at all.
 ///
 /// `normalized_identifier` alone is not enough here: it returns `None`
 /// both for "absent" and for "an ARN this operation can't resolve"

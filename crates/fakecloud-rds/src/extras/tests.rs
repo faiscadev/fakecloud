@@ -1716,7 +1716,11 @@ fn modify_db_cluster_endpoint_persists_endpoint_type() {
         ],
     );
     let v = extras_value(&svc, "cluster_endpoints", "ce1");
-    assert_eq!(v["EndpointType"].as_str(), Some("ANY"));
+    // AWS maps the request's EndpointType onto CustomEndpointType and
+    // reports the endpoint itself as CUSTOM -- this operation only ever
+    // creates custom endpoints.
+    assert_eq!(v["CustomEndpointType"].as_str(), Some("ANY"));
+    assert_eq!(v["EndpointType"].as_str(), Some("CUSTOM"));
     assert_eq!(
         v["StaticMembers"].as_array().unwrap()[0].as_str(),
         Some("writer-1")
@@ -3166,8 +3170,9 @@ fn describe_db_cluster_endpoints_honors_filters() {
         &[
             ("DBClusterEndpointIdentifier", "ep-custom"),
             ("DBClusterIdentifier", "clu-1"),
-            ("EndpointType", "CUSTOM"),
-            ("CustomEndpointType", "READER"),
+            // The REQUEST's type becomes the endpoint's
+            // CustomEndpointType; the endpoint itself reads back CUSTOM.
+            ("EndpointType", "READER"),
             ("StaticMembers.member.1", "inst-1"),
         ],
     );
@@ -3177,7 +3182,7 @@ fn describe_db_cluster_endpoints_honors_filters() {
         &[
             ("DBClusterEndpointIdentifier", "ep-reader"),
             ("DBClusterIdentifier", "clu-1"),
-            ("EndpointType", "READER"),
+            ("EndpointType", "ANY"),
         ],
     );
 
@@ -3194,12 +3199,6 @@ fn describe_db_cluster_endpoints_honors_filters() {
     );
 
     for (name, value, expected, unexpected) in [
-        (
-            "db-cluster-endpoint-type",
-            "CUSTOM",
-            "ep-custom",
-            "ep-reader",
-        ),
         (
             "db-cluster-endpoint-custom-type",
             "READER",
@@ -3234,6 +3233,18 @@ fn describe_db_cluster_endpoints_honors_filters() {
             "{name}={value} kept {unexpected}: {body}"
         );
     }
+
+    // Both endpoints are CUSTOM: that is what this operation creates.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-type"),
+            ("Filters.Filter.1.Values.Value.1", "custom"),
+        ],
+    );
+    assert!(body.contains("<DBClusterEndpointIdentifier>ep-custom</DBClusterEndpointIdentifier>"));
+    assert!(body.contains("<DBClusterEndpointIdentifier>ep-reader</DBClusterEndpointIdentifier>"));
 
     // Status defaults to `available` on both the stored row and the
     // renderer, so the filter has to see that same default -- and a
@@ -3289,8 +3300,7 @@ fn cluster_endpoint_filters_accept_the_documented_lowercase_values() {
         &[
             ("DBClusterEndpointIdentifier", "ep-custom"),
             ("DBClusterIdentifier", "clu-1"),
-            ("EndpointType", "CUSTOM"),
-            ("CustomEndpointType", "READER"),
+            ("EndpointType", "READER"),
         ],
     );
 
@@ -3320,7 +3330,7 @@ fn cluster_endpoint_filters_accept_the_documented_lowercase_values() {
         &svc,
         "DescribeDBClusterEndpoints",
         &[
-            ("Filters.Filter.1.Name", "db-cluster-endpoint-type"),
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-custom-type"),
             ("Filters.Filter.1.Values.Value.1", "writer"),
         ],
     );
@@ -3443,27 +3453,26 @@ fn modify_cluster_endpoint_clears_stale_fields() {
         &[
             ("DBClusterEndpointIdentifier", "ep-1"),
             ("DBClusterIdentifier", "clu-1"),
-            ("EndpointType", "CUSTOM"),
-            ("CustomEndpointType", "READER"),
+            ("EndpointType", "READER"),
             ("StaticMembers.member.1", "inst-1"),
         ],
     );
 
-    // Away from CUSTOM: the custom type no longer applies.
+    // Retargeting the custom endpoint replaces the custom type rather
+    // than leaving the old one selectable.
     ok_on(
         &svc,
         "ModifyDBClusterEndpoint",
         &[
             ("DBClusterEndpointIdentifier", "ep-1"),
-            ("EndpointType", "READER"),
+            ("EndpointType", "ANY"),
         ],
     );
     let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
     assert!(
-        !body.contains("<CustomEndpointType>"),
-        "a READER endpoint kept a custom type: {body}"
+        body.contains("<CustomEndpointType>ANY</CustomEndpointType>"),
+        "{body}"
     );
-    // And it is no longer selectable by the stale value.
     let filtered = body_of_action(
         &svc,
         "DescribeDBClusterEndpoints",
@@ -3474,7 +3483,7 @@ fn modify_cluster_endpoint_clears_stale_fields() {
     );
     assert!(
         !filtered.contains("<DBClusterEndpointIdentifier>"),
-        "a stale custom type still matched: {filtered}"
+        "the replaced custom type still matched: {filtered}"
     );
 
     // Static members survive a modify that doesn't mention them...
@@ -3719,42 +3728,6 @@ fn describe_db_cluster_endpoints_reports_an_unknown_cluster() {
     }
 }
 
-/// Create applies the same "only a CUSTOM endpoint carries a custom
-/// type" rule Modify does; otherwise the field is rendered, selectable,
-/// and then silently dropped by the next unrelated modify.
-#[test]
-fn create_cluster_endpoint_ignores_a_custom_type_on_a_reader() {
-    let svc = svc();
-    ok_on(
-        &svc,
-        "CreateDBClusterEndpoint",
-        &[
-            ("DBClusterEndpointIdentifier", "ep-reader"),
-            ("DBClusterIdentifier", "clu-1"),
-            ("EndpointType", "READER"),
-            ("CustomEndpointType", "ANY"),
-        ],
-    );
-
-    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
-    assert!(
-        !body.contains("<CustomEndpointType>"),
-        "a READER endpoint stored a custom type: {body}"
-    );
-    let filtered = body_of_action(
-        &svc,
-        "DescribeDBClusterEndpoints",
-        &[
-            ("Filters.Filter.1.Name", "db-cluster-endpoint-custom-type"),
-            ("Filters.Filter.1.Values.Value.1", "any"),
-        ],
-    );
-    assert!(
-        !filtered.contains("<DBClusterEndpointIdentifier>"),
-        "a READER endpoint was selectable by custom type: {filtered}"
-    );
-}
-
 /// `parse_member_list` reads through the form-body fallback, so the
 /// presence check has to as well -- otherwise the members are parsed and
 /// then discarded as "never sent".
@@ -3767,7 +3740,7 @@ fn member_lists_are_read_from_an_unmerged_form_body() {
         &[
             ("DBClusterEndpointIdentifier", "ep-1"),
             ("DBClusterIdentifier", "clu-1"),
-            ("EndpointType", "CUSTOM"),
+            ("EndpointType", "READER"),
         ],
     );
 
@@ -3892,34 +3865,78 @@ fn a_backtrack_id_without_a_cluster_selects_nothing() {
     );
 }
 
-/// Modify applies the same rule Create does, against the type the
-/// request LEAVES the endpoint in.
+/// The endpoint a REAL client gets back.
+///
+/// `CustomEndpointType` is not a member of either input shape, so no SDK,
+/// CLI or Terraform caller can send it -- AWS derives it from the
+/// request's `EndpointType` and reports the endpoint itself as `CUSTOM`.
+/// A handler that read `CustomEndpointType` off the request stored
+/// nothing, and `aws_rds_cluster_endpoint` (which writes
+/// `custom_endpoint_type` as `EndpointType` and reads it back from
+/// `CustomEndpointType`) would fail its post-apply consistency check.
 #[test]
-fn modify_cluster_endpoint_ignores_a_custom_type_on_a_reader() {
+fn create_cluster_endpoint_maps_endpoint_type_to_the_custom_type() {
+    let svc = svc();
+    let body = body_of_action(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+    assert!(
+        body.contains("<CustomEndpointType>READER</CustomEndpointType>"),
+        "the create response dropped the custom type: {body}"
+    );
+    assert!(
+        body.contains("<EndpointType>CUSTOM</EndpointType>"),
+        "a custom endpoint did not read back as CUSTOM: {body}"
+    );
+
+    // The listing agrees, and the documented filter selects it.
+    let listed = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-custom-type"),
+            ("Filters.Filter.1.Values.Value.1", "reader"),
+        ],
+    );
+    assert!(
+        listed.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "the documented filter selected nothing: {listed}"
+    );
+}
+
+/// The Describe side reduces an ARN, so the Create side has to store the
+/// reduced form or the endpoint is unreachable by the bare id.
+#[test]
+fn create_cluster_endpoint_stores_a_reduced_cluster_identifier() {
     let svc = svc();
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
         &[
             ("DBClusterEndpointIdentifier", "ep-1"),
-            ("DBClusterIdentifier", "clu-1"),
-            ("EndpointType", "CUSTOM"),
-        ],
-    );
-    ok_on(
-        &svc,
-        "ModifyDBClusterEndpoint",
-        &[
-            ("DBClusterEndpointIdentifier", "ep-1"),
+            (
+                "DBClusterIdentifier",
+                "arn:aws:rds:us-east-1:000000000000:cluster:clu-1",
+            ),
             ("EndpointType", "READER"),
-            ("CustomEndpointType", "READER"),
         ],
     );
+    create_cluster(&svc, "clu-1");
 
-    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
     assert!(
-        !body.contains("<CustomEndpointType>"),
-        "a modify stored a custom type on a READER endpoint: {body}"
+        body.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "an endpoint created with the cluster ARN was unreachable by id: {body}"
     );
 }
 
