@@ -208,7 +208,7 @@ Override knobs (env vars, both optional):
 
 ## Describe filters
 
-The `Filters` parameter is honored on the four Describe operations in the table below. Other operations that AWS documents filters for (`DescribeDBClusterEndpoints`, `DescribeDBShardGroups`, `DescribeDBClusterBacktracks`, `DescribePendingMaintenanceActions`) accept the parameter and currently return the unfiltered list. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Names and values are case-sensitive, and wildcards are not supported (same as AWS).
+The `Filters` parameter is honored on the Describe operations in the table below. `DescribePendingMaintenanceActions` accepts the parameter and returns the unfiltered list. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Filter names are case-sensitive and wildcards are not supported (same as AWS); values are case-sensitive too, except for the four enum-valued endpoint and backtrack filters noted below.
 
 | Operation | Supported filter names |
 | --- | --- |
@@ -216,6 +216,27 @@ The `Filters` parameter is honored on the four Describe operations in the table 
 | `DescribeDBSnapshots` | `db-instance-id`, `db-snapshot-id`, `dbi-resource-id`, `engine`, `snapshot-type` |
 | `DescribeDBClusters` | `clone-group-id`, `db-cluster-id`, `db-cluster-resource-id`, `domain`, `engine` |
 | `DescribeDBClusterSnapshots` | `db-cluster-id`, `db-cluster-snapshot-id`, `engine`, `snapshot-type` |
+| `DescribeDBClusterEndpoints` | `db-cluster-endpoint-id`, `db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-status` |
+| `DescribeDBClusterBacktracks` | `db-cluster-backtrack-id`, `db-cluster-backtrack-status` |
+| `DescribeDBShardGroups` | `db-shard-group-id` |
+
+`DescribeDBClusterBacktracks` returns the backtracks `BacktrackDBCluster` recorded, scoped to the cluster named in the request; an unknown cluster raises `DBClusterNotFoundFault`. AWS marks `DBClusterIdentifier` required, but the only errors the RDS model declares on this operation are `DBClusterNotFoundFault` and `DBClusterBacktrackNotFoundFault`, so omitting it selects no cluster's backtracks rather than emitting an error shape that isn't in the model. Backtrack `Status` is reported lowercase (`completed`), matching the values the `db-cluster-backtrack-status` filter documents.
+
+`DescribeDBClusterEndpoints` reports each cluster's built-in writer and reader endpoints alongside the custom ones, as AWS does. They belong to the cluster rather than the endpoint store -- there is no API that creates or deletes them -- so `db-cluster-endpoint-type=reader` matches them while `custom` matches the ones you created. They report no `DBClusterEndpointIdentifier`, `DBClusterEndpointResourceIdentifier` or `DBClusterEndpointArn`, matching AWS: a built-in has no identity of its own, and borrowing the cluster's would make a lookup by endpoint identifier return rows AWS doesn't. Their `Status` is mapped into the endpoint's own enum (`creating`, `available`, `deleting`, `inactive`, `modifying`), so a cluster that is backing up or upgrading reports `modifying` rather than a value that enum has no room for.
+
+`DeleteDBClusterEndpoint` raises `DBClusterEndpointNotFoundFault` for an identifier that doesn't exist instead of reporting success, and reports the endpoint as `deleting`. `DeleteDBCluster` deletes the cluster's custom endpoints and backtrack records with it, as AWS does, so recreating a cluster under the same name doesn't inherit them.
+
+`CreateDBClusterEndpoint` raises `DBClusterEndpointAlreadyExistsFault` for an identifier that already exists rather than overwriting it.
+
+`CreateDBClusterEndpoint` only ever creates custom endpoints, so the request's `EndpointType` (`READER`, `WRITER`, `ANY`) is reported back as `CustomEndpointType` with `EndpointType` set to `CUSTOM`, matching AWS -- `CustomEndpointType` is an output member, not something a caller sends. `ModifyDBClusterEndpoint` retargets it the same way. `StaticMembers` and `ExcludedMembers` are persisted and reported too, along with the endpoint's ARN and resource id, so a caller can read back what it set and `db-cluster-endpoint-custom-type` has something to match.
+
+The model documents no filter names for `DescribeDBShardGroups`; the shard group's own id is accepted, as on the sibling Describes. An identifier parameter that names another account's resource, or an ARN of the wrong resource type, matches nothing rather than falling back to the unfiltered list. A named `DBShardGroupIdentifier` or `BacktrackIdentifier` that doesn't exist raises the fault the model declares (`DBShardGroupNotFound`, `DBClusterBacktrackNotFoundFault` -- the first drops the shape name's `Fault` suffix on the wire, as AWS does) rather than an empty list, so a poller can tell "gone" from "no rows".
+
+`db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-status` and `db-cluster-backtrack-status` match case-insensitively. AWS returns the endpoint types uppercase (`CUSTOM`, `READER`) while documenting the filter values lowercase (`custom`, `reader`), so an exact comparison would return nothing for a caller copying the documented command. The status values are lowercase on both sides; matching them case-insensitively too just keeps the four filters consistent.
+
+These three operations honor `MaxRecords` and `Marker` and report a `Marker` when more rows remain.
+
+Listings come out in a stable order, so two identical requests report the same rows in the same order and a pagination marker stays meaningful between calls. It is identifier order for most listings; on `DescribeDBClusterEndpoints` a cluster's built-in endpoints sort under the cluster's own identifier, interleaved with the custom endpoints rather than ahead of them.
 
 Filters documented as accepting "identifiers and ARNs" (`db-instance-id`, `db-cluster-id`, `db-snapshot-id`, `db-cluster-snapshot-id`) match either form.
 

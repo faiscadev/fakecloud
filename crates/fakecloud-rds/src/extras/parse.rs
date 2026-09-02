@@ -168,11 +168,47 @@ pub(super) fn list_extras_xml(
     rid: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state_handle().read();
-    let items: Vec<Value> = accounts
+    let items: Vec<Value> = sorted_entries(&accounts, aid, category, |_| true)
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect();
+    Ok(xml_response(
+        action,
+        render_list(wrapper, member_tag, &items, "", render),
+        rid,
+    ))
+}
+
+/// The rows of one extras category, in key order and passing `keep`.
+///
+/// `extras` is a `BTreeMap`, so iteration is already key-ordered -- two
+/// identical requests answer with the rows in the same order, which is
+/// what makes the key usable as a pagination cursor.
+pub(super) fn sorted_entries(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<crate::state::RdsState>,
+    aid: &str,
+    category: &str,
+    keep: impl Fn(&Value) -> bool,
+) -> Vec<(String, Value)> {
+    accounts
         .get(aid)
         .and_then(|s| s.extras.get(category))
-        .map(|m| m.values().cloned().collect())
-        .unwrap_or_default();
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| keep(v))
+                .map(|(key, v)| (key.clone(), v.clone()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn render_list(
+    wrapper: &str,
+    member_tag: &str,
+    items: &[Value],
+    marker_xml: &str,
+    render: impl Fn(&Value) -> String,
+) -> String {
     let body = items
         .iter()
         .map(|v| {
@@ -183,8 +219,66 @@ pub(super) fn list_extras_xml(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let inner = format!("    <{wrapper}>\n{body}\n    </{wrapper}>");
-    Ok(xml_response(action, inner, rid))
+    format!("    <{wrapper}>\n{body}\n    </{wrapper}>{marker_xml}")
+}
+
+/// [`list_extras_xml`] with a predicate and pagination, for the Describe
+/// operations that model `Filters` alongside `MaxRecords` / `Marker`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn list_extras_filtered_xml(
+    svc: &RdsService,
+    aid: &str,
+    category: &str,
+    wrapper: &str,
+    member_tag: &str,
+    action: &str,
+    req: &AwsRequest,
+    keep: impl Fn(&Value) -> bool,
+    render: impl Fn(&Value) -> String,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = svc.state_handle().read();
+    let entries = sorted_entries(&accounts, aid, category, keep);
+    drop(accounts);
+    list_items_xml(entries, wrapper, member_tag, action, req, render, rid)
+}
+
+/// The rendering + pagination half of [`list_extras_filtered_xml`], for a
+/// listing whose rows don't all come from one extras category.
+pub(super) fn list_items_xml(
+    entries: Vec<(String, Value)>,
+    wrapper: &str,
+    member_tag: &str,
+    action: &str,
+    req: &AwsRequest,
+    render: impl Fn(&Value) -> String,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    // The map key is unique and the rows are in key order, so it is a
+    // stable cursor. Without this a client that asked for a page got the
+    // whole list back and no Marker to continue from.
+    //
+    // `get_param` keeps `Marker=` as Some(""), which would decode to a
+    // position no row matches and return an EMPTY page rather than the
+    // first one; every other parameter here treats an explicit empty as
+    // absent too.
+    let paginated = crate::service::service_helpers::paginate(
+        entries,
+        get_param(req, "Marker").filter(|value| !value.is_empty()),
+        get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
+        |(key, _)| key.as_str(),
+    )?;
+    let marker_xml = paginated
+        .next_marker
+        .as_ref()
+        .map(|m| format!("\n    <Marker>{}</Marker>", xml_escape(m)))
+        .unwrap_or_default();
+    let items: Vec<Value> = paginated.items.into_iter().map(|(_, v)| v).collect();
+    Ok(xml_response(
+        action,
+        render_list(wrapper, member_tag, &items, &marker_xml, render),
+        rid,
+    ))
 }
 
 /// Like [`list_extras_xml`] but wraps each element in the list's *named*

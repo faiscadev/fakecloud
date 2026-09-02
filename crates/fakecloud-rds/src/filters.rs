@@ -15,7 +15,9 @@
 //!
 //! Semantics, per the AWS docs: filters are AND-ed with each other and
 //! with the operation's own identifier parameter; the values inside one
-//! filter are OR-ed. Names and values are case-sensitive, and wildcards
+//! filter are OR-ed. Names are case-sensitive, and so are values except on the few
+//! enum-valued filters AWS documents in a different case than it
+//! returns (see `matches_ignore_case`), and wildcards
 //! are not supported.
 //!
 //! Real RDS rejects a filter name an operation doesn't support with
@@ -27,7 +29,7 @@
 //! per-operation matchers below do — a caller filtering on something we
 //! don't recognise gets an empty result rather than the whole list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fakecloud_core::service::AwsRequest;
 
@@ -71,11 +73,82 @@ impl RdsFilter {
         }
     }
 
+    /// True when `candidate` is one of the filter's values, compared
+    /// case-insensitively.
+    ///
+    /// Filters are case-sensitive on AWS, but a few enum-valued ones
+    /// are documented in a different case than the API stores and
+    /// returns -- `db-cluster-endpoint-type` accepts `reader` while the
+    /// endpoint reads back `READER`. An exact comparison there means a
+    /// caller copying the documented command selects nothing.
+    pub fn matches_ignore_case(&self, candidate: Option<&str>) -> bool {
+        match candidate {
+            Some(value) => self.values.iter().any(|v| v.eq_ignore_ascii_case(value)),
+            None => false,
+        }
+    }
+
     /// True when any of `candidates` is one of the filter's values. Used
     /// for filters AWS documents as accepting "identifiers and ARNs".
     pub fn matches_any<'a>(&self, candidates: impl IntoIterator<Item = Option<&'a str>>) -> bool {
         candidates.into_iter().any(|c| self.matches(c))
     }
+}
+
+/// Reports the filter names an operation doesn't support, once per
+/// request.
+///
+/// Called before the rows are scanned, not from inside the per-row
+/// predicate: reporting from there logged one line per row, and a cache
+/// to dedupe it would grow without bound on request-supplied names.
+/// Here the work is bounded by the request's own filter count and the
+/// predicate stays side-effect-free.
+pub(crate) fn warn_unknown_filters(filters: &[RdsFilter], supported: &[&str]) {
+    // Deduped within the request: a caller may repeat the same name
+    // across entries, and one line per entry is the same noise the
+    // per-row report made, just smaller. A local set keeps this bounded
+    // by the request rather than by anything the caller can grow, and
+    // keeps the pass linear -- the names are request-controlled, so a
+    // scan per name would let a long list cost quadratic time before
+    // the Describe even starts.
+    let mut reported: HashSet<&str> = HashSet::new();
+    for filter in filters {
+        let name = filter.name.as_str();
+        if supported.contains(&name) || !reported.insert(name) {
+            continue;
+        }
+        tracing::warn!(
+            filter = %name,
+            "unrecognized RDS filter name; matching no resource"
+        );
+    }
+}
+
+/// The identifier a Describe was asked to narrow to, or `None` when it
+/// was not asked to narrow at all.
+///
+/// `normalized_identifier` alone is not enough here: it returns `None`
+/// both for "absent" and for "an ARN this operation can't resolve"
+/// (wrong resource type, or another account's), and a caller reading
+/// `None` as "no narrowing" would answer a targeted request with the
+/// WHOLE list -- and skip the not-found check on the way. Failing
+/// closed, an unresolvable identifier stays as the caller wrote it: it
+/// matches no stored row, so the request selects nothing or raises the
+/// operation's declared not-found fault.
+pub(crate) fn requested_identifier(
+    raw: Option<String>,
+    resource_type: &str,
+    account_id: &str,
+) -> Option<String> {
+    // An explicitly empty value is not a request for a resource named
+    // "" -- every other parameter here treats it as absent.
+    let raw = raw.filter(|value| !value.is_empty())?;
+    if !addresses_own_account(&raw, account_id) {
+        // Another account's ARN must not alias onto this account's
+        // same-named resource.
+        return Some(raw);
+    }
+    Some(normalized_identifier(Some(raw.clone()), resource_type).unwrap_or(raw))
 }
 
 /// Rebuild an RDS ARN for a sibling resource of `arn` (same partition,

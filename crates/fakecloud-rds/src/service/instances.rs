@@ -11,6 +11,16 @@ use crate::filters::{
 /// each other; the values within one filter are OR-ed. The names come
 /// from the `DescribeDBInstances` docs: `db-cluster-id`,
 /// `db-instance-id`, `dbi-resource-id`, `domain` and `engine`.
+/// The filter names this Describe supports, for the
+/// one-per-request report of the ones it doesn't.
+const INSTANCE_FILTERS: &[&str] = &[
+    "db-cluster-id",
+    "db-instance-id",
+    "dbi-resource-id",
+    "domain",
+    "engine",
+];
+
 fn instance_matches_filters(instance: &DbInstance, filters: &[RdsFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-instance-id" => filter.matches_any([
@@ -28,10 +38,9 @@ fn instance_matches_filters(instance: &DbInstance, filters: &[RdsFilter]) -> boo
         }
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        other => {
-            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
-            false
-        }
+        // Unsupported names are reported once per request by
+        // `warn_unknown_filters`, before the scan.
+        _ => false,
     })
 }
 
@@ -1291,6 +1300,7 @@ impl RdsService {
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
         let filters = parse_filters(request);
+        crate::filters::warn_unknown_filters(&filters, INSTANCE_FILTERS);
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);

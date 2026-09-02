@@ -682,7 +682,16 @@ pub(super) fn backtrack_db_cluster_action(
     req: &AwsRequest,
     rid: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+    // Reduced from an ARN, as DescribeDBClusterBacktracks does: a client
+    // that uses the ARN form consistently could otherwise list a
+    // cluster's backtracks but not create one, because the lookup below
+    // would report an existing cluster as not found.
+    let id = crate::filters::requested_identifier(
+        get_param(req, "DBClusterIdentifier"),
+        "cluster",
+        account_id,
+    )
+    .ok_or_else(|| missing("DBClusterIdentifier"))?;
     let backtrack_to = get_param(req, "BacktrackTo").ok_or_else(|| missing("BacktrackTo"))?;
     let arn = Arn::new("rds", region, account_id, &format!("cluster:{id}")).to_string();
     let entry = cluster_entry(svc, account_id, &id)?;
@@ -705,6 +714,7 @@ pub(super) fn backtrack_db_cluster_action(
     }
 
     let backtrack_id = format!("bt-{}", rand_id());
+    let backtrack_record;
     {
         let mut accounts = svc.state_handle().write();
         let state = accounts.get_or_create(account_id);
@@ -727,14 +737,21 @@ pub(super) fn backtrack_db_cluster_action(
             }
         }
         // Append a backtrack record so DescribeDBClusterBacktracks returns it.
+        let now = chrono::Utc::now().to_rfc3339();
         let record = json!({
             "BacktrackIdentifier": backtrack_id,
             "DBClusterIdentifier": id,
             "BacktrackTo": backtrack_to,
-            "BacktrackedFrom": chrono::Utc::now().to_rfc3339(),
-            "Status": "COMPLETED",
+            "BacktrackedFrom": now,
+            "BacktrackRequestCreationTime": now,
+            // Lowercase, as AWS reports it and as the documented
+            // `db-cluster-backtrack-status` filter values are spelled --
+            // the filter is case-sensitive, so `COMPLETED` could never
+            // be selected by the value the docs tell a caller to send.
+            "Status": "completed",
         });
-        store(&mut state.extras, "cluster_backtracks").insert(backtrack_id.clone(), record);
+        store(&mut state.extras, "cluster_backtracks").insert(backtrack_id.clone(), record.clone());
+        backtrack_record = record;
     }
 
     svc.emit_event(
@@ -746,9 +763,14 @@ pub(super) fn backtrack_db_cluster_action(
         "DB cluster backtrack completed",
     );
 
+    // The modeled output is DBClusterBacktrack, not DBCluster. Returning
+    // the cluster meant the response carried no BacktrackIdentifier --
+    // the id the caller needs to address the backtrack through
+    // DescribeDBClusterBacktracks or its `db-cluster-backtrack-id`
+    // filter.
     Ok(xml_response(
         "BacktrackDBCluster",
-        cluster_xml_from_state(svc, account_id, &id, &arn),
+        super::xml_renderers::cluster_backtrack_xml(&backtrack_record),
         rid,
     ))
 }

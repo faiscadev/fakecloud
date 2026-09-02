@@ -42,6 +42,31 @@ fn entry_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
 /// with each other; the values within one filter are OR-ed. The names
 /// come from the `DescribeDBClusters` docs: `clone-group-id`,
 /// `db-cluster-id`, `db-cluster-resource-id`, `domain` and `engine`.
+/// The filter names each Describe supports, for the one-per-request
+/// report of the ones it doesn't. Kept beside the matchers that read
+/// them so the two can't drift.
+const CLUSTER_FILTERS: &[&str] = &[
+    "clone-group-id",
+    "db-cluster-id",
+    "db-cluster-resource-id",
+    "domain",
+    "engine",
+];
+const CLUSTER_ENDPOINT_FILTERS: &[&str] = &[
+    "db-cluster-endpoint-id",
+    "db-cluster-endpoint-type",
+    "db-cluster-endpoint-custom-type",
+    "db-cluster-endpoint-status",
+];
+const SHARD_GROUP_FILTERS: &[&str] = &["db-shard-group-id"];
+const BACKTRACK_FILTERS: &[&str] = &["db-cluster-backtrack-id", "db-cluster-backtrack-status"];
+const CLUSTER_SNAPSHOT_FILTERS: &[&str] = &[
+    "db-cluster-id",
+    "db-cluster-snapshot-id",
+    "engine",
+    "snapshot-type",
+];
+
 fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-cluster-id" => filter.matches_any([
@@ -54,16 +79,12 @@ fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        other => {
-            // Warn, not debug: the result is an EMPTY list where the
-            // caller expected a narrowed one, and nothing on the wire
-            // says why (InvalidParameterValue isn't declared on these
-            // operations, so it can't be returned). A silent empty
-            // result is the hardest failure to diagnose, so the reason
-            // has to reach a default log level.
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
-            false
-        }
+        // The result is an EMPTY list where the caller expected a
+        // narrowed one, and nothing on the wire says why
+        // (InvalidParameterValue isn't declared on these operations, so
+        // it can't be returned). `warn_unknown_filters` reports the
+        // reason once per request, before the scan.
+        _ => false,
     })
 }
 
@@ -86,6 +107,186 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
         labels.push("shared".to_string());
     }
     labels
+}
+
+/// The row as the delete response reports it.
+fn deleting(mut entry: Value) -> Value {
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("Status".to_string(), json!("deleting"));
+    }
+    entry
+}
+
+/// The shard-group identifier a request addresses, reduced from an ARN.
+///
+/// The read path reduces it, so the write paths have to as well: a group
+/// created with the ARN form was keyed by the ARN, and the very next
+/// `DescribeDBShardGroups` with that same ARN reduced it to the bare id,
+/// found nothing, and reported an existing group as missing.
+fn shard_group_identifier(req: &AwsRequest, account_id: &str) -> Option<String> {
+    // An explicitly empty value is absent, as it is for every other
+    // identifier parameter -- `unwrap_or(raw)` handed `""` back as if it
+    // were a real id, so a create stored a row under the empty key.
+    let raw = get_param(req, "DBShardGroupIdentifier").filter(|value| !value.is_empty())?;
+    Some(
+        crate::filters::requested_identifier(Some(raw.clone()), "shard-group", account_id)
+            .unwrap_or(raw),
+    )
+}
+
+/// The endpoint identifier a request addresses, reduced from an ARN.
+///
+/// Never fails: an absent or empty value falls through as `""`, which
+/// matches no stored endpoint and so reaches the operation's own
+/// declared fault. Raising `missing()` instead would put
+/// `InvalidParameterValue` on the wire, and that error is not declared
+/// anywhere in the RDS model.
+fn endpoint_identifier(req: &AwsRequest, account_id: &str) -> String {
+    let raw = get_param(req, "DBClusterEndpointIdentifier").unwrap_or_default();
+    crate::filters::requested_identifier(Some(raw.clone()), "cluster-endpoint", account_id)
+        .unwrap_or(raw)
+}
+
+/// A stored endpoint, in the shape a CUSTOM endpoint reports.
+///
+/// Rows written before `CustomEndpointType` was derived carry the
+/// request's `EndpointType` (READER / WRITER / ANY) and no custom type.
+/// RDS state is persisted, so those rows outlive the change: read
+/// verbatim they are indistinguishable from a cluster's built-in
+/// endpoints -- `db-cluster-endpoint-type=custom` would miss them,
+/// `=reader` would return them as if they were a built-in, and the
+/// caller would read back a type it never asked for. Everything in the
+/// endpoints store was created through `CreateDBClusterEndpoint`, which
+/// only makes custom endpoints, so the old value IS the custom type.
+fn as_custom_endpoint(mut entry: Value) -> Value {
+    if entry_str(&entry, "CustomEndpointType").is_some() {
+        return entry;
+    }
+    let Some(kind) = entry_str(&entry, "EndpointType").map(str::to_string) else {
+        return entry;
+    };
+    if kind.eq_ignore_ascii_case("CUSTOM") {
+        return entry;
+    }
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("CustomEndpointType".to_string(), json!(kind));
+        object.insert("EndpointType".to_string(), json!("CUSTOM"));
+    }
+    entry
+}
+
+/// A cluster's built-in writer and reader endpoints.
+///
+/// AWS reports these from `DescribeDBClusterEndpoints` next to the custom
+/// ones, but they are part of the cluster: there is no API to create or
+/// delete them, and they carry no `DBClusterEndpointIdentifier`. They are
+/// synthesized from the cluster's stored endpoints rather than seeded
+/// into the endpoints store so that deleting a custom endpoint can never
+/// remove one, and so a cluster created before this existed still
+/// reports them.
+fn built_in_cluster_endpoints(cluster_id: &str, cluster: &Value) -> Vec<(String, Value)> {
+    // DBClusterEndpoint.Status is its own enum (creating / available /
+    // deleting / inactive / modifying). A cluster's status has values
+    // outside it -- backing-up, upgrading, failing-over, starting,
+    // stopped -- and a caller polling the endpoint for one of the five
+    // would either loop forever or fail to parse the enum.
+    let status = match entry_str(cluster, "Status").unwrap_or("available") {
+        state @ ("creating" | "available" | "deleting" | "inactive" | "modifying") => state,
+        "stopped" => "inactive",
+        _ => "modifying",
+    }
+    .to_string();
+    [("WRITER", "Endpoint"), ("READER", "ReaderEndpoint")]
+        .into_iter()
+        .filter_map(|(kind, field)| {
+            let address = entry_str(cluster, field)?;
+            // Only the four members AWS reports for a built-in. It has
+            // no identifier, no resource id and no ARN of its own:
+            // borrowing the cluster's would make
+            // `--db-cluster-endpoint-identifier <cluster>` return rows
+            // AWS doesn't, and would hand a cleanup script that deletes
+            // every reported identifier the cluster's own name.
+            // `cluster-endpoint:{cluster}-writer` is likewise the ARN of
+            // a CUSTOM endpoint literally named that, and the cluster's
+            // resource id is a different namespace from the
+            // `cluster-endpoint-` one this API mints. All three members
+            // are optional; reporting nothing beats reporting a
+            // borrowed or fabricated value.
+            let value = json!({
+                "DBClusterIdentifier": cluster_id,
+                "Endpoint": address,
+                "EndpointType": kind,
+                "Status": status,
+            });
+            // Keyed by the CLUSTER id, so a cluster's built-ins sort
+            // among the custom endpoints rather than ahead of all of
+            // them: with the global prefix, an account with enough
+            // clusters filled the whole first page with built-ins and a
+            // client that ignores `Marker` -- as every caller of this
+            // operation did before it paginated -- saw none of its own
+            // endpoints. The NUL keeps the pair distinct from a custom
+            // endpoint named exactly the cluster id.
+            Some((format!("{cluster_id}\u{0}{kind}"), value))
+        })
+        .collect()
+}
+
+/// True when a stored cluster endpoint satisfies every filter. The names
+/// come from the `DescribeDBClusterEndpoints` docs:
+/// `db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`,
+/// `db-cluster-endpoint-id` and `db-cluster-endpoint-status`.
+fn cluster_endpoint_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-endpoint-id" => filter.matches(entry_str(entry, "DBClusterEndpointIdentifier")),
+        // AWS stores and returns these UPPERCASE (READER / WRITER /
+        // CUSTOM) while the DescribeDBClusterEndpoints docs spell the
+        // filter values lowercase (reader, writer, custom) -- so a
+        // caller copying the documented command would select nothing
+        // under an exact comparison.
+        "db-cluster-endpoint-type" => filter.matches_ignore_case(entry_str(entry, "EndpointType")),
+        "db-cluster-endpoint-custom-type" => {
+            filter.matches_ignore_case(entry_str(entry, "CustomEndpointType"))
+        }
+        // AWS defaults a stored endpoint to `available`, and so does the
+        // renderer -- so the filter has to see the same default rather
+        // than skipping a row that simply never recorded a status.
+        "db-cluster-endpoint-status" => {
+            filter.matches_ignore_case(entry_str(entry, "Status").or(Some("available")))
+        }
+        // Unsupported names are reported once per request by
+        // `warn_unknown_filters`, before the scan.
+        _ => false,
+    })
+}
+
+/// True when a stored shard group satisfies every filter. The model
+/// documents no filter names for `DescribeDBShardGroups`; AWS accepts
+/// the resource's own id, as the sibling Describes do.
+fn shard_group_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-shard-group-id" => filter.matches(entry_str(entry, "DBShardGroupIdentifier")),
+        // Unsupported names are reported once per request by
+        // `warn_unknown_filters`, before the scan.
+        _ => false,
+    })
+}
+
+/// True when a stored backtrack satisfies every filter. The names come
+/// from the `DescribeDBClusterBacktracks` docs:
+/// `db-cluster-backtrack-id` and `db-cluster-backtrack-status`.
+fn backtrack_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-backtrack-id" => filter.matches(entry_str(entry, "BacktrackIdentifier")),
+        // Case-insensitive for the same reason, and so a backtrack
+        // persisted by an older build (which wrote `COMPLETED`) is still
+        // selectable by the documented lowercase value after a restore.
+        "db-cluster-backtrack-status" => {
+            filter.matches_ignore_case(entry_str(entry, "Status").or(Some("completed")))
+        }
+        // Unsupported names are reported once per request by
+        // `warn_unknown_filters`, before the scan.
+        _ => false,
+    })
 }
 
 /// True when a stored cluster snapshot satisfies every filter. The names
@@ -130,27 +331,49 @@ fn cluster_snapshot_matches_filters(
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        other => {
-            // Warn, not debug: the result is an EMPTY list where the
-            // caller expected a narrowed one, and nothing on the wire
-            // says why (InvalidParameterValue isn't declared on these
-            // operations, so it can't be returned). A silent empty
-            // result is the hardest failure to diagnose, so the reason
-            // has to reach a default log level.
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
-            false
-        }
+        // The result is an EMPTY list where the caller expected a
+        // narrowed one, and nothing on the wire says why
+        // (InvalidParameterValue isn't declared on these operations, so
+        // it can't be returned). `warn_unknown_filters` reports the
+        // reason once per request, before the scan.
+        _ => false,
     })
 }
 
+/// A unique id fragment.
+///
+/// The timestamp alone is not unique: two calls within the clock's
+/// resolution produce the same value, and callers use it as a MAP KEY
+/// (backtrack records) or as an id AWS guarantees unique (a cluster
+/// endpoint's resource identifier), so a collision silently overwrites
+/// one of the two.
 fn rand_id() -> String {
-    format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    format!("{nanos:x}{}", &unique[..8])
+}
+
+/// True when the request carries the member list at all, empty included.
+///
+/// `parse_member_list` returns an empty vec both for "not sent" and for
+/// "sent empty", which are different requests: the second is asking to
+/// clear the list.
+fn member_list_present(req: &AwsRequest, prefix: &str) -> bool {
+    let names = |key: &String| key == prefix || key.starts_with(&format!("{prefix}."));
+    if req.query_params.keys().any(names) {
+        return true;
+    }
+    // `parse_member_list` reads through `get_param`, which falls back to
+    // the form body whenever the key is absent from `query_params` --
+    // not only when they are empty. A narrower check here would let the
+    // members be parsed and then discarded as "never sent".
+    !req.body.is_empty()
+        && fakecloud_core::protocol::parse_query_body(&req.body)
+            .keys()
+            .any(names)
 }
 
 pub(crate) fn xml_response(action: &str, inner: String, request_id: &str) -> AwsResponse {
@@ -334,12 +557,52 @@ impl RdsService {
                 ))
             }
             "DeleteDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                    &aid,
+                )
+                .ok_or_else(|| missing("DBClusterIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
                 {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
                     if let Some(m) = state.extras.get_mut("clusters") { m.remove(&id); }
+                    // Deleting a cluster deletes what belongs to it, as
+                    // on AWS. Left behind, a custom endpoint of a cluster
+                    // that no longer exists keeps appearing in
+                    // DescribeDBClusterEndpoints and -- now that create
+                    // raises DBClusterEndpointAlreadyExistsFault instead
+                    // of overwriting -- makes recreating the cluster and
+                    // its endpoint under the same names fail forever,
+                    // which is an ordinary destroy/apply cycle. Orphaned
+                    // backtracks are worse than noise: the Describe
+                    // matches on the cluster identifier alone, so a NEW
+                    // cluster of that name would report backtracks it
+                    // never performed.
+                    for category in ["cluster_endpoints", "cluster_backtracks"] {
+                        if let Some(m) = state.extras.get_mut(category) {
+                            m.retain(|_, entry| {
+                                // Compared through the same reduction the
+                                // request went through: a row written
+                                // before identifiers were normalized
+                                // stores the cluster's ARN, and an exact
+                                // comparison would leave it behind --
+                                // which is the orphan this cascade exists
+                                // to prevent.
+                                let stored = entry_str(entry, "DBClusterIdentifier")
+                                    .map(str::to_string)
+                                    .and_then(|value| {
+                                        crate::filters::requested_identifier(
+                                            Some(value),
+                                            "cluster",
+                                            &aid,
+                                        )
+                                    });
+                                stored.as_deref() != Some(id.as_str())
+                            });
+                        }
+                    }
                 }
                 self.emit_event(
                     RdsSourceType::DbCluster,
@@ -396,6 +659,7 @@ impl RdsService {
                 }
                 let id_filter = normalized_identifier(raw_cluster_identifier, "cluster");
                 let filters = parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, CLUSTER_FILTERS);
                 let accounts = self.state_handle().read();
                 // A named cluster that doesn't exist is the declared
                 // `DBClusterNotFoundFault`; an empty list would tell a
@@ -694,6 +958,7 @@ impl RdsService {
                 let include_public =
                     optional_flag(get_param(req, "IncludePublic").as_deref()).unwrap_or(false);
                 let filters = parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, CLUSTER_SNAPSHOT_FILTERS);
                 let accounts = self.state_handle().read();
                 // A named snapshot that doesn't exist is the declared
                 // `DBClusterSnapshotNotFoundFault`, same as the instance
@@ -1108,7 +1373,97 @@ impl RdsService {
             }
             "DescribeDBClusterAutomatedBackups" => Ok(xml_response("DescribeDBClusterAutomatedBackups", "    <DBClusterAutomatedBackups/>".to_string(), &rid)),
             "DeleteDBClusterAutomatedBackup" => Ok(xml_response("DeleteDBClusterAutomatedBackup", "    <DBClusterAutomatedBackup/>".to_string(), &rid)),
-            "DescribeDBClusterBacktracks" => Ok(xml_response("DescribeDBClusterBacktracks", "    <DBClusterBacktracks/>".to_string(), &rid)),
+            "DescribeDBClusterBacktracks" => {
+                // BacktrackDBCluster has always recorded these; this
+                // operation answered with a hardcoded empty list, so
+                // every backtrack a caller performed was invisible.
+                // AWS marks DBClusterIdentifier required, but the only
+                // errors declared on this operation are
+                // DBClusterNotFoundFault and
+                // DBClusterBacktrackNotFoundFault --
+                // InvalidParameterValue appears nowhere in the RDS
+                // model, so rejecting the omission would put an
+                // undeclared error shape on the wire. A request that
+                // names no cluster selects no cluster's backtracks.
+                // Reduced from an ARN, as every sibling Describe does:
+                // clients (the Terraform provider notably) pass the ARN
+                // form, and comparing it against the stored bare
+                // identifier would match nothing -- or, through
+                // `cluster_entry` below, report a cluster that exists as
+                // not found.
+                let cluster = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                    &aid,
+                )
+                .unwrap_or_default();
+                // A cluster that was named but doesn't exist gets the
+                // declared fault, as on AWS, rather than an empty list a
+                // caller would read as "no backtracks".
+                if !cluster.is_empty() {
+                    cluster_entry(self, &aid, &cluster)?;
+                }
+                let filters = crate::filters::parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, BACKTRACK_FILTERS);
+                // `normalized_identifier` also drops an explicitly
+                // empty value, which no stored record carries and which
+                // would otherwise trip the not-found check below.
+                let wanted = crate::filters::requested_identifier(
+                    get_param(req, "BacktrackIdentifier"),
+                    "cluster-backtrack",
+                    &aid,
+                );
+                // A named backtrack that doesn't exist gets the fault the
+                // model declares for it, not an empty list -- a caller
+                // can't tell "gone" from "no rows" otherwise.
+                // Only when a cluster was named: the check below matches
+                // on the cluster too, so without one it would report
+                // every backtrack as not found rather than selecting
+                // none, which is what this handler says it does.
+                if let Some(id) = wanted.as_deref().filter(|_| !cluster.is_empty()) {
+                    let known = self
+                        .state_handle()
+                        .read()
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("cluster_backtracks"))
+                        .is_some_and(|m| {
+                            m.values().any(|v| {
+                                entry_str(v, "BacktrackIdentifier") == Some(id)
+                                    && entry_str(v, "DBClusterIdentifier")
+                                        == Some(cluster.as_str())
+                            })
+                        });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterBacktrackNotFoundFault",
+                            format!("DBClusterBacktrack {id} not found."),
+                        ));
+                    }
+                }
+                list_extras_filtered_xml(
+                    self,
+                    &aid,
+                    "cluster_backtracks",
+                    "DBClusterBacktracks",
+                    // The named member tag, not `<member>`: the list
+                    // carries xmlName `DBClusterBacktrack`, and the SDK
+                    // unmarshals an empty list from the generic tag.
+                    "DBClusterBacktrack",
+                    "DescribeDBClusterBacktracks",
+                    req,
+                    |v| {
+                        !cluster.is_empty()
+                            && entry_str(v, "DBClusterIdentifier") == Some(cluster.as_str())
+                            && wanted.as_deref().is_none_or(|wanted| {
+                                entry_str(v, "BacktrackIdentifier") == Some(wanted)
+                            })
+                            && backtrack_matches_filters(v, &filters)
+                    },
+                    cluster_backtrack_xml,
+                    &rid,
+                )
+            }
 
             // ── DB Cluster parameter groups ──
             "CreateDBClusterParameterGroup" | "CopyDBClusterParameterGroup" => {
@@ -1311,17 +1666,88 @@ impl RdsService {
 
             // ── DB Cluster endpoints ──
             "CreateDBClusterEndpoint" => {
-                let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
-                let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_default();
-                let kind = get_param(req, "EndpointType").unwrap_or_else(|| "READER".to_string());
-                let entry = json!({"DBClusterEndpointIdentifier": id, "DBClusterIdentifier": cluster, "Endpoint": format!("{id}.cluster-custom.{region}.rds.amazonaws.com"), "EndpointType": kind, "Status": "available"});
+                // Reduced like Modify, Delete and Describe reduce it:
+                // a row keyed by the ARN form is one no later call can
+                // address. Unlike those, create still REQUIRES a name:
+                // `endpoint_identifier` never fails, and a row stored
+                // under "" renders with no identifier at all -- the very
+                // shape that marks a built-in, undeletable endpoint.
+                let id = endpoint_identifier(req, &aid);
+                if id.is_empty() {
+                    return Err(missing("DBClusterEndpointIdentifier"));
+                }
+                // The cluster identifier is reduced the same way: the
+                // Describe side normalizes it, so an endpoint created
+                // with the ARN form would otherwise never match a
+                // lookup by the bare id.
+                // The same fail-closed reduction the Describe side uses.
+                // `normalized_identifier` alone reports None for an ARN
+                // it can't resolve, which would store an EMPTY cluster id
+                // (leaving the endpoint unreachable by any lookup), and
+                // it would reduce ANOTHER account's cluster ARN to the
+                // bare id, aliasing the endpoint onto this account's
+                // same-named cluster.
+                let cluster = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                    &aid,
+                )
+                .unwrap_or_default();
+                // AWS maps the REQUEST's EndpointType (READER / WRITER /
+                // ANY) onto the response's CustomEndpointType, and
+                // reports EndpointType as CUSTOM -- this operation only
+                // ever creates custom endpoints. CustomEndpointType is
+                // not an input member at all, so reading it from the
+                // request could never fire for an SDK, CLI or Terraform
+                // caller.
+                let custom_kind =
+                    get_param(req, "EndpointType").unwrap_or_else(|| "READER".to_string());
+                let mut entry = json!({"DBClusterEndpointIdentifier": id, "DBClusterIdentifier": cluster, "Endpoint": format!("{id}.cluster-custom.{region}.rds.amazonaws.com"), "EndpointType": "CUSTOM", "CustomEndpointType": custom_kind, "Status": "available", "DBClusterEndpointResourceIdentifier": format!("cluster-endpoint-{}", uuid::Uuid::new_v4().simple()), "DBClusterEndpointArn": Arn::new("rds", region, &aid, &format!("cluster-endpoint:{id}")).with_partition(partition_for(region)).to_string()});
+                // `db-cluster-endpoint-custom-type` filters on this, and
+                // the members define what a CUSTOM endpoint routes to --
+                // dropping them left the endpoint unreadable.
+                if let Some(obj) = entry.as_object_mut() {
+                    let static_members = parse_member_list(req, "StaticMembers");
+                    if !static_members.is_empty() {
+                        obj.insert("StaticMembers".to_string(), json!(static_members));
+                    }
+                    let excluded_members = parse_member_list(req, "ExcludedMembers");
+                    if !excluded_members.is_empty() {
+                        obj.insert("ExcludedMembers".to_string(), json!(excluded_members));
+                    }
+                }
+                // DBClusterIdentifier is required and
+                // DBClusterNotFoundFault is declared here. Without the
+                // check an omitted parameter stored an endpoint with an
+                // EMPTY cluster id, and another account's cluster ARN
+                // (which `requested_identifier` deliberately leaves
+                // whole) was stored verbatim -- either way the endpoint
+                // is orphaned, matching no cluster lookup for the rest
+                // of its life.
+                cluster_entry(self, &aid, &cluster)?;
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
-                store(&mut state.extras, "cluster_endpoints").insert(id.clone(), entry.clone());
+                let endpoints = store(&mut state.extras, "cluster_endpoints");
+                // Declared on this operation. Inserting over an existing
+                // endpoint replaced its members, custom type and ARN and
+                // reported success, so a retried or re-applied create
+                // silently rewrote the endpoint it meant to leave alone.
+                if endpoints.contains_key(&id) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "DBClusterEndpointAlreadyExistsFault",
+                        format!("DBClusterEndpoint {id} already exists."),
+                    ));
+                }
+                endpoints.insert(id.clone(), entry.clone());
                 Ok(xml_response("CreateDBClusterEndpoint", cluster_endpoint_xml(&entry), &rid))
             }
             "ModifyDBClusterEndpoint" => {
-                let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
+                // Reduced from an ARN, as the Describe side is: clients
+                // round-trip the ARN they read back, and matching it
+                // against the stored bare identifier would report an
+                // endpoint that exists as missing.
+                let id = endpoint_identifier(req, &aid);
                 let static_members = parse_member_list(req, "StaticMembers");
                 let excluded_members = parse_member_list(req, "ExcludedMembers");
                 let mut accounts = write_state!();
@@ -1332,33 +1758,151 @@ impl RdsService {
                     .and_then(|m| m.get_mut(&id))
                     .ok_or_else(|| {
                         AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
+                            StatusCode::BAD_REQUEST,
                             "DBClusterEndpointNotFoundFault",
                             format!("DBClusterEndpoint {id} not found."),
                         )
                     })?;
                 if let Some(obj) = entry.as_object_mut() {
+                    // The request's EndpointType retargets the custom
+                    // endpoint; the endpoint itself stays CUSTOM, which
+                    // is what AWS reports for one created through this
+                    // API.
                     if let Some(kind) = get_param(req, "EndpointType") {
-                        obj.insert("EndpointType".to_string(), json!(kind));
+                        obj.insert("CustomEndpointType".to_string(), json!(kind));
+                        obj.insert("EndpointType".to_string(), json!("CUSTOM"));
                     }
-                    if !static_members.is_empty() {
+                    // Presence, not emptiness: a request that sends the
+                    // list empty is asking to clear it, and treating that
+                    // as "unset" made the removal a silent no-op.
+                    if member_list_present(req, "StaticMembers") {
                         obj.insert("StaticMembers".to_string(), json!(static_members));
                     }
-                    if !excluded_members.is_empty() {
+                    if member_list_present(req, "ExcludedMembers") {
                         obj.insert("ExcludedMembers".to_string(), json!(excluded_members));
                     }
                 }
-                let updated = entry.clone();
+                // Through the same read-time normalization the listing
+                // applies: without it a modify of a row persisted by an
+                // older build answers EndpointType=READER while
+                // DescribeDBClusterEndpoints answers CUSTOM for that very
+                // row, so a read-after-modify records a value the next
+                // refresh disagrees with.
+                let updated = as_custom_endpoint(entry.clone());
                 Ok(xml_response("ModifyDBClusterEndpoint", cluster_endpoint_xml(&updated), &rid))
             }
             "DeleteDBClusterEndpoint" => {
-                let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
+                // Same reduction as Modify and Describe. Without it the
+                // fail-closed delete below turns an ARN a caller read
+                // back from this very API into a hard destroy failure.
+                let id = endpoint_identifier(req, &aid);
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
-                if let Some(m) = state.extras.get_mut("cluster_endpoints") { m.remove(&id); }
-                Ok(xml_response("DeleteDBClusterEndpoint", format!("    <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>", xml_escape(&id)), &rid))
+                // Declared on this operation. Reporting success for an
+                // endpoint that never existed tells a caller it deleted
+                // something -- including a built-in endpoint, which has
+                // no identifier and cannot be deleted at all.
+                let removed = state
+                    .extras
+                    .get_mut("cluster_endpoints")
+                    .and_then(|m| m.remove(&id));
+                let Some(removed) = removed else {
+                    return Err(AwsServiceError::aws_error(
+                        // 400, per the model's httpError / awsQueryError
+                        // httpResponseCode -- unlike the shard-group and
+                        // backtrack faults, which really are 404. SDK
+                        // retry and error classification key on this.
+                        StatusCode::BAD_REQUEST,
+                        "DBClusterEndpointNotFoundFault",
+                        format!("DBClusterEndpoint {id} not found."),
+                    ));
+                };
+                Ok(xml_response(
+                    "DeleteDBClusterEndpoint",
+                    // The modeled output is the whole DBClusterEndpoint,
+                    // not just its identifier: a caller reading the
+                    // delete response got an almost-empty struct.
+                    // AWS reports the endpoint as `deleting`, not with
+                    // the `available` it had a moment ago: a caller
+                    // polling the delete response would otherwise read
+                    // "present and healthy" for a resource that is gone.
+                    cluster_endpoint_xml(&deleting(as_custom_endpoint(removed))),
+                    &rid,
+                ))
             }
-            "DescribeDBClusterEndpoints" => list_extras_xml(self, &aid, "cluster_endpoints", "DBClusterEndpoints", "DBClusterEndpointList", "DescribeDBClusterEndpoints", cluster_endpoint_xml, &rid),
+            "DescribeDBClusterEndpoints" => {
+                let filters = crate::filters::parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, CLUSTER_ENDPOINT_FILTERS);
+                // The identifier parameters narrow the same way the
+                // filters do; AWS applies both.
+                // A named cluster that doesn't exist gets the fault the
+                // model declares on this operation, matching the sibling
+                // Describes rather than answering 200 with an empty list.
+                let wanted_endpoint = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterEndpointIdentifier"),
+                    "cluster-endpoint",
+                    &aid,
+                );
+                let wanted_cluster = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                    &aid,
+                );
+                if let Some(cluster) = wanted_cluster.as_deref() {
+                    cluster_entry(self, &aid, cluster)?;
+                }
+                let keep = |v: &Value| {
+                    wanted_endpoint.as_deref().is_none_or(|wanted| {
+                        entry_str(v, "DBClusterEndpointIdentifier") == Some(wanted)
+                    }) && wanted_cluster.as_deref().is_none_or(|wanted| {
+                        entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                    }) && cluster_endpoint_matches_filters(v, &filters)
+                };
+                let entries = {
+                    let accounts = self.state_handle().read();
+                    // AWS reports every cluster's built-in writer and
+                    // reader endpoints alongside the custom ones. They
+                    // are not creatable or deletable, so they live on the
+                    // cluster rather than in the endpoints store -- but
+                    // without them `db-cluster-endpoint-type=reader`
+                    // (which the docs advertise) could never match
+                    // anything, since CreateDBClusterEndpoint only ever
+                    // makes CUSTOM endpoints.
+                    let mut entries: Vec<(String, Value)> = accounts
+                        .get(&aid)
+                        .and_then(|state| state.extras.get("clusters"))
+                        .map(|clusters| {
+                            clusters
+                                .iter()
+                                .flat_map(|(id, cluster)| {
+                                    built_in_cluster_endpoints(id, cluster)
+                                })
+                                .filter(|(_, v)| keep(v))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    entries.extend(
+                        sorted_entries(&accounts, &aid, "cluster_endpoints", |_| true)
+                            .into_iter()
+                            .map(|(key, value)| (key, as_custom_endpoint(value)))
+                            .filter(|(_, value)| keep(value)),
+                    );
+                    entries
+                };
+                // One order for the whole listing, custom and built-in
+                // alike, so the pagination cursor stays meaningful.
+                let mut entries = entries;
+                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                list_items_xml(
+                    entries,
+                    "DBClusterEndpoints",
+                    "DBClusterEndpointList",
+                    "DescribeDBClusterEndpoints",
+                    req,
+                    cluster_endpoint_xml,
+                    &rid,
+                )
+            }
 
             // ── DB Proxies ──
             "CreateDBProxy" => {
@@ -2029,7 +2573,10 @@ impl RdsService {
 
             // ── Blue/Green deployments ──
             "CreateBlueGreenDeployment" => {
-                let id = format!("bgd-{}", rand_id());
+                // AWS blue/green ids are a short token, not a full
+                // uuid, and the green identifier built from one below
+                // has to stay inside the 63-character limit.
+                let id = format!("bgd-{}", &uuid::Uuid::new_v4().simple().to_string()[..17]);
                 let arn = Arn::new("rds", region, &aid, &format!("blue-green-deployment:{id}"))
                     .to_string();
                 let source_arn = get_param(req, "Source")
@@ -2040,7 +2587,10 @@ impl RdsService {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
                 let target_id = get_param(req, "TargetDBInstanceName")
-                    .unwrap_or_else(|| format!("{source_id}-green-{}", rand_id()));
+                    .unwrap_or_else(|| format!(
+                            "{source_id}-green-{}",
+                            &uuid::Uuid::new_v4().simple().to_string()[..8]
+                        ));
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 let source_arn_full = if source_arn.starts_with("arn:") {
@@ -2219,7 +2769,7 @@ impl RdsService {
 
             // ── Shard groups ──
             "CreateDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let mut entry = json!({"DBShardGroupIdentifier": id, "Status": "available"});
                 if let Some(obj) = entry.as_object_mut() {
                     if let Some(cluster) = get_param(req, "DBClusterIdentifier") {
@@ -2233,7 +2783,7 @@ impl RdsService {
                 Ok(xml_response("CreateDBShardGroup", shard_group_xml(&entry), &rid))
             }
             "ModifyDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let entry = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
@@ -2256,7 +2806,7 @@ impl RdsService {
                 Ok(xml_response("ModifyDBShardGroup", shard_group_xml(&entry), &rid))
             }
             "RebootDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let entry = self
                     .state_handle()
                     .read()
@@ -2268,13 +2818,64 @@ impl RdsService {
                 Ok(xml_response("RebootDBShardGroup", shard_group_xml(&entry), &rid))
             }
             "DeleteDBShardGroup" => {
-                let id = get_param(req, "DBShardGroupIdentifier").ok_or_else(|| missing("DBShardGroupIdentifier"))?;
+                let id = shard_group_identifier(req, &aid).ok_or_else(|| missing("DBShardGroupIdentifier"))?;
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 if let Some(m) = state.extras.get_mut("shard_groups") { m.remove(&id); }
                 Ok(xml_response("DeleteDBShardGroup", "    <DBShardGroup/>".to_string(), &rid))
             }
-            "DescribeDBShardGroups" => list_extras_xml(self, &aid, "shard_groups", "DBShardGroups", "DBShardGroup", "DescribeDBShardGroups", shard_group_xml, &rid),
+            "DescribeDBShardGroups" => {
+                let filters = crate::filters::parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, SHARD_GROUP_FILTERS);
+                let wanted = crate::filters::requested_identifier(
+                    get_param(req, "DBShardGroupIdentifier"),
+                    "shard-group",
+                    &aid,
+                );
+                // Declared on this operation, and the difference a
+                // polling caller needs: "deleted" rather than "exists
+                // but empty".
+                if let Some(id) = wanted.as_deref() {
+                    let known = self
+                        .state_handle()
+                        .read()
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("shard_groups"))
+                        .is_some_and(|m| {
+                            m.values().any(|v| {
+                                entry_str(v, "DBShardGroupIdentifier") == Some(id)
+                            })
+                        });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            // The wire code, which drops the shape's
+                            // `Fault` suffix (aws.protocols#awsQueryError
+                            // code is `DBShardGroupNotFound`); emitting
+                            // the shape name puts an undeclared error on
+                            // the wire.
+                            "DBShardGroupNotFound",
+                            format!("DBShardGroup {id} not found."),
+                        ));
+                    }
+                }
+                list_extras_filtered_xml(
+                    self,
+                    &aid,
+                    "shard_groups",
+                    "DBShardGroups",
+                    "DBShardGroup",
+                    "DescribeDBShardGroups",
+                    req,
+                    |v| {
+                        wanted.as_deref().is_none_or(|wanted| {
+                            entry_str(v, "DBShardGroupIdentifier") == Some(wanted)
+                        }) && shard_group_matches_filters(v, &filters)
+                    },
+                    shard_group_xml,
+                    &rid,
+                )
+            }
 
             // ── Custom engine versions ──
             "CreateCustomDBEngineVersion" | "ModifyCustomDBEngineVersion" => {
