@@ -14,13 +14,134 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 
-use fakecloud_aws::arn::Arn;
+use fakecloud_aws::arn::{partition_for, Arn};
 use fakecloud_aws::xml::xml_escape;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::{RdsService, RdsSourceType};
 
+use crate::filters::{
+    addresses_own_account, identifier_account, identifier_matches_type, normalized_identifier,
+    optional_flag, parse_filters, sibling_rds_arn, RdsFilter,
+};
+
 const NS: &str = "http://rds.amazonaws.com/doc/2014-10-31/";
+
+/// Password recorded for a cluster created without one. The engines
+/// refuse to start with an empty password, so a restore from such a
+/// cluster's snapshot needs a non-empty value to hand the container.
+pub(crate) const DEFAULT_CLUSTER_MASTER_PASSWORD: &str = "fakecloud";
+
+/// Read a string field off an extras entry, treating an absent or
+/// non-string value as "the resource doesn't carry this attribute".
+fn entry_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
+    entry.get(key).and_then(|v| v.as_str())
+}
+
+/// True when a stored cluster satisfies every filter. Filters are AND-ed
+/// with each other; the values within one filter are OR-ed. The names
+/// come from the `DescribeDBClusters` docs: `clone-group-id`,
+/// `db-cluster-id`, `db-cluster-resource-id`, `domain` and `engine`.
+fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => filter.matches_any([
+            entry_str(entry, "DBClusterIdentifier"),
+            entry_str(entry, "DBClusterArn"),
+        ]),
+        "db-cluster-resource-id" => filter.matches(entry_str(entry, "DbClusterResourceId")),
+        "clone-group-id" => filter.matches(entry_str(entry, "CloneGroupId")),
+        "domain" => filter.matches(entry_str(entry, "Domain")),
+        "engine" => filter.matches(entry_str(entry, "Engine")),
+        // A filter name AWS doesn't document for this operation
+        // matches nothing — see the module docs on `crate::filters`.
+        other => {
+            // Warn, not debug: the result is an EMPTY list where the
+            // caller expected a narrowed one, and nothing on the wire
+            // says why (InvalidParameterValue isn't declared on these
+            // operations, so it can't be returned). A silent empty
+            // result is the hardest failure to diagnose, so the reason
+            // has to reach a default log level.
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
+    })
+}
+
+/// The `snapshot-type` values a cluster snapshot answers to for
+/// `caller`: its stored type, plus `public` / `shared` when it is shared
+/// that way. Keeps the filter speaking the same vocabulary as the
+/// `SnapshotType` parameter.
+fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec<String> {
+    // Defaulted to match the renderer, which reports a stored entry
+    // carrying no SnapshotType as `manual`.
+    let mut labels = vec![entry_str(entry, "SnapshotType")
+        .unwrap_or("manual")
+        .to_string()];
+    let attrs = cluster_snapshot_attributes(entry);
+    let targets = attrs.get("restore");
+    if targets.is_some_and(|targets| targets.iter().any(|t| t == "all")) {
+        labels.push("public".to_string());
+    }
+    if !owned && targets.is_some_and(|targets| targets.iter().any(|t| t == caller)) {
+        labels.push("shared".to_string());
+    }
+    labels
+}
+
+/// True when a stored cluster snapshot satisfies every filter. The names
+/// come from the `DescribeDBClusterSnapshots` docs: `db-cluster-id`,
+/// `db-cluster-snapshot-id`, `engine` and `snapshot-type`.
+fn cluster_snapshot_matches_filters(
+    entry: &Value,
+    filters: &[RdsFilter],
+    caller: &str,
+    owned: bool,
+) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        // Accepts DB cluster identifiers and DB cluster ARNs; the
+        // snapshot ARN supplies the partition/region/account needed to
+        // rebuild the source cluster ARN.
+        "db-cluster-id" => {
+            let cluster = entry_str(entry, "DBClusterIdentifier");
+            let sibling = |arn: Option<&str>| match (arn, cluster) {
+                (Some(arn), Some(id)) => sibling_rds_arn(arn, "cluster", id),
+                _ => None,
+            };
+            let cluster_arn = sibling(entry_str(entry, "DBClusterSnapshotArn"));
+            // A copy's own ARN names the COPIER, while the cluster it
+            // records still belongs to the original owner -- so for a
+            // cross-account or cross-region copy the ARN rebuilt from it
+            // names a cluster that doesn't exist. The source snapshot's
+            // ARN names the account and region that one really is in.
+            let source_cluster_arn = sibling(entry_str(entry, "SourceDBClusterSnapshotArn"));
+            filter.matches_any([
+                cluster,
+                cluster_arn.as_deref(),
+                source_cluster_arn.as_deref(),
+            ])
+        }
+        "db-cluster-snapshot-id" => filter.matches_any([
+            entry_str(entry, "DBClusterSnapshotIdentifier"),
+            entry_str(entry, "DBClusterSnapshotArn"),
+        ]),
+        "snapshot-type" => cluster_snapshot_type_labels(entry, caller, owned)
+            .iter()
+            .any(|label| filter.matches(Some(label.as_str()))),
+        "engine" => filter.matches(entry_str(entry, "Engine")),
+        // A filter name AWS doesn't document for this operation
+        // matches nothing — see the module docs on `crate::filters`.
+        other => {
+            // Warn, not debug: the result is an EMPTY list where the
+            // caller expected a narrowed one, and nothing on the wire
+            // says why (InvalidParameterValue isn't declared on these
+            // operations, so it can't be returned). A silent empty
+            // result is the hardest failure to diagnose, so the reason
+            // has to reach a default log level.
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
+    })
+}
 
 fn rand_id() -> String {
     format!(
@@ -64,17 +185,6 @@ fn xml_response_no_result(action: &str, request_id: &str) -> AwsResponse {
     AwsResponse::xml(StatusCode::OK, body)
 }
 
-fn members<F>(items: &[Value], render: F) -> String
-where
-    F: Fn(&Value) -> String,
-{
-    items
-        .iter()
-        .map(|v| format!("        <member>\n{}\n        </member>", render(v)))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn store<'a>(
     extras: &'a mut BTreeMap<String, BTreeMap<String, Value>>,
     category: &str,
@@ -103,6 +213,44 @@ fn missing(name: &str) -> AwsServiceError {
 /// `ModifyActivityStream` (which take a `ResourceArn` rather than a typed
 /// cluster/instance id, so the typed `DBClusterNotFoundFault` isn't in their
 /// Smithy error set).
+/// Builds a cluster snapshot's ARN in the region's own partition.
+///
+/// `Arn::new` hardcodes `aws`, so a China or GovCloud region would
+/// otherwise get an `arn:aws:` ARN -- wrong on the wire, and, since
+/// pagination keys on this string, inconsistent with the ARN a row
+/// stored at create time if the two were built differently.
+fn cluster_snapshot_arn(region: &str, account_id: &str, id: &str) -> String {
+    Arn::new("rds", region, account_id, &format!("cluster-snapshot:{id}"))
+        .with_partition(partition_for(region))
+        .to_string()
+}
+
+/// Stamps the owning account's ARN onto a cluster-snapshot row that
+/// lacks one.
+///
+/// Pagination keys on the ARN, and the identifier alone is NOT a unique
+/// key: a shared listing can hold same-named rows from several accounts,
+/// so a cursor built from one would resolve to whichever came first and
+/// hand the client that page again forever. Every insert path sets the
+/// ARN today; this keeps a row that somehow missed it -- an older
+/// persisted file, a hand-seeded entry -- from poisoning the cursor, and
+/// renders the field the SDK expects while it's at it.
+fn with_owner_arn(mut entry: Value, owner: &str, region: &str) -> Value {
+    if entry_str(&entry, "DBClusterSnapshotArn").is_some() {
+        return entry;
+    }
+    let Some(id) = entry_str(&entry, "DBClusterSnapshotIdentifier").map(str::to_string) else {
+        return entry;
+    };
+    if let Some(object) = entry.as_object_mut() {
+        object.insert(
+            "DBClusterSnapshotArn".to_string(),
+            Value::String(cluster_snapshot_arn(region, owner, &id)),
+        );
+    }
+    entry
+}
+
 fn resource_not_found(arn: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::NOT_FOUND,
@@ -149,6 +297,12 @@ impl RdsService {
                     "Endpoint": format!("{id}.cluster-xxx.{region}.rds.amazonaws.com"),
                     "ReaderEndpoint": format!("{id}.cluster-ro-xxx.{region}.rds.amazonaws.com"),
                     "Port": port, "MasterUsername": get_param(req, "MasterUsername").unwrap_or_else(|| "postgres".to_string()),
+                    // Persisted so a snapshot of this cluster carries
+                    // usable credentials: RestoreDBInstanceFromDBSnapshot
+                    // takes no password and has to start a container with
+                    // the ones the snapshot captured.
+                    "MasterUserPassword": get_param(req, "MasterUserPassword")
+                        .unwrap_or_else(|| DEFAULT_CLUSTER_MASTER_PASSWORD.to_string()),
                 });
                 // Persist the remaining create-time input fields (safety flags
                 // like DeletionProtection / StorageEncrypted, KmsKeyId,
@@ -223,8 +377,46 @@ impl RdsService {
                 ))
             }
             "DescribeDBClusters" => {
-                let id_filter = get_param(req, "DBClusterIdentifier");
+                // Same normalization as DescribeDBClusterSnapshots: an
+                // empty parameter means "absent", and AWS documents this
+                // one as accepting a cluster ARN too. A cluster is never
+                // shared across accounts, so an ARN naming a different
+                // account is not found rather than aliased onto this
+                // account's same-named cluster.
+                let raw_cluster_identifier = get_param(req, "DBClusterIdentifier");
+                if let Some(raw) = raw_cluster_identifier.as_deref() {
+                    if !addresses_own_account(raw, &aid) || !identifier_matches_type(raw, "cluster")
+                    {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterNotFoundFault",
+                            format!("DBCluster {raw} not found."),
+                        ));
+                    }
+                }
+                let id_filter = normalized_identifier(raw_cluster_identifier, "cluster");
+                let filters = parse_filters(req);
                 let accounts = self.state_handle().read();
+                // A named cluster that doesn't exist is the declared
+                // `DBClusterNotFoundFault`; an empty list would tell a
+                // client that distinguishes "gone" from "no match" the
+                // wrong thing.
+                if let Some(wanted) = id_filter.as_deref() {
+                    let known = accounts
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("clusters"))
+                        .is_some_and(|m| {
+                            m.values()
+                                .any(|v| entry_str(v, "DBClusterIdentifier") == Some(wanted))
+                        });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterNotFoundFault",
+                            format!("DBCluster {wanted} not found."),
+                        ));
+                    }
+                }
                 let items: Vec<Value> = accounts.get(&aid)
                     .and_then(|s| s.extras.get("clusters"))
                     .map(|m| {
@@ -234,6 +426,7 @@ impl RdsService {
                                     .as_deref()
                                     .map(|filter| v["DBClusterIdentifier"].as_str() == Some(filter))
                                     .unwrap_or(true)
+                                    && cluster_matches_filters(v, &filters)
                             })
                             .cloned()
                             .collect()
@@ -253,102 +446,163 @@ impl RdsService {
                 Ok(xml_response("DescribeDBClusters", inner, &rid))
             }
 
-            // ── DB Cluster snapshots ──
-            // CreateDBClusterSnapshot is implemented in service.rs because
-            // the real path needs the async runtime to dump the writer's
-            // database. We keep a metadata-only fallback here for unit
-            // tests that exercise the extras handler directly without a
-            // runtime wired up; the dispatcher in `RdsService::handle_request`
-            // routes the action through the async path before reaching us.
-            "CreateDBClusterSnapshot" => {
-                let id = get_param(req, "DBClusterSnapshotIdentifier")
-                    .ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
-                let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_else(|| "default".to_string());
-                {
-                    let mut accounts = write_state!();
-                    let state = accounts.get_or_create(&aid);
-                    let mut entry = state
-                        .extras
-                        .get("clusters")
-                        .and_then(|m| m.get(&cluster))
-                        .cloned()
-                        .unwrap_or_else(|| json!({}));
-                    if let Some(obj) = entry.as_object_mut() {
-                        obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
-                        obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
-                        obj.insert("DBClusterIdentifier".to_string(), json!(cluster));
-                        obj.insert("Status".to_string(), json!("available"));
-                        obj.insert("SnapshotType".to_string(), json!("manual"));
-                    }
-                    store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
-                }
-                self.emit_event(
-                    RdsSourceType::DbClusterSnapshot,
-                    &id,
-                    &arn,
-                    "RDS-EVENT-0074",
-                    &["backup"],
-                    "DB cluster snapshot created",
-                );
-                Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
-            }
             "CopyDBClusterSnapshot" => {
                 let id = get_param(req, "TargetDBClusterSnapshotIdentifier")
                     .ok_or_else(|| missing("TargetDBClusterSnapshotIdentifier"))?;
                 let source_id = get_param(req, "SourceDBClusterSnapshotIdentifier")
                     .ok_or_else(|| missing("SourceDBClusterSnapshotIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
+                let arn = cluster_snapshot_arn(region, &aid, &id);
                 let mut accounts = write_state!();
+                // Guarded ARN reduction: AWS automated-snapshot ids carry
+                // a colon (`rds:mydb-...`), so only an `arn:` value is
+                // trimmed.
+                let source_key = normalized_identifier(Some(source_id.clone()), "cluster-snapshot")
+                    .unwrap_or_else(|| source_id.clone());
+                // AWS supports copying a snapshot another account shared
+                // with you, so resolve cross-account -- but only against
+                // the account the ARN names, never by aliasing a foreign
+                // ARN onto this account's same-named snapshot. Resolved
+                // before the mutable borrow the insert below needs.
+                let source_owner = identifier_account(&source_id);
+                // An existing target is the declared AlreadyExists fault:
+                // overwriting would silently replace the target's dump
+                // and revoke its sharing on a retried copy.
+                if accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .is_some_and(|m| m.contains_key(&id))
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "DBClusterSnapshotAlreadyExistsFault",
+                        format!("DBClusterSnapshot {id} already exists."),
+                    ));
+                }
+                let mut entry =
+                    find_cluster_snapshot(&accounts, &aid, source_owner.as_deref(), &source_key)
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterSnapshotNotFoundFault",
+                                format!("DBClusterSnapshot {source_id} not found."),
+                            )
+                        })?;
                 let state = accounts.get_or_create(&aid);
-                let source_key = source_id.rsplit(':').next().unwrap_or(&source_id).to_string();
-                let mut entry = state
-                    .extras
-                    .get("cluster_snapshots")
-                    .and_then(|m| m.get(&source_key))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBClusterSnapshotNotFoundFault",
-                            format!("DBClusterSnapshot {source_id} not found."),
-                        )
-                    })?;
                 let cluster = entry
                     .get("DBClusterIdentifier")
                     .and_then(|v| v.as_str())
                     .unwrap_or("default")
                     .to_string();
+                // The member is typed as an ARN, and the source may have
+                // been named by bare id: take the resolved entry's own
+                // ARN (which names its owner) rather than echoing the
+                // caller's input, now that DescribeDBClusterSnapshots
+                // reports this field. Read before the mutable borrow.
+                let source_arn = if source_id.starts_with("arn:") {
+                    source_id.clone()
+                } else {
+                    entry_str(&entry, "DBClusterSnapshotArn")
+                        .map(str::to_string)
+                        .unwrap_or_else(|| source_id.clone())
+                };
                 if let Some(obj) = entry.as_object_mut() {
                     obj.insert("DBClusterSnapshotIdentifier".to_string(), json!(id));
                     obj.insert("DBClusterSnapshotArn".to_string(), json!(arn));
                     obj.insert("Status".to_string(), json!("available"));
                     obj.insert("SnapshotType".to_string(), json!("manual"));
-                    obj.insert("SourceDBClusterSnapshotArn".to_string(), json!(source_id));
+                    obj.insert("SourceDBClusterSnapshotArn".to_string(), json!(source_arn));
+                    // The copy is created now; CopyDBSnapshot does the
+                    // same, and a stale time sorts it wrongly in a
+                    // time-ordered listing.
+                    obj.insert(
+                        "SnapshotCreateTime".to_string(),
+                        json!(chrono::Utc::now().to_rfc3339()),
+                    );
+                    // A copy is a fresh sharing surface -- inheriting the
+                    // source's `restore` list would publish a snapshot
+                    // nobody shared.
+                    obj.remove("SnapshotAttributes");
                 }
-                store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry);
-                Ok(xml_response(action.as_str(), cluster_snapshot_xml(&id, &arn, &cluster), &rid))
+                store(&mut state.extras, "cluster_snapshots").insert(id.clone(), entry.clone());
+                Ok(xml_response(
+                    action.as_str(),
+                    cluster_snapshot_status_detail_xml(
+                        &id,
+                        &arn,
+                        &cluster,
+                        "available",
+                        cluster_snapshot_detail_xml(Some(&entry)),
+                    ),
+                    &rid,
+                ))
             }
             "DeleteDBClusterSnapshot" => {
-                let id = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| missing("DBClusterSnapshotIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster-snapshot:{id}")).to_string();
+                // Resolve the ARN form, as Describe and Restore do -- an
+                // unnormalized delete would report success while leaving
+                // the entry in place, so a Terraform destroy never
+                // converges.
+                // `missing()` raises InvalidParameterValue, which is not
+                // a shape anywhere in the RDS model -- the same objection
+                // this branch applies to the wrong-type-ARN path. Use the
+                // operation's declared fault instead.
+                let raw = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshotIdentifier is required",
+                    )
+                })?;
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {raw} not found."),
+                    ));
+                }
+                // A wrong-type ARN names no cluster snapshot. That is the
+                // declared DBClusterSnapshotNotFoundFault, not the
+                // undeclared InvalidParameterValue `missing()` raises --
+                // an unmodeled error hard-fails a Terraform destroy that
+                // would otherwise treat the snapshot as gone.
+                let id = normalized_identifier(Some(raw.clone()), "cluster-snapshot").ok_or_else(
+                    || {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        )
+                    },
+                )?;
+                let arn = cluster_snapshot_arn(region, &aid, &id);
                 // Recover the source cluster id from stored state before
                 // remove — emitting a hardcoded "default" would corrupt
                 // downstream consumers that key off DBClusterIdentifier.
-                let cluster = {
+                let deleted = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
-                    let prior = state
+                    // Deleting a snapshot that doesn't exist is the
+                    // declared fault, not a 200 with an empty cluster id
+                    // and a spurious "snapshot deleted" event.
+                    let entry = state
                         .extras
                         .get("cluster_snapshots")
                         .and_then(|m| m.get(&id))
-                        .and_then(|v| v.get("DBClusterIdentifier"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default()
-                        .to_string();
-                    if let Some(m) = state.extras.get_mut("cluster_snapshots") { m.remove(&id); }
-                    prior
+                        .cloned()
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterSnapshotNotFoundFault",
+                                format!("DBClusterSnapshot {id} not found."),
+                            )
+                        })?;
+                    if let Some(m) = state.extras.get_mut("cluster_snapshots") {
+                        m.remove(&id);
+                    }
+                    entry
                 };
+                let cluster = entry_str(&deleted, "DBClusterIdentifier")
+                    .unwrap_or_default()
+                    .to_string();
                 self.emit_event(
                     RdsSourceType::DbClusterSnapshot,
                     &id,
@@ -357,12 +611,500 @@ impl RdsService {
                     &["deletion"],
                     "DB cluster snapshot deleted",
                 );
-                Ok(xml_response("DeleteDBClusterSnapshot", cluster_snapshot_xml(&id, &arn, &cluster), &rid))
+                Ok(xml_response(
+                    "DeleteDBClusterSnapshot",
+                    // Same detail the create / copy responses report, as
+                    // `cluster_snapshot_detail_xml` documents: the entry
+                    // is in hand a few lines above.
+                    cluster_snapshot_status_detail_xml(
+                        &id,
+                        &arn,
+                        &cluster,
+                        "deleted",
+                        cluster_snapshot_detail_xml(Some(&deleted)),
+                    ),
+                    &rid,
+                ))
             }
-            "DescribeDBClusterSnapshots" => list_extras_xml(self, &aid, "cluster_snapshots", "DBClusterSnapshots", "DescribeDBClusterSnapshots", cluster_snapshot_member_xml, &rid),
-            "DescribeDBClusterSnapshotAttributes" | "ModifyDBClusterSnapshotAttribute" => {
-                let id = get_param(req, "DBClusterSnapshotIdentifier").unwrap_or_default();
-                Ok(xml_response(action.as_str(), format!("    <DBClusterSnapshotAttributesResult>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotAttributes/>\n    </DBClusterSnapshotAttributesResult>", xml_escape(&id)), &rid))
+            "DescribeDBClusterSnapshots" => {
+                // Narrow by the request's own identifier parameters,
+                // SnapshotType and Filters — all AND-ed, as on real AWS.
+                // Returning every snapshot regardless makes clients that
+                // expect a unique match (Terraform) fail to resolve one.
+                // `normalized_identifier` reduces an ARN to its resource
+                // segment (clients pass either form, and
+                // CopyDBClusterSnapshot already normalizes the same way)
+                // and treats an explicitly-empty parameter as absent --
+                // `get_param` keeps `DBClusterSnapshotIdentifier=`, which
+                // would otherwise match nothing and 404 below.
+                // The ARN's account is kept, not dropped: a foreign ARN
+                // must not resolve against this account's same-named
+                // snapshot (nor against a third account that happens to
+                // have shared one under the same id).
+                let raw_snapshot_id = get_param(req, "DBClusterSnapshotIdentifier");
+                // A wrong-type ARN is not a cluster snapshot; without
+                // this it would normalize to `None` and list everything.
+                if let Some(raw) = raw_snapshot_id.as_deref() {
+                    if !identifier_matches_type(raw, "cluster-snapshot") {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        ));
+                    }
+                }
+                let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
+                let snapshot_id = normalized_identifier(raw_snapshot_id, "cluster-snapshot");
+                let raw_cluster_id = get_param(req, "DBClusterIdentifier");
+                // A wrong-type ARN names no cluster, so nothing matches.
+                // Returning early beats dropping the parameter, which
+                // would read as "no filter" and list everything.
+                if raw_cluster_id
+                    .as_deref()
+                    .is_some_and(|raw| !identifier_matches_type(raw, "cluster"))
+                {
+                    return Ok(xml_response(
+                        "DescribeDBClusterSnapshots",
+                        "    <DBClusterSnapshots>\n\n    </DBClusterSnapshots>".to_string(),
+                        &rid,
+                    ));
+                }
+                let cluster_owner = raw_cluster_id.as_deref().and_then(identifier_account);
+                let cluster_id = normalized_identifier(raw_cluster_id, "cluster");
+                // An identifier naming another account can never match a
+                // snapshot this account owns.
+                let owner_is_caller = snapshot_owner
+                    .as_deref()
+                    .is_none_or(|account| account == aid)
+                    && cluster_owner
+                        .as_deref()
+                        .is_none_or(|account| account == aid);
+                // Modeled narrowing parameter; ignoring it returns the
+                // whole list to a client that named one cluster.
+                let cluster_resource_id =
+                    get_param(req, "DbClusterResourceId").filter(|value| !value.is_empty());
+                let snapshot_type =
+                    get_param(req, "SnapshotType").filter(|value| !value.is_empty());
+                // Parsed exactly as DescribeDBSnapshots does, so the two
+                // ops can't drift on what counts as true. A junk boolean
+                // is treated as absent: InvalidParameterValue isn't
+                // declared on this operation.
+                let include_shared =
+                    optional_flag(get_param(req, "IncludeShared").as_deref()).unwrap_or(false);
+                let include_public =
+                    optional_flag(get_param(req, "IncludePublic").as_deref()).unwrap_or(false);
+                let filters = parse_filters(req);
+                let accounts = self.state_handle().read();
+                // A named snapshot that doesn't exist is the declared
+                // `DBClusterSnapshotNotFoundFault`, same as the instance
+                // and DB-snapshot describes. (Unknown *filter* names
+                // can't error the same way — `InvalidParameterValue`
+                // isn't declared here; see `crate::filters`.)
+                if let Some(wanted) = snapshot_id.as_deref() {
+                    let known = accounts.iter().any(|(owner, s)| {
+                        snapshot_owner
+                            .as_deref()
+                            .is_none_or(|account| account == owner)
+                            && s.extras.get("cluster_snapshots").is_some_and(|m| {
+                            m.values().any(|v| {
+                                entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                    && (owner == aid || {
+                                        // Another account's snapshot
+                                        // exists for this caller when it
+                                        // was shared with them AND the
+                                        // request reaches foreign rows at
+                                        // all: by its ARN, or through
+                                        // SnapshotType=shared/public or
+                                        // IncludeShared/IncludePublic --
+                                        // the same rule the listing
+                                        // applies, so the two can't
+                                        // disagree and 404 a row the
+                                        // listing would have returned.
+                                        let attrs = cluster_snapshot_attributes(v);
+                                        (snapshot_owner.as_deref() == Some(owner)
+                                            || matches!(
+                                                snapshot_type.as_deref(),
+                                                Some("shared") | Some("public")
+                                            )
+                                            || include_shared
+                                            || include_public)
+                                            && attrs.get("restore").is_some_and(|targets| {
+                                                targets.contains(&aid)
+                                                    || targets.iter().any(|t| t == "all")
+                                            })
+                                    })
+                            })
+                        })
+                    });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {wanted} not found."),
+                        ));
+                    }
+                }
+                let mut items: Vec<Value> = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .filter(|_| owner_is_caller)
+                    .map(|m| {
+                        m.values()
+                            // Normalized BEFORE the filters run: an
+                            // ARN-valued filter matches against the row's
+                            // ARN, so a row that lacks one would be
+                            // filtered out before it could be stamped.
+                            .map(|v| with_owner_arn(v.clone(), &aid, region))
+                            .filter(|v| {
+                                snapshot_id.as_deref().is_none_or(|wanted| {
+                                    entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                }) && cluster_id.as_deref().is_none_or(|wanted| {
+                                    entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                                }) && cluster_resource_id.as_deref().is_none_or(|wanted| {
+                                    entry_str(v, "DbClusterResourceId") == Some(wanted)
+                                }) && owned_snapshot_type_matches(v, snapshot_type.as_deref())
+                                    && cluster_snapshot_matches_filters(v, &filters, &aid, true)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                // `shared` / `public` select cluster snapshots another
+                // account shared through ModifyDBClusterSnapshotAttribute,
+                // exactly as on DescribeDBSnapshots.
+                // IncludeShared / IncludePublic widen an unqualified
+                // listing, exactly as on DescribeDBSnapshots.
+                // A caller that named a snapshot explicitly resolves it
+                // without IncludeShared as well -- AWS resolves a shared
+                // snapshot addressed by ARN.
+                // A named lookup the caller OWNS must not also pull in
+                // another account's identical id: AWS resolves a named
+                // snapshot uniquely, and two rows are the "couldn't
+                // resolve a single result" failure this branch exists to
+                // avoid. Keyed on whether an owned row with that id
+                // exists at all, not on whether it survived the filters --
+                // otherwise a filtered-out owned row would be replaced by
+                // a foreign one.
+                let owns_named = snapshot_id.as_deref().is_some_and(|wanted| {
+                    owner_is_caller
+                        && accounts
+                            .get(&aid)
+                            .and_then(|s| s.extras.get("cluster_snapshots"))
+                            .is_some_and(|m| {
+                                m.values().any(|v| {
+                                    entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                })
+                            })
+                });
+                // Only an ARN reaches another account's shared snapshot
+                // (AWS requires it, and a bare id could match several
+                // accounts at once and return duplicate rows).
+                let named = snapshot_id.is_some() && !owns_named && snapshot_owner.is_some();
+                // Owning the named row suppresses the cross-account scan
+                // outright, not just the implicit widening: with
+                // IncludeShared set (which `data.aws_db_cluster_snapshot`
+                // does), another account's snapshot of the same bare id
+                // would otherwise be appended and the lookup would return
+                // two rows.
+                let want_shared = !owns_named
+                    && (snapshot_type.as_deref() == Some("shared")
+                        || ((include_shared || named) && snapshot_type.is_none()));
+                let want_public = !owns_named
+                    && (snapshot_type.as_deref() == Some("public")
+                        || ((include_public || named) && snapshot_type.is_none()));
+                // Collected separately from the owned rows: a bare id
+                // can name a shared snapshot in several accounts at once,
+                // and appending them all would hand
+                // `data.aws_db_cluster_snapshot` two rows for one lookup.
+                // Counting them requires them apart from the owned rows.
+                let mut foreign = Vec::new();
+                if want_shared || want_public {
+                    for (owner, other) in accounts.iter() {
+                        if owner == aid {
+                            continue;
+                        }
+                        // An ARN names its owner: never resolve it
+                        // against a different account's identical id.
+                        // The cluster ARN's account is honoured for
+                        // foreign rows too, not just owned ones.
+                        if snapshot_owner
+                            .as_deref()
+                            .is_some_and(|account| account != owner)
+                            || cluster_owner
+                                .as_deref()
+                                .is_some_and(|account| account != owner)
+                        {
+                            continue;
+                        }
+                        let Some(bucket) = other.extras.get("cluster_snapshots") else {
+                            continue;
+                        };
+                        foreign.extend(
+                            bucket
+                                .values()
+                                // Stamped first, for the same reason the
+                                // owned rows are.
+                                .map(|v| with_owner_arn(v.clone(), owner, region))
+                                .filter(|v| {
+                                    let attrs = cluster_snapshot_attributes(v);
+                                    let restore = attrs.get("restore");
+                                    (want_shared
+                                        && restore
+                                            .is_some_and(|targets| targets.contains(&aid)))
+                                        || (want_public
+                                            && restore.is_some_and(|targets| {
+                                                targets.iter().any(|t| t == "all")
+                                            }))
+                                })
+                                .filter(|v| {
+                                    snapshot_id.as_deref().is_none_or(|wanted| {
+                                        entry_str(v, "DBClusterSnapshotIdentifier") == Some(wanted)
+                                    }) && cluster_id.as_deref().is_none_or(|wanted| {
+                                        entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                                    }) && cluster_resource_id.as_deref().is_none_or(|wanted| {
+                                        entry_str(v, "DbClusterResourceId") == Some(wanted)
+                                    }) && cluster_snapshot_matches_filters(
+                                        v, &filters, &aid, false,
+                                    )
+                                }),
+                        );
+                    }
+                }
+                // An ARN pins the owner, so it can only ever match one
+                // account. A bare id can't: exactly one shared row
+                // resolves it, several are ambiguous and resolve to
+                // nothing, and the caller has to pin the owner with an
+                // ARN -- the same rule `DescribeDBSnapshots` applies, so
+                // the two paths can't disagree.
+                let ambiguous = snapshot_owner.is_none() && foreign.len() > 1;
+                if let Some(wanted) = snapshot_id.as_deref().filter(|_| ambiguous) {
+                    tracing::debug!(
+                        snapshot = wanted,
+                        accounts = foreign.len(),
+                        "bare cluster snapshot id is shared by several accounts; \
+                         address it by ARN"
+                    );
+                    // Not-found rather than an empty 200: a named lookup
+                    // that answers with an empty list is the failure this
+                    // handler already guards against elsewhere -- the SDK
+                    // reports "no rows" and the caller can't tell it from
+                    // a snapshot that was deleted. This is also what the
+                    // `DescribeDBSnapshots` sibling returns for the same
+                    // ambiguity.
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {wanted} not found."),
+                    ));
+                }
+                items.extend(foreign);
+                // The cross-account scan walks a HashMap, so without an
+                // explicit order two identical requests can return the
+                // rows in different orders. Sort by creation time then
+                // ARN, as the DB-snapshot path does -- the ARN is unique
+                // across accounts and is what pagination keys on.
+                items.sort_by(|a, b| {
+                    entry_str(a, "SnapshotCreateTime")
+                        .cmp(&entry_str(b, "SnapshotCreateTime"))
+                        .then_with(|| {
+                            entry_str(a, "DBClusterSnapshotArn")
+                                .cmp(&entry_str(b, "DBClusterSnapshotArn"))
+                        })
+                });
+                // MaxRecords / Marker are modeled here, and sharing makes
+                // an unqualified listing unbounded: a paginating client
+                // would otherwise re-read page one forever.
+                // `get_param` keeps `Marker=` as Some(""), which decodes
+                // to a position no row matches and returns an EMPTY page
+                // instead of the first one. Every other parameter in this
+                // handler already treats an explicit empty as absent.
+                // The cursor is the last row's key, so a row with no key
+                // would encode the EMPTY marker -- which this handler
+                // reads back as "no marker" and answers with page one,
+                // leaving a paginating client looping forever.
+                // `with_owner_arn` has stamped the owning account's ARN
+                // onto every row that reached here, so the key is both
+                // present and unique across accounts.
+                let paginated = crate::service::service_helpers::paginate(
+                    items,
+                    get_param(req, "Marker").filter(|value| !value.is_empty()),
+                    get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
+                    |entry| entry_str(entry, "DBClusterSnapshotArn").unwrap_or_default(),
+                )?;
+                // Named member tags, not the generic `<member>`: the
+                // Smithy list carries xmlName `DBClusterSnapshot`, and the
+                // AWS SDK unmarshals an empty list from `<member>` (see
+                // `list_extras_named_xml`) -- which would make the filtering
+                // above invisible to every real client.
+                let body = paginated
+                    .items
+                    .iter()
+                    .map(|v| {
+                        format!(
+                            "        <DBClusterSnapshot>\n{}\n        </DBClusterSnapshot>",
+                            cluster_snapshot_member_xml(v)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let marker_xml = paginated
+                    .next_marker
+                    .as_ref()
+                    .map(|m| format!("\n    <Marker>{}</Marker>", xml_escape(m)))
+                    .unwrap_or_default();
+                let inner = format!(
+                    "    <DBClusterSnapshots>\n{body}\n    </DBClusterSnapshots>{marker_xml}"
+                );
+                Ok(xml_response("DescribeDBClusterSnapshots", inner, &rid))
+            }
+            "DescribeDBClusterSnapshotAttributes" => {
+                // `missing()` raises InvalidParameterValue, which is not
+                // a shape anywhere in the RDS model -- the same objection
+                // this branch applies to the wrong-type-ARN path. Use the
+                // operation's declared fault instead.
+                let raw = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshotIdentifier is required",
+                    )
+                })?;
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {raw} not found."),
+                    ));
+                }
+                // A wrong-type ARN names no cluster snapshot. That is the
+                // declared DBClusterSnapshotNotFoundFault, not the
+                // undeclared InvalidParameterValue `missing()` raises --
+                // an unmodeled error hard-fails a Terraform destroy that
+                // would otherwise treat the snapshot as gone.
+                let id = normalized_identifier(Some(raw.clone()), "cluster-snapshot").ok_or_else(
+                    || {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        )
+                    },
+                )?;
+                let accounts = self.state_handle().read();
+                let entry = accounts
+                    .get(&aid)
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .and_then(|m| m.get(&id))
+                    .ok_or_else(|| {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {id} not found."),
+                        )
+                    })?;
+                Ok(xml_response(
+                    action.as_str(),
+                    cluster_snapshot_attributes_result_xml(&id, &cluster_snapshot_attributes(entry)),
+                    &rid,
+                ))
+            }
+            "ModifyDBClusterSnapshotAttribute" => {
+                // Mirrors ModifyDBSnapshotAttribute: the `restore`
+                // attribute records the accounts (or `all`) a snapshot is
+                // shared with, which is what SnapshotType=shared/public
+                // selects on.
+                // `missing()` raises InvalidParameterValue, which is not
+                // a shape anywhere in the RDS model -- the same objection
+                // this branch applies to the wrong-type-ARN path. Use the
+                // operation's declared fault instead.
+                let raw = get_param(req, "DBClusterSnapshotIdentifier").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "DBClusterSnapshotIdentifier is required",
+                    )
+                })?;
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        format!("DBClusterSnapshot {raw} not found."),
+                    ));
+                }
+                // A wrong-type ARN names no cluster snapshot. That is the
+                // declared DBClusterSnapshotNotFoundFault, not the
+                // undeclared InvalidParameterValue `missing()` raises --
+                // an unmodeled error hard-fails a Terraform destroy that
+                // would otherwise treat the snapshot as gone.
+                let id = normalized_identifier(Some(raw.clone()), "cluster-snapshot").ok_or_else(
+                    || {
+                        AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterSnapshotNotFoundFault",
+                            format!("DBClusterSnapshot {raw} not found."),
+                        )
+                    },
+                )?;
+                let attribute_name = get_param(req, "AttributeName").ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterSnapshotNotFoundFault",
+                        "AttributeName is required",
+                    )
+                })?;
+                let to_add = parse_attribute_values(req, "ValuesToAdd");
+                let to_remove = parse_attribute_values(req, "ValuesToRemove");
+                // AWS rejects a value present in both lists, but
+                // `InvalidParameterCombination` is not even a shape in the
+                // RDS model, so emitting it here would be an undeclared
+                // error (see the module docs on `crate::filters`). Resolve
+                // it deterministically instead -- additions first, then
+                // removals, so a contradictory request leaves the snapshot
+                // UNSHARED. This is a permission surface: the ambiguous
+                // case has to fail closed.
+                let attrs = {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let entry = state
+                        .extras
+                        .get_mut("cluster_snapshots")
+                        .and_then(|m| m.get_mut(&id))
+                        .ok_or_else(|| {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterSnapshotNotFoundFault",
+                                format!("DBClusterSnapshot {id} not found."),
+                            )
+                        })?;
+                    let mut attrs = cluster_snapshot_attributes(entry);
+                    let values = attrs.entry(attribute_name.clone()).or_default();
+                    for v in &to_add {
+                        if !values.contains(v) {
+                            values.push(v.clone());
+                        }
+                    }
+                    for dup in to_add.iter().filter(|v| to_remove.contains(v)) {
+                        tracing::warn!(
+                            value = %dup,
+                            "value present in both ValuesToAdd and ValuesToRemove; \
+                             resolving to removed (AWS would reject the request)"
+                        );
+                    }
+                    values.retain(|v| !to_remove.contains(v));
+                    // An attribute with no values reads back as unshared,
+                    // matching AWS, so drop it rather than storing [].
+                    if values.is_empty() {
+                        attrs.remove(&attribute_name);
+                    }
+                    if let Some(obj) = entry.as_object_mut() {
+                        obj.insert("SnapshotAttributes".to_string(), json!(attrs));
+                    }
+                    attrs
+                };
+                Ok(xml_response(
+                    "ModifyDBClusterSnapshotAttribute",
+                    cluster_snapshot_attributes_result_xml(&id, &attrs),
+                    &rid,
+                ))
             }
             "DescribeDBClusterAutomatedBackups" => Ok(xml_response("DescribeDBClusterAutomatedBackups", "    <DBClusterAutomatedBackups/>".to_string(), &rid)),
             "DeleteDBClusterAutomatedBackup" => Ok(xml_response("DeleteDBClusterAutomatedBackup", "    <DBClusterAutomatedBackup/>".to_string(), &rid)),
@@ -616,7 +1358,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("cluster_endpoints") { m.remove(&id); }
                 Ok(xml_response("DeleteDBClusterEndpoint", format!("    <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>", xml_escape(&id)), &rid))
             }
-            "DescribeDBClusterEndpoints" => list_extras_xml(self, &aid, "cluster_endpoints", "DBClusterEndpoints", "DescribeDBClusterEndpoints", cluster_endpoint_xml, &rid),
+            "DescribeDBClusterEndpoints" => list_extras_xml(self, &aid, "cluster_endpoints", "DBClusterEndpoints", "DBClusterEndpointList", "DescribeDBClusterEndpoints", cluster_endpoint_xml, &rid),
 
             // ── DB Proxies ──
             "CreateDBProxy" => {
@@ -707,7 +1449,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("proxies") { m.remove(&name); }
                 Ok(xml_response("DeleteDBProxy", "    <DBProxy/>".to_string(), &rid))
             }
-            "DescribeDBProxies" => list_extras_xml(self, &aid, "proxies", "DBProxies", "DescribeDBProxies", proxy_xml, &rid),
+            "DescribeDBProxies" => list_extras_xml(self, &aid, "proxies", "DBProxies", "member", "DescribeDBProxies", proxy_xml, &rid),
             "CreateDBProxyEndpoint" => {
                 let name = get_param(req, "DBProxyEndpointName").ok_or_else(|| missing("DBProxyEndpointName"))?;
                 let entry = json!({"DBProxyEndpointName": name, "Status": "available"});
@@ -934,7 +1676,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("security_groups") { m.remove(&name); }
                 xml_empty_action(&action, &rid)
             }
-            "DescribeDBSecurityGroups" => list_extras_xml(self, &aid, "security_groups", "DBSecurityGroups", "DescribeDBSecurityGroups", security_group_xml, &rid),
+            "DescribeDBSecurityGroups" => list_extras_xml(self, &aid, "security_groups", "DBSecurityGroups", "DBSecurityGroup", "DescribeDBSecurityGroups", security_group_xml, &rid),
 
             // ── Option groups ──
             "CreateOptionGroup" | "CopyOptionGroup" => {
@@ -1283,7 +2025,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("integrations") { m.remove(&name); }
                 Ok(xml_response("DeleteIntegration", "    <Integration/>".to_string(), &rid))
             }
-            "DescribeIntegrations" => list_extras_xml(self, &aid, "integrations", "Integrations", "DescribeIntegrations", integration_xml, &rid),
+            "DescribeIntegrations" => list_extras_xml(self, &aid, "integrations", "Integrations", "Integration", "DescribeIntegrations", integration_xml, &rid),
 
             // ── Blue/Green deployments ──
             "CreateBlueGreenDeployment" => {
@@ -1473,7 +2215,7 @@ impl RdsService {
                     &rid,
                 ))
             }
-            "DescribeBlueGreenDeployments" => list_extras_xml(self, &aid, "blue_green", "BlueGreenDeployments", "DescribeBlueGreenDeployments", blue_green_xml, &rid),
+            "DescribeBlueGreenDeployments" => list_extras_xml(self, &aid, "blue_green", "BlueGreenDeployments", "member", "DescribeBlueGreenDeployments", blue_green_xml, &rid),
 
             // ── Shard groups ──
             "CreateDBShardGroup" => {
@@ -1532,7 +2274,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("shard_groups") { m.remove(&id); }
                 Ok(xml_response("DeleteDBShardGroup", "    <DBShardGroup/>".to_string(), &rid))
             }
-            "DescribeDBShardGroups" => list_extras_xml(self, &aid, "shard_groups", "DBShardGroups", "DescribeDBShardGroups", shard_group_xml, &rid),
+            "DescribeDBShardGroups" => list_extras_xml(self, &aid, "shard_groups", "DBShardGroups", "DBShardGroup", "DescribeDBShardGroups", shard_group_xml, &rid),
 
             // ── Custom engine versions ──
             "CreateCustomDBEngineVersion" | "ModifyCustomDBEngineVersion" => {
@@ -1591,7 +2333,7 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("tenant_dbs") { m.remove(&name); }
                 Ok(xml_response("DeleteTenantDatabase", "    <TenantDatabase/>".to_string(), &rid))
             }
-            "DescribeTenantDatabases" => list_extras_xml(self, &aid, "tenant_dbs", "TenantDatabases", "DescribeTenantDatabases", tenant_db_xml, &rid),
+            "DescribeTenantDatabases" => list_extras_xml(self, &aid, "tenant_dbs", "TenantDatabases", "TenantDatabase", "DescribeTenantDatabases", tenant_db_xml, &rid),
             "DescribeDBSnapshotTenantDatabases" => Ok(xml_response("DescribeDBSnapshotTenantDatabases", "    <DBSnapshotTenantDatabases/>".to_string(), &rid)),
 
             // ── Export tasks ──
@@ -1604,7 +2346,7 @@ impl RdsService {
                 Ok(xml_response("StartExportTask", export_task_xml(&entry), &rid))
             }
             "CancelExportTask" => Ok(xml_response("CancelExportTask", "    <ExportTask/>".to_string(), &rid)),
-            "DescribeExportTasks" => list_extras_xml(self, &aid, "export_tasks", "ExportTasks", "DescribeExportTasks", export_task_xml, &rid),
+            "DescribeExportTasks" => list_extras_xml(self, &aid, "export_tasks", "ExportTasks", "ExportTask", "DescribeExportTasks", export_task_xml, &rid),
 
             // ── Activity stream ──
             // ResourceArn names either an Aurora DB cluster or an RDS DB
@@ -1750,26 +2492,68 @@ impl RdsService {
                 let source_id = get_param(req, "SourceDBSnapshotIdentifier")
                     .ok_or_else(|| missing("SourceDBSnapshotIdentifier"))?;
                 // Source may be passed as a bare id or a full ARN; key state
-                // by the trailing identifier segment either way.
-                let source_key = source_id.rsplit(':').next().unwrap_or(&source_id).to_string();
+                // by the trailing identifier segment either way, and keep
+                // the ARN's account so a foreign ARN can't alias onto this
+                // account's same-named snapshot.
+                let source_key = normalized_identifier(Some(source_id.clone()), "snapshot")
+                    .unwrap_or_else(|| source_id.clone());
+                let source_owner = identifier_account(&source_id);
                 let option_group_name = get_param(req, "OptionGroupName");
                 let kms_key_id = get_param(req, "KmsKeyId");
                 let (snapshot, arn) = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
+                    let aid = aid.clone();
                     if state.snapshots.contains_key(&target_id) {
                         return Err(AwsServiceError::aws_error(
-                            StatusCode::CONFLICT,
+                            StatusCode::BAD_REQUEST,
                             "DBSnapshotAlreadyExists",
                             format!("DBSnapshot {target_id} already exists."),
                         ));
                     }
-                    let mut snapshot = state
-                        .snapshots
-                        .get(&source_key)
-                        .cloned()
-                        .ok_or_else(|| crate::service::service_helpers::db_snapshot_not_found(&source_id))?;
+                    // AWS supports copying a snapshot another account
+                    // shared with you, so fall back to a shared source --
+                    // only from the account the ARN names, and only when
+                    // it really was shared with this caller.
+                    let owned = source_owner
+                        .as_deref()
+                        .is_none_or(|account| account == aid)
+                        .then(|| state.snapshots.get(&source_key).cloned())
+                        .flatten();
+                    let mut snapshot = match owned {
+                        Some(snapshot) => snapshot,
+                        // The ARN form is required to reach another
+                        // account's shared snapshot, here as elsewhere.
+                        None => accounts
+                            .iter()
+                            .filter(|(owner, _)| *owner != aid)
+                            .filter(|(owner, _)| {
+                                source_owner.as_deref() == Some(*owner)
+                            })
+                            .find_map(|(_, other)| {
+                                other
+                                    .snapshots
+                                    .get(&source_key)
+                                    .filter(|snapshot| {
+                                        snapshot.snapshot_attributes.get("restore").is_some_and(
+                                            |targets| {
+                                                targets.iter().any(|t| *t == aid || t == "all")
+                                            },
+                                        )
+                                    })
+                                    .cloned()
+                            })
+                            .ok_or_else(|| {
+                                crate::service::service_helpers::db_snapshot_not_found(&source_id)
+                            })?,
+                    };
+                    let state = accounts.get_or_create(&aid);
                     let arn = state.db_snapshot_arn(region, &target_id);
+                    // Recorded before the copy's own ARN overwrites it:
+                    // the source ARN is the only thing that still says
+                    // which account and region the recorded instance
+                    // lives in once this is a cross-account copy.
+                    snapshot.source_db_snapshot_arn = Some(snapshot.db_snapshot_arn.clone());
                     snapshot.db_snapshot_identifier = target_id.clone();
                     snapshot.db_snapshot_arn = arn.clone();
                     snapshot.snapshot_create_time = chrono::Utc::now();
@@ -1811,14 +2595,28 @@ impl RdsService {
                     .ok_or_else(|| missing("TargetDBParameterGroupIdentifier"))?;
                 let source = get_param(req, "SourceDBParameterGroupIdentifier")
                     .ok_or_else(|| missing("SourceDBParameterGroupIdentifier"))?;
-                let source_key = source.rsplit(':').next().unwrap_or(&source).to_string();
+                // Same guarded reduction as the snapshot copies: an
+                // unconditional rsplit lets an ARN of another account --
+                // or of another resource type -- silently copy THIS
+                // account's parameter group of that name.
+                if !addresses_own_account(&source, &aid)
+                    || !identifier_matches_type(&source, "pg")
+                {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBParameterGroupNotFound",
+                        format!("DBParameterGroup {source} not found."),
+                    ));
+                }
+                let source_key = normalized_identifier(Some(source.clone()), "pg")
+                    .unwrap_or_else(|| source.clone());
                 let description = get_param(req, "TargetDBParameterGroupDescription");
                 let group = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
                     if state.parameter_groups.contains_key(&target) {
                         return Err(AwsServiceError::aws_error(
-                            StatusCode::CONFLICT,
+                            StatusCode::BAD_REQUEST,
                             "DBParameterGroupAlreadyExists",
                             format!("DBParameterGroup {target} already exists."),
                         ));
@@ -1897,8 +2695,20 @@ impl RdsService {
                 Ok(xml_response("DescribeEngineDefaultParameters", body, &rid))
             }
             "DescribeDBSnapshotAttributes" => {
-                let id = get_param(req, "DBSnapshotIdentifier")
+                let raw = get_param(req, "DBSnapshotIdentifier")
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // An ARN naming another account addresses THEIR snapshot,
+                // which this op cannot act on; resolving it by bare id
+                // would silently hit this account's same-named one.
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
+                }
+                // A wrong-type ARN names no DB snapshot: the declared
+                // DBSnapshotNotFoundFault, not an undeclared
+                // InvalidParameterValue.
+                let id = normalized_identifier(Some(raw.clone()), "snapshot").ok_or_else(|| {
+                    crate::service::service_helpers::db_snapshot_not_found(&raw)
+                })?;
                 let attrs = {
                     let accounts = self.state_handle().read();
                     let snapshot = accounts
@@ -1914,20 +2724,32 @@ impl RdsService {
                 ))
             }
             "ModifyDBSnapshotAttribute" => {
-                let id = get_param(req, "DBSnapshotIdentifier")
+                let raw = get_param(req, "DBSnapshotIdentifier")
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // An ARN naming another account addresses THEIR snapshot,
+                // which this op cannot act on; resolving it by bare id
+                // would silently hit this account's same-named one.
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
+                }
+                // A wrong-type ARN names no DB snapshot: the declared
+                // DBSnapshotNotFoundFault, not an undeclared
+                // InvalidParameterValue.
+                let id = normalized_identifier(Some(raw.clone()), "snapshot").ok_or_else(|| {
+                    crate::service::service_helpers::db_snapshot_not_found(&raw)
+                })?;
                 let attribute_name = get_param(req, "AttributeName")
                     .ok_or_else(|| missing("AttributeName"))?;
                 let to_add = parse_attribute_values(req, "ValuesToAdd");
                 let to_remove = parse_attribute_values(req, "ValuesToRemove");
-                // AWS rejects a value that appears in both add and remove lists.
-                if let Some(dup) = to_add.iter().find(|v| to_remove.contains(v)) {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterCombination",
-                        format!("The value {dup} is present in both ValuesToAdd and ValuesToRemove."),
-                    ));
-                }
+                // AWS rejects a value present in both lists, but
+                // `InvalidParameterCombination` is not even a shape in the
+                // RDS model, so emitting it here would be an undeclared
+                // error (see the module docs on `crate::filters`). Resolve
+                // it deterministically instead -- additions first, then
+                // removals, so a contradictory request leaves the snapshot
+                // UNSHARED. This is a permission surface: the ambiguous
+                // case has to fail closed.
                 let attrs = {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
@@ -1939,12 +2761,19 @@ impl RdsService {
                         .snapshot_attributes
                         .entry(attribute_name.clone())
                         .or_default();
-                    values.retain(|v| !to_remove.contains(v));
-                    for v in to_add {
-                        if !values.contains(&v) {
-                            values.push(v);
+                    for v in &to_add {
+                        if !values.contains(v) {
+                            values.push(v.clone());
                         }
                     }
+                    for dup in to_add.iter().filter(|v| to_remove.contains(v)) {
+                        tracing::warn!(
+                            value = %dup,
+                            "value present in both ValuesToAdd and ValuesToRemove; \
+                             resolving to removed (AWS would reject the request)"
+                        );
+                    }
+                    values.retain(|v| !to_remove.contains(v));
                     // Drop the attribute entirely once it has no values so
                     // Describe reports an empty (unshared) snapshot rather
                     // than an empty `restore` list, matching AWS.
@@ -1960,8 +2789,20 @@ impl RdsService {
                 ))
             }
             "ModifyDBSnapshot" => {
-                let id = get_param(req, "DBSnapshotIdentifier")
+                let raw = get_param(req, "DBSnapshotIdentifier")
                     .ok_or_else(|| missing("DBSnapshotIdentifier"))?;
+                // An ARN naming another account addresses THEIR snapshot,
+                // which this op cannot act on; resolving it by bare id
+                // would silently hit this account's same-named one.
+                if !addresses_own_account(&raw, &aid) {
+                    return Err(crate::service::service_helpers::db_snapshot_not_found(&raw));
+                }
+                // A wrong-type ARN names no DB snapshot: the declared
+                // DBSnapshotNotFoundFault, not an undeclared
+                // InvalidParameterValue.
+                let id = normalized_identifier(Some(raw.clone()), "snapshot").ok_or_else(|| {
+                    crate::service::service_helpers::db_snapshot_not_found(&raw)
+                })?;
                 let engine_version = get_param(req, "EngineVersion");
                 let option_group_name = get_param(req, "OptionGroupName");
                 let snapshot = {
@@ -1984,179 +2825,6 @@ impl RdsService {
                     format!(
                         "    <DBSnapshot>{}</DBSnapshot>",
                         crate::service::service_helpers::db_snapshot_xml(&snapshot)
-                    ),
-                    &rid,
-                ))
-            }
-            "RestoreDBClusterFromSnapshot" => {
-                let target = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let snapshot_id = get_param(req, "SnapshotIdentifier")
-                    .or_else(|| get_param(req, "DBClusterSnapshotIdentifier"))
-                    .ok_or_else(|| missing("SnapshotIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                let snapshot = state
-                    .extras
-                    .get("cluster_snapshots")
-                    .and_then(|m| m.get(&snapshot_id))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBClusterSnapshotNotFoundFault",
-                            format!("DBClusterSnapshot {snapshot_id} not found."),
-                        )
-                    })?;
-                let source_cluster_id = snapshot
-                    .get("DBClusterIdentifier")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let pending_dump_b64 = snapshot
-                    .get("DumpDataB64")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
-                let mut entry = state
-                    .extras
-                    .get("clusters")
-                    .and_then(|m| m.get(source_cluster_id))
-                    .cloned()
-                    .unwrap_or_else(|| {
-                        json!({
-                            "Engine": get_param(req, "Engine").unwrap_or_else(|| "aurora-postgresql".to_string()),
-                            "EngineVersion": get_param(req, "EngineVersion").unwrap_or_else(|| "15.3".to_string()),
-                            "MasterUsername": "postgres",
-                            "Port": 5432,
-                        })
-                    });
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("DBClusterIdentifier".to_string(), json!(target));
-                    obj.insert("DBClusterArn".to_string(), json!(arn));
-                    obj.insert("Status".to_string(), json!("available"));
-                    obj.insert(
-                        "Endpoint".to_string(),
-                        json!(format!("{target}.cluster-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    obj.insert(
-                        "ReaderEndpoint".to_string(),
-                        json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    // Restored cluster is a distinct resource: mint a fresh
-                    // immutable resource id rather than reuse the source's.
-                    obj.insert(
-                        "DbClusterResourceId".to_string(),
-                        json!(new_cluster_resource_id()),
-                    );
-                    obj.remove("ReplicationSourceIdentifier");
-                    // The new cluster starts empty; the user is expected
-                    // to call CreateDBInstance with DBClusterIdentifier
-                    // pointing here, at which point we replay the dump.
-                    obj.remove("DBClusterMembers");
-                    obj.remove("WriterDBInstanceIdentifier");
-                    // Drop snapshot bookkeeping that leaked in via the
-                    // source-cluster clone path.
-                    obj.remove("DBClusterSnapshotIdentifier");
-                    obj.remove("DBClusterSnapshotArn");
-                    obj.remove("DumpDataB64");
-                    if let Some(engine) = get_param(req, "Engine") {
-                        obj.insert("Engine".to_string(), json!(engine));
-                    }
-                    if let Some(version) = get_param(req, "EngineVersion") {
-                        obj.insert("EngineVersion".to_string(), json!(version));
-                    }
-                    if let Some(port) = get_param(req, "Port").and_then(|p| p.parse::<i64>().ok()) {
-                        obj.insert("Port".to_string(), json!(port));
-                    }
-                    // Stage the snapshot dump so the next CreateDBInstance
-                    // joining this cluster replays the data into its
-                    // fresh container.
-                    if let Some(b64) = pending_dump_b64 {
-                        obj.insert("PendingRestoreDumpB64".to_string(), json!(b64));
-                    }
-                }
-                store(&mut state.extras, "clusters").insert(target.clone(), entry.clone());
-                drop(accounts);
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &target,
-                    &arn,
-                    "RDS-EVENT-0170",
-                    &["creation"],
-                    "DB cluster restored from snapshot",
-                );
-                Ok(xml_response(
-                    "RestoreDBClusterFromSnapshot",
-                    format!(
-                        "    <DBCluster>\n{}\n    </DBCluster>",
-                        db_cluster_member_xml(&entry)
-                    ),
-                    &rid,
-                ))
-            }
-            // Sync metadata-only fallback for RestoreDBClusterToPointInTime;
-            // the dispatcher in `handle_request` routes the action to the
-            // async path that also dumps and stages the source writer.
-            "RestoreDBClusterToPointInTime" => {
-                let target = get_param(req, "DBClusterIdentifier")
-                    .ok_or_else(|| missing("DBClusterIdentifier"))?;
-                let source = get_param(req, "SourceDBClusterIdentifier")
-                    .ok_or_else(|| missing("SourceDBClusterIdentifier"))?;
-                let arn = Arn::new("rds", region, &aid, &format!("cluster:{target}")).to_string();
-                let mut accounts = write_state!();
-                let state = accounts.get_or_create(&aid);
-                let mut entry = state
-                    .extras
-                    .get("clusters")
-                    .and_then(|m| m.get(&source))
-                    .cloned()
-                    .ok_or_else(|| {
-                        AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBClusterNotFoundFault",
-                            format!("DBCluster {source} not found."),
-                        )
-                    })?;
-                if let Some(obj) = entry.as_object_mut() {
-                    obj.insert("DBClusterIdentifier".to_string(), json!(target));
-                    obj.insert("DBClusterArn".to_string(), json!(arn));
-                    obj.insert("Status".to_string(), json!("available"));
-                    obj.insert(
-                        "Endpoint".to_string(),
-                        json!(format!("{target}.cluster-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    obj.insert(
-                        "ReaderEndpoint".to_string(),
-                        json!(format!("{target}.cluster-ro-xxx.{region}.rds.amazonaws.com")),
-                    );
-                    obj.insert(
-                        "DbClusterResourceId".to_string(),
-                        json!(new_cluster_resource_id()),
-                    );
-                    obj.remove("DBClusterMembers");
-                    obj.remove("WriterDBInstanceIdentifier");
-                    if let Some(restore_time) = get_param(req, "RestoreToTime") {
-                        obj.insert("RestoreToTime".to_string(), json!(restore_time));
-                    }
-                    if let Some(latest) = get_param(req, "UseLatestRestorableTime") {
-                        obj.insert("UseLatestRestorableTime".to_string(), json!(latest));
-                    }
-                }
-                store(&mut state.extras, "clusters").insert(target.clone(), entry.clone());
-                drop(accounts);
-                self.emit_event(
-                    RdsSourceType::DbCluster,
-                    &target,
-                    &arn,
-                    "RDS-EVENT-0171",
-                    &["creation"],
-                    "DB cluster restored to point in time",
-                );
-                Ok(xml_response(
-                    "RestoreDBClusterToPointInTime",
-                    format!(
-                        "    <DBCluster>\n{}\n    </DBCluster>",
-                        db_cluster_member_xml(&entry)
                     ),
                     &rid,
                 ))
@@ -2457,6 +3125,136 @@ fn apply_shard_group_capacity(obj: &mut serde_json::Map<String, Value>, req: &Aw
     }
 }
 
+/// Look a cluster snapshot up across accounts: the caller's own first,
+/// then any account that shared it with the caller (or with everyone).
+/// `named_account` is the owner an ARN named, when the caller used one.
+pub(crate) fn find_cluster_snapshot(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<crate::state::RdsState>,
+    caller: &str,
+    named_account: Option<&str>,
+    id: &str,
+) -> Option<Value> {
+    if named_account.is_none_or(|account| account == caller) {
+        if let Some(entry) = accounts
+            .get(caller)
+            .and_then(|s| s.extras.get("cluster_snapshots"))
+            .and_then(|m| m.get(id))
+        {
+            return Some(entry.clone());
+        }
+    }
+    // AWS requires the ARN to reach another account's shared snapshot,
+    // and a bare id could match several accounts at once -- the scan
+    // would then return an arbitrary (HashMap-ordered) row.
+    let named_account = named_account?;
+    accounts
+        .iter()
+        .filter(|(owner, _)| *owner != caller)
+        .filter(|(owner, _)| *owner == named_account)
+        .find_map(|(_, other)| {
+            other
+                .extras
+                .get("cluster_snapshots")
+                .and_then(|m| m.get(id))
+                .filter(|entry| {
+                    cluster_snapshot_attributes(entry)
+                        .get("restore")
+                        .is_some_and(|targets| targets.iter().any(|t| t == caller || t == "all"))
+                })
+                .cloned()
+        })
+}
+
+/// The stored share attributes of a cluster snapshot entry
+/// (`ModifyDBClusterSnapshotAttribute` writes them under
+/// `SnapshotAttributes`), keyed by attribute name.
+fn cluster_snapshot_attributes(entry: &Value) -> BTreeMap<String, Vec<String>> {
+    entry
+        .get("SnapshotAttributes")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .map(|(name, values)| {
+                    let values = values
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    (name.clone(), values)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// True when a cluster snapshot the caller owns satisfies `SnapshotType`.
+/// `shared` / `public` select other accounts' snapshots instead and are
+/// handled separately.
+fn owned_snapshot_type_matches(entry: &Value, snapshot_type: Option<&str>) -> bool {
+    match snapshot_type {
+        // An owned snapshot marked public is still public; `shared`
+        // means "shared TO me", which an owned snapshot never is.
+        Some("public") => cluster_snapshot_attributes(entry)
+            .get("restore")
+            .is_some_and(|targets| targets.iter().any(|t| t == "all")),
+        Some("shared") => false,
+        // Same default the renderer emits, so a stored entry without the
+        // field can't read back as `manual` yet be excluded by
+        // `--snapshot-type manual`.
+        Some(wanted) => entry_str(entry, "SnapshotType").unwrap_or("manual") == wanted,
+        None => true,
+    }
+}
+
+/// `DBClusterSnapshotAttributesResult`, the cluster-snapshot twin of
+/// [`snapshot_attributes_result_xml`].
+fn cluster_snapshot_attributes_result_xml(
+    id: &str,
+    attrs: &BTreeMap<String, Vec<String>>,
+) -> String {
+    let attributes = if attrs.is_empty() {
+        "      <DBClusterSnapshotAttributes/>".to_string()
+    } else {
+        let members = attrs
+            .iter()
+            .map(|(name, values)| {
+                let value_members = if values.is_empty() {
+                    "            <AttributeValues/>".to_string()
+                } else {
+                    let inner = values
+                        .iter()
+                        .map(|v| {
+                            format!(
+                                "              <AttributeValue>{}</AttributeValue>",
+                                xml_escape(v)
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("            <AttributeValues>\n{inner}\n            </AttributeValues>")
+                };
+                format!(
+                    "        <DBClusterSnapshotAttribute>\n          <AttributeName>{}</AttributeName>\n{}\n        </DBClusterSnapshotAttribute>",
+                    xml_escape(name),
+                    value_members,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "      <DBClusterSnapshotAttributes>\n{members}\n      </DBClusterSnapshotAttributes>"
+        )
+    };
+    format!(
+        "    <DBClusterSnapshotAttributesResult>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n{}\n    </DBClusterSnapshotAttributesResult>",
+        xml_escape(id),
+        attributes,
+    )
+}
+
 /// Render the `DBSnapshotAttributesResult` block shared by
 /// `DescribeDBSnapshotAttributes` and `ModifyDBSnapshotAttribute`.
 fn snapshot_attributes_result_xml(id: &str, attrs: &BTreeMap<String, Vec<String>>) -> String {
@@ -2512,22 +3310,50 @@ pub(crate) fn db_cluster_xml(id: &str, arn: &str) -> String {
     )
 }
 
-pub(crate) fn cluster_snapshot_xml(id: &str, arn: &str, cluster: &str) -> String {
-    cluster_snapshot_status_xml(id, arn, cluster, "available")
+/// Snapshot-type / engine fields for a single-object response, read off
+/// the stored entry. The Describe path reports these, so the create /
+/// copy / delete responses have to as well -- otherwise a client reads a
+/// blank `SnapshotType` off the copy it just made.
+pub(crate) fn cluster_snapshot_detail_xml(entry: Option<&Value>) -> String {
+    let mut out = String::new();
+    let entry = match entry {
+        Some(entry) => entry,
+        None => return out,
+    };
+    out.push_str(&format!(
+        "\n      <SnapshotType>{}</SnapshotType>",
+        xml_escape(entry_str(entry, "SnapshotType").unwrap_or("manual"))
+    ));
+    if let Some(engine) = entry_str(entry, "Engine") {
+        out.push_str(&format!("\n      <Engine>{}</Engine>", xml_escape(engine)));
+    }
+    if let Some(version) = entry_str(entry, "EngineVersion") {
+        out.push_str(&format!(
+            "\n      <EngineVersion>{}</EngineVersion>",
+            xml_escape(version)
+        ));
+    }
+    out
 }
 
-/// Same as `cluster_snapshot_xml` but with an explicit status, so the
-/// CreateDBClusterSnapshot response can report `creating` while the writer
-/// dump runs in the background.
-pub(crate) fn cluster_snapshot_status_xml(
+/// A single `<DBClusterSnapshot>` element with an explicit status (so
+/// CreateDBClusterSnapshot can report `creating` while the writer dump
+/// runs) plus the extra fields the caller read off the stored entry (see
+/// [`cluster_snapshot_detail_xml`]).
+pub(crate) fn cluster_snapshot_status_detail_xml(
     id: &str,
     arn: &str,
     cluster: &str,
     status: &str,
+    detail: String,
 ) -> String {
     format!(
-        "    <DBClusterSnapshot>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <Status>{}</Status>\n    </DBClusterSnapshot>",
-        xml_escape(id), xml_escape(arn), xml_escape(cluster), xml_escape(status),
+        "    <DBClusterSnapshot>\n      <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n      <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n      <DBClusterIdentifier>{}</DBClusterIdentifier>\n      <Status>{}</Status>{}\n    </DBClusterSnapshot>",
+        xml_escape(id),
+        xml_escape(arn),
+        xml_escape(cluster),
+        xml_escape(status),
+        detail,
     )
 }
 

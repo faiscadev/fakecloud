@@ -25,7 +25,7 @@ impl RdsService {
 
         if state.subnet_groups.contains_key(&db_subnet_group_name) {
             return Err(AwsServiceError::aws_error(
-                StatusCode::CONFLICT,
+                StatusCode::BAD_REQUEST,
                 "DBSubnetGroupAlreadyExists",
                 format!("DBSubnetGroup {db_subnet_group_name} already exists."),
             ));

@@ -371,6 +371,16 @@ pub struct RdsTag {
 pub struct DbSnapshot {
     pub db_snapshot_identifier: String,
     pub db_snapshot_arn: String,
+    /// The ARN of the snapshot this one was copied from, when it is a
+    /// copy. AWS reports it as `SourceDBSnapshotIdentifier`.
+    ///
+    /// A copy's own ARN names the COPIER's account and region, while the
+    /// instance it records still belongs to the original owner -- so the
+    /// source ARN is the only thing that says where that instance lives,
+    /// and `db-instance-id` needs it to match a cross-account or
+    /// cross-region copy by ARN.
+    #[serde(default)]
+    pub source_db_snapshot_arn: Option<String>,
     pub db_instance_identifier: String,
     pub snapshot_create_time: DateTime<Utc>,
     pub engine: String,
@@ -684,6 +694,31 @@ impl RdsState {
             extras: BTreeMap::new(),
             events: Vec::new(),
             default_certificate_identifier: None,
+        }
+    }
+
+    /// Fix up state loaded from an older persistence snapshot, given the
+    /// schema version the file declared.
+    ///
+    /// Final snapshots (`FinalDBSnapshotIdentifier` on DeleteDBInstance)
+    /// were recorded as `automated` up to schema v2; AWS types them
+    /// `manual`, because they outlive the instance, unlike automated
+    /// backups. Left alone such a row would silently disappear from
+    /// `DescribeDBSnapshots --snapshot-type manual` now that SnapshotType
+    /// actually narrows the result.
+    ///
+    /// Version-gated on purpose: this rewrite is only sound while nothing
+    /// produces genuine `automated` snapshots. Once automated backups
+    /// become real they are written at a newer schema version and are
+    /// left untouched here.
+    pub fn migrate_loaded(&mut self, from_schema_version: u32) {
+        if from_schema_version > RDS_FINAL_SNAPSHOT_AUTOMATED_SCHEMA {
+            return;
+        }
+        for snapshot in self.snapshots.values_mut() {
+            if snapshot.snapshot_type == "automated" {
+                snapshot.snapshot_type = "manual".to_string();
+            }
         }
     }
 
@@ -1029,7 +1064,13 @@ pub fn default_parameter_groups(
     groups
 }
 
-pub const RDS_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// v3 retyped final snapshots from `automated` to `manual`; a v2 file
+/// still carries the old type and is migrated on load.
+pub const RDS_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+
+/// Last schema version whose final snapshots were persisted as
+/// `automated`. Files at or below this need [`RdsState::migrate_loaded`].
+pub const RDS_FINAL_SNAPSHOT_AUTOMATED_SCHEMA: u32 = 2;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RdsSnapshot {

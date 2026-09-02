@@ -28,7 +28,7 @@ impl RdsService {
 
             if !state.begin_instance_creation(&db_instance_identifier) {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::CONFLICT,
+                    StatusCode::BAD_REQUEST,
                     "DBInstanceAlreadyExists",
                     format!("DBInstance {db_instance_identifier} already exists."),
                 ));
@@ -101,6 +101,37 @@ impl RdsService {
             &source_instance,
             &creating_placeholder_container(),
         );
+        // Active Directory membership is settable on this request too
+        // (all six members are modeled): an explicit Domain overrides
+        // whatever the source carried, and dropping it would leave the
+        // new instance invisible to the `domain` filter.
+        // Gated on ANY Domain member, not just `Domain`: AWS's
+        // self-managed AD flow sets DomainFqdn / DomainOu /
+        // DomainAuthSecretArn / DomainDnsIps without a directory id.
+        let domain_members = [
+            "Domain",
+            "DomainFqdn",
+            "DomainOu",
+            "DomainIAMRoleName",
+            "DomainAuthSecretArn",
+        ];
+        let joins_a_domain = domain_members
+            .iter()
+            .any(|member| optional_query_param(request, member).is_some())
+            || !parse_string_member_list(request, "DomainDnsIps").is_empty();
+        if joins_a_domain {
+            replica.domain = optional_query_param(request, "Domain");
+            replica.domain_fqdn = optional_query_param(request, "DomainFqdn");
+            replica.domain_ou = optional_query_param(request, "DomainOu");
+            replica.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
+            replica.domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
+            // Every field moves together: keeping the source's DNS IPs
+            // beside a different domain name is an incoherent
+            // DomainMembership, and the snapshot-restore path already
+            // assigns all six unconditionally.
+            replica.domain_dns_ips = parse_string_member_list(request, "DomainDnsIps");
+        }
+
         replica.db_instance_status = "creating".to_string();
         replica.endpoint_address = String::new();
         replica.port = 0;

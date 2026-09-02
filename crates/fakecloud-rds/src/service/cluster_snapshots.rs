@@ -2,6 +2,8 @@
 
 use super::*;
 
+use crate::filters::{identifier_account, normalized_identifier};
+
 impl RdsService {
     /// Real CreateDBClusterSnapshot: locates the cluster's writer
     /// member, dumps its database synchronously via the runtime, and
@@ -18,6 +20,33 @@ impl RdsService {
             "arn:aws:rds:{}:{}:cluster-snapshot:{}",
             request.region, request.account_id, snapshot_id
         );
+
+        // A duplicate identifier is the declared AlreadyExists fault, not
+        // a silent overwrite of the existing snapshot's dump and sharing.
+        // Checked here to fail before paying for the dump, and AGAIN
+        // under the write lock below -- the dump is awaited in between,
+        // so two concurrent calls would otherwise both pass this one.
+        // Gated on the cluster existing, so a duplicate id against a
+        // cluster that doesn't exist still reports DBClusterNotFoundFault
+        // from the write block below rather than AlreadyExists here.
+        let duplicate_of_existing_cluster = {
+            let accounts = self.state.read();
+            let account = accounts.get(&request.account_id);
+            let cluster_exists = account
+                .and_then(|s| s.extras.get("clusters"))
+                .is_some_and(|m| m.contains_key(&cluster_id));
+            cluster_exists
+                && account
+                    .and_then(|s| s.extras.get("cluster_snapshots"))
+                    .is_some_and(|m| m.contains_key(&snapshot_id))
+        };
+        if duplicate_of_existing_cluster {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBClusterSnapshotAlreadyExistsFault",
+                format!("DBClusterSnapshot {snapshot_id} already exists."),
+            ));
+        }
 
         let writer_info = {
             let accounts = self.state.read();
@@ -48,11 +77,27 @@ impl RdsService {
                     inst.db_name
                         .clone()
                         .unwrap_or_else(|| default_db_name(&inst.engine).to_string()),
+                    inst.engine_version.clone(),
                 ))
             })
         };
 
-        let dump_b64 = if let Some((wid, eng, user, pass, db)) = writer_info {
+        // The writer's own settings, kept alongside the dump: it was taken
+        // with these credentials and database, and its engine is the
+        // container engine (`postgres` / `mysql`), not the cluster's
+        // `aurora-*` family which no runtime can start.
+        let writer_source = writer_info
+            .as_ref()
+            .map(|(_, eng, user, pass, db, version)| {
+                (
+                    eng.clone(),
+                    user.clone(),
+                    pass.clone(),
+                    db.clone(),
+                    version.clone(),
+                )
+            });
+        let dump_b64 = if let Some((wid, eng, user, pass, db, _version)) = writer_info {
             if let Some(runtime) = self.runtime_ref() {
                 match runtime.dump_database(&wid, &eng, &user, &pass, &db).await {
                     Ok(data) => {
@@ -76,9 +121,12 @@ impl RdsService {
             None
         };
 
-        {
+        let stored = {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&request.account_id);
+            // The cluster is validated before the duplicate check, so a
+            // duplicate id against a cluster that doesn't exist reports
+            // DBClusterNotFoundFault rather than AlreadyExists.
             let mut entry = state
                 .extras
                 .get("clusters")
@@ -91,6 +139,17 @@ impl RdsService {
                         format!("DBCluster {cluster_id} not found."),
                     )
                 })?;
+            if state
+                .extras
+                .get("cluster_snapshots")
+                .is_some_and(|m| m.contains_key(&snapshot_id))
+            {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "DBClusterSnapshotAlreadyExistsFault",
+                    format!("DBClusterSnapshot {snapshot_id} already exists."),
+                ));
+            }
             if let Some(obj) = entry.as_object_mut() {
                 obj.insert(
                     "DBClusterSnapshotIdentifier".to_string(),
@@ -100,6 +159,23 @@ impl RdsService {
                 obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
                 obj.insert("Status".to_string(), json!("available"));
                 obj.insert("SnapshotType".to_string(), json!("manual"));
+                obj.insert(
+                    "SnapshotCreateTime".to_string(),
+                    json!(Utc::now().to_rfc3339()),
+                );
+                obj.insert("PercentProgress".to_string(), json!(100));
+                if let Some((engine, username, password, db_name, engine_version)) =
+                    writer_source.as_ref()
+                {
+                    obj.insert("SourceEngine".to_string(), json!(engine));
+                    obj.insert("SourceMasterUsername".to_string(), json!(username));
+                    obj.insert("SourceMasterUserPassword".to_string(), json!(password));
+                    obj.insert("SourceDBName".to_string(), json!(db_name));
+                    // Paired with SourceEngine: reporting the cluster's
+                    // Aurora version against the writer's engine would be
+                    // an engine/version pair that doesn't exist on AWS.
+                    obj.insert("SourceEngineVersion".to_string(), json!(engine_version));
+                }
                 if let Some(b64) = dump_b64.as_ref() {
                     obj.insert("DumpDataB64".to_string(), json!(b64));
                 }
@@ -108,8 +184,9 @@ impl RdsService {
                 .extras
                 .entry("cluster_snapshots".to_string())
                 .or_default()
-                .insert(snapshot_id.clone(), entry);
-        }
+                .insert(snapshot_id.clone(), entry.clone());
+            entry
+        };
 
         self.emit_event(
             RdsSourceType::DbClusterSnapshot,
@@ -125,7 +202,13 @@ impl RdsService {
             query_response_xml(
                 "CreateDBClusterSnapshot",
                 RDS_NS,
-                &crate::extras::cluster_snapshot_xml(&snapshot_id, &arn, &cluster_id),
+                &crate::extras::cluster_snapshot_status_detail_xml(
+                    &snapshot_id,
+                    &arn,
+                    &cluster_id,
+                    "available",
+                    crate::extras::cluster_snapshot_detail_xml(Some(&stored)),
+                ),
                 &request.request_id,
             ),
         ))
@@ -142,17 +225,34 @@ impl RdsService {
     ) -> Result<AwsResponse, AwsServiceError> {
         use serde_json::json;
         let target = required_query_param(request, "DBClusterIdentifier")?;
-        let snapshot_id = optional_query_param(request, "SnapshotIdentifier")
-            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"))
-            .ok_or_else(|| {
-                // Without a snapshot id there's no snapshot to look up,
-                // so surface the same declared `*NotFound` shape we'd
-                // emit for a non-existent id. Smithy doesn't declare a
-                // generic `MissingParameter` on this op.
+        // The Terraform provider stores a full snapshot ARN in
+        // `snapshot_identifier`, and DescribeDBClusterSnapshots /
+        // CopyDBClusterSnapshot both resolve that form, so this lookup
+        // has to as well.
+        let raw_snapshot_id = optional_query_param(request, "SnapshotIdentifier")
+            .or_else(|| optional_query_param(request, "DBClusterSnapshotIdentifier"));
+        let snapshot_owner = raw_snapshot_id.as_deref().and_then(identifier_account);
+        // Distinguish "never supplied" from "supplied but names no
+        // cluster snapshot": reporting `DBClusterSnapshot (none) not
+        // found.` for a missing parameter implies a snapshot by that
+        // name was looked up.
+        let missing_snapshot_id = raw_snapshot_id.is_none();
+        let reported_snapshot_id = raw_snapshot_id.clone().unwrap_or_default();
+        let snapshot_id =
+            normalized_identifier(raw_snapshot_id, "cluster-snapshot").ok_or_else(|| {
+                // Covers both "not supplied" and "supplied but names no
+                // cluster snapshot" (a wrong-type ARN reduces to None):
+                // report the declared *NotFound shape with the caller's
+                // own value rather than a misleading "is required".
+                // Smithy declares no generic MissingParameter here.
                 AwsServiceError::aws_error(
                     StatusCode::NOT_FOUND,
                     "DBClusterSnapshotNotFoundFault",
-                    "SnapshotIdentifier is required",
+                    if missing_snapshot_id {
+                        "SnapshotIdentifier or DBClusterSnapshotIdentifier is required".to_string()
+                    } else {
+                        format!("DBClusterSnapshot {reported_snapshot_id} not found.")
+                    },
                 )
             })?;
         let arn = format!(
@@ -161,21 +261,49 @@ impl RdsService {
         );
 
         let mut accounts = self.state.write();
+        // Resolved before the mutable borrow the cluster insert needs.
+        // A snapshot another account shared with this caller is listable,
+        // so it has to be restorable too -- and an ARN names its owner,
+        // so it can't resolve against a different account's identical id.
+        let snapshot = crate::extras::find_cluster_snapshot(
+            &accounts,
+            &request.account_id,
+            snapshot_owner.as_deref(),
+            &snapshot_id,
+        )
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "DBClusterSnapshotNotFoundFault",
+                format!("DBClusterSnapshot {snapshot_id} not found."),
+            )
+        })?;
         let state = accounts.get_or_create(&request.account_id);
-        let snapshot = state
+        // Restoring onto an existing cluster would replace a live
+        // row whose members were just stripped, orphaning its writer
+        // instance -- and for a self-targeted PITR, destroying the
+        // very cluster being read. That is the declared
+        // DBClusterAlreadyExistsFault.
+        if state
             .extras
-            .get("cluster_snapshots")
-            .and_then(|m| m.get(&snapshot_id))
-            .cloned()
-            .ok_or_else(|| {
-                AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "DBClusterSnapshotNotFoundFault",
-                    format!("DBClusterSnapshot {snapshot_id} not found."),
-                )
-            })?;
+            .get("clusters")
+            .is_some_and(|m| m.contains_key(&target))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBClusterAlreadyExistsFault",
+                format!("DBCluster {target} already exists."),
+            ));
+        }
         let pending_dump_b64 = snapshot
             .get("DumpDataB64")
+            // A snapshot of a cluster that was itself restored, taken
+            // before an instance attached, has no DumpDataB64 -- there
+            // was no writer to dump -- and carries the data staged under
+            // PendingRestoreDumpB64 instead. Without this fallback that
+            // chain loses the database here, while the instance restore
+            // (which does read it) recovers it from the same snapshot.
+            .or_else(|| snapshot.get("PendingRestoreDumpB64"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
 
@@ -209,6 +337,47 @@ impl RdsService {
             obj.remove("DBClusterSnapshotIdentifier");
             obj.remove("DBClusterSnapshotArn");
             obj.remove("DumpDataB64");
+            // Also drop any staged dump inherited from an earlier
+            // restore: the fresh one is inserted below when there is one,
+            // and leaving this would silently replay stale data when
+            // there isn't (the create path tolerates a failed dump).
+            obj.remove("PendingRestoreDumpB64");
+            // Snapshot-only bookkeeping has no meaning on a cluster row,
+            // and CreateDBClusterSnapshot copies the whole row into the
+            // next snapshot, so leaving it would propagate forward.
+            obj.remove("SnapshotType");
+            obj.remove("SnapshotCreateTime");
+            obj.remove("PercentProgress");
+            // Sharing must not propagate forward either: the restored
+            // cluster is snapshotted whole by CreateDBClusterSnapshot.
+            obj.remove("SnapshotAttributes");
+            // The writer settings the snapshot captured describe the
+            // SOURCE cluster's writer, not this one. Left in place they
+            // would survive into a later snapshot of the restored cluster
+            // (taken while it has no instance attached) and make an
+            // instance restore start with the old credentials and
+            // database.
+            // A restored cluster is not a copy of the snapshot's source:
+            // leaving this would make a later snapshot OF the restored
+            // cluster report an unrelated copy source, now that the
+            // renderer emits the field.
+            obj.remove("SourceDBClusterSnapshotArn");
+            obj.remove("SourceEngine");
+            obj.remove("SourceEngineVersion");
+            obj.remove("SourceMasterUsername");
+            obj.remove("SourceMasterUserPassword");
+            obj.remove("SourceDBName");
+            // The snapshot carries the source cluster's identity fields
+            // (CreateDBClusterSnapshot copies the whole cluster JSON).
+            // A restore is an independent full copy: it gets its own
+            // resource id and belongs to no clone group. Inheriting
+            // either makes `db-cluster-resource-id` / `clone-group-id`
+            // return two clusters for what AWS scopes to one.
+            obj.insert(
+                "DbClusterResourceId".to_string(),
+                json!(crate::extras::new_cluster_resource_id()),
+            );
+            obj.remove("CloneGroupId");
             if let Some(engine) = optional_query_param(request, "Engine") {
                 obj.insert("Engine".to_string(), json!(engine));
             }
@@ -321,8 +490,26 @@ impl RdsService {
         // source writer and stages it as `PendingRestoreDumpB64` on the target
         // cluster, which the first attached CreateDBInstance replays. Mirrors
         // the instance-restore path's `spawn_finalize_restored_instance`.
+        let restore_type = optional_query_param(request, "RestoreType");
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&request.account_id);
+        // Restoring onto an existing cluster would replace a live
+        // row whose members were just stripped, orphaning its writer
+        // instance -- and for a self-targeted PITR, destroying the
+        // very cluster being read. That is the declared
+        // DBClusterAlreadyExistsFault.
+        if state
+            .extras
+            .get("clusters")
+            .is_some_and(|m| m.contains_key(&target))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "DBClusterAlreadyExistsFault",
+                format!("DBCluster {target} already exists."),
+            ));
+        }
+
         let mut entry = state
             .extras
             .get("clusters")
@@ -335,6 +522,31 @@ impl RdsService {
                     format!("DBCluster {source} not found."),
                 )
             })?;
+
+        // A `copy-on-write` restore clones the source: both clusters join
+        // one clone group, so stamp the source with a group id if it
+        // isn't already in one.
+        let clone_group_id = if restore_type.as_deref() == Some("copy-on-write") {
+            let existing = entry
+                .get("CloneGroupId")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            // AWS reports CloneGroupId as a hyphenated UUID (the bare-hex
+            // `.simple()` form this crate uses elsewhere is always
+            // prefixed, e.g. `db-`/`cluster-`).
+            let group_id = existing.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            if let Some(source_entry) = state
+                .extras
+                .get_mut("clusters")
+                .and_then(|m| m.get_mut(&source))
+                .and_then(|v| v.as_object_mut())
+            {
+                source_entry.insert("CloneGroupId".to_string(), json!(group_id));
+            }
+            group_id
+        } else {
+            String::new()
+        };
         if let Some(obj) = entry.as_object_mut() {
             obj.insert("DBClusterIdentifier".to_string(), json!(target));
             obj.insert("DBClusterArn".to_string(), json!(arn));
@@ -355,6 +567,35 @@ impl RdsService {
             );
             obj.remove("DBClusterMembers");
             obj.remove("WriterDBInstanceIdentifier");
+            // A PITR target is an independent cluster, never a replica --
+            // the from-snapshot path above already drops this. Inherited,
+            // a PITR restore of an Aurora read replica would report the
+            // source's writer as its replication source, so
+            // DescribeDBClusters shows an independent cluster as a
+            // replica and PromoteReadReplicaDBCluster becomes meaningful
+            // on a cluster that never was one.
+            obj.remove("ReplicationSourceIdentifier");
+            // The restored cluster is a new resource: the immutable
+            // resource id must not be inherited from the source, or
+            // `db-cluster-resource-id` (a unique match on AWS) selects
+            // both clusters.
+            obj.insert(
+                "DbClusterResourceId".to_string(),
+                json!(crate::extras::new_cluster_resource_id()),
+            );
+            // Only a `copy-on-write` restore is a clone: AWS puts the
+            // clone and its source in the same clone group, which is
+            // what `DescribeDBClusters --filters Name=clone-group-id`
+            // selects on. A full-copy restore is an independent cluster,
+            // so it must not inherit the source's group.
+            match restore_type.as_deref() {
+                Some("copy-on-write") => {
+                    obj.insert("CloneGroupId".to_string(), json!(clone_group_id));
+                }
+                _ => {
+                    obj.remove("CloneGroupId");
+                }
+            }
             if let Some(restore_time) = optional_query_param(request, "RestoreToTime") {
                 obj.insert("RestoreToTime".to_string(), json!(restore_time));
             }

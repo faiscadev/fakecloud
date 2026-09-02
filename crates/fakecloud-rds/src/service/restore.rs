@@ -33,7 +33,7 @@ impl RdsService {
 
             if !state.begin_instance_creation(&target_id) {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::CONFLICT,
+                    StatusCode::BAD_REQUEST,
                     "DBInstanceAlreadyExists",
                     format!("DBInstance {target_id} already exists."),
                 ));
@@ -163,6 +163,37 @@ impl RdsService {
         instance.db_instance_status = "creating".to_string();
         instance.endpoint_address = String::new();
         instance.port = 0;
+        // Active Directory membership is settable on this request too
+        // (all six members are modeled): an explicit Domain overrides
+        // whatever the source carried, and dropping it would leave the
+        // new instance invisible to the `domain` filter.
+        // Gated on ANY Domain member, not just `Domain`: AWS's
+        // self-managed AD flow sets DomainFqdn / DomainOu /
+        // DomainAuthSecretArn / DomainDnsIps without a directory id.
+        let domain_members = [
+            "Domain",
+            "DomainFqdn",
+            "DomainOu",
+            "DomainIAMRoleName",
+            "DomainAuthSecretArn",
+        ];
+        let joins_a_domain = domain_members
+            .iter()
+            .any(|member| optional_query_param(request, member).is_some())
+            || !parse_string_member_list(request, "DomainDnsIps").is_empty();
+        if joins_a_domain {
+            instance.domain = optional_query_param(request, "Domain");
+            instance.domain_fqdn = optional_query_param(request, "DomainFqdn");
+            instance.domain_ou = optional_query_param(request, "DomainOu");
+            instance.domain_iam_role_name = optional_query_param(request, "DomainIAMRoleName");
+            instance.domain_auth_secret_arn = optional_query_param(request, "DomainAuthSecretArn");
+            // Every field moves together: keeping the source's DNS IPs
+            // beside a different domain name is an incoherent
+            // DomainMembership, and the snapshot-restore path already
+            // assigns all six unconditionally.
+            instance.domain_dns_ips = parse_string_member_list(request, "DomainDnsIps");
+        }
+
         // An explicit DBSubnetGroupName places the restored instance in that
         // group (validated above); the builder hardcodes None otherwise.
         if let Some(ref name) = db_subnet_group_name {
@@ -279,7 +310,7 @@ impl RdsService {
 
             if !state.begin_instance_creation(&db_instance_identifier) {
                 return Err(AwsServiceError::aws_error(
-                    StatusCode::CONFLICT,
+                    StatusCode::BAD_REQUEST,
                     "DBInstanceAlreadyExists",
                     format!("DBInstance {db_instance_identifier} already exists."),
                 ));

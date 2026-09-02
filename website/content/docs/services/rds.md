@@ -206,7 +206,44 @@ Override knobs (env vars, both optional):
 - `FAKECLOUD_POSTGRES_REGISTRY=registry.example.com/team` — point at a private mirror (default `ghcr.io/faiscadev`).
 - `FAKECLOUD_REBUILD_POSTGRES_IMAGE=1` — skip inspect + pull and force a fresh local build. Use after editing the embedded Dockerfile or extension SQL during development.
 
+## Describe filters
+
+The `Filters` parameter is honored on the four Describe operations in the table below. Other operations that AWS documents filters for (`DescribeDBClusterEndpoints`, `DescribeDBShardGroups`, `DescribeDBClusterBacktracks`, `DescribePendingMaintenanceActions`) accept the parameter and currently return the unfiltered list. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Names and values are case-sensitive, and wildcards are not supported (same as AWS).
+
+| Operation | Supported filter names |
+| --- | --- |
+| `DescribeDBInstances` | `db-cluster-id`, `db-instance-id`, `dbi-resource-id`, `domain`, `engine` |
+| `DescribeDBSnapshots` | `db-instance-id`, `db-snapshot-id`, `dbi-resource-id`, `engine`, `snapshot-type` |
+| `DescribeDBClusters` | `clone-group-id`, `db-cluster-id`, `db-cluster-resource-id`, `domain`, `engine` |
+| `DescribeDBClusterSnapshots` | `db-cluster-id`, `db-cluster-snapshot-id`, `engine`, `snapshot-type` |
+
+Filters documented as accepting "identifiers and ARNs" (`db-instance-id`, `db-cluster-id`, `db-snapshot-id`, `db-cluster-snapshot-id`) match either form.
+
+```bash
+# Only the instance with this resource id -- what the Terraform/OpenTofu
+# AWS provider uses to read a DB instance back after creating it.
+aws rds describe-db-instances \
+  --endpoint-url http://localhost:4566 \
+  --filters "Name=dbi-resource-id,Values=db-1b8e439e59564e849b38b04191c40b8e"
+```
+
+`DescribeDBSnapshots` honors `SnapshotType` including `shared` and `public`, which report snapshots another account shared with the caller (or with everyone) through `ModifyDBSnapshotAttribute`'s `restore` attribute; `IncludeShared` / `IncludePublic` add those to an otherwise-unqualified listing. `DescribeDBClusterSnapshots` honors the same `shared` / `public` values, backed by `ModifyDBClusterSnapshotAttribute`, and the top-level `SnapshotType` parameter, and `DescribeDBClusterSnapshots` honors `DBClusterSnapshotIdentifier` / `DBClusterIdentifier`. A named resource that doesn't exist raises the operation's declared fault (`DBInstanceNotFound`, `DBSnapshotNotFound`, `DBClusterNotFoundFault`, `DBClusterSnapshotNotFoundFault`) rather than returning an empty list, so a client can tell "gone" from "no match".
+
+Identifier parameters accept an ARN as well as a plain id (`DBInstanceIdentifier`, `DBSnapshotIdentifier`, `DBClusterIdentifier`, `DBClusterSnapshotIdentifier`, and the `SnapshotIdentifier` on the restore operations), matching what the Terraform provider stores in `snapshot_identifier`.
+
+Reaching a snapshot another account shared with you takes the ARN, which names its owner. A plain id resolves a shared snapshot only while exactly one account shares one under that name; once two do, the id is ambiguous and `DescribeDBSnapshots` / `DescribeDBClusterSnapshots` raise the not-found fault rather than picking one of them, so a lookup can't quietly return the wrong account's snapshot or two rows for one name.
+
+`clone-group-id` is populated by `RestoreDBClusterToPointInTime` with `RestoreType=copy-on-write`, which puts the clone and its source in one clone group; a full-copy restore is an independent cluster and carries no group.
+
+`ModifyDBSnapshotAttribute` and `ModifyDBClusterSnapshotAttribute` resolve a value listed in both `ValuesToAdd` and `ValuesToRemove` by removing it (AWS rejects the request outright, but that error shape isn't in the RDS model). The response echoes the resulting attribute set, so a caller can confirm what was actually applied.
+
+Real RDS rejects a filter name an operation doesn't support with `InvalidParameterValue`. fakecloud can't: that error isn't declared on any of these operations in the Smithy model, so returning it would emit an undeclared error shape. An unrecognized filter name matches no resource instead, so a caller that asked to narrow gets an empty result rather than the full list. Because nothing on the wire explains that, the name is logged at `warn` level.
+
+`CopyDBSnapshot` records the source it copied from and reports it as `SourceDBSnapshotIdentifier` (an ARN, as AWS does); a snapshot that isn't a copy omits the field. That ARN is also what `db-instance-id` matches a copy's source instance against: a copy's own ARN names the account that made the copy, while the instance it records still belongs to the original owner, so for a cross-account or cross-region copy only the source ARN says where that instance lives. `db-cluster-id` does the same through `SourceDBClusterSnapshotArn`.
+
 ## Gotchas
+
+- **Persistence snapshots are one-way across the v3 bump.** RDS state written by this version declares snapshot schema v3 (final snapshots are typed `manual`, matching AWS; earlier builds wrote `automated`). An older fakecloud refuses to load a v3 file and exits, so downgrade by removing `<data-path>/rds/snapshot.json` first.
 
 - **Requires a Docker socket.** RDS needs access to `/var/run/docker.sock` to start and stop containers.
 - **First use pulls the image.** Expect a slower first run while the database image downloads. Heavy engines (Oracle/SQL Server/Db2) can pull 1-3 GB on first use. The PostgreSQL image is custom (`ghcr.io/faiscadev/fakecloud-postgres:<major>-<version>`) and is pulled from the registry when available; otherwise it's built locally (~60 s).

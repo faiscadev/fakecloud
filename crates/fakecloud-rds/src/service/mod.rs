@@ -1381,8 +1381,8 @@ fn map_log_file_to_container_path(engine: &str, log_file_name: &str) -> String {
 }
 
 pub(crate) struct PaginationResult<T> {
-    items: Vec<T>,
-    next_marker: Option<String>,
+    pub(crate) items: Vec<T>,
+    pub(crate) next_marker: Option<String>,
 }
 
 /// Attach `instance_id` to the cluster's `DBClusterMembers` array,

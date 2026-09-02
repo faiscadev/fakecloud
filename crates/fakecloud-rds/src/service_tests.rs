@@ -289,6 +289,7 @@ fn db_snapshot_xml_emits_extended_fields() {
     let snapshot = crate::state::DbSnapshot {
         db_snapshot_identifier: "snap-1".to_string(),
         db_snapshot_arn: "arn:aws:rds:us-east-1:123:snapshot:snap-1".to_string(),
+        source_db_snapshot_arn: None,
         db_instance_identifier: "src-db".to_string(),
         snapshot_create_time: Utc::now(),
         engine: "postgres".to_string(),
@@ -1618,6 +1619,366 @@ fn describe_db_instances_lists_all_when_unbounded() {
     }
 }
 
+// ── DescribeDBInstances Filters ──────────────────────────────────
+
+/// Read back the generated resource id of a seeded instance.
+fn resource_id_of(svc: &RdsService, identifier: &str) -> String {
+    svc.state
+        .read()
+        .default_ref()
+        .instances
+        .get(identifier)
+        .expect("seeded instance")
+        .dbi_resource_id
+        .clone()
+}
+
+#[test]
+fn describe_db_instances_filters_by_dbi_resource_id() {
+    // Regression for #2481: the Terraform/OpenTofu AWS provider reads a
+    // DB instance back by `dbi-resource-id`. Ignoring the filter returns
+    // every instance, so the provider can't resolve the one it created.
+    let svc = make_service();
+    seed_instance(&svc, "mydb-01-default");
+    seed_instance(&svc, "mydb-02-default");
+    let wanted = resource_id_of(&svc, "mydb-02-default");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "dbi-resource-id"),
+            ("Filters.Filter.1.Values.Value.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>mydb-02-default</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>mydb-01-default</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn a_wrong_type_arn_never_widens_a_targeted_read() {
+    // A wrong-type ARN normalizes to "no identifier", and an absent
+    // identifier means "no filter" -- so without an explicit guard a
+    // misconfigured ARN turns a single-resource read into a full listing
+    // and a client expecting one row matches an arbitrary resource.
+    let svc = make_service();
+    seed_instance(&svc, "mydb");
+    seed_instance(&svc, "otherdb");
+    seed_snapshot(&svc, "snap-1", "mydb");
+
+    let cluster_arn = "arn:aws:rds:us-east-1:123456789012:cluster:mycl";
+    let req = request(
+        "DescribeDBInstances",
+        &[("DBInstanceIdentifier", cluster_arn)],
+    );
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+
+    let cluster_snapshot_arn = "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1";
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", cluster_snapshot_arn)],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // ...and the same for the instance filter on DescribeDBSnapshots.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBInstanceIdentifier", cluster_arn)],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+
+    // Every narrowing parameter is AND-ed with the identifier, the same
+    // rule SnapshotType and Filters follow: a matching instance id keeps
+    // the named snapshot, a non-matching one excludes it.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "snap-1"),
+            ("DBInstanceIdentifier", "mydb"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>snap-1</DBSnapshotIdentifier>"));
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "snap-1"),
+            ("DBInstanceIdentifier", "otherdb"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>"),
+        "the instance id was dropped on the named-snapshot path: {body}"
+    );
+
+    // Right type, EMPTY resource id: still an identifier that names
+    // nothing, not an absent parameter.
+    let req = request(
+        "DescribeDBInstances",
+        &[(
+            "DBInstanceIdentifier",
+            "arn:aws:rds:us-east-1:123456789012:db:",
+        )],
+    );
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:123456789012:snapshot:",
+        )],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+}
+
+#[tokio::test]
+async fn restore_db_instance_reports_the_identifier_it_was_given() {
+    // The cluster-snapshot parameter is an alias, so an ARN of that type
+    // resolves through it -- and an unknown one echoes the caller's own
+    // identifier instead of a bare "(none)".
+    let svc = make_service();
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            (
+                "DBClusterSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:ghost",
+            ),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Err(err) => {
+            // A Multi-AZ DB cluster snapshot has its own declared fault.
+            assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
+            let message = format!("{err:?}");
+            assert!(
+                message.contains("ghost"),
+                "the caller's identifier was dropped from the error: {message}"
+            );
+        }
+        Ok(_) => panic!("unknown snapshot should fault"),
+    }
+}
+
+#[test]
+fn describe_db_instances_rejects_another_accounts_arn() {
+    // A DB instance is never shared across accounts, so a foreign ARN
+    // must not report this account's same-named instance.
+    let svc = make_service();
+    seed_instance(&svc, "mydb");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[(
+            "DBInstanceIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:db:mydb",
+        )],
+    );
+    assert_code(svc.describe_db_instances(&req), "DBInstanceNotFound");
+}
+
+#[test]
+fn describe_db_instances_identifier_accepts_an_arn() {
+    // The Smithy doc: "The user-supplied instance identifier or the
+    // Amazon Resource Name (ARN) of the DB instance".
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+
+    let req = request("DescribeDBInstances", &[("DBInstanceIdentifier", &arn)]);
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_filter_accepts_member_element_spelling() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    let wanted = resource_id_of(&svc, "db1");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.member.1.Name", "dbi-resource-id"),
+            ("Filters.member.1.Values.member.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_filter_values_are_ored() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    seed_instance(&svc, "db3");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            ("Filters.Filter.1.Values.Value.1", "db1"),
+            ("Filters.Filter.1.Values.Value.2", "db3"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(body.contains("<DBInstanceIdentifier>db3</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_db_instance_id_filter_accepts_an_arn() {
+    let svc = make_service();
+    let arn = seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            ("Filters.Filter.1.Values.Value.1", &arn),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_separate_filters_are_anded() {
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+    seed_instance(&svc, "db2");
+    let wanted = resource_id_of(&svc, "db1");
+
+    // engine matches both instances, the resource id only db1.
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "postgres"),
+            ("Filters.Filter.2.Name", "dbi-resource-id"),
+            ("Filters.Filter.2.Values.Value.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>db2</DBInstanceIdentifier>"));
+
+    // A filter no instance satisfies yields an empty list, not an error.
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "mysql"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(!body.contains("<DBInstanceIdentifier>"), "body: {body}");
+}
+
+#[test]
+fn describe_db_instances_filters_by_db_cluster_id() {
+    let svc = make_service();
+    seed_instance(&svc, "writer");
+    seed_instance(&svc, "standalone");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .instances
+            .get_mut("writer")
+            .expect("seeded instance")
+            .db_cluster_identifier = Some("aurora-1".to_string());
+    }
+
+    for value in [
+        "aurora-1",
+        "arn:aws:rds:us-east-1:123456789012:cluster:aurora-1",
+    ] {
+        let req = request(
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        );
+        let body = body_of(svc.describe_db_instances(&req).unwrap());
+        assert!(
+            body.contains("<DBInstanceIdentifier>writer</DBInstanceIdentifier>"),
+            "value {value} body: {body}"
+        );
+        assert!(!body.contains("<DBInstanceIdentifier>standalone</DBInstanceIdentifier>"));
+    }
+}
+
+#[test]
+fn describe_db_instances_filter_is_anded_with_the_identifier() {
+    // The instance exists, so a filter it doesn't satisfy yields an
+    // empty list rather than DBInstanceNotFound.
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "mysql"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(!body.contains("<DBInstanceIdentifier>"), "body: {body}");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("DBInstanceIdentifier", "db1"),
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "postgres"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>db1</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_instances_unrecognized_filter_matches_nothing() {
+    // `InvalidParameterValue` isn't declared on DescribeDBInstances, so
+    // an unknown filter name can't be rejected the way AWS does; an
+    // empty result is the closest in-shape behaviour, and is safer than
+    // returning every instance to a caller that asked to narrow.
+    let svc = make_service();
+    seed_instance(&svc, "db1");
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "not-a-real-filter"),
+            ("Filters.Filter.1.Values.Value.1", "whatever"),
+        ],
+    );
+    let resp = svc.describe_db_instances(&req).unwrap();
+    assert!(resp.status.is_success());
+    assert!(!body_of(resp).contains("<DBInstanceIdentifier>"));
+}
+
 // ── ModifyDBInstance ─────────────────────────────────────────────
 
 #[test]
@@ -1832,6 +2193,44 @@ fn modify_db_instance_cloudwatch_disable_log_types_removes_existing() {
 
 // ── Snapshots (sync ops only) ────────────────────────────────────
 
+/// A snapshot record owned by an account other than the default one,
+/// for the shared / public listing paths.
+fn other_account_snapshot(snapshot_id: &str) -> crate::state::DbSnapshot {
+    crate::state::DbSnapshot {
+        db_snapshot_identifier: snapshot_id.to_string(),
+        db_snapshot_arn: format!("arn:aws:rds:us-east-1:999999999999:snapshot:{snapshot_id}"),
+        source_db_snapshot_arn: None,
+        db_instance_identifier: "other-db".to_string(),
+        snapshot_create_time: Utc::now(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        allocated_storage: 20,
+        status: "available".to_string(),
+        port: 5432,
+        master_username: "admin".to_string(),
+        db_name: Some("appdb".to_string()),
+        dbi_resource_id: format!("db-{}", Uuid::new_v4().simple()),
+        snapshot_type: "manual".to_string(),
+        master_user_password: "secret".to_string(),
+        tags: Vec::new(),
+        dump_data: Vec::new(),
+        availability_zone: None,
+        vpc_id: None,
+        instance_create_time: None,
+        license_model: None,
+        iops: None,
+        option_group_name: None,
+        percent_progress: None,
+        storage_type: None,
+        encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        timezone: None,
+        storage_throughput: None,
+        snapshot_attributes: std::collections::BTreeMap::new(),
+    }
+}
+
 fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
     let mut __a = svc.state.write();
     let state = __a.default_mut();
@@ -1841,6 +2240,7 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
         crate::state::DbSnapshot {
             db_snapshot_identifier: snapshot_id.to_string(),
             db_snapshot_arn: arn,
+            source_db_snapshot_arn: None,
             db_instance_identifier: instance_id.to_string(),
             snapshot_create_time: Utc::now(),
             engine: "postgres".to_string(),
@@ -1871,6 +2271,1727 @@ fn seed_snapshot(svc: &RdsService, snapshot_id: &str, instance_id: &str) {
             snapshot_attributes: std::collections::BTreeMap::new(),
         },
     );
+}
+
+#[test]
+fn migrate_loaded_retypes_persisted_final_snapshots() {
+    // Final snapshots were once persisted as `automated`; AWS types them
+    // `manual`. SnapshotType now actually narrows the result, so without
+    // a migration a pre-existing row would silently vanish from
+    // `--snapshot-type manual` after an upgrade.
+    let svc = make_service();
+    seed_snapshot(&svc, "final-snap", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("final-snap")
+            .expect("seeded snapshot")
+            .snapshot_type = "automated".to_string();
+        state.migrate_loaded(crate::state::RDS_FINAL_SNAPSHOT_AUTOMATED_SCHEMA);
+    }
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "manual")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>final-snap</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn migrate_loaded_leaves_newer_state_alone() {
+    // The rewrite is only sound while nothing produces genuine automated
+    // snapshots; a file written at a newer schema must pass through.
+    let svc = make_service();
+    seed_snapshot(&svc, "auto-snap", "db1");
+    let mut accounts = svc.state.write();
+    let state = accounts.default_mut();
+    state
+        .snapshots
+        .get_mut("auto-snap")
+        .expect("seeded snapshot")
+        .snapshot_type = "automated".to_string();
+
+    state.migrate_loaded(crate::state::RDS_SNAPSHOT_SCHEMA_VERSION);
+
+    assert_eq!(state.snapshots["auto-snap"].snapshot_type, "automated");
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_a_cluster_snapshot() {
+    // AWS models DBClusterSnapshotIdentifier on this operation for
+    // Multi-AZ DB cluster snapshots; their metadata lives in the cluster
+    // snapshot store, so resolving only `snapshots` always 404'd.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                    "MasterUsername": "admin",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBClusterSnapshotIdentifier", "clu-snap"),
+        ],
+    );
+    // Without a container runtime the restore fails after the lookup, so
+    // any error other than a not-found proves the snapshot resolved.
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => {}
+        Err(err) => assert!(
+            !err.code().contains("NotFound"),
+            "cluster snapshot did not resolve: {err:?}"
+        ),
+    }
+}
+
+#[tokio::test]
+async fn create_db_instance_persists_the_domain_membership() {
+    // The `domain` filter reads instance.domain, so an instance created
+    // WITH a domain (rather than modified into one) has to carry it --
+    // otherwise the filter is dead for the common case.
+    // The stub runtime lets the create reach the point where the record
+    // is staged; without one it fails before that and the assertions
+    // below would never run.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    let req = request(
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "domain-db"),
+            ("DBInstanceClass", "db.t3.micro"),
+            ("Engine", "postgres"),
+            ("AllocatedStorage", "20"),
+            ("MasterUsername", "admin"),
+            ("MasterUserPassword", "secret123"),
+            ("Domain", "d-1234567890"),
+            ("DomainIAMRoleName", "rds-directory"),
+        ],
+    );
+    svc.create_db_instance(&req)
+        .await
+        .expect("create with the stub runtime");
+
+    let (domain, role) = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("domain-db")
+        .map(|instance| {
+            (
+                instance.domain.clone(),
+                instance.domain_iam_role_name.clone(),
+            )
+        })
+        // Requiring the row is the point: an `if let` here would let a
+        // regression in create-time domain persistence pass silently.
+        .expect("the created instance is recorded");
+    assert_eq!(domain.as_deref(), Some("d-1234567890"));
+    assert_eq!(role.as_deref(), Some("rds-directory"));
+}
+
+#[test]
+fn describe_db_instances_filters_by_domain() {
+    let svc = make_service();
+    seed_instance(&svc, "joined");
+    seed_instance(&svc, "standalone");
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .instances
+            .get_mut("joined")
+            .expect("seeded instance")
+            .domain = Some("d-1234567890".to_string());
+    }
+
+    let req = request(
+        "DescribeDBInstances",
+        &[
+            ("Filters.Filter.1.Name", "domain"),
+            ("Filters.Filter.1.Values.Value.1", "d-1234567890"),
+        ],
+    );
+    let body = body_of(svc.describe_db_instances(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>joined</DBInstanceIdentifier>"));
+    assert!(!body.contains("<DBInstanceIdentifier>standalone</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn restored_instance_inherits_the_snapshots_encryption() {
+    // The snapshot reports StorageEncrypted / KmsKeyId, so an instance
+    // restored from it must too -- otherwise the pair is internally
+    // inconsistent and Terraform diffs storage_encrypted forever. Both
+    // the synthesized source AND the instance builder have to carry it;
+    // fixing only one leaves the other dropping the value.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "enc-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "enc-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-postgresql",
+                    "StorageEncrypted": true,
+                    "KmsKeyId": "arn:aws:kms:us-east-1:123456789012:key/abc",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "enc-snap");
+    assert!(source.encrypted);
+    assert_eq!(
+        source.kms_key_id.as_deref(),
+        Some("arn:aws:kms:us-east-1:123456789012:key/abc")
+    );
+
+    let instance = crate::service::service_helpers::build_restored_instance(
+        "restored-db",
+        "arn:aws:rds:us-east-1:123456789012:db:restored-db".to_string(),
+        "db-1".to_string(),
+        Utc::now(),
+        Vec::new(),
+        &source,
+        &crate::service::service_helpers::creating_placeholder_container(),
+        Vec::new(),
+    );
+    assert!(
+        instance.storage_encrypted,
+        "the instance builder dropped the snapshot's encryption"
+    );
+    assert_eq!(
+        instance.kms_key_id.as_deref(),
+        Some("arn:aws:kms:us-east-1:123456789012:key/abc")
+    );
+}
+
+#[test]
+fn a_shared_snapshot_resolves_with_its_owners_instance_arn() {
+    // The named form of a query the list form answers must not return
+    // nothing: the instance ARN's account is checked against the row's
+    // owner, not simply against the caller.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared.db_instance_identifier = "db-1".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:shared-snap",
+            ),
+            (
+                "DBInstanceIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:db:db-1",
+            ),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "the owner's instance ARN excluded their own shared snapshot: {body}"
+    );
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_reports_the_writers_engine_version() {
+    // Engine and EngineVersion must come from the same place: the
+    // writer's engine against the cluster's Aurora version is a pair AWS
+    // never reports, and a Terraform engine_version comparison would
+    // diff forever.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                    "SourceEngine": "mysql",
+                    "SourceEngineVersion": "8.0.36",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "clu-snap");
+    assert_eq!(source.engine, "mysql");
+    assert_eq!(source.engine_version, "8.0.36");
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_uses_the_writers_engine_and_credentials() {
+    // The dump was taken from the writer with ITS engine, credentials and
+    // database. Rebuilding the source from the cluster row instead hands
+    // the runtime `aurora-postgresql` (which no engine match accepts, so
+    // the instance fails) and replays the dump into the wrong database
+    // under the wrong password.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    // The cluster's own family, which is not a container engine.
+                    "Engine": "aurora-postgresql",
+                    "MasterUsername": "cluster-admin",
+                    "MasterUserPassword": "cluster-pw",
+                    // What the writer actually ran when the dump was taken.
+                    "SourceEngine": "postgres",
+                    "SourceMasterUsername": "writer-admin",
+                    "SourceMasterUserPassword": "writer-pw",
+                    "SourceDBName": "appdb",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "clu-snap");
+    assert_eq!(source.engine, "postgres");
+    assert_eq!(source.master_username, "writer-admin");
+    assert_eq!(source.master_user_password, "writer-pw");
+    assert_eq!(source.db_name.as_deref(), Some("appdb"));
+}
+
+#[tokio::test]
+async fn restored_cluster_does_not_carry_the_sources_writer_settings() {
+    // The writer settings describe the SOURCE cluster's writer. Left on
+    // the restored row they survive into a later snapshot of it (taken
+    // before an instance attaches) and an instance restore then starts
+    // with the old credentials and database.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "SourceEngine": "postgres",
+                    "SourceMasterUsername": "old-admin",
+                    "SourceMasterUserPassword": "old-pw",
+                    "SourceDBName": "olddb",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored");
+    for key in [
+        "SourceEngine",
+        "SourceMasterUsername",
+        "SourceMasterUserPassword",
+        "SourceDBName",
+    ] {
+        assert!(
+            restored.get(key).is_none(),
+            "restored cluster kept {key} from the source"
+        );
+    }
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_replays_a_staged_dump() {
+    // A cluster restored from a snapshot stages its data under
+    // PendingRestoreDumpB64 until an instance attaches; a snapshot taken
+    // in that window carries the key verbatim. The cluster restore
+    // replays it, so the instance restore must too.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let dump = base64::engine::general_purpose::STANDARD.encode(b"-- staged --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "staged-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "staged-snap",
+                    "DBClusterIdentifier": "restored-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-postgresql",
+                    "PendingRestoreDumpB64": dump,
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "staged-snap");
+    assert_eq!(source.dump_data, b"-- staged --".to_vec());
+}
+
+#[tokio::test]
+async fn a_remapped_engine_never_keeps_the_aurora_version() {
+    // A snapshot taken before any writer attached records no
+    // SourceEngine, so the family is remapped to a container engine --
+    // and the cluster's Aurora version must not ride along with it.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "no-writer".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "no-writer",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "no-writer");
+    assert_eq!(source.engine, "mysql");
+    assert_ne!(
+        source.engine_version, "8.0.mysql_aurora.3.04.0",
+        "a remapped engine kept the cluster's Aurora version"
+    );
+
+    // A non-Aurora cluster keeps its own version, since nothing was
+    // remapped.
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "plain".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "plain",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "postgres",
+                    "EngineVersion": "16.3",
+                }),
+            );
+    }
+    let source = cluster_snapshot_source_for_test(&svc, "plain");
+    assert_eq!(source.engine, "postgres");
+    assert_eq!(source.engine_version, "16.3");
+}
+
+#[tokio::test]
+async fn a_restored_cluster_is_not_reported_as_a_copy() {
+    // SourceDBClusterSnapshotArn describes the snapshot a COPY came
+    // from. Left on a restored cluster row it propagates into the next
+    // snapshot of that cluster, which the renderer now reports.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "SourceDBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:unrelated",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    assert!(
+        cluster_entry(&svc, "restored")
+            .get("SourceDBClusterSnapshotArn")
+            .is_none(),
+        "the restored cluster claims to be a copy of an unrelated snapshot"
+    );
+}
+
+/// The fault follows the parameter the caller used.
+///
+/// An identifier that doesn't resolve at all reported DBSnapshotNotFound
+/// even for DBClusterSnapshotIdentifier, while a cluster snapshot that
+/// merely doesn't exist reports DBClusterSnapshotNotFoundFault -- two
+/// shapes for one parameter, which breaks a client that branches on the
+/// fault to tell a cluster-snapshot source from an instance one.
+#[tokio::test]
+async fn restore_reports_the_fault_for_the_parameter_the_caller_used() {
+    let svc = make_service();
+
+    // Unresolvable (an ARN of the wrong resource type).
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "target-1"),
+            (
+                "DBClusterSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:snapshot:s1",
+            ),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "DBClusterSnapshotNotFoundFault",
+    );
+
+    // Resolvable but absent: the same fault, so the two agree.
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "target-2"),
+            ("DBClusterSnapshotIdentifier", "ghost-cluster-snap"),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "DBClusterSnapshotNotFoundFault",
+    );
+
+    // The instance-snapshot parameter keeps its own fault.
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "target-3"),
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:s1",
+            ),
+        ],
+    );
+    assert_code(
+        svc.restore_db_instance_from_db_snapshot(&req).await,
+        "DBSnapshotNotFound",
+    );
+}
+
+/// `db-instance-id` reaches a cross-account copy's source instance.
+///
+/// A copy's own ARN names the COPIER, while the instance it records
+/// still belongs to the original owner -- so the ARN rebuilt from the
+/// copy's own ARN names an instance that doesn't exist, and only the
+/// recorded source ARN says where the real one lives.
+#[tokio::test]
+async fn db_instance_id_filter_matches_a_copys_source_instance_arn() {
+    let svc = make_service();
+    seed_snapshot(&svc, "mycopy", "their-db");
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .snapshots
+            .get_mut("mycopy")
+            .expect("seeded")
+            .source_db_snapshot_arn =
+            Some("arn:aws:rds:us-east-1:999999999999:snapshot:snap-1".to_string());
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:999999999999:db:their-db",
+            ),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>mycopy</DBSnapshotIdentifier>"),
+        "the source instance's ARN did not match the copy: {body}"
+    );
+
+    // A different account's ARN for the same instance name still must
+    // not match -- the fallback widens by one real source, not to any
+    // account.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:888888888888:db:their-db",
+            ),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>mycopy</DBSnapshotIdentifier>"),
+        "an unrelated account's ARN matched: {body}"
+    );
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_maps_an_aurora_family_to_its_engine() {
+    // A metadata-only snapshot (no writer recorded) still must not hand
+    // the runtime an `aurora-*` engine it cannot start.
+    let svc = make_service();
+    for (snapshot_id, family, expected) in [
+        ("aurora-pg", "aurora-postgresql", "postgres"),
+        ("aurora-my", "aurora-mysql", "mysql"),
+    ] {
+        {
+            let mut accounts = svc.state.write();
+            accounts
+                .default_mut()
+                .extras
+                .entry("cluster_snapshots".to_string())
+                .or_default()
+                .insert(
+                    snapshot_id.to_string(),
+                    serde_json::json!({
+                        "DBClusterSnapshotIdentifier": snapshot_id,
+                        "DBClusterIdentifier": "src-cluster",
+                        "Status": "available",
+                        "Engine": family,
+                    }),
+                );
+        }
+
+        let source = cluster_snapshot_source_for_test(&svc, snapshot_id);
+        assert_eq!(source.engine, expected, "family {family}");
+    }
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_carries_the_dump_and_credentials() {
+    // A restore that reports available with an empty database, or that
+    // hands the container an empty password (which the engines reject),
+    // is a silent data-loss / failed-instance bug.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let dump = base64::engine::general_purpose::STANDARD.encode(b"-- dump --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "MasterUsername": "admin",
+                    "MasterUserPassword": "s3cret",
+                    "DumpDataB64": dump,
+                }),
+            );
+    }
+
+    let source = cluster_snapshot_source_for_test(&svc, "clu-snap");
+    assert_eq!(source.dump_data, b"-- dump --".to_vec());
+    assert_eq!(source.master_user_password, "s3cret");
+    // The ARN names the snapshot's owner, not the caller.
+    assert!(source.db_snapshot_arn.contains("999999999999"));
+}
+
+#[tokio::test]
+async fn cluster_snapshot_restore_validates_the_subnet_group() {
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "clu-snap".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "clu-snap",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBClusterSnapshotIdentifier", "clu-snap"),
+            ("DBSubnetGroupName", "ghost-group"),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBSubnetGroupNotFoundFault"),
+        Ok(_) => panic!("restore accepted a nonexistent subnet group"),
+    }
+}
+
+#[test]
+fn describe_db_snapshots_reports_a_foreign_instance_arns_shared_snapshots() {
+    // A DB instance ARN naming another account matches none of this
+    // account's snapshots -- but the owner may have shared snapshots OF
+    // that instance, and those must still be listed.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "src");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared.db_instance_identifier = "src".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            (
+                "DBInstanceIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:db:src",
+            ),
+            ("IncludeShared", "true"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "the owner's shared snapshots were suppressed: {body}"
+    );
+    // This account's own snapshot of a same-named instance is not the
+    // one the ARN named.
+    assert!(!body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_snapshots_reports_shared_and_public_snapshots() {
+    // `shared` / `public` select snapshots another account shared via
+    // ModifyDBSnapshotAttribute's `restore` attribute; they are not the
+    // caller's own snapshots, so an owned-type match would return
+    // nothing.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+
+        let mut public = other_account_snapshot("public-snap");
+        public
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+        other.snapshots.insert("public-snap".to_string(), public);
+
+        let unshared = other_account_snapshot("private-snap");
+        other.snapshots.insert("private-snap".to_string(), unshared);
+    }
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "shared")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>private-snap</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "public")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>public-snap</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    // IncludeShared / IncludePublic widen an otherwise-unqualified list.
+    let req = request("DescribeDBSnapshots", &[]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[("IncludeShared", "true")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[("IncludePublic", "true")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>public-snap</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn include_shared_does_not_widen_an_owned_snapshot_type() {
+    // AWS: IncludeShared / IncludePublic don't apply when SnapshotType
+    // selects an owned type, and a foreign row must never slip past the
+    // type selector.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared.snapshot_type = "automated".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("SnapshotType", "manual"), ("IncludeShared", "true")],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "IncludeShared widened an owned SnapshotType: {body}"
+    );
+}
+
+#[test]
+fn describe_db_snapshots_resolves_a_shared_snapshot_by_identifier() {
+    // The list path reports it, so re-reading it by id (the Terraform
+    // read-back pattern) must not 404.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    // AWS requires the ARN to address a snapshot another account shared
+    // with you; a bare id would also be ambiguous once two accounts have
+    // shared one under the same name.
+    let shared_arn = "arn:aws:rds:us-east-1:999999999999:snapshot:shared-snap";
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", shared_arn),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    // A bare id resolves too WHEN the request widens to foreign rows --
+    // the list path returns that row under the same flags and reports it
+    // by its bare identifier, so 404-ing it here would reject a row the
+    // emulator just listed.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "shared-snap"),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    // Without widening, a bare id still names nothing this account owns.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", "shared-snap")],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // Once a SECOND account shares a snapshot under the same name, the
+    // bare id names two rows. Resolving it to whichever the account map
+    // happened to yield first would answer the same request differently
+    // between calls, so an ambiguous bare id resolves to nothing and the
+    // caller has to pin the owner with an ARN.
+    {
+        let mut accounts = svc.state.write();
+        let third = accounts.get_or_create("888888888888");
+        let mut also_shared = other_account_snapshot("shared-snap");
+        also_shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        third
+            .snapshots
+            .insert("shared-snap".to_string(), also_shared);
+    }
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "shared-snap"),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // Both ARNs still resolve -- ambiguity is a property of the bare id,
+    // not of the snapshots.
+    for owner in ["999999999999", "888888888888"] {
+        let arn = format!("arn:aws:rds:us-east-1:{owner}:snapshot:shared-snap");
+        let req = request(
+            "DescribeDBSnapshots",
+            &[("DBSnapshotIdentifier", &arn), ("SnapshotType", "shared")],
+        );
+        let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+        assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+    }
+
+    // Drop the duplicate so the rest of the test sees one sharer again.
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .get_or_create("888888888888")
+            .snapshots
+            .remove("shared-snap");
+    }
+
+    // A snapshot nobody shared stays invisible.
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        other.snapshots.insert(
+            "private-snap".to_string(),
+            other_account_snapshot("private-snap"),
+        );
+    }
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", "private-snap")],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // IncludeShared on an unqualified read resolves it too -- the list
+    // path reports it under the same flag.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", shared_arn),
+            ("IncludeShared", "true"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "IncludeShared read-back returned nothing: {body}"
+    );
+
+    // Naming the snapshot explicitly resolves it without IncludeShared:
+    // AWS resolves a shared snapshot addressed by id or ARN. (The flag
+    // still gates whether it appears in an unqualified *list*.)
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("DBSnapshotIdentifier", shared_arn)],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+
+    let req = request("DescribeDBSnapshots", &[]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"),
+        "unqualified list leaked a shared snapshot: {body}"
+    );
+}
+
+#[test]
+fn include_public_does_not_apply_to_snapshot_type_shared() {
+    // AWS: "The IncludePublic parameter doesn't apply when SnapshotType
+    // is set to shared" (and IncludeShared doesn't apply to `public`).
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+
+        let mut public = other_account_snapshot("public-snap");
+        public
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+        other.snapshots.insert("public-snap".to_string(), public);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[("SnapshotType", "shared"), ("IncludePublic", "true")],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>shared-snap</DBSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>public-snap</DBSnapshotIdentifier>"),
+        "IncludePublic applied to SnapshotType=shared: {body}"
+    );
+}
+
+#[test]
+fn describe_db_snapshots_tolerates_a_junk_include_flag() {
+    // InvalidParameterValue isn't declared on this op, so an unparsable
+    // boolean is treated as absent rather than rejected.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine", "db1");
+
+    let req = request("DescribeDBSnapshots", &[("IncludeShared", "yes-please")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn a_foreign_arn_is_never_typed_as_owned() {
+    // Ownership must come from where the row resolved, not from a bare
+    // id probe: with a local namesake, a foreign row was typed "owned",
+    // so `--snapshot-type shared` dropped it while `--snapshot-type
+    // manual` wrongly returned another account's snapshot.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap-1", "my-db");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("snap-1");
+        shared.db_instance_identifier = "their-db".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("snap-1".to_string(), shared);
+    }
+
+    let foreign_arn = "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1";
+
+    // The shared row answers to `shared`...
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", foreign_arn),
+            ("SnapshotType", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBInstanceIdentifier>their-db</DBInstanceIdentifier>"),
+        "shared lookup dropped the foreign row: {body}"
+    );
+
+    // ...and not to an owned type.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", foreign_arn),
+            ("SnapshotType", "manual"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        !body.contains("<DBSnapshotIdentifier>"),
+        "a foreign row answered to an owned SnapshotType: {body}"
+    );
+
+    // The snapshot-type filter agrees with the parameter.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", foreign_arn),
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "shared"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBInstanceIdentifier>their-db</DBInstanceIdentifier>"));
+}
+
+#[test]
+fn describe_db_snapshots_arn_account_wins_over_a_local_namesake() {
+    // Resolving the local row first would return B's own `prod-snap` for
+    // an ARN that named account A -- the same aliasing the delete path
+    // guards against.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "my-db");
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("prod-snap");
+        shared.db_instance_identifier = "their-db".to_string();
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("prod-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:snapshot:prod-snap",
+        )],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(
+        body.contains("<DBInstanceIdentifier>their-db</DBInstanceIdentifier>"),
+        "a foreign ARN resolved to the local namesake: {body}"
+    );
+    assert!(!body.contains("<DBInstanceIdentifier>my-db</DBInstanceIdentifier>"));
+}
+
+#[tokio::test]
+async fn restore_db_instance_refuses_a_local_namesake_for_a_foreign_arn() {
+    // Hydrating from the local snapshot would silently restore the wrong
+    // data (engine, credentials, dump) and report success.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "my-db");
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:prod-snap",
+            ),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => panic!("restored from the local namesake of a foreign ARN"),
+        Err(err) => assert!(
+            format!("{err:?}").contains("DBSnapshotNotFound"),
+            "unexpected error: {err:?}"
+        ),
+    }
+}
+
+#[test]
+fn snapshot_type_filter_speaks_the_same_vocabulary_as_the_parameter() {
+    // A snapshot reported by `--snapshot-type public` must also match
+    // `--filters Name=snapshot-type,Values=public`.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine-public", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("mine-public")
+            .expect("seeded snapshot")
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+    }
+
+    for params in [
+        vec![("SnapshotType", "public")],
+        vec![
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "public"),
+        ],
+    ] {
+        let req = request("DescribeDBSnapshots", &params);
+        let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+        assert!(
+            body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"),
+            "public snapshot missed by {params:?}: {body}"
+        );
+    }
+
+    // The stored type still matches too.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "manual"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn delete_db_snapshot_refuses_another_accounts_arn() {
+    // Reducing a foreign ARN to its bare id would delete THIS account's
+    // same-named snapshot while the client believes it addressed the
+    // other account's.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "db1");
+
+    let req = request(
+        "DeleteDBSnapshot",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:snapshot:prod-snap",
+        )],
+    );
+    assert_code(svc.delete_db_snapshot(&req), "DBSnapshotNotFound");
+    assert!(
+        svc.state
+            .read()
+            .default_ref()
+            .snapshots
+            .contains_key("prod-snap"),
+        "a foreign ARN deleted the local snapshot"
+    );
+}
+
+#[test]
+fn describe_db_snapshots_reports_an_owned_public_snapshot() {
+    // AWS: "public - Return all DB snapshots that have been marked as
+    // public" -- not scoped to other accounts.
+    let svc = make_service();
+    seed_snapshot(&svc, "mine-public", "db1");
+    seed_snapshot(&svc, "mine-private", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("mine-public")
+            .expect("seeded snapshot")
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["all".to_string()]);
+    }
+
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "public")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>mine-private</DBSnapshotIdentifier>"));
+
+    // `shared` is "shared TO me", which an owned snapshot never is.
+    let req = request("DescribeDBSnapshots", &[("SnapshotType", "shared")]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>mine-public</DBSnapshotIdentifier>"));
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_a_shared_snapshot() {
+    // DescribeDBSnapshots reports snapshots other accounts shared with
+    // the caller, so restoring from one must work -- otherwise the
+    // sharing surface is listable but unusable. Without a container
+    // runtime the restore fails after the lookup, so anything other than
+    // DBSnapshotNotFound proves the snapshot resolved.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = other_account_snapshot("shared-snap");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["123456789012".to_string()]);
+        other.snapshots.insert("shared-snap".to_string(), shared);
+    }
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            (
+                "DBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:shared-snap",
+            ),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => {}
+        Err(err) => assert!(
+            !format!("{err:?}").contains("DBSnapshotNotFound"),
+            "shared snapshot did not resolve for restore: {err:?}"
+        ),
+    }
+}
+
+#[test]
+fn delete_db_snapshot_accepts_an_arn_identifier() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    let arn = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap1")
+        .expect("seeded snapshot")
+        .db_snapshot_arn
+        .clone();
+
+    let req = request("DeleteDBSnapshot", &[("DBSnapshotIdentifier", &arn)]);
+    svc.delete_db_snapshot(&req)
+        .expect("ARN-form identifier should resolve");
+    assert!(svc.state.read().default_ref().snapshots.is_empty());
+}
+
+#[test]
+fn describe_db_snapshots_accepts_an_arn_identifier() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+    let arn = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap1")
+        .expect("seeded snapshot")
+        .db_snapshot_arn
+        .clone();
+
+    let req = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", &arn)]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+}
+
+#[tokio::test]
+async fn restore_db_instance_from_db_snapshot_accepts_an_arn_identifier() {
+    // `aws_db_instance.snapshot_identifier` in the Terraform provider
+    // holds a full snapshot ARN. Without a container runtime the restore
+    // fails after the lookup, so assert on the error we get: anything
+    // other than DBSnapshotNotFound proves the ARN resolved.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    let arn = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap1")
+        .expect("seeded snapshot")
+        .db_snapshot_arn
+        .clone();
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBSnapshotIdentifier", &arn),
+        ],
+    );
+    match svc.restore_db_instance_from_db_snapshot(&req).await {
+        Ok(_) => {}
+        Err(err) => assert!(
+            !format!("{err:?}").contains("DBSnapshotNotFound"),
+            "ARN-form snapshot identifier did not resolve: {err:?}"
+        ),
+    }
+}
+
+#[test]
+fn describe_db_snapshots_honors_the_dbi_resource_id_parameter() {
+    // The modeled parameter, not the filter: ignoring it returns every
+    // snapshot to a client that asked for one instance's -- the same
+    // failure #2481 reported for the filter form.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+    let wanted = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap2")
+        .expect("seeded snapshot")
+        .dbi_resource_id
+        .clone();
+
+    let req = request("DescribeDBSnapshots", &[("DbiResourceId", &wanted)]);
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+
+    // AND-ed with a named snapshot, like every other narrowing parameter.
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "snap1"),
+            ("DbiResourceId", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+}
+
+#[tokio::test]
+async fn an_explicit_domain_replaces_every_source_field() {
+    // Keeping the source's DNS IPs beside a different domain name is an
+    // incoherent DomainMembership; all six fields move together.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "source-db");
+    {
+        let mut accounts = svc.state.write();
+        let source = accounts
+            .default_mut()
+            .instances
+            .get_mut("source-db")
+            .expect("seeded instance");
+        source.domain = Some("d-old".to_string());
+        source.domain_dns_ips = vec!["10.0.0.1".to_string()];
+    }
+
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "source-db"),
+            ("TargetDBInstanceIdentifier", "pit-db"),
+            ("UseLatestRestorableTime", "true"),
+            ("Domain", "d-new"),
+        ],
+    );
+    svc.restore_db_instance_to_point_in_time(&req)
+        .await
+        .expect("PITR with the stub runtime");
+
+    let restored = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("pit-db")
+        .map(|i| (i.domain.clone(), i.domain_dns_ips.clone()))
+        .expect("the restored instance is recorded");
+    assert_eq!(restored.0.as_deref(), Some("d-new"));
+    assert!(
+        restored.1.is_empty(),
+        "the new domain kept the source's DNS IPs: {:?}",
+        restored.1
+    );
+}
+
+#[tokio::test]
+async fn self_managed_ad_fields_are_kept_without_a_directory_id() {
+    // AWS's self-managed AD flow sets DomainFqdn / DomainOu /
+    // DomainAuthSecretArn / DomainDnsIps and no `Domain`, so gating the
+    // block on `Domain` alone dropped all of them.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "source-db");
+
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "source-db"),
+            ("TargetDBInstanceIdentifier", "pit-db"),
+            ("UseLatestRestorableTime", "true"),
+            ("DomainFqdn", "corp.example.com"),
+            (
+                "DomainAuthSecretArn",
+                "arn:aws:secretsmanager:us-east-1:123456789012:secret:ad",
+            ),
+            ("DomainDnsIps.member.1", "10.0.0.1"),
+        ],
+    );
+    svc.restore_db_instance_to_point_in_time(&req)
+        .await
+        .expect("PITR with the stub runtime");
+
+    let restored = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("pit-db")
+        .map(|i| {
+            (
+                i.domain_fqdn.clone(),
+                i.domain_auth_secret_arn.clone(),
+                i.domain_dns_ips.clone(),
+            )
+        })
+        .expect("the restored instance is recorded");
+    assert_eq!(restored.0.as_deref(), Some("corp.example.com"));
+    assert!(restored.1.is_some(), "the auth secret ARN was dropped");
+    assert_eq!(restored.2, vec!["10.0.0.1".to_string()]);
+}
+
+#[test]
+fn an_arn_naming_no_account_resolves_to_nothing() {
+    // `identifier_account` reports None for it, which a resolve path
+    // can't tell from a bare id -- so without the guard it would alias
+    // onto this account's resource of that name.
+    let svc = make_service();
+    seed_snapshot(&svc, "prod-snap", "db1");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1::snapshot:prod-snap",
+        )],
+    );
+    assert_code(svc.describe_db_snapshots(&req), "DBSnapshotNotFound");
+
+    // And it cannot be copied from either.
+    let result = svc.handle_extra_action(&request(
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1::snapshot:prod-snap",
+            ),
+            ("TargetDBSnapshotIdentifier", "copy-snap"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBSnapshotNotFound"),
+        Ok(_) => panic!("an account-less ARN copied the local snapshot"),
+    }
+}
+
+#[tokio::test]
+async fn point_in_time_restore_carries_the_requested_domain() {
+    // Modeled on the request, and an explicit Domain overrides whatever
+    // the source carried -- otherwise the new instance is invisible to
+    // the `domain` filter.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_instance(&svc, "source-db");
+
+    let req = request(
+        "RestoreDBInstanceToPointInTime",
+        &[
+            ("SourceDBInstanceIdentifier", "source-db"),
+            ("TargetDBInstanceIdentifier", "pit-db"),
+            ("UseLatestRestorableTime", "true"),
+            ("Domain", "d-1234567890"),
+            ("DomainIAMRoleName", "rds-directory"),
+        ],
+    );
+    svc.restore_db_instance_to_point_in_time(&req)
+        .await
+        .expect("PITR with the stub runtime");
+
+    let (domain, role) = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("pit-db")
+        .map(|instance| {
+            (
+                instance.domain.clone(),
+                instance.domain_iam_role_name.clone(),
+            )
+        })
+        .expect("the restored instance is recorded");
+    assert_eq!(domain.as_deref(), Some("d-1234567890"));
+    assert_eq!(role.as_deref(), Some("rds-directory"));
+}
+
+#[tokio::test]
+async fn restore_db_instance_carries_the_requested_domain() {
+    // Settable on the restore request as it is on create; dropping it
+    // leaves the instance invisible to the `domain` filter.
+    let svc = make_service().with_runtime(Arc::new(crate::runtime::RdsRuntime::new_stub()));
+    seed_snapshot(&svc, "snap1", "db1");
+
+    let req = request(
+        "RestoreDBInstanceFromDBSnapshot",
+        &[
+            ("DBInstanceIdentifier", "restored-db"),
+            ("DBSnapshotIdentifier", "snap1"),
+            ("Domain", "d-1234567890"),
+            ("DomainIAMRoleName", "rds-directory"),
+        ],
+    );
+    svc.restore_db_instance_from_db_snapshot(&req)
+        .await
+        .expect("restore with the stub runtime");
+
+    let (domain, role) = svc
+        .state
+        .read()
+        .default_ref()
+        .instances
+        .get("restored-db")
+        .map(|instance| {
+            (
+                instance.domain.clone(),
+                instance.domain_iam_role_name.clone(),
+            )
+        })
+        .expect("the restored instance is recorded");
+    assert_eq!(domain.as_deref(), Some("d-1234567890"));
+    assert_eq!(role.as_deref(), Some("rds-directory"));
+}
+
+#[test]
+fn describe_db_snapshots_filters_by_dbi_resource_id() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+    let wanted = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap2")
+        .expect("seeded snapshot")
+        .dbi_resource_id
+        .clone();
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "dbi-resource-id"),
+            ("Filters.Filter.1.Values.Value.1", &wanted),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+
+    assert!(body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_snapshots_ignores_another_accounts_instance_arn() {
+    // A DB instance is never cross-account, so an ARN naming another
+    // account must not list this account's same-named instance's
+    // snapshots.
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "mydb");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[(
+            "DBInstanceIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:db:mydb",
+        )],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
+}
+
+#[test]
+fn describe_db_snapshots_filters_by_db_instance_id() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+    seed_snapshot(&svc, "snap2", "db2");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-instance-id"),
+            ("Filters.Filter.1.Values.Value.1", "db1"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+
+    assert!(body.contains("<DBSnapshotIdentifier>snap1</DBSnapshotIdentifier>"));
+    assert!(!body.contains("<DBSnapshotIdentifier>snap2</DBSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_snapshots_honors_snapshot_type() {
+    let svc = make_service();
+    seed_snapshot(&svc, "manual-snap", "db1");
+    seed_snapshot(&svc, "auto-snap", "db1");
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .snapshots
+            .get_mut("auto-snap")
+            .expect("seeded snapshot")
+            .snapshot_type = "automated".to_string();
+    }
+
+    // Both the SnapshotType parameter and the snapshot-type filter
+    // narrow the result the same way.
+    for params in [
+        vec![("SnapshotType", "automated")],
+        vec![
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "automated"),
+        ],
+    ] {
+        let req = request("DescribeDBSnapshots", &params);
+        let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+        assert!(
+            body.contains("<DBSnapshotIdentifier>auto-snap</DBSnapshotIdentifier>"),
+            "body: {body}"
+        );
+        assert!(!body.contains("<DBSnapshotIdentifier>manual-snap</DBSnapshotIdentifier>"));
+    }
+}
+
+#[test]
+fn describe_db_snapshots_snapshot_type_is_anded_with_the_identifier() {
+    let svc = make_service();
+    seed_snapshot(&svc, "snap1", "db1");
+
+    let req = request(
+        "DescribeDBSnapshots",
+        &[
+            ("DBSnapshotIdentifier", "snap1"),
+            ("SnapshotType", "automated"),
+        ],
+    );
+    let body = body_of(svc.describe_db_snapshots(&req).unwrap());
+    assert!(!body.contains("<DBSnapshotIdentifier>"), "body: {body}");
 }
 
 #[test]
@@ -1971,6 +4092,704 @@ fn reconcile_ignores_available_snapshots() {
     assert!(rearm.is_empty());
     assert!(reap.is_empty());
     assert_eq!(snapshot_status(&svc, "snap1"), "available");
+}
+
+/// The source-snapshot record the cluster-snapshot restore synthesizes,
+/// for asserting on the dump / credentials / ARN it carries.
+fn cluster_snapshot_source_for_test(
+    svc: &RdsService,
+    snapshot_id: &str,
+) -> crate::state::DbSnapshot {
+    let accounts = svc.state.read();
+    let entry = accounts
+        .default_ref()
+        .extras
+        .get("cluster_snapshots")
+        .and_then(|m| m.get(snapshot_id))
+        .cloned()
+        .expect("seeded cluster snapshot");
+    super::snapshots::cluster_snapshot_as_source(&entry, snapshot_id, "123456789012", "us-east-1")
+}
+
+/// Seed a cluster entry with the identity fields a restore must not
+/// inherit verbatim.
+fn seed_cluster_entry(svc: &RdsService, id: &str, extra: serde_json::Value) {
+    let mut accounts = svc.state.write();
+    let state = accounts.default_mut();
+    let mut entry = serde_json::json!({
+        "DBClusterIdentifier": id,
+        "DBClusterArn": format!("arn:aws:rds:us-east-1:123456789012:cluster:{id}"),
+        "Engine": "postgres",
+        "Status": "available",
+        "DbClusterResourceId": format!("cluster-{id}"),
+    });
+    if let (Some(obj), Some(extra)) = (entry.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    state
+        .extras
+        .entry("clusters".to_string())
+        .or_default()
+        .insert(id.to_string(), entry);
+}
+
+fn cluster_entry(svc: &RdsService, id: &str) -> serde_json::Value {
+    svc.state
+        .read()
+        .default_ref()
+        .extras
+        .get("clusters")
+        .and_then(|m| m.get(id))
+        .cloned()
+        .unwrap_or_else(|| panic!("cluster {id} not recorded"))
+}
+
+/// A PITR target is an independent cluster, never a replica.
+///
+/// The from-snapshot path already drops `ReplicationSourceIdentifier`.
+/// Inherited here, PITR-restoring an Aurora read replica would report
+/// the restored cluster as a replica of the original writer, and
+/// PromoteReadReplicaDBCluster would become meaningful on a cluster that
+/// never was one.
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_clears_the_replication_source() {
+    let svc = make_service();
+    seed_cluster_entry(
+        &svc,
+        "replica-cluster",
+        serde_json::json!({
+            "ReplicationSourceIdentifier":
+                "arn:aws:rds:us-east-1:123456789012:cluster:writer-cluster",
+        }),
+    );
+
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            ("SourceDBClusterIdentifier", "replica-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored-cluster");
+    assert!(
+        restored.get("ReplicationSourceIdentifier").is_none(),
+        "the PITR target inherited its source's replication source: {restored}"
+    );
+    // The source itself is untouched -- it really is a replica.
+    let source = cluster_entry(&svc, "replica-cluster");
+    assert_eq!(
+        source["ReplicationSourceIdentifier"],
+        "arn:aws:rds:us-east-1:123456789012:cluster:writer-cluster"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_assigns_its_own_resource_id() {
+    // The restored cluster is a new resource: inheriting the source's
+    // immutable resource id makes `db-cluster-resource-id` — a unique
+    // match on AWS — select two clusters.
+    let svc = make_service();
+    seed_cluster_entry(&svc, "src-cluster", serde_json::json!({}));
+
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored-cluster");
+    let source = cluster_entry(&svc, "src-cluster");
+    assert_ne!(
+        restored["DbClusterResourceId"], source["DbClusterResourceId"],
+        "restored cluster reused the source resource id"
+    );
+    assert!(restored["DbClusterResourceId"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("cluster-"));
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_clone_group_follows_restore_type() {
+    let svc = make_service();
+    seed_cluster_entry(&svc, "src-cluster", serde_json::json!({}));
+
+    // copy-on-write: clone and source share a clone group.
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "clone-cluster"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("RestoreType", "copy-on-write"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let clone_group = cluster_entry(&svc, "clone-cluster")["CloneGroupId"]
+        .as_str()
+        .expect("clone carries a clone group")
+        .to_string();
+    assert_eq!(
+        cluster_entry(&svc, "src-cluster")["CloneGroupId"].as_str(),
+        Some(clone_group.as_str()),
+        "source was not stamped with the shared clone group"
+    );
+
+    // full-copy (the default) is an independent cluster and must not
+    // inherit the source's group.
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "full-copy-cluster"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+    assert!(
+        cluster_entry(&svc, "full-copy-cluster")
+            .get("CloneGroupId")
+            .is_none(),
+        "full-copy restore inherited the source clone group"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_accepts_an_arn_snapshot_identifier() {
+    // The Terraform provider stores a full ARN in `snapshot_identifier`.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "postgres",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            (
+                "SnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:cluster-snapshot:snap-1",
+            ),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req)
+        .await
+        .expect("ARN-form snapshot identifier should resolve");
+    assert_eq!(
+        cluster_entry(&svc, "restored-cluster")["DBClusterIdentifier"].as_str(),
+        Some("restored-cluster")
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_drops_inherited_identity() {
+    // CreateDBClusterSnapshot copies the whole cluster JSON, so the
+    // snapshot carries the source's resource id and clone group. A
+    // restore is an independent full copy of both.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "postgres",
+                    "Status": "available",
+                    "DbClusterResourceId": "cluster-source",
+                    "CloneGroupId": "clone-group-source",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored-cluster"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored-cluster");
+    assert_ne!(
+        restored["DbClusterResourceId"].as_str(),
+        Some("cluster-source"),
+        "restored cluster reused the snapshot's resource id"
+    );
+    assert!(
+        restored.get("CloneGroupId").is_none(),
+        "restored cluster inherited the source clone group"
+    );
+}
+
+#[tokio::test]
+async fn create_db_cluster_snapshot_reports_an_unknown_cluster_first() {
+    // A duplicate id against a cluster that doesn't exist is a
+    // DBClusterNotFoundFault, not AlreadyExists.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({"DBClusterSnapshotIdentifier": "snap-1"}),
+            );
+    }
+
+    let req = request(
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-2"),
+            ("DBClusterIdentifier", "ghost-cluster"),
+        ],
+    );
+    match svc.create_db_cluster_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("snapshot of a nonexistent cluster accepted"),
+    }
+}
+
+#[tokio::test]
+async fn create_db_cluster_snapshot_rejects_a_duplicate_identifier() {
+    let svc = make_service();
+    seed_cluster_entry(&svc, "clu-1", serde_json::json!({}));
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({"DBClusterSnapshotIdentifier": "snap-1"}),
+            );
+    }
+
+    let req = request(
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("DBClusterIdentifier", "clu-1"),
+        ],
+    );
+    match svc.create_db_cluster_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotAlreadyExistsFault"),
+        Ok(_) => panic!("duplicate snapshot identifier accepted"),
+    }
+}
+
+#[test]
+fn describe_db_snapshots_not_found_echoes_the_caller_identifier() {
+    let svc = make_service();
+    let arn = "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1";
+
+    let req = request("DescribeDBSnapshots", &[("DBSnapshotIdentifier", arn)]);
+    match svc.describe_db_snapshots(&req) {
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(
+                message.contains(arn),
+                "the error reported the reduced id, not the caller's ARN: {message}"
+            );
+        }
+        Ok(_) => panic!("unknown snapshot should fault"),
+    }
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_carries_the_snapshot_fields() {
+    // CreateDBClusterSnapshot copies the whole cluster row in, so the
+    // restore reflects the snapshot -- including changes made to the
+    // source cluster only BEFORE the snapshot was taken.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    "EngineVersion": "8.0.mysql_aurora.3.04.0",
+                    "BackupRetentionPeriod": 21,
+                }),
+            );
+        // A same-named local cluster with different settings must not be
+        // what the restore reads.
+        state
+            .extras
+            .entry("clusters".to_string())
+            .or_default()
+            .insert(
+                "src-cluster".to_string(),
+                serde_json::json!({
+                    "DBClusterIdentifier": "src-cluster",
+                    "Engine": "aurora-postgresql",
+                    "EngineVersion": "16.9",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored");
+    assert_eq!(restored["Engine"].as_str(), Some("aurora-mysql"));
+    assert_eq!(restored["BackupRetentionPeriod"].as_i64(), Some(21));
+    assert_eq!(restored["Status"].as_str(), Some("available"));
+    assert!(restored["DBClusterArn"]
+        .as_str()
+        .unwrap_or_default()
+        .ends_with(":cluster:restored"));
+}
+
+#[tokio::test]
+async fn cluster_restores_refuse_an_existing_target() {
+    // Overwriting would replace a live cluster row whose members were
+    // just stripped, orphaning its writer instance -- and a
+    // self-targeted PITR would destroy the very cluster it reads.
+    let svc = make_service();
+    seed_cluster_entry(
+        &svc,
+        "prod",
+        serde_json::json!({"WriterDBInstanceIdentifier": "writer-1"}),
+    );
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "prod",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "prod"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterAlreadyExistsFault"),
+        Ok(_) => panic!("restore overwrote an existing cluster"),
+    }
+
+    // A self-targeted PITR is the destructive case.
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "prod"),
+            ("SourceDBClusterIdentifier", "prod"),
+            ("RestoreType", "copy-on-write"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    match svc.restore_db_cluster_to_point_in_time(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterAlreadyExistsFault"),
+        Ok(_) => panic!("PITR overwrote its own source"),
+    }
+
+    // The live cluster still has its writer registration.
+    assert_eq!(
+        cluster_entry(&svc, "prod")["WriterDBInstanceIdentifier"].as_str(),
+        Some("writer-1")
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_reports_a_wrong_type_arn_as_not_found() {
+    // A DB-snapshot ARN names no cluster snapshot, so it reduces to
+    // None -- but the parameter WAS supplied, and "is required" would
+    // send the caller looking for the wrong problem.
+    let svc = make_service();
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            (
+                "SnapshotIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:snapshot:s1",
+            ),
+        ],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => {
+            assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
+            let message = format!("{err:?}");
+            // The WHOLE identifier, not a substring every ARN contains:
+            // asserting on "s1" alone would pass even if the value were
+            // reduced or dropped.
+            assert!(
+                message.contains("arn:aws:rds:us-east-1:123456789012:snapshot:s1"),
+                "the caller's identifier was not echoed: {message}"
+            );
+            assert!(
+                !message.contains("is required"),
+                "a supplied identifier was reported as missing: {message}"
+            );
+        }
+        Ok(_) => panic!("a DB-snapshot ARN resolved as a cluster snapshot"),
+    }
+
+    // And a genuinely absent parameter says so, rather than reporting a
+    // snapshot named "(none)".
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[("DBClusterIdentifier", "restored")],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => {
+            let message = format!("{err:?}");
+            assert!(message.contains("is required"), "{message}");
+            assert!(!message.contains("(none)"), "{message}");
+        }
+        Ok(_) => panic!("a missing snapshot identifier should fault"),
+    }
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "ghost"),
+        ],
+    );
+    match svc.restore_db_cluster_from_snapshot(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("unknown snapshot should fault"),
+    }
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_carries_a_staged_dump_forward() {
+    // A snapshot of a cluster that was itself restored, taken before an
+    // instance attached, has no DumpDataB64 -- there was no writer to
+    // dump -- and holds the data under PendingRestoreDumpB64. That IS
+    // the snapshot's data: dropping it loses the database on a
+    // cluster -> snapshot -> cluster chain, while the instance restore
+    // reads it from the very same snapshot.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let staged = base64::engine::general_purpose::STANDARD.encode(b"-- staged --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "PendingRestoreDumpB64": staged,
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    use base64::Engine;
+    let staged = base64::engine::general_purpose::STANDARD.encode(b"-- staged --");
+    assert_eq!(
+        cluster_entry(&svc, "restored")["PendingRestoreDumpB64"].as_str(),
+        Some(staged.as_str()),
+        "the snapshot's staged data was lost on restore"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_prefers_a_fresh_dump() {
+    // When the snapshot carries both, the writer's own dump wins over
+    // anything staged by an earlier restore.
+    let svc = make_service();
+    {
+        use base64::Engine;
+        let fresh = base64::engine::general_purpose::STANDARD.encode(b"-- fresh --");
+        let stale = base64::engine::general_purpose::STANDARD.encode(b"-- stale --");
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "DumpDataB64": fresh,
+                    "PendingRestoreDumpB64": stale,
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    use base64::Engine;
+    let fresh = base64::engine::general_purpose::STANDARD.encode(b"-- fresh --");
+    assert_eq!(
+        cluster_entry(&svc, "restored")["PendingRestoreDumpB64"].as_str(),
+        Some(fresh.as_str()),
+        "the restore replayed the stale staged dump over the writer's own"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_from_snapshot_does_not_inherit_sharing() {
+    // Sharing must not propagate: CreateDBClusterSnapshot copies the
+    // restored cluster's whole row into the next snapshot.
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        let state = accounts.default_mut();
+        state
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-cluster",
+                    "Status": "available",
+                    "SnapshotAttributes": {"restore": ["all"]},
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    assert!(
+        cluster_entry(&svc, "restored")
+            .get("SnapshotAttributes")
+            .is_none(),
+        "restored cluster inherited the snapshot's share list"
+    );
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_unknown_source_errors() {
+    let svc = make_service();
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SourceDBClusterIdentifier", "ghost"),
+        ],
+    );
+    match svc.restore_db_cluster_to_point_in_time(&req).await {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("unknown source should fault"),
+    }
+}
+
+#[tokio::test]
+async fn restore_db_cluster_to_point_in_time_carries_source_fields() {
+    let svc = make_service();
+    seed_cluster_entry(
+        &svc,
+        "src-cluster",
+        serde_json::json!({"EngineVersion": "16.2"}),
+    );
+
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "pit"),
+            ("SourceDBClusterIdentifier", "src-cluster"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "pit");
+    assert_eq!(restored["EngineVersion"].as_str(), Some("16.2"));
+    assert_eq!(restored["Status"].as_str(), Some("available"));
+    assert_eq!(restored["UseLatestRestorableTime"].as_str(), Some("true"));
 }
 
 #[tokio::test]
@@ -2728,6 +5547,7 @@ async fn restore_db_instance_from_db_snapshot_persists_tags() {
     let snapshot = crate::state::DbSnapshot {
         db_snapshot_identifier: "snap".to_string(),
         db_snapshot_arn: "arn:aws:rds:us-east-1:123456789012:snapshot:snap".to_string(),
+        source_db_snapshot_arn: None,
         db_instance_identifier: "src".to_string(),
         snapshot_create_time: Utc::now(),
         engine: "postgres".to_string(),
@@ -3436,6 +6256,7 @@ fn apply_snapshot_dump_result_transitions_status() {
             crate::state::DbSnapshot {
                 db_snapshot_identifier: id.to_string(),
                 db_snapshot_arn: format!("arn:aws:rds:us-east-1:123456789012:snapshot:{id}"),
+                source_db_snapshot_arn: None,
                 db_instance_identifier: "src".to_string(),
                 snapshot_create_time: Utc::now(),
                 engine: "postgres".to_string(),
@@ -3960,11 +6781,17 @@ fn modify_current_db_cluster_capacity_echoes_requested_capacity() {
 }
 
 #[test]
-fn modify_db_snapshot_attribute_rejects_value_in_add_and_remove() {
+fn modify_db_snapshot_attribute_resolves_a_value_in_add_and_remove() {
+    // AWS rejects this with InvalidParameterCombination, which is not
+    // even a shape in the RDS model -- emitting it would be an undeclared
+    // error. Resolve deterministically instead, and fail CLOSED: this is
+    // a permission surface, so a contradictory request must leave the
+    // snapshot unshared rather than shared.
     let svc = make_service();
     seed_snapshot(&svc, "snap-dup", "db1");
-    assert_code(
-        svc.handle_extra_action(&request(
+
+    let resp = svc
+        .handle_extra_action(&request(
             "ModifyDBSnapshotAttribute",
             &[
                 ("DBSnapshotIdentifier", "snap-dup"),
@@ -3972,8 +6799,27 @@ fn modify_db_snapshot_attribute_rejects_value_in_add_and_remove() {
                 ("ValuesToAdd.AttributeValue.1", "111111111111"),
                 ("ValuesToRemove.AttributeValue.1", "111111111111"),
             ],
-        )),
-        "InvalidParameterCombination",
+        ))
+        .expect("overlapping values should resolve, not fault");
+    let body = body_of(resp);
+    assert!(
+        !body.contains("<AttributeValue>111111111111</AttributeValue>"),
+        "an ambiguous sharing request left the snapshot shared: {body}"
+    );
+
+    // The snapshot really is unshared, so the shared listing can't see it.
+    let shared_with = svc
+        .state
+        .read()
+        .default_ref()
+        .snapshots
+        .get("snap-dup")
+        .expect("seeded snapshot")
+        .snapshot_attributes
+        .contains_key("restore");
+    assert!(
+        !shared_with,
+        "an empty attribute should be dropped entirely"
     );
 }
 

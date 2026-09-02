@@ -3008,6 +3008,7 @@ async fn main() {
                 Ok(Some(bytes)) => {
                     match serde_json::from_slice::<fakecloud_rds::RdsSnapshot>(&bytes) {
                         Ok(snapshot) => {
+                            let loaded_schema_version = snapshot.schema_version;
                             if snapshot.schema_version > fakecloud_rds::RDS_SNAPSHOT_SCHEMA_VERSION
                             {
                                 fatal_exit(format_args!(
@@ -3052,6 +3053,12 @@ async fn main() {
                                     // DBInstanceAlreadyExists forever (bug-audit
                                     // 2026-06-26, 4.2).
                                     state.in_progress_instance_ids.clear();
+                                    // Bring older rows in line with the current
+                                    // field semantics (e.g. final snapshots typed
+                                    // `automated` before they were `manual`).
+                                    // Gated on the version the file declared, so
+                                    // it can't keep rewriting newer state.
+                                    state.migrate_loaded(loaded_schema_version);
                                 }
                             }
                         }

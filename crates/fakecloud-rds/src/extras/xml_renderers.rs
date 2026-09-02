@@ -111,6 +111,12 @@ pub(super) fn db_cluster_member_xml(v: &Value) -> String {
             xml_escape(s)
         ));
     }
+    if let Some(s) = v["CloneGroupId"].as_str() {
+        out.push_str(&format!(
+            "          <CloneGroupId>{}</CloneGroupId>\n",
+            xml_escape(s)
+        ));
+    }
     if let Some(s) = v["ClusterCreateTime"].as_str() {
         out.push_str(&format!(
             "          <ClusterCreateTime>{}</ClusterCreateTime>\n",
@@ -289,13 +295,62 @@ pub(super) fn db_cluster_member_xml(v: &Value) -> String {
 }
 
 pub(super) fn cluster_snapshot_member_xml(v: &Value) -> String {
-    format!(
+    let mut out = format!(
         "          <DBClusterSnapshotIdentifier>{}</DBClusterSnapshotIdentifier>\n          <DBClusterSnapshotArn>{}</DBClusterSnapshotArn>\n          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <Status>{}</Status>",
         xml_escape(v["DBClusterSnapshotIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["DBClusterSnapshotArn"].as_str().unwrap_or("")),
         xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["Status"].as_str().unwrap_or("available")),
-    )
+    );
+    // Echo the fields DescribeDBClusterSnapshots filters on, so a client
+    // that narrowed by snapshot-type / engine can read those values back
+    // off the result instead of getting blanks.
+    out.push_str(&format!(
+        "\n          <SnapshotType>{}</SnapshotType>",
+        xml_escape(v["SnapshotType"].as_str().unwrap_or("manual"))
+    ));
+    if let Some(s) = v["Engine"].as_str() {
+        out.push_str(&format!("\n          <Engine>{}</Engine>", xml_escape(s)));
+    }
+    if let Some(s) = v["EngineVersion"].as_str() {
+        out.push_str(&format!(
+            "\n          <EngineVersion>{}</EngineVersion>",
+            xml_escape(s)
+        ));
+    }
+    // The rest of what a client reads off a cluster snapshot
+    // (`aws_db_cluster_snapshot` reads every one of these). The entry is
+    // a clone of the cluster row, so it carries them.
+    for (key, tag) in [
+        ("SnapshotCreateTime", "SnapshotCreateTime"),
+        ("ClusterCreateTime", "ClusterCreateTime"),
+        ("MasterUsername", "MasterUsername"),
+        ("VpcId", "VpcId"),
+        ("KmsKeyId", "KmsKeyId"),
+        ("LicenseModel", "LicenseModel"),
+        // Stored by CopyDBClusterSnapshot / CreateDBCluster and modeled
+        // on DBClusterSnapshot; `aws_db_cluster_snapshot` reads both.
+        ("SourceDBClusterSnapshotArn", "SourceDBClusterSnapshotArn"),
+        ("DbClusterResourceId", "DbClusterResourceId"),
+    ] {
+        if let Some(value) = v[key].as_str() {
+            out.push_str(&format!("\n          <{tag}>{}</{tag}>", xml_escape(value)));
+        }
+    }
+    for (key, tag) in [
+        ("Port", "Port"),
+        ("AllocatedStorage", "AllocatedStorage"),
+        ("PercentProgress", "PercentProgress"),
+    ] {
+        if let Some(value) = v[key].as_i64() {
+            out.push_str(&format!("\n          <{tag}>{value}</{tag}>"));
+        }
+    }
+    out.push_str(&format!(
+        "\n          <StorageEncrypted>{}</StorageEncrypted>",
+        v["StorageEncrypted"].as_bool().unwrap_or(false)
+    ));
+    out
 }
 
 pub(super) fn cluster_pg_xml(name: &str, arn: &str, family: &str, description: &str) -> String {

@@ -2,6 +2,39 @@
 
 use super::*;
 
+use crate::filters::{
+    addresses_own_account, identifier_matches_type, normalized_identifier, parse_filters,
+    sibling_rds_arn, RdsFilter,
+};
+
+/// True when `instance` satisfies every filter. Filters are AND-ed with
+/// each other; the values within one filter are OR-ed. The names come
+/// from the `DescribeDBInstances` docs: `db-cluster-id`,
+/// `db-instance-id`, `dbi-resource-id`, `domain` and `engine`.
+fn instance_matches_filters(instance: &DbInstance, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-instance-id" => filter.matches_any([
+            Some(instance.db_instance_identifier.as_str()),
+            Some(instance.db_instance_arn.as_str()),
+        ]),
+        "dbi-resource-id" => filter.matches(Some(instance.dbi_resource_id.as_str())),
+        "engine" => filter.matches(Some(instance.engine.as_str())),
+        "domain" => filter.matches(instance.domain.as_deref()),
+        "db-cluster-id" => {
+            let cluster = instance.db_cluster_identifier.as_deref();
+            let cluster_arn =
+                cluster.and_then(|id| sibling_rds_arn(&instance.db_instance_arn, "cluster", id));
+            filter.matches_any([cluster, cluster_arn.as_deref()])
+        }
+        // A filter name AWS doesn't document for this operation
+        // matches nothing — see the module docs on `crate::filters`.
+        other => {
+            tracing::debug!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
+    })
+}
+
 impl RdsService {
     pub(super) async fn create_db_instance(
         &self,
@@ -209,12 +242,17 @@ impl RdsService {
                 tde_credential_arn: None,
                 delete_automated_backups: None,
                 db_security_groups: Vec::new(),
-                domain: None,
-                domain_fqdn: None,
-                domain_ou: None,
-                domain_iam_role_name: None,
-                domain_auth_secret_arn: None,
-                domain_dns_ips: Vec::new(),
+                // Active Directory membership is settable at create
+                // time, not only through ModifyDBInstance -- without
+                // this the `domain` filter is dead for every instance
+                // that was created with one (and DescribeDBInstances
+                // reports no DomainMembership).
+                domain: optional_query_param(request, "Domain"),
+                domain_fqdn: optional_query_param(request, "DomainFqdn"),
+                domain_ou: optional_query_param(request, "DomainOu"),
+                domain_iam_role_name: optional_query_param(request, "DomainIAMRoleName"),
+                domain_auth_secret_arn: optional_query_param(request, "DomainAuthSecretArn"),
+                domain_dns_ips: parse_string_member_list(request, "DomainDnsIps"),
                 db_cluster_identifier: db_cluster_identifier.clone(),
                 activity_stream: None,
             };
@@ -1231,9 +1269,28 @@ impl RdsService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        let db_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        // "The user-supplied instance identifier or the Amazon Resource
+        // Name (ARN) of the DB instance" -- resolve either form. A DB
+        // instance is never shared across accounts, so an ARN naming a
+        // different account is simply not found here; resolving it by
+        // bare id would report this account's same-named instance and
+        // make a cross-account misconfiguration look like success.
+        let raw_instance_identifier = optional_query_param(request, "DBInstanceIdentifier");
+        if let Some(raw) = raw_instance_identifier.as_deref() {
+            // An ARN of another account, or of another resource TYPE,
+            // names something that is not a DB instance here. Both are
+            // not-found: a `None` identifier would otherwise read as "no
+            // filter" and list every instance in the account.
+            if !addresses_own_account(raw, &request.account_id)
+                || !identifier_matches_type(raw, "db")
+            {
+                return Err(db_instance_not_found(raw));
+            }
+        }
+        let db_instance_identifier = normalized_identifier(raw_instance_identifier.clone(), "db");
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
+        let filters = parse_filters(request);
 
         let accounts = self.state.read();
         let empty = RdsState::new(&request.account_id, &request.region);
@@ -1245,24 +1302,38 @@ impl RdsService {
                 .instances
                 .get(&identifier)
                 .cloned()
-                .ok_or_else(|| db_instance_not_found(&identifier))?;
+                // Echo what the caller passed (the ARN, when they used
+                // one), as the snapshot paths do.
+                .ok_or_else(|| {
+                    db_instance_not_found(raw_instance_identifier.as_deref().unwrap_or(&identifier))
+                })?;
+
+            // AWS AND-s the identifier with any filters: the instance
+            // exists, so this is an empty result rather than
+            // `DBInstanceNotFound`.
+            let body = if instance_matches_filters(&instance, &filters) {
+                format!(
+                    "<DBInstances><DBInstance>{}</DBInstance></DBInstances>",
+                    db_instance_xml(&instance, None, instance_subnet_group(state, &instance))
+                )
+            } else {
+                "<DBInstances></DBInstances>".to_string()
+            };
 
             return Ok(AwsResponse::xml(
                 StatusCode::OK,
-                query_response_xml(
-                    "DescribeDBInstances",
-                    RDS_NS,
-                    &format!(
-                        "<DBInstances><DBInstance>{}</DBInstance></DBInstances>",
-                        db_instance_xml(&instance, None, instance_subnet_group(state, &instance))
-                    ),
-                    &request.request_id,
-                ),
+                query_response_xml("DescribeDBInstances", RDS_NS, &body, &request.request_id),
             ));
         }
 
-        // Get all instances sorted by created_at, then identifier
-        let mut instances: Vec<DbInstance> = state.instances.values().cloned().collect();
+        // Get all instances matching the filters, sorted by created_at,
+        // then identifier
+        let mut instances: Vec<DbInstance> = state
+            .instances
+            .values()
+            .filter(|instance| instance_matches_filters(instance, &filters))
+            .cloned()
+            .collect();
         instances.sort_by(|a, b| {
             a.created_at
                 .cmp(&b.created_at)

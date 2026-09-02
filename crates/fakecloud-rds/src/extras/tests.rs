@@ -212,14 +212,7 @@ fn cluster_lifecycle() {
 #[test]
 fn cluster_snapshot_lifecycle() {
     let svc = svc();
-    ok_on(
-        &svc,
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "cs1"),
-            ("DBClusterIdentifier", "c1"),
-        ],
-    );
+    snapshot_cluster(&svc, "cs1", "c1");
     ok_on(
         &svc,
         "CopyDBClusterSnapshot",
@@ -234,10 +227,16 @@ fn cluster_snapshot_lifecycle() {
         "DescribeDBClusterSnapshotAttributes",
         &[("DBClusterSnapshotIdentifier", "cs1")],
     );
+    // AttributeName is @required in the model; the handler now stores
+    // the share list rather than echoing an empty attribute set.
     ok_on(
         &svc,
         "ModifyDBClusterSnapshotAttribute",
-        &[("DBClusterSnapshotIdentifier", "cs1")],
+        &[
+            ("DBClusterSnapshotIdentifier", "cs1"),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "999999999999"),
+        ],
     );
     ok_on(&svc, "DescribeDBClusterAutomatedBackups", &[]);
     ok_on(&svc, "DeleteDBClusterAutomatedBackup", &[]);
@@ -1376,106 +1375,6 @@ fn cluster_lifecycle_op_missing_identifier_errors() {
     assert_eq!(err.code(), "InvalidParameterValue");
 }
 
-#[test]
-fn restore_db_cluster_from_snapshot_clones_source_cluster_fields() {
-    let svc = svc();
-    create_cluster(&svc, "src");
-    // Mutate source so we can verify it carries through.
-    svc.handle_extra_action(&req(
-        "ModifyDBCluster",
-        &[
-            ("DBClusterIdentifier", "src"),
-            ("EngineVersion", "16.1"),
-            ("BackupRetentionPeriod", "21"),
-        ],
-    ))
-    .expect("ModifyDBCluster");
-    // Snapshot the source.
-    svc.handle_extra_action(&req(
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "snap1"),
-            ("DBClusterIdentifier", "src"),
-        ],
-    ))
-    .expect("CreateDBClusterSnapshot");
-    svc.handle_extra_action(&req(
-        "RestoreDBClusterFromSnapshot",
-        &[
-            ("DBClusterIdentifier", "restored"),
-            ("SnapshotIdentifier", "snap1"),
-        ],
-    ))
-    .expect("RestoreDBClusterFromSnapshot");
-    let v = cluster_value(&svc, "restored");
-    assert_eq!(v["DBClusterIdentifier"].as_str(), Some("restored"));
-    assert_eq!(v["EngineVersion"].as_str(), Some("16.1"));
-    // Coerced to integer in ModifyDBCluster, carried verbatim through the snapshot/restore.
-    assert_eq!(v["BackupRetentionPeriod"].as_i64(), Some(21));
-    assert_eq!(v["Status"].as_str(), Some("available"));
-    assert!(v["DBClusterArn"]
-        .as_str()
-        .unwrap_or_default()
-        .ends_with(":cluster:restored"));
-}
-
-#[test]
-fn restore_db_cluster_from_snapshot_unknown_snapshot_errors() {
-    let svc = svc();
-    let err = svc
-        .handle_extra_action(&req(
-            "RestoreDBClusterFromSnapshot",
-            &[
-                ("DBClusterIdentifier", "restored"),
-                ("SnapshotIdentifier", "ghost"),
-            ],
-        ))
-        .err()
-        .expect("missing snapshot should error");
-    assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault");
-}
-
-#[test]
-fn restore_db_cluster_to_point_in_time_clones_source() {
-    let svc = svc();
-    create_cluster(&svc, "src");
-    svc.handle_extra_action(&req(
-        "ModifyDBCluster",
-        &[("DBClusterIdentifier", "src"), ("EngineVersion", "16.2")],
-    ))
-    .expect("ModifyDBCluster");
-    svc.handle_extra_action(&req(
-        "RestoreDBClusterToPointInTime",
-        &[
-            ("DBClusterIdentifier", "pit"),
-            ("SourceDBClusterIdentifier", "src"),
-            ("UseLatestRestorableTime", "true"),
-        ],
-    ))
-    .expect("RestoreDBClusterToPointInTime");
-    let v = cluster_value(&svc, "pit");
-    assert_eq!(v["DBClusterIdentifier"].as_str(), Some("pit"));
-    assert_eq!(v["EngineVersion"].as_str(), Some("16.2"));
-    assert_eq!(v["Status"].as_str(), Some("available"));
-    assert_eq!(v["UseLatestRestorableTime"].as_str(), Some("true"));
-}
-
-#[test]
-fn restore_db_cluster_to_point_in_time_unknown_source_errors() {
-    let svc = svc();
-    let err = svc
-        .handle_extra_action(&req(
-            "RestoreDBClusterToPointInTime",
-            &[
-                ("DBClusterIdentifier", "pit"),
-                ("SourceDBClusterIdentifier", "ghost"),
-            ],
-        ))
-        .err()
-        .expect("missing source should error");
-    assert_eq!(err.code(), "DBClusterNotFoundFault");
-}
-
 fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
     use crate::state::DbInstance;
     use chrono::Utc;
@@ -2151,14 +2050,7 @@ fn copy_db_cluster_snapshot_carries_source_engine() {
             ("EngineVersion", "8.0.32"),
         ],
     );
-    ok_on(
-        &svc,
-        "CreateDBClusterSnapshot",
-        &[
-            ("DBClusterSnapshotIdentifier", "snap-src"),
-            ("DBClusterIdentifier", "src"),
-        ],
-    );
+    snapshot_cluster(&svc, "snap-src", "src");
     ok_on(
         &svc,
         "CopyDBClusterSnapshot",
@@ -2341,4 +2233,1949 @@ fn create_db_cluster_persists_safety_fields() {
         dbody.contains("<DatabaseName>appdb</DatabaseName>"),
         "describe missing DatabaseName: {dbody}"
     );
+}
+
+// ── Describe* Filters ────────────────────────────────────────────
+
+/// Body of a successful extras action.
+fn body_of_action(svc: &RdsService, action: &str, params: &[(&str, &str)]) -> String {
+    let resp = svc
+        .handle_extra_action(&req(action, params))
+        .unwrap_or_else(|e| panic!("{action} failed: {e:?}"));
+    assert!(resp.status.is_success(), "{action} status: {}", resp.status);
+    String::from_utf8(resp.body.expect_bytes().to_vec()).expect("utf8")
+}
+
+fn local_snapshot(snapshot_id: &str, instance_id: &str, account: &str) -> crate::state::DbSnapshot {
+    crate::state::DbSnapshot {
+        db_snapshot_identifier: snapshot_id.to_string(),
+        db_snapshot_arn: format!("arn:aws:rds:us-east-1:{account}:snapshot:{snapshot_id}"),
+        source_db_snapshot_arn: None,
+        db_instance_identifier: instance_id.to_string(),
+        snapshot_create_time: chrono::Utc::now(),
+        engine: "postgres".to_string(),
+        engine_version: "16.3".to_string(),
+        allocated_storage: 20,
+        status: "available".to_string(),
+        port: 5432,
+        master_username: "admin".to_string(),
+        db_name: Some("appdb".to_string()),
+        dbi_resource_id: format!("db-{snapshot_id}"),
+        snapshot_type: "manual".to_string(),
+        master_user_password: "secret".to_string(),
+        tags: Vec::new(),
+        dump_data: Vec::new(),
+        availability_zone: None,
+        vpc_id: None,
+        instance_create_time: None,
+        license_model: None,
+        iops: None,
+        option_group_name: None,
+        percent_progress: None,
+        storage_type: None,
+        encrypted: false,
+        kms_key_id: None,
+        iam_database_authentication_enabled: false,
+        timezone: None,
+        storage_throughput: None,
+        snapshot_attributes: std::collections::BTreeMap::new(),
+    }
+}
+
+fn seed_cluster(svc: &RdsService, id: &str, resource_id: &str, engine: &str) {
+    let state = svc.state_handle();
+    let mut accounts = state.write();
+    let s = accounts.get_or_create("000000000000");
+    s.extras.entry("clusters".to_string()).or_default().insert(
+        id.to_string(),
+        json!({
+            "DBClusterIdentifier": id,
+            "DBClusterArn": format!("arn:aws:rds:us-east-1:000000000000:cluster:{id}"),
+            "DbClusterResourceId": resource_id,
+            "Status": "available",
+            "Engine": engine,
+        }),
+    );
+}
+
+/// Snapshot a seeded cluster the way `CreateDBClusterSnapshot` does --
+/// clone the cluster row, stamp the snapshot fields -- without needing a
+/// container runtime to dump a writer.
+fn snapshot_cluster(svc: &RdsService, snapshot_id: &str, cluster_id: &str) {
+    let state = svc.state_handle();
+    let mut accounts = state.write();
+    let s = accounts.get_or_create("000000000000");
+    let mut entry = s
+        .extras
+        .get("clusters")
+        .and_then(|m| m.get(cluster_id))
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if let Some(obj) = entry.as_object_mut() {
+        obj.insert(
+            "DBClusterSnapshotIdentifier".to_string(),
+            json!(snapshot_id),
+        );
+        obj.insert(
+            "DBClusterSnapshotArn".to_string(),
+            json!(format!(
+                "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:{snapshot_id}"
+            )),
+        );
+        obj.insert("DBClusterIdentifier".to_string(), json!(cluster_id));
+        obj.insert("Status".to_string(), json!("available"));
+        obj.insert("SnapshotType".to_string(), json!("manual"));
+    }
+    s.extras
+        .entry("cluster_snapshots".to_string())
+        .or_default()
+        .insert(snapshot_id.to_string(), entry);
+}
+
+fn seed_cluster_snapshot(svc: &RdsService, id: &str, cluster: &str, snapshot_type: &str) {
+    let state = svc.state_handle();
+    let mut accounts = state.write();
+    let s = accounts.get_or_create("000000000000");
+    s.extras
+        .entry("cluster_snapshots".to_string())
+        .or_default()
+        .insert(
+            id.to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": id,
+                "DBClusterSnapshotArn":
+                    format!("arn:aws:rds:us-east-1:000000000000:cluster-snapshot:{id}"),
+                "DBClusterIdentifier": cluster,
+                "Status": "available",
+                "SnapshotType": snapshot_type,
+                "Engine": "aurora-postgresql",
+            }),
+        );
+}
+
+#[test]
+fn describe_db_clusters_filters_by_db_cluster_resource_id() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-resource-id"),
+            ("Filters.Filter.1.Values.Value.1", "cluster-BBBB"),
+        ],
+    );
+
+    assert!(body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+    assert!(!body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+}
+
+#[test]
+fn describe_db_clusters_filters_by_db_cluster_id_and_arn() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+
+    for value in ["clu-1", "arn:aws:rds:us-east-1:000000000000:cluster:clu-1"] {
+        let body = body_of_action(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        );
+        assert!(
+            body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"),
+            "value {value} body: {body}"
+        );
+        assert!(!body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+    }
+}
+
+#[test]
+fn describe_db_clusters_unrecognized_filter_matches_nothing() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "not-a-real-filter"),
+            ("Filters.Filter.1.Values.Value.1", "whatever"),
+        ],
+    );
+
+    assert!(!body.contains("<DBClusterIdentifier>"), "body: {body}");
+}
+
+#[test]
+fn describe_db_cluster_snapshots_honors_the_identifier_params() {
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap-2")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_unknown_identifier_is_not_found() {
+    // `DBClusterSnapshotNotFoundFault` is declared on this operation, so
+    // an unknown named snapshot errors rather than returning an empty
+    // list -- matching DescribeDBInstances / DescribeDBSnapshots.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "ghost")],
+    ));
+    match result {
+        Err(err) => assert!(
+            format!("{err:?}").contains("DBClusterSnapshotNotFoundFault"),
+            "unexpected error: {err:?}"
+        ),
+        Ok(_) => panic!("unknown snapshot should be a fault"),
+    }
+}
+
+#[test]
+fn describe_lists_use_the_smithy_member_tag() {
+    // The AWS SDKs unmarshal an empty list from the generic `<member>`
+    // element, so every list whose Smithy member declares an `xmlName`
+    // has to emit that name -- otherwise the rows are on the wire but
+    // invisible to real clients. Names verified against aws-models.
+    let cases = [
+        (
+            "cluster_endpoints",
+            "DescribeDBClusterEndpoints",
+            "DBClusterEndpointList",
+        ),
+        (
+            "security_groups",
+            "DescribeDBSecurityGroups",
+            "DBSecurityGroup",
+        ),
+        ("integrations", "DescribeIntegrations", "Integration"),
+        ("shard_groups", "DescribeDBShardGroups", "DBShardGroup"),
+        ("tenant_dbs", "DescribeTenantDatabases", "TenantDatabase"),
+        ("export_tasks", "DescribeExportTasks", "ExportTask"),
+    ];
+
+    for (category, action, member_tag) in cases {
+        let svc = svc();
+        {
+            let state = svc.state_handle();
+            let mut accounts = state.write();
+            let s = accounts.get_or_create("000000000000");
+            s.extras
+                .entry(category.to_string())
+                .or_default()
+                .insert("entry-1".to_string(), json!({"Status": "available"}));
+        }
+
+        let body = body_of_action(&svc, action, &[]);
+        assert!(
+            body.contains(&format!("<{member_tag}>")),
+            "{action} did not use <{member_tag}>: {body}"
+        );
+        assert!(
+            !body.contains("<member>"),
+            "{action} still emits the generic <member>: {body}"
+        );
+    }
+}
+
+#[test]
+fn cluster_snapshot_attributes_round_trip_and_drive_shared() {
+    // ModifyDBClusterSnapshotAttribute used to be a no-op that always
+    // rendered an empty attribute set, so no cluster snapshot could ever
+    // appear under SnapshotType=shared.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "111111111111"),
+        ],
+    );
+    assert!(body.contains("<AttributeName>restore</AttributeName>"));
+    assert!(body.contains("<AttributeValue>111111111111</AttributeValue>"));
+
+    // Describe reads the stored value back.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "snap-1")],
+    );
+    assert!(body.contains("<AttributeValue>111111111111</AttributeValue>"));
+
+    // Removing the last value reads back as unshared, matching AWS.
+    let body = body_of_action(
+        &svc,
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("AttributeName", "restore"),
+            ("ValuesToRemove.AttributeValue.1", "111111111111"),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotAttributes/>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_reports_shared_and_public() {
+    // A snapshot another account shared with this caller is selected by
+    // SnapshotType=shared; one shared with `all` by SnapshotType=public.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        let bucket = other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default();
+        bucket.insert(
+            "shared-snap".to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": "shared-snap",
+                "DBClusterIdentifier": "other-clu",
+                "Status": "available",
+                "SnapshotType": "manual",
+                "SnapshotAttributes": {"restore": ["000000000000"]},
+            }),
+        );
+        bucket.insert(
+            "public-snap".to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": "public-snap",
+                "DBClusterIdentifier": "other-clu",
+                "Status": "available",
+                "SnapshotType": "manual",
+                "SnapshotAttributes": {"restore": ["all"]},
+            }),
+        );
+        bucket.insert(
+            "private-snap".to_string(),
+            json!({
+                "DBClusterSnapshotIdentifier": "private-snap",
+                "DBClusterIdentifier": "other-clu",
+                "Status": "available",
+                "SnapshotType": "manual",
+            }),
+        );
+    }
+    seed_cluster_snapshot(&svc, "mine", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("SnapshotType", "shared")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>private-snap</DBClusterSnapshotIdentifier>")
+    );
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>mine</DBClusterSnapshotIdentifier>"));
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("SnapshotType", "public")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>public-snap</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+    );
+
+    // An owned type still lists only the caller's own snapshots.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("SnapshotType", "manual")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>mine</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+    );
+}
+
+#[test]
+fn copy_db_cluster_snapshot_does_not_inherit_the_share_list() {
+    // A copy is a fresh sharing surface: inheriting the source's
+    // `restore` list would publish a snapshot nobody shared.
+    let svc = svc();
+    create_cluster(&svc, "src");
+    snapshot_cluster(&svc, "s1", "src");
+    ok_on(
+        &svc,
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            ("DBClusterSnapshotIdentifier", "s1"),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "all"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "s1"),
+            ("TargetDBClusterSnapshotIdentifier", "s2"),
+        ],
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "s2")],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotAttributes/>"),
+        "copied snapshot inherited the share list: {body}"
+    );
+}
+
+#[test]
+fn modify_db_cluster_snapshot_attribute_refuses_another_accounts_arn() {
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "prod-snap", "clu-1", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "ModifyDBClusterSnapshotAttribute",
+        &[
+            (
+                "DBClusterSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:prod-snap",
+            ),
+            ("AttributeName", "restore"),
+            ("ValuesToAdd.AttributeValue.1", "all"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a foreign ARN modified the local snapshot"),
+    }
+
+    // The local snapshot is untouched.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshotAttributes",
+        &[("DBClusterSnapshotIdentifier", "prod-snap")],
+    );
+    assert!(body.contains("<DBClusterSnapshotAttributes/>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_resolves_a_named_shared_snapshot() {
+    // Addressing a shared snapshot by identifier resolves it without
+    // IncludeShared; previously the existence check accepted it but the
+    // listing dropped it, yielding 200 with an empty list.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    // AWS requires the ARN to reach another account's shared snapshot;
+    // a bare id could match several accounts and return duplicate rows.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:shared-snap",
+        )],
+    );
+    assert!(
+        body.matches("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+            .count()
+            == 1,
+        "named shared snapshot did not return exactly one row: {body}"
+    );
+
+    // The bare id names nothing this account owns.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "shared-snap")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a bare id reached another account's snapshot"),
+    }
+
+    // IncludeShared widens to foreign rows, which is exactly what
+    // `data.aws_db_cluster_snapshot` sends. With one sharer the bare id
+    // still resolves to that single row.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("IncludeShared", "true"),
+        ],
+    );
+    // Exactly one row, not merely "present": two accounts sharing the
+    // same name is the duplicate this branch exists to prevent, and a
+    // `contains` check would pass on it.
+    assert_eq!(
+        body.matches("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+            .count(),
+        1,
+        "IncludeShared did not return exactly one shared row: {body}"
+    );
+
+    // Once a SECOND account shares a snapshot of the same name, the bare
+    // id names two rows. Returning both would hand the data source two
+    // results for one lookup, so an ambiguous bare id resolves to
+    // nothing and the caller has to pin the owner with an ARN.
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let third = accounts.get_or_create("888888888888");
+        third
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:888888888888:cluster-snapshot:shared-snap",
+                    "DBClusterIdentifier": "third-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("IncludeShared", "true"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(response) => panic!(
+            "an ambiguous bare id resolved: {}",
+            String::from_utf8_lossy(response.body.expect_bytes())
+        ),
+    }
+
+    // Each ARN still resolves -- ambiguity is a property of the bare id,
+    // not of the snapshots.
+    for owner in ["999999999999", "888888888888"] {
+        let arn = format!("arn:aws:rds:us-east-1:{owner}:cluster-snapshot:shared-snap");
+        let body = body_of_action(
+            &svc,
+            "DescribeDBClusterSnapshots",
+            &[("DBClusterSnapshotIdentifier", &arn)],
+        );
+        assert_eq!(
+            body.matches("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+                .count(),
+            1,
+            "ARN for {owner} did not return exactly one row: {body}"
+        );
+        // And it is the row that account owns, not the other one.
+        assert!(
+            body.contains(&format!(
+                "<DBClusterSnapshotArn>arn:aws:rds:us-east-1:{owner}:cluster-snapshot:shared-snap</DBClusterSnapshotArn>"
+            )),
+            "ARN for {owner} resolved another account's row: {body}"
+        );
+    }
+}
+
+/// Same-named rows from different accounts must page apart.
+///
+/// The cursor is the last row's key. Keyed on the identifier, two
+/// accounts sharing `dup-snap` would produce the same cursor for both
+/// rows, and the lookup for page two would find the first one again --
+/// so a paginating client would re-read the same row forever and never
+/// see the second. The account-qualified ARN is what makes the key
+/// unique.
+#[test]
+fn shared_cluster_snapshots_with_one_name_paginate_apart() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        for owner in ["999999999999", "888888888888", "777777777777"] {
+            accounts
+                .get_or_create(owner)
+                .extras
+                .entry("cluster_snapshots".to_string())
+                .or_default()
+                .insert(
+                    "dup-snap".to_string(),
+                    json!({
+                        "DBClusterSnapshotIdentifier": "dup-snap",
+                        "DBClusterIdentifier": format!("clu-{owner}"),
+                        "Status": "available",
+                        "SnapshotType": "manual",
+                        "SnapshotCreateTime": "2026-01-01T00:00:00Z",
+                        "SnapshotAttributes": {"restore": ["000000000000"]},
+                    }),
+                );
+        }
+    }
+
+    // Unqualified listing, one row per page: walk every page and collect
+    // the ARNs in order.
+    let mut seen: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    for _ in 0..6 {
+        let mut params: Vec<(&str, &str)> = vec![("IncludeShared", "true"), ("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &params);
+        for arn in body.split("<DBClusterSnapshotArn>").skip(1) {
+            let arn = arn
+                .split("</DBClusterSnapshotArn>")
+                .next()
+                .unwrap_or_default();
+            seen.push(arn.to_string());
+        }
+        marker = body
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if marker.is_none() {
+            break;
+        }
+    }
+
+    // The paged walk must reproduce the unpaginated listing EXACTLY --
+    // same rows, same order. Sorting first would only prove membership,
+    // and a paginator that reordered or repeated rows would still pass.
+    let unpaged = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("IncludeShared", "true")],
+    );
+    let expected: Vec<String> = unpaged
+        .split("<DBClusterSnapshotArn>")
+        .skip(1)
+        .filter_map(|rest| rest.split("</DBClusterSnapshotArn>").next())
+        .map(str::to_string)
+        .collect();
+    assert_eq!(
+        seen, expected,
+        "paginating a shared listing did not reproduce the unpaginated order"
+    );
+
+    // And that listing is the three distinct rows -- so the comparison
+    // above can't be satisfied by two identical sequences of one row.
+    let mut unique = expected.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique,
+        vec![
+            "arn:aws:rds:us-east-1:777777777777:cluster-snapshot:dup-snap".to_string(),
+            "arn:aws:rds:us-east-1:888888888888:cluster-snapshot:dup-snap".to_string(),
+            "arn:aws:rds:us-east-1:999999999999:cluster-snapshot:dup-snap".to_string(),
+        ],
+        "the shared listing itself lost a row"
+    );
+}
+
+/// A row persisted or seeded without an ARN still matches an ARN-valued
+/// filter, and the ARN it gets carries the region's own partition.
+#[test]
+fn cluster_snapshot_without_an_arn_is_stamped_before_filtering() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("000000000000")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "bare-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "bare-snap",
+                    "DBClusterIdentifier": "clu-1",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                }),
+            );
+    }
+
+    // Filtering by the snapshot's ARN: the row carries none in state, so
+    // stamping has to happen BEFORE the filter runs or it is filtered
+    // out before it can be stamped.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-snapshot-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:bare-snap",
+            ),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>bare-snap</DBClusterSnapshotIdentifier>"),
+        "an ARN filter missed a row that had no stored ARN: {body}"
+    );
+}
+
+/// `Arn::new` hardcodes the `aws` partition, so a synthesized ARN in a
+/// China or GovCloud region would be wrong on the wire -- and, since
+/// pagination keys on it, inconsistent with a stored one.
+#[test]
+fn synthesized_cluster_snapshot_arn_uses_the_regions_partition() {
+    for (region, partition) in [
+        ("us-east-1", "aws"),
+        ("cn-north-1", "aws-cn"),
+        ("us-gov-west-1", "aws-us-gov"),
+    ] {
+        let arn = super::cluster_snapshot_arn(region, "000000000000", "snap-1");
+        assert_eq!(
+            arn,
+            format!("arn:{partition}:rds:{region}:000000000000:cluster-snapshot:snap-1")
+        );
+    }
+}
+
+/// A copy's own ARN names the copier, so the cluster it records is only
+/// reachable by ARN through the SOURCE snapshot's ARN.
+#[test]
+fn db_cluster_id_filter_matches_a_cross_account_copys_source_cluster() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("000000000000")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "mycopy".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "mycopy",
+                    "DBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:mycopy",
+                    // The cluster belongs to the account that shared the
+                    // source, not to the copier.
+                    "DBClusterIdentifier": "cluB",
+                    "SourceDBClusterSnapshotArn":
+                        "arn:aws:rds:us-east-1:222222222222:cluster-snapshot:snapB",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:222222222222:cluster:cluB",
+            ),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>mycopy</DBClusterSnapshotIdentifier>"),
+        "the source cluster's ARN did not match a copy: {body}"
+    );
+
+    // The copier's own account does NOT own that cluster, so the ARN
+    // rebuilt from the copy's own ARN must not match.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:000000000000:cluster:cluB",
+            ),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>mycopy</DBClusterSnapshotIdentifier>"),
+        "the copy's own account ARN stopped matching: {body}"
+    );
+}
+
+#[test]
+fn copy_db_snapshot_prefers_the_account_the_arn_names() {
+    // A foreign ARN must not silently copy this account's same-named
+    // snapshot -- the caller would end up with the wrong data.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let mine = accounts.get_or_create("000000000000");
+        mine.snapshots.insert(
+            "snap-1".to_string(),
+            local_snapshot("snap-1", "my-db", "000000000000"),
+        );
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = local_snapshot("snap-1", "their-db", "999999999999");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["000000000000".to_string()]);
+        other.snapshots.insert("snap-1".to_string(), shared);
+    }
+
+    // AWS supports copying a snapshot shared with you: the ARN picks the
+    // other account's row, not the local one.
+    ok_on(
+        &svc,
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1",
+            ),
+            ("TargetDBSnapshotIdentifier", "copy-1"),
+        ],
+    );
+    let copied = svc
+        .state_handle()
+        .read()
+        .get("000000000000")
+        .and_then(|s| s.snapshots.get("copy-1").cloned())
+        .expect("copy recorded");
+    assert_eq!(
+        copied.db_instance_identifier, "their-db",
+        "copied the local snapshot instead of the shared one"
+    );
+}
+
+/// A copy records where it came from, and `db-instance-id` uses that to
+/// reach the source instance by ARN.
+#[test]
+fn copy_db_snapshot_records_the_source_and_filters_on_it() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        let mut shared = local_snapshot("snap-1", "their-db", "999999999999");
+        shared
+            .snapshot_attributes
+            .insert("restore".to_string(), vec!["000000000000".to_string()]);
+        other.snapshots.insert("snap-1".to_string(), shared);
+    }
+
+    let body = body_of_action(
+        &svc,
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1",
+            ),
+            ("TargetDBSnapshotIdentifier", "mycopy"),
+        ],
+    );
+    // AWS reports the source as an ARN on a copy.
+    assert!(
+        body.contains(
+            "<SourceDBSnapshotIdentifier>arn:aws:rds:us-east-1:999999999999:snapshot:snap-1</SourceDBSnapshotIdentifier>"
+        ),
+        "the copy didn't report its source: {body}"
+    );
+
+    // And it is recorded in state, which is what `db-instance-id`
+    // matches the source instance's ARN against.
+    let state = svc.state_handle();
+    let accounts = state.read();
+    let copy = accounts
+        .get("000000000000")
+        .and_then(|s| s.snapshots.get("mycopy"))
+        .expect("copy not stored");
+    assert_eq!(
+        copy.source_db_snapshot_arn.as_deref(),
+        Some("arn:aws:rds:us-east-1:999999999999:snapshot:snap-1")
+    );
+    // The instance still belongs to the original owner, which is why the
+    // copy's own ARN can't be used to rebuild that instance's ARN.
+    assert_eq!(copy.db_instance_identifier, "their-db");
+    assert_eq!(
+        copy.db_snapshot_arn,
+        "arn:aws:rds:us-east-1:000000000000:snapshot:mycopy"
+    );
+}
+
+#[test]
+fn copy_db_snapshot_rejects_an_unshared_foreign_arn() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other.snapshots.insert(
+            "snap-1".to_string(),
+            local_snapshot("snap-1", "their-db", "999999999999"),
+        );
+    }
+
+    let result = svc.handle_extra_action(&req(
+        "CopyDBSnapshot",
+        &[
+            (
+                "SourceDBSnapshotIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:snapshot:snap-1",
+            ),
+            ("TargetDBSnapshotIdentifier", "copy-1"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBSnapshotNotFound"),
+        Ok(_) => panic!("copied a snapshot nobody shared"),
+    }
+}
+
+#[test]
+fn describe_db_cluster_snapshots_named_lookup_prefers_the_owned_row() {
+    // Two rows for one named id is the "couldn't resolve a single
+    // result" failure this whole change set exists to avoid.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap", "clu-1", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap")],
+    );
+    assert_eq!(
+        body.matches("<DBClusterSnapshotIdentifier>snap</DBClusterSnapshotIdentifier>")
+            .count(),
+        1,
+        "named lookup returned more than one row: {body}"
+    );
+    assert!(body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+}
+
+#[test]
+fn wrong_type_arns_do_not_widen_the_cluster_describes() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    // A DB-instance ARN is not a cluster.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusters",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:db:clu-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("a db ARN resolved as a cluster"),
+    }
+
+    // A cluster ARN is not a cluster snapshot.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster:snap-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a cluster ARN resolved as a cluster snapshot"),
+    }
+
+    // A wrong-type cluster filter matches nothing rather than listing all.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:db:clu-1",
+        )],
+    );
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>"),
+        "wrong-type cluster filter widened the listing: {body}"
+    );
+}
+
+#[test]
+fn wrong_type_arns_raise_the_declared_fault_not_invalid_parameter() {
+    // `InvalidParameterValue` isn't declared on any of these ops, so an
+    // unmodeled error would hard-fail a Terraform destroy that should
+    // simply treat the snapshot as gone.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    let wrong_type = "arn:aws:rds:us-east-1:000000000000:snapshot:snap-1";
+
+    for action in [
+        "DeleteDBClusterSnapshot",
+        "DescribeDBClusterSnapshotAttributes",
+    ] {
+        let result =
+            svc.handle_extra_action(&req(action, &[("DBClusterSnapshotIdentifier", wrong_type)]));
+        match result {
+            Err(err) => assert_eq!(
+                err.code(),
+                "DBClusterSnapshotNotFoundFault",
+                "{action} raised {}",
+                err.code()
+            ),
+            Ok(_) => panic!("{action} accepted a wrong-type ARN"),
+        }
+    }
+
+    let result = svc.handle_extra_action(&req(
+        "ModifyDBSnapshot",
+        &[(
+            "DBSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:snap-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBSnapshotNotFound"),
+        Ok(_) => panic!("ModifyDBSnapshot accepted a wrong-type ARN"),
+    }
+}
+
+#[test]
+fn describe_db_clusters_rejects_another_accounts_arn() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusters",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:999999999999:cluster:clu-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("a foreign ARN resolved to the local cluster"),
+    }
+}
+
+#[test]
+fn describe_db_cluster_snapshots_honors_the_arn_account() {
+    // A foreign ARN must resolve against the account it names -- not
+    // this account's same-named snapshot, and not a third account that
+    // happens to have shared one under the same id.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "my-clu", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let sharer = accounts.get_or_create("333333333333");
+        sharer
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "sharer-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    // An ARN naming account 111 matches neither the local row nor 333's.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:111111111111:cluster-snapshot:snap-1",
+        )],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(resp) => {
+            let body = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+            panic!("a foreign ARN resolved: {body}");
+        }
+    }
+
+    // The sharer's own ARN resolves to the sharer's row.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:333333333333:cluster-snapshot:snap-1",
+        )],
+    );
+    assert!(body.contains("<DBClusterIdentifier>sharer-clu</DBClusterIdentifier>"));
+    assert!(!body.contains("<DBClusterIdentifier>my-clu</DBClusterIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_filtered_owned_row_is_not_replaced() {
+    // An owned row excluded by a filter must yield an empty result, not
+    // fall through to another account's identically-named snapshot.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "my-clu", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        // The owned row is aurora-postgresql...
+        if let Some(entry) = accounts
+            .get_or_create("000000000000")
+            .extras
+            .get_mut("cluster_snapshots")
+            .and_then(|m| m.get_mut("snap-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-postgresql"));
+        }
+        // ...while a shared one with the same id is aurora-mysql.
+        accounts
+            .get_or_create("999999999999")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "Engine": "aurora-mysql",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("Filters.Filter.1.Name", "engine"),
+            ("Filters.Filter.1.Values.Value.1", "aurora-mysql"),
+        ],
+    );
+    assert!(
+        !body.contains("<DBClusterIdentifier>other-clu</DBClusterIdentifier>"),
+        "a filtered-out owned row was replaced by a foreign one: {body}"
+    );
+}
+
+#[test]
+fn describe_db_cluster_snapshots_honors_the_cluster_resource_id_parameter() {
+    // Modeled narrowing parameter; ignoring it returns the whole list.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("000000000000");
+        for (id, resource) in [("snap-1", "cluster-AAAA"), ("snap-2", "cluster-BBBB")] {
+            if let Some(entry) = s
+                .extras
+                .get_mut("cluster_snapshots")
+                .and_then(|m| m.get_mut(id))
+                .and_then(|v| v.as_object_mut())
+            {
+                entry.insert("DbClusterResourceId".to_string(), json!(resource));
+            }
+        }
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DbClusterResourceId", "cluster-BBBB")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_paginates_and_orders_stably() {
+    // Sharing makes an unqualified listing unbounded, and the
+    // cross-account scan walks a HashMap -- so the rows need an explicit
+    // order and the modeled MaxRecords / Marker have to work.
+    let svc = svc();
+    for i in 1..=5 {
+        seed_cluster_snapshot(&svc, &format!("snap-{i}"), "clu-1", "manual");
+    }
+
+    let first = body_of_action(&svc, "DescribeDBClusterSnapshots", &[("MaxRecords", "2")]);
+    assert_eq!(
+        first.matches("<DBClusterSnapshotIdentifier>").count(),
+        2,
+        "MaxRecords ignored: {first}"
+    );
+    let marker = first
+        .split("<Marker>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Marker>").next())
+        .expect("a next-page marker")
+        .to_string();
+
+    // Walk every page and compare the COMPLETE sequence: non-overlapping
+    // pages alone would still pass if the paginator skipped a row.
+    fn ids_of(body: &str) -> Vec<String> {
+        body.split("<DBClusterSnapshotIdentifier>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</DBClusterSnapshotIdentifier>").next())
+            .map(str::to_string)
+            .collect()
+    }
+
+    let mut seen = ids_of(&first);
+    let mut next = Some(marker.clone());
+    while let Some(m) = next {
+        let page = body_of_action(
+            &svc,
+            "DescribeDBClusterSnapshots",
+            &[("MaxRecords", "2"), ("Marker", &m)],
+        );
+        seen.extend(ids_of(&page));
+        next = page
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .map(str::to_string);
+    }
+
+    let mut expected = ids_of(&body_of_action(&svc, "DescribeDBClusterSnapshots", &[]));
+    assert_eq!(expected.len(), 5, "the unpaginated listing lost rows");
+    assert_eq!(
+        seen, expected,
+        "paging did not reproduce the full listing in order"
+    );
+    expected.dedup();
+    assert_eq!(expected.len(), 5, "the listing repeated a row");
+
+    // Identical requests return identical order.
+    let again = body_of_action(&svc, "DescribeDBClusterSnapshots", &[("MaxRecords", "2")]);
+    assert_eq!(first, again, "listing order is not stable");
+}
+
+#[test]
+fn describe_db_cluster_snapshots_treats_an_empty_marker_as_page_one() {
+    // `Marker=` decodes to a position no row matches, which would return
+    // an empty page rather than the first one.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("Marker", ""), ("MaxRecords", "")],
+    );
+    assert!(
+        body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"),
+        "an empty marker returned an empty page: {body}"
+    );
+}
+
+#[test]
+fn copy_db_parameter_group_refuses_a_foreign_or_wrong_type_arn() {
+    // An unconditional rsplit would trim either ARN to `mypg` and copy
+    // THIS account's parameter group of that name, reporting success.
+    let svc = svc();
+
+    for source in [
+        "arn:aws:rds:us-east-1:999999999999:pg:mypg",
+        "arn:aws:rds:us-east-1:000000000000:cluster-pg:mypg",
+        // An empty account field names nothing resolvable; treating it
+        // as a bare id would copy the local group.
+        "arn:aws:rds:us-east-1::pg:mypg",
+    ] {
+        let result = svc.handle_extra_action(&req(
+            "CopyDBParameterGroup",
+            &[
+                ("SourceDBParameterGroupIdentifier", source),
+                ("TargetDBParameterGroupIdentifier", "copy-pg"),
+            ],
+        ));
+        match result {
+            Err(err) => assert_eq!(err.code(), "DBParameterGroupNotFound", "source {source}"),
+            Ok(_) => panic!("copied from {source}"),
+        }
+    }
+}
+
+#[test]
+fn a_shared_cluster_snapshot_resolves_by_bare_id_when_the_request_widens() {
+    // The existence check and the listing have to agree: with
+    // SnapshotType=shared (or IncludeShared) a bare id reaches foreign
+    // rows, so 404-ing it here would reject a row the listing returns.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("999999999999")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    for params in [
+        vec![
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("SnapshotType", "shared"),
+        ],
+        vec![
+            ("DBClusterSnapshotIdentifier", "shared-snap"),
+            ("IncludeShared", "true"),
+        ],
+    ] {
+        let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &params);
+        assert!(
+            body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"),
+            "existence check rejected a row the listing returns, for {params:?}: {body}"
+        );
+    }
+
+    // Without either, a bare id still names nothing this account owns.
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "shared-snap")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("a bare id reached another account without widening"),
+    }
+}
+
+#[test]
+fn cluster_snapshot_attribute_ops_use_a_declared_fault_for_a_missing_param() {
+    // `missing()` raises InvalidParameterValue, which is not a shape
+    // anywhere in the RDS model -- an SDK client would see an unmodeled
+    // failure.
+    let svc = svc();
+    for action in [
+        "DescribeDBClusterSnapshotAttributes",
+        "ModifyDBClusterSnapshotAttribute",
+        "DeleteDBClusterSnapshot",
+    ] {
+        let result = svc.handle_extra_action(&req(action, &[]));
+        match result {
+            Err(err) => assert_eq!(
+                err.code(),
+                "DBClusterSnapshotNotFoundFault",
+                "{action} raised {}",
+                err.code()
+            ),
+            Ok(_) => panic!("{action} accepted a missing identifier"),
+        }
+    }
+}
+
+#[test]
+fn describe_db_cluster_snapshots_honors_include_shared() {
+    // The modeled IncludeShared / IncludePublic members widen an
+    // unqualified listing, as on DescribeDBSnapshots.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "mine", "clu-1", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let other = accounts.get_or_create("999999999999");
+        other
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "shared-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "shared-snap",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &[]);
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>")
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("IncludeShared", "true")],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>mine</DBClusterSnapshotIdentifier>"));
+    assert!(body.contains("<DBClusterSnapshotIdentifier>shared-snap</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_accepts_an_arn_identifier() {
+    // Clients pass the snapshot ARN here as readily as the plain id
+    // (CopyDBClusterSnapshot normalizes the same way), so an ARN must
+    // resolve rather than 404.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:snap-1",
+        )],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+    assert!(!body.contains("<DBClusterSnapshotIdentifier>snap-2</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_treats_empty_identifiers_as_absent() {
+    // `DBClusterSnapshotIdentifier=` on the wire reaches the handler as
+    // Some(""); AWS ignores an empty parameter rather than matching the
+    // empty string, so this must list, not raise NotFound.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", ""),
+            ("DBClusterIdentifier", ""),
+            ("SnapshotType", ""),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"));
+}
+
+#[test]
+fn describe_db_cluster_snapshots_defaults_missing_snapshot_type_to_manual() {
+    // A stored entry written before SnapshotType was persisted renders
+    // as `manual`, so it must also be selected by `manual` -- renderer
+    // and matcher have to share the default.
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("000000000000");
+        s.extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "legacy-snap".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "legacy-snap",
+                    "DBClusterIdentifier": "clu-1",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &[]);
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "renderer default changed: {body}"
+    );
+
+    for params in [
+        vec![("SnapshotType", "manual")],
+        vec![
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "manual"),
+        ],
+    ] {
+        let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &params);
+        assert!(
+            body.contains("<DBClusterSnapshotIdentifier>legacy-snap</DBClusterSnapshotIdentifier>"),
+            "entry rendered as manual but excluded by {params:?}: {body}"
+        );
+    }
+}
+
+#[test]
+fn describe_db_cluster_snapshots_keeps_colon_bearing_identifiers() {
+    // `rds:mydb-...` is a real AWS identifier, not an ARN: it must be
+    // looked up verbatim rather than trimmed at the last colon.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "rds:clu-1-2026-08-30-06-00", "clu-1", "automated");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "rds:clu-1-2026-08-30-06-00")],
+    );
+    assert!(body.contains(
+        "<DBClusterSnapshotIdentifier>rds:clu-1-2026-08-30-06-00</DBClusterSnapshotIdentifier>"
+    ));
+}
+
+#[test]
+fn delete_db_cluster_snapshot_unknown_identifier_is_not_found() {
+    // A 200 here would report success -- and emit a "snapshot deleted"
+    // event -- for a snapshot that never existed, while the sibling
+    // Describe raises the fault for the same id.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "DeleteDBClusterSnapshot",
+        &[("DBClusterSnapshotIdentifier", "ghost")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotNotFoundFault"),
+        Ok(_) => panic!("deleting a nonexistent snapshot reported success"),
+    }
+}
+
+#[test]
+fn a_named_owned_cluster_snapshot_is_never_shadowed_by_a_shared_one() {
+    // `data.aws_db_cluster_snapshot` sets include_shared, so the flag
+    // must not append another account's row for an id the caller owns --
+    // two rows is the "couldn't resolve a single result" failure.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "my-clu", "manual");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .get_or_create("999999999999")
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "other-clu",
+                    "Status": "available",
+                    "SnapshotType": "manual",
+                    "SnapshotAttributes": {"restore": ["000000000000"]},
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("IncludeShared", "true"),
+        ],
+    );
+    assert_eq!(
+        body.matches("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>")
+            .count(),
+        1,
+        "IncludeShared shadowed the owned row: {body}"
+    );
+    assert!(body.contains("<DBClusterIdentifier>my-clu</DBClusterIdentifier>"));
+}
+
+#[test]
+fn copy_db_cluster_snapshot_response_reports_the_snapshot_type() {
+    // The Describe path reports SnapshotType/Engine, so the copy
+    // response must too -- otherwise the client reads a blank off the
+    // copy it just made.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    let body = body_of_action(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+        ],
+    );
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<Engine>aurora-postgresql</Engine>"),
+        "{body}"
+    );
+}
+
+#[test]
+fn cluster_snapshot_responses_report_the_stored_fields() {
+    // A copied snapshot's source ARN and the cluster resource id are
+    // stored and modeled; `aws_db_cluster_snapshot` reads both, and the
+    // delete response reports the same detail as create / copy.
+    let svc = svc();
+    create_cluster(&svc, "src");
+    snapshot_cluster(&svc, "snap-1", "src");
+
+    let body = body_of_action(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+        ],
+    );
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "{body}"
+    );
+
+    let body = body_of_action(&svc, "DescribeDBClusterSnapshots", &[]);
+    assert!(
+        body.contains("<SourceDBClusterSnapshotArn>"),
+        "copy source ARN not reported: {body}"
+    );
+    assert!(
+        body.contains("<DbClusterResourceId>"),
+        "cluster resource id not reported: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DeleteDBClusterSnapshot",
+        &[("DBClusterSnapshotIdentifier", "snap-copy")],
+    );
+    assert!(
+        body.contains("<SnapshotType>manual</SnapshotType>"),
+        "delete response dropped the detail fields: {body}"
+    );
+}
+
+#[test]
+fn copy_db_cluster_snapshot_stamps_its_own_creation_time() {
+    // The copy is created now, not when its source was -- CopyDBSnapshot
+    // already behaves this way, and a stale time sorts the copy wrongly
+    // in a time-ordered listing.
+    let svc = svc();
+    create_cluster(&svc, "src");
+    snapshot_cluster(&svc, "snap-1", "src");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .get_or_create("000000000000")
+            .extras
+            .get_mut("cluster_snapshots")
+            .and_then(|m| m.get_mut("snap-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert(
+                "SnapshotCreateTime".to_string(),
+                json!("2020-01-01T00:00:00+00:00"),
+            );
+        }
+    }
+
+    ok_on(
+        &svc,
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-copy"),
+        ],
+    );
+
+    let copied = extras_value(&svc, "cluster_snapshots", "snap-copy");
+    // Require the field: `as_str()` on a missing key is None, which
+    // would satisfy an inequality against the source's time and let a
+    // copy that reports NO creation time pass.
+    let copied_time = copied["SnapshotCreateTime"]
+        .as_str()
+        .expect("the copy records its own creation time")
+        .to_string();
+    assert_ne!(
+        copied_time, "2020-01-01T00:00:00+00:00",
+        "the copy kept its source's creation time"
+    );
+    // And it records where it was copied from, as an ARN.
+    assert!(copied["SourceDBClusterSnapshotArn"]
+        .as_str()
+        .unwrap_or_default()
+        .starts_with("arn:aws:rds:"));
+}
+
+#[test]
+fn copy_db_cluster_snapshot_rejects_an_existing_target() {
+    // Overwriting would silently replace the target's dump and revoke
+    // its sharing on a retried copy.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "snap-2", "clu-2", "manual");
+
+    let result = svc.handle_extra_action(&req(
+        "CopyDBClusterSnapshot",
+        &[
+            ("SourceDBClusterSnapshotIdentifier", "snap-1"),
+            ("TargetDBClusterSnapshotIdentifier", "snap-2"),
+        ],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterSnapshotAlreadyExistsFault"),
+        Ok(_) => panic!("copy overwrote an existing snapshot"),
+    }
+
+    // The existing target is untouched.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap-2")],
+    );
+    assert!(body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+}
+
+#[test]
+fn delete_db_cluster_snapshot_accepts_an_arn_identifier() {
+    // A delete that doesn't resolve the ARN reports success while
+    // leaving the entry behind, so the following Describe keeps
+    // reporting the snapshot and a destroy never converges.
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "snap-1", "clu-1", "manual");
+
+    ok_on(
+        &svc,
+        "DeleteDBClusterSnapshot",
+        &[(
+            "DBClusterSnapshotIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster-snapshot:snap-1",
+        )],
+    );
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusterSnapshots",
+        &[("DBClusterSnapshotIdentifier", "snap-1")],
+    ));
+    match result {
+        Err(err) => assert!(
+            format!("{err:?}").contains("DBClusterSnapshotNotFoundFault"),
+            "unexpected error: {err:?}"
+        ),
+        Ok(_) => panic!("snapshot still present after ARN-form delete"),
+    }
+}
+
+#[test]
+fn describe_db_clusters_identifier_accepts_arn_and_ignores_empty() {
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+    seed_cluster(&svc, "clu-2", "cluster-BBBB", "aurora-mysql");
+
+    // Empty parameter means "not supplied", so everything lists.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[("DBClusterIdentifier", "")]);
+    assert!(body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+    assert!(body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+
+    // AWS documents this parameter as accepting a cluster ARN.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[(
+            "DBClusterIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster:clu-1",
+        )],
+    );
+    assert!(body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"));
+    assert!(!body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"));
+}
+
+#[test]
+fn describe_db_clusters_unknown_identifier_is_not_found() {
+    // `DBClusterNotFoundFault` is declared on the operation, so a named
+    // cluster that doesn't exist errors rather than returning an empty
+    // list -- a client polling a deleted cluster needs to tell "gone"
+    // from "no match".
+    let svc = svc();
+    seed_cluster(&svc, "clu-1", "cluster-AAAA", "aurora-postgresql");
+
+    let result = svc.handle_extra_action(&req(
+        "DescribeDBClusters",
+        &[("DBClusterIdentifier", "ghost")],
+    ));
+    match result {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("unknown cluster should be a fault"),
+    }
+}
+
+#[test]
+fn describe_db_clusters_reports_clone_group_id() {
+    // A copy-on-write restore puts source and clone in one clone group,
+    // which is what the `clone-group-id` filter selects on.
+    let svc = svc();
+    seed_cluster(&svc, "source-clu", "cluster-AAAA", "aurora-postgresql");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("000000000000");
+        for (id, resource_id) in [
+            ("source-clu", "cluster-AAAA"),
+            ("clone-clu", "cluster-BBBB"),
+        ] {
+            let entry = s
+                .extras
+                .entry("clusters".to_string())
+                .or_default()
+                .entry(id.to_string())
+                .or_insert_with(|| {
+                    json!({
+                        "DBClusterIdentifier": id,
+                        "DBClusterArn":
+                            format!("arn:aws:rds:us-east-1:000000000000:cluster:{id}"),
+                        "DbClusterResourceId": resource_id,
+                        "Status": "available",
+                        "Engine": "aurora-postgresql",
+                    })
+                });
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert("CloneGroupId".to_string(), json!("clone-group-1"));
+            }
+        }
+    }
+
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains("<CloneGroupId>clone-group-1</CloneGroupId>"),
+        "clone group id not rendered: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "clone-group-id"),
+            ("Filters.Filter.1.Values.Value.1", "clone-group-1"),
+        ],
+    );
+    assert!(body.contains("<DBClusterIdentifier>source-clu</DBClusterIdentifier>"));
+    assert!(body.contains("<DBClusterIdentifier>clone-clu</DBClusterIdentifier>"));
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusters",
+        &[
+            ("Filters.Filter.1.Name", "clone-group-id"),
+            ("Filters.Filter.1.Values.Value.1", "other-group"),
+        ],
+    );
+    assert!(!body.contains("<DBClusterIdentifier>"), "body: {body}");
+}
+
+#[test]
+fn describe_db_cluster_snapshots_filters_by_snapshot_type_and_cluster() {
+    let svc = svc();
+    seed_cluster_snapshot(&svc, "manual-snap", "clu-1", "manual");
+    seed_cluster_snapshot(&svc, "auto-snap", "clu-1", "automated");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "snapshot-type"),
+            ("Filters.Filter.1.Values.Value.1", "automated"),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>auto-snap</DBClusterSnapshotIdentifier>"));
+    assert!(
+        !body.contains("<DBClusterSnapshotIdentifier>manual-snap</DBClusterSnapshotIdentifier>")
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterSnapshots",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-id"),
+            (
+                "Filters.Filter.1.Values.Value.1",
+                "arn:aws:rds:us-east-1:000000000000:cluster:clu-1",
+            ),
+        ],
+    );
+    assert!(body.contains("<DBClusterSnapshotIdentifier>auto-snap</DBClusterSnapshotIdentifier>"));
+    assert!(body.contains("<DBClusterSnapshotIdentifier>manual-snap</DBClusterSnapshotIdentifier>"));
 }
