@@ -601,6 +601,7 @@ pub(crate) fn build_restored_instance(
     tags: Vec<RdsTag>,
 ) -> DbInstance {
     DbInstance {
+        associated_roles: Vec::new(),
         db_instance_identifier: db_instance_identifier.to_string(),
         db_instance_arn,
         db_instance_class: "db.t3.micro".to_string(),
@@ -690,6 +691,7 @@ pub(crate) fn build_s3_restored_instance(
     tags: Vec<RdsTag>,
 ) -> DbInstance {
     DbInstance {
+        associated_roles: Vec::new(),
         db_instance_identifier: db_instance_identifier.to_string(),
         db_instance_arn,
         db_instance_class,
@@ -783,6 +785,7 @@ pub(crate) fn build_pit_restored_instance(
     tags: Vec<RdsTag>,
 ) -> DbInstance {
     DbInstance {
+        associated_roles: Vec::new(),
         db_instance_identifier: db_instance_identifier.to_string(),
         db_instance_arn,
         db_instance_class: source.db_instance_class.clone(),
@@ -861,6 +864,7 @@ pub(crate) fn build_read_replica_instance(
     running: &crate::runtime::RunningDbContainer,
 ) -> DbInstance {
     DbInstance {
+        associated_roles: Vec::new(),
         db_instance_identifier: db_instance_identifier.to_string(),
         db_instance_arn,
         db_instance_class: source.db_instance_class.clone(),
@@ -1119,6 +1123,27 @@ pub(crate) fn db_instance_xml(
     status_override: Option<&str>,
     subnet_group: Option<&DbSubnetGroup>,
 ) -> String {
+    // Roles attached through AddRoleToDBInstance. AWS omits the element
+    // entirely when there are none, as it does for the other optional
+    // lists on this shape.
+    let associated_roles_xml = if instance.associated_roles.is_empty() {
+        String::new()
+    } else {
+        let members = instance
+            .associated_roles
+            .iter()
+            .map(|role| {
+                format!(
+                    "<DBInstanceRole><RoleArn>{}</RoleArn><FeatureName>{}</FeatureName>\
+                     <Status>{}</Status></DBInstanceRole>",
+                    xml_escape(&role.role_arn),
+                    xml_escape(&role.feature_name),
+                    xml_escape(&role.status),
+                )
+            })
+            .collect::<String>();
+        format!("<AssociatedRoles>{members}</AssociatedRoles>")
+    };
     let status = status_override.unwrap_or(&instance.db_instance_status);
     let db_subnet_group_xml = subnet_group
         .map(|group| {
@@ -1641,6 +1666,7 @@ pub(crate) fn db_instance_xml(
          {charset_xml}\
          {copy_tags_xml}\
          {master_user_secret_xml}\
+         {associated_roles_xml}\
          <ProcessorFeatures/>\
          {activity_stream_xml}\
          <DbiResourceId>{dbi_resource_id}</DbiResourceId>\

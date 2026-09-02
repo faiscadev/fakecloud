@@ -21,6 +21,25 @@ pub(super) fn json_str_array_xml(v: &Value, wrapper: &str) -> String {
 
 pub(super) fn db_cluster_member_xml(v: &Value) -> String {
     let mut out = String::new();
+    // Roles attached through AddRoleToDBCluster. AWS omits the element
+    // when there are none.
+    if let Some(roles) = v["AssociatedRoles"].as_array().filter(|r| !r.is_empty()) {
+        out.push_str("          <AssociatedRoles>");
+        for role in roles {
+            out.push_str("<DBClusterRole>");
+            for (key, tag) in [
+                ("RoleArn", "RoleArn"),
+                ("FeatureName", "FeatureName"),
+                ("Status", "Status"),
+            ] {
+                if let Some(value) = role[key].as_str() {
+                    out.push_str(&format!("<{tag}>{}</{tag}>", xml_escape(value)));
+                }
+            }
+            out.push_str("</DBClusterRole>");
+        }
+        out.push_str("</AssociatedRoles>\n");
+    }
     out.push_str(&format!(
         "          <DBClusterIdentifier>{}</DBClusterIdentifier>\n",
         xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or(""))

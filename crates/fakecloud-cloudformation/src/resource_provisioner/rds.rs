@@ -481,6 +481,7 @@ impl ResourceProvisioner {
         let dbi_resource_id = format!("db-{}", Uuid::new_v4().simple());
         let dbi_resource_id_attr = dbi_resource_id.clone();
         let inst = DbInstance {
+            associated_roles: Vec::new(),
             db_instance_identifier: identifier.clone(),
             db_instance_arn: arn.clone(),
             db_instance_class: class,

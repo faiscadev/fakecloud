@@ -104,6 +104,10 @@ pub const SUPPORTED_INSTANCE_CLASSES: &[&str] = &[
 pub struct DbInstance {
     pub db_instance_identifier: String,
     pub db_instance_arn: String,
+    /// IAM roles associated through `AddRoleToDBInstance`, reported as
+    /// `AssociatedRoles`.
+    #[serde(default)]
+    pub associated_roles: Vec<DbRole>,
     pub db_instance_class: String,
     pub engine: String,
     pub engine_version: String,
@@ -365,6 +369,16 @@ impl fmt::Debug for DbInstance {
 pub struct RdsTag {
     pub key: String,
     pub value: String,
+}
+
+/// An IAM role associated with a DB instance or cluster.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct DbRole {
+    pub role_arn: String,
+    pub feature_name: String,
+    /// AWS reports `ACTIVE` once the association is usable; there is
+    /// nothing to wait for here.
+    pub status: String,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
@@ -1109,6 +1123,7 @@ mod tests {
             DbInstance {
                 db_instance_identifier: "db-1".to_string(),
                 db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:db-1".to_string(),
+                associated_roles: Vec::new(),
                 db_instance_class: "db.t3.micro".to_string(),
                 engine: "postgres".to_string(),
                 engine_version: "16.3".to_string(),
@@ -1276,6 +1291,7 @@ mod tests {
         DbInstance {
             db_instance_identifier: id.to_string(),
             db_instance_arn: Arn::new("rds", "us-east-1", "123", &format!("db:{id}")).to_string(),
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),

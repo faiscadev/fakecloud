@@ -3048,7 +3048,133 @@ impl RdsService {
             "DescribeDBInstanceAutomatedBackups" => Ok(xml_response("DescribeDBInstanceAutomatedBackups", "    <DBInstanceAutomatedBackups/>".to_string(), &rid)),
 
             // ── Roles ──
-            "AddRoleToDBCluster" | "RemoveRoleFromDBCluster" | "AddRoleToDBInstance" | "RemoveRoleFromDBInstance" => xml_empty_action(&action, &rid),
+            // These accepted anything and answered 200 without recording
+            // the association, so a caller could attach a role to a
+            // cluster that does not exist, and DescribeDBClusters never
+            // reported the roles it was told about.
+            "AddRoleToDBCluster" | "RemoveRoleFromDBCluster" => {
+                // An absent identifier reaches the declared
+                // DBClusterNotFoundFault rather than missing(), which
+                // emits InvalidParameterValue -- undeclared anywhere in
+                // the RDS model.
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                    &aid,
+                )
+                .unwrap_or_default();
+                let role_arn = get_param(req, "RoleArn").unwrap_or_default();
+                let feature_name = get_param(req, "FeatureName");
+                let adding = action == "AddRoleToDBCluster";
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let entry = state
+                        .extras
+                        .get_mut("clusters")
+                        .and_then(|m| m.get_mut(&id))
+                        .ok_or_else(|| cluster_not_found(&id))?;
+                    let roles = entry
+                        .as_object_mut()
+                        .map(|object| {
+                            object
+                                .entry("AssociatedRoles".to_string())
+                                .or_insert_with(|| json!([]))
+                        })
+                        .and_then(|value| value.as_array_mut())
+                        .ok_or_else(|| cluster_not_found(&id))?;
+                    let position = roles.iter().position(|role| {
+                        entry_str(role, "RoleArn") == Some(role_arn.as_str())
+                    });
+                    match (adding, position) {
+                        (true, Some(_)) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBClusterRoleAlreadyExists",
+                                format!(
+                                    "Role {role_arn} is already associated with DB cluster {id}."
+                                ),
+                            ));
+                        }
+                        (true, None) => {
+                            let mut role = json!({
+                                "RoleArn": role_arn,
+                                // AWS reports the association as ACTIVE
+                                // once it is usable; there is nothing to
+                                // wait for here.
+                                "Status": "ACTIVE",
+                            });
+                            if let (Some(feature), Some(object)) =
+                                (feature_name.as_ref(), role.as_object_mut())
+                            {
+                                object.insert("FeatureName".to_string(), json!(feature));
+                            }
+                            roles.push(role);
+                        }
+                        (false, Some(index)) => {
+                            roles.remove(index);
+                        }
+                        (false, None) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterRoleNotFound",
+                                format!("Role {role_arn} is not associated with DB cluster {id}."),
+                            ));
+                        }
+                    }
+                }
+                xml_empty_action(&action, &rid)
+            }
+            "AddRoleToDBInstance" | "RemoveRoleFromDBInstance" => {
+                // Same: DBInstanceNotFoundFault is declared here.
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBInstanceIdentifier"),
+                    "db",
+                    &aid,
+                )
+                .unwrap_or_default();
+                let role_arn = get_param(req, "RoleArn").unwrap_or_default();
+                let feature_name = get_param(req, "FeatureName").unwrap_or_default();
+                let adding = action == "AddRoleToDBInstance";
+                {
+                    let mut accounts = write_state!();
+                    let state = accounts.get_or_create(&aid);
+                    let instance = state.instances.get_mut(&id).ok_or_else(|| {
+                        crate::service::service_helpers::db_instance_not_found(&id)
+                    })?;
+                    let position = instance
+                        .associated_roles
+                        .iter()
+                        .position(|role| role.role_arn == role_arn);
+                    match (adding, position) {
+                        (true, Some(_)) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBInstanceRoleAlreadyExists",
+                                format!(
+                                    "Role {role_arn} is already associated with DB instance {id}."
+                                ),
+                            ));
+                        }
+                        (true, None) => instance.associated_roles.push(crate::state::DbRole {
+                            role_arn: role_arn.clone(),
+                            feature_name: feature_name.clone(),
+                            status: "ACTIVE".to_string(),
+                        }),
+                        (false, Some(index)) => {
+                            instance.associated_roles.remove(index);
+                        }
+                        (false, None) => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBInstanceRoleNotFound",
+                                format!("Role {role_arn} is not associated with DB instance {id}."),
+                            ));
+                        }
+                    }
+                }
+                xml_empty_action(&action, &rid)
+            }
 
             // ── Pending maintenance ──
             "ApplyPendingMaintenanceAction" => {

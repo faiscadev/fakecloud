@@ -493,10 +493,25 @@ fn export_activity_replicas_recommendations_certs_pending() {
     ok("DescribeExportTasks", &[]);
     // StartActivityStream / ModifyActivityStream / StopActivityStream now
     // persist onto a real instance; see activity_stream_persists_on_instance.
-    ok("AddRoleToDBCluster", &[]);
-    ok("RemoveRoleFromDBCluster", &[]);
-    ok("AddRoleToDBInstance", &[]);
-    ok("RemoveRoleFromDBInstance", &[]);
+    // Role association is no longer a no-op: it needs a real cluster.
+    let svc = svc();
+    create_cluster(&svc, "role-clu");
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "role-clu"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/rds-role"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "role-clu"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/rds-role"),
+        ],
+    );
     ok(
         "ApplyPendingMaintenanceAction",
         &[
@@ -610,6 +625,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
         DbInstance {
             db_instance_identifier: source_id.to_string(),
             db_instance_arn: source_arn,
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -681,6 +697,7 @@ fn seed_replica(svc: &RdsService, replica_id: &str, source_id: &str) {
         DbInstance {
             db_instance_identifier: replica_id.to_string(),
             db_instance_arn: arn,
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -1391,6 +1408,7 @@ fn seed_blue_instance(svc: &RdsService, id: &str, addr: &str, port: i32) {
         DbInstance {
             db_instance_identifier: id.to_string(),
             db_instance_arn: arn,
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -4742,6 +4760,83 @@ fn deleting_a_cluster_removes_a_legacy_arn_keyed_endpoint() {
             ("DBClusterIdentifier", "clu-1"),
             ("EndpointType", "READER"),
         ],
+    );
+}
+
+/// Role association is recorded, reported, and refuses the duplicates
+/// and absences the model declares faults for.
+///
+/// All four role operations were `xml_empty_action`: they accepted any
+/// request, stored nothing, and answered 200 -- so a caller could attach
+/// a role to a cluster that does not exist, and DescribeDBClusters never
+/// reported the roles it had been told about.
+#[test]
+fn cluster_roles_are_recorded_and_reported() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let role = "arn:aws:iam::000000000000:role/s3-import";
+
+    // A cluster that doesn't exist gets the declared fault, not a 200.
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "ghost"), ("RoleArn", role)],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("attached a role to a cluster that does not exist"),
+    }
+
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+
+    // Reported by the listing, which never saw these before.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains(&format!("<RoleArn>{role}</RoleArn>")),
+        "the association was not reported: {body}"
+    );
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "{body}"
+    );
+    assert!(body.contains("<Status>ACTIVE</Status>"), "{body}");
+
+    // Attaching the same role twice is the declared conflict.
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleAlreadyExists"),
+        Ok(_) => panic!("attached the same role twice"),
+    }
+
+    // Removing a role that was never attached is the declared absence.
+    match svc.handle_extra_action(&req(
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/other"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Ok(_) => panic!("removed a role that was never attached"),
+    }
+
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        !body.contains("<AssociatedRoles>"),
+        "the association outlived its removal: {body}"
     );
 }
 

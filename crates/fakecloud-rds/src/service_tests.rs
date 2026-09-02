@@ -158,6 +158,7 @@ fn db_instance_xml_renders_endpoint_and_status() {
     let instance = DbInstance {
         db_instance_identifier: "test-db".to_string(),
         db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:test-db".to_string(),
+        associated_roles: Vec::new(),
         db_instance_class: "db.t3.micro".to_string(),
         engine: "postgres".to_string(),
         engine_version: "16.3".to_string(),
@@ -344,6 +345,7 @@ fn make_instance_with_defaults(id: &str) -> DbInstance {
     DbInstance {
         db_instance_identifier: id.to_string(),
         db_instance_arn: format!("arn:aws:rds:us-east-1:123:db:{id}"),
+        associated_roles: Vec::new(),
         db_instance_class: "db.t3.micro".to_string(),
         engine: "postgres".to_string(),
         engine_version: "16.3".to_string(),
@@ -624,6 +626,7 @@ fn seed_instance(svc: &RdsService, identifier: &str) -> String {
         DbInstance {
             db_instance_identifier: identifier.to_string(),
             db_instance_arn: arn.clone(),
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
@@ -2891,6 +2894,93 @@ async fn db_instance_id_filter_matches_a_copys_source_instance_arn() {
     assert!(
         !body.contains("<DBSnapshotIdentifier>mycopy</DBSnapshotIdentifier>"),
         "an unrelated account's ARN matched: {body}"
+    );
+}
+
+/// The instance side of role association: recorded, reported, and
+/// refusing the duplicates and absences the model declares faults for.
+#[tokio::test]
+async fn instance_roles_are_recorded_and_reported() {
+    let svc = make_service();
+    seed_instance(&svc, "db-1");
+    let role = "arn:aws:iam::123456789012:role/s3-export";
+
+    match svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "ghost"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBInstanceNotFound"),
+        Ok(_) => panic!("attached a role to an instance that does not exist"),
+    }
+
+    svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    ))
+    .expect("AddRoleToDBInstance");
+
+    let body = body_of(
+        svc.describe_db_instances(&request("DescribeDBInstances", &[]))
+            .unwrap(),
+    );
+    assert!(
+        body.contains(&format!("<RoleArn>{role}</RoleArn>")),
+        "the association was not reported: {body}"
+    );
+    assert!(
+        body.contains("<FeatureName>S3_INTEGRATION</FeatureName>"),
+        "{body}"
+    );
+
+    match svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBInstanceRoleAlreadyExists"),
+        Ok(_) => panic!("attached the same role twice"),
+    }
+
+    match svc.handle_extra_action(&request(
+        "RemoveRoleFromDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", "arn:aws:iam::123456789012:role/other"),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBInstanceRoleNotFound"),
+        Ok(_) => panic!("removed a role that was never attached"),
+    }
+
+    svc.handle_extra_action(&request(
+        "RemoveRoleFromDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", role),
+            ("FeatureName", "S3_INTEGRATION"),
+        ],
+    ))
+    .expect("RemoveRoleFromDBInstance");
+
+    let body = body_of(
+        svc.describe_db_instances(&request("DescribeDBInstances", &[]))
+            .unwrap(),
+    );
+    assert!(
+        !body.contains("<AssociatedRoles>"),
+        "the association outlived its removal: {body}"
     );
 }
 
@@ -6070,6 +6160,7 @@ async fn save_snapshot_static_persists_status_flip_from_bg_task() {
         DbInstance {
             db_instance_identifier: id.to_string(),
             db_instance_arn: format!("arn:aws:rds:us-east-1:123456789012:db:{id}"),
+            associated_roles: Vec::new(),
             db_instance_class: "db.t3.micro".to_string(),
             engine: "postgres".to_string(),
             engine_version: "16.3".to_string(),
