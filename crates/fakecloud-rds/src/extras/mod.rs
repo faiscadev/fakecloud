@@ -103,7 +103,10 @@ fn deleting(mut entry: Value) -> Value {
 /// `DescribeDBShardGroups` with that same ARN reduced it to the bare id,
 /// found nothing, and reported an existing group as missing.
 fn shard_group_identifier(req: &AwsRequest, account_id: &str) -> Option<String> {
-    let raw = get_param(req, "DBShardGroupIdentifier")?;
+    // An explicitly empty value is absent, as it is for every other
+    // identifier parameter -- `unwrap_or(raw)` handed `""` back as if it
+    // were a real id, so a create stored a row under the empty key.
+    let raw = get_param(req, "DBShardGroupIdentifier").filter(|value| !value.is_empty())?;
     Some(
         crate::filters::requested_identifier(Some(raw.clone()), "shard-group", account_id)
             .unwrap_or(raw),

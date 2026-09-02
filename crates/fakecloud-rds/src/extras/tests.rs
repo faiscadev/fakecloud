@@ -4550,6 +4550,94 @@ fn deleting_a_cluster_deletes_its_endpoints_and_backtracks() {
     );
 }
 
+/// An empty shard-group identifier is absent, not a row named "".
+#[test]
+fn an_empty_shard_group_identifier_is_absent() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+
+    for action in [
+        "CreateDBShardGroup",
+        "ModifyDBShardGroup",
+        "RebootDBShardGroup",
+        "DeleteDBShardGroup",
+    ] {
+        assert!(
+            svc.handle_extra_action(&req(
+                action,
+                &[
+                    ("DBShardGroupIdentifier", ""),
+                    ("DBClusterIdentifier", "clu-1"),
+                ],
+            ))
+            .is_err(),
+            "{action} accepted an empty identifier"
+        );
+    }
+
+    // And nothing was stored under the empty key.
+    let body = body_of_action(&svc, "DescribeDBShardGroups", &[]);
+    assert!(
+        !body.contains("<DBShardGroup>"),
+        "an empty identifier stored a shard group: {body}"
+    );
+}
+
+/// The pagination marker is base64, so the NUL in a built-in endpoint's
+/// sort key never reaches the XML -- a literal U+0000 (or an `&#x0;`
+/// character reference) is not legal in XML 1.0 and parsers reject it.
+#[test]
+fn the_pagination_marker_is_xml_safe_across_a_built_in_row() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+
+    // MaxRecords=1 puts every page boundary on a row in turn, including
+    // both built-ins.
+    let mut marker: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &params);
+        assert!(
+            !body.contains('\u{0}') && !body.contains("&#x0;") && !body.contains("&#0;"),
+            "a NUL reached the response: {body:?}"
+        );
+        marker = body
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        let Some(value) = marker.as_deref() else {
+            break;
+        };
+        // Base64 alphabet only.
+        assert!(
+            value
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')),
+            "the marker is not base64: {value:?}"
+        );
+        pages += 1;
+        assert!(pages < 10, "pagination did not terminate");
+    }
+    assert_eq!(pages, 2, "expected three rows across three pages");
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();
