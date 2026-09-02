@@ -156,13 +156,18 @@ fn describe_events_is_lenient_about_pagination_parameters() {
     }
 
     // A marker that resolves to no row points past the end: an empty
-    // page, not an error, and not the first page.
-    let body = body_of_action(&svc, "DescribeEvents", &[("Marker", "bm90LWFuLWV2ZW50")]);
-    assert!(body.contains("<Events>"), "{body}");
-    assert!(
-        !body.contains("<Event>"),
-        "an unresolvable marker returned the first page: {body}"
-    );
+    // page, not an error, and not the first page. Both halves of that
+    // contract: a marker that DECODES but names no row, and one that is
+    // not decodable base64 at all -- the second used to collapse to
+    // "no marker" and restart the walk at page one.
+    for marker in ["bm90LWFuLWV2ZW50", "not-base64!!", "///"] {
+        let body = body_of_action(&svc, "DescribeEvents", &[("Marker", marker)]);
+        assert!(body.contains("<Events>"), "{body}");
+        assert!(
+            !body.contains("<Event>"),
+            "marker {marker:?} returned the first page: {body}"
+        );
+    }
 
     // And a real marker resumes AFTER the row it names rather than
     // repeating it.
