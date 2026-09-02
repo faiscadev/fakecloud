@@ -1606,6 +1606,15 @@ impl RdsService {
                         obj.insert("ExcludedMembers".to_string(), json!(excluded_members));
                     }
                 }
+                // DBClusterIdentifier is required and
+                // DBClusterNotFoundFault is declared here. Without the
+                // check an omitted parameter stored an endpoint with an
+                // EMPTY cluster id, and another account's cluster ARN
+                // (which `requested_identifier` deliberately leaves
+                // whole) was stored verbatim -- either way the endpoint
+                // is orphaned, matching no cluster lookup for the rest
+                // of its life.
+                cluster_entry(self, &aid, &cluster)?;
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 let endpoints = store(&mut state.extras, "cluster_endpoints");
@@ -1624,7 +1633,16 @@ impl RdsService {
                 Ok(xml_response("CreateDBClusterEndpoint", cluster_endpoint_xml(&entry), &rid))
             }
             "ModifyDBClusterEndpoint" => {
-                let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
+                // Reduced from an ARN, as the Describe side is: clients
+                // round-trip the ARN they read back, and matching it
+                // against the stored bare identifier would report an
+                // endpoint that exists as missing.
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterEndpointIdentifier"),
+                    "cluster-endpoint",
+                    &aid,
+                )
+                .ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
                 let static_members = parse_member_list(req, "StaticMembers");
                 let excluded_members = parse_member_list(req, "ExcludedMembers");
                 let mut accounts = write_state!();
@@ -1635,7 +1653,7 @@ impl RdsService {
                     .and_then(|m| m.get_mut(&id))
                     .ok_or_else(|| {
                         AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
+                            StatusCode::BAD_REQUEST,
                             "DBClusterEndpointNotFoundFault",
                             format!("DBClusterEndpoint {id} not found."),
                         )
@@ -1669,7 +1687,15 @@ impl RdsService {
                 Ok(xml_response("ModifyDBClusterEndpoint", cluster_endpoint_xml(&updated), &rid))
             }
             "DeleteDBClusterEndpoint" => {
-                let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
+                // Same reduction as Modify and Describe. Without it the
+                // fail-closed delete below turns an ARN a caller read
+                // back from this very API into a hard destroy failure.
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterEndpointIdentifier"),
+                    "cluster-endpoint",
+                    &aid,
+                )
+                .ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 // Declared on this operation. Reporting success for an
@@ -1680,14 +1706,25 @@ impl RdsService {
                     .extras
                     .get_mut("cluster_endpoints")
                     .and_then(|m| m.remove(&id));
-                if removed.is_none() {
+                let Some(removed) = removed else {
                     return Err(AwsServiceError::aws_error(
-                        StatusCode::NOT_FOUND,
+                        // 400, per the model's httpError / awsQueryError
+                        // httpResponseCode -- unlike the shard-group and
+                        // backtrack faults, which really are 404. SDK
+                        // retry and error classification key on this.
+                        StatusCode::BAD_REQUEST,
                         "DBClusterEndpointNotFoundFault",
                         format!("DBClusterEndpoint {id} not found."),
                     ));
-                }
-                Ok(xml_response("DeleteDBClusterEndpoint", format!("    <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>", xml_escape(&id)), &rid))
+                };
+                Ok(xml_response(
+                    "DeleteDBClusterEndpoint",
+                    // The modeled output is the whole DBClusterEndpoint,
+                    // not just its identifier: a caller reading the
+                    // delete response got an almost-empty struct.
+                    cluster_endpoint_xml(&as_custom_endpoint(removed)),
+                    &rid,
+                ))
             }
             "DescribeDBClusterEndpoints" => {
                 let filters = crate::filters::parse_filters(req);

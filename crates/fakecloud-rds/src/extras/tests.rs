@@ -281,10 +281,14 @@ fn cluster_param_groups_lifecycle() {
 #[test]
 fn endpoints_proxies_secgroups() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
-        &[("DBClusterEndpointIdentifier", "ce1")],
+        &[
+            ("DBClusterEndpointIdentifier", "ce1"),
+            ("DBClusterIdentifier", "clu-1"),
+        ],
     );
     ok_on(
         &svc,
@@ -1696,6 +1700,7 @@ fn modify_event_subscription_unknown_subscription_errors() {
 #[test]
 fn modify_db_cluster_endpoint_persists_endpoint_type() {
     let svc = svc();
+    create_cluster(&svc, "c1");
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
@@ -3164,6 +3169,7 @@ fn describe_db_cluster_backtracks_returns_recorded_backtracks() {
 #[test]
 fn describe_db_cluster_endpoints_honors_filters() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
@@ -3294,6 +3300,7 @@ fn describe_db_cluster_endpoints_honors_filters() {
 #[test]
 fn cluster_endpoint_filters_accept_the_documented_lowercase_values() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
@@ -3447,6 +3454,7 @@ fn named_lookups_raise_the_declared_not_found_faults() {
 #[test]
 fn modify_cluster_endpoint_clears_stale_fields() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
@@ -3553,6 +3561,7 @@ fn backtrack_ids_are_unique_within_a_clock_tick() {
 #[test]
 fn describe_db_cluster_endpoints_pages() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     for id in ["ep-1", "ep-2", "ep-3"] {
         ok_on(
             &svc,
@@ -3567,7 +3576,8 @@ fn describe_db_cluster_endpoints_pages() {
 
     let mut seen: Vec<String> = Vec::new();
     let mut marker: Option<String> = None;
-    for _ in 0..5 {
+    // Three custom endpoints plus the cluster's two built-ins.
+    for _ in 0..7 {
         let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
         let held;
         if let Some(value) = marker.as_deref() {
@@ -3575,11 +3585,12 @@ fn describe_db_cluster_endpoints_pages() {
             params.push(("Marker", &held));
         }
         let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &params);
-        let mut page = 0;
+        // Counted by ROWS, not identifiers: the cluster's two built-in
+        // endpoints have none, and they page like any other row.
+        let page = body.matches("<DBClusterEndpointList>").count();
         for chunk in body.split("<DBClusterEndpointIdentifier>").skip(1) {
             if let Some(id) = chunk.split("</DBClusterEndpointIdentifier>").next() {
                 seen.push(id.to_string());
-                page += 1;
             }
         }
         // MaxRecords=1 means ONE row per page. Without this the test
@@ -3734,6 +3745,7 @@ fn describe_db_cluster_endpoints_reports_an_unknown_cluster() {
 #[test]
 fn member_lists_are_read_from_an_unmerged_form_body() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
@@ -3877,6 +3889,7 @@ fn a_backtrack_id_without_a_cluster_selects_nothing() {
 #[test]
 fn create_cluster_endpoint_maps_endpoint_type_to_the_custom_type() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     let body = body_of_action(
         &svc,
         "CreateDBClusterEndpoint",
@@ -3915,6 +3928,7 @@ fn create_cluster_endpoint_maps_endpoint_type_to_the_custom_type() {
 #[test]
 fn create_cluster_endpoint_stores_a_reduced_cluster_identifier() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     ok_on(
         &svc,
         "CreateDBClusterEndpoint",
@@ -3927,7 +3941,6 @@ fn create_cluster_endpoint_stores_a_reduced_cluster_identifier() {
             ("EndpointType", "READER"),
         ],
     );
-    create_cluster(&svc, "clu-1");
 
     let body = body_of_action(
         &svc,
@@ -4009,57 +4022,45 @@ fn describe_db_cluster_endpoints_reports_the_built_in_endpoints() {
     );
 }
 
-/// The create side fails closed on an identifier it can't resolve, like
-/// the Describe side: an empty stored cluster id would leave the
-/// endpoint unreachable, and reducing a FOREIGN ARN would alias it onto
-/// this account's same-named cluster.
+/// A cluster the create can't resolve is rejected, not stored.
+///
+/// `requested_identifier` deliberately leaves a foreign or wrong-type
+/// ARN whole; stored verbatim as the endpoint's `DBClusterIdentifier`
+/// that endpoint would be orphaned for the rest of its life, matching no
+/// cluster lookup. `DBClusterNotFoundFault` is declared on this
+/// operation, so the create fails instead.
 #[test]
-fn create_cluster_endpoint_does_not_reduce_an_unresolvable_cluster_arn() {
+fn create_cluster_endpoint_rejects_a_cluster_it_cannot_resolve() {
     let svc = svc();
     create_cluster(&svc, "clu-1");
 
-    ok_on(
-        &svc,
-        "CreateDBClusterEndpoint",
-        &[
-            ("DBClusterEndpointIdentifier", "ep-foreign"),
-            (
-                "DBClusterIdentifier",
-                "arn:aws:rds:us-east-1:999999999999:cluster:clu-1",
-            ),
-            ("EndpointType", "READER"),
-        ],
-    );
+    for cluster in [
+        // Another account's cluster ARN: must not attach to this
+        // account's same-named cluster, and must not be stored raw.
+        "arn:aws:rds:us-east-1:999999999999:cluster:clu-1",
+        // An ARN of the wrong resource type.
+        "arn:aws:rds:us-east-1:000000000000:db:mydb",
+        // A cluster that simply doesn't exist.
+        "ghost",
+    ] {
+        match svc.handle_extra_action(&req(
+            "CreateDBClusterEndpoint",
+            &[
+                ("DBClusterEndpointIdentifier", "ep-x"),
+                ("DBClusterIdentifier", cluster),
+                ("EndpointType", "READER"),
+            ],
+        )) {
+            Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault", "for {cluster}"),
+            Ok(_) => panic!("created an endpoint on an unresolvable cluster: {cluster}"),
+        }
+    }
 
-    // It must NOT have attached itself to this account's clu-1.
-    let body = body_of_action(
-        &svc,
-        "DescribeDBClusterEndpoints",
-        &[("DBClusterIdentifier", "clu-1")],
-    );
+    // Nothing was stored along the way.
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
     assert!(
-        !body.contains("<DBClusterEndpointIdentifier>ep-foreign</DBClusterEndpointIdentifier>"),
-        "a foreign cluster ARN aliased onto this account's cluster: {body}"
-    );
-
-    // And a wrong-type ARN is kept verbatim rather than stored empty.
-    ok_on(
-        &svc,
-        "CreateDBClusterEndpoint",
-        &[
-            ("DBClusterEndpointIdentifier", "ep-wrongtype"),
-            (
-                "DBClusterIdentifier",
-                "arn:aws:rds:us-east-1:000000000000:db:mydb",
-            ),
-            ("EndpointType", "READER"),
-        ],
-    );
-    let stored = extras_value(&svc, "cluster_endpoints", "ep-wrongtype");
-    assert_eq!(
-        stored["DBClusterIdentifier"].as_str(),
-        Some("arn:aws:rds:us-east-1:000000000000:db:mydb"),
-        "a wrong-type ARN was silently replaced with an empty cluster id"
+        !body.contains("<DBClusterEndpointIdentifier>"),
+        "an orphaned endpoint was stored: {body}"
     );
 }
 
@@ -4239,6 +4240,7 @@ fn a_legacy_cluster_endpoint_still_reads_back_as_custom() {
 #[test]
 fn create_cluster_endpoint_rejects_a_duplicate_identifier() {
     let svc = svc();
+    create_cluster(&svc, "clu-1");
     let params = [
         ("DBClusterEndpointIdentifier", "ep-1"),
         ("DBClusterIdentifier", "clu-1"),

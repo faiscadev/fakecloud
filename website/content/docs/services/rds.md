@@ -236,7 +236,7 @@ The model documents no filter names for `DescribeDBShardGroups`; the shard group
 
 These three operations honor `MaxRecords` and `Marker` and report a `Marker` when more rows remain.
 
-Listings come out in identifier order, so two identical requests report the same rows in the same order and a pagination marker stays meaningful between calls.
+Listings come out in a stable order, so two identical requests report the same rows in the same order and a pagination marker stays meaningful between calls. It is identifier order for most listings; on `DescribeDBClusterEndpoints` a cluster's built-in endpoints sort ahead of the custom ones.
 
 Filters documented as accepting "identifiers and ARNs" (`db-instance-id`, `db-cluster-id`, `db-snapshot-id`, `db-cluster-snapshot-id`) match either form.
 
