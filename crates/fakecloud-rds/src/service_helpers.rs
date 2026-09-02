@@ -512,10 +512,17 @@ fn is_valid_instance_size(size: &str) -> bool {
 
 pub(crate) fn validate_db_instance_class(db_instance_class: &str) -> Result<(), AwsServiceError> {
     if !is_valid_db_instance_class(db_instance_class) {
+        // InsufficientDBInstanceCapacity, not InvalidParameterValue: the
+        // latter is declared nowhere in the RDS model, so it put an
+        // undeclared shape on the wire for CreateDBInstance and
+        // ModifyDBInstance, both of which DO declare this one -- and the
+        // sibling engine-version check a few lines up already reports an
+        // unavailable configuration this way. A class this emulator does
+        // not recognize is a class it cannot provide capacity for.
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            format!("Invalid DB Instance class: {db_instance_class}"),
+            "InsufficientDBInstanceCapacity",
+            format!("DB instance class {db_instance_class} is not available."),
         ));
     }
     Ok(())
@@ -2499,7 +2506,7 @@ mod instance_class_tests {
     }
 
     #[test]
-    fn rejects_malformed_classes_with_invalid_parameter_value() {
+    fn rejects_malformed_classes_with_a_declared_fault() {
         for class in [
             "notaclass",          // no `db.` prefix, no segments
             "db.foo",             // only two segments
@@ -2517,8 +2524,16 @@ mod instance_class_tests {
                 !is_valid_db_instance_class(class),
                 "expected {class:?} to be rejected"
             );
+            // The DECLARED fault: InvalidParameterValue appears nowhere
+            // in the RDS model, so raising it here put an undeclared
+            // shape on the wire for the two operations that validate a
+            // class.
             let err = validate_db_instance_class(class).unwrap_err();
-            assert_eq!(err.code(), "InvalidParameterValue", "for {class:?}");
+            assert_eq!(
+                err.code(),
+                "InsufficientDBInstanceCapacity",
+                "for {class:?}"
+            );
         }
     }
 

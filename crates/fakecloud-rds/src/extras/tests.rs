@@ -92,6 +92,61 @@ fn describe_events_returns_emitted_events() {
     assert!(body.contains("DB instance created"));
 }
 
+/// The SourceType list must track the model's enum.
+///
+/// It had drifted: `db-shard-group` and `zero-etl` are real values that
+/// DescribeEvents rejected as invalid.
+#[test]
+fn describe_events_accepts_every_modeled_source_type() {
+    let svc = svc();
+    for source_type in [
+        "db-instance",
+        "db-parameter-group",
+        "db-security-group",
+        "db-snapshot",
+        "db-cluster",
+        "db-cluster-snapshot",
+        "custom-engine-version",
+        "db-proxy",
+        "blue-green-deployment",
+        "db-shard-group",
+        "zero-etl",
+    ] {
+        ok_on(&svc, "DescribeEvents", &[("SourceType", source_type)]);
+    }
+
+    // A value outside the enum is still rejected -- the probe's negative
+    // variant asserts that, and it is the only reason this list exists.
+    assert!(
+        svc.handle_extra_action(&req("DescribeEvents", &[("SourceType", "not-a-source")]))
+            .is_err(),
+        "an invalid SourceType was accepted"
+    );
+}
+
+/// Pagination parameters are lenient, as `service_helpers::paginate` is
+/// and for its reason: no Describe operation declares an
+/// InvalidParameterValue-equivalent, so rejecting put an undeclared
+/// shape on the wire.
+#[test]
+fn describe_events_is_lenient_about_pagination_parameters() {
+    let svc = svc();
+
+    // Junk and out-of-range MaxRecords clamp rather than reject.
+    for max_records in ["not-a-number", "0", "-5", "9999"] {
+        ok_on(&svc, "DescribeEvents", &[("MaxRecords", max_records)]);
+    }
+
+    // A marker that doesn't parse points past the end: an empty page,
+    // not an error.
+    let body = body_of_action(&svc, "DescribeEvents", &[("Marker", "not-an-index")]);
+    assert!(body.contains("<Events>"), "{body}");
+    assert!(
+        !body.contains("<Event>"),
+        "a junk marker returned rows: {body}"
+    );
+}
+
 #[test]
 fn describe_events_filters_by_source_identifier() {
     let svc = svc();

@@ -272,6 +272,12 @@ The faults the model declares are raised: the resource not existing (`DBClusterN
 
 A restored cluster carries no associations: neither `RestoreDBClusterFromSnapshot` nor `RestoreDBClusterToPointInTime` takes roles, and the snapshot holds a clone of the source cluster.
 
+## Events and instance classes
+
+`DescribeEvents` accepts every `SourceType` the Smithy model defines, including `db-shard-group` and `zero-etl`. A value outside that set is rejected; `MaxRecords` and `Marker` are lenient, matching the other paginated Describes -- an out-of-range or unparseable `MaxRecords` clamps to 1..100, and a marker that doesn't resolve returns an empty page rather than an error.
+
+An unrecognized `DBInstanceClass` on `CreateDBInstance` or `ModifyDBInstance` raises `InsufficientDBInstanceCapacity`, which both operations declare, rather than `InvalidParameterValue`, which the RDS model declares nowhere. The sibling engine-version check reports an unavailable configuration the same way.
+
 ## Gotchas
 
 - **Persistence snapshots are one-way across the v3 bump.** RDS state written by this version declares snapshot schema v3 (final snapshots are typed `manual`, matching AWS; earlier builds wrote `automated`). An older fakecloud refuses to load a v3 file and exits, so downgrade by removing `<data-path>/rds/snapshot.json` first.

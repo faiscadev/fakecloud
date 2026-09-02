@@ -4213,18 +4213,25 @@ pub(crate) fn cluster_snapshot_status_detail_xml(
     )
 }
 
-/// AWS-spec `SourceType` enum values for the `DescribeEvents` filter.
-/// Anything else triggers `InvalidParameterValue`.
+/// The `SourceType` enum values, exactly as the Smithy model lists them.
+///
+/// This list had drifted: it was missing `db-shard-group` and `zero-etl`,
+/// so DescribeEvents rejected two values the model defines. It has to
+/// track `com.amazonaws.rds#SourceType` -- a value missing from here is
+/// reported as invalid, and one that does not belong here is accepted
+/// and then matches no stored event.
 const VALID_DESCRIBE_EVENTS_SOURCE_TYPES: &[&str] = &[
     "db-instance",
-    "db-cluster",
     "db-parameter-group",
     "db-security-group",
     "db-snapshot",
+    "db-cluster",
     "db-cluster-snapshot",
+    "custom-engine-version",
     "db-proxy",
     "blue-green-deployment",
-    "custom-engine-version",
+    "db-shard-group",
+    "zero-etl",
 ];
 
 impl RdsService {
@@ -4294,35 +4301,22 @@ impl RdsService {
         // MaxRecords (1..=100, default 100) and Marker pagination. We key
         // the marker by the event's RFC3339 timestamp + identifier so
         // duplicate dates still paginate deterministically.
-        let max_records: usize = match get_param(req, "MaxRecords") {
-            Some(raw) => {
-                let parsed: i32 = raw.parse().map_err(|_| {
-                    AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterValue",
-                        "MaxRecords must be a valid integer.",
-                    )
-                })?;
-                if !(1..=100).contains(&parsed) {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterValue",
-                        "MaxRecords must be between 1 and 100.",
-                    ));
-                }
-                parsed as usize
-            }
-            None => 100,
+        // Clamped and lenient, matching `service_helpers::paginate` and
+        // for its reason: no Describe operation declares an
+        // InvalidParameterValue-equivalent, and real RDS is lenient on
+        // an out-of-range MaxRecords. This handler rolled its own
+        // pagination and rejected instead.
+        let max_records: usize = match get_param(req, "MaxRecords").map(|raw| raw.parse::<i32>()) {
+            Some(Ok(parsed)) => parsed.clamp(1, 100) as usize,
+            Some(Err(_)) | None => 100,
         };
 
+        // A marker that doesn't parse points past the end of the list,
+        // as an unrecognized marker does in `paginate` -- the caller
+        // gets an empty page rather than an error shape the operation
+        // never declares.
         let start_index = match get_param(req, "Marker") {
-            Some(marker) => marker.parse::<usize>().map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValue",
-                    "Marker is invalid.",
-                )
-            })?,
+            Some(marker) => marker.parse::<usize>().unwrap_or(usize::MAX),
             None => 0,
         };
         let end_index = std::cmp::min(start_index.saturating_add(max_records), filtered.len());
