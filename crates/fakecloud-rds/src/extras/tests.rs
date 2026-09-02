@@ -1,5 +1,6 @@
 use crate::service::RdsService;
 use crate::state::{RdsState, SharedRdsState};
+use base64::Engine as _;
 use fakecloud_core::multi_account::MultiAccountState;
 use fakecloud_core::service::AwsRequest;
 use http::Method;
@@ -215,22 +216,37 @@ fn describe_events_paginates_past_identical_rows() {
         let mut accounts = state.write();
         let events = &mut accounts.default_mut().events;
         let date = chrono::Utc::now();
-        for _ in 0..3 {
+        for n in 0..3 {
             events.push(crate::state::RdsEventRecord {
                 source_identifier: "clu-1".to_string(),
                 source_type: "db-cluster".to_string(),
                 source_arn: "arn:aws:rds:us-east-1:000000000000:cluster:clu-1".to_string(),
                 event_id: "RDS-EVENT-0042".to_string(),
                 event_categories: vec!["creation".to_string()],
-                message: "identical".to_string(),
-                // Same instant: the collision this guards against.
+                // Everything the KEY is built from is identical -- the
+                // collision this guards against. The message differs so
+                // the rows are still tellable apart on the wire, which
+                // is what lets the walk prove it returned each one once.
+                message: format!("row-{n}"),
                 date,
             });
         }
     }
 
+    // The rows in one request, for the walk to be compared against.
+    let messages = |body: &str| -> Vec<String> {
+        body.split("<Message>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</Message>").next())
+            .map(str::to_string)
+            .collect()
+    };
+    let unpaged = messages(&body_of_action(&svc, "DescribeEvents", &[]));
+    assert_eq!(unpaged.len(), 3, "expected the three seeded events");
+
     // Walk one row at a time. Every page must advance.
     let mut marker: Option<String> = None;
+    let mut seen: Vec<String> = Vec::new();
     let mut pages = 0;
     loop {
         let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
@@ -240,10 +256,11 @@ fn describe_events_paginates_past_identical_rows() {
             params.push(("Marker", &held));
         }
         let body = body_of_action(&svc, "DescribeEvents", &params);
-        let rows = body.matches("<Event>").count();
-        if rows == 0 {
+        let rows = messages(&body);
+        if rows.is_empty() {
             break;
         }
+        seen.extend(rows);
         pages += 1;
         assert!(
             pages <= 3,
@@ -259,6 +276,17 @@ fn describe_events_paginates_past_identical_rows() {
             break;
         }
     }
+
+    // Each row once, in the unpaginated order -- counting pages alone
+    // would pass on a walk that returned the same row three times.
+    assert_eq!(
+        seen, unpaged,
+        "the walk did not reproduce the unpaginated listing"
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 3, "a row was returned twice: {seen:?}");
     assert_eq!(pages, 3, "expected one page per identical event");
 }
 
@@ -304,6 +332,28 @@ fn describe_events_freezes_its_window_across_a_walk() {
         .and_then(|rest| rest.split("</Marker>").next())
         .expect("a marker for the next page")
         .to_string();
+
+    // The marker CARRIES the window: decoding it must yield the two
+    // timestamps the first page was computed under. Asserting the
+    // mechanism directly, because the symptom below depends on how much
+    // wall-clock passes between the two requests.
+    let decoded = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(marker.as_bytes())
+            .expect("the marker is base64"),
+    )
+    .expect("the marker is utf-8");
+    let mut fields = decoded.splitn(3, '|');
+    let window_start = fields.next().expect("a window start");
+    let window_end = fields.next().expect("a window end");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(window_start).is_ok(),
+        "the marker carries no window start: {decoded}"
+    );
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(window_end).is_ok(),
+        "the marker carries no window end: {decoded}"
+    );
 
     // The marker resolves against the FROZEN window, so the walk
     // continues instead of returning an empty page.
