@@ -112,6 +112,19 @@ pub struct DynamoTable {
     pub attribute_definitions: Vec<AttributeDefinition>,
     pub provisioned_throughput: ProvisionedThroughput,
     pub items: Vec<HashMap<String, AttributeValue>>,
+    /// Primary-key -> position in `items`, so a write does not have to scan
+    /// the whole table to decide insert-vs-overwrite. Without it every write
+    /// was O(table size) and a bulk load was quadratic (#2502).
+    ///
+    /// Not persisted: it is derived state, and rebuilding it on load keeps
+    /// existing snapshots readable. `items` stays the source of truth —
+    /// scans, pagination and the stream paths all still index into it — so
+    /// the two must be mutated together via `put_item_at_key` /
+    /// `remove_item_by_key`, never by touching `items` directly.
+    /// Public so out-of-crate constructors (the CloudFormation provisioner)
+    /// can build a table with `key_index: Default::default()`.
+    #[serde(skip)]
+    pub key_index: HashMap<String, usize>,
     pub gsi: Vec<GlobalSecondaryIndex>,
     pub lsi: Vec<LocalSecondaryIndex>,
     pub tags: BTreeMap<String, String>,
@@ -343,8 +356,108 @@ impl DynamoTable {
             .map(|k| k.attribute_name.as_str())
     }
 
-    /// Find an item index by its primary key.
+    /// Canonical string form of one key attribute, used to build the
+    /// `key_index` lookup string.
+    ///
+    /// This must induce exactly the same equivalence classes as
+    /// `values_equal`, which the linear scan used before: two attribute
+    /// values are equal iff their encodings are equal. Numbers are the only
+    /// type with a non-byte-exact equality — `{"N":"1"}` and `{"N":"1.0"}`
+    /// are the same DynamoDB number — so a *valid* number is encoded by its
+    /// canonical decimal form. A malformed number (`{"N":"abc"}`) falls back
+    /// to its exact byte form, matching `values_equal`'s deliberate strictness
+    /// there: a bad operand must never collide with a valid stored key
+    /// (Cubic P1, 2026-07-01).
+    fn encode_key_value(v: &Value) -> String {
+        use crate::service::helpers::partiql::canonical_number;
+        if let Some(("N", n)) = attribute_type_and_value(v) {
+            if let Some(canon) = n.as_str().and_then(canonical_number) {
+                return format!("N:{canon}");
+            }
+        }
+        // `to_string` on a serde_json Value is stable for a given value, and
+        // the type tag is part of it, so `{"S":"1"}` cannot collide with
+        // `{"N":"1"}`.
+        format!("X:{v}")
+    }
+
+    /// Canonical string form of an item's full primary key, or `None` if the
+    /// item is missing the hash key (or a declared range key) — such an item
+    /// is not addressable by key and is left out of the index, mirroring the
+    /// old scan, which required `item.get(hash_key).is_some()`.
+    fn encode_key(&self, item: &HashMap<String, AttributeValue>) -> Option<String> {
+        let hash_key = self.hash_key_name();
+        let mut out = Self::encode_key_value(item.get(hash_key)?);
+        if let Some(rk) = self.range_key_name() {
+            // The range key is part of the identity when the schema declares
+            // one; `values_equal(None, None)` was true in the scan, so an item
+            // with no range-key attribute is only equal to another item that
+            // also lacks it. A distinct sentinel keeps that class separate
+            // from any real value.
+            out.push('\u{1f}');
+            match item.get(rk) {
+                Some(v) => out.push_str(&Self::encode_key_value(v)),
+                None => out.push_str("\u{0}none"),
+            }
+        }
+        Some(out)
+    }
+
+    /// Rebuild `key_index` from `items`. Called after loading a snapshot (the
+    /// index is not persisted) and after any bulk rewrite of `items`.
+    pub fn rebuild_key_index(&mut self) {
+        let mut index = HashMap::with_capacity(self.items.len());
+        // Iterate forward and keep the *first* position for a duplicate key so
+        // lookups agree with the old `position()` scan. Well-formed tables have
+        // no duplicates; a snapshot written by an older build might.
+        for (i, item) in self.items.iter().enumerate() {
+            if let Some(k) = self.encode_key(item) {
+                index.entry(k).or_insert(i);
+            }
+        }
+        self.key_index = index;
+    }
+
+    /// Whether `key_index` still needs building. It is `#[serde(skip)]`, so a
+    /// table restored from a snapshot arrives with items but an empty index;
+    /// an empty table legitimately has an empty index, hence the `items` check.
+    fn key_index_is_stale(&self) -> bool {
+        self.key_index.len() != self.items.len()
+    }
+
+    /// Ensure `key_index` is populated, rebuilding it if this table came from a
+    /// snapshot (where the index is not persisted) or from a bulk assignment to
+    /// `items`. Repairing lazily here means no load path can forget to do it
+    /// and silently turn every lookup into a miss — which would make writes
+    /// duplicate rows instead of overwriting them.
+    pub fn ensure_key_index(&mut self) {
+        if self.key_index_is_stale() {
+            self.rebuild_key_index();
+        }
+    }
+
+    /// Find an item index by its primary key. O(1) via `key_index`.
+    ///
+    /// Takes `&self`, so it cannot repair a stale index; it falls back to the
+    /// original linear scan in that case rather than returning a wrong answer.
+    /// Every mutating path goes through the `&mut self` helpers below, which
+    /// call `ensure_key_index` first, so the fallback is a correctness
+    /// backstop rather than the normal path.
     pub fn find_item_index(&self, key: &HashMap<String, AttributeValue>) -> Option<usize> {
+        if self.key_index_is_stale() {
+            return self.find_item_index_scan(key);
+        }
+        match self.encode_key(key) {
+            Some(k) => self.key_index.get(&k).copied(),
+            // A key that cannot be encoded is missing the hash key, so it
+            // matches nothing — the same answer the scan gave.
+            None => None,
+        }
+    }
+
+    /// The pre-index linear scan. Retained as the fallback for a stale index
+    /// and as the oracle the index is tested against.
+    fn find_item_index_scan(&self, key: &HashMap<String, AttributeValue>) -> Option<usize> {
         let hash_key = self.hash_key_name();
         let range_key = self.range_key_name();
 
@@ -366,6 +479,81 @@ impl DynamoTable {
                 None => true,
             }
         })
+    }
+
+    /// Insert or overwrite the item with this key, keeping `key_index` and the
+    /// cached stats in step. Returns the index it now occupies, and whether
+    /// this replaced an existing item.
+    pub fn put_item_at_key(&mut self, item: HashMap<String, AttributeValue>) -> (usize, bool) {
+        self.ensure_key_index();
+        match self.find_item_index(&item) {
+            Some(idx) => {
+                // Adjust the cached size by the delta rather than resumming the
+                // whole table (#2502).
+                self.size_bytes -= Self::estimate_item_size(&self.items[idx]);
+                self.size_bytes += Self::estimate_item_size(&item);
+                self.items[idx] = item;
+                (idx, true)
+            }
+            None => {
+                let idx = self.items.len();
+                if let Some(k) = self.encode_key(&item) {
+                    self.key_index.insert(k, idx);
+                }
+                self.size_bytes += Self::estimate_item_size(&item);
+                self.item_count += 1;
+                self.items.push(item);
+                (idx, false)
+            }
+        }
+    }
+
+    /// Remove the item with this key, keeping `key_index` and the cached stats
+    /// in step. Returns the removed item, if there was one.
+    pub fn remove_item_by_key(
+        &mut self,
+        key: &HashMap<String, AttributeValue>,
+    ) -> Option<HashMap<String, AttributeValue>> {
+        self.ensure_key_index();
+        let idx = self.find_item_index(key)?;
+        let removed = self.items.remove(idx);
+        if let Some(k) = self.encode_key(&removed) {
+            self.key_index.remove(&k);
+        }
+        // `Vec::remove` shifts every later element down one, so their recorded
+        // positions are now stale. Repair just those rather than rebuilding the
+        // whole index.
+        for pos in self.key_index.values_mut() {
+            if *pos > idx {
+                *pos -= 1;
+            }
+        }
+        self.size_bytes -= Self::estimate_item_size(&removed);
+        self.item_count -= 1;
+        Some(removed)
+    }
+
+    /// Replace the item already stored at `idx`, keeping the cached size in
+    /// step. The caller must not change the item's primary key.
+    pub fn replace_item_at(&mut self, idx: usize, item: HashMap<String, AttributeValue>) {
+        self.size_bytes -= Self::estimate_item_size(&self.items[idx]);
+        self.size_bytes += Self::estimate_item_size(&item);
+        self.items[idx] = item;
+    }
+
+    /// The size the item at `idx` currently contributes to `size_bytes`.
+    /// Pair with [`Self::sync_item_size_at`] around an in-place mutation.
+    pub fn item_size_at(&self, idx: usize) -> i64 {
+        self.items
+            .get(idx)
+            .map(Self::estimate_item_size)
+            .unwrap_or(0)
+    }
+
+    /// Settle `size_bytes` after the item at `idx` was mutated in place,
+    /// given the size it contributed beforehand.
+    pub fn sync_item_size_at(&mut self, idx: usize, size_before: i64) {
+        self.size_bytes += self.item_size_at(idx) - size_before;
     }
 
     /// Estimate item size in bytes (rough approximation).
@@ -458,10 +646,17 @@ impl DynamoTable {
         entries
     }
 
-    /// Recalculate item_count and size_bytes from the items vec.
+    /// Recalculate item_count and size_bytes from the items vec, and rebuild
+    /// the key index.
+    ///
+    /// This is O(table size). The single-item write paths keep both the stats
+    /// and the index up to date incrementally instead (#2502) — reserve this
+    /// for bulk paths that rewrite `items` wholesale (import, restore, TTL
+    /// sweep), where the full pass is proportional to the work already done.
     pub fn recalculate_stats(&mut self) {
         self.item_count = self.items.len() as i64;
         self.size_bytes = self.items.iter().map(Self::estimate_item_size).sum::<i64>();
+        self.rebuild_key_index();
     }
 }
 
@@ -609,6 +804,7 @@ mod tests {
                 write_capacity_units: 1,
             },
             items: Vec::new(),
+            key_index: Default::default(),
             gsi: Vec::new(),
             lsi: Vec::new(),
             tags: BTreeMap::new(),
@@ -761,5 +957,153 @@ mod tests {
         assert_eq!(ns, 5);
         let bin = DynamoTable::estimate_value_size(&json!({"B": "AAAAAAAA"}));
         assert_eq!(bin, 6);
+    }
+
+    /// #2502: the key index must induce exactly the same equivalence classes
+    /// as the linear scan it replaced. The scan is kept as
+    /// `find_item_index_scan`, so it doubles as the oracle here.
+    #[test]
+    fn key_index_agrees_with_linear_scan() {
+        let cases: Vec<Value> = vec![
+            json!({"S": "a"}),
+            json!({"S": "b"}),
+            json!({"S": "1"}), // must not collide with {"N":"1"}
+            json!({"N": "1"}),
+            json!({"N": "1.0"}), // same number as {"N":"1"}
+            json!({"N": "1e0"}), // ditto
+            json!({"N": "-0"}),  // negative zero == zero
+            json!({"N": "0"}),
+            json!({"N": "abc"}), // malformed: byte-equality only
+            json!({"N": "abc "}),
+            json!({"B": "AAAA"}),
+            json!({"BOOL": true}),
+        ];
+        let mut t = table_with_hash_key("pk");
+        for v in &cases {
+            let mut item = HashMap::new();
+            item.insert("pk".to_string(), v.clone());
+            // Only insert if the scan says it is not already present, so the
+            // table holds one row per equivalence class.
+            if t.find_item_index_scan(&item).is_none() {
+                t.items.push(item);
+            }
+        }
+        t.rebuild_key_index();
+
+        for v in &cases {
+            let mut probe = HashMap::new();
+            probe.insert("pk".to_string(), v.clone());
+            assert_eq!(
+                t.find_item_index(&probe),
+                t.find_item_index_scan(&probe),
+                "index and scan disagree for {v}"
+            );
+        }
+    }
+
+    /// A malformed Number probe must not be answered with a valid stored row
+    /// via the index either (the scan already guaranteed this).
+    #[test]
+    fn key_index_malformed_number_does_not_match_valid() {
+        let mut t = table_with_hash_key("pk");
+        let mut item = HashMap::new();
+        item.insert("pk".to_string(), json!({"N": "5"}));
+        t.items.push(item);
+        t.rebuild_key_index();
+
+        let mut bad = HashMap::new();
+        bad.insert("pk".to_string(), json!({"N": "abc"}));
+        assert_eq!(t.find_item_index(&bad), None);
+    }
+
+    /// A composite key must distinguish rows that share a hash key, and must
+    /// not let the hash/range boundary be forged by a crafted string.
+    #[test]
+    fn key_index_composite_keys_are_unambiguous() {
+        let mut t = table_with_hash_key("pk");
+        t.key_schema.push(KeySchemaElement {
+            attribute_name: "sk".to_string(),
+            key_type: "RANGE".to_string(),
+        });
+        let mk = |pk: &str, sk: &str| {
+            let mut m = HashMap::new();
+            m.insert("pk".to_string(), json!({ "S": pk }));
+            m.insert("sk".to_string(), json!({ "S": sk }));
+            m
+        };
+        for (pk, sk) in [("a", "b"), ("a", "c"), ("ab", "")] {
+            t.put_item_at_key(mk(pk, sk));
+        }
+        assert_eq!(t.items.len(), 3);
+        assert_eq!(t.find_item_index(&mk("a", "b")), Some(0));
+        assert_eq!(t.find_item_index(&mk("a", "c")), Some(1));
+        assert_eq!(t.find_item_index(&mk("ab", "")), Some(2));
+        assert_eq!(t.find_item_index(&mk("a", "z")), None);
+    }
+
+    /// #2502: incremental stats must match a full recompute, and the index
+    /// must stay consistent across interleaved puts, overwrites and deletes.
+    #[test]
+    fn incremental_stats_and_index_match_full_recompute() {
+        let mut t = table_with_hash_key("pk");
+        let mk = |pk: &str, payload: &str| {
+            let mut m = HashMap::new();
+            m.insert("pk".to_string(), json!({ "S": pk }));
+            m.insert("v".to_string(), json!({ "S": payload }));
+            m
+        };
+        for i in 0..50 {
+            t.put_item_at_key(mk(&format!("k{i}"), "xxxxx"));
+        }
+        // Overwrite with a different size, and delete from the middle so the
+        // index has to repair the shifted positions.
+        for i in (0..50).step_by(3) {
+            t.put_item_at_key(mk(&format!("k{i}"), "yy"));
+        }
+        for i in (0..50).step_by(7) {
+            t.remove_item_by_key(&mk(&format!("k{i}"), ""));
+        }
+
+        let (inc_count, inc_size) = (t.item_count, t.size_bytes);
+        t.recalculate_stats();
+        assert_eq!(inc_count, t.item_count, "item_count drifted");
+        assert_eq!(inc_size, t.size_bytes, "size_bytes drifted");
+
+        // Every surviving row is still addressable at its true position.
+        for (i, item) in t.items.clone().iter().enumerate() {
+            assert_eq!(t.find_item_index(item), Some(i));
+            assert_eq!(t.find_item_index_scan(item), Some(i));
+        }
+    }
+
+    /// The index is `#[serde(skip)]`, so a table restored from a snapshot
+    /// arrives with items and no index. Lookups must still be correct, and a
+    /// write must overwrite rather than duplicate.
+    #[test]
+    fn key_index_recovers_after_snapshot_round_trip() {
+        let mut t = table_with_hash_key("pk");
+        let mk = |pk: &str| {
+            let mut m = HashMap::new();
+            m.insert("pk".to_string(), json!({ "S": pk }));
+            m
+        };
+        for i in 0..5 {
+            t.put_item_at_key(mk(&format!("k{i}")));
+        }
+        let json = serde_json::to_string(&t).unwrap();
+        let mut restored: DynamoTable = serde_json::from_str(&json).unwrap();
+        assert!(restored.key_index.is_empty(), "index should not persist");
+
+        // Read path works via the scan fallback...
+        assert_eq!(restored.find_item_index(&mk("k3")), Some(3));
+        // ...and the write path repairs the index instead of duplicating.
+        restored.put_item_at_key(mk("k3"));
+        assert_eq!(
+            restored.items.len(),
+            5,
+            "write after restore duplicated a row"
+        );
+        assert!(!restored.key_index.is_empty(), "index was not rebuilt");
+        assert_eq!(restored.find_item_index(&mk("k3")), Some(3));
     }
 }

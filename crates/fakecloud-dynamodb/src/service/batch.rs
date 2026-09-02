@@ -299,24 +299,21 @@ impl DynamoDbService {
                         serde_json::from_value(put_req["Item"].clone()).unwrap_or_default();
                     let key = extract_key(table, &item);
                     keys_for_icm.push(key.clone());
-                    if let Some(idx) = table.find_item_index(&key) {
-                        table.items[idx] = item;
-                    } else {
-                        table.items.push(item);
-                    }
+                    table.put_item_at_key(item);
                     write_count += 1;
                 } else if let Some(del_req) = request.get("DeleteRequest") {
                     let key: HashMap<String, AttributeValue> =
                         serde_json::from_value(del_req["Key"].clone()).unwrap_or_default();
                     keys_for_icm.push(key.clone());
-                    if let Some(idx) = table.find_item_index(&key) {
-                        table.items.remove(idx);
-                    }
+                    table.remove_item_by_key(&key);
                     write_count += 1;
                 }
             }
 
-            table.recalculate_stats();
+            // No `recalculate_stats()` here: `put_item_at_key` /
+            // `remove_item_by_key` keep item_count, size_bytes and the key
+            // index current. Re-summing the whole table once per batch was
+            // half of the quadratic cost in #2502.
 
             let cc = build_consumed_capacity(
                 &return_consumed,
@@ -885,12 +882,7 @@ impl DynamoDbService {
                     let key = extract_key(table, &item);
                     let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
                     let is_modify = old_image.is_some();
-                    if let Some(idx) = table.find_item_index(&key) {
-                        table.items[idx] = item.clone();
-                    } else {
-                        table.items.push(item.clone());
-                    }
-                    table.recalculate_stats();
+                    table.put_item_at_key(item.clone());
                     let event_name = if is_modify { "MODIFY" } else { "INSERT" };
                     if let Some(record) = crate::streams::generate_stream_record(
                         table,
@@ -919,10 +911,7 @@ impl DynamoDbService {
                     let table =
                         get_table_mut(&mut state.tables, table_name).map_err(|e| (op_idx, e))?;
                     let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
-                    if let Some(idx) = table.find_item_index(&key) {
-                        table.items.remove(idx);
-                    }
-                    table.recalculate_stats();
+                    table.remove_item_by_key(&key);
                     if old_image.is_some() {
                         if let Some(record) = crate::streams::generate_stream_record(
                             table,
@@ -964,10 +953,10 @@ impl DynamoDbService {
                             for (k, v) in &key {
                                 new_item.insert(k.clone(), v.clone());
                             }
-                            table.items.push(new_item);
-                            table.items.len() - 1
+                            table.put_item_at_key(new_item).0
                         }
                     };
+                    let size_before = table.item_size_at(idx);
 
                     if let Some(expr) = update_expression {
                         apply_update_expression(
@@ -979,7 +968,7 @@ impl DynamoDbService {
                         .map_err(|e| (op_idx, e))?;
                     }
                     let new_image = table.items[idx].clone();
-                    table.recalculate_stats();
+                    table.sync_item_size_at(idx, size_before);
                     let event_name = if is_modify { "MODIFY" } else { "INSERT" };
                     if let Some(record) = crate::streams::generate_stream_record(
                         table,
@@ -1746,6 +1735,7 @@ mod tests {
                 write_capacity_units: 0,
             },
             items: vec![],
+            key_index: Default::default(),
             gsi: vec![],
             lsi: vec![],
             tags: BTreeMap::new(),

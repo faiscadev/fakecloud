@@ -79,14 +79,11 @@ impl DynamoDbService {
 
             let is_modify = existing_idx.is_some();
 
-            if let Some(idx) = existing_idx {
-                table.items[idx] = item.clone();
-            } else {
-                table.items.push(item.clone());
-            }
+            // Maintains item_count, size_bytes and the key index incrementally
+            // rather than re-summing the whole table (#2502).
+            table.put_item_at_key(item.clone());
 
             table.record_item_access(&item);
-            table.recalculate_stats();
 
             let event_name = if is_modify { "MODIFY" } else { "INSERT" };
             let key = extract_key(table, &item);
@@ -309,8 +306,7 @@ impl DynamoDbService {
                     kinesis_info = Some((target, key.clone(), Some(old_item)));
                 }
 
-                table.items.remove(idx);
-                table.recalculate_stats();
+                table.remove_item_by_key(&key);
             }
 
             let return_consumed = body["ReturnConsumedCapacity"].as_str().unwrap_or("NONE");
@@ -402,10 +398,16 @@ impl DynamoDbService {
                 for (k, v) in &key {
                     new_item.insert(k.clone(), v.clone());
                 }
-                table.items.push(new_item);
-                table.items.len() - 1
+                // Registers the row in the key index and the stats; the
+                // attribute updates below then mutate it in place, and the
+                // size delta for that is settled by `sync_item_size_at`.
+                table.put_item_at_key(new_item).0
             }
         };
+
+        // The size this row contributes before the update is applied; paired
+        // with `sync_item_size_at` after it to keep size_bytes exact.
+        let size_before = table.item_size_at(idx);
 
         // Capture old item for stream/kinesis (before update)
         let needs_change_capture = table.stream_enabled
@@ -509,7 +511,10 @@ impl DynamoDbService {
             )
         });
 
-        table.recalculate_stats();
+        // The update rewrote the item at `idx` in place; only that row's
+        // contribution to size_bytes can have changed, so settle it rather
+        // than re-summing the whole table (#2502).
+        table.sync_item_size_at(idx, size_before);
 
         let icm = build_item_collection_metrics(&return_icm, table, &key);
 
@@ -805,6 +810,7 @@ mod tests {
                         write_capacity_units: 0,
                     },
                     items: vec![],
+                    key_index: Default::default(),
                     gsi: vec![],
                     lsi: vec![],
                     tags: BTreeMap::new(),

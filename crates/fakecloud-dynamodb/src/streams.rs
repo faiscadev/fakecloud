@@ -222,6 +222,7 @@ mod tests {
                 write_capacity_units: 5,
             },
             items: vec![],
+            key_index: Default::default(),
             gsi: vec![],
             lsi: vec![],
             tags: BTreeMap::new(),
