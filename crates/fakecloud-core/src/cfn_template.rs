@@ -123,6 +123,34 @@ fn parse_yaml(body: &str) -> Result<Json, String> {
 /// template — cannot push a shallow template over the limit.
 fn exceeds_nesting_limit(body: &str) -> bool {
     let mut flow_depth = 0usize;
+    // A quote only *opens* where a scalar can start — at the beginning of a
+    // line or straight after `:`/`,`/`[`/`{`/`-`/whitespace. YAML allows a bare
+    // apostrophe inside a plain scalar (`baz: don't`), and treating that as an
+    // opening quote would swallow everything after it.
+    //
+    // Quote state carries across lines, because a quoted scalar may legally
+    // span them — but only for `MAX_QUOTE_LINES`. Openers seen while inside a
+    // quote are counted separately: if the quote closes in time, the run
+    // really was a scalar and they are discarded; if it outlives that budget
+    // (or the body ends inside it), the "scalar" was never one and they are
+    // added back.
+    //
+    // The budget is what keeps this fail-closed. Carrying quote state without
+    // one reopens the bypass: alternating an apostrophe per line makes each
+    // line close the previous quote and open a new one, so half the brackets
+    // are suppressed and a bomb just has to be twice as long. Real multiline
+    // scalars in a template close within a line or two.
+    let mut quote: Option<u8> = None;
+    let mut escaped = false;
+    // True while the scanner sits where a *value* can begin: the start of a
+    // line, or just past `:` / `,` / `[` / `{` / `-` and any spaces after it.
+    // Any other byte clears it. A quote only opens at such a position, so the
+    // apostrophe in a plain scalar (`baz: don't`, `x ', [`) is content rather
+    // than a delimiter — which is what YAML says it is, and what stops an
+    // apostrophe from suppressing the brackets that follow it.
+    let mut at_value_start = true;
+    let mut suppressed = 0usize;
+    let mut quote_lines = 0usize;
     for line in body.lines() {
         // Block depth: the line's indentation plus its compact `- ` markers.
         // Each level of block nesting costs at least one column, so the
@@ -147,24 +175,6 @@ fn exceeds_nesting_limit(body: &str) -> bool {
         // of braces in one string -- so quotes are tracked and their contents
         // skipped. A `#` outside quotes starts a comment.
         //
-        // A quote only *opens* where a scalar can start — at the beginning of
-        // a line or straight after `:`/`,`/`[`/`{`/`-`/whitespace. YAML allows
-        // a bare apostrophe inside a plain scalar (`baz: don't`), and treating
-        // that as an opening quote would swallow the rest of the line. That
-        // matters for more than false rejections: if an unterminated quote
-        // could suppress a line's brackets, a body could disable this guard
-        // outright by putting an apostrophe on every line, which is exactly
-        // the stack exhaustion the guard exists to stop. Quote state is per
-        // line and is never allowed to suppress counting beyond it.
-        let mut quote: Option<u8> = None;
-        let mut escaped = false;
-        let mut prev = b'\n';
-        // Openers seen inside the current quoted run. If the quote closes, the
-        // run really was a scalar and they stay skipped; if the line ends with
-        // the quote still open, the "scalar" was never one, so they are added
-        // back. Failing closed matters: silently dropping them would let a
-        // body opt out of the guard by leaving a quote open on every line.
-        let mut suppressed = 0usize;
         for b in line.bytes() {
             match quote {
                 Some(q) => {
@@ -182,13 +192,9 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                     }
                 }
                 None => match b {
-                    b'"' | b'\''
-                        if matches!(
-                            prev,
-                            b'\n' | b' ' | b'\t' | b':' | b',' | b'[' | b'{' | b'-'
-                        ) =>
-                    {
-                        quote = Some(b)
+                    b'"' | b'\'' if at_value_start => {
+                        quote = Some(b);
+                        at_value_start = false;
                     }
                     b'#' => break,
                     b'[' | b'{' => {
@@ -196,22 +202,50 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                         if flow_depth > MAX_NESTING_DEPTH {
                             return true;
                         }
+                        at_value_start = true;
                     }
-                    b']' | b'}' => flow_depth = flow_depth.saturating_sub(1),
-                    _ => {}
+                    b']' | b'}' => {
+                        flow_depth = flow_depth.saturating_sub(1);
+                        at_value_start = false;
+                    }
+                    b':' | b',' | b'-' => at_value_start = true,
+                    b' ' | b'\t' => {}
+                    _ => at_value_start = false,
                 },
             }
-            prev = b;
         }
+        // A new line is itself a value-start position.
+        at_value_start = true;
+
         if quote.is_some() {
-            flow_depth += suppressed;
-            if flow_depth > MAX_NESTING_DEPTH {
-                return true;
+            quote_lines += 1;
+            if quote_lines > MAX_QUOTE_LINES {
+                // Outlived the budget: treat it as never having been a scalar.
+                flow_depth = flow_depth.saturating_add(suppressed);
+                if flow_depth > MAX_NESTING_DEPTH {
+                    return true;
+                }
+                quote = None;
+                suppressed = 0;
+                quote_lines = 0;
             }
+        } else {
+            quote_lines = 0;
         }
+    }
+    // The body ended inside a quote: it was never a scalar, so put back what
+    // it suppressed.
+    if quote.is_some() && flow_depth.saturating_add(suppressed) > MAX_NESTING_DEPTH {
+        return true;
     }
     false
 }
+
+/// How many physical lines a quoted scalar may span before the pre-scan stops
+/// believing it is one. Real templates keep quoted scalars on a line or two;
+/// long embedded documents use block scalars (`|`), which this budget does not
+/// constrain because their content is not inside quotes.
+const MAX_QUOTE_LINES: usize = 8;
 
 /// Strip a UTF-8 byte-order mark. `str::trim_start` does not remove U+FEFF,
 /// and PowerShell's `Out-File` / `Set-Content` write one by default — so a
@@ -867,6 +901,23 @@ Resources:
         assert!(
             exceeds_nesting_limit(&unterminated),
             "an unterminated quote must not disable bracket counting"
+        );
+    }
+
+    #[test]
+    fn multiline_quoted_scalars_are_not_counted() {
+        // A quoted scalar may legally span lines. Its braces are content, so a
+        // long embedded document must not trip the guard just because it wraps.
+        let chunk = "{".repeat(80);
+        let mut body = String::from("Resources:\n  Q:\n    Policy: \"");
+        for _ in 0..8 {
+            body.push_str(&chunk);
+            body.push('\n');
+        }
+        body.push_str("\"\n");
+        assert!(
+            !exceeds_nesting_limit(&body),
+            "a multiline quoted scalar is content, not nesting"
         );
     }
 
