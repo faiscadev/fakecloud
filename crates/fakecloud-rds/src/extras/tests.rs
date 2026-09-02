@@ -257,6 +257,62 @@ fn describe_events_paginates_past_identical_rows() {
     assert_eq!(pages, 3, "expected one page per identical event");
 }
 
+/// A walk sees one result set even as the default window slides.
+///
+/// `StartTime` defaults to `Duration` minutes ago and is recomputed per
+/// request. An event sitting near that boundary ages out between pages,
+/// and an unresolvable marker ends the walk -- so a backlog truncated
+/// silently. The marker carries the window it was issued under.
+#[test]
+fn describe_events_freezes_its_window_across_a_walk() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let events = &mut accounts.default_mut().events;
+        let now = chrono::Utc::now();
+        // The first event sits just inside the default 60-minute window
+        // and falls out of it almost immediately.
+        for (n, age_seconds) in [(0, 3599), (1, 30), (2, 5)] {
+            events.push(crate::state::RdsEventRecord {
+                source_identifier: format!("clu-{n}"),
+                source_type: "db-cluster".to_string(),
+                source_arn: format!("arn:aws:rds:us-east-1:000000000000:cluster:clu-{n}"),
+                event_id: "RDS-EVENT-0042".to_string(),
+                event_categories: vec!["creation".to_string()],
+                message: "seeded".to_string(),
+                date: now - chrono::Duration::seconds(age_seconds),
+            });
+        }
+    }
+
+    // Page one under the default window; its marker names the oldest
+    // event, which a later request would no longer include.
+    let first = body_of_action(&svc, "DescribeEvents", &[("MaxRecords", "1")]);
+    assert!(
+        first.contains("<SourceIdentifier>clu-0</SourceIdentifier>"),
+        "{first}"
+    );
+    let marker = first
+        .split("<Marker>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Marker>").next())
+        .expect("a marker for the next page")
+        .to_string();
+
+    // The marker resolves against the FROZEN window, so the walk
+    // continues instead of returning an empty page.
+    let second = body_of_action(
+        &svc,
+        "DescribeEvents",
+        &[("MaxRecords", "1"), ("Marker", &marker)],
+    );
+    assert!(
+        second.contains("<SourceIdentifier>clu-1</SourceIdentifier>"),
+        "the walk truncated when the window slid: {second}"
+    );
+}
+
 #[test]
 fn describe_events_filters_by_source_identifier() {
     let svc = svc();

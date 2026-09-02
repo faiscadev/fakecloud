@@ -4264,14 +4264,45 @@ impl RdsService {
             .and_then(|s| s.parse().ok())
             .unwrap_or(60);
         let now = chrono::Utc::now();
-        let start_time = get_param(req, "StartTime")
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|| now - chrono::Duration::minutes(duration_minutes));
-        let end_time = get_param(req, "EndTime")
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or(now);
+        // The marker carries the window it was issued under, so a walk
+        // sees ONE result set. `StartTime` defaults to `Duration`
+        // minutes ago and is recomputed per request, so the window slides
+        // forward between pages: a marker naming a row near the boundary
+        // resolved to nothing by the time page two arrived, and an
+        // unresolvable marker ends the walk -- silently truncating a
+        // backlog. Freezing it also keeps the occurrence ordinals stable,
+        // which renumber if an earlier duplicate ages out.
+        let frozen_window = get_param(req, "Marker")
+            .filter(|value| !value.is_empty())
+            .and_then(|marker| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(marker.as_bytes())
+                    .ok()
+            })
+            .and_then(|decoded| String::from_utf8(decoded).ok())
+            .and_then(|key| {
+                let mut fields = key.splitn(3, '|');
+                let start = chrono::DateTime::parse_from_rfc3339(fields.next()?).ok()?;
+                let end = chrono::DateTime::parse_from_rfc3339(fields.next()?).ok()?;
+                Some((
+                    start.with_timezone(&chrono::Utc),
+                    end.with_timezone(&chrono::Utc),
+                ))
+            });
+        let (start_time, end_time) = match frozen_window {
+            Some(window) => window,
+            None => {
+                let start = get_param(req, "StartTime")
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|| now - chrono::Duration::minutes(duration_minutes));
+                let end = get_param(req, "EndTime")
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or(now);
+                (start, end)
+            }
+        };
 
         let state = self.state_handle().read();
         let mut events = state
@@ -4321,8 +4352,12 @@ impl RdsService {
         let keyed: Vec<(String, crate::state::RdsEventRecord)> = filtered
             .into_iter()
             .map(|e| {
+                // The window leads the key so a marker issued under it
+                // resolves against rows built under the same one.
                 let base = format!(
-                    "{}|{}|{}",
+                    "{}|{}|{}|{}|{}",
+                    start_time.to_rfc3339(),
+                    end_time.to_rfc3339(),
                     e.date.to_rfc3339(),
                     e.source_identifier,
                     e.event_id
