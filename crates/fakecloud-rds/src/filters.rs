@@ -104,13 +104,21 @@ impl RdsFilter {
 /// Here the work is bounded by the request's own filter count and the
 /// predicate stays side-effect-free.
 pub(crate) fn warn_unknown_filters(filters: &[RdsFilter], supported: &[&str]) {
+    // Deduped within the request: a caller may repeat the same name
+    // across entries, and one line per entry is the same noise the
+    // per-row report made, just smaller. A local list keeps this bounded
+    // by the request rather than by anything the caller can grow.
+    let mut reported: Vec<&str> = Vec::new();
     for filter in filters {
-        if !supported.contains(&filter.name.as_str()) {
-            tracing::warn!(
-                filter = %filter.name,
-                "unrecognized RDS filter name; matching no resource"
-            );
+        let name = filter.name.as_str();
+        if supported.contains(&name) || reported.contains(&name) {
+            continue;
         }
+        reported.push(name);
+        tracing::warn!(
+            filter = %name,
+            "unrecognized RDS filter name; matching no resource"
+        );
     }
 }
 
