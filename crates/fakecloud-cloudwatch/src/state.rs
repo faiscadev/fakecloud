@@ -57,6 +57,9 @@ pub struct CloudWatchState {
     /// region -> alarm_name -> CompositeAlarm
     #[serde(default)]
     pub composite_alarms: BTreeMap<String, BTreeMap<String, CompositeAlarm>>,
+    /// region -> alarm_name -> LogAlarm
+    #[serde(default)]
+    pub log_alarms: BTreeMap<String, BTreeMap<String, LogAlarm>>,
     /// region -> alarm_name -> history items (newest appended last). Populated
     /// by PutMetricAlarm (ConfigurationUpdate), SetAlarmState (StateUpdate) and
     /// DeleteAlarms so DescribeAlarmHistory reflects real transitions.
@@ -144,6 +147,14 @@ impl CloudWatchState {
         region: &str,
     ) -> &mut BTreeMap<String, CompositeAlarm> {
         self.composite_alarms.entry(region.to_string()).or_default()
+    }
+
+    pub fn log_alarms_in(&self, region: &str) -> Option<&BTreeMap<String, LogAlarm>> {
+        self.log_alarms.get(region)
+    }
+
+    pub fn log_alarms_in_mut(&mut self, region: &str) -> &mut BTreeMap<String, LogAlarm> {
+        self.log_alarms.entry(region.to_string()).or_default()
     }
 
     pub fn alarm_history_in(
@@ -374,6 +385,40 @@ pub struct CompositeAlarm {
     pub actions_suppressor: Option<String>,
     pub actions_suppressor_wait_period: Option<i64>,
     pub actions_suppressor_extension_period: Option<i64>,
+    pub state_value: AlarmState,
+    pub state_reason: String,
+    pub state_updated_timestamp: DateTime<Utc>,
+    pub alarm_configuration_updated_timestamp: DateTime<Utc>,
+}
+
+/// A log alarm: evaluates a scheduled CloudWatch Logs query's results against
+/// a threshold. The scheduled query itself is service-managed, so the
+/// configuration is stored verbatim and echoed back on describe.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogAlarm {
+    pub alarm_name: String,
+    pub alarm_arn: String,
+    pub alarm_description: Option<String>,
+    /// The `ScheduledQueryConfiguration` members, stored as supplied.
+    pub query_string: String,
+    pub scheduled_query_role_arn: String,
+    pub schedule_expression: Option<String>,
+    pub schedule_start_time_offset: Option<i64>,
+    pub schedule_end_time_offset: Option<i64>,
+    pub aggregation_expression: String,
+    pub log_group_identifiers: Vec<String>,
+    pub query_arn: Option<String>,
+    pub query_results_to_evaluate: i64,
+    pub query_results_to_alarm: i64,
+    pub threshold: f64,
+    pub comparison_operator: String,
+    pub treat_missing_data: Option<String>,
+    pub action_log_line_count: Option<i64>,
+    pub action_log_line_role_arn: Option<String>,
+    pub actions_enabled: bool,
+    pub ok_actions: Vec<String>,
+    pub alarm_actions: Vec<String>,
+    pub insufficient_data_actions: Vec<String>,
     pub state_value: AlarmState,
     pub state_reason: String,
     pub state_updated_timestamp: DateTime<Utc>,

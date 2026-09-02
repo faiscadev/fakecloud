@@ -94,6 +94,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "StopMetricStreams",
     // Composite alarms.
     "PutCompositeAlarm",
+    "PutLogAlarm",
     // Mute rules.
     "PutAlarmMuteRule",
     "GetAlarmMuteRule",
@@ -235,6 +236,7 @@ impl AwsService for CloudWatchService {
                 | "StartMetricStreams"
                 | "StopMetricStreams"
                 | "PutCompositeAlarm"
+                | "PutLogAlarm"
                 | "PutAlarmMuteRule"
                 | "DeleteAlarmMuteRule"
                 | "StartOTelEnrichment"
@@ -283,6 +285,7 @@ impl AwsService for CloudWatchService {
             "StopMetricStreams" => self.stop_metric_streams(&req),
             // Composite alarms.
             "PutCompositeAlarm" => self.put_composite_alarm(&req),
+            "PutLogAlarm" => self.put_log_alarm(&req),
             // Mute rules.
             "PutAlarmMuteRule" => self.put_alarm_mute_rule(&req),
             "GetAlarmMuteRule" => self.get_alarm_mute_rule(&req),
@@ -332,6 +335,16 @@ pub(crate) fn xml_response(action: &str, inner: &str, request_id: &str) -> AwsRe
         StatusCode::OK,
         query_response_xml(action, NS, inner, request_id),
     )
+}
+
+/// Which alarm list a rendered body belongs in. DescribeAlarms pages across
+/// all three kinds together, then buckets the page into its three output
+/// members.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AlarmKind {
+    Metric,
+    Composite,
+    Log,
 }
 
 pub(crate) fn empty_metadata_response(action: &str, request_id: &str) -> AwsResponse {
@@ -1526,7 +1539,7 @@ impl CloudWatchService {
         // CompositeAlarm). Absent -> metric alarms only.
         let alarm_types = collect_member_values(req, "AlarmTypes");
         for t in &alarm_types {
-            if t != "MetricAlarm" && t != "CompositeAlarm" {
+            if !matches!(t.as_str(), "MetricAlarm" | "CompositeAlarm" | "LogAlarm") {
                 return Err(invalid_param(format!(
                     "AlarmTypes has an invalid value '{t}'"
                 )));
@@ -1534,6 +1547,7 @@ impl CloudWatchService {
         }
         let want_metric = alarm_types.is_empty() || alarm_types.iter().any(|t| t == "MetricAlarm");
         let want_composite = alarm_types.iter().any(|t| t == "CompositeAlarm");
+        let want_log = alarm_types.iter().any(|t| t == "LogAlarm");
         validate_len(req, "AlarmNamePrefix", 1, 255)?;
         validate_len(req, "ActionPrefix", 1, 1024)?;
         validate_len(req, "ChildrenOfAlarmName", 1, 255)?;
@@ -1587,7 +1601,7 @@ impl CloudWatchService {
         if let Some(acct) = state.accounts.get_mut(&req.account_id) {
             crate::alarm_eval::evaluate_alarms(acct, &req.region, Utc::now());
         }
-        let mut combined: Vec<(bool, String)> = Vec::new();
+        let mut combined: Vec<(AlarmKind, String)> = Vec::new();
         if let Some(acct) = state.get(&req.account_id) {
             if want_metric {
                 if let Some(alarms) = acct.alarms_in(&req.region) {
@@ -1601,7 +1615,7 @@ impl CloudWatchService {
                                 &alarm.insufficient_data_actions,
                             ],
                         ) {
-                            combined.push((false, render_alarm(alarm)));
+                            combined.push((AlarmKind::Metric, render_alarm(alarm)));
                         }
                     }
                 }
@@ -1619,30 +1633,50 @@ impl CloudWatchService {
                             ],
                         ) {
                             combined.push((
-                                true,
+                                AlarmKind::Composite,
                                 crate::composite_alarms::render_composite_alarm(alarm),
                             ));
                         }
                     }
                 }
             }
+
+            if want_log {
+                if let Some(log_alarms) = acct.log_alarms_in(&req.region) {
+                    for alarm in log_alarms.values() {
+                        if matches(
+                            &alarm.alarm_name,
+                            alarm.state_value.as_str(),
+                            [
+                                &alarm.alarm_actions,
+                                &alarm.ok_actions,
+                                &alarm.insufficient_data_actions,
+                            ],
+                        ) {
+                            combined
+                                .push((AlarmKind::Log, crate::log_alarms::render_log_alarm(alarm)));
+                        }
+                    }
+                }
+            }
         }
 
-        let page: Vec<&(bool, String)> = combined.iter().skip(offset).take(max_records).collect();
-        let mut inner = String::from("<MetricAlarms>");
-        for (is_composite, body) in &page {
-            if !*is_composite {
-                inner.push_str(body);
+        let page: Vec<&(AlarmKind, String)> =
+            combined.iter().skip(offset).take(max_records).collect();
+        let mut inner = String::new();
+        for (tag, kind) in [
+            ("MetricAlarms", AlarmKind::Metric),
+            ("CompositeAlarms", AlarmKind::Composite),
+            ("LogAlarms", AlarmKind::Log),
+        ] {
+            inner.push_str(&format!("<{tag}>"));
+            for (k, body) in &page {
+                if *k == kind {
+                    inner.push_str(body);
+                }
             }
+            inner.push_str(&format!("</{tag}>"));
         }
-        inner.push_str("</MetricAlarms>");
-        inner.push_str("<CompositeAlarms>");
-        for (is_composite, body) in &page {
-            if *is_composite {
-                inner.push_str(body);
-            }
-        }
-        inner.push_str("</CompositeAlarms>");
         if offset + max_records < combined.len() {
             inner.push_str(&format!(
                 "<NextToken>{}</NextToken>",
@@ -1720,6 +1754,7 @@ impl CloudWatchService {
         for name in &names {
             acct.alarms_in_mut(&req.region).remove(name);
             acct.composite_alarms_in_mut(&req.region).remove(name);
+            acct.log_alarms_in_mut(&req.region).remove(name);
             // Alarm history is tied to the alarm; AWS drops it when the alarm
             // is deleted, so clear it here rather than orphan stale items.
             acct.alarm_history_in_mut(&req.region).remove(name);
@@ -1786,34 +1821,41 @@ impl CloudWatchService {
         let now = Utc::now();
         let mut state = self.state.write();
         let acct = state.get_or_create(&req.account_id);
-        // SetAlarmState can target a metric alarm or a composite alarm; look up
-        // the metric store first, then fall back to the composite store.
-        let (old_state, alarm_type) =
-            if let Some(alarm) = acct.alarms_in_mut(&req.region).get_mut(&alarm_name) {
-                let old = alarm.state_value.as_str().to_string();
-                alarm.state_value = new_state;
-                alarm.state_reason = state_reason.clone();
-                alarm.state_updated_timestamp = now;
-                // Mark this as a manual override so a later evaluation with no
-                // datapoints keeps it rather than resetting to INSUFFICIENT_DATA.
-                alarm.state_manually_set = true;
-                (old, "MetricAlarm")
-            } else if let Some(composite) = acct
-                .composite_alarms_in_mut(&req.region)
-                .get_mut(&alarm_name)
-            {
-                let old = composite.state_value.as_str().to_string();
-                composite.state_value = new_state;
-                composite.state_reason = state_reason.clone();
-                composite.state_updated_timestamp = now;
-                (old, "CompositeAlarm")
-            } else {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::NOT_FOUND,
-                    "ResourceNotFound",
-                    format!("Alarm {alarm_name} not found"),
-                ));
-            };
+        // SetAlarmState can target a metric, composite or log alarm; look up
+        // the metric store first, then fall back to the other two.
+        let (old_state, alarm_type) = if let Some(alarm) =
+            acct.alarms_in_mut(&req.region).get_mut(&alarm_name)
+        {
+            let old = alarm.state_value.as_str().to_string();
+            alarm.state_value = new_state;
+            alarm.state_reason = state_reason.clone();
+            alarm.state_updated_timestamp = now;
+            // Mark this as a manual override so a later evaluation with no
+            // datapoints keeps it rather than resetting to INSUFFICIENT_DATA.
+            alarm.state_manually_set = true;
+            (old, "MetricAlarm")
+        } else if let Some(composite) = acct
+            .composite_alarms_in_mut(&req.region)
+            .get_mut(&alarm_name)
+        {
+            let old = composite.state_value.as_str().to_string();
+            composite.state_value = new_state;
+            composite.state_reason = state_reason.clone();
+            composite.state_updated_timestamp = now;
+            (old, "CompositeAlarm")
+        } else if let Some(log_alarm) = acct.log_alarms_in_mut(&req.region).get_mut(&alarm_name) {
+            let old = log_alarm.state_value.as_str().to_string();
+            log_alarm.state_value = new_state;
+            log_alarm.state_reason = state_reason.clone();
+            log_alarm.state_updated_timestamp = now;
+            (old, "LogAlarm")
+        } else {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFound",
+                format!("Alarm {alarm_name} not found"),
+            ));
+        };
 
         let new_state_str = new_state.as_str().to_string();
         let summary = format!("Alarm updated from {old_state} to {new_state_str}");
