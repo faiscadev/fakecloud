@@ -4929,6 +4929,7 @@ dependencies = [
  "fakecloud-wafv2",
  "http 1.4.0",
  "parking_lot",
+ "percent-encoding",
  "rcgen",
  "serde",
  "serde_json",

@@ -281,31 +281,13 @@ fn scheme_prefix(value: &str) -> Option<&str> {
 ///
 /// A key with a space, `#` or other reserved character arrives encoded
 /// (`my%20template.yaml`), and looking up the literal encoded text reports the
-/// template missing. Note this is NOT form decoding: `+` is a literal plus in
-/// a path segment, not a space, so it is left alone. A malformed escape is
-/// left as-is rather than dropped, so the lookup fails on the key the caller
-/// actually wrote.
+/// template missing. Uses the same decoder `fakecloud-s3` applies to incoming
+/// keys, so the two agree by construction. Note this is NOT form decoding: `+`
+/// stays a literal plus in a path segment.
 fn percent_decode_key(key: &str) -> String {
-    if !key.contains('%') {
-        return key.to_string();
-    }
-    let bytes = key.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hi = (bytes[i + 1] as char).to_digit(16);
-            let lo = (bytes[i + 2] as char).to_digit(16);
-            if let (Some(hi), Some(lo)) = (hi, lo) {
-                out.push(((hi << 4) | lo) as u8);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    percent_encoding::percent_decode_str(key)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {

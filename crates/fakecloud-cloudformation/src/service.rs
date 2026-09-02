@@ -1464,7 +1464,13 @@ impl CloudFormationService {
             return imports;
         };
         for (name, export) in &state.exports {
-            if matches!(skip_stack, Some(skip) if skip == export.exporting_stack_name) {
+            // `UpdateStack` accepts a stack ARN as well as a name, and exports
+            // are registered under the name — so comparing only against the
+            // name made a stack fail to skip its OWN export and report
+            // "already exported by another stack" for a valid no-op update.
+            let is_own_export = matches!(skip_stack, Some(skip)
+                if skip == export.exporting_stack_name || skip == export.exporting_stack_id);
+            if is_own_export {
                 continue;
             }
             imports.insert(name.clone(), export.value.clone());
@@ -2533,17 +2539,21 @@ impl CloudFormationService {
                 ),
             ));
         }
-        // Only for a stack that actually reached a completed state. A stack
-        // left in a failure state (an empty stored template plus CREATE_FAILED)
-        // would otherwise report UPDATE_COMPLETE and have its reason cleared,
-        // so a stack that was never provisioned would look successfully
-        // updated.
+        // Only for a stack that actually reached a successful state. A stack
+        // left in a failure state would otherwise report UPDATE_COMPLETE and
+        // have its reason cleared, so a stack that was never provisioned (or
+        // whose last update rolled back) would look successfully updated.
+        //
+        // An explicit allowlist, not a `_COMPLETE` suffix test: `ROLLBACK_
+        // COMPLETE` and `UPDATE_ROLLBACK_COMPLETE` end with it too, and those
+        // are exactly the states this is meant to exclude.
         let completed = {
             let accounts = self.state.read();
             accounts.get(&req.account_id).is_some_and(|s| {
-                s.stacks
-                    .values()
-                    .any(|st| st.stack_id == found_stack_id && st.status.ends_with("_COMPLETE"))
+                s.stacks.values().any(|st| {
+                    st.stack_id == found_stack_id
+                        && matches!(st.status.as_str(), "CREATE_COMPLETE" | "UPDATE_COMPLETE")
+                })
             })
         };
         if input.template_body.trim().is_empty() && !found_stack_id.is_empty() && completed {
@@ -3756,6 +3766,53 @@ mod tests {
             log[1]["ResourceStatusReason"],
             serde_json::json!("Failed to create resource Fn: boom")
         );
+    }
+
+    #[test]
+    fn a_stack_skips_its_own_export_by_name_or_id() {
+        // `UpdateStack` accepts a stack ARN, but exports are registered under
+        // the stack NAME. Comparing only the name made a stack fail to skip
+        // its own export and report "already exported by another stack" for a
+        // valid no-op update.
+        let state: SharedCloudFormationState = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::<CloudFormationState>::new(
+                "123456789012",
+                "us-east-1",
+                "",
+            ),
+        ));
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create("123456789012");
+            st.exports.insert(
+                "shared-arn".to_string(),
+                crate::state::StackExport {
+                    value: "v".to_string(),
+                    exporting_stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/s/abc"
+                        .to_string(),
+                    exporting_stack_name: "s".to_string(),
+                },
+            );
+        }
+
+        // Someone else's export is visible.
+        assert!(CloudFormationService::collect_account_imports(
+            &state,
+            "123456789012",
+            Some("other")
+        )
+        .contains_key("shared-arn"));
+        // Its own export is skipped, addressed either way.
+        for own in [
+            "s",
+            "arn:aws:cloudformation:us-east-1:123456789012:stack/s/abc",
+        ] {
+            assert!(
+                !CloudFormationService::collect_account_imports(&state, "123456789012", Some(own))
+                    .contains_key("shared-arn"),
+                "a stack must skip its own export when addressed as {own}"
+            );
+        }
     }
 
     #[test]
