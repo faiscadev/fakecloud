@@ -1358,11 +1358,19 @@ impl CloudFormationService {
     /// own `ParameterValue` — the two fields are mutually exclusive on the
     /// wire, and enforcing that here means a client that sends both cannot
     /// have its explicit value clobbered.
+    ///
+    /// Returns the keys that asked for a previous value the stack does not
+    /// have. Silently dropping those leaves the parameter absent, so a
+    /// `Ref` to it bakes the bare parameter name into the resource -- the
+    /// silent-wrong-value outcome this crate is closing elsewhere. Real
+    /// CloudFormation answers `ValidationError: Parameter X does not exist in
+    /// the stack`; the caller decides whether to enforce that.
     pub(crate) fn refill_use_previous_values(
         raw: &BTreeMap<String, String>,
         previous: &BTreeMap<String, String>,
         parameters: &mut BTreeMap<String, String>,
-    ) {
+    ) -> Vec<String> {
+        let mut unknown = Vec::new();
         for i in 1.. {
             let Some(key) = raw.get(&format!("Parameters.member.{i}.ParameterKey")) else {
                 break;
@@ -1377,11 +1385,15 @@ impl CloudFormationService {
             let has_explicit_value =
                 raw.contains_key(&format!("Parameters.member.{i}.ParameterValue"));
             if use_previous && !has_explicit_value {
-                if let Some(prev) = previous.get(key) {
-                    parameters.insert(key.clone(), prev.clone());
+                match previous.get(key) {
+                    Some(prev) => {
+                        parameters.insert(key.clone(), prev.clone());
+                    }
+                    None => unknown.push(key.clone()),
                 }
             }
         }
+        unknown
     }
 
     /// Fill in declared `Parameters.<Name>.Default` for any parameter the
@@ -2464,12 +2476,20 @@ impl CloudFormationService {
         } else {
             resolved_stack_name.clone()
         };
+        let resources_before_update: Vec<StackResource>;
 
-        Self::refill_use_previous_values(
+        let unknown_previous = Self::refill_use_previous_values(
             &Self::get_all_params(req),
             &previous_parameters,
             &mut input.parameters,
         );
+        if let Some(key) = unknown_previous.first() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                format!("Parameter {key} does not exist in the stack"),
+            ));
+        }
 
         // `UsePreviousTemplate=true` and `TemplateURL` both arrive with an
         // empty `TemplateBody`. Resolve them to a real template before
@@ -2581,7 +2601,12 @@ impl CloudFormationService {
                 .values_mut()
                 .find(|s| s.stack_id == found_stack_id)
             {
-                stack.parameters = input.parameters.clone();
+                // Each guarded the same way: a metadata-only update that
+                // sends just `--tags` must not wipe the stored parameters,
+                // which an unconditional assignment did.
+                if !input.parameters.is_empty() {
+                    stack.parameters = input.parameters.clone();
+                }
                 if !input.tags.is_empty() {
                     stack.tags = input.tags.clone();
                 }
@@ -2652,10 +2677,14 @@ impl CloudFormationService {
             .parameters
             .entry("AWS::StackId".to_string())
             .or_insert_with(|| found_stack_id.clone());
+        // The canonical name, for the same reason the export bookkeeping uses
+        // it: `UpdateStack` accepts an ARN, and seeding the pseudo-parameter
+        // from the caller's spelling makes `!Sub "${AWS::StackName}-queue"`
+        // provision `arn:aws:...:stack/mystack/abc-queue`.
         input
             .parameters
             .entry("AWS::StackName".to_string())
-            .or_insert_with(|| input.stack_name.clone());
+            .or_insert_with(|| export_owner_name.clone());
         input
             .parameters
             .entry("AWS::Partition".to_string())
@@ -2823,6 +2852,10 @@ impl CloudFormationService {
                     .expect("stack existence checked above");
 
                 stack.status = "UPDATE_IN_PROGRESS".to_string();
+                // Captured before the update rewrites it, so the
+                // export-collision rollback below can put back a resource list
+                // that matches the template it restores.
+                resources_before_update = stack.resources.clone();
                 let update_result = apply_resource_updates(
                     stack,
                     &parsed.resources,
@@ -2997,9 +3030,21 @@ impl CloudFormationService {
                     // The update already overwrote these ~130 lines up. A
                     // stack reporting a rollback while holding the new
                     // template would hand `GetTemplate` the template that
-                    // supposedly rolled back, so put the previous ones back.
+                    // supposedly rolled back, so put the previous ones back --
+                    // including the resource list, which otherwise described
+                    // the NEW template's resources while `GetTemplate`
+                    // returned the old one. A later
+                    // `update-stack --use-previous-template` diffed that
+                    // mismatch and deleted them.
+                    //
+                    // Physical resources this update already provisioned are
+                    // NOT unwound (that needs a real provisioner rollback), so
+                    // any it created are left orphaned rather than tracked.
+                    // Recording them under a template that does not declare
+                    // them is the worse of the two.
                     stack.template = previous_template.clone();
                     stack.parameters = previous_parameters.clone();
+                    stack.resources = resources_before_update.clone();
                 }
                 // The canonical name, not the caller's spelling: `StackName`
                 // on a StackEvent must match what every other event for this
@@ -3874,6 +3919,38 @@ mod tests {
         assert_eq!(parameters.get("A").map(String::as_str), Some("explicit"));
         // B carries no explicit value, so it takes the stored one.
         assert_eq!(parameters.get("B").map(String::as_str), Some("stored-b"));
+    }
+
+    #[test]
+    fn use_previous_value_reports_a_parameter_the_stack_lacks() {
+        // Real CloudFormation answers "Parameter X does not exist in the
+        // stack". Dropping it silently left the parameter absent, so a `Ref`
+        // to it baked the bare name into the resource.
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "Parameters.member.1.ParameterKey".to_string(),
+            "Ghost".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+
+        let previous = BTreeMap::new();
+        let mut parameters = BTreeMap::new();
+        let unknown =
+            CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+        assert_eq!(unknown, vec!["Ghost".to_string()]);
+        assert!(!parameters.contains_key("Ghost"));
+
+        // A key the stack DOES have is refilled and not reported.
+        let mut previous = BTreeMap::new();
+        previous.insert("Ghost".to_string(), "stored".to_string());
+        let mut parameters = BTreeMap::new();
+        let unknown =
+            CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+        assert!(unknown.is_empty());
+        assert_eq!(parameters.get("Ghost").map(String::as_str), Some("stored"));
     }
 
     #[test]
