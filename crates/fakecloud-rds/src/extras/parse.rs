@@ -167,40 +167,31 @@ pub(super) fn list_extras_xml(
     render: impl Fn(&Value) -> String,
     rid: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    list_extras_filtered_xml(
-        svc,
-        aid,
-        category,
-        wrapper,
-        member_tag,
+    let accounts = svc.state_handle().read();
+    let items: Vec<Value> = sorted_entries(&accounts, aid, category, |_| true)
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect();
+    Ok(xml_response(
         action,
-        |_| true,
-        render,
+        render_list(wrapper, member_tag, &items, "", render),
         rid,
-    )
+    ))
 }
 
-/// [`list_extras_xml`] with a predicate, for the Describe operations that
-/// model `Filters`.
+/// The rows of one extras category, in key order and passing `keep`.
 ///
-/// Rows come out in key order rather than the backing map's iteration
-/// order: a `HashMap` walk means two identical requests can answer with
-/// the rows in different orders, which a client diffing a listing sees
-/// as spurious churn.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn list_extras_filtered_xml(
-    svc: &RdsService,
+/// Key order rather than the backing map's iteration order: a `HashMap`
+/// walk means two identical requests can answer with the rows in
+/// different orders, which a client diffing a listing reads as churn --
+/// and it makes the key usable as a pagination cursor.
+fn sorted_entries(
+    accounts: &fakecloud_core::multi_account::MultiAccountState<crate::state::RdsState>,
     aid: &str,
     category: &str,
-    wrapper: &str,
-    member_tag: &str,
-    action: &str,
     keep: impl Fn(&Value) -> bool,
-    render: impl Fn(&Value) -> String,
-    rid: &str,
-) -> Result<AwsResponse, AwsServiceError> {
-    let accounts = svc.state_handle().read();
-    let items: Vec<Value> = accounts
+) -> Vec<(String, Value)> {
+    accounts
         .get(aid)
         .and_then(|s| s.extras.get(category))
         .map(|m| {
@@ -208,12 +199,20 @@ pub(super) fn list_extras_filtered_xml(
             entries.sort_by_key(|(key, _)| *key);
             entries
                 .into_iter()
-                .map(|(_, v)| v)
-                .filter(|v| keep(v))
-                .cloned()
+                .filter(|(_, v)| keep(v))
+                .map(|(key, v)| (key.clone(), v.clone()))
                 .collect()
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
+
+fn render_list(
+    wrapper: &str,
+    member_tag: &str,
+    items: &[Value],
+    marker_xml: &str,
+    render: impl Fn(&Value) -> String,
+) -> String {
     let body = items
         .iter()
         .map(|v| {
@@ -224,8 +223,51 @@ pub(super) fn list_extras_filtered_xml(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let inner = format!("    <{wrapper}>\n{body}\n    </{wrapper}>");
-    Ok(xml_response(action, inner, rid))
+    format!("    <{wrapper}>\n{body}\n    </{wrapper}>{marker_xml}")
+}
+
+/// [`list_extras_xml`] with a predicate and pagination, for the Describe
+/// operations that model `Filters` alongside `MaxRecords` / `Marker`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn list_extras_filtered_xml(
+    svc: &RdsService,
+    aid: &str,
+    category: &str,
+    wrapper: &str,
+    member_tag: &str,
+    action: &str,
+    req: &AwsRequest,
+    keep: impl Fn(&Value) -> bool,
+    render: impl Fn(&Value) -> String,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
+    let accounts = svc.state_handle().read();
+    let entries = sorted_entries(&accounts, aid, category, keep);
+    // The map key is unique and the rows are in key order, so it is a
+    // stable cursor. Without this a client that asked for a page got the
+    // whole list back and no Marker to continue from.
+    //
+    // `get_param` keeps `Marker=` as Some(""), which would decode to a
+    // position no row matches and return an EMPTY page rather than the
+    // first one; every other parameter here treats an explicit empty as
+    // absent too.
+    let paginated = crate::service::service_helpers::paginate(
+        entries,
+        get_param(req, "Marker").filter(|value| !value.is_empty()),
+        get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
+        |(key, _)| key.as_str(),
+    )?;
+    let marker_xml = paginated
+        .next_marker
+        .as_ref()
+        .map(|m| format!("\n    <Marker>{}</Marker>", xml_escape(m)))
+        .unwrap_or_default();
+    let items: Vec<Value> = paginated.items.into_iter().map(|(_, v)| v).collect();
+    Ok(xml_response(
+        action,
+        render_list(wrapper, member_tag, &items, &marker_xml, render),
+        rid,
+    ))
 }
 
 /// Like [`list_extras_xml`] but wraps each element in the list's *named*

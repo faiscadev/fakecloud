@@ -95,13 +95,20 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
 fn cluster_endpoint_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-cluster-endpoint-id" => filter.matches(entry_str(entry, "DBClusterEndpointIdentifier")),
-        "db-cluster-endpoint-type" => filter.matches(entry_str(entry, "EndpointType")),
-        "db-cluster-endpoint-custom-type" => filter.matches(entry_str(entry, "CustomEndpointType")),
+        // AWS stores and returns these UPPERCASE (READER / WRITER /
+        // CUSTOM) while the DescribeDBClusterEndpoints docs spell the
+        // filter values lowercase (reader, writer, custom) -- so a
+        // caller copying the documented command would select nothing
+        // under an exact comparison.
+        "db-cluster-endpoint-type" => filter.matches_ignore_case(entry_str(entry, "EndpointType")),
+        "db-cluster-endpoint-custom-type" => {
+            filter.matches_ignore_case(entry_str(entry, "CustomEndpointType"))
+        }
         // AWS defaults a stored endpoint to `available`, and so does the
         // renderer -- so the filter has to see the same default rather
         // than skipping a row that simply never recorded a status.
         "db-cluster-endpoint-status" => {
-            filter.matches(entry_str(entry, "Status").or(Some("available")))
+            filter.matches_ignore_case(entry_str(entry, "Status").or(Some("available")))
         }
         other => {
             tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
@@ -129,8 +136,11 @@ fn shard_group_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
 fn backtrack_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-cluster-backtrack-id" => filter.matches(entry_str(entry, "BacktrackIdentifier")),
+        // Case-insensitive for the same reason, and so a backtrack
+        // persisted by an older build (which wrote `COMPLETED`) is still
+        // selectable by the documented lowercase value after a restore.
         "db-cluster-backtrack-status" => {
-            filter.matches(entry_str(entry, "Status").or(Some("completed")))
+            filter.matches_ignore_case(entry_str(entry, "Status").or(Some("completed")))
         }
         other => {
             tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
@@ -194,14 +204,31 @@ fn cluster_snapshot_matches_filters(
     })
 }
 
+/// A unique id fragment.
+///
+/// The timestamp alone is not unique: two calls within the clock's
+/// resolution produce the same value, and callers use it as a MAP KEY
+/// (backtrack records) or as an id AWS guarantees unique (a cluster
+/// endpoint's resource identifier), so a collision silently overwrites
+/// one of the two.
 fn rand_id() -> String {
-    format!(
-        "{:x}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0)
-    )
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let unique = uuid::Uuid::new_v4().simple().to_string();
+    format!("{nanos:x}{}", &unique[..8])
+}
+
+/// True when the request carries the member list at all, empty included.
+///
+/// `parse_member_list` returns an empty vec both for "not sent" and for
+/// "sent empty", which are different requests: the second is asking to
+/// clear the list.
+fn member_list_present(req: &AwsRequest, prefix: &str) -> bool {
+    req.query_params
+        .keys()
+        .any(|key| key == prefix || key.starts_with(&format!("{prefix}.")))
 }
 
 pub(crate) fn xml_response(action: &str, inner: String, request_id: &str) -> AwsResponse {
@@ -1171,7 +1198,17 @@ impl RdsService {
                 // model, so rejecting the omission would put an
                 // undeclared error shape on the wire. A request that
                 // names no cluster selects no cluster's backtracks.
-                let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_default();
+                // Reduced from an ARN, as every sibling Describe does:
+                // clients (the Terraform provider notably) pass the ARN
+                // form, and comparing it against the stored bare
+                // identifier would match nothing -- or, through
+                // `cluster_entry` below, report a cluster that exists as
+                // not found.
+                let cluster = crate::filters::normalized_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                )
+                .unwrap_or_default();
                 // A cluster that was named but doesn't exist gets the
                 // declared fault, as on AWS, rather than an empty list a
                 // caller would read as "no backtracks".
@@ -1180,6 +1217,30 @@ impl RdsService {
                 }
                 let filters = crate::filters::parse_filters(req);
                 let wanted = get_param(req, "BacktrackIdentifier");
+                // A named backtrack that doesn't exist gets the fault the
+                // model declares for it, not an empty list -- a caller
+                // can't tell "gone" from "no rows" otherwise.
+                if let Some(id) = wanted.as_deref() {
+                    let known = self
+                        .state_handle()
+                        .read()
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("cluster_backtracks"))
+                        .is_some_and(|m| {
+                            m.values().any(|v| {
+                                entry_str(v, "BacktrackIdentifier") == Some(id)
+                                    && entry_str(v, "DBClusterIdentifier")
+                                        == Some(cluster.as_str())
+                            })
+                        });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterBacktrackNotFoundFault",
+                            format!("DBClusterBacktrack {id} not found."),
+                        ));
+                    }
+                }
                 list_extras_filtered_xml(
                     self,
                     &aid,
@@ -1190,6 +1251,7 @@ impl RdsService {
                     // unmarshals an empty list from the generic tag.
                     "DBClusterBacktrack",
                     "DescribeDBClusterBacktracks",
+                    req,
                     |v| {
                         !cluster.is_empty()
                             && entry_str(v, "DBClusterIdentifier") == Some(cluster.as_str())
@@ -1452,11 +1514,25 @@ impl RdsService {
                     }
                     if let Some(custom) = get_param(req, "CustomEndpointType") {
                         obj.insert("CustomEndpointType".to_string(), json!(custom));
+                    } else if obj
+                        .get("EndpointType")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|kind| !kind.eq_ignore_ascii_case("CUSTOM"))
+                    {
+                        // Only a CUSTOM endpoint carries a custom type.
+                        // Left behind when the endpoint is changed away
+                        // from CUSTOM, the stale value is now both
+                        // rendered and selectable by
+                        // `db-cluster-endpoint-custom-type`.
+                        obj.remove("CustomEndpointType");
                     }
-                    if !static_members.is_empty() {
+                    // Presence, not emptiness: a request that sends the
+                    // list empty is asking to clear it, and treating that
+                    // as "unset" made the removal a silent no-op.
+                    if member_list_present(req, "StaticMembers") {
                         obj.insert("StaticMembers".to_string(), json!(static_members));
                     }
-                    if !excluded_members.is_empty() {
+                    if member_list_present(req, "ExcludedMembers") {
                         obj.insert("ExcludedMembers".to_string(), json!(excluded_members));
                     }
                 }
@@ -1474,8 +1550,14 @@ impl RdsService {
                 let filters = crate::filters::parse_filters(req);
                 // The identifier parameters narrow the same way the
                 // filters do; AWS applies both.
-                let wanted_endpoint = get_param(req, "DBClusterEndpointIdentifier");
-                let wanted_cluster = get_param(req, "DBClusterIdentifier");
+                let wanted_endpoint = crate::filters::normalized_identifier(
+                    get_param(req, "DBClusterEndpointIdentifier"),
+                    "cluster-endpoint",
+                );
+                let wanted_cluster = crate::filters::normalized_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                );
                 list_extras_filtered_xml(
                     self,
                     &aid,
@@ -1483,6 +1565,7 @@ impl RdsService {
                     "DBClusterEndpoints",
                     "DBClusterEndpointList",
                     "DescribeDBClusterEndpoints",
+                    req,
                     |v| {
                         wanted_endpoint.as_deref().is_none_or(|wanted| {
                             entry_str(v, "DBClusterEndpointIdentifier") == Some(wanted)
@@ -2412,6 +2495,33 @@ impl RdsService {
             "DescribeDBShardGroups" => {
                 let filters = crate::filters::parse_filters(req);
                 let wanted = get_param(req, "DBShardGroupIdentifier");
+                // Declared on this operation, and the difference a
+                // polling caller needs: "deleted" rather than "exists
+                // but empty".
+                if let Some(id) = wanted.as_deref() {
+                    let known = self
+                        .state_handle()
+                        .read()
+                        .get(&aid)
+                        .and_then(|s| s.extras.get("shard_groups"))
+                        .is_some_and(|m| {
+                            m.values().any(|v| {
+                                entry_str(v, "DBShardGroupIdentifier") == Some(id)
+                            })
+                        });
+                    if !known {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            // The wire code, which drops the shape's
+                            // `Fault` suffix (aws.protocols#awsQueryError
+                            // code is `DBShardGroupNotFound`); emitting
+                            // the shape name puts an undeclared error on
+                            // the wire.
+                            "DBShardGroupNotFound",
+                            format!("DBShardGroup {id} not found."),
+                        ));
+                    }
+                }
                 list_extras_filtered_xml(
                     self,
                     &aid,
@@ -2419,6 +2529,7 @@ impl RdsService {
                     "DBShardGroups",
                     "DBShardGroup",
                     "DescribeDBShardGroups",
+                    req,
                     |v| {
                         wanted.as_deref().is_none_or(|wanted| {
                             entry_str(v, "DBShardGroupIdentifier") == Some(wanted)

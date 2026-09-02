@@ -224,7 +224,11 @@ The `Filters` parameter is honored on the Describe operations in the table below
 
 `CreateDBClusterEndpoint` and `ModifyDBClusterEndpoint` persist `CustomEndpointType`, `StaticMembers` and `ExcludedMembers`, and `DescribeDBClusterEndpoints` reports them along with the endpoint's ARN and resource id -- the fields `db-cluster-endpoint-custom-type` filters on, and the ones a caller needs to read back what it set.
 
-The model documents no filter names for `DescribeDBShardGroups`; the shard group's own id is accepted, as on the sibling Describes.
+The model documents no filter names for `DescribeDBShardGroups`; the shard group's own id is accepted, as on the sibling Describes. A named `DBShardGroupIdentifier` or `BacktrackIdentifier` that doesn't exist raises the fault the model declares (`DBShardGroupNotFound`, `DBClusterBacktrackNotFoundFault` -- the first drops the shape name's `Fault` suffix on the wire, as AWS does) rather than an empty list, so a poller can tell "gone" from "no rows".
+
+`db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-status` and `db-cluster-backtrack-status` match case-insensitively. AWS stores and returns these uppercase (`CUSTOM`, `READER`) while documenting the filter values lowercase (`custom`, `reader`), so an exact comparison would return nothing for a caller copying the documented command.
+
+These three operations honor `MaxRecords` and `Marker` and report a `Marker` when more rows remain.
 
 Listings come out in a stable order rather than the backing map's iteration order, so two identical requests can't answer with the same rows shuffled.
 

@@ -71,6 +71,21 @@ impl RdsFilter {
         }
     }
 
+    /// True when `candidate` is one of the filter's values, compared
+    /// case-insensitively.
+    ///
+    /// Filters are case-sensitive on AWS, but a few enum-valued ones
+    /// are documented in a different case than the API stores and
+    /// returns -- `db-cluster-endpoint-type` accepts `reader` while the
+    /// endpoint reads back `READER`. An exact comparison there means a
+    /// caller copying the documented command selects nothing.
+    pub fn matches_ignore_case(&self, candidate: Option<&str>) -> bool {
+        match candidate {
+            Some(value) => self.values.iter().any(|v| v.eq_ignore_ascii_case(value)),
+            None => false,
+        }
+    }
+
     /// True when any of `candidates` is one of the filter's values. Used
     /// for filters AWS documents as accepting "identifiers and ARNs".
     pub fn matches_any<'a>(&self, candidates: impl IntoIterator<Item = Option<&'a str>>) -> bool {

@@ -3277,6 +3277,323 @@ fn describe_db_cluster_endpoints_honors_filters() {
     );
 }
 
+/// The documented filter values are spelled in a different case than
+/// the API stores and returns, so an exact comparison selects nothing
+/// for a caller copying the docs verbatim.
+#[test]
+fn cluster_endpoint_filters_accept_the_documented_lowercase_values() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-custom"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "CUSTOM"),
+            ("CustomEndpointType", "READER"),
+        ],
+    );
+
+    // `aws rds describe-db-cluster-endpoints --filters
+    //  Name=db-cluster-endpoint-type,Values=custom`, as documented.
+    for (name, value) in [
+        ("db-cluster-endpoint-type", "custom"),
+        ("db-cluster-endpoint-custom-type", "reader"),
+        ("db-cluster-endpoint-status", "AVAILABLE"),
+    ] {
+        let body = body_of_action(
+            &svc,
+            "DescribeDBClusterEndpoints",
+            &[
+                ("Filters.Filter.1.Name", name),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        );
+        assert!(
+            body.contains("<DBClusterEndpointIdentifier>ep-custom</DBClusterEndpointIdentifier>"),
+            "{name}={value} selected nothing: {body}"
+        );
+    }
+
+    // Case-insensitive is not match-anything.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-type"),
+            ("Filters.Filter.1.Values.Value.1", "writer"),
+        ],
+    );
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>"),
+        "a non-matching type still returned rows: {body}"
+    );
+}
+
+/// Identifier parameters arrive as ARNs -- the Terraform provider sends
+/// them -- so comparing the raw value against a stored bare identifier
+/// finds nothing, or reports an existing cluster as not found.
+#[test]
+fn describes_accept_arn_identifiers() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .default_mut()
+            .extras
+            .get_mut("clusters")
+            .and_then(|m| m.get_mut("clu-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-mysql"));
+            entry.insert("Status".to_string(), json!("available"));
+        }
+    }
+    ok_on(
+        &svc,
+        "BacktrackDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("BacktrackTo", "2026-01-01T00:00:00Z"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+
+    let cluster_arn = "arn:aws:rds:us-east-1:000000000000:cluster:clu-1";
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", cluster_arn)],
+    );
+    assert!(
+        body.contains("<DBClusterBacktrack>"),
+        "a cluster ARN found no backtracks: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[("DBClusterIdentifier", cluster_arn)],
+    );
+    assert!(
+        body.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "a cluster ARN narrowed the endpoints to nothing: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[(
+            "DBClusterEndpointIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:cluster-endpoint:ep-1",
+        )],
+    );
+    assert!(
+        body.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "an endpoint ARN narrowed to nothing: {body}"
+    );
+}
+
+/// A named resource that doesn't exist gets the fault the model declares
+/// for it, not an empty list a poller reads as "still there".
+#[test]
+fn named_lookups_raise_the_declared_not_found_faults() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+
+    match svc.handle_extra_action(&req(
+        "DescribeDBShardGroups",
+        &[("DBShardGroupIdentifier", "sg-gone")],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBShardGroupNotFound"),
+        Ok(_) => panic!("an unknown shard group returned a list"),
+    }
+
+    match svc.handle_extra_action(&req(
+        "DescribeDBClusterBacktracks",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("BacktrackIdentifier", "bt-gone"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterBacktrackNotFoundFault"),
+        Ok(_) => panic!("an unknown backtrack returned a list"),
+    }
+}
+
+/// Modify has to leave the row coherent: a stale custom type is now both
+/// rendered and selectable, and a list sent empty is a request to clear
+/// it rather than one to leave it alone.
+#[test]
+fn modify_cluster_endpoint_clears_stale_fields() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "CUSTOM"),
+            ("CustomEndpointType", "READER"),
+            ("StaticMembers.member.1", "inst-1"),
+        ],
+    );
+
+    // Away from CUSTOM: the custom type no longer applies.
+    ok_on(
+        &svc,
+        "ModifyDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        !body.contains("<CustomEndpointType>"),
+        "a READER endpoint kept a custom type: {body}"
+    );
+    // And it is no longer selectable by the stale value.
+    let filtered = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-custom-type"),
+            ("Filters.Filter.1.Values.Value.1", "reader"),
+        ],
+    );
+    assert!(
+        !filtered.contains("<DBClusterEndpointIdentifier>"),
+        "a stale custom type still matched: {filtered}"
+    );
+
+    // Static members survive a modify that doesn't mention them...
+    assert!(body.contains("<member>inst-1</member>"), "{body}");
+
+    // ...and an explicitly empty list clears them.
+    ok_on(
+        &svc,
+        "ModifyDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("StaticMembers", ""),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        !body.contains("<member>inst-1</member>"),
+        "clearing the static members was ignored: {body}"
+    );
+}
+
+/// Two calls in the same clock tick must not collide: the backtrack id
+/// is a map key, so a duplicate silently drops one of the records.
+#[test]
+fn backtrack_ids_are_unique_within_a_clock_tick() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .default_mut()
+            .extras
+            .get_mut("clusters")
+            .and_then(|m| m.get_mut("clu-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-mysql"));
+            entry.insert("Status".to_string(), json!("available"));
+        }
+    }
+
+    for _ in 0..25 {
+        ok_on(
+            &svc,
+            "BacktrackDBCluster",
+            &[
+                ("DBClusterIdentifier", "clu-1"),
+                ("BacktrackTo", "2026-01-01T00:00:00Z"),
+            ],
+        );
+    }
+
+    let stored = svc
+        .state_handle()
+        .read()
+        .default_ref()
+        .extras
+        .get("cluster_backtracks")
+        .map(|m| m.len())
+        .unwrap_or(0);
+    assert_eq!(stored, 25, "backtrack ids collided and dropped records");
+}
+
+/// MaxRecords / Marker are modeled on these operations; without paging
+/// a client that asked for a page got the whole list and no Marker.
+#[test]
+fn describe_db_cluster_endpoints_pages() {
+    let svc = svc();
+    for id in ["ep-1", "ep-2", "ep-3"] {
+        ok_on(
+            &svc,
+            "CreateDBClusterEndpoint",
+            &[
+                ("DBClusterEndpointIdentifier", id),
+                ("DBClusterIdentifier", "clu-1"),
+                ("EndpointType", "READER"),
+            ],
+        );
+    }
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    for _ in 0..5 {
+        let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &params);
+        let mut page = 0;
+        for chunk in body.split("<DBClusterEndpointIdentifier>").skip(1) {
+            if let Some(id) = chunk.split("</DBClusterEndpointIdentifier>").next() {
+                seen.push(id.to_string());
+                page += 1;
+            }
+        }
+        // MaxRecords=1 means ONE row per page. Without this the test
+        // passes on a handler that ignores paging entirely and returns
+        // the whole list on the first request.
+        assert_eq!(page, 1, "MaxRecords=1 returned {page} rows: {body}");
+        marker = body
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if marker.is_none() {
+            break;
+        }
+    }
+
+    // Every row, once, in the unpaginated order -- and the walk really
+    // took three pages to get them.
+    assert_eq!(seen, vec!["ep-1", "ep-2", "ep-3"]);
+    assert!(marker.is_none(), "the last page still carried a Marker");
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();
