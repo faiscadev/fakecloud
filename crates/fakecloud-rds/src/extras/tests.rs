@@ -4910,6 +4910,54 @@ fn cluster_roles_are_recorded_and_reported() {
     }
 }
 
+/// A failed role request leaves the cluster untouched.
+///
+/// The roles array was materialized before the add/remove ran, so a
+/// remove against a cluster with no roles wrote `"AssociatedRoles": []`
+/// into the stored entry and THEN returned the fault --
+/// CreateDBClusterSnapshot cloned that key forward into every later
+/// snapshot.
+#[test]
+fn a_failed_role_request_does_not_write_to_the_cluster() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let before = extras_value(&svc, "clusters", "clu-1");
+    assert!(before.get("AssociatedRoles").is_none());
+
+    match svc.handle_extra_action(&req(
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/never-attached"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Ok(_) => panic!("removed a role that was never attached"),
+    }
+
+    let after = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        after.get("AssociatedRoles").is_none(),
+        "a failed remove wrote the key into the cluster: {after}"
+    );
+
+    // An empty RoleArn is not stored as an association either. Requests
+    // through `handle` never reach this -- prevalidate rejects the
+    // missing required parameter first -- but an in-process caller can.
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", "")],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Ok(_) => panic!("stored an association with no role"),
+    }
+    let after = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        after.get("AssociatedRoles").is_none(),
+        "an empty role was stored: {after}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();

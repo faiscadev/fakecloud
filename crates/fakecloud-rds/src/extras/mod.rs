@@ -3068,7 +3068,9 @@ impl RdsService {
                     &aid,
                 )
                 .unwrap_or_default();
-                let role_arn = get_param(req, "RoleArn").unwrap_or_default();
+                let role_arn = get_param(req, "RoleArn")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default();
                 let feature_name = get_param(req, "FeatureName");
                 let adding = action == "AddRoleToDBCluster";
                 {
@@ -3079,15 +3081,31 @@ impl RdsService {
                         .get_mut("clusters")
                         .and_then(|m| m.get_mut(&id))
                         .ok_or_else(|| cluster_not_found(&id))?;
-                    let roles = entry
+                    let object = entry
                         .as_object_mut()
-                        .map(|object| {
-                            object
-                                .entry("AssociatedRoles".to_string())
-                                .or_insert_with(|| json!([]))
-                        })
-                        .and_then(|value| value.as_array_mut())
                         .ok_or_else(|| cluster_not_found(&id))?;
+                    // Read WITHOUT creating the key: materializing it up
+                    // front wrote `"AssociatedRoles": []` into the stored
+                    // cluster even when the request went on to fail, and
+                    // CreateDBClusterSnapshot cloned that key forward
+                    // into every later snapshot.
+                    let mut roles: Vec<Value> = object
+                        .get("AssociatedRoles")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if role_arn.is_empty() {
+                        // `prevalidate` rejects a missing RoleArn before
+                        // this runs, so only an in-process caller gets
+                        // here -- but an empty ARN must not become a
+                        // stored association that renders as an empty
+                        // element and burns a quota slot.
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBClusterRoleNotFound",
+                            format!("No role is associated with DB cluster {id} under that name."),
+                        ));
+                    }
                     // Keyed on the (role, feature) PAIR, as AWS keys it:
                     // one role is commonly attached for both s3Import and
                     // s3Export, and matching on the ARN alone rejected
@@ -3144,6 +3162,8 @@ impl RdsService {
                             ));
                         }
                     }
+                    // Written back only once the change succeeded.
+                    object.insert("AssociatedRoles".to_string(), Value::Array(roles));
                 }
                 xml_empty_action(&action, &rid)
             }
@@ -3155,7 +3175,11 @@ impl RdsService {
                     &aid,
                 )
                 .unwrap_or_default();
-                let role_arn = get_param(req, "RoleArn").unwrap_or_default();
+                // As above: `prevalidate` rejects a missing RoleArn or
+                // FeatureName first; an empty one must not be stored.
+                let role_arn = get_param(req, "RoleArn")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default();
                 let feature_name = get_param(req, "FeatureName").unwrap_or_default();
                 let adding = action == "AddRoleToDBInstance";
                 {
@@ -3166,6 +3190,13 @@ impl RdsService {
                     })?;
                     // The pair again -- and FeatureName is a REQUIRED
                     // input here, so ignoring it was strictly wrong.
+                    if role_arn.is_empty() {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::NOT_FOUND,
+                            "DBInstanceRoleNotFound",
+                            format!("No role is associated with DB instance {id} under that name."),
+                        ));
+                    }
                     let position = instance
                         .associated_roles
                         .iter()

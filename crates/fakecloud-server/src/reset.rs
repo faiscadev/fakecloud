@@ -640,6 +640,7 @@ mod tests {
         rds.instances.insert(
             "db-1".to_string(),
             DbInstance {
+                associated_roles: Vec::new(),
                 db_instance_identifier: "db-1".to_string(),
                 db_instance_arn: "arn:aws:rds:us-east-1:123456789012:db:db-1".to_string(),
                 db_instance_class: "db.t3.micro".to_string(),
