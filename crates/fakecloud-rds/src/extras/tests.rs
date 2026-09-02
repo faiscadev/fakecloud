@@ -4254,6 +4254,122 @@ fn create_cluster_endpoint_rejects_a_duplicate_identifier() {
     }
 }
 
+/// Every arm of the endpoint lifecycle addresses a row the same way, so
+/// an ARN a caller read back from one call works on all of them.
+#[test]
+fn cluster_endpoint_lifecycle_accepts_the_arn_form_throughout() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let arn = "arn:aws:rds:us-east-1:000000000000:cluster-endpoint:ep-1";
+
+    // Created BY ARN: the row must not be keyed by the ARN, or nothing
+    // below can address it.
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", arn),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        body.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "the endpoint was stored under its ARN: {body}"
+    );
+
+    ok_on(
+        &svc,
+        "ModifyDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", arn),
+            ("EndpointType", "ANY"),
+        ],
+    );
+
+    // Deleting by ARN reports the endpoint as deleting, not as the
+    // `available` it was a moment ago.
+    let body = body_of_action(
+        &svc,
+        "DeleteDBClusterEndpoint",
+        &[("DBClusterEndpointIdentifier", arn)],
+    );
+    assert!(
+        body.contains("<Status>deleting</Status>"),
+        "the delete response reported a live endpoint: {body}"
+    );
+    assert!(
+        body.contains("<CustomEndpointType>ANY</CustomEndpointType>"),
+        "the delete response dropped the endpoint's fields: {body}"
+    );
+}
+
+/// An empty identifier reaches the operation's DECLARED fault rather
+/// than InvalidParameterValue, which the RDS model does not define.
+#[test]
+fn an_empty_endpoint_identifier_uses_the_declared_fault() {
+    let svc = svc();
+    for action in ["ModifyDBClusterEndpoint", "DeleteDBClusterEndpoint"] {
+        for params in [
+            vec![("DBClusterEndpointIdentifier", "")],
+            vec![("EndpointType", "READER")],
+        ] {
+            match svc.handle_extra_action(&req(action, &params)) {
+                Err(err) => assert_eq!(
+                    err.code(),
+                    "DBClusterEndpointNotFoundFault",
+                    "{action} with {params:?}"
+                ),
+                Ok(_) => panic!("{action} succeeded with no identifier"),
+            }
+        }
+    }
+}
+
+/// The create side of backtracks accepts the ARN its Describe accepts.
+#[test]
+fn backtrack_db_cluster_accepts_an_arn_identifier() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .default_mut()
+            .extras
+            .get_mut("clusters")
+            .and_then(|m| m.get_mut("clu-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-mysql"));
+            entry.insert("Status".to_string(), json!("available"));
+        }
+    }
+
+    ok_on(
+        &svc,
+        "BacktrackDBCluster",
+        &[
+            (
+                "DBClusterIdentifier",
+                "arn:aws:rds:us-east-1:000000000000:cluster:clu-1",
+            ),
+            ("BacktrackTo", "2026-01-01T00:00:00Z"),
+        ],
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
+    assert!(
+        body.contains("<DBClusterBacktrack>"),
+        "a backtrack created by ARN was filed under the ARN: {body}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();

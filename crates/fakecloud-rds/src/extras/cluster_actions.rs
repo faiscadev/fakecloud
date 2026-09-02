@@ -682,7 +682,16 @@ pub(super) fn backtrack_db_cluster_action(
     req: &AwsRequest,
     rid: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
-    let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+    // Reduced from an ARN, as DescribeDBClusterBacktracks does: a client
+    // that uses the ARN form consistently could otherwise list a
+    // cluster's backtracks but not create one, because the lookup below
+    // would report an existing cluster as not found.
+    let id = crate::filters::requested_identifier(
+        get_param(req, "DBClusterIdentifier"),
+        "cluster",
+        account_id,
+    )
+    .ok_or_else(|| missing("DBClusterIdentifier"))?;
     let backtrack_to = get_param(req, "BacktrackTo").ok_or_else(|| missing("BacktrackTo"))?;
     let arn = Arn::new("rds", region, account_id, &format!("cluster:{id}")).to_string();
     let entry = cluster_entry(svc, account_id, &id)?;

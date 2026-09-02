@@ -88,6 +88,27 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
     labels
 }
 
+/// The row as the delete response reports it.
+fn deleting(mut entry: Value) -> Value {
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("Status".to_string(), json!("deleting"));
+    }
+    entry
+}
+
+/// The endpoint identifier a request addresses, reduced from an ARN.
+///
+/// Never fails: an absent or empty value falls through as `""`, which
+/// matches no stored endpoint and so reaches the operation's own
+/// declared fault. Raising `missing()` instead would put
+/// `InvalidParameterValue` on the wire, and that error is not declared
+/// anywhere in the RDS model.
+fn endpoint_identifier(req: &AwsRequest, account_id: &str) -> String {
+    let raw = get_param(req, "DBClusterEndpointIdentifier").unwrap_or_default();
+    crate::filters::requested_identifier(Some(raw.clone()), "cluster-endpoint", account_id)
+        .unwrap_or(raw)
+}
+
 /// A stored endpoint, in the shape a CUSTOM endpoint reports.
 ///
 /// Rows written before `CustomEndpointType` was derived carry the
@@ -1565,11 +1586,14 @@ impl RdsService {
 
             // ── DB Cluster endpoints ──
             "CreateDBClusterEndpoint" => {
-                let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
-                // Reduced from an ARN before it is stored: the Describe
-                // side normalizes the request's identifier, so an
-                // endpoint created with the ARN form would otherwise
-                // never match a lookup by the bare id.
+                // Reduced like Modify, Delete and Describe reduce it:
+                // a row keyed by the ARN form is one no later call can
+                // address.
+                let id = endpoint_identifier(req, &aid);
+                // The cluster identifier is reduced the same way: the
+                // Describe side normalizes it, so an endpoint created
+                // with the ARN form would otherwise never match a
+                // lookup by the bare id.
                 // The same fail-closed reduction the Describe side uses.
                 // `normalized_identifier` alone reports None for an ARN
                 // it can't resolve, which would store an EMPTY cluster id
@@ -1637,12 +1661,7 @@ impl RdsService {
                 // round-trip the ARN they read back, and matching it
                 // against the stored bare identifier would report an
                 // endpoint that exists as missing.
-                let id = crate::filters::requested_identifier(
-                    get_param(req, "DBClusterEndpointIdentifier"),
-                    "cluster-endpoint",
-                    &aid,
-                )
-                .ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
+                let id = endpoint_identifier(req, &aid);
                 let static_members = parse_member_list(req, "StaticMembers");
                 let excluded_members = parse_member_list(req, "ExcludedMembers");
                 let mut accounts = write_state!();
@@ -1690,12 +1709,7 @@ impl RdsService {
                 // Same reduction as Modify and Describe. Without it the
                 // fail-closed delete below turns an ARN a caller read
                 // back from this very API into a hard destroy failure.
-                let id = crate::filters::requested_identifier(
-                    get_param(req, "DBClusterEndpointIdentifier"),
-                    "cluster-endpoint",
-                    &aid,
-                )
-                .ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
+                let id = endpoint_identifier(req, &aid);
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 // Declared on this operation. Reporting success for an
@@ -1722,7 +1736,11 @@ impl RdsService {
                     // The modeled output is the whole DBClusterEndpoint,
                     // not just its identifier: a caller reading the
                     // delete response got an almost-empty struct.
-                    cluster_endpoint_xml(&as_custom_endpoint(removed)),
+                    // AWS reports the endpoint as `deleting`, not with
+                    // the `available` it had a moment ago: a caller
+                    // polling the delete response would otherwise read
+                    // "present and healthy" for a resource that is gone.
+                    cluster_endpoint_xml(&deleting(as_custom_endpoint(removed))),
                     &rid,
                 ))
             }
