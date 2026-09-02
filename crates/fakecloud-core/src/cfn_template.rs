@@ -286,9 +286,44 @@ fn exceeds_nesting_limit(body: &str) -> bool {
 /// scalar, and `Resources: # |` really does not — treating the latter as one
 /// would skip every indented line after it and step around the depth guard.
 fn opens_block_scalar(line: &str) -> bool {
-    let trimmed = line.trim_end();
-    let head = trimmed.trim_end_matches(|c: char| c == '-' || c == '+' || c.is_ascii_digit());
-    head.ends_with('|') || head.ends_with('>')
+    // Strip the key and any sequence markers, then require the VALUE to be
+    // exactly the indicator. A suffix test is not enough: `Body: ||` and
+    // `Command: echo a |` both end with `|` without opening anything, and
+    // treating them as headers skips every indented line after them — which
+    // steps around the depth guard.
+    let mut value = line.trim();
+    while let Some(rest) = value.strip_prefix("- ") {
+        value = rest.trim_start();
+    }
+    if let Some((_key, rest)) = value.split_once(KEY_VALUE_SEP) {
+        value = rest.trim();
+    } else if value.ends_with(':') {
+        value = "";
+    }
+    is_block_indicator(value)
+}
+
+/// The key/value separator. Split on `": "` rather than a bare colon so a
+/// value that contains one (`Arn: arn:aws:...`) is not truncated.
+const KEY_VALUE_SEP: &str = ": ";
+
+/// A block-scalar indicator: `|` or `>`, optionally with the chomping (`-`,
+/// `+`) and explicit-indentation (a digit) indicators in either order.
+fn is_block_indicator(value: &str) -> bool {
+    let mut chars = value.chars();
+    if !matches!(chars.next(), Some('|') | Some('>')) {
+        return false;
+    }
+    let rest: Vec<char> = chars.collect();
+    match rest.len() {
+        0 => true,
+        1 => rest[0] == '-' || rest[0] == '+' || rest[0].is_ascii_digit(),
+        2 => {
+            (rest[0].is_ascii_digit() && (rest[1] == '-' || rest[1] == '+'))
+                || ((rest[0] == '-' || rest[0] == '+') && rest[1].is_ascii_digit())
+        }
+        _ => false,
+    }
 }
 
 /// How many physical lines a quoted scalar may span before the pre-scan stops
@@ -1044,6 +1079,54 @@ Resources:
             "[".repeat(MAX_NESTING_DEPTH + 50)
         );
         assert!(exceeds_nesting_limit(&hash_in_scalar));
+    }
+
+    #[test]
+    fn only_a_bare_indicator_opens_a_block_scalar() {
+        // Real headers, including sequence items and every indicator spelling.
+        for header in [
+            "Body: |",
+            "Body: >",
+            "Body: |-",
+            "Body: |+",
+            "Body: >2",
+            "Body: |2-",
+            "Body: |-2",
+            "- |",
+            "Body:  |  ",
+            "Body: | # note",
+        ] {
+            assert!(
+                opens_block_scalar(header.split(" #").next().unwrap()),
+                "{header:?} should open a block scalar"
+            );
+        }
+        // Values that merely END with an indicator open nothing. Skipping the
+        // indented lines after these would step around the depth guard.
+        for not_header in [
+            "Body: ||",
+            "Body: >>",
+            "Command: echo a |",
+            "Body: a|",
+            "Resources:",
+            "Body: |x",
+            "Arn: arn:aws:s3:::b |",
+        ] {
+            assert!(
+                !opens_block_scalar(not_header),
+                "{not_header:?} must not open a block scalar"
+            );
+        }
+
+        // End to end: the bypass shape must still be caught.
+        let bypass = format!(
+            "Resources:\n  Q:\n    Body: ||\n      V: {}\n",
+            "[".repeat(MAX_NESTING_DEPTH + 50)
+        );
+        assert!(
+            exceeds_nesting_limit(&bypass),
+            "`||` must not suppress the lines after it"
+        );
     }
 
     #[test]
