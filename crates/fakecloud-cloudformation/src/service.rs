@@ -1351,11 +1351,13 @@ impl CloudFormationService {
     /// normal companion to `--use-previous-template`) and were drifting apart
     /// with one copy each.
     ///
-    /// The insert is unconditional because template defaults have already been
-    /// merged into `parameters` by the time this runs: a `contains_key` guard
-    /// would skip a defaulted parameter and silently revert an explicitly-set
-    /// value. `UsePreviousValue` and `ParameterValue` are mutually exclusive on
-    /// the wire, so nothing user-supplied is clobbered.
+    /// The insert does not check whether the key is already present: template
+    /// defaults have been merged into `parameters` by the time this runs, so a
+    /// `contains_key` guard would skip a defaulted parameter and silently
+    /// revert an explicitly-set value. It does skip an entry that carries its
+    /// own `ParameterValue` — the two fields are mutually exclusive on the
+    /// wire, and enforcing that here means a client that sends both cannot
+    /// have its explicit value clobbered.
     pub(crate) fn refill_use_previous_values(
         raw: &BTreeMap<String, String>,
         previous: &BTreeMap<String, String>,
@@ -1368,7 +1370,11 @@ impl CloudFormationService {
             let use_previous = raw
                 .get(&format!("Parameters.member.{i}.UsePreviousValue"))
                 .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-            if use_previous {
+            // An explicit value at the same index wins.
+            let has_explicit_value = raw
+                .get(&format!("Parameters.member.{i}.ParameterValue"))
+                .is_some_and(|v| !v.is_empty());
+            if use_previous && !has_explicit_value {
                 if let Some(prev) = previous.get(key) {
                     parameters.insert(key.clone(), prev.clone());
                 }
@@ -3748,6 +3754,46 @@ mod tests {
             log[1]["ResourceStatusReason"],
             serde_json::json!("Failed to create resource Fn: boom")
         );
+    }
+
+    #[test]
+    fn use_previous_value_never_clobbers_an_explicit_value() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "Parameters.member.1.ParameterKey".to_string(),
+            "A".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+        // Same index also carries an explicit value. The two are mutually
+        // exclusive on the wire, but a client that sends both must not have
+        // its explicit value silently replaced by the stored one.
+        raw.insert(
+            "Parameters.member.1.ParameterValue".to_string(),
+            "explicit".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.2.ParameterKey".to_string(),
+            "B".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.2.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+
+        let mut previous = BTreeMap::new();
+        previous.insert("A".to_string(), "stored-a".to_string());
+        previous.insert("B".to_string(), "stored-b".to_string());
+
+        let mut parameters = BTreeMap::new();
+        parameters.insert("A".to_string(), "explicit".to_string());
+        CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+
+        assert_eq!(parameters.get("A").map(String::as_str), Some("explicit"));
+        // B carries no explicit value, so it takes the stored one.
+        assert_eq!(parameters.get("B").map(String::as_str), Some("stored-b"));
     }
 
     #[test]
