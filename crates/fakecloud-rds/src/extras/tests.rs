@@ -132,18 +132,67 @@ fn describe_events_accepts_every_modeled_source_type() {
 fn describe_events_is_lenient_about_pagination_parameters() {
     let svc = svc();
 
-    // Junk and out-of-range MaxRecords clamp rather than reject.
+    // Events have to EXIST for any of this to be distinguishable: with
+    // an empty ring every marker yields an empty page, so the assertions
+    // below would hold no matter what the code did.
+    for id in ["clu-a", "clu-b", "clu-c"] {
+        create_cluster(&svc, id);
+    }
+    let all = body_of_action(&svc, "DescribeEvents", &[]);
+    assert!(
+        all.matches("<Event>").count() >= 3,
+        "expected an event per cluster: {all}"
+    );
+
+    // Junk and out-of-range MaxRecords clamp rather than reject -- and
+    // still return rows, so the clamp lands inside 1..=100 rather than
+    // on zero.
     for max_records in ["not-a-number", "0", "-5", "9999"] {
-        ok_on(&svc, "DescribeEvents", &[("MaxRecords", max_records)]);
+        let body = body_of_action(&svc, "DescribeEvents", &[("MaxRecords", max_records)]);
+        assert!(
+            body.contains("<Event>"),
+            "MaxRecords={max_records} returned nothing: {body}"
+        );
     }
 
-    // A marker that doesn't parse points past the end: an empty page,
-    // not an error.
-    let body = body_of_action(&svc, "DescribeEvents", &[("Marker", "not-an-index")]);
+    // A marker that resolves to no row points past the end: an empty
+    // page, not an error, and not the first page.
+    let body = body_of_action(&svc, "DescribeEvents", &[("Marker", "bm90LWFuLWV2ZW50")]);
     assert!(body.contains("<Events>"), "{body}");
     assert!(
         !body.contains("<Event>"),
-        "a junk marker returned rows: {body}"
+        "an unresolvable marker returned the first page: {body}"
+    );
+
+    // And a real marker resumes AFTER the row it names rather than
+    // repeating it.
+    let first = body_of_action(&svc, "DescribeEvents", &[("MaxRecords", "1")]);
+    let marker = first
+        .split("<Marker>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Marker>").next())
+        .expect("a marker for the next page")
+        .to_string();
+    let first_id = first
+        .split("<SourceIdentifier>")
+        .nth(1)
+        .and_then(|rest| rest.split("</SourceIdentifier>").next())
+        .expect("an event")
+        .to_string();
+    let second = body_of_action(
+        &svc,
+        "DescribeEvents",
+        &[("MaxRecords", "1"), ("Marker", &marker)],
+    );
+    let second_id = second
+        .split("<SourceIdentifier>")
+        .nth(1)
+        .and_then(|rest| rest.split("</SourceIdentifier>").next())
+        .expect("an event")
+        .to_string();
+    assert_ne!(
+        first_id, second_id,
+        "the second page repeated the first row: {second}"
     );
 }
 

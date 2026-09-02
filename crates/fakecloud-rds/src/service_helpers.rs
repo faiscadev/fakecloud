@@ -512,18 +512,19 @@ fn is_valid_instance_size(size: &str) -> bool {
 
 pub(crate) fn validate_db_instance_class(db_instance_class: &str) -> Result<(), AwsServiceError> {
     if !is_valid_db_instance_class(db_instance_class) {
-        // InsufficientDBInstanceCapacity, not InvalidParameterValue: the
-        // latter is declared nowhere in the RDS model, so it put an
-        // undeclared shape on the wire for CreateDBInstance and
-        // ModifyDBInstance, both of which DO declare this one -- and the
-        // sibling engine-version check a few lines up already reports an
-        // unavailable configuration this way. A class this emulator does
-        // not recognize is a class it cannot provide capacity for.
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InsufficientDBInstanceCapacity",
-            format!("DB instance class {db_instance_class} is not available."),
-        ));
+        // AWS returns InvalidParameterValue for a MALFORMED class, and
+        // InsufficientDBInstanceCapacity only for a well-formed one that
+        // is momentarily unavailable -- a transient condition whose
+        // documented remedy is to retry. Reporting a typo as a capacity
+        // problem would name no parameter and tell the caller to retry
+        // something that can never succeed. InvalidParameterValue is one
+        // of RDS's published Common Errors; it appears nowhere in the
+        // Smithy file, which is why the conformance classifier carries an
+        // `rds` common-error entry rather than this being bent to a
+        // declared-but-wrong shape.
+        return Err(invalid_param(&format!(
+            "Invalid DB Instance class: {db_instance_class}"
+        )));
     }
     Ok(())
 }
@@ -2506,7 +2507,7 @@ mod instance_class_tests {
     }
 
     #[test]
-    fn rejects_malformed_classes_with_a_declared_fault() {
+    fn rejects_malformed_classes_with_invalid_parameter_value() {
         for class in [
             "notaclass",          // no `db.` prefix, no segments
             "db.foo",             // only two segments
@@ -2524,16 +2525,12 @@ mod instance_class_tests {
                 !is_valid_db_instance_class(class),
                 "expected {class:?} to be rejected"
             );
-            // The DECLARED fault: InvalidParameterValue appears nowhere
-            // in the RDS model, so raising it here put an undeclared
-            // shape on the wire for the two operations that validate a
-            // class.
+            // AWS's own answer for a malformed class, and one of RDS's
+            // published Common Errors -- see the note on the conformance
+            // classifier's `rds` entry for why that is in-contract
+            // despite appearing nowhere in the Smithy file.
             let err = validate_db_instance_class(class).unwrap_err();
-            assert_eq!(
-                err.code(),
-                "InsufficientDBInstanceCapacity",
-                "for {class:?}"
-            );
+            assert_eq!(err.code(), "InvalidParameterValue", "for {class:?}");
         }
     }
 

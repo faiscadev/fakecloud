@@ -274,9 +274,9 @@ A restored cluster carries no associations: neither `RestoreDBClusterFromSnapsho
 
 ## Events and instance classes
 
-`DescribeEvents` accepts every `SourceType` the Smithy model defines, including `db-shard-group` and `zero-etl`. A value outside that set is rejected; `MaxRecords` and `Marker` are lenient, matching the other paginated Describes -- an out-of-range or unparseable `MaxRecords` clamps to 1..100, and a marker that doesn't resolve returns an empty page rather than an error.
+`DescribeEvents` accepts every `SourceType` the Smithy model defines, including `db-shard-group` and `zero-etl`. A value outside that set is rejected with `InvalidParameterValue`. `MaxRecords` and `Marker` are lenient, matching the other paginated Describes -- an out-of-range or unparseable `MaxRecords` clamps to 1..100, and a marker that resolves to no row returns an empty page rather than an error. The marker names the event to resume after (its timestamp and source identifier, base64-encoded), not an index: RDS emits an event on nearly every write, so an index would shift between pages and skip or repeat rows.
 
-An unrecognized `DBInstanceClass` on `CreateDBInstance` or `ModifyDBInstance` raises `InsufficientDBInstanceCapacity`, which both operations declare, rather than `InvalidParameterValue`, which the RDS model declares nowhere. The sibling engine-version check reports an unavailable configuration the same way.
+A malformed `DBInstanceClass` on `CreateDBInstance` or `ModifyDBInstance` raises `InvalidParameterValue`, as AWS does; a well-formed class that cannot be provided raises `InsufficientDBInstanceCapacity`. `InvalidParameterValue`, `InvalidParameterCombination` and `MissingParameter` are RDS's published Common Errors -- every operation can return them -- but they appear nowhere in the Smithy file, so the conformance classifier carries them in its per-service common-error list rather than these handlers being bent to a declared-but-wrong shape.
 
 ## Gotchas
 

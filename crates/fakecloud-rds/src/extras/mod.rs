@@ -10,6 +10,7 @@
 //! `RdsState`. Returns valid Query-protocol XML responses with
 //! stable IDs so SDK callers can chain operations.
 
+use base64::Engine as _;
 use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -4298,30 +4299,47 @@ impl RdsService {
             })
             .collect();
 
-        // MaxRecords (1..=100, default 100) and Marker pagination. We key
-        // the marker by the event's RFC3339 timestamp + identifier so
-        // duplicate dates still paginate deterministically.
-        // Clamped and lenient, matching `service_helpers::paginate` and
-        // for its reason: no Describe operation declares an
-        // InvalidParameterValue-equivalent, and real RDS is lenient on
-        // an out-of-range MaxRecords. This handler rolled its own
-        // pagination and rejected instead.
+        // MaxRecords (1..=100, default 100) clamped and lenient, matching
+        // `service_helpers::paginate` and for its reason: no Describe
+        // operation declares an InvalidParameterValue-equivalent, and
+        // real RDS is lenient on an out-of-range MaxRecords. This handler
+        // rolled its own pagination and rejected instead.
         let max_records: usize = match get_param(req, "MaxRecords").map(|raw| raw.parse::<i32>()) {
             Some(Ok(parsed)) => parsed.clamp(1, 100) as usize,
             Some(Err(_)) | None => 100,
         };
 
-        // A marker that doesn't parse points past the end of the list,
-        // as an unrecognized marker does in `paginate` -- the caller
-        // gets an empty page rather than an error shape the operation
-        // never declares.
+        // The marker names the ROW to resume at -- the event's timestamp
+        // and identifier -- not its index. An index is a position in a
+        // freshly filtered-and-sorted list, and RDS emits an event on
+        // every create and modify, so anything happening between two
+        // pages shifted the list and made the index skip or repeat rows.
+        // Keying on the row itself is what the comment here always
+        // claimed and what `paginate` does.
+        //
+        // A marker that resolves to no row points past the end, as an
+        // unrecognized marker does in `paginate` -- an empty page rather
+        // than an error shape this operation never declares.
+        let event_key = |e: &crate::state::RdsEventRecord| {
+            format!("{}|{}", e.date.to_rfc3339(), e.source_identifier)
+        };
         let start_index = match get_param(req, "Marker") {
-            Some(marker) => marker.parse::<usize>().unwrap_or(usize::MAX),
+            Some(marker) => base64::engine::general_purpose::STANDARD
+                .decode(marker.as_bytes())
+                .ok()
+                .and_then(|decoded| String::from_utf8(decoded).ok())
+                .and_then(|key| filtered.iter().position(|e| event_key(e) == key))
+                .map(|position| position + 1)
+                .unwrap_or(usize::MAX),
             None => 0,
         };
         let end_index = std::cmp::min(start_index.saturating_add(max_records), filtered.len());
         let next_marker = if end_index < filtered.len() {
-            Some(end_index.to_string())
+            // The LAST row of this page: the next request resumes after
+            // it, wherever it has moved to by then.
+            filtered
+                .get(end_index - 1)
+                .map(|e| base64::engine::general_purpose::STANDARD.encode(event_key(e).as_bytes()))
         } else {
             None
         };
