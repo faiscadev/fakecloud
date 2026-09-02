@@ -3125,9 +3125,30 @@ impl RdsService {
                     // the second feature as a duplicate -- then removed
                     // whichever entry came first when asked to detach
                     // one of them.
-                    let position = roles.iter().position(|role| {
+                    let exact = |role: &Value| {
                         entry_str(role, "RoleArn") == Some(role_arn.as_str())
                             && entry_str(role, "FeatureName") == feature_name.as_deref()
+                    };
+                    let position = roles.iter().position(&exact).or_else(|| {
+                        // FeatureName is OPTIONAL on the cluster
+                        // operations. A remove that names only the role
+                        // disassociates it when that is unambiguous --
+                        // exactly one association carries the ARN. With
+                        // several, the caller has to say which, because
+                        // guessing is how the ARN-only matching this
+                        // replaced removed the wrong one.
+                        if adding || feature_name.is_some() {
+                            return None;
+                        }
+                        let mut matching = roles
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, role)| {
+                                entry_str(role, "RoleArn") == Some(role_arn.as_str())
+                            })
+                            .map(|(index, _)| index);
+                        let only = matching.next()?;
+                        matching.next().is_none().then_some(only)
                     });
                     match (adding, position) {
                         (true, Some(_)) => {

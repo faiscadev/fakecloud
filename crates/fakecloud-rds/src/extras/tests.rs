@@ -4970,6 +4970,84 @@ fn a_failed_role_request_does_not_write_to_the_cluster() {
     );
 }
 
+/// FeatureName is optional on the cluster operations, so a remove that
+/// names only the role works when that is unambiguous -- and refuses to
+/// guess when it isn't.
+#[test]
+fn removing_a_cluster_role_without_a_feature_resolves_only_when_unambiguous() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let role = "arn:aws:iam::000000000000:role/s3";
+
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+
+    // One association carries the ARN, so naming just the role is
+    // unambiguous.
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(stored.get("AssociatedRoles").is_none(), "{stored}");
+
+    // Two features on one role: naming only the role is ambiguous, and
+    // guessing is how the ARN-only matching removed the wrong one.
+    for feature in ["s3Import", "s3Export"] {
+        ok_on(
+            &svc,
+            "AddRoleToDBCluster",
+            &[
+                ("DBClusterIdentifier", "clu-1"),
+                ("RoleArn", role),
+                ("FeatureName", feature),
+            ],
+        );
+    }
+    match svc.handle_extra_action(&req(
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Ok(_) => panic!("an ambiguous remove guessed an association"),
+    }
+    // Both survive it.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert_eq!(
+        body.matches(&format!("<RoleArn>{role}</RoleArn>")).count(),
+        2,
+        "an ambiguous remove deleted an association: {body}"
+    );
+
+    // Naming the feature still resolves exactly one.
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Export"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("<FeatureName>s3Export</FeatureName>"),
+        "{body}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();
