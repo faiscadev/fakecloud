@@ -173,6 +173,7 @@ impl ResourceProvisioner {
             stack_id: child_stack_id.clone(),
             template: template_body.clone(),
             status: "CREATE_COMPLETE".to_string(),
+            status_reason: None,
             resources: child_resources.clone(),
             parameters: child_parameters,
             tags: child_tags,

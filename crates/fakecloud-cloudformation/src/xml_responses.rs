@@ -154,16 +154,29 @@ fn stack_member_xml(stack: &Stack) -> String {
         r#"      <member>
         <StackName>{name}</StackName>
         <StackId>{id}</StackId>
-        <StackStatus>{status}</StackStatus>
+        <StackStatus>{status}</StackStatus>{status_reason_xml}
         <CreationTime>{created}</CreationTime>
         <EnableTerminationProtection>{termination_protection}</EnableTerminationProtection>{description_xml}{tags_xml}{params_xml}{notification_arns_xml}{outputs_xml}
       </member>"#,
         name = xml_escape(&stack.name),
         id = xml_escape(&stack.stack_id),
         status = xml_escape(&stack.status),
+        status_reason_xml = status_reason_xml(stack.status_reason.as_deref()),
         created = stack.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
         termination_protection = stack.enable_termination_protection,
     )
+}
+
+/// `StackStatusReason` element, emitted only when the stack carries a reason.
+/// AWS omits the member entirely on a healthy stack rather than sending an
+/// empty one.
+fn status_reason_xml(reason: Option<&str>) -> String {
+    reason.map_or_else(String::new, |r| {
+        format!(
+            "\n        <StackStatusReason>{}</StackStatusReason>",
+            xml_escape(r)
+        )
+    })
 }
 
 pub fn list_stacks_response(stacks: &[Stack], request_id: &str) -> String {
@@ -174,12 +187,13 @@ pub fn list_stacks_response(stacks: &[Stack], request_id: &str) -> String {
                 r#"      <member>
         <StackName>{name}</StackName>
         <StackId>{id}</StackId>
-        <StackStatus>{status}</StackStatus>
+        <StackStatus>{status}</StackStatus>{status_reason_xml}
         <CreationTime>{created}</CreationTime>
       </member>"#,
                 name = xml_escape(&s.name),
                 id = xml_escape(&s.stack_id),
                 status = xml_escape(&s.status),
+                status_reason_xml = status_reason_xml(s.status_reason.as_deref()),
                 created = s.created_at.format("%Y-%m-%dT%H:%M:%SZ"),
             )
         })
@@ -313,6 +327,7 @@ mod tests {
             .to_string(),
             template: "{}".to_string(),
             status: "CREATE_COMPLETE".to_string(),
+            status_reason: None,
             resources: vec![],
             parameters: BTreeMap::new(),
             tags: BTreeMap::new(),
@@ -367,6 +382,29 @@ mod tests {
         assert!(xml.contains("<StackName>my-stack</StackName>"));
         assert!(xml.contains("CREATE_COMPLETE"));
         assert!(xml.contains("DescribeStacksResponse"));
+    }
+
+    #[test]
+    fn status_reason_is_emitted_only_when_present() {
+        // A healthy stack omits the member entirely, matching AWS.
+        let healthy = make_stack("healthy");
+        let xml = describe_stacks_response(std::slice::from_ref(&healthy), "req-a");
+        assert!(!xml.contains("StackStatusReason"), "{xml}");
+        assert!(!list_stacks_response(&[healthy], "req-b").contains("StackStatusReason"));
+
+        // A failed stack carries the reason on both DescribeStacks and
+        // ListStacks, XML-escaped.
+        let mut failed = make_stack("failed");
+        failed.status = "CREATE_FAILED".to_string();
+        failed.status_reason = Some("Resource <NoType> must have a Type property".to_string());
+        let xml = describe_stacks_response(std::slice::from_ref(&failed), "req-c");
+        assert!(
+            xml.contains(
+                "<StackStatusReason>Resource &lt;NoType&gt; must have a Type property</StackStatusReason>"
+            ),
+            "{xml}"
+        );
+        assert!(list_stacks_response(&[failed], "req-d").contains("<StackStatusReason>"));
     }
 
     #[test]

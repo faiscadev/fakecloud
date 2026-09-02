@@ -240,38 +240,140 @@ fn require_collection(
     }
 }
 
-/// Extract `(bucket, key)` from a CloudFormation `TemplateURL`. Handles
-/// both path-style (`https://s3.us-east-1.amazonaws.com/bucket/key`, or a
-/// fakecloud endpoint `http://127.0.0.1:4566/bucket/key`) and
-/// virtual-hosted (`https://bucket.s3.amazonaws.com/key`) forms, and
-/// drops any query string. Returns `None` if the shape isn't recognized.
-fn parse_s3_url(url: &str) -> Option<(String, String)> {
-    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+/// Whether a `TemplateURL` value is *meant* as a URL, as opposed to the
+/// synthetic scalar the conformance probe sends (`"t"`).
+///
+/// The distinction matters because an unusable URL has to be reported rather
+/// than silently ignored -- falling back to the stack's stored template
+/// re-applies the old one and reports success for an update that never
+/// happened -- while erroring on the probe's placeholder would return an
+/// undeclared `ValidationError` and drop conformance.
+pub(crate) fn looks_like_url(value: &str) -> bool {
+    if value.contains("://") {
+        return true;
+    }
+    // A single-slash typo (`s3:/bucket/app.yaml`, `https:/...`) is still
+    // plainly meant as a URL. Missing it would send the request down the
+    // lenient path and rebuild the #2480 silent no-op.
+    scheme_prefix(value).is_some_and(|rest| rest.contains('/'))
+}
+
+/// The remainder after a URL scheme prefix (`s3:`, `https:`), or `None` when
+/// the value doesn't start with one. The probe's placeholders (`t`, `test`)
+/// carry no colon, so they never look like a scheme.
+fn scheme_prefix(value: &str) -> Option<&str> {
+    let (scheme, rest) = value.split_once(':')?;
+    let looks_like_scheme = !scheme.is_empty()
+        && scheme.starts_with(|c: char| c.is_ascii_alphabetic())
+        && scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'));
+    looks_like_scheme.then_some(rest)
+}
+
+/// Extract `(bucket, key)` from a CloudFormation `TemplateURL`. Handles the
+/// `s3://bucket/key` scheme, path-style
+/// (`https://s3.us-east-1.amazonaws.com/bucket/key`, or a fakecloud endpoint
+/// `http://127.0.0.1:4566/bucket/key`) and virtual-hosted
+/// (`https://bucket.s3.amazonaws.com/key`) forms, and drops any query string.
+/// Returns `None` if the shape isn't recognized.
+/// Percent-decode an S3 object key taken from a URL path.
+///
+/// A key with a space, `#` or other reserved character arrives encoded
+/// (`my%20template.yaml`), and looking up the literal encoded text reports the
+/// template missing. Uses the same decoder `fakecloud-s3` applies to incoming
+/// keys, so the two agree by construction. Note this is NOT form decoding: `+`
+/// stays a literal plus in a path segment.
+fn percent_decode_key(key: &str) -> String {
+    percent_encoding::percent_decode_str(key)
+        .decode_utf8_lossy()
+        .into_owned()
+}
+
+pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
+    // A scheme-bearing value has to spell out `://`. `https:/b/k` (one slash)
+    // carries no authority at all, so the path-style branch below would read
+    // `b` as the bucket -- and if a bucket by that name exists, fetch and
+    // provision a DIFFERENT object. Report it as an unusable URL instead.
+    if !url.contains("://") && scheme_prefix(url).is_some() {
+        return None;
+    }
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, url),
+    };
+    // `s3://bucket/prefix/key`: the authority IS the bucket and the whole
+    // path is the key. Falling through to the path-style branch below would
+    // read the first *path* segment as the bucket -- dropping the real one,
+    // and resolving a different object entirely if a bucket happens to be
+    // named after that prefix (`s3://mybucket/templates/app.yaml` ->
+    // bucket `templates`).
+    if scheme.is_some_and(|s| s.eq_ignore_ascii_case("s3")) {
+        let (bucket, key) = rest.split_once('/')?;
+        let key = key.split(['?', '#']).next().unwrap_or(key);
+        if bucket.is_empty() || key.is_empty() {
+            return None;
+        }
+        return Some((bucket.to_string(), percent_decode_key(key)));
+    }
     let (host, after) = rest.split_once('/')?;
     let path = after.split(['?', '#']).next().unwrap_or(after);
     // Virtual-hosted: `<bucket>.s3...`. The `.s3` guard avoids treating a
     // path-style host like `s3.amazonaws.com` (no leading bucket) as one.
     if let Some(idx) = host.find(".s3") {
         let bucket = &host[..idx];
-        if !bucket.is_empty() {
-            return Some((bucket.to_string(), path.to_string()));
+        // Both other branches reject an empty key; this one must too, or
+        // `https://bucket.s3.amazonaws.com/` "parses" with no key and the
+        // caller reports a missing object rather than an unusable URL.
+        if !bucket.is_empty() && !path.is_empty() {
+            return Some((bucket.to_string(), percent_decode_key(path)));
         }
+        return None;
     }
     // Path-style: first path segment is the bucket, the rest is the key.
     let (bucket, key) = path.split_once('/')?;
     if bucket.is_empty() || key.is_empty() {
         return None;
     }
-    Some((bucket.to_string(), key.to_string()))
+    Some((bucket.to_string(), percent_decode_key(key)))
 }
 
 impl CloudFormationService {
-    /// Resolve a CloudFormation `TemplateURL` against fakecloud's own S3.
-    /// `sam deploy`, `aws cloudformation deploy`, and CDK upload the
-    /// template to S3 and pass its URL; the object is in fakecloud's S3 by
-    /// the time the change set is created, so read it back. Returns `None`
-    /// if the URL can't be parsed or the object isn't present.
-    fn fetch_template_from_url(&self, account_id: &str, url: &str) -> Option<String> {
+    /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
+    /// it can fail. AWS reports an unusable URL shape and a missing object
+    /// differently, and collapsing them into one message sends the caller
+    /// looking for a missing key when the URL itself is the problem.
+    ///
+    /// `Err` is either `TemplateURL must be a supported URL: <url>` (the shape
+    /// is unusable) or `Template not found at <url>` (well-formed, but no
+    /// object there — or an empty one).
+    ///
+    /// The caller is expected to have already decided the value is meant as a
+    /// URL (`looks_like_url`); a synthetic non-URL scalar must not reach here.
+    pub(crate) fn resolve_template_url(
+        &self,
+        account_id: &str,
+        url: &str,
+    ) -> Result<String, String> {
+        if parse_s3_url(url).is_none() {
+            return Err(format!("TemplateURL must be a supported URL: {url}"));
+        }
+        // An object that exists but is empty (a truncated `aws s3 cp`, a
+        // `sam package` that wrote nothing) counts as absent: an empty body
+        // parses to no resources and would report success having built
+        // nothing.
+        self.fetch_template_from_url(account_id, url)
+            .filter(|body| !body.trim().is_empty())
+            .ok_or_else(|| format!("Template not found at {url}"))
+    }
+
+    /// Read a CloudFormation `TemplateURL` out of fakecloud's own S3.
+    /// `sam deploy`, `aws cloudformation deploy`, and CDK upload the template
+    /// to S3 and pass its URL; the object is in fakecloud's S3 by the time the
+    /// stack or change set is created, so read it back. Returns `None` if the
+    /// URL can't be parsed or the object isn't present — callers that need to
+    /// tell those apart should use `resolve_template_url`.
+    pub(crate) fn fetch_template_from_url(&self, account_id: &str, url: &str) -> Option<String> {
         let (bucket, key) = parse_s3_url(url)?;
         let mut accounts = self.deps.s3.write();
         let state = accounts.get_or_create(account_id);
@@ -309,15 +411,62 @@ impl CloudFormationService {
                 // fakecloud's own S3 at this point, so fetch it back instead
                 // of storing an empty template and silently no-op'ing at
                 // execute time (issue #1646).
+                // The stack's stored template + parameters, for
+                // `UsePreviousTemplate` / `UsePreviousValue`.
+                let previous: Option<(String, BTreeMap<String, String>)> = {
+                    let accounts = self.state.read();
+                    accounts.get(&aid).and_then(|s| {
+                        s.stacks
+                            .values()
+                            .find(|st| {
+                                (st.name == stack_name || st.stack_id == stack_name)
+                                    && st.status != "DELETE_COMPLETE"
+                            })
+                            .map(|st| (st.template.clone(), st.parameters.clone()))
+                    })
+                };
                 let template_body = {
                     let inline = params.get("TemplateBody").cloned().unwrap_or_default();
-                    if inline.trim().is_empty() {
-                        params
-                            .get("TemplateURL")
-                            .and_then(|url| self.fetch_template_from_url(&aid, url))
-                            .unwrap_or(inline)
-                    } else {
+                    if !inline.trim().is_empty() {
                         inline
+                    } else if let Some(url) =
+                        params.get("TemplateURL").filter(|u| looks_like_url(u))
+                    {
+                        // A URL that was given has to resolve. Falling back to
+                        // the stored template would diff against the old one,
+                        // report zero changes, and let ExecuteChangeSet claim
+                        // success having applied nothing — `sam deploy`
+                        // against a key that doesn't round-trip would print
+                        // "no changes to deploy". CreateStack and UpdateStack
+                        // both hard-fail this condition.
+                        //
+                        // The shape guard matters: the probe's
+                        // `optional_TemplateURL` variant sends `"t"` and
+                        // expects success, and `ValidationError` is not in
+                        // CreateChangeSet's Smithy `errors`. A value that
+                        // isn't meant as a URL takes the lenient path below;
+                        // one that is but cannot be read is reported.
+                        match self.resolve_template_url(&aid, url) {
+                            Ok(body) => body,
+                            Err(err) => {
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "ValidationError",
+                                    err,
+                                ))
+                            }
+                        }
+                    } else {
+                        // `UsePreviousTemplate=true` sends neither a body nor
+                        // a URL. Leaving it empty skips the diff entirely, so
+                        // the change set records zero changes and
+                        // ExecuteChangeSet's empty-body short-circuit marks it
+                        // EXECUTE_COMPLETE without applying anything — a
+                        // parameter-only deploy accepted and discarded.
+                        previous
+                            .as_ref()
+                            .map(|(tpl, _)| tpl.clone())
+                            .unwrap_or(inline)
                     }
                 };
                 // `ChangeSetType` is `CREATE` for first-time deploys (the
@@ -330,6 +479,17 @@ impl CloudFormationService {
 
                 let mut cs_params = CloudFormationService::extract_parameters(&params);
                 CloudFormationService::merge_parameter_defaults(&mut cs_params, &template_body);
+                // ExecuteChangeSet assigns `stack.parameters = cs_params`, so
+                // a `UsePreviousValue` entry that isn't refilled here is
+                // dropped (or reset to its template default) and every `Ref`
+                // to it resolves wrong.
+                if let Some((_, prev_params)) = &previous {
+                    CloudFormationService::refill_use_previous_values(
+                        &params,
+                        prev_params,
+                        &mut cs_params,
+                    );
+                }
                 let cs_tags = CloudFormationService::extract_tags(&params);
                 let cs_notif = CloudFormationService::extract_notification_arns(&params);
 
@@ -385,8 +545,29 @@ impl CloudFormationService {
                     // Treat parse failures here as an empty diff rather than
                     // emitting an undeclared `ValidationError` (CreateChangeSet's
                     // Smithy `errors` list doesn't include it).
-                    let parsed =
-                        template::parse_template(&template_body, &full_params).unwrap_or_default();
+                    //
+                    // A real template document that won't parse is different:
+                    // an empty parse result makes the diff list every existing
+                    // resource as `Remove`, so DescribeChangeSet shows a full
+                    // teardown plan for what is really a syntax error, and the
+                    // user only finds out at ExecuteChangeSet. Reject it up
+                    // front with the same `ValidationError` ExecuteChangeSet
+                    // already returns for an unparseable template; placeholder
+                    // bodies keep the lenient branch, so the probe never sees
+                    // it.
+                    let parsed = match template::parse_template(&template_body, &full_params) {
+                        Ok(parsed) => parsed,
+                        Err(err) => {
+                            if fakecloud_core::cfn_template::is_template_document(&template_body) {
+                                return Err(AwsServiceError::aws_error(
+                                    StatusCode::BAD_REQUEST,
+                                    "ValidationError",
+                                    err,
+                                ));
+                            }
+                            template::ParsedTemplate::default()
+                        }
+                    };
 
                     let existing_resources = stack_lookup
                         .as_ref()
@@ -525,6 +706,7 @@ impl CloudFormationService {
                                     stack_id: stack_id_str.clone(),
                                     template: String::new(),
                                     status: "REVIEW_IN_PROGRESS".to_string(),
+                                    status_reason: None,
                                     resources: Vec::new(),
                                     parameters: BTreeMap::new(),
                                     tags: BTreeMap::new(),
@@ -843,6 +1025,7 @@ impl CloudFormationService {
                         {
                             if stack.status == "REVIEW_IN_PROGRESS" {
                                 stack.status = "CREATE_COMPLETE".to_string();
+                                stack.status_reason = None;
                                 stack.updated_at = Some(Utc::now());
                             }
                         }
@@ -974,6 +1157,10 @@ impl CloudFormationService {
                         (false, true) => "UPDATE_ROLLBACK_COMPLETE",
                     }
                     .to_string();
+                    // Track the reason alongside the status: a success must
+                    // clear any reason left by an earlier failure, and a
+                    // rollback must say why it rolled back.
+                    stack.status_reason = result.as_ref().err().map(ToString::to_string);
                     stack.parameters = cs_params.clone();
                     if !cs_tags.is_empty() {
                         stack.tags = cs_tags;
@@ -1018,12 +1205,16 @@ impl CloudFormationService {
                     }
                     Err(_) => failed,
                 };
-                crate::service::record_stack_status_event(
+                // Carry the failure reason onto the terminal event, so
+                // DescribeStackEvents explains a failed execution instead of
+                // reporting a bare ROLLBACK_COMPLETE.
+                crate::service::record_stack_status_event_with_reason(
                     state,
                     &sid,
                     &stack_name_owned,
                     "AWS::CloudFormation::Stack",
                     final_status,
+                    update_result.as_ref().err().map(String::as_str),
                 );
 
                 if let Some(m) = state.extras.get_mut("change_sets") {
@@ -2127,7 +2318,7 @@ impl CloudFormationService {
                         "    <StackEvents>\n{}\n    </StackEvents>",
                         members_xml(&events, |v| {
                             format!(
-                            "        <EventId>{}</EventId>\n        <StackId>{}</StackId>\n        <StackName>{}</StackName>\n        <LogicalResourceId>{}</LogicalResourceId>\n        <PhysicalResourceId>{}</PhysicalResourceId>\n        <ResourceType>{}</ResourceType>\n        <ResourceStatus>{}</ResourceStatus>\n        <Timestamp>{}</Timestamp>",
+                            "        <EventId>{}</EventId>\n        <StackId>{}</StackId>\n        <StackName>{}</StackName>\n        <LogicalResourceId>{}</LogicalResourceId>\n        <PhysicalResourceId>{}</PhysicalResourceId>\n        <ResourceType>{}</ResourceType>\n        <ResourceStatus>{}</ResourceStatus>{}\n        <Timestamp>{}</Timestamp>",
                             xml_escape(v["EventId"].as_str().unwrap_or("")),
                             xml_escape(v["StackId"].as_str().unwrap_or("")),
                             xml_escape(v["StackName"].as_str().unwrap_or("")),
@@ -2135,6 +2326,10 @@ impl CloudFormationService {
                             xml_escape(v["PhysicalResourceId"].as_str().unwrap_or("")),
                             xml_escape(v["ResourceType"].as_str().unwrap_or("")),
                             xml_escape(v["ResourceStatus"].as_str().unwrap_or("")),
+                            v["ResourceStatusReason"].as_str().map_or_else(String::new, |r| format!(
+                                "\n        <ResourceStatusReason>{}</ResourceStatusReason>",
+                                xml_escape(r)
+                            )),
                             xml_escape(v["Timestamp"].as_str().unwrap_or("")),
                         )
                         }),
@@ -2489,7 +2684,7 @@ impl CloudFormationService {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_s3_url;
+    use super::{looks_like_url, parse_s3_url};
     use crate::service::{CloudFormationDeps, CloudFormationService};
     use crate::state::{CloudFormationState, SharedCloudFormationState};
     use fakecloud_core::delivery::DeliveryBus;
@@ -2525,6 +2720,108 @@ mod tests {
         );
         // Not an object URL (no key).
         assert_eq!(parse_s3_url("https://s3.amazonaws.com/bucket-only"), None);
+    }
+
+    #[test]
+    fn resolve_template_url_distinguishes_bad_shape_from_missing_object() {
+        let svc = svc();
+        // Unusable URL shape (no key) -> the URL itself is the problem.
+        let err = svc
+            .resolve_template_url("000000000000", "https://s3.amazonaws.com/bucket-only")
+            .expect_err("no key");
+        assert!(
+            err.starts_with("TemplateURL must be a supported URL"),
+            "{err}"
+        );
+        // Well-formed URL, no such object -> a different message, so the
+        // caller isn't sent hunting for a key when the URL was fine.
+        let err = svc
+            .resolve_template_url("000000000000", "https://s3.amazonaws.com/b/missing.yaml")
+            .expect_err("missing object");
+        assert!(err.starts_with("Template not found at"), "{err}");
+    }
+
+    #[test]
+    fn parse_s3_url_percent_decodes_the_key() {
+        assert_eq!(
+            parse_s3_url("https://s3.amazonaws.com/b/my%20template.yaml"),
+            Some(("b".to_string(), "my template.yaml".to_string()))
+        );
+        assert_eq!(
+            parse_s3_url("s3://b/dir/caf%C3%A9.yaml"),
+            Some(("b".to_string(), "dir/café.yaml".to_string()))
+        );
+        // `+` is a literal plus in a path segment, not a space.
+        assert_eq!(
+            parse_s3_url("https://s3.amazonaws.com/b/a+b.yaml"),
+            Some(("b".to_string(), "a+b.yaml".to_string()))
+        );
+        // A malformed escape is left alone rather than dropped.
+        assert_eq!(
+            parse_s3_url("https://s3.amazonaws.com/b/100%.yaml"),
+            Some(("b".to_string(), "100%.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn virtual_hosted_url_without_a_key_is_not_an_object_url() {
+        // Both other branches reject an empty key; this one used to accept it,
+        // so a bad shape was reported as a missing object.
+        assert_eq!(parse_s3_url("https://mybucket.s3.amazonaws.com/"), None);
+        assert_eq!(parse_s3_url("https://mybucket.s3.amazonaws.com/?x=1"), None);
+        assert_eq!(
+            parse_s3_url("https://mybucket.s3.amazonaws.com/k.yaml"),
+            Some(("mybucket".to_string(), "k.yaml".to_string()))
+        );
+    }
+
+    #[test]
+    fn looks_like_url_accepts_single_slash_typos_but_not_placeholders() {
+        // Plainly meant as a URL: must be reported, not silently ignored.
+        for url in [
+            "https://b.s3.amazonaws.com/k.yaml",
+            "s3://b/k.yaml",
+            "s3:/b/k.yaml",
+            "https:/b/k.yaml",
+        ] {
+            assert!(looks_like_url(url), "{url}");
+        }
+        // The conformance probe's synthetic values must stay lenient.
+        for placeholder in ["t", "test", "aaaaaaaa", "", "not-a-url"] {
+            assert!(!looks_like_url(placeholder), "{placeholder}");
+        }
+    }
+
+    #[test]
+    fn single_slash_scheme_typos_are_not_object_urls() {
+        // No authority: reading the first path segment as the bucket could
+        // fetch a completely different object.
+        assert_eq!(parse_s3_url("https:/b/k.yaml"), None);
+        assert_eq!(parse_s3_url("s3:/mybucket/app.yaml"), None);
+        // Still classified as URL-intent, so it is reported rather than
+        // silently ignored.
+        assert!(looks_like_url("https:/b/k.yaml"));
+        // A scheme-less path is not a URL at all and keeps the lenient path.
+        assert!(!looks_like_url("b/k.yaml"));
+    }
+
+    #[test]
+    fn parse_s3_url_handles_the_s3_scheme() {
+        // The authority is the bucket and the WHOLE path is the key. Reading
+        // the first path segment as the bucket would drop `mybucket` and, if
+        // a bucket named `templates` existed, silently resolve a different
+        // object.
+        assert_eq!(
+            parse_s3_url("s3://mybucket/templates/app.yaml"),
+            Some(("mybucket".to_string(), "templates/app.yaml".to_string()))
+        );
+        assert_eq!(
+            parse_s3_url("s3://mybucket/key.yaml?versionId=abc"),
+            Some(("mybucket".to_string(), "key.yaml".to_string()))
+        );
+        // No key.
+        assert_eq!(parse_s3_url("s3://mybucket"), None);
+        assert_eq!(parse_s3_url("s3://mybucket/"), None);
     }
 
     use crate::template::ResourceDefinition;

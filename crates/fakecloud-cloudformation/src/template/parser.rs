@@ -33,11 +33,7 @@ pub fn parse_template_with_resolution(
     resource_physical_ids: &BTreeMap<String, String>,
     resource_attributes: &BTreeMap<String, BTreeMap<String, String>>,
 ) -> Result<ParsedTemplate, String> {
-    let value: Value = if template_body.trim_start().starts_with('{') {
-        serde_json::from_str(template_body).map_err(|e| format!("Invalid JSON template: {e}"))?
-    } else {
-        serde_yaml::from_str(template_body).map_err(|e| format!("Invalid YAML template: {e}"))?
-    };
+    let value: Value = fakecloud_core::cfn_template::parse_template_body(template_body)?;
 
     // Expand `Fn::ForEach::*` macros (template transform). New resources
     // and properties land in place before the rest of resolution sees the
