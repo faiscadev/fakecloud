@@ -3594,6 +3594,198 @@ fn describe_db_cluster_endpoints_pages() {
     assert!(marker.is_none(), "the last page still carried a Marker");
 }
 
+/// The modeled output is DBClusterBacktrack, not DBCluster -- and
+/// without it the caller never learns the id it needs to address the
+/// backtrack.
+#[test]
+fn backtrack_db_cluster_returns_the_backtrack_record() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .default_mut()
+            .extras
+            .get_mut("clusters")
+            .and_then(|m| m.get_mut("clu-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-mysql"));
+            entry.insert("Status".to_string(), json!("available"));
+        }
+    }
+
+    let body = body_of_action(
+        &svc,
+        "BacktrackDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("BacktrackTo", "2026-01-01T00:00:00Z"),
+        ],
+    );
+    assert!(
+        body.contains("<BacktrackIdentifier>bt-"),
+        "the response carried no backtrack id: {body}"
+    );
+    assert!(body.contains("<Status>completed</Status>"), "{body}");
+    assert!(
+        !body.contains("<Endpoint>"),
+        "the response is still a DBCluster body: {body}"
+    );
+
+    // The id it reported addresses the backtrack.
+    let id = body
+        .split("<BacktrackIdentifier>")
+        .nth(1)
+        .and_then(|rest| rest.split("</BacktrackIdentifier>").next())
+        .expect("id")
+        .to_string();
+    let listed = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("BacktrackIdentifier", &id),
+        ],
+    );
+    assert!(listed.contains(&format!("<BacktrackIdentifier>{id}</BacktrackIdentifier>")));
+}
+
+/// An explicitly empty identifier is not a request for a resource named
+/// "" -- the new hard not-found must not fire on it, and an ARN has to
+/// reduce first.
+#[test]
+fn empty_and_arn_identifiers_do_not_trip_the_not_found_checks() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    ok_on(
+        &svc,
+        "CreateDBShardGroup",
+        &[
+            ("DBShardGroupIdentifier", "sg-1"),
+            ("DBClusterIdentifier", "clu-1"),
+        ],
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBShardGroups",
+        &[("DBShardGroupIdentifier", "")],
+    );
+    assert!(
+        body.contains("<DBShardGroupIdentifier>sg-1</DBShardGroupIdentifier>"),
+        "an empty identifier 404'd instead of listing: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBShardGroups",
+        &[(
+            "DBShardGroupIdentifier",
+            "arn:aws:rds:us-east-1:000000000000:shard-group:sg-1",
+        )],
+    );
+    assert!(
+        body.contains("<DBShardGroupIdentifier>sg-1</DBShardGroupIdentifier>"),
+        "a shard group ARN 404'd: {body}"
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("BacktrackIdentifier", ""),
+        ],
+    );
+    assert!(
+        !body.contains("<DBClusterBacktrack>"),
+        "no backtracks exist yet: {body}"
+    );
+}
+
+/// The declared fault, not an empty list -- the same rule the sibling
+/// Describes apply.
+#[test]
+fn describe_db_cluster_endpoints_reports_an_unknown_cluster() {
+    let svc = svc();
+    match svc.handle_extra_action(&req(
+        "DescribeDBClusterEndpoints",
+        &[("DBClusterIdentifier", "ghost")],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("an unknown cluster returned a list"),
+    }
+}
+
+/// Create applies the same "only a CUSTOM endpoint carries a custom
+/// type" rule Modify does; otherwise the field is rendered, selectable,
+/// and then silently dropped by the next unrelated modify.
+#[test]
+fn create_cluster_endpoint_ignores_a_custom_type_on_a_reader() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-reader"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+            ("CustomEndpointType", "ANY"),
+        ],
+    );
+
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        !body.contains("<CustomEndpointType>"),
+        "a READER endpoint stored a custom type: {body}"
+    );
+    let filtered = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-custom-type"),
+            ("Filters.Filter.1.Values.Value.1", "any"),
+        ],
+    );
+    assert!(
+        !filtered.contains("<DBClusterEndpointIdentifier>"),
+        "a READER endpoint was selectable by custom type: {filtered}"
+    );
+}
+
+/// `parse_member_list` reads through the form-body fallback, so the
+/// presence check has to as well -- otherwise the members are parsed and
+/// then discarded as "never sent".
+#[test]
+fn member_lists_are_read_from_an_unmerged_form_body() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "CUSTOM"),
+        ],
+    );
+
+    let mut request = req("ModifyDBClusterEndpoint", &[]);
+    request.query_params.clear();
+    request.body = bytes::Bytes::from_static(
+        b"Action=ModifyDBClusterEndpoint&DBClusterEndpointIdentifier=ep-1&StaticMembers.member.1=inst-9",
+    );
+    svc.handle_extra_action(&request)
+        .expect("ModifyDBClusterEndpoint failed");
+
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        body.contains("<member>inst-9</member>"),
+        "members sent in the form body were parsed and then discarded: {body}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();

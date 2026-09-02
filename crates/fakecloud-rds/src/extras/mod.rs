@@ -226,9 +226,20 @@ fn rand_id() -> String {
 /// "sent empty", which are different requests: the second is asking to
 /// clear the list.
 fn member_list_present(req: &AwsRequest, prefix: &str) -> bool {
-    req.query_params
-        .keys()
-        .any(|key| key == prefix || key.starts_with(&format!("{prefix}.")))
+    let names = |key: &String| key == prefix || key.starts_with(&format!("{prefix}."));
+    if req.query_params.keys().any(names) {
+        return true;
+    }
+    // `parse_member_list` reads through `get_param`, which falls back to
+    // the form body for a request whose body was never merged into
+    // `query_params`. Checking only the query params there would parse
+    // the members and then discard them as "never sent".
+    if req.query_params.is_empty() && !req.body.is_empty() {
+        return fakecloud_core::protocol::parse_query_body(&req.body)
+            .keys()
+            .any(names);
+    }
+    false
 }
 
 pub(crate) fn xml_response(action: &str, inner: String, request_id: &str) -> AwsResponse {
@@ -1216,7 +1227,13 @@ impl RdsService {
                     cluster_entry(self, &aid, &cluster)?;
                 }
                 let filters = crate::filters::parse_filters(req);
-                let wanted = get_param(req, "BacktrackIdentifier");
+                // `normalized_identifier` also drops an explicitly
+                // empty value, which no stored record carries and which
+                // would otherwise trip the not-found check below.
+                let wanted = crate::filters::normalized_identifier(
+                    get_param(req, "BacktrackIdentifier"),
+                    "cluster-backtrack",
+                );
                 // A named backtrack that doesn't exist gets the fault the
                 // model declares for it, not an empty list -- a caller
                 // can't tell "gone" from "no rows" otherwise.
@@ -1474,7 +1491,14 @@ impl RdsService {
                 // the members define what a CUSTOM endpoint routes to --
                 // dropping them left the endpoint unreadable.
                 if let Some(obj) = entry.as_object_mut() {
-                    if let Some(custom) = get_param(req, "CustomEndpointType") {
+                    // Only a CUSTOM endpoint carries a custom type --
+                    // the same rule Modify applies. Stored on a READER
+                    // endpoint it would be rendered, be selectable by
+                    // `db-cluster-endpoint-custom-type`, and then vanish
+                    // on the next unrelated modify.
+                    if let Some(custom) = get_param(req, "CustomEndpointType")
+                        .filter(|_| kind.eq_ignore_ascii_case("CUSTOM"))
+                    {
                         obj.insert("CustomEndpointType".to_string(), json!(custom));
                     }
                     let static_members = parse_member_list(req, "StaticMembers");
@@ -1550,6 +1574,9 @@ impl RdsService {
                 let filters = crate::filters::parse_filters(req);
                 // The identifier parameters narrow the same way the
                 // filters do; AWS applies both.
+                // A named cluster that doesn't exist gets the fault the
+                // model declares on this operation, matching the sibling
+                // Describes rather than answering 200 with an empty list.
                 let wanted_endpoint = crate::filters::normalized_identifier(
                     get_param(req, "DBClusterEndpointIdentifier"),
                     "cluster-endpoint",
@@ -1558,6 +1585,9 @@ impl RdsService {
                     get_param(req, "DBClusterIdentifier"),
                     "cluster",
                 );
+                if let Some(cluster) = wanted_cluster.as_deref() {
+                    cluster_entry(self, &aid, cluster)?;
+                }
                 list_extras_filtered_xml(
                     self,
                     &aid,
@@ -2494,7 +2524,10 @@ impl RdsService {
             }
             "DescribeDBShardGroups" => {
                 let filters = crate::filters::parse_filters(req);
-                let wanted = get_param(req, "DBShardGroupIdentifier");
+                let wanted = crate::filters::normalized_identifier(
+                    get_param(req, "DBShardGroupIdentifier"),
+                    "shard-group",
+                );
                 // Declared on this operation, and the difference a
                 // polling caller needs: "deleted" rather than "exists
                 // but empty".

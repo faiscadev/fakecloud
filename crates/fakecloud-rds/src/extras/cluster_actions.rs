@@ -705,6 +705,7 @@ pub(super) fn backtrack_db_cluster_action(
     }
 
     let backtrack_id = format!("bt-{}", rand_id());
+    let backtrack_record;
     {
         let mut accounts = svc.state_handle().write();
         let state = accounts.get_or_create(account_id);
@@ -740,7 +741,8 @@ pub(super) fn backtrack_db_cluster_action(
             // be selected by the value the docs tell a caller to send.
             "Status": "completed",
         });
-        store(&mut state.extras, "cluster_backtracks").insert(backtrack_id.clone(), record);
+        store(&mut state.extras, "cluster_backtracks").insert(backtrack_id.clone(), record.clone());
+        backtrack_record = record;
     }
 
     svc.emit_event(
@@ -752,9 +754,14 @@ pub(super) fn backtrack_db_cluster_action(
         "DB cluster backtrack completed",
     );
 
+    // The modeled output is DBClusterBacktrack, not DBCluster. Returning
+    // the cluster meant the response carried no BacktrackIdentifier --
+    // the id the caller needs to address the backtrack through
+    // DescribeDBClusterBacktracks or its `db-cluster-backtrack-id`
+    // filter.
     Ok(xml_response(
         "BacktrackDBCluster",
-        cluster_xml_from_state(svc, account_id, &id, &arn),
+        super::xml_renderers::cluster_backtrack_xml(&backtrack_record),
         rid,
     ))
 }
