@@ -989,3 +989,246 @@ async fn vault_lock_accepts_valid_changeable_days() {
     .await;
     assert_eq!(body_of(&resp)["Locked"], false);
 }
+
+// ---------------------------------------------------------------------------
+// Backup access points
+// ---------------------------------------------------------------------------
+
+/// Run a backup job so there is a real recovery point to hang an access point
+/// off; returns `(recovery_point_arn, resource_arn)`.
+async fn make_recovery_point(svc: &BackupService, vault: &str, resource_arn: &str) -> String {
+    make_vault(svc, vault).await;
+    let started = body_of(
+        &call(
+            svc,
+            req(
+                Method::PUT,
+                "/backup-jobs",
+                json!({
+                    "BackupVaultName": vault,
+                    "ResourceArn": resource_arn,
+                    "IamRoleArn": "arn:aws:iam::000000000000:role/backup",
+                }),
+            ),
+        )
+        .await,
+    );
+    started["RecoveryPointArn"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn access_point_create_describe_list_delete_roundtrip() {
+    let svc = service();
+    let resource = "arn:aws:ec2:us-east-1:000000000000:volume/vol-ap1";
+    let rp = make_recovery_point(&svc, "apvault", resource).await;
+
+    let created = body_of(
+        &call(
+            &svc,
+            req(
+                Method::PUT,
+                "/backup-access-point/create",
+                json!({
+                    "Name": "my-access-point",
+                    "RecoveryPointArn": rp,
+                    "AccessPointMetadata": { "team": "core" },
+                }),
+            ),
+        )
+        .await,
+    );
+    let ap_arn = created["AccessPointArn"].as_str().unwrap().to_string();
+    assert!(ap_arn.contains(":accesspoint/my-access-point"), "{ap_arn}");
+    assert_eq!(created["Status"], "AVAILABLE");
+
+    // Describe resolves the vault and resource from the recovery point rather
+    // than echoing the request.
+    let enc = percent(&ap_arn);
+    let d = body_of(
+        &call(
+            &svc,
+            req(
+                Method::GET,
+                &format!("/backup-access-point/{enc}"),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(d["Name"], "my-access-point");
+    assert_eq!(d["RecoveryPointArn"], rp.as_str());
+    assert_eq!(d["BackupVaultName"], "apvault");
+    assert_eq!(d["ResourceArn"], resource);
+    assert_eq!(d["AccessPointMetadata"]["team"], "core");
+    assert!(d["BackupVaultArn"]
+        .as_str()
+        .unwrap()
+        .contains(":backup-vault:apvault"));
+
+    // All three list forms find it.
+    let all = body_of(&call(&svc, req(Method::GET, "/backup-access-point", json!({}))).await);
+    assert_eq!(all["BackupAccessPoints"].as_array().unwrap().len(), 1);
+
+    let by_rp = body_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("/backup-access-point/recovery-point/{}", percent(&rp)),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(
+        by_rp["BackupAccessPoints"][0]["AccessPointArn"],
+        ap_arn.as_str()
+    );
+
+    let by_res = body_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!("/backup-access-point/resource/{}", percent(resource)),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert_eq!(by_res["BackupAccessPoints"][0]["Name"], "my-access-point");
+
+    // A different recovery point / resource matches nothing.
+    let other = body_of(
+        &call(
+            &svc,
+            req(
+                Method::POST,
+                &format!(
+                    "/backup-access-point/resource/{}",
+                    percent("arn:aws:ec2:us-east-1:000000000000:volume/vol-other")
+                ),
+                json!({}),
+            ),
+        )
+        .await,
+    );
+    assert!(other["BackupAccessPoints"].as_array().unwrap().is_empty());
+
+    // Delete removes it; describing it afterwards is ResourceNotFoundException.
+    let resp = call(
+        &svc,
+        req(
+            Method::DELETE,
+            &format!("/backup-access-point/delete/{enc}"),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(resp.status.as_u16(), 204);
+    let (_, code) = call_err(
+        &svc,
+        req(
+            Method::GET,
+            &format!("/backup-access-point/{enc}"),
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(code, "ResourceNotFoundException");
+}
+
+#[tokio::test]
+async fn access_point_validates_name_and_recovery_point() {
+    let svc = service();
+    let rp = make_recovery_point(
+        &svc,
+        "valvault",
+        "arn:aws:ec2:us-east-1:000000000000:volume/vol-val",
+    )
+    .await;
+
+    // Name and RecoveryPointArn are both required.
+    let (_, code) = call_err(
+        &svc,
+        req(
+            Method::PUT,
+            "/backup-access-point/create",
+            json!({ "RecoveryPointArn": rp }),
+        ),
+    )
+    .await;
+    assert_eq!(code, "MissingParameterValueException");
+    let (_, code) = call_err(
+        &svc,
+        req(
+            Method::PUT,
+            "/backup-access-point/create",
+            json!({ "Name": "no-recovery-point" }),
+        ),
+    )
+    .await;
+    assert_eq!(code, "MissingParameterValueException");
+
+    // AccessPointName is 3..50, lower-case alphanumeric with interior hyphens.
+    for bad in ["ab", &"n".repeat(51), "Has-Upper", "-leading", "trailing-"] {
+        let (_, code) = call_err(
+            &svc,
+            req(
+                Method::PUT,
+                "/backup-access-point/create",
+                json!({ "Name": bad, "RecoveryPointArn": rp }),
+            ),
+        )
+        .await;
+        assert_eq!(code, "InvalidParameterValueException", "name {bad:?}");
+    }
+
+    // The recovery point has to exist — an access point never dangles.
+    let (_, code) = call_err(
+        &svc,
+        req(
+            Method::PUT,
+            "/backup-access-point/create",
+            json!({
+                "Name": "ghost-point",
+                "RecoveryPointArn": "arn:aws:backup:us-east-1:000000000000:recovery-point:nope",
+            }),
+        ),
+    )
+    .await;
+    assert_eq!(code, "ResourceNotFoundException");
+
+    // A duplicate name conflicts.
+    call(
+        &svc,
+        req(
+            Method::PUT,
+            "/backup-access-point/create",
+            json!({ "Name": "dupe-point", "RecoveryPointArn": rp }),
+        ),
+    )
+    .await;
+    let (_, code) = call_err(
+        &svc,
+        req(
+            Method::PUT,
+            "/backup-access-point/create",
+            json!({ "Name": "dupe-point", "RecoveryPointArn": rp }),
+        ),
+    )
+    .await;
+    assert_eq!(code, "AlreadyExistsException");
+
+    // Deleting an unknown access point is ResourceNotFoundException.
+    let (_, code) = call_err(
+        &svc,
+        req(
+            Method::DELETE,
+            "/backup-access-point/delete/arn%3Aaws%3Abackup%3Aus-east-1%3A000000000000%3Aaccesspoint%2Fnope",
+            json!({}),
+        ),
+    )
+    .await;
+    assert_eq!(code, "ResourceNotFoundException");
+}
