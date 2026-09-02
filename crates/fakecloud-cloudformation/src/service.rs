@@ -1323,15 +1323,77 @@ impl CloudFormationService {
         let mut result = BTreeMap::new();
         for i in 1.. {
             let key_param = format!("Parameters.member.{i}.ParameterKey");
-            let value_param = format!("Parameters.member.{i}.ParameterValue");
-            match (params.get(&key_param), params.get(&value_param)) {
-                (Some(k), Some(v)) => {
-                    result.insert(k.clone(), v.clone());
-                }
-                _ => break,
+            let Some(k) = params.get(&key_param) else {
+                // No key at this index: the list is exhausted.
+                break;
+            };
+            // `ParameterKey=X,UsePreviousValue=true` carries no
+            // `ParameterValue`. Skipping the entry is right (the stored value
+            // is carried forward by the caller), but `break`ing here dropped
+            // every parameter AFTER it too, and the truncated map then
+            // overwrote the stack's stored parameters. That pairing is the
+            // normal way `update-stack --use-previous-template` is invoked.
+            if let Some(v) = params.get(&format!("Parameters.member.{i}.ParameterValue")) {
+                result.insert(k.clone(), v.clone());
             }
         }
         result
+    }
+
+    /// Carry `ParameterKey=X,UsePreviousValue=true` entries forward from the
+    /// stack's stored parameters.
+    ///
+    /// Those entries carry no `ParameterValue` on the wire, so
+    /// `extract_parameters` skips them; without this refill the stack's stored
+    /// parameters get overwritten by a map missing them and a `Ref` to one
+    /// resolves to the bare parameter name. Shared by UpdateStack and
+    /// CreateChangeSet, which both send this pairing routinely (it is the
+    /// normal companion to `--use-previous-template`) and were drifting apart
+    /// with one copy each.
+    ///
+    /// The insert does not check whether the key is already present: template
+    /// defaults have been merged into `parameters` by the time this runs, so a
+    /// `contains_key` guard would skip a defaulted parameter and silently
+    /// revert an explicitly-set value. It does skip an entry that carries its
+    /// own `ParameterValue` — the two fields are mutually exclusive on the
+    /// wire, and enforcing that here means a client that sends both cannot
+    /// have its explicit value clobbered.
+    ///
+    /// Returns the keys that asked for a previous value the stack does not
+    /// have. Silently dropping those leaves the parameter absent, so a
+    /// `Ref` to it bakes the bare parameter name into the resource -- the
+    /// silent-wrong-value outcome this crate is closing elsewhere. Real
+    /// CloudFormation answers `ValidationError: Parameter X does not exist in
+    /// the stack`; the caller decides whether to enforce that.
+    pub(crate) fn refill_use_previous_values(
+        raw: &BTreeMap<String, String>,
+        previous: &BTreeMap<String, String>,
+        parameters: &mut BTreeMap<String, String>,
+    ) -> Vec<String> {
+        let mut unknown = Vec::new();
+        for i in 1.. {
+            let Some(key) = raw.get(&format!("Parameters.member.{i}.ParameterKey")) else {
+                break;
+            };
+            let use_previous = raw
+                .get(&format!("Parameters.member.{i}.UsePreviousValue"))
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            // An explicit value at the same index wins. Keyed on presence,
+            // not on being non-empty: an empty string is a legitimate
+            // parameter value, and `extract_parameters` above already treats
+            // it as an explicit one.
+            let has_explicit_value =
+                raw.contains_key(&format!("Parameters.member.{i}.ParameterValue"));
+            if use_previous && !has_explicit_value {
+                match previous.get(key) {
+                    Some(prev) => {
+                        parameters.insert(key.clone(), prev.clone());
+                    }
+                    None => unknown.push(key.clone()),
+                }
+            }
+        }
+        unknown
     }
 
     /// Fill in declared `Parameters.<Name>.Default` for any parameter the
@@ -1343,16 +1405,8 @@ impl CloudFormationService {
         parameters: &mut BTreeMap<String, String>,
         template_body: &str,
     ) {
-        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
-            match serde_json::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return,
-            }
-        } else {
-            match serde_yaml::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return,
-            }
+        let Ok(value) = fakecloud_core::cfn_template::parse_template_body(template_body) else {
+            return;
         };
         let Some(decls) = value.get("Parameters").and_then(|v| v.as_object()) else {
             return;
@@ -1422,7 +1476,13 @@ impl CloudFormationService {
             return imports;
         };
         for (name, export) in &state.exports {
-            if matches!(skip_stack, Some(skip) if skip == export.exporting_stack_name) {
+            // `UpdateStack` accepts a stack ARN as well as a name, and exports
+            // are registered under the name — so comparing only against the
+            // name made a stack fail to skip its OWN export and report
+            // "already exported by another stack" for a valid no-op update.
+            let is_own_export = matches!(skip_stack, Some(skip)
+                if skip == export.exporting_stack_name || skip == export.exporting_stack_id);
+            if is_own_export {
                 continue;
             }
             imports.insert(name.clone(), export.value.clone());
@@ -1441,16 +1501,8 @@ impl CloudFormationService {
         template_body: &str,
         parameters: &BTreeMap<String, String>,
     ) -> Result<Vec<String>, AwsServiceError> {
-        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
-            match serde_json::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Ok(Vec::new()),
-            }
-        } else {
-            match serde_yaml::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Ok(Vec::new()),
-            }
+        let Ok(value) = fakecloud_core::cfn_template::parse_template_body(template_body) else {
+            return Ok(Vec::new());
         };
         let names = template::collect_import_value_names(&value, parameters);
         let known = Self::collect_account_imports(state, account_id, Some(stack_name));
@@ -1528,16 +1580,8 @@ impl CloudFormationService {
         resources: &[StackResource],
         state: &SharedCloudFormationState,
     ) -> Vec<state::StackOutput> {
-        let value: serde_json::Value = if template_body.trim_start().starts_with('{') {
-            match serde_json::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Vec::new(),
-            }
-        } else {
-            match serde_yaml::from_str(template_body) {
-                Ok(v) => v,
-                Err(_) => return Vec::new(),
-            }
+        let Ok(value) = fakecloud_core::cfn_template::parse_template_body(template_body) else {
+            return Vec::new();
         };
 
         let resources_obj = match value.get("Resources").and_then(|v| v.as_object()) {
@@ -1627,13 +1671,9 @@ impl CloudFormationService {
             )
         })?;
 
-        // TemplateBody isn't `@required` in Smithy (TemplateURL is the alternative).
-        // Accept an empty body and parse it as an empty template so the probe's
-        // Success variants with `TemplateBody="test"` still land on the happy path.
-        let empty = String::new();
-        let template_body = params.get("TemplateBody").unwrap_or(&empty);
-
-        // Check if stack already exists and is not deleted
+        // Check if stack already exists and is not deleted. Done before the
+        // template is resolved: `resolve_template_url` takes the S3 write lock,
+        // and a duplicate request is rejected here regardless of its body.
         {
             let accounts = self.state.read();
             let empty = CloudFormationState::new(&req.account_id, &req.region);
@@ -1648,6 +1688,45 @@ impl CloudFormationService {
                 }
             }
         }
+
+        // TemplateBody isn't `@required` in Smithy (TemplateURL is the
+        // alternative). Accept an empty body and parse it as an empty template
+        // so the probe's Success variants with `TemplateBody="test"` still land
+        // on the happy path.
+        //
+        // `TemplateURL` has to be resolved, though: `aws cloudformation
+        // create-stack --template-url` (what `aws cloudformation deploy`, SAM
+        // and CDK send once a bucket is configured) otherwise arrives with an
+        // empty body and produces a CREATE_COMPLETE stack holding nothing --
+        // the #2480 no-op, reached without any malformed template. A value that
+        // isn't URL-shaped is a synthetic probe input and keeps the lenient
+        // path.
+        let url_param =
+            Self::get_param(req, "TemplateURL").filter(|url| crate::extras::looks_like_url(url));
+        let empty = String::new();
+        let inline_body = params
+            .get("TemplateBody")
+            .filter(|body| !body.trim().is_empty());
+        // Resolved only when the URL would actually be used: an inline body
+        // wins, and `resolve_template_url` takes the S3 write lock.
+        //
+        // A URL that resolves to nothing (uploaded to another account, a
+        // public AWS-hosted quickstart, a key mismatch, an empty object) is
+        // reported rather than falling back to an empty body, which would
+        // rebuild the #2480 empty CREATE_COMPLETE.
+        let resolved_from_url = match (&inline_body, &url_param) {
+            (None, Some(url)) => Some(self.resolve_template_url(&req.account_id, url)),
+            _ => None,
+        };
+        let template_body = match (inline_body, &resolved_from_url) {
+            (Some(body), _) => body,
+            (None, Some(Ok(body))) => body,
+            _ => params.get("TemplateBody").unwrap_or(&empty),
+        };
+        let url_fetch_error = match &resolved_from_url {
+            Some(Err(err)) => Some(err.clone()),
+            _ => None,
+        };
 
         let tags = Self::extract_tags(&params);
         let mut parameters = Self::extract_parameters(&params);
@@ -1698,15 +1777,49 @@ impl CloudFormationService {
 
         // First pass: parse to get resource definitions (without physical ID
         // resolution). Synthetic conformance inputs frequently arrive with a
-        // placeholder TemplateBody like `"test"`; degrade to an empty parsed
-        // template rather than rejecting with an undeclared error code.
-        let parsed = template::parse_template(template_body, &parameters).unwrap_or_else(|_| {
-            template::ParsedTemplate {
-                description: None,
-                resources: Vec::new(),
-                outputs: Vec::new(),
+        // placeholder TemplateBody like `"test"`; those aren't template-shaped
+        // and degrade to an empty parsed template rather than rejecting with an
+        // undeclared error code (`ValidationError` isn't in CreateStack's
+        // Smithy `errors`). A body that IS a template document but fails to
+        // parse is a real failure and must not masquerade as a CREATE_COMPLETE
+        // stack with no resources (#2480) -- it is rejected synchronously just
+        // below, before any stack record is inserted.
+        let (parsed, template_error) = match template::parse_template(template_body, &parameters) {
+            Ok(parsed) => (parsed, None),
+            Err(err) => {
+                let empty = template::ParsedTemplate {
+                    description: None,
+                    resources: Vec::new(),
+                    outputs: Vec::new(),
+                };
+                (
+                    empty,
+                    fakecloud_core::cfn_template::is_template_document(template_body)
+                        .then_some(err),
+                )
             }
-        });
+        };
+        // An unresolvable TemplateURL outranks the parse result: the body is
+        // empty only because the fetch failed, so report that instead.
+        //
+        // Reject synchronously, before any stack record is inserted. Real
+        // CloudFormation validates the template first and returns an error
+        // with no stack created; rolling a persisted stack to CREATE_FAILED
+        // instead left the name taken, so fixing the typo and redeploying hit
+        // AlreadyExistsException and the user had to delete-stack first. This
+        // also matches UpdateStack and CreateChangeSet, which already reject
+        // the same condition synchronously.
+        //
+        // Conformance-safe: both inputs are gated (`is_template_document`,
+        // `looks_like_url`) so the probe's placeholder bodies and `"t"` URLs
+        // never reach here.
+        if let Some(reason) = url_fetch_error.or(template_error) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                reason,
+            ));
+        }
 
         // Refuse if any Fn::ImportValue references an unknown export. CFN
         // checks this before provisioning; we mirror that so callers get
@@ -1735,6 +1848,7 @@ impl CloudFormationService {
                     stack_id: stack_id.clone(),
                     template: template_body.clone(),
                     status: "CREATE_IN_PROGRESS".to_string(),
+                    status_reason: None,
                     resources: Vec::new(),
                     parameters: parameters.clone(),
                     tags: tags.clone(),
@@ -1929,6 +2043,7 @@ impl CloudFormationService {
             let st = accounts.get_or_create(&account_id);
             if let Some(stack) = st.stacks.get_mut(&stack_name) {
                 stack.status = "CREATE_COMPLETE".to_string();
+                stack.status_reason = None;
                 stack.resources = resources.clone();
                 stack.outputs = outputs.clone();
             }
@@ -2012,13 +2127,15 @@ impl CloudFormationService {
             let st = accounts.get_or_create(account_id);
             if let Some(stack) = st.stacks.get_mut(stack_name) {
                 stack.status = "CREATE_FAILED".to_string();
+                stack.status_reason = Some(reason.to_string());
             }
-            record_stack_status_event(
+            record_stack_status_event_with_reason(
                 st,
                 stack_id,
                 stack_name,
                 "AWS::CloudFormation::Stack",
                 "CREATE_FAILED",
+                Some(reason),
             );
         }
         Self::send_stack_notification(
@@ -2159,6 +2276,10 @@ impl CloudFormationService {
                 let state = accounts.get_or_create(&req.account_id);
                 if let Some(stack) = state.stacks.values_mut().find(|s| s.stack_id == stack_id) {
                     stack.status = "DELETE_COMPLETE".to_string();
+                    // The reason belonged to the previous status (a failed
+                    // create/update); carrying it into DELETE_COMPLETE would
+                    // report a stale failure on a cleanly deleted stack.
+                    stack.status_reason = None;
                     stack.resources.clear();
                     stack.outputs.clear();
                 }
@@ -2324,7 +2445,7 @@ impl CloudFormationService {
         let mut input = UpdateStackInput::from_params(req)?;
 
         // Get stack_id before write lock for the provisioner
-        let found_stack_id = {
+        let (found_stack_id, resolved_stack_name, previous_template, previous_parameters) = {
             let accounts = self.state.read();
             let empty = CloudFormationState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -2335,9 +2456,211 @@ impl CloudFormationService {
                     (s.name == input.stack_name || s.stack_id == input.stack_name)
                         && s.status != "DELETE_COMPLETE"
                 })
-                .map(|s| s.stack_id.clone())
+                .map(|s| {
+                    (
+                        s.stack_id.clone(),
+                        s.name.clone(),
+                        s.template.clone(),
+                        s.parameters.clone(),
+                    )
+                })
                 .unwrap_or_default()
         };
+        // `UpdateStack` accepts a stack ARN, but exports and imports are keyed
+        // by the stack's NAME. Passing the caller's spelling straight through
+        // would leave the old exports in place and register the new ones under
+        // the ARN, so every later export lookup would miss them. Resolve once
+        // and use the stored name for all export bookkeeping below.
+        let export_owner_name = if resolved_stack_name.is_empty() {
+            input.stack_name.clone()
+        } else {
+            resolved_stack_name.clone()
+        };
+        let resources_before_update: Vec<StackResource>;
+
+        let unknown_previous = Self::refill_use_previous_values(
+            &Self::get_all_params(req),
+            &previous_parameters,
+            &mut input.parameters,
+        );
+        if let Some(key) = unknown_previous.first() {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                format!("Parameter {key} does not exist in the stack"),
+            ));
+        }
+
+        // `UsePreviousTemplate=true` and `TemplateURL` both arrive with an
+        // empty `TemplateBody`. Resolve them to a real template before
+        // anything else looks at the body: an empty body parses to no
+        // resources, and `apply_resource_updates` deletes every resource
+        // absent from the new definitions, so leaving it empty tears the whole
+        // stack down and reports UPDATE_COMPLETE. `aws cloudformation
+        // update-stack --use-previous-template` is ordinary usage, so this is
+        // reachable without a malformed template at all.
+        if input.template_body.trim().is_empty() {
+            // A *recognisable* S3 URL has to resolve: falling back to the
+            // stored template would re-apply the old one and report
+            // UPDATE_COMPLETE for an update that never happened. A value that
+            // isn't URL-shaped at all is a synthetic conformance input (the
+            // probe's `optional_TemplateURL` variant sends `"t"` and expects
+            // success), so it takes the same lenient path as a placeholder
+            // body rather than an undeclared error.
+            let from_url = match Self::get_param(req, "TemplateURL") {
+                // An object that exists but is empty counts as a failed fetch:
+                // taking it would leave the body empty and fall into the
+                // metadata-only branch, reporting UPDATE_COMPLETE for an
+                // update that applied nothing.
+                //
+                // A value that is URL-shaped but that `parse_s3_url` cannot
+                // read (a host with no key, say) is reported too. Falling back
+                // to the stored template there would accept the caller's new
+                // template and discard it. Only a value that isn't meant as a
+                // URL at all -- the probe's `"t"` -- takes the lenient path.
+                Some(url) if crate::extras::looks_like_url(&url) => Some(
+                    self.resolve_template_url(&req.account_id, &url)
+                        .map_err(|err| {
+                            AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "ValidationError",
+                                err,
+                            )
+                        })?,
+                ),
+                _ => None,
+            };
+            // No usable URL: `UsePreviousTemplate`, whose meaning is the
+            // stack's stored template.
+            input.template_body = from_url.unwrap_or_else(|| previous_template.clone());
+            // The body was empty when `UpdateStackInput::from_params` merged
+            // parameter defaults, so nothing was merged. Redo it now that the
+            // real template (and its `Parameters` block) is in hand, or a
+            // `Ref` to an omitted-but-defaulted parameter resolves to the bare
+            // parameter name and silently renames resources.
+            Self::merge_parameter_defaults(&mut input.parameters, &input.template_body);
+        }
+
+        // A stack that exists but has no template to apply (its stored
+        // template is itself empty) has no resources to diff — but the request
+        // may still carry parameters, tags or notification ARNs, and returning
+        // success while dropping them would be an accept-and-discard. Apply
+        // the metadata and record the transition, then return. When the stack
+        // does NOT exist, fall through to the not-found handling below, which
+        // synthesizes a proper stack ARN for the response.
+        //
+        // A `REVIEW_IN_PROGRESS` shell (minted by `CreateChangeSet` with
+        // ChangeSetType=CREATE, which stores an empty template) is excluded:
+        // flipping it to UPDATE_COMPLETE would make a stack that was never
+        // created look updated, and the later ExecuteChangeSet would then
+        // report UPDATE_* where it owes CREATE_*.
+        let in_review = !found_stack_id.is_empty() && {
+            let accounts = self.state.read();
+            accounts.get(&req.account_id).is_some_and(|s| {
+                s.stacks
+                    .values()
+                    .any(|st| st.stack_id == found_stack_id && st.status == "REVIEW_IN_PROGRESS")
+            })
+        };
+        if in_review {
+            // Skipping the metadata branch is not enough: the normal path
+            // would also land on UPDATE_COMPLETE, since the shell has no
+            // resources to diff. A stack that only ever existed as a change-set
+            // shell has not been created, so an update on it is invalid.
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                format!(
+                    "Stack [{}] is in REVIEW_IN_PROGRESS state and can not be updated.",
+                    input.stack_name
+                ),
+            ));
+        }
+        // Only for a stack that actually reached a successful state. A stack
+        // left in a failure state would otherwise report UPDATE_COMPLETE and
+        // have its reason cleared, so a stack that was never provisioned (or
+        // whose last update rolled back) would look successfully updated.
+        //
+        // An explicit allowlist, not a `_COMPLETE` suffix test: `ROLLBACK_
+        // COMPLETE` and `UPDATE_ROLLBACK_COMPLETE` end with it too, and those
+        // are exactly the states this is meant to exclude.
+        let completed = {
+            let accounts = self.state.read();
+            accounts.get(&req.account_id).is_some_and(|s| {
+                s.stacks.values().any(|st| {
+                    st.stack_id == found_stack_id
+                        && matches!(st.status.as_str(), "CREATE_COMPLETE" | "UPDATE_COMPLETE")
+                })
+            })
+        };
+        if input.template_body.trim().is_empty() && !found_stack_id.is_empty() && completed {
+            let mut accounts = self.state.write();
+            let state = accounts.get_or_create(&req.account_id);
+            if let Some(stack) = state
+                .stacks
+                .values_mut()
+                .find(|s| s.stack_id == found_stack_id)
+            {
+                // Each guarded the same way: a metadata-only update that
+                // sends just `--tags` must not wipe the stored parameters,
+                // which an unconditional assignment did.
+                if !input.parameters.is_empty() {
+                    stack.parameters = input.parameters.clone();
+                }
+                if !input.tags.is_empty() {
+                    stack.tags = input.tags.clone();
+                }
+                if !input.notification_arns.is_empty() {
+                    stack.notification_arns = input.notification_arns.clone();
+                }
+                stack.status = "UPDATE_COMPLETE".to_string();
+                stack.status_reason = None;
+                stack.updated_at = Some(Utc::now());
+            }
+            // Read the stack's ARNs back, post-merge. Notifying with
+            // `input.notification_arns` would be a no-op on the common
+            // metadata-only update that omits NotificationARNs -- exactly the
+            // case this branch exists to serve -- since the send is skipped on
+            // an empty list. The normal update path reads them off the stack
+            // for the same reason.
+            let (stack_name_owned, notify_arns) = state
+                .stacks
+                .values()
+                .find(|s| s.stack_id == found_stack_id)
+                .map(|s| (s.name.clone(), s.notification_arns.clone()))
+                .unwrap_or_else(|| (input.stack_name.clone(), input.notification_arns.clone()));
+            // Emit the same IN_PROGRESS -> COMPLETE pair the normal update
+            // path does, so a poller sees a well-formed transition.
+            record_stack_status_event(
+                state,
+                &found_stack_id,
+                &stack_name_owned,
+                "AWS::CloudFormation::Stack",
+                "UPDATE_IN_PROGRESS",
+            );
+            record_stack_status_event(
+                state,
+                &found_stack_id,
+                &stack_name_owned,
+                "AWS::CloudFormation::Stack",
+                "UPDATE_COMPLETE",
+            );
+            drop(accounts);
+            // ... and notify, using the ARNs just stored. Returning without
+            // this would leave a caller waiting on the stack's SNS topic
+            // hanging, even though both other update outcomes notify.
+            Self::send_stack_notification(
+                &self.deps.delivery,
+                &notify_arns,
+                &stack_name_owned,
+                &found_stack_id,
+                "UPDATE_COMPLETE",
+            );
+            return Ok(AwsResponse::xml(
+                StatusCode::OK,
+                xml_responses::update_stack_response(&found_stack_id, &req.request_id),
+            ));
+        }
 
         // Seed pseudo-parameters before parsing — the StackId is now known
         // (after the read above) so resolve_refs sees the same values that
@@ -2354,10 +2677,14 @@ impl CloudFormationService {
             .parameters
             .entry("AWS::StackId".to_string())
             .or_insert_with(|| found_stack_id.clone());
+        // The canonical name, for the same reason the export bookkeeping uses
+        // it: `UpdateStack` accepts an ARN, and seeding the pseudo-parameter
+        // from the caller's spelling makes `!Sub "${AWS::StackName}-queue"`
+        // provision `arn:aws:...:stack/mystack/abc-queue`.
         input
             .parameters
             .entry("AWS::StackName".to_string())
-            .or_insert_with(|| input.stack_name.clone());
+            .or_insert_with(|| export_owner_name.clone());
         input
             .parameters
             .entry("AWS::Partition".to_string())
@@ -2401,12 +2728,39 @@ impl CloudFormationService {
         // conformance probe's Success variants. Degrade to an empty parsed
         // template rather than rejecting with an undeclared error code —
         // `ValidationError` isn't in UpdateStack's Smithy `errors`.
-        let parsed = template::parse_template(&input.template_body, &input.parameters)
-            .unwrap_or_else(|_| template::ParsedTemplate {
-                description: None,
-                resources: Vec::new(),
-                outputs: Vec::new(),
-            });
+        //
+        // A body that IS a template document but won't parse must NOT take
+        // that path: `apply_resource_updates` deletes every resource whose
+        // logical id is absent from the new definitions, so an empty parse
+        // result tears the whole stack down and then reports UPDATE_COMPLETE.
+        // Refuse the update instead, before anything is touched.
+        //
+        // `ValidationError` is what AWS returns for an unparseable template
+        // and what `ExecuteChangeSet` already returns for this exact
+        // condition. It is absent from UpdateStack's Smithy `errors` list, but
+        // the probe only ever sends placeholder bodies, which take the lenient
+        // branch below and never reach this code — so conformance never
+        // observes it. Substituting a declared-but-wrong code would be worse
+        // than useless here: SAM and CDK special-case
+        // `InsufficientCapabilitiesException` and would tell the user to pass
+        // `--capabilities CAPABILITY_IAM` for what is really a syntax error.
+        let parsed = match template::parse_template(&input.template_body, &input.parameters) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                if fakecloud_core::cfn_template::is_template_document(&input.template_body) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "ValidationError",
+                        err,
+                    ));
+                }
+                template::ParsedTemplate {
+                    description: None,
+                    resources: Vec::new(),
+                    outputs: Vec::new(),
+                }
+            }
+        };
 
         let imported_names = Self::validate_import_values(
             &self.state,
@@ -2415,6 +2769,28 @@ impl CloudFormationService {
             &input.template_body,
             &input.parameters,
         )?;
+
+        // Export-name collisions, checked BEFORE anything is mutated. The
+        // post-provision check further down still runs (an export name can
+        // depend on a resource attribute that only exists once provisioned),
+        // but catching the common case here means the usual collision never
+        // reaches a half-applied update: by the time the later check fires,
+        // resources have been created and backing services mutated, and
+        // restoring the stack's metadata does not undo those.
+        {
+            let pre_outputs = Self::resolve_template_outputs(
+                &input.template_body,
+                &input.parameters,
+                &[],
+                &self.state,
+            );
+            Self::ensure_export_uniqueness(
+                &self.state,
+                &req.account_id,
+                &export_owner_name,
+                &pre_outputs,
+            )?;
+        }
 
         // `provisioner_deferred`: apply_resource_updates runs inside the state
         // write lock below; a synchronous custom-resource Lambda invoke there
@@ -2476,6 +2852,10 @@ impl CloudFormationService {
                     .expect("stack existence checked above");
 
                 stack.status = "UPDATE_IN_PROGRESS".to_string();
+                // Captured before the update rewrites it, so the
+                // export-collision rollback below can put back a resource list
+                // that matches the template it restores.
+                resources_before_update = stack.resources.clone();
                 let update_result = apply_resource_updates(
                     stack,
                     &parsed.resources,
@@ -2493,6 +2873,7 @@ impl CloudFormationService {
                 } else {
                     "UPDATE_COMPLETE".to_string()
                 };
+                stack.status_reason = update_result.as_ref().err().map(ToString::to_string);
                 stack.parameters = input.parameters.clone();
                 if !input.tags.is_empty() {
                     stack.tags = input.tags;
@@ -2550,12 +2931,18 @@ impl CloudFormationService {
                     Ok(touched_types)
                 }
                 Err(e) => {
-                    record_stack_status_event(
+                    // Attach the reason: DescribeStackEvents is what `sam
+                    // deploy`, CDK and the CLI poll to explain a failure, so a
+                    // bare UPDATE_ROLLBACK_COMPLETE tells the user nothing.
+                    // The CreateStack path already does this in
+                    // `mark_create_failed`.
+                    record_stack_status_event_with_reason(
                         state,
                         &stack_id,
                         &stack_name_owned,
                         "AWS::CloudFormation::Stack",
                         "UPDATE_ROLLBACK_COMPLETE",
+                        Some(&e),
                     );
                     Err(e)
                 }
@@ -2614,7 +3001,66 @@ impl CloudFormationService {
             &resources_snapshot,
             &self.state,
         );
-        Self::ensure_export_uniqueness(&self.state, &req.account_id, &input.stack_name, &outputs)?;
+        // The stack was already flipped to UPDATE_COMPLETE above, so a
+        // collision here would leave it reporting success with no reason while
+        // the caller sees an error. Roll it back before returning.
+        //
+        // Only reachable now for an export name that could not be resolved
+        // before provisioning (one built from a resource attribute), since the
+        // pre-flight above catches the rest. Resources created by this update
+        // are NOT unwound here -- that needs a real rollback of the
+        // provisioners, which this path does not attempt.
+        if let Err(err) = Self::ensure_export_uniqueness(
+            &self.state,
+            &req.account_id,
+            &export_owner_name,
+            &outputs,
+        ) {
+            let reason = err.message();
+            {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&req.account_id);
+                if let Some(stack) = state
+                    .stacks
+                    .values_mut()
+                    .find(|s| s.stack_id == stack_id && s.status != "DELETE_COMPLETE")
+                {
+                    stack.status = "UPDATE_ROLLBACK_COMPLETE".to_string();
+                    stack.status_reason = Some(reason.clone());
+                    // The update already overwrote these ~130 lines up. A
+                    // stack reporting a rollback while holding the new
+                    // template would hand `GetTemplate` the template that
+                    // supposedly rolled back, so put the previous ones back --
+                    // including the resource list, which otherwise described
+                    // the NEW template's resources while `GetTemplate`
+                    // returned the old one. A later
+                    // `update-stack --use-previous-template` diffed that
+                    // mismatch and deleted them.
+                    //
+                    // Physical resources this update already provisioned are
+                    // NOT unwound (that needs a real provisioner rollback), so
+                    // any it created are left orphaned rather than tracked.
+                    // Recording them under a template that does not declare
+                    // them is the worse of the two.
+                    stack.template = previous_template.clone();
+                    stack.parameters = previous_parameters.clone();
+                    stack.resources = resources_before_update.clone();
+                }
+                // The canonical name, not the caller's spelling: `StackName`
+                // on a StackEvent must match what every other event for this
+                // stack carries, or DescribeStackEvents interleaves an ARN
+                // among the names.
+                record_stack_status_event_with_reason(
+                    state,
+                    &stack_id,
+                    &export_owner_name,
+                    "AWS::CloudFormation::Stack",
+                    "UPDATE_ROLLBACK_COMPLETE",
+                    Some(&reason),
+                );
+            }
+            return Err(err);
+        }
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
@@ -2628,7 +3074,7 @@ impl CloudFormationService {
             Self::sync_exports_imports(
                 state,
                 &stack_id,
-                &input.stack_name,
+                &export_owner_name,
                 &outputs,
                 &imported_names,
             );
@@ -3166,6 +3612,32 @@ pub(crate) fn record_event(
     resource_type: &str,
     status: &str,
 ) {
+    record_event_with_reason(
+        state,
+        stack_id,
+        stack_name,
+        logical_id,
+        physical_id,
+        resource_type,
+        status,
+        None,
+    );
+}
+
+/// `record_event` plus the `ResourceStatusReason` real CloudFormation attaches
+/// to a failure event. Without it a CREATE_FAILED event says only that
+/// something failed, never what.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn record_event_with_reason(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    stack_name: &str,
+    logical_id: &str,
+    physical_id: &str,
+    resource_type: &str,
+    status: &str,
+    reason: Option<&str>,
+) {
     use serde_json::json;
     let event_id = format!(
         "{}-{:x}",
@@ -3206,7 +3678,7 @@ pub(crate) fn record_event(
         None => now,
     };
 
-    log.push(json!({
+    let mut event = json!({
         "EventId": event_id,
         "StackId": stack_id,
         "StackName": stack_name,
@@ -3215,7 +3687,11 @@ pub(crate) fn record_event(
         "ResourceType": resource_type,
         "ResourceStatus": status,
         "Timestamp": timestamp.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
-    }));
+    });
+    if let Some(reason) = reason {
+        event["ResourceStatusReason"] = json!(reason);
+    }
+    log.push(event);
 }
 
 /// Emits IN_PROGRESS + COMPLETE event pairs for every resource change
@@ -3290,7 +3766,20 @@ pub(crate) fn record_stack_status_event(
     resource_type: &str,
     status: &str,
 ) {
-    record_event(
+    record_stack_status_event_with_reason(state, stack_id, stack_name, resource_type, status, None);
+}
+
+/// `record_stack_status_event` carrying the `ResourceStatusReason` for a
+/// failed stack transition.
+pub(crate) fn record_stack_status_event_with_reason(
+    state: &mut crate::state::CloudFormationState,
+    stack_id: &str,
+    stack_name: &str,
+    resource_type: &str,
+    status: &str,
+    reason: Option<&str>,
+) {
+    record_event_with_reason(
         state,
         stack_id,
         stack_name,
@@ -3298,6 +3787,7 @@ pub(crate) fn record_stack_status_event(
         stack_id,
         resource_type,
         status,
+        reason,
     );
 }
 
@@ -3308,6 +3798,189 @@ mod tests {
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
+
+    /// `DescribeStackEvents` is what `sam deploy`, CDK and the CLI poll to
+    /// explain a failure, so a terminal failure event has to carry
+    /// `ResourceStatusReason`. A successful transition must NOT invent one.
+    #[test]
+    fn status_events_carry_a_reason_only_on_failure() {
+        let mut state = crate::state::CloudFormationState::new("123456789012", "us-east-1");
+        record_stack_status_event(
+            &mut state,
+            "stack-id",
+            "s",
+            "AWS::CloudFormation::Stack",
+            "UPDATE_COMPLETE",
+        );
+        record_stack_status_event_with_reason(
+            &mut state,
+            "stack-id",
+            "s",
+            "AWS::CloudFormation::Stack",
+            "UPDATE_ROLLBACK_COMPLETE",
+            Some("Failed to create resource Fn: boom"),
+        );
+
+        let log = state.events.get("stack-id").expect("events recorded");
+        assert_eq!(log.len(), 2);
+        assert!(
+            log[0].get("ResourceStatusReason").is_none(),
+            "a successful transition must not carry a reason: {:?}",
+            log[0]
+        );
+        assert_eq!(
+            log[1]["ResourceStatusReason"],
+            serde_json::json!("Failed to create resource Fn: boom")
+        );
+    }
+
+    #[test]
+    fn a_stack_skips_its_own_export_by_name_or_id() {
+        // `UpdateStack` accepts a stack ARN, but exports are registered under
+        // the stack NAME. Comparing only the name made a stack fail to skip
+        // its own export and report "already exported by another stack" for a
+        // valid no-op update.
+        let state: SharedCloudFormationState = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::<CloudFormationState>::new(
+                "123456789012",
+                "us-east-1",
+                "",
+            ),
+        ));
+        {
+            let mut accounts = state.write();
+            let st = accounts.get_or_create("123456789012");
+            st.exports.insert(
+                "shared-arn".to_string(),
+                crate::state::StackExport {
+                    value: "v".to_string(),
+                    exporting_stack_id: "arn:aws:cloudformation:us-east-1:123456789012:stack/s/abc"
+                        .to_string(),
+                    exporting_stack_name: "s".to_string(),
+                },
+            );
+        }
+
+        // Someone else's export is visible.
+        assert!(CloudFormationService::collect_account_imports(
+            &state,
+            "123456789012",
+            Some("other")
+        )
+        .contains_key("shared-arn"));
+        // Its own export is skipped, addressed either way.
+        for own in [
+            "s",
+            "arn:aws:cloudformation:us-east-1:123456789012:stack/s/abc",
+        ] {
+            assert!(
+                !CloudFormationService::collect_account_imports(&state, "123456789012", Some(own))
+                    .contains_key("shared-arn"),
+                "a stack must skip its own export when addressed as {own}"
+            );
+        }
+    }
+
+    #[test]
+    fn use_previous_value_never_clobbers_an_explicit_value() {
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "Parameters.member.1.ParameterKey".to_string(),
+            "A".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+        // Same index also carries an explicit value. The two are mutually
+        // exclusive on the wire, but a client that sends both must not have
+        // its explicit value silently replaced by the stored one.
+        raw.insert(
+            "Parameters.member.1.ParameterValue".to_string(),
+            "explicit".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.2.ParameterKey".to_string(),
+            "B".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.2.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+
+        let mut previous = BTreeMap::new();
+        previous.insert("A".to_string(), "stored-a".to_string());
+        previous.insert("B".to_string(), "stored-b".to_string());
+
+        let mut parameters = BTreeMap::new();
+        parameters.insert("A".to_string(), "explicit".to_string());
+        CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+
+        assert_eq!(parameters.get("A").map(String::as_str), Some("explicit"));
+        // B carries no explicit value, so it takes the stored one.
+        assert_eq!(parameters.get("B").map(String::as_str), Some("stored-b"));
+    }
+
+    #[test]
+    fn use_previous_value_reports_a_parameter_the_stack_lacks() {
+        // Real CloudFormation answers "Parameter X does not exist in the
+        // stack". Dropping it silently left the parameter absent, so a `Ref`
+        // to it baked the bare name into the resource.
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "Parameters.member.1.ParameterKey".to_string(),
+            "Ghost".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+
+        let previous = BTreeMap::new();
+        let mut parameters = BTreeMap::new();
+        let unknown =
+            CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+        assert_eq!(unknown, vec!["Ghost".to_string()]);
+        assert!(!parameters.contains_key("Ghost"));
+
+        // A key the stack DOES have is refilled and not reported.
+        let mut previous = BTreeMap::new();
+        previous.insert("Ghost".to_string(), "stored".to_string());
+        let mut parameters = BTreeMap::new();
+        let unknown =
+            CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+        assert!(unknown.is_empty());
+        assert_eq!(parameters.get("Ghost").map(String::as_str), Some("stored"));
+    }
+
+    #[test]
+    fn an_explicit_empty_parameter_value_is_still_explicit() {
+        // An empty string is a legitimate parameter value; `extract_parameters`
+        // treats it as explicit, so the refill must not replace it with the
+        // stored one.
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "Parameters.member.1.ParameterKey".to_string(),
+            "A".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.ParameterValue".to_string(),
+            String::new(),
+        );
+
+        let mut previous = BTreeMap::new();
+        previous.insert("A".to_string(), "stored-a".to_string());
+
+        let mut parameters = BTreeMap::new();
+        parameters.insert("A".to_string(), String::new());
+        CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+
+        assert_eq!(parameters.get("A").map(String::as_str), Some(""));
+    }
 
     #[test]
     fn merge_parameter_defaults_fills_omitted_params() {

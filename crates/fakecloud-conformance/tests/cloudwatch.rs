@@ -685,3 +685,50 @@ async fn cloudwatch_dataset_kms_key() {
     .await;
     assert!(!after.contains("<KmsKeyArn>"), "key not cleared: {after}");
 }
+
+/// `PutLogAlarm` is absent from the vendored aws-sdk-cloudwatch, so drive it
+/// via a raw awsQuery POST. `DescribeAlarms` reads it back through the typed
+/// client, which already knows the `LogAlarm` alarm type.
+#[test_action("monitoring", "PutLogAlarm", checksum = "bb86a83a")]
+#[tokio::test]
+async fn cloudwatch_log_alarm() {
+    let server = TestServer::start().await;
+
+    let body = concat!(
+        "Action=PutLogAlarm&Version=2010-08-01",
+        "&AlarmName=conf-log-alarm",
+        "&ScheduledQueryConfiguration.QueryString=fields%20%40message",
+        "&ScheduledQueryConfiguration.ScheduledQueryRoleARN=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fcw",
+        "&ScheduledQueryConfiguration.ScheduleConfiguration.ScheduleExpression=rate(5%20minutes)",
+        "&ScheduledQueryConfiguration.AggregationExpression=count(*)",
+        "&QueryResultsToEvaluate=3",
+        "&QueryResultsToAlarm=2",
+        "&Threshold=10",
+        "&ComparisonOperator=GreaterThanThreshold",
+    );
+    cw_raw(&server, body).await;
+
+    let described = cw_raw(
+        &server,
+        "Action=DescribeAlarms&Version=2010-08-01&AlarmTypes.member.1=LogAlarm",
+    )
+    .await;
+    assert!(
+        described.contains("<AlarmName>conf-log-alarm</AlarmName>"),
+        "{described}"
+    );
+    assert!(described.contains("<LogAlarms>"), "{described}");
+
+    // DeleteAlarms removes log alarms too.
+    cw_raw(
+        &server,
+        "Action=DeleteAlarms&Version=2010-08-01&AlarmNames.member.1=conf-log-alarm",
+    )
+    .await;
+    let described = cw_raw(
+        &server,
+        "Action=DescribeAlarms&Version=2010-08-01&AlarmTypes.member.1=LogAlarm",
+    )
+    .await;
+    assert!(!described.contains("conf-log-alarm"), "{described}");
+}

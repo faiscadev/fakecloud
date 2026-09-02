@@ -107,6 +107,16 @@ use helpers::TestServer;
 #[test_action("backup", "TagResource", checksum = "f68dba96")]
 #[test_action("backup", "UntagResource", checksum = "cabb6a5c")]
 #[test_action("backup", "UpdateBackupPlan", checksum = "5910684c")]
+#[test_action("backup", "CreateBackupAccessPoint", checksum = "a0911d5d")]
+#[test_action("backup", "DeleteBackupAccessPoint", checksum = "ee5c22e6")]
+#[test_action("backup", "DescribeBackupAccessPoint", checksum = "f71ef580")]
+#[test_action("backup", "ListBackupAccessPoints", checksum = "b08abff3")]
+#[test_action(
+    "backup",
+    "ListBackupAccessPointsByRecoveryPoint",
+    checksum = "ca9202d4"
+)]
+#[test_action("backup", "ListBackupAccessPointsByResource", checksum = "03e85655")]
 #[test_action("backup", "UpdateFramework", checksum = "be5d9414")]
 #[test_action("backup", "UpdateGlobalSettings", checksum = "1ea40909")]
 #[test_action("backup", "UpdateRecoveryPointIndexSettings", checksum = "52d80975")]

@@ -17,6 +17,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use http::{Method, StatusCode};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 
@@ -25,10 +26,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    framework_arn, legal_hold_arn, plan_arn, recovery_point_arn, report_plan_arn,
-    restore_testing_plan_arn, tiering_configuration_arn, vault_arn, PlanRecord, PlanVersion,
-    RestoreTestingPlanRecord, RestoreTestingSelectionRecord, SelectionRecord, SharedBackupState,
-    TagMap, VaultRecord,
+    access_point_arn, framework_arn, legal_hold_arn, plan_arn, recovery_point_arn, report_plan_arn,
+    restore_testing_plan_arn, tiering_configuration_arn, vault_arn, AccessPointRecord, PlanRecord,
+    PlanVersion, RestoreTestingPlanRecord, RestoreTestingSelectionRecord, SelectionRecord,
+    SharedBackupState, TagMap, VaultRecord,
 };
 
 /// The resource types AWS Backup can protect (a representative catalogue,
@@ -53,6 +54,12 @@ const SUPPORTED_RESOURCE_TYPES: &[&str] = &[
 ];
 
 pub const BACKUP_ACTIONS: &[&str] = &[
+    "CreateBackupAccessPoint",
+    "DeleteBackupAccessPoint",
+    "DescribeBackupAccessPoint",
+    "ListBackupAccessPoints",
+    "ListBackupAccessPointsByRecoveryPoint",
+    "ListBackupAccessPointsByResource",
     "AssociateBackupVaultMpaApprovalTeam",
     "CancelLegalHold",
     "CreateBackupPlan",
@@ -234,6 +241,22 @@ impl BackupService {
             ($a:expr, $($x:expr),*) => { Some(($a, vec![$($x),*])) };
         }
         match (m, segs.as_slice()) {
+            // ---- backup access points ----
+            (&Method::PUT, ["backup-access-point", "create"]) => one("CreateBackupAccessPoint"),
+            (&Method::GET, ["backup-access-point"]) => one("ListBackupAccessPoints"),
+            (&Method::DELETE, ["backup-access-point", "delete", arn]) => {
+                l!("DeleteBackupAccessPoint", d(arn))
+            }
+            (&Method::POST, ["backup-access-point", "recovery-point", arn]) => {
+                l!("ListBackupAccessPointsByRecoveryPoint", d(arn))
+            }
+            (&Method::POST, ["backup-access-point", "resource", arn]) => {
+                l!("ListBackupAccessPointsByResource", d(arn))
+            }
+            (&Method::GET, ["backup-access-point", arn]) => {
+                l!("DescribeBackupAccessPoint", d(arn))
+            }
+
             // ---- backup plans ----
             (&Method::PUT, ["backup", "plans"]) => one("CreateBackupPlan"),
             (&Method::GET, ["backup", "plans"]) => one("ListBackupPlans"),
@@ -466,6 +489,8 @@ impl BackupService {
 }
 
 const MUTATING: &[&str] = &[
+    "CreateBackupAccessPoint",
+    "DeleteBackupAccessPoint",
     "CreateBackupPlan",
     "CreateBackupSelection",
     "CreateBackupVault",
@@ -563,6 +588,16 @@ impl BackupService {
     ) -> Result<AwsResponse, AwsServiceError> {
         validate_query_constraints(action, req)?;
         match action {
+            "CreateBackupAccessPoint" => self.create_backup_access_point(req),
+            "DescribeBackupAccessPoint" => self.describe_backup_access_point(req, &l[0]),
+            "DeleteBackupAccessPoint" => self.delete_backup_access_point(req, &l[0]),
+            "ListBackupAccessPoints" => self.list_backup_access_points(req),
+            "ListBackupAccessPointsByRecoveryPoint" => {
+                self.list_backup_access_points_by_recovery_point(req, &l[0])
+            }
+            "ListBackupAccessPointsByResource" => {
+                self.list_backup_access_points_by_resource(req, &l[0])
+            }
             "CreateBackupPlan" => self.create_backup_plan(req),
             "GetBackupPlan" => self.get_backup_plan(req, &l[0]),
             "UpdateBackupPlan" => self.update_backup_plan(req, &l[0]),

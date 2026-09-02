@@ -79,19 +79,9 @@ pub fn parse_template(body: &str) -> Option<Value> {
     if trimmed.is_empty() {
         return None;
     }
-    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
-        if v.is_object() {
-            return Some(v);
-        }
-    }
-    // YAML (the usual SAM authoring format). `serde_yaml` parses JSON too, but
-    // we try JSON first to preserve exact numeric/precision semantics.
-    if let Ok(v) = serde_yaml::from_str::<Value>(trimmed) {
-        if v.is_object() {
-            return Some(v);
-        }
-    }
-    None
+    // Shared with CloudFormation so SAM's YAML short-form intrinsics (`!Ref`,
+    // `!GetAtt`, ...) parse here exactly as they do there.
+    fakecloud_core::cfn_template::parse_template_object(trimmed)
 }
 
 /// Build the `parameterDefinitions` list for a template's `Parameters` section.

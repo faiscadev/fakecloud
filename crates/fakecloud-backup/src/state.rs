@@ -85,6 +85,30 @@ pub struct VaultRecord {
     pub recovery_points: BTreeMap<String, Value>,
 }
 
+/// A backup access point: a named handle onto one recovery point, through
+/// which the backed-up data can be reached without touching the vault itself.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AccessPointRecord {
+    pub arn: String,
+    pub name: String,
+    pub recovery_point_arn: String,
+    pub backup_vault_name: String,
+    pub backup_vault_arn: String,
+    pub resource_arn: String,
+    pub resource_type: String,
+    pub creation_time: DateTime<Utc>,
+    /// `AccessPointStatus` (AVAILABLE | CREATING | DELETING | ...).
+    pub status: String,
+    #[serde(default)]
+    pub status_message: Option<String>,
+    #[serde(default)]
+    pub metadata: BTreeMap<String, String>,
+    #[serde(default)]
+    pub policy: Option<String>,
+    #[serde(default)]
+    pub tags: BTreeMap<String, String>,
+}
+
 /// A restore-testing plan with its selections.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RestoreTestingPlanRecord {
@@ -141,6 +165,9 @@ pub struct BackupState {
     /// resourceArn -> list of recoveryPointArn (in creation order).
     #[serde(default)]
     pub resource_recovery_points: BTreeMap<String, Vec<String>>,
+    /// Backup access points keyed by `AccessPointArn`.
+    #[serde(default)]
+    pub access_points: BTreeMap<String, AccessPointRecord>,
     #[serde(default)]
     pub global_settings: BTreeMap<String, String>,
     /// Per-resource-type opt-in preference (defaults applied on read).
@@ -185,6 +212,11 @@ pub fn recovery_point_arn(region: &str, account_id: &str, id: &str) -> String {
 
 pub fn framework_arn(region: &str, account_id: &str, name: &str, id: &str) -> String {
     format!("arn:aws:backup:{region}:{account_id}:framework:{name}-{id}")
+}
+/// `AccessPointArn` — the model's pattern is
+/// `arn:aws...:backup:<region>:<account>:accesspoint/<name>`.
+pub fn access_point_arn(region: &str, account_id: &str, name: &str) -> String {
+    format!("arn:aws:backup:{region}:{account_id}:accesspoint/{name}")
 }
 
 pub fn report_plan_arn(region: &str, account_id: &str, name: &str, id: &str) -> String {

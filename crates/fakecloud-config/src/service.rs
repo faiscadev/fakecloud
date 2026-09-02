@@ -2617,11 +2617,7 @@ impl ConfigService {
 /// yields an empty list (compliance then aggregates over all account rules).
 fn extract_pack_rule_names(template: Option<&str>) -> Vec<String> {
     let Some(t) = template else { return Vec::new() };
-    // Try JSON first, then YAML (a superset that also accepts JSON, but JSON is
-    // cheaper and the common case for programmatically-generated templates).
-    let v: Value = serde_json::from_str(t)
-        .or_else(|_| serde_yaml::from_str::<Value>(t))
-        .unwrap_or(Value::Null);
+    let v: Value = fakecloud_core::cfn_template::parse_template_body(t).unwrap_or(Value::Null);
     let Some(resources) = v.get("Resources").and_then(Value::as_object) else {
         return Vec::new();
     };

@@ -1,11 +1,14 @@
 use std::collections::BTreeMap;
 
 use fakecloud_persistence::{
-    AclGrantSnapshot, AclSnapshot, BucketMeta, BucketSnapshot, InventorySnapshot, LoadedMpu,
-    LoadedObject, LoadedPart, MpuInit, ObjectMeta, S3StateSnapshot, TagsSnapshot, UploadPartMeta,
+    AclGrantSnapshot, AclSnapshot, AnnotationSnapshot, BucketMeta, BucketSnapshot,
+    InventorySnapshot, LoadedMpu, LoadedObject, LoadedPart, MpuInit, ObjectMeta, S3StateSnapshot,
+    TagsSnapshot, UploadPartMeta,
 };
 
-use crate::state::{AclGrant, MultipartUpload, S3Bucket, S3Object, S3State, UploadPart};
+use crate::state::{
+    AclGrant, MultipartUpload, ObjectAnnotation, S3Bucket, S3Object, S3State, UploadPart,
+};
 
 impl From<&AclGrant> for AclGrantSnapshot {
     fn from(g: &AclGrant) -> Self {
@@ -60,6 +63,17 @@ pub fn object_meta_snapshot(o: &S3Object) -> ObjectMeta {
         lock_mode: o.lock_mode.clone(),
         lock_retain_until: o.lock_retain_until,
         lock_legal_hold: o.lock_legal_hold.clone(),
+        annotations: o
+            .annotations
+            .values()
+            .map(|a| AnnotationSnapshot {
+                name: a.name.clone(),
+                payload: a.payload.clone(),
+                etag: a.etag.clone(),
+                last_modified: a.last_modified,
+                checksum_algorithm: a.checksum_algorithm.clone(),
+            })
+            .collect(),
         content_encoding: o.content_encoding.clone(),
         cache_control: o.cache_control.clone(),
         content_disposition: o.content_disposition.clone(),
@@ -146,6 +160,22 @@ pub fn s3_object_from_loaded(lo: LoadedObject) -> S3Object {
         lock_mode: meta.lock_mode,
         lock_retain_until: meta.lock_retain_until,
         lock_legal_hold: meta.lock_legal_hold,
+        annotations: meta
+            .annotations
+            .into_iter()
+            .map(|a| {
+                (
+                    a.name.clone(),
+                    ObjectAnnotation {
+                        name: a.name,
+                        payload: a.payload,
+                        etag: a.etag,
+                        last_modified: a.last_modified,
+                        checksum_algorithm: a.checksum_algorithm,
+                    },
+                )
+            })
+            .collect(),
     }
 }
 
@@ -257,6 +287,7 @@ pub fn s3_bucket_from_snapshot(
         abac_config: None,
         metadata_configuration: None,
         metadata_table_configuration: None,
+        annotation_table_config: None,
     };
     for (key, lo) in objects {
         b.objects.insert(key, s3_object_from_loaded(lo));

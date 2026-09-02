@@ -6,6 +6,7 @@ pub mod delivery;
 pub(crate) mod insight_rules;
 pub mod introspection;
 pub(crate) mod json_protocol;
+pub(crate) mod log_alarms;
 pub(crate) mod metric_math;
 pub(crate) mod metric_streams;
 pub(crate) mod mute_rules;
