@@ -329,6 +329,9 @@ fn is_mutating_action(action: &str) -> bool {
             | "DescribeManagedLoginBrandingByClient"
             | "DescribeUserImportJob"
             | "DescribeTerms"
+            | "DescribeTermsByClient"
+            | "GetClientToken"
+            | "AdminDeleteSoftwareToken"
             | "ListUserPools"
             | "ListUserPoolClients"
             | "ListUserPoolClientSecrets"
@@ -402,6 +405,9 @@ impl AwsService for CognitoService {
             "AdminSetUserPassword" => self.admin_set_user_password(&req),
             "AdminInitiateAuth" => self.admin_initiate_auth(&req).await,
             "InitiateAuth" => self.initiate_auth(&req).await,
+            "GetClientToken" => self.get_client_token(&req).await,
+            "AdminDeleteSoftwareToken" => self.admin_delete_software_token(&req),
+            "DescribeTermsByClient" => self.describe_terms_by_client(&req),
             "RespondToAuthChallenge" => self.respond_to_auth_challenge(&req).await,
             "AdminRespondToAuthChallenge" => self.admin_respond_to_auth_challenge(&req).await,
             "SignUp" => self.sign_up(&req).await,
@@ -3005,6 +3011,142 @@ fn verify_pkce(challenge: &str, method: Option<&str>, verifier: &str) -> bool {
             challenge == computed
         }
         _ => false,
+    }
+}
+
+impl CognitoService {
+    /// `GetClientToken` — the machine-to-machine client-credentials grant
+    /// exposed as an API operation rather than through the Hosted-UI token
+    /// endpoint. It mints the same access token `handle_client_credentials_grant`
+    /// does, registers it so `RevokeToken` / `GetUser` can resolve it, and
+    /// enforces the same rules: the client must have a secret, must allow the
+    /// `client_credentials` flow, and may only request scopes it is registered
+    /// for.
+    pub(super) async fn get_client_token(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let client_id = require_str(&body, "ClientId")?.to_string();
+        let secret = require_str(&body, "Secret")?.to_string();
+
+        let unauthorized = || {
+            AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "Invalid client credentials.",
+            )
+        };
+
+        let (pool_id, stored_secret, allowed_flows, allowed_scopes) = {
+            let mas = self.state.read();
+            let mut found = None;
+            for (_, account) in mas.iter() {
+                if let Some(c) = account.user_pool_clients.get(&client_id) {
+                    found = Some((
+                        c.user_pool_id.clone(),
+                        c.client_secret.clone(),
+                        c.allowed_o_auth_flows.clone(),
+                        c.allowed_o_auth_scopes.clone(),
+                    ));
+                    break;
+                }
+            }
+            found.ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("App client {client_id} does not exist."),
+                )
+            })?
+        };
+
+        // A confidential client only: a public client (no secret) cannot use
+        // the client-credentials grant at all.
+        match stored_secret.as_deref() {
+            Some(stored) if stored == secret => {}
+            _ => return Err(unauthorized()),
+        }
+        if !allowed_flows
+            .iter()
+            .any(|f| f.eq_ignore_ascii_case("client_credentials"))
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "NotAuthorizedException",
+                "The app client is not configured for the client_credentials flow.",
+            ));
+        }
+
+        // Requested scopes must be a subset of what the client is registered
+        // for; asking for anything else is rejected rather than silently
+        // narrowed.
+        let requested: Vec<String> = body["Scopes"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default();
+        for scope in &requested {
+            if !allowed_scopes.iter().any(|s| s == scope) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    format!("Scope {scope} is not allowed for this app client."),
+                ));
+            }
+        }
+        let granted = if requested.is_empty() {
+            allowed_scopes.join(" ")
+        } else {
+            requested.join(" ")
+        };
+
+        let signing = ensure_pool_signing_key(&self.state, &pool_id).await;
+        let signing_ref = signing.as_ref().map(|(p, k)| (p.as_str(), k.as_str()));
+        let access_ttl =
+            collect_token_claims(&self.state, &pool_id, &client_id, &client_id).access_ttl();
+        let access_token = build_client_credentials_access_token(
+            &pool_id,
+            &client_id,
+            Some(&granted),
+            &req.region,
+            signing_ref,
+            access_ttl,
+        );
+
+        {
+            let mut mas = self.state.write();
+            for (_, account) in mas.iter_mut() {
+                if !account.user_pool_clients.contains_key(&client_id) {
+                    continue;
+                }
+                // No user is involved, so the token's owner is the client
+                // itself — the same convention the OAuth grant uses.
+                account.access_tokens.insert(
+                    access_token.clone(),
+                    crate::state::AccessTokenData {
+                        user_pool_id: pool_id.clone(),
+                        username: client_id.clone(),
+                        client_id: client_id.clone(),
+                        issued_at: Utc::now(),
+                        expires_at: Some(Utc::now() + chrono::Duration::seconds(access_ttl)),
+                    },
+                );
+                break;
+            }
+        }
+
+        Ok(AwsResponse::ok_json(json!({
+            "ClientAuthenticationResult": {
+                "AccessToken": access_token,
+                "ExpiresIn": access_ttl,
+                "TokenType": "Bearer",
+            }
+        })))
     }
 }
 

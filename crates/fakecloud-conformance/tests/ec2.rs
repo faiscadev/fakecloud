@@ -181,7 +181,7 @@ async fn ec2_describe_account_attributes() {
 
 // ---- VPCs ----
 
-#[test_action("ec2", "CreateVpc", checksum = "6a8251a6")]
+#[test_action("ec2", "CreateVpc", checksum = "ecd9464e")]
 #[tokio::test]
 async fn ec2_create_vpc() {
     let server = TestServer::start().await;
@@ -198,7 +198,7 @@ async fn ec2_create_vpc() {
     assert_eq!(v.state(), Some(&aws_sdk_ec2::types::VpcState::Available));
 }
 
-#[test_action("ec2", "CreateDefaultVpc", checksum = "e508c9f8")]
+#[test_action("ec2", "CreateDefaultVpc", checksum = "75cd911a")]
 #[tokio::test]
 async fn ec2_create_default_vpc() {
     let server = TestServer::start().await;
@@ -207,7 +207,7 @@ async fn ec2_create_default_vpc() {
     assert_eq!(vpc.vpc().unwrap().is_default(), Some(true));
 }
 
-#[test_action("ec2", "DescribeVpcs", checksum = "970ba030")]
+#[test_action("ec2", "DescribeVpcs", checksum = "934351bf")]
 #[tokio::test]
 async fn ec2_describe_vpcs() {
     let server = TestServer::start().await;
@@ -2480,7 +2480,7 @@ async fn run_one(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "RunInstances", checksum = "67c28d0f")]
+#[test_action("ec2", "RunInstances", checksum = "567060a9")]
 #[tokio::test]
 async fn ec2_run_instances() {
     let s = TestServer::start().await;
@@ -3615,7 +3615,7 @@ async fn ec2_register_image() {
     assert!(r.image_id().unwrap().starts_with("ami-"));
 }
 
-#[test_action("ec2", "DescribeImages", checksum = "a21445a1")]
+#[test_action("ec2", "DescribeImages", checksum = "a0fc0779")]
 #[tokio::test]
 async fn ec2_describe_images() {
     let s = TestServer::start().await;
@@ -3682,6 +3682,7 @@ async fn ec2_describe_image_attribute() {
     assert_eq!(r.image_id(), Some(id.as_str()));
 }
 
+#[test_action("ec2", "ReplaceImageInstanceTypeSpecification", checksum = "6203df8a")]
 #[test_action("ec2", "ModifyImageAttribute", checksum = "08749225")]
 #[tokio::test]
 async fn ec2_modify_image_attribute() {
@@ -4716,7 +4717,7 @@ async fn make_lt(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateLaunchTemplate", checksum = "b14932d9")]
+#[test_action("ec2", "CreateLaunchTemplate", checksum = "b619c9db")]
 #[tokio::test]
 async fn ec2_create_launch_template() {
     let s = TestServer::start().await;
@@ -4740,7 +4741,7 @@ async fn ec2_create_launch_template() {
         .starts_with("lt-"));
 }
 
-#[test_action("ec2", "CreateLaunchTemplateVersion", checksum = "30151ce2")]
+#[test_action("ec2", "CreateLaunchTemplateVersion", checksum = "fef0ba9e")]
 #[tokio::test]
 async fn ec2_create_launch_template_version() {
     let s = TestServer::start().await;
@@ -4778,7 +4779,7 @@ async fn ec2_describe_launch_templates() {
     assert_eq!(r.launch_templates().len(), 1);
 }
 
-#[test_action("ec2", "DescribeLaunchTemplateVersions", checksum = "bd5d8f16")]
+#[test_action("ec2", "DescribeLaunchTemplateVersions", checksum = "e0fffc42")]
 #[tokio::test]
 async fn ec2_describe_launch_template_versions() {
     let s = TestServer::start().await;
@@ -4827,7 +4828,7 @@ async fn ec2_delete_launch_template_versions() {
         .unwrap();
 }
 
-#[test_action("ec2", "GetLaunchTemplateData", checksum = "3b4ef9da")]
+#[test_action("ec2", "GetLaunchTemplateData", checksum = "57b24b11")]
 #[tokio::test]
 async fn ec2_get_launch_template_data() {
     let s = TestServer::start().await;
@@ -5103,7 +5104,7 @@ async fn make_fleet(c: &aws_sdk_ec2::Client) -> String {
         .to_string()
 }
 
-#[test_action("ec2", "CreateFleet", checksum = "53159a0c")]
+#[test_action("ec2", "CreateFleet", checksum = "d3fe1e01")]
 #[tokio::test]
 async fn ec2_create_fleet() {
     let s = TestServer::start().await;
@@ -5112,7 +5113,7 @@ async fn ec2_create_fleet() {
     assert!(id.starts_with("fleet-"));
 }
 
-#[test_action("ec2", "DescribeFleets", checksum = "d3e933cd")]
+#[test_action("ec2", "DescribeFleets", checksum = "4c58cdf5")]
 #[tokio::test]
 async fn ec2_describe_fleets() {
     let s = TestServer::start().await;

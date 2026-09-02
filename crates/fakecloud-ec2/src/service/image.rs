@@ -47,6 +47,21 @@ fn image_xml(i: &Image, tags: &[Tag], owner: &str) -> String {
         .as_deref()
         .map(|a| ec2_elem("imageOwnerAlias", a))
         .unwrap_or_default();
+    // `instanceTypeSpecification` is present only when the AMI declares one.
+    // The two lists are mutually exclusive, so at most one is rendered.
+    let instance_type_spec_xml = if !i.supported_instance_types.is_empty() {
+        format!(
+            "<instanceTypeSpecification>{}</instanceTypeSpecification>",
+            ec2_list("supportedInstanceTypes", &i.supported_instance_types)
+        )
+    } else if !i.unsupported_instance_types.is_empty() {
+        format!(
+            "<instanceTypeSpecification>{}</instanceTypeSpecification>",
+            ec2_list("unsupportedInstanceTypes", &i.unsupported_instance_types)
+        )
+    } else {
+        String::new()
+    };
     // Windows AMIs additionally report `<platform>windows</platform>`.
     let platform_xml = if platform_details.eq_ignore_ascii_case("windows") {
         ec2_elem("platform", "windows")
@@ -54,7 +69,7 @@ fn image_xml(i: &Image, tags: &[Tag], owner: &str) -> String {
         String::new()
     };
     format!(
-        "{}{}<imageState>{}</imageState>{}{}{}{}<isPublic>{}</isPublic>{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}<imageState>{}</imageState>{}{}{}{}<isPublic>{}</isPublic>{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("imageId", &i.image_id),
         ec2_elem("imageLocation", &format!("{owner_id}/{}", i.name)),
         i.state,
@@ -83,6 +98,7 @@ fn image_xml(i: &Image, tags: &[Tag], owner: &str) -> String {
         ),
         ec2_list("productCodes", &[]),
         ec2_list("blockDeviceMapping", &[]),
+        instance_type_spec_xml,
         super::tags::tag_set_xml(tags),
     )
 }
@@ -103,6 +119,8 @@ fn build_image(name: String, description: String, source_instance_id: Option<Str
         launch_permission_groups: Vec::new(),
         boot_mode: None,
         owner_id: None,
+        supported_instance_types: Vec::new(),
+        unsupported_instance_types: Vec::new(),
         owner_alias: None,
         creation_date: None,
         root_device_name: None,
@@ -1176,6 +1194,8 @@ mod tests {
             launch_permission_groups: vec![],
             boot_mode: None,
             owner_id: owner_id.map(str::to_string),
+            supported_instance_types: Vec::new(),
+            unsupported_instance_types: Vec::new(),
             owner_alias: alias.map(str::to_string),
             creation_date: None,
             root_device_name: None,
@@ -1514,5 +1534,205 @@ mod tests {
             dates.len() >= 5 && n >= 6,
             "seeds need distinct creation dates for most_recent"
         );
+    }
+}
+
+/// `ReplaceImageInstanceTypeSpecification` — set or clear the instance-type
+/// specification on an AMI.
+///
+/// The specification is one list or the other, never both: an AMI either
+/// names the instance types it supports or the ones it does not. Omitting
+/// `InstanceTypeSpecification` entirely removes the specification, which is
+/// how the operation's "or removes" half works.
+pub(crate) fn replace_image_instance_type_specification(
+    svc: &Ec2Service,
+    req: &AwsRequest,
+) -> Result<AwsResponse, AwsServiceError> {
+    let id = require(&req.query_params, "ImageId")?;
+    let supported = indexed_list(
+        &req.query_params,
+        "InstanceTypeSpecification.SupportedInstanceTypes",
+    );
+    let unsupported = indexed_list(
+        &req.query_params,
+        "InstanceTypeSpecification.UnsupportedInstanceTypes",
+    );
+    if !supported.is_empty() && !unsupported.is_empty() {
+        return Err(crate::service_helpers::invalid_parameter_value(
+            "InstanceTypeSpecification accepts SupportedInstanceTypes or \
+             UnsupportedInstanceTypes, not both",
+        ));
+    }
+
+    let dry_run = req
+        .query_params
+        .get("DryRun")
+        .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+
+    let mut accounts = svc.state.write();
+    let state = accounts.get_or_create(&req.account_id);
+    let img = state
+        .images
+        .get_mut(&id)
+        .ok_or_else(|| crate::service_helpers::not_found("InvalidAMIID.NotFound", &id))?;
+
+    // A DryRun validates the request — including that the AMI exists — and
+    // changes nothing.
+    if !dry_run {
+        img.supported_instance_types = supported;
+        img.unsupported_instance_types = unsupported;
+    }
+
+    Ok(Ec2Service::respond(
+        "ReplaceImageInstanceTypeSpecification",
+        &req.request_id,
+        &ec2_elem("return", "true"),
+    ))
+}
+
+#[cfg(test)]
+mod instance_type_specification_tests {
+    use super::*;
+    use crate::test_support::{ec2_request as req, err_of};
+
+    fn body(resp: AwsResponse) -> String {
+        String::from_utf8_lossy(resp.body.expect_bytes()).to_string()
+    }
+
+    fn register(svc: &Ec2Service) -> String {
+        let resp = register_image(
+            svc,
+            &req(
+                "RegisterImage",
+                &[("Name", "spec-ami"), ("Architecture", "x86_64")],
+            ),
+        )
+        .unwrap();
+        let b = body(resp);
+        b.split("<imageId>")
+            .nth(1)
+            .unwrap()
+            .split("</imageId>")
+            .next()
+            .unwrap()
+            .to_string()
+    }
+
+    fn describe(svc: &Ec2Service, id: &str) -> String {
+        body(describe_images(svc, &req("DescribeImages", &[("ImageId", id)])).unwrap())
+    }
+
+    #[test]
+    fn replace_sets_clears_and_swaps_the_specification() {
+        let svc = Ec2Service::new();
+        let id = register(&svc);
+        // An AMI with no specification omits the element entirely.
+        assert!(!describe(&svc, &id).contains("<instanceTypeSpecification>"));
+
+        replace_image_instance_type_specification(
+            &svc,
+            &req(
+                "ReplaceImageInstanceTypeSpecification",
+                &[
+                    ("ImageId", &id),
+                    (
+                        "InstanceTypeSpecification.SupportedInstanceTypes.1",
+                        "t3.micro",
+                    ),
+                    (
+                        "InstanceTypeSpecification.SupportedInstanceTypes.2",
+                        "m5.large",
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        let d = describe(&svc, &id);
+        assert!(d.contains("<supportedInstanceTypes>"), "{d}");
+        assert!(d.contains("<item>t3.micro</item>"), "{d}");
+        assert!(d.contains("<item>m5.large</item>"), "{d}");
+
+        // Replacing with the other list swaps which one is reported.
+        replace_image_instance_type_specification(
+            &svc,
+            &req(
+                "ReplaceImageInstanceTypeSpecification",
+                &[
+                    ("ImageId", &id),
+                    (
+                        "InstanceTypeSpecification.UnsupportedInstanceTypes.1",
+                        "t2.nano",
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        let d = describe(&svc, &id);
+        assert!(d.contains("<unsupportedInstanceTypes>"), "{d}");
+        assert!(!d.contains("<supportedInstanceTypes>"), "{d}");
+
+        // Omitting the specification removes it.
+        replace_image_instance_type_specification(
+            &svc,
+            &req("ReplaceImageInstanceTypeSpecification", &[("ImageId", &id)]),
+        )
+        .unwrap();
+        assert!(!describe(&svc, &id).contains("<instanceTypeSpecification>"));
+    }
+
+    #[test]
+    fn replace_rejects_both_lists_and_an_unknown_ami() {
+        let svc = Ec2Service::new();
+        let id = register(&svc);
+
+        let err = err_of(replace_image_instance_type_specification(
+            &svc,
+            &req(
+                "ReplaceImageInstanceTypeSpecification",
+                &[
+                    ("ImageId", &id),
+                    (
+                        "InstanceTypeSpecification.SupportedInstanceTypes.1",
+                        "t3.micro",
+                    ),
+                    (
+                        "InstanceTypeSpecification.UnsupportedInstanceTypes.1",
+                        "t2.nano",
+                    ),
+                ],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
+
+        let err = err_of(replace_image_instance_type_specification(
+            &svc,
+            &req(
+                "ReplaceImageInstanceTypeSpecification",
+                &[("ImageId", "ami-00000000000000000")],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidAMIID.NotFound");
+    }
+
+    #[test]
+    fn replace_with_dry_run_validates_without_changing_anything() {
+        let svc = Ec2Service::new();
+        let id = register(&svc);
+        replace_image_instance_type_specification(
+            &svc,
+            &req(
+                "ReplaceImageInstanceTypeSpecification",
+                &[
+                    ("ImageId", &id),
+                    ("DryRun", "true"),
+                    (
+                        "InstanceTypeSpecification.SupportedInstanceTypes.1",
+                        "t3.micro",
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        assert!(!describe(&svc, &id).contains("<instanceTypeSpecification>"));
     }
 }

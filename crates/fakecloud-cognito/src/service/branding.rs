@@ -750,3 +750,46 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(result))
     }
 }
+
+impl CognitoService {
+    /// `DescribeTermsByClient` — resolve a terms document by the app client it
+    /// is attached to plus its name, rather than by terms id.
+    ///
+    /// The stored record already carries `ClientId` and `TermsName`, so this is
+    /// a real lookup over the same store `DescribeTerms` reads; a terms
+    /// document attached to a different client, or a different pool, does not
+    /// match.
+    pub(super) fn describe_terms_by_client(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let client_id = require_str(&body, "ClientId")?;
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let terms_name = require_str(&body, "TermsName")?;
+
+        let accounts = self.state.read();
+        let empty = CognitoState::new(&req.account_id, &req.region);
+        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+
+        ensure_user_pool_exists(state, pool_id)?;
+
+        let terms = state
+            .terms
+            .values()
+            .find(|t| {
+                t["UserPoolId"].as_str() == Some(pool_id)
+                    && t["ClientId"].as_str() == Some(client_id)
+                    && t["TermsName"].as_str() == Some(terms_name)
+            })
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    format!("Terms {terms_name} does not exist for client {client_id}."),
+                )
+            })?;
+
+        Ok(AwsResponse::ok_json(json!({ "Terms": terms })))
+    }
+}

@@ -432,7 +432,7 @@ async fn logs_destinations() {
 // -- Queries --
 
 #[test_action("logs", "StartQuery", checksum = "9936a5f2")]
-#[test_action("logs", "GetQueryResults", checksum = "e27a8ac8")]
+#[test_action("logs", "GetQueryResults", checksum = "d86b8fbf")]
 #[test_action("logs", "DescribeQueries", checksum = "fb7f2a3c")]
 #[tokio::test]
 async fn logs_queries() {

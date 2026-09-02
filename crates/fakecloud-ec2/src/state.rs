@@ -595,6 +595,13 @@ pub struct Image {
     /// the default `uefi`; settable via `ModifyImageAttribute`.
     #[serde(default)]
     pub boot_mode: Option<String>,
+    /// `instanceTypeSpecification` — the instance types this AMI declares
+    /// compatibility with. Either list may be set (never both); `None` on both
+    /// means the AMI carries no specification.
+    #[serde(default)]
+    pub supported_instance_types: Vec<String>,
+    #[serde(default)]
+    pub unsupported_instance_types: Vec<String>,
     /// `imageOwnerId` — the AWS account that owns the AMI. `None` reports the
     /// requesting account (a user-registered AMI is owned by its creator); the
     /// seeded public AMIs set this to the real Amazon/Canonical/etc. owner so

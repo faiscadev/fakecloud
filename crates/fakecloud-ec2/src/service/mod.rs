@@ -270,6 +270,7 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "CopyImage",
     "DescribeImageAttribute",
     "ModifyImageAttribute",
+    "ReplaceImageInstanceTypeSpecification",
     "ResetImageAttribute",
     "EnableImage",
     "DisableImage",
@@ -1577,6 +1578,9 @@ impl AwsService for Ec2Service {
             "CopyImage" => image::copy_image(self, &request),
             "DescribeImageAttribute" => image::describe_image_attribute(self, &request),
             "ModifyImageAttribute" => image::modify_image_attribute(self, &request),
+            "ReplaceImageInstanceTypeSpecification" => {
+                image::replace_image_instance_type_specification(self, &request)
+            }
             "ResetImageAttribute" => image::reset_image_attribute(self, &request),
             "EnableImage" => image::enable_image(self, &request),
             "DisableImage" => image::disable_image(self, &request),

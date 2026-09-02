@@ -390,7 +390,7 @@ async fn rds_remove_tags_from_resource() {
     assert_eq!(tags[0].key(), Some("team"));
 }
 
-#[test_action("rds", "CreateDBSnapshot", checksum = "bdeba3a7")]
+#[test_action("rds", "CreateDBSnapshot", checksum = "ae125b96")]
 #[tokio::test]
 async fn rds_create_db_snapshot() {
     let server = TestServer::start().await;
@@ -421,7 +421,7 @@ async fn rds_create_db_snapshot() {
     );
 }
 
-#[test_action("rds", "DescribeDBSnapshots", checksum = "c67cf62b")]
+#[test_action("rds", "DescribeDBSnapshots", checksum = "ad086cb0")]
 #[tokio::test]
 async fn rds_describe_db_snapshots() {
     let server = TestServer::start().await;
@@ -448,7 +448,7 @@ async fn rds_describe_db_snapshots() {
     assert_eq!(snapshots[0].db_snapshot_identifier(), Some("conf-snapshot"));
 }
 
-#[test_action("rds", "DeleteDBSnapshot", checksum = "cdb4726c")]
+#[test_action("rds", "DeleteDBSnapshot", checksum = "6deea900")]
 #[tokio::test]
 async fn rds_delete_db_snapshot() {
     let server = TestServer::start().await;
@@ -1020,7 +1020,7 @@ async fn rds_describe_db_instances_pagination() {
     assert!(response3.marker().is_none());
 }
 
-#[test_action("rds", "DescribeDBSnapshots", checksum = "c67cf62b")]
+#[test_action("rds", "DescribeDBSnapshots", checksum = "ad086cb0")]
 #[tokio::test]
 async fn rds_describe_db_snapshots_pagination() {
     let server = TestServer::start().await;
@@ -1252,7 +1252,7 @@ async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
 #[test_action("rds", "CopyDBClusterParameterGroup", checksum = "2bc6a350")]
 #[test_action("rds", "CopyDBClusterSnapshot", checksum = "fd51edab")]
 #[test_action("rds", "CopyDBParameterGroup", checksum = "e0eccdea")]
-#[test_action("rds", "CopyDBSnapshot", checksum = "acf9719f")]
+#[test_action("rds", "CopyDBSnapshot", checksum = "c39cdbbd")]
 #[test_action("rds", "CopyOptionGroup", checksum = "1ef09200")]
 #[test_action("rds", "CreateBlueGreenDeployment", checksum = "f58bfeb5")]
 #[test_action("rds", "CreateCustomDBEngineVersion", checksum = "52cd54db")]
@@ -1346,7 +1346,7 @@ async fn rds_route(server: &TestServer, action: &str, params: &[(&str, &str)]) {
 #[test_action("rds", "ModifyDBProxyTargetGroup", checksum = "d76aac3a")]
 #[test_action("rds", "ModifyDBRecommendation", checksum = "b835f503")]
 #[test_action("rds", "ModifyDBShardGroup", checksum = "4fe41f81")]
-#[test_action("rds", "ModifyDBSnapshot", checksum = "23c89969")]
+#[test_action("rds", "ModifyDBSnapshot", checksum = "0893c313")]
 #[test_action("rds", "ModifyDBSnapshotAttribute", checksum = "8fb6e6ef")]
 #[test_action("rds", "ModifyEventSubscription", checksum = "e63827e9")]
 #[test_action("rds", "ModifyGlobalCluster", checksum = "e614d4b4")]
