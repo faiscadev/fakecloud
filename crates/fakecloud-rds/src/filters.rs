@@ -95,18 +95,22 @@ impl RdsFilter {
     }
 }
 
-/// Reports an unrecognized filter name once, not once per row.
+/// Reports the filter names an operation doesn't support, once per
+/// request.
 ///
-/// The name is checked inside the per-row predicate, so a listing of a
-/// thousand rows logged a thousand identical lines. Deduped, the reason
-/// a caller got an empty result still reaches a default log level
-/// without drowning the rest of the request.
-pub(crate) fn warn_unrecognized_filter(name: &str) {
-    static SEEN: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
-        std::sync::OnceLock::new();
-    let seen = SEEN.get_or_init(Default::default);
-    if seen.lock().insert(name.to_string()) {
-        tracing::warn!(filter = %name, "unrecognized RDS filter name; matching no resource");
+/// Called before the rows are scanned, not from inside the per-row
+/// predicate: reporting from there logged one line per row, and a cache
+/// to dedupe it would grow without bound on request-supplied names.
+/// Here the work is bounded by the request's own filter count and the
+/// predicate stays side-effect-free.
+pub(crate) fn warn_unknown_filters(filters: &[RdsFilter], supported: &[&str]) {
+    for filter in filters {
+        if !supported.contains(&filter.name.as_str()) {
+            tracing::warn!(
+                filter = %filter.name,
+                "unrecognized RDS filter name; matching no resource"
+            );
+        }
     }
 }
 

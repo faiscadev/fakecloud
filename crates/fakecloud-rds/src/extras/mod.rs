@@ -42,6 +42,31 @@ fn entry_str<'a>(entry: &'a Value, key: &str) -> Option<&'a str> {
 /// with each other; the values within one filter are OR-ed. The names
 /// come from the `DescribeDBClusters` docs: `clone-group-id`,
 /// `db-cluster-id`, `db-cluster-resource-id`, `domain` and `engine`.
+/// The filter names each Describe supports, for the one-per-request
+/// report of the ones it doesn't. Kept beside the matchers that read
+/// them so the two can't drift.
+const CLUSTER_FILTERS: &[&str] = &[
+    "clone-group-id",
+    "db-cluster-id",
+    "db-cluster-resource-id",
+    "domain",
+    "engine",
+];
+const CLUSTER_ENDPOINT_FILTERS: &[&str] = &[
+    "db-cluster-endpoint-id",
+    "db-cluster-endpoint-type",
+    "db-cluster-endpoint-custom-type",
+    "db-cluster-endpoint-status",
+];
+const SHARD_GROUP_FILTERS: &[&str] = &["db-shard-group-id"];
+const BACKTRACK_FILTERS: &[&str] = &["db-cluster-backtrack-id", "db-cluster-backtrack-status"];
+const CLUSTER_SNAPSHOT_FILTERS: &[&str] = &[
+    "db-cluster-id",
+    "db-cluster-snapshot-id",
+    "engine",
+    "snapshot-type",
+];
+
 fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-cluster-id" => filter.matches_any([
@@ -54,16 +79,12 @@ fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        other => {
-            // Warn, not debug: the result is an EMPTY list where the
-            // caller expected a narrowed one, and nothing on the wire
-            // says why (InvalidParameterValue isn't declared on these
-            // operations, so it can't be returned). A silent empty
-            // result is the hardest failure to diagnose, so the reason
-            // has to reach a default log level.
-            crate::filters::warn_unrecognized_filter(other);
-            false
-        }
+        // The result is an EMPTY list where the caller expected a
+        // narrowed one, and nothing on the wire says why
+        // (InvalidParameterValue isn't declared on these operations, so
+        // it can't be returned). `warn_unknown_filters` reports the
+        // reason once per request, before the scan.
+        _ => false,
     })
 }
 
@@ -232,10 +253,9 @@ fn cluster_endpoint_matches_filters(entry: &Value, filters: &[RdsFilter]) -> boo
         "db-cluster-endpoint-status" => {
             filter.matches_ignore_case(entry_str(entry, "Status").or(Some("available")))
         }
-        other => {
-            crate::filters::warn_unrecognized_filter(other);
-            false
-        }
+        // Unsupported names are reported once per request by
+        // `warn_unknown_filters`, before the scan.
+        _ => false,
     })
 }
 
@@ -245,10 +265,9 @@ fn cluster_endpoint_matches_filters(entry: &Value, filters: &[RdsFilter]) -> boo
 fn shard_group_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-shard-group-id" => filter.matches(entry_str(entry, "DBShardGroupIdentifier")),
-        other => {
-            crate::filters::warn_unrecognized_filter(other);
-            false
-        }
+        // Unsupported names are reported once per request by
+        // `warn_unknown_filters`, before the scan.
+        _ => false,
     })
 }
 
@@ -264,10 +283,9 @@ fn backtrack_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
         "db-cluster-backtrack-status" => {
             filter.matches_ignore_case(entry_str(entry, "Status").or(Some("completed")))
         }
-        other => {
-            crate::filters::warn_unrecognized_filter(other);
-            false
-        }
+        // Unsupported names are reported once per request by
+        // `warn_unknown_filters`, before the scan.
+        _ => false,
     })
 }
 
@@ -313,16 +331,12 @@ fn cluster_snapshot_matches_filters(
         "engine" => filter.matches(entry_str(entry, "Engine")),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        other => {
-            // Warn, not debug: the result is an EMPTY list where the
-            // caller expected a narrowed one, and nothing on the wire
-            // says why (InvalidParameterValue isn't declared on these
-            // operations, so it can't be returned). A silent empty
-            // result is the hardest failure to diagnose, so the reason
-            // has to reach a default log level.
-            crate::filters::warn_unrecognized_filter(other);
-            false
-        }
+        // The result is an EMPTY list where the caller expected a
+        // narrowed one, and nothing on the wire says why
+        // (InvalidParameterValue isn't declared on these operations, so
+        // it can't be returned). `warn_unknown_filters` reports the
+        // reason once per request, before the scan.
+        _ => false,
     })
 }
 
@@ -645,6 +659,7 @@ impl RdsService {
                 }
                 let id_filter = normalized_identifier(raw_cluster_identifier, "cluster");
                 let filters = parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, CLUSTER_FILTERS);
                 let accounts = self.state_handle().read();
                 // A named cluster that doesn't exist is the declared
                 // `DBClusterNotFoundFault`; an empty list would tell a
@@ -943,6 +958,7 @@ impl RdsService {
                 let include_public =
                     optional_flag(get_param(req, "IncludePublic").as_deref()).unwrap_or(false);
                 let filters = parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, CLUSTER_SNAPSHOT_FILTERS);
                 let accounts = self.state_handle().read();
                 // A named snapshot that doesn't exist is the declared
                 // `DBClusterSnapshotNotFoundFault`, same as the instance
@@ -1388,6 +1404,7 @@ impl RdsService {
                     cluster_entry(self, &aid, &cluster)?;
                 }
                 let filters = crate::filters::parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, BACKTRACK_FILTERS);
                 // `normalized_identifier` also drops an explicitly
                 // empty value, which no stored record carries and which
                 // would otherwise trip the not-found check below.
@@ -1815,6 +1832,7 @@ impl RdsService {
             }
             "DescribeDBClusterEndpoints" => {
                 let filters = crate::filters::parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, CLUSTER_ENDPOINT_FILTERS);
                 // The identifier parameters narrow the same way the
                 // filters do; AWS applies both.
                 // A named cluster that doesn't exist gets the fault the
@@ -2808,6 +2826,7 @@ impl RdsService {
             }
             "DescribeDBShardGroups" => {
                 let filters = crate::filters::parse_filters(req);
+                crate::filters::warn_unknown_filters(&filters, SHARD_GROUP_FILTERS);
                 let wanted = crate::filters::requested_identifier(
                     get_param(req, "DBShardGroupIdentifier"),
                     "shard-group",

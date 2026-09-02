@@ -70,6 +70,16 @@ fn snapshot_type_labels(snapshot: &DbSnapshot, caller: &str, owned: bool) -> Vec
 /// each other; the values within one filter are OR-ed. The names come
 /// from the `DescribeDBSnapshots` docs: `db-instance-id`,
 /// `db-snapshot-id`, `dbi-resource-id`, `engine` and `snapshot-type`.
+/// The filter names this Describe supports, for the
+/// one-per-request report of the ones it doesn't.
+const SNAPSHOT_FILTERS: &[&str] = &[
+    "db-instance-id",
+    "db-snapshot-id",
+    "dbi-resource-id",
+    "engine",
+    "snapshot-type",
+];
+
 fn snapshot_matches_filters(
     snapshot: &DbSnapshot,
     filters: &[RdsFilter],
@@ -113,16 +123,12 @@ fn snapshot_matches_filters(
             .any(|label| filter.matches(Some(label.as_str()))),
         // A filter name AWS doesn't document for this operation
         // matches nothing — see the module docs on `crate::filters`.
-        other => {
-            // Warn, not debug: the result is an EMPTY list where the
-            // caller expected a narrowed one, and nothing on the wire
-            // says why (InvalidParameterValue isn't declared on these
-            // operations, so it can't be returned). A silent empty
-            // result is the hardest failure to diagnose, so the reason
-            // has to reach a default log level.
-            crate::filters::warn_unrecognized_filter(other);
-            false
-        }
+        // The result is an EMPTY list where the caller expected a
+        // narrowed one, and nothing on the wire says why
+        // (InvalidParameterValue isn't declared on these operations, so
+        // it can't be returned). `warn_unknown_filters` reports the
+        // reason once per request, before the scan.
+        _ => false,
     })
 }
 
@@ -599,6 +605,7 @@ impl RdsService {
         let marker = optional_query_param(request, "Marker");
         let max_records = optional_query_param(request, "MaxRecords");
         let filters = parse_filters(request);
+        crate::filters::warn_unknown_filters(&filters, SNAPSHOT_FILTERS);
 
         // Specifying both DBSnapshotIdentifier and DBInstanceIdentifier
         // is tolerated: they are AND-ed, like SnapshotType and Filters.
