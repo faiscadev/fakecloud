@@ -1370,10 +1370,12 @@ impl CloudFormationService {
             let use_previous = raw
                 .get(&format!("Parameters.member.{i}.UsePreviousValue"))
                 .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-            // An explicit value at the same index wins.
-            let has_explicit_value = raw
-                .get(&format!("Parameters.member.{i}.ParameterValue"))
-                .is_some_and(|v| !v.is_empty());
+            // An explicit value at the same index wins. Keyed on presence,
+            // not on being non-empty: an empty string is a legitimate
+            // parameter value, and `extract_parameters` above already treats
+            // it as an explicit one.
+            let has_explicit_value =
+                raw.contains_key(&format!("Parameters.member.{i}.ParameterValue"));
             if use_previous && !has_explicit_value {
                 if let Some(prev) = previous.get(key) {
                     parameters.insert(key.clone(), prev.clone());
@@ -3794,6 +3796,35 @@ mod tests {
         assert_eq!(parameters.get("A").map(String::as_str), Some("explicit"));
         // B carries no explicit value, so it takes the stored one.
         assert_eq!(parameters.get("B").map(String::as_str), Some("stored-b"));
+    }
+
+    #[test]
+    fn an_explicit_empty_parameter_value_is_still_explicit() {
+        // An empty string is a legitimate parameter value; `extract_parameters`
+        // treats it as explicit, so the refill must not replace it with the
+        // stored one.
+        let mut raw = BTreeMap::new();
+        raw.insert(
+            "Parameters.member.1.ParameterKey".to_string(),
+            "A".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.UsePreviousValue".to_string(),
+            "true".to_string(),
+        );
+        raw.insert(
+            "Parameters.member.1.ParameterValue".to_string(),
+            String::new(),
+        );
+
+        let mut previous = BTreeMap::new();
+        previous.insert("A".to_string(), "stored-a".to_string());
+
+        let mut parameters = BTreeMap::new();
+        parameters.insert("A".to_string(), String::new());
+        CloudFormationService::refill_use_previous_values(&raw, &previous, &mut parameters);
+
+        assert_eq!(parameters.get("A").map(String::as_str), Some(""));
     }
 
     #[test]
