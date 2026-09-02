@@ -196,6 +196,67 @@ fn describe_events_is_lenient_about_pagination_parameters() {
     );
 }
 
+/// Events that share a timestamp, source and event code still paginate.
+///
+/// `event_id` is the RDS event CODE (`RDS-EVENT-0042`), not a unique id,
+/// so a key of timestamp + source + code can repeat. A repeated key
+/// resolves to the first match, which pages that row forever under
+/// MaxRecords=1 -- an SDK paginator hangs rather than erroring.
+#[test]
+fn describe_events_paginates_past_identical_rows() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let events = &mut accounts.default_mut().events;
+        let date = chrono::Utc::now();
+        for _ in 0..3 {
+            events.push(crate::state::RdsEventRecord {
+                source_identifier: "clu-1".to_string(),
+                source_type: "db-cluster".to_string(),
+                source_arn: "arn:aws:rds:us-east-1:000000000000:cluster:clu-1".to_string(),
+                event_id: "RDS-EVENT-0042".to_string(),
+                event_categories: vec!["creation".to_string()],
+                message: "identical".to_string(),
+                // Same instant: the collision this guards against.
+                date,
+            });
+        }
+    }
+
+    // Walk one row at a time. Every page must advance.
+    let mut marker: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let body = body_of_action(&svc, "DescribeEvents", &params);
+        let rows = body.matches("<Event>").count();
+        if rows == 0 {
+            break;
+        }
+        pages += 1;
+        assert!(
+            pages <= 3,
+            "pagination revisited a duplicate row instead of advancing"
+        );
+        marker = body
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if marker.is_none() {
+            break;
+        }
+    }
+    assert_eq!(pages, 3, "expected one page per identical event");
+}
+
 #[test]
 fn describe_events_filters_by_source_identifier() {
     let svc = svc();

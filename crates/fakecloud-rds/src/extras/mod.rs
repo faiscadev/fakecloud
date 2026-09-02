@@ -4299,52 +4299,50 @@ impl RdsService {
             })
             .collect();
 
-        // MaxRecords (1..=100, default 100) clamped and lenient, matching
-        // `service_helpers::paginate` and for its reason: no Describe
-        // operation declares an InvalidParameterValue-equivalent, and
-        // real RDS is lenient on an out-of-range MaxRecords. This handler
-        // rolled its own pagination and rejected instead.
-        let max_records: usize = match get_param(req, "MaxRecords").map(|raw| raw.parse::<i32>()) {
-            Some(Ok(parsed)) => parsed.clamp(1, 100) as usize,
-            Some(Err(_)) | None => 100,
-        };
-
-        // The marker names the ROW to resume at -- the event's timestamp
-        // and identifier -- not its index. An index is a position in a
-        // freshly filtered-and-sorted list, and RDS emits an event on
-        // every create and modify, so anything happening between two
-        // pages shifted the list and made the index skip or repeat rows.
-        // Keying on the row itself is what the comment here always
-        // claimed and what `paginate` does.
+        // Paginated through `service_helpers::paginate` rather than by
+        // hand. This handler used to roll its own -- rejecting an
+        // out-of-range MaxRecords and an unparseable Marker with
+        // InvalidParameterValue, which no Describe declares -- and then
+        // duplicated the helper almost line for line once that was
+        // fixed. Calling it keeps the two from drifting apart again, and
+        // brings the clamp (1..=100) and the "unresolvable marker points
+        // past the end" rule with it.
         //
-        // A marker that resolves to no row points past the end, as an
-        // unrecognized marker does in `paginate` -- an empty page rather
-        // than an error shape this operation never declares.
-        let event_key = |e: &crate::state::RdsEventRecord| {
-            format!("{}|{}", e.date.to_rfc3339(), e.source_identifier)
-        };
-        let start_index = match get_param(req, "Marker") {
-            Some(marker) => base64::engine::general_purpose::STANDARD
-                .decode(marker.as_bytes())
-                .ok()
-                .and_then(|decoded| String::from_utf8(decoded).ok())
-                .and_then(|key| filtered.iter().position(|e| event_key(e) == key))
-                .map(|position| position + 1)
-                .unwrap_or(usize::MAX),
-            None => 0,
-        };
-        let end_index = std::cmp::min(start_index.saturating_add(max_records), filtered.len());
-        let next_marker = if end_index < filtered.len() {
-            // The LAST row of this page: the next request resumes after
-            // it, wherever it has moved to by then.
-            filtered
-                .get(end_index - 1)
-                .map(|e| base64::engine::general_purpose::STANDARD.encode(event_key(e).as_bytes()))
-        } else {
-            None
-        };
-        let page = filtered.get(start_index..end_index).unwrap_or(&[]);
+        // The key is the ROW, not its index: an index is a position in a
+        // freshly filtered-and-sorted list, and RDS emits an event on
+        // nearly every write, so anything happening between two pages
+        // shifted it and made the walk skip or repeat rows. The
+        // occurrence ordinal makes the key unique -- `event_id` is the
+        // RDS event CODE (`RDS-EVENT-0042`), so a timestamp and source
+        // identifier alone can repeat, and a duplicate key resolves to
+        // the first match and pages that row forever under MaxRecords=1.
+        let mut seen_keys: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let keyed: Vec<(String, crate::state::RdsEventRecord)> = filtered
+            .into_iter()
+            .map(|e| {
+                let base = format!(
+                    "{}|{}|{}",
+                    e.date.to_rfc3339(),
+                    e.source_identifier,
+                    e.event_id
+                );
+                let ordinal = seen_keys.entry(base.clone()).or_insert(0);
+                let key = format!("{base}|{ordinal}");
+                *ordinal += 1;
+                (key, e)
+            })
+            .collect();
 
+        let paginated = crate::service::service_helpers::paginate(
+            keyed,
+            get_param(req, "Marker").filter(|value| !value.is_empty()),
+            get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
+            |(key, _)| key.as_str(),
+        )?;
+        let next_marker = paginated.next_marker.clone();
+        let page: Vec<crate::state::RdsEventRecord> =
+            paginated.items.into_iter().map(|(_, e)| e).collect();
         let mut body = String::new();
         if let Some(m) = next_marker {
             body.push_str(&format!("    <Marker>{}</Marker>\n", xml_escape(&m)));
