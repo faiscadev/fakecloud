@@ -3100,11 +3100,24 @@ impl RdsService {
                         // here -- but an empty ARN must not become a
                         // stored association that renders as an empty
                         // element and burns a quota slot.
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBClusterRoleNotFound",
-                            format!("No role is associated with DB cluster {id} under that name."),
-                        ));
+                        //
+                        // The fault has to be one the OPERATION declares:
+                        // DBClusterRoleNotFoundFault is declared on
+                        // Remove and not on Add, so Add answers the way
+                        // `prevalidate` answers the same request rather
+                        // than inventing a shape that operation never
+                        // returns.
+                        return Err(if adding {
+                            missing("RoleArn")
+                        } else {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBClusterRoleNotFound",
+                                format!(
+                                    "No role is associated with DB cluster {id} under that name."
+                                ),
+                            )
+                        });
                     }
                     // Keyed on the (role, feature) PAIR, as AWS keys it:
                     // one role is commonly attached for both s3Import and
@@ -3162,8 +3175,16 @@ impl RdsService {
                             ));
                         }
                     }
-                    // Written back only once the change succeeded.
-                    object.insert("AssociatedRoles".to_string(), Value::Array(roles));
+                    // Written back only once the change succeeded, and
+                    // the key is dropped rather than left as an empty
+                    // array: that is the same key the read above avoids
+                    // materializing, and CreateDBClusterSnapshot would
+                    // clone it forward into every later snapshot.
+                    if roles.is_empty() {
+                        object.remove("AssociatedRoles");
+                    } else {
+                        object.insert("AssociatedRoles".to_string(), Value::Array(roles));
+                    }
                 }
                 xml_empty_action(&action, &rid)
             }
@@ -3191,11 +3212,19 @@ impl RdsService {
                     // The pair again -- and FeatureName is a REQUIRED
                     // input here, so ignoring it was strictly wrong.
                     if role_arn.is_empty() {
-                        return Err(AwsServiceError::aws_error(
-                            StatusCode::NOT_FOUND,
-                            "DBInstanceRoleNotFound",
-                            format!("No role is associated with DB instance {id} under that name."),
-                        ));
+                        // Same: DBInstanceRoleNotFound is declared on
+                        // Remove, not on Add.
+                        return Err(if adding {
+                            missing("RoleArn")
+                        } else {
+                            AwsServiceError::aws_error(
+                                StatusCode::NOT_FOUND,
+                                "DBInstanceRoleNotFound",
+                                format!(
+                                    "No role is associated with DB instance {id} under that name."
+                                ),
+                            )
+                        });
                     }
                     let position = instance
                         .associated_roles

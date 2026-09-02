@@ -4885,6 +4885,14 @@ fn cluster_roles_are_recorded_and_reported() {
         !body.contains("<AssociatedRoles>"),
         "the association outlived its removal: {body}"
     );
+    // And the key is GONE, not left as an empty array: snapshots clone
+    // the cluster entry forward, so an empty key would ride along in
+    // every later snapshot.
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        stored.get("AssociatedRoles").is_none(),
+        "removing the last role left an empty key behind: {stored}"
+    );
 
     // AWS caps roles per cluster at five, and the Add op declares the
     // quota fault.
@@ -4944,11 +4952,15 @@ fn a_failed_role_request_does_not_write_to_the_cluster() {
     // An empty RoleArn is not stored as an association either. Requests
     // through `handle` never reach this -- prevalidate rejects the
     // missing required parameter first -- but an in-process caller can.
+    // The Add path answers the way prevalidate answers the same request:
+    // DBClusterRoleNotFoundFault is declared on Remove, not on Add, so
+    // raising it here would put a shape on the wire that this operation
+    // never returns.
     match svc.handle_extra_action(&req(
         "AddRoleToDBCluster",
         &[("DBClusterIdentifier", "clu-1"), ("RoleArn", "")],
     )) {
-        Err(err) => assert_eq!(err.code(), "DBClusterRoleNotFound"),
+        Err(err) => assert_eq!(err.code(), "InvalidParameterValue"),
         Ok(_) => panic!("stored an association with no role"),
     }
     let after = extras_value(&svc, "clusters", "clu-1");
