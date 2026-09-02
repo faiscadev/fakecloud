@@ -1268,3 +1268,223 @@ async fn put_anomaly_detector_persists_configuration() {
     assert!(xml.contains("<StartTime>2020-01-01T00:00:00Z</StartTime>"));
     assert!(xml.contains("<PeriodicSpikes>true</PeriodicSpikes>"));
 }
+
+// ---------------------------------------------------------------------
+// Log alarms
+// ---------------------------------------------------------------------
+
+fn log_alarm_params<'a>(name: &'a str, extra: &[(&'a str, &'a str)]) -> Vec<(&'a str, &'a str)> {
+    let mut p: Vec<(&str, &str)> = vec![
+        ("AlarmName", name),
+        (
+            "ScheduledQueryConfiguration.QueryString",
+            "fields @message | filter @message like /ERROR/",
+        ),
+        (
+            "ScheduledQueryConfiguration.ScheduledQueryRoleARN",
+            "arn:aws:iam::123456789012:role/cw-query",
+        ),
+        (
+            "ScheduledQueryConfiguration.ScheduleConfiguration.ScheduleExpression",
+            "rate(5 minutes)",
+        ),
+        (
+            "ScheduledQueryConfiguration.AggregationExpression",
+            "count(*)",
+        ),
+        ("QueryResultsToEvaluate", "3"),
+        ("QueryResultsToAlarm", "2"),
+        ("Threshold", "10"),
+        ("ComparisonOperator", "GreaterThanThreshold"),
+    ];
+    p.extend_from_slice(extra);
+    p
+}
+
+#[tokio::test]
+async fn put_log_alarm_round_trips_through_describe_alarms() {
+    let svc = service();
+    call(
+        &svc,
+        "PutLogAlarm",
+        &log_alarm_params(
+            "errors-alarm",
+            &[
+                ("AlarmDescription", "too many errors"),
+                (
+                    "ScheduledQueryConfiguration.LogGroupIdentifiers.member.1",
+                    "/aws/lambda/fn",
+                ),
+                (
+                    "AlarmActions.member.1",
+                    "arn:aws:sns:us-east-1:123456789012:ops",
+                ),
+                ("TreatMissingData", "notBreaching"),
+            ],
+        ),
+    )
+    .await;
+
+    // A log alarm is only returned when AlarmTypes asks for it: the default is
+    // metric alarms only.
+    let default_body = body_of(&call(&svc, "DescribeAlarms", &[]).await);
+    assert!(!default_body.contains("errors-alarm"), "{default_body}");
+
+    let body = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmTypes.member.1", "LogAlarm")],
+        )
+        .await,
+    );
+    assert!(body.contains("<LogAlarms>"), "{body}");
+    assert!(
+        body.contains("<AlarmName>errors-alarm</AlarmName>"),
+        "{body}"
+    );
+    assert!(body.contains("<AlarmDescription>too many errors</AlarmDescription>"));
+    assert!(body.contains("<QueryResultsToEvaluate>3</QueryResultsToEvaluate>"));
+    assert!(body.contains("<QueryResultsToAlarm>2</QueryResultsToAlarm>"));
+    assert!(body.contains("<ComparisonOperator>GreaterThanThreshold</ComparisonOperator>"));
+    assert!(body.contains("<TreatMissingData>notBreaching</TreatMissingData>"));
+    assert!(body.contains("<ScheduleExpression>rate(5 minutes)</ScheduleExpression>"));
+    assert!(body.contains("<member>/aws/lambda/fn</member>"));
+    assert!(body.contains(
+        "<AlarmArn>arn:aws:cloudwatch:us-east-1:123456789012:alarm:errors-alarm</AlarmArn>"
+    ));
+    // A fresh alarm has not been evaluated yet.
+    assert!(body.contains("<StateValue>INSUFFICIENT_DATA</StateValue>"));
+
+    // DeleteAlarms removes it alongside metric and composite alarms.
+    call(
+        &svc,
+        "DeleteAlarms",
+        &[("AlarmNames.member.1", "errors-alarm")],
+    )
+    .await;
+    let body = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmTypes.member.1", "LogAlarm")],
+        )
+        .await,
+    );
+    assert!(!body.contains("errors-alarm"), "{body}");
+}
+
+#[tokio::test]
+async fn put_log_alarm_update_preserves_alarm_state() {
+    let svc = service();
+    call(&svc, "PutLogAlarm", &log_alarm_params("stateful", &[])).await;
+    call(
+        &svc,
+        "SetAlarmState",
+        &[
+            ("AlarmName", "stateful"),
+            ("StateValue", "ALARM"),
+            ("StateReason", "manual"),
+        ],
+    )
+    .await;
+
+    // Re-putting the configuration must not reset the alarm's state.
+    call(
+        &svc,
+        "PutLogAlarm",
+        &log_alarm_params("stateful", &[("Threshold", "99")]),
+    )
+    .await;
+    let body = body_of(
+        &call(
+            &svc,
+            "DescribeAlarms",
+            &[("AlarmTypes.member.1", "LogAlarm")],
+        )
+        .await,
+    );
+    assert!(body.contains("<Threshold>99</Threshold>"), "{body}");
+}
+
+#[tokio::test]
+async fn put_log_alarm_validates_required_and_bounded_members() {
+    let svc = service();
+
+    // Each required member is enforced.
+    for drop_key in [
+        "AlarmName",
+        "ScheduledQueryConfiguration.QueryString",
+        "ScheduledQueryConfiguration.ScheduledQueryRoleARN",
+        "ScheduledQueryConfiguration.ScheduleConfiguration.ScheduleExpression",
+        "ScheduledQueryConfiguration.AggregationExpression",
+        "QueryResultsToEvaluate",
+        "QueryResultsToAlarm",
+        "Threshold",
+        "ComparisonOperator",
+    ] {
+        let params: Vec<(&str, &str)> = log_alarm_params("req-check", &[])
+            .into_iter()
+            .filter(|(k, _)| *k != drop_key)
+            .collect();
+        let err = call_err(&svc, "PutLogAlarm", &params).await;
+        assert_eq!(
+            err.status().as_u16(),
+            400,
+            "missing {drop_key} should be rejected"
+        );
+    }
+
+    // QueryResultsToEvaluate / QueryResultsToAlarm are min 1, and an alarm
+    // cannot need more results to alarm than it evaluates.
+    for (k, v) in [
+        ("QueryResultsToEvaluate", "0"),
+        ("QueryResultsToAlarm", "0"),
+    ] {
+        let err = call_err(&svc, "PutLogAlarm", &log_alarm_params("bounds", &[(k, v)])).await;
+        assert_eq!(err.code(), "ValidationError", "{k}={v}");
+    }
+    let err = call_err(
+        &svc,
+        "PutLogAlarm",
+        &log_alarm_params("bounds", &[("QueryResultsToAlarm", "9")]),
+    )
+    .await;
+    assert_eq!(err.code(), "ValidationError");
+
+    // ComparisonOperator and TreatMissingData are enum-bound.
+    let err = call_err(
+        &svc,
+        "PutLogAlarm",
+        &log_alarm_params("enums", &[("ComparisonOperator", "NotAnOperator")]),
+    )
+    .await;
+    assert_eq!(err.code(), "ValidationError");
+    let err = call_err(
+        &svc,
+        "PutLogAlarm",
+        &log_alarm_params("enums", &[("TreatMissingData", "nope")]),
+    )
+    .await;
+    assert_eq!(err.code(), "ValidationError");
+}
+
+#[tokio::test]
+async fn describe_alarms_accepts_the_log_alarm_type() {
+    // `AlarmType` gained `LogAlarm`; DescribeAlarms used to reject it as an
+    // invalid AlarmTypes value.
+    let svc = service();
+    call(
+        &svc,
+        "DescribeAlarms",
+        &[("AlarmTypes.member.1", "LogAlarm")],
+    )
+    .await;
+    let err = call_err(
+        &svc,
+        "DescribeAlarms",
+        &[("AlarmTypes.member.1", "NotAnAlarmType")],
+    )
+    .await;
+    assert_eq!(err.code(), "InvalidParameterValue");
+}
