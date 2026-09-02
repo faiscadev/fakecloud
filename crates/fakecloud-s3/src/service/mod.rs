@@ -20,6 +20,7 @@ use crate::state::{AclGrant, S3Bucket, S3Object, SharedS3State};
 
 mod access_points;
 mod acl;
+mod annotations;
 mod buckets;
 pub(crate) mod config;
 mod lock;
@@ -230,6 +231,7 @@ impl AwsService for S3Service {
                 .unwrap_or(false);
         let q = &req.query_params;
         let is_put_object = is_put_to_key
+            && !q.contains_key("annotation")
             && !q.contains_key("tagging")
             && !q.contains_key("acl")
             && !q.contains_key("retention")
@@ -515,6 +517,7 @@ impl AwsService for S3Service {
         // error; mirroring that prevents bucket-required ops from being
         // accidentally answered by ListBuckets / WriteGetObjectResponse.
         let bucket_subresources: &[&str] = &[
+            "metadataAnnotationTable",
             "tagging",
             "acl",
             "versioning",
@@ -586,7 +589,9 @@ impl AwsService for S3Service {
 
             // Bucket-level operations (no key)
             (&Method::PUT, Some(b), None) => {
-                if req.query_params.contains_key("tagging") {
+                if req.query_params.contains_key("metadataAnnotationTable") {
+                    self.update_bucket_metadata_annotation_table_configuration(account_id, &req, b)
+                } else if req.query_params.contains_key("tagging") {
                     self.put_bucket_tagging(account_id, &req, b)
                 } else if req.query_params.contains_key("acl") {
                     self.put_bucket_acl(account_id, &req, b)
@@ -780,7 +785,9 @@ impl AwsService for S3Service {
 
             // Object-level operations
             (&Method::PUT, Some(b), Some(k)) => {
-                if req.query_params.contains_key("tagging") {
+                if req.query_params.contains_key("annotation") {
+                    self.put_object_annotation(account_id, &req, b, k)
+                } else if req.query_params.contains_key("tagging") {
                     self.put_object_tagging(account_id, &req, b, k)
                 } else if req.query_params.contains_key("acl") {
                     self.put_object_acl(account_id, &req, b, k)
@@ -799,7 +806,15 @@ impl AwsService for S3Service {
                 }
             }
             (&Method::GET, Some(b), Some(k)) => {
-                if req.query_params.contains_key("tagging") {
+                if req.query_params.contains_key("annotation") {
+                    // Both `?annotation` reads share a URI; `AnnotationName`
+                    // selects one annotation, its absence lists them.
+                    if req.query_params.contains_key("AnnotationName") {
+                        self.get_object_annotation(account_id, &req, b, k)
+                    } else {
+                        self.list_object_annotations(account_id, &req, b, k)
+                    }
+                } else if req.query_params.contains_key("tagging") {
                     self.get_object_tagging(account_id, &req, b, k)
                 } else if req.query_params.contains_key("acl") {
                     self.get_object_acl(account_id, &req, b, k)
@@ -848,7 +863,9 @@ impl AwsService for S3Service {
                 }
             }
             (&Method::DELETE, Some(b), Some(k)) => {
-                if req.query_params.contains_key("tagging") {
+                if req.query_params.contains_key("annotation") {
+                    self.delete_object_annotation(account_id, &req, b, k)
+                } else if req.query_params.contains_key("tagging") {
                     self.delete_object_tagging(account_id, b, k)
                 } else {
                     self.delete_object(account_id, &req, b, k)
@@ -987,6 +1004,12 @@ impl AwsService for S3Service {
             "ListObjectVersions",
             "GetObjectAttributes",
             "RestoreObject",
+            // Object annotations
+            "PutObjectAnnotation",
+            "GetObjectAnnotation",
+            "DeleteObjectAnnotation",
+            "ListObjectAnnotations",
+            "UpdateBucketMetadataAnnotationTableConfiguration",
             // Object properties
             "PutObjectTagging",
             "GetObjectTagging",
@@ -1366,6 +1389,17 @@ fn s3_detect_action(
     // since a request can carry multiple; we pick the most specific.
     // Object-level sub-resources come first (key present).
     if has_key {
+        if has("annotation") {
+            return Some(match method {
+                // One URI serves both reads; `AnnotationName` picks a single
+                // annotation, its absence lists them.
+                "GET" if has("AnnotationName") => "GetObjectAnnotation",
+                "GET" => "ListObjectAnnotations",
+                "PUT" => "PutObjectAnnotation",
+                "DELETE" => "DeleteObjectAnnotation",
+                _ => return None,
+            });
+        }
         if has("tagging") {
             return Some(match method {
                 "GET" => "GetObjectTagging",
@@ -1431,6 +1465,9 @@ fn s3_detect_action(
 
     // Bucket-level sub-resources (key absent).
     if !has_key {
+        if has("metadataAnnotationTable") && method == "PUT" {
+            return Some("UpdateBucketMetadataAnnotationTableConfiguration");
+        }
         if has("tagging") {
             return Some(match method {
                 "GET" => "GetBucketTagging",

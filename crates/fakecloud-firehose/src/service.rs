@@ -1148,6 +1148,7 @@ impl FirehoseService {
             lock_mode: None,
             lock_retain_until: None,
             lock_legal_hold: None,
+            annotations: BTreeMap::new(),
         };
         // Write through to the durable S3 store so delivered records survive a
         // restart. S3 has no state snapshot: on boot it is rebuilt from this

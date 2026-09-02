@@ -63,6 +63,22 @@ pub struct S3Object {
     pub lock_retain_until: Option<DateTime<Utc>>,
     /// Legal hold status (ON or OFF).
     pub lock_legal_hold: Option<String>,
+    /// Named annotations attached to this object version, keyed by
+    /// `AnnotationName`. Each is an independent payload with its own ETag and
+    /// last-modified stamp; the object's own body and ETag are untouched.
+    pub annotations: BTreeMap<String, ObjectAnnotation>,
+}
+
+/// A named payload attached to an object version by `PutObjectAnnotation`.
+#[derive(Debug, Clone, Default)]
+pub struct ObjectAnnotation {
+    pub name: String,
+    pub payload: Vec<u8>,
+    pub etag: String,
+    pub last_modified: DateTime<Utc>,
+    /// The `x-amz-sdk-checksum-algorithm` the writer declared, echoed back on
+    /// list and get.
+    pub checksum_algorithm: Option<String>,
 }
 
 /// A part uploaded via the multipart upload API.
@@ -130,6 +146,9 @@ pub struct S3Bucket {
     pub notification_config: Option<String>,
     pub logging_config: Option<String>,
     pub website_config: Option<String>,
+    /// Raw `AnnotationTableConfiguration` XML from
+    /// `UpdateBucketMetadataAnnotationTableConfiguration`.
+    pub annotation_table_config: Option<String>,
     pub accelerate_status: Option<String>,
     pub public_access_block: Option<String>,
     pub object_lock_config: Option<String>,
@@ -183,6 +202,7 @@ impl S3Bucket {
             notification_config: None,
             logging_config: None,
             website_config: None,
+            annotation_table_config: None,
             accelerate_status: None,
             public_access_block: None,
             object_lock_config: None,
