@@ -4472,6 +4472,84 @@ fn built_in_endpoints_do_not_monopolize_the_first_page() {
     );
 }
 
+/// Deleting a cluster deletes what belongs to it.
+///
+/// An orphaned endpoint keeps appearing in listings for a cluster that
+/// no longer exists, and -- now that create raises
+/// DBClusterEndpointAlreadyExistsFault rather than overwriting -- makes
+/// an ordinary destroy/apply cycle fail forever. Orphaned backtracks are
+/// worse: the Describe matches on the cluster identifier alone, so a NEW
+/// cluster of that name would report backtracks it never performed.
+#[test]
+fn deleting_a_cluster_deletes_its_endpoints_and_backtracks() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .default_mut()
+            .extras
+            .get_mut("clusters")
+            .and_then(|m| m.get_mut("clu-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-mysql"));
+            entry.insert("Status".to_string(), json!("available"));
+        }
+    }
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "BacktrackDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("BacktrackTo", "2026-01-01T00:00:00Z"),
+        ],
+    );
+
+    ok_on(&svc, "DeleteDBCluster", &[("DBClusterIdentifier", "clu-1")]);
+
+    // Nothing of the deleted cluster is left listed.
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "an endpoint outlived its cluster: {body}"
+    );
+
+    // Recreating both under the same names works -- the destroy/apply
+    // cycle that the AlreadyExists guard would otherwise block forever.
+    create_cluster(&svc, "clu-1");
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+
+    // And the new cluster reports none of the old one's backtracks.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
+    assert!(
+        !body.contains("<DBClusterBacktrack>"),
+        "a recreated cluster inherited backtracks it never performed: {body}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();

@@ -540,12 +540,36 @@ impl RdsService {
                 ))
             }
             "DeleteDBCluster" => {
-                let id = get_param(req, "DBClusterIdentifier").ok_or_else(|| missing("DBClusterIdentifier"))?;
+                let id = crate::filters::requested_identifier(
+                    get_param(req, "DBClusterIdentifier"),
+                    "cluster",
+                    &aid,
+                )
+                .ok_or_else(|| missing("DBClusterIdentifier"))?;
                 let arn = Arn::new("rds", region, &aid, &format!("cluster:{id}")).to_string();
                 {
                     let mut accounts = write_state!();
                     let state = accounts.get_or_create(&aid);
                     if let Some(m) = state.extras.get_mut("clusters") { m.remove(&id); }
+                    // Deleting a cluster deletes what belongs to it, as
+                    // on AWS. Left behind, a custom endpoint of a cluster
+                    // that no longer exists keeps appearing in
+                    // DescribeDBClusterEndpoints and -- now that create
+                    // raises DBClusterEndpointAlreadyExistsFault instead
+                    // of overwriting -- makes recreating the cluster and
+                    // its endpoint under the same names fail forever,
+                    // which is an ordinary destroy/apply cycle. Orphaned
+                    // backtracks are worse than noise: the Describe
+                    // matches on the cluster identifier alone, so a NEW
+                    // cluster of that name would report backtracks it
+                    // never performed.
+                    for category in ["cluster_endpoints", "cluster_backtracks"] {
+                        if let Some(m) = state.extras.get_mut(category) {
+                            m.retain(|_, entry| {
+                                entry_str(entry, "DBClusterIdentifier") != Some(id.as_str())
+                            });
+                        }
+                    }
                 }
                 self.emit_event(
                     RdsSourceType::DbCluster,

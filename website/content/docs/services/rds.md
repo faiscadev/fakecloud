@@ -224,7 +224,7 @@ The `Filters` parameter is honored on the Describe operations in the table below
 
 `DescribeDBClusterEndpoints` reports each cluster's built-in writer and reader endpoints alongside the custom ones, as AWS does. They belong to the cluster rather than the endpoint store -- there is no API that creates or deletes them -- so `db-cluster-endpoint-type=reader` matches them while `custom` matches the ones you created. They report no `DBClusterEndpointIdentifier`, `DBClusterEndpointResourceIdentifier` or `DBClusterEndpointArn`, matching AWS: a built-in has no identity of its own, and borrowing the cluster's would make a lookup by endpoint identifier return rows AWS doesn't. Their `Status` is mapped into the endpoint's own enum (`creating`, `available`, `deleting`, `inactive`, `modifying`), so a cluster that is backing up or upgrading reports `modifying` rather than a value that enum has no room for.
 
-`DeleteDBClusterEndpoint` raises `DBClusterEndpointNotFoundFault` for an identifier that doesn't exist instead of reporting success.
+`DeleteDBClusterEndpoint` raises `DBClusterEndpointNotFoundFault` for an identifier that doesn't exist instead of reporting success, and reports the endpoint as `deleting`. `DeleteDBCluster` deletes the cluster's custom endpoints and backtrack records with it, as AWS does, so recreating a cluster under the same name doesn't inherit them.
 
 `CreateDBClusterEndpoint` raises `DBClusterEndpointAlreadyExistsFault` for an identifier that already exists rather than overwriting it.
 
@@ -236,7 +236,7 @@ The model documents no filter names for `DescribeDBShardGroups`; the shard group
 
 These three operations honor `MaxRecords` and `Marker` and report a `Marker` when more rows remain.
 
-Listings come out in a stable order, so two identical requests report the same rows in the same order and a pagination marker stays meaningful between calls. It is identifier order for most listings; on `DescribeDBClusterEndpoints` a cluster's built-in endpoints sort ahead of the custom ones.
+Listings come out in a stable order, so two identical requests report the same rows in the same order and a pagination marker stays meaningful between calls. It is identifier order for most listings; on `DescribeDBClusterEndpoints` a cluster's built-in endpoints sort under the cluster's own identifier, interleaved with the custom endpoints rather than ahead of them.
 
 Filters documented as accepting "identifiers and ARNs" (`db-instance-id`, `db-cluster-id`, `db-snapshot-id`, `db-cluster-snapshot-id`) match either form.
 
