@@ -2433,7 +2433,7 @@ impl CloudFormationService {
         let mut input = UpdateStackInput::from_params(req)?;
 
         // Get stack_id before write lock for the provisioner
-        let (found_stack_id, previous_template, previous_parameters) = {
+        let (found_stack_id, resolved_stack_name, previous_template, previous_parameters) = {
             let accounts = self.state.read();
             let empty = CloudFormationState::new(&req.account_id, &req.region);
             let state = accounts.get(&req.account_id).unwrap_or(&empty);
@@ -2444,8 +2444,25 @@ impl CloudFormationService {
                     (s.name == input.stack_name || s.stack_id == input.stack_name)
                         && s.status != "DELETE_COMPLETE"
                 })
-                .map(|s| (s.stack_id.clone(), s.template.clone(), s.parameters.clone()))
+                .map(|s| {
+                    (
+                        s.stack_id.clone(),
+                        s.name.clone(),
+                        s.template.clone(),
+                        s.parameters.clone(),
+                    )
+                })
                 .unwrap_or_default()
+        };
+        // `UpdateStack` accepts a stack ARN, but exports and imports are keyed
+        // by the stack's NAME. Passing the caller's spelling straight through
+        // would leave the old exports in place and register the new ones under
+        // the ARN, so every later export lookup would miss them. Resolve once
+        // and use the stored name for all export bookkeeping below.
+        let export_owner_name = if resolved_stack_name.is_empty() {
+            input.stack_name.clone()
+        } else {
+            resolved_stack_name.clone()
         };
 
         Self::refill_use_previous_values(
@@ -2741,7 +2758,7 @@ impl CloudFormationService {
             Self::ensure_export_uniqueness(
                 &self.state,
                 &req.account_id,
-                &input.stack_name,
+                &export_owner_name,
                 &pre_outputs,
             )?;
         }
@@ -2963,7 +2980,7 @@ impl CloudFormationService {
         if let Err(err) = Self::ensure_export_uniqueness(
             &self.state,
             &req.account_id,
-            &input.stack_name,
+            &export_owner_name,
             &outputs,
         ) {
             let reason = err.message();
@@ -3008,7 +3025,7 @@ impl CloudFormationService {
             Self::sync_exports_imports(
                 state,
                 &stack_id,
-                &input.stack_name,
+                &export_owner_name,
                 &outputs,
                 &imported_names,
             );
