@@ -233,9 +233,21 @@ pub fn is_template_document(body: &str) -> bool {
         // removing every existing resource. `Description` is deliberately not
         // in the list: on its own it is too generic to mark a body as a
         // template.
-        return TEMPLATE_SECTIONS
-            .iter()
-            .any(|section| value.get(section).is_some());
+        return match value {
+            // A mapping: judged on its sections, above.
+            Json::Object(_) => TEMPLATE_SECTIONS
+                .iter()
+                .any(|section| value.get(section).is_some()),
+            // A string scalar is the placeholder shape the probe sends
+            // (`TemplateBody="test"`), and `Null` is an absent or empty body.
+            // Both keep the lenient path.
+            Json::String(_) | Json::Null => false,
+            // A sequence, number or bool parses fine but is not a template of
+            // any kind — real CloudFormation rejects it as an unsupported
+            // structure. Treating it as a placeholder would accept an empty
+            // stack, or on update remove every existing resource.
+            _ => true,
+        };
     }
     looks_like_template_text(body)
 }
@@ -923,12 +935,33 @@ Resources:
         // A parseable document with no Resources section isn't one either.
         assert!(!is_template_document("Description: just a description\n"));
 
+        // An empty / absent body parses to null and must stay lenient — the
+        // probe omits TemplateBody entirely on some variants.
+        for empty in ["", "   ", "\n", "null", "~"] {
+            assert!(
+                !is_template_document(empty),
+                "{empty:?} must keep the lenient path"
+            );
+        }
+
         // An unparseable body that merely mentions `Resources` without making
         // it a key (a pasted log, a CSV header) must stay lenient — the hard
         // failure paths would otherwise reject it outright.
         assert!(!is_template_document(
             "Name\tResources\tOwner\n\tbad\ttabs\there\n"
         ));
+    }
+
+    #[test]
+    fn non_object_bodies_are_not_placeholders() {
+        // These parse, but no CloudFormation template is a sequence, a number
+        // or a bool. Real CFN rejects them as an unsupported structure;
+        // treating them as placeholders would accept an empty stack (and on
+        // update remove every existing resource).
+        for body in ["[]", "[a, b]", "1", "true", "- a\n- b\n"] {
+            assert!(parse_template_body(body).is_ok(), "{body:?} should parse");
+            assert!(is_template_document(body), "{body:?} is not a placeholder");
+        }
     }
 
     #[test]
