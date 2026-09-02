@@ -2952,6 +2952,35 @@ async fn instance_roles_are_recorded_and_reported() {
         Ok(_) => panic!("attached the same role twice"),
     }
 
+    // An association with no feature reports no FeatureName ELEMENT: an
+    // empty one reads as a feature named "".
+    svc.handle_extra_action(&request(
+        "AddRoleToDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", "arn:aws:iam::123456789012:role/no-feature"),
+            ("FeatureName", ""),
+        ],
+    ))
+    .expect("AddRoleToDBInstance");
+    let body = body_of(
+        svc.describe_db_instances(&request("DescribeDBInstances", &[]))
+            .unwrap(),
+    );
+    assert!(
+        !body.contains("<FeatureName></FeatureName>"),
+        "an empty feature was rendered: {body}"
+    );
+    svc.handle_extra_action(&request(
+        "RemoveRoleFromDBInstance",
+        &[
+            ("DBInstanceIdentifier", "db-1"),
+            ("RoleArn", "arn:aws:iam::123456789012:role/no-feature"),
+            ("FeatureName", ""),
+        ],
+    ))
+    .expect("RemoveRoleFromDBInstance");
+
     match svc.handle_extra_action(&request(
         "RemoveRoleFromDBInstance",
         &[

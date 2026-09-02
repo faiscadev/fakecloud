@@ -1133,11 +1133,22 @@ pub(crate) fn db_instance_xml(
             .associated_roles
             .iter()
             .map(|role| {
+                // An absent feature is an absent ELEMENT, not an empty
+                // one: `<FeatureName></FeatureName>` reads as a feature
+                // named "". FeatureName is required on these operations,
+                // so only an in-process caller produces this.
+                let feature = if role.feature_name.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "<FeatureName>{}</FeatureName>",
+                        xml_escape(&role.feature_name)
+                    )
+                };
                 format!(
-                    "<DBInstanceRole><RoleArn>{}</RoleArn><FeatureName>{}</FeatureName>\
+                    "<DBInstanceRole><RoleArn>{}</RoleArn>{feature}\
                      <Status>{}</Status></DBInstanceRole>",
                     xml_escape(&role.role_arn),
-                    xml_escape(&role.feature_name),
                     xml_escape(&role.status),
                 )
             })
