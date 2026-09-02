@@ -61,7 +61,7 @@ fn cluster_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
             // operations, so it can't be returned). A silent empty
             // result is the hardest failure to diagnose, so the reason
             // has to reach a default log level.
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            crate::filters::warn_unrecognized_filter(other);
             false
         }
     })
@@ -233,7 +233,7 @@ fn cluster_endpoint_matches_filters(entry: &Value, filters: &[RdsFilter]) -> boo
             filter.matches_ignore_case(entry_str(entry, "Status").or(Some("available")))
         }
         other => {
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            crate::filters::warn_unrecognized_filter(other);
             false
         }
     })
@@ -246,7 +246,7 @@ fn shard_group_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-shard-group-id" => filter.matches(entry_str(entry, "DBShardGroupIdentifier")),
         other => {
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            crate::filters::warn_unrecognized_filter(other);
             false
         }
     })
@@ -265,7 +265,7 @@ fn backtrack_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
             filter.matches_ignore_case(entry_str(entry, "Status").or(Some("completed")))
         }
         other => {
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            crate::filters::warn_unrecognized_filter(other);
             false
         }
     })
@@ -320,7 +320,7 @@ fn cluster_snapshot_matches_filters(
             // operations, so it can't be returned). A silent empty
             // result is the hardest failure to diagnose, so the reason
             // has to reach a default log level.
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            crate::filters::warn_unrecognized_filter(other);
             false
         }
     })
@@ -569,7 +569,23 @@ impl RdsService {
                     for category in ["cluster_endpoints", "cluster_backtracks"] {
                         if let Some(m) = state.extras.get_mut(category) {
                             m.retain(|_, entry| {
-                                entry_str(entry, "DBClusterIdentifier") != Some(id.as_str())
+                                // Compared through the same reduction the
+                                // request went through: a row written
+                                // before identifiers were normalized
+                                // stores the cluster's ARN, and an exact
+                                // comparison would leave it behind --
+                                // which is the orphan this cascade exists
+                                // to prevent.
+                                let stored = entry_str(entry, "DBClusterIdentifier")
+                                    .map(str::to_string)
+                                    .and_then(|value| {
+                                        crate::filters::requested_identifier(
+                                            Some(value),
+                                            "cluster",
+                                            &aid,
+                                        )
+                                    });
+                                stored.as_deref() != Some(id.as_str())
                             });
                         }
                     }

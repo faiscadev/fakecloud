@@ -3108,8 +3108,10 @@ fn describe_db_cluster_backtracks_returns_recorded_backtracks() {
         body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"),
         "the recorded backtrack was not returned: {body}"
     );
-    // Lowercase, as AWS reports it and as the documented filter values
-    // are spelled -- the filter is case-sensitive.
+    // Lowercase, as AWS reports it and as the model's own Status
+    // documentation spells it (applying / completed / failed / pending).
+    // The filter itself matches case-insensitively, so a record
+    // persisted by an older build is still selectable.
     assert!(
         body.contains("<Status>completed</Status>"),
         "status case does not match the documented filter values: {body}"
@@ -3574,6 +3576,23 @@ fn describe_db_cluster_endpoints_pages() {
         );
     }
 
+    // Every row, built-ins included, identified by its Endpoint address:
+    // a built-in carries no identifier, so comparing only custom ids
+    // would leave two of the five rows unchecked.
+    let addresses = |body: &str| -> Vec<String> {
+        body.split("<Endpoint>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</Endpoint>").next())
+            .map(str::to_string)
+            .collect()
+    };
+    let unpaged = addresses(&body_of_action(&svc, "DescribeDBClusterEndpoints", &[]));
+    assert_eq!(
+        unpaged.len(),
+        5,
+        "expected three custom endpoints and two built-ins"
+    );
+
     let mut seen: Vec<String> = Vec::new();
     let mut marker: Option<String> = None;
     // Three custom endpoints plus the cluster's two built-ins.
@@ -3585,14 +3604,9 @@ fn describe_db_cluster_endpoints_pages() {
             params.push(("Marker", &held));
         }
         let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &params);
-        // Counted by ROWS, not identifiers: the cluster's two built-in
-        // endpoints have none, and they page like any other row.
-        let page = body.matches("<DBClusterEndpointList>").count();
-        for chunk in body.split("<DBClusterEndpointIdentifier>").skip(1) {
-            if let Some(id) = chunk.split("</DBClusterEndpointIdentifier>").next() {
-                seen.push(id.to_string());
-            }
-        }
+        let rows = addresses(&body);
+        let page = rows.len();
+        seen.extend(rows);
         // MaxRecords=1 means ONE row per page. Without this the test
         // passes on a handler that ignores paging entirely and returns
         // the whole list on the first request.
@@ -3608,9 +3622,19 @@ fn describe_db_cluster_endpoints_pages() {
         }
     }
 
-    // Every row, once, in the unpaginated order -- and the walk really
-    // took three pages to get them.
-    assert_eq!(seen, vec!["ep-1", "ep-2", "ep-3"]);
+    // Every row, once, in the unpaginated order -- built-ins included.
+    assert_eq!(
+        seen, unpaged,
+        "the paged walk did not reproduce the unpaginated listing"
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "a row was returned twice: {seen:?}"
+    );
     assert!(marker.is_none(), "the last page still carried a Marker");
 }
 
@@ -4667,6 +4691,58 @@ fn the_pagination_marker_is_xml_safe_across_a_built_in_row() {
         "a row was returned twice: {seen:?}"
     );
     assert_eq!(pages, 3, "expected three rows across three pages");
+}
+
+/// The cascade reaches a row written before identifiers were normalized.
+///
+/// Such a row stores the cluster's ARN, so an exact comparison leaves it
+/// behind -- the orphan the cascade exists to prevent.
+#[test]
+fn deleting_a_cluster_removes_a_legacy_arn_keyed_endpoint() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_endpoints".to_string())
+            .or_default()
+            .insert(
+                "ep-legacy".to_string(),
+                json!({
+                    "DBClusterEndpointIdentifier": "ep-legacy",
+                    // As an older build stored it.
+                    "DBClusterIdentifier":
+                        "arn:aws:rds:us-east-1:000000000000:cluster:clu-1",
+                    "Endpoint": "ep-legacy.cluster-custom.us-east-1.rds.amazonaws.com",
+                    "EndpointType": "CUSTOM",
+                    "CustomEndpointType": "READER",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    ok_on(&svc, "DeleteDBCluster", &[("DBClusterIdentifier", "clu-1")]);
+
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>ep-legacy</DBClusterEndpointIdentifier>"),
+        "an ARN-keyed endpoint outlived its cluster: {body}"
+    );
+
+    // So recreating the pair under the same names still works.
+    create_cluster(&svc, "clu-1");
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-legacy"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
 }
 
 #[test]

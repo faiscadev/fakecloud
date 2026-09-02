@@ -120,7 +120,7 @@ fn snapshot_matches_filters(
             // operations, so it can't be returned). A silent empty
             // result is the hardest failure to diagnose, so the reason
             // has to reach a default log level.
-            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            crate::filters::warn_unrecognized_filter(other);
             false
         }
     })

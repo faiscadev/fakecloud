@@ -95,6 +95,21 @@ impl RdsFilter {
     }
 }
 
+/// Reports an unrecognized filter name once, not once per row.
+///
+/// The name is checked inside the per-row predicate, so a listing of a
+/// thousand rows logged a thousand identical lines. Deduped, the reason
+/// a caller got an empty result still reaches a default log level
+/// without drowning the rest of the request.
+pub(crate) fn warn_unrecognized_filter(name: &str) {
+    static SEEN: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    let seen = SEEN.get_or_init(Default::default);
+    if seen.lock().insert(name.to_string()) {
+        tracing::warn!(filter = %name, "unrecognized RDS filter name; matching no resource");
+    }
+}
+
 /// The identifier a Describe was asked to narrow to, or `None` when it
 /// was not asked to narrow at all.
 ///
