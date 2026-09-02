@@ -106,7 +106,8 @@ fn strip_bom(body: &str) -> &str {
 /// unbalanced bracket) is the most common way a real template breaks. Re-using
 /// the parser here would answer "not a template" for every syntax error and
 /// send it down the lenient degrade-to-empty path, which is the silent no-op
-/// #2480 is about. So fall back to a shape check on the raw text.
+/// #2480 is about. So fall back to a text-level scan for any top-level section
+/// name.
 pub fn is_template_document(body: &str) -> bool {
     let body = strip_bom(body);
     if let Ok(value) = parse_template_body(body) {
@@ -151,8 +152,9 @@ const TEMPLATE_SECTIONS: &[&str] = &[
 ];
 
 /// Text-level shape check for a body that would not parse: does it *look* like
-/// someone's template? Keyed on a top-level `Resources` section, the one
-/// section CloudFormation requires.
+/// someone's template? Keyed on any top-level section CloudFormation defines,
+/// not just `Resources` — the syntax error may sit in (or truncate at) the
+/// `Parameters` block before `Resources:` is ever reached.
 fn looks_like_template_text(body: &str) -> bool {
     if body.trim_start().starts_with('{') {
         // A `{`-leading body that parses as neither JSON nor YAML is a broken
@@ -167,10 +169,10 @@ fn looks_like_template_text(body: &str) -> bool {
     // A top-level YAML key sits at column zero. It may be quoted, and may
     // carry whitespace before its colon — both legal, and both emitted by
     // real generators.
-    body.lines().any(declares_resources)
+    body.lines().any(declares_template_section)
 }
 
-fn declares_resources(line: &str) -> bool {
+fn declares_template_section(line: &str) -> bool {
     let unquoted = line
         .strip_prefix('"')
         .or_else(|| line.strip_prefix('\''))
