@@ -4600,9 +4600,22 @@ fn the_pagination_marker_is_xml_safe_across_a_built_in_row() {
         ],
     );
 
+    // Rows are identified by their Endpoint address: a built-in carries
+    // no identifier, and the address is unique per row.
+    let addresses = |body: &str| -> Vec<String> {
+        body.split("<Endpoint>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</Endpoint>").next())
+            .map(str::to_string)
+            .collect()
+    };
+    let unpaged = addresses(&body_of_action(&svc, "DescribeDBClusterEndpoints", &[]));
+    assert_eq!(unpaged.len(), 3, "expected two built-ins and one custom");
+
     // MaxRecords=1 puts every page boundary on a row in turn, including
     // both built-ins.
     let mut marker: Option<String> = None;
+    let mut seen: Vec<String> = Vec::new();
     let mut pages = 0;
     loop {
         let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
@@ -4616,6 +4629,11 @@ fn the_pagination_marker_is_xml_safe_across_a_built_in_row() {
             !body.contains('\u{0}') && !body.contains("&#x0;") && !body.contains("&#0;"),
             "a NUL reached the response: {body:?}"
         );
+        let page = addresses(&body);
+        assert_eq!(page.len(), 1, "MaxRecords=1 returned {} rows", page.len());
+        seen.extend(page);
+        pages += 1;
+        assert!(pages < 10, "pagination did not terminate");
         marker = body
             .split("<Marker>")
             .nth(1)
@@ -4632,10 +4650,23 @@ fn the_pagination_marker_is_xml_safe_across_a_built_in_row() {
                 .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=')),
             "the marker is not base64: {value:?}"
         );
-        pages += 1;
-        assert!(pages < 10, "pagination did not terminate");
     }
-    assert_eq!(pages, 2, "expected three rows across three pages");
+
+    // Every row, once, in the unpaginated order -- a paginator that
+    // skipped a built-in, repeated one, or reordered them fails here.
+    assert_eq!(
+        seen, unpaged,
+        "the paged walk did not reproduce the unpaginated listing"
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "a row was returned twice: {seen:?}"
+    );
+    assert_eq!(pages, 3, "expected three rows across three pages");
 }
 
 #[test]
