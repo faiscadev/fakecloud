@@ -88,6 +88,34 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
     labels
 }
 
+/// A stored endpoint, in the shape a CUSTOM endpoint reports.
+///
+/// Rows written before `CustomEndpointType` was derived carry the
+/// request's `EndpointType` (READER / WRITER / ANY) and no custom type.
+/// RDS state is persisted, so those rows outlive the change: read
+/// verbatim they are indistinguishable from a cluster's built-in
+/// endpoints -- `db-cluster-endpoint-type=custom` would miss them,
+/// `=reader` would return them as if they were a built-in, and the
+/// caller would read back a type it never asked for. Everything in the
+/// endpoints store was created through `CreateDBClusterEndpoint`, which
+/// only makes custom endpoints, so the old value IS the custom type.
+fn as_custom_endpoint(mut entry: Value) -> Value {
+    if entry_str(&entry, "CustomEndpointType").is_some() {
+        return entry;
+    }
+    let Some(kind) = entry_str(&entry, "EndpointType").map(str::to_string) else {
+        return entry;
+    };
+    if kind.eq_ignore_ascii_case("CUSTOM") {
+        return entry;
+    }
+    if let Some(object) = entry.as_object_mut() {
+        object.insert("CustomEndpointType".to_string(), json!(kind));
+        object.insert("EndpointType".to_string(), json!("CUSTOM"));
+    }
+    entry
+}
+
 /// A cluster's built-in writer and reader endpoints.
 ///
 /// AWS reports these from `DescribeDBClusterEndpoints` next to the custom
@@ -97,12 +125,7 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
 /// into the endpoints store so that deleting a custom endpoint can never
 /// remove one, and so a cluster created before this existed still
 /// reports them.
-fn built_in_cluster_endpoints(
-    cluster_id: &str,
-    cluster: &Value,
-    region: &str,
-    account_id: &str,
-) -> Vec<(String, Value)> {
+fn built_in_cluster_endpoints(cluster_id: &str, cluster: &Value) -> Vec<(String, Value)> {
     let status = entry_str(cluster, "Status")
         .unwrap_or("available")
         .to_string();
@@ -110,20 +133,31 @@ fn built_in_cluster_endpoints(
         .into_iter()
         .filter_map(|(kind, field)| {
             let address = entry_str(cluster, field)?;
-            let value = json!({
+            let mut value = json!({
+                // AWS reports the built-ins under the CLUSTER's own
+                // identifier and resource id -- they are the cluster's
+                // endpoints, so `db-cluster-endpoint-id=<cluster>`
+                // selects them, as it does on AWS.
+                "DBClusterEndpointIdentifier": cluster_id,
                 "DBClusterIdentifier": cluster_id,
                 "Endpoint": address,
                 "EndpointType": kind,
                 "Status": status,
-                "DBClusterEndpointArn": Arn::new(
-                    "rds",
-                    region,
-                    account_id,
-                    &format!("cluster-endpoint:{cluster_id}-{}", kind.to_lowercase()),
-                )
-                .with_partition(partition_for(region))
-                .to_string(),
             });
+            // No ARN: a built-in has no identifier of its own to build
+            // one from, and `cluster-endpoint:{cluster}-writer` would be
+            // the ARN of a CUSTOM endpoint literally named that -- two
+            // different endpoints reporting one ARN. The member is
+            // optional, so reporting nothing beats reporting a
+            // fabricated collision.
+            if let Some(resource_id) = entry_str(cluster, "DbClusterResourceId") {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert(
+                        "DBClusterEndpointResourceIdentifier".to_string(),
+                        json!(resource_id),
+                    );
+                }
+            }
             // Sorted ahead of any custom endpoint of the same cluster,
             // and stable across calls.
             Some((format!("\u{0}{cluster_id}:{kind}"), value))
@@ -1573,7 +1607,19 @@ impl RdsService {
                 }
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
-                store(&mut state.extras, "cluster_endpoints").insert(id.clone(), entry.clone());
+                let endpoints = store(&mut state.extras, "cluster_endpoints");
+                // Declared on this operation. Inserting over an existing
+                // endpoint replaced its members, custom type and ARN and
+                // reported success, so a retried or re-applied create
+                // silently rewrote the endpoint it meant to leave alone.
+                if endpoints.contains_key(&id) {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "DBClusterEndpointAlreadyExistsFault",
+                        format!("DBClusterEndpoint {id} already exists."),
+                    ));
+                }
+                endpoints.insert(id.clone(), entry.clone());
                 Ok(xml_response("CreateDBClusterEndpoint", cluster_endpoint_xml(&entry), &rid))
             }
             "ModifyDBClusterEndpoint" => {
@@ -1666,18 +1712,18 @@ impl RdsService {
                             clusters
                                 .iter()
                                 .flat_map(|(id, cluster)| {
-                                    built_in_cluster_endpoints(id, cluster, region, &aid)
+                                    built_in_cluster_endpoints(id, cluster)
                                 })
                                 .filter(|(_, v)| keep(v))
                                 .collect()
                         })
                         .unwrap_or_default();
-                    entries.extend(sorted_entries(
-                        &accounts,
-                        &aid,
-                        "cluster_endpoints",
-                        keep,
-                    ));
+                    entries.extend(
+                        sorted_entries(&accounts, &aid, "cluster_endpoints", |_| true)
+                            .into_iter()
+                            .map(|(key, value)| (key, as_custom_endpoint(value)))
+                            .filter(|(_, value)| keep(value)),
+                    );
                     entries
                 };
                 // One order for the whole listing, custom and built-in

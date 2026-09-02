@@ -4099,6 +4099,125 @@ fn backtrack_status_reads_back_lowercase_for_a_legacy_record() {
     );
 }
 
+/// The built-ins are the CLUSTER's endpoints: AWS reports them under its
+/// identifier, so a lookup by that id finds them.
+#[test]
+fn built_in_endpoints_report_the_cluster_identifier() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[("DBClusterEndpointIdentifier", "clu-1")],
+    );
+    assert_eq!(
+        body.matches("<DBClusterEndpointIdentifier>clu-1</DBClusterEndpointIdentifier>")
+            .count(),
+        2,
+        "the cluster's two built-in endpoints were not both reported: {body}"
+    );
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier></DBClusterEndpointIdentifier>"),
+        "a built-in reported an empty identifier: {body}"
+    );
+
+    // The documented filter reaches them the same way.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-id"),
+            ("Filters.Filter.1.Values.Value.1", "clu-1"),
+        ],
+    );
+    assert!(
+        body.contains("<EndpointType>WRITER</EndpointType>"),
+        "{body}"
+    );
+    assert!(
+        body.contains("<EndpointType>READER</EndpointType>"),
+        "{body}"
+    );
+
+    // No fabricated ARN: `cluster-endpoint:clu-1-writer` is the ARN of a
+    // CUSTOM endpoint literally named that, so reporting it here would
+    // give two different endpoints one ARN.
+    assert!(
+        !body.contains("<DBClusterEndpointArn>"),
+        "a built-in reported an ARN it cannot own: {body}"
+    );
+}
+
+/// An endpoint persisted before `CustomEndpointType` was derived carries
+/// the request's type and no custom type. Read verbatim it is
+/// indistinguishable from a built-in.
+#[test]
+fn a_legacy_cluster_endpoint_still_reads_back_as_custom() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_endpoints".to_string())
+            .or_default()
+            .insert(
+                "ep-legacy".to_string(),
+                json!({
+                    "DBClusterEndpointIdentifier": "ep-legacy",
+                    "DBClusterIdentifier": "clu-1",
+                    "Endpoint": "ep-legacy.cluster-custom.us-east-1.rds.amazonaws.com",
+                    "EndpointType": "READER",
+                    "Status": "available",
+                }),
+            );
+    }
+
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        body.contains("<EndpointType>CUSTOM</EndpointType>"),
+        "a created endpoint read back as a built-in: {body}"
+    );
+    assert!(
+        body.contains("<CustomEndpointType>READER</CustomEndpointType>"),
+        "the legacy row lost its type: {body}"
+    );
+
+    // And it is selected by the filter for what it is.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-type"),
+            ("Filters.Filter.1.Values.Value.1", "custom"),
+        ],
+    );
+    assert!(
+        body.contains("<DBClusterEndpointIdentifier>ep-legacy</DBClusterEndpointIdentifier>"),
+        "db-cluster-endpoint-type=custom missed a created endpoint: {body}"
+    );
+}
+
+/// The declared fault, not a silent overwrite: a retried create was
+/// replacing the existing endpoint's members and ARN and reporting 200.
+#[test]
+fn create_cluster_endpoint_rejects_a_duplicate_identifier() {
+    let svc = svc();
+    let params = [
+        ("DBClusterEndpointIdentifier", "ep-1"),
+        ("DBClusterIdentifier", "clu-1"),
+        ("EndpointType", "READER"),
+    ];
+    ok_on(&svc, "CreateDBClusterEndpoint", &params);
+
+    match svc.handle_extra_action(&req("CreateDBClusterEndpoint", &params)) {
+        Err(err) => assert_eq!(err.code(), "DBClusterEndpointAlreadyExistsFault"),
+        Ok(_) => panic!("a duplicate create overwrote the endpoint"),
+    }
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();
