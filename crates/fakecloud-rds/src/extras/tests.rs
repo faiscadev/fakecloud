@@ -4807,14 +4807,36 @@ fn cluster_roles_are_recorded_and_reported() {
     );
     assert!(body.contains("<Status>ACTIVE</Status>"), "{body}");
 
-    // Attaching the same role twice is the declared conflict.
+    // The SAME pair twice is the declared conflict.
     match svc.handle_extra_action(&req(
         "AddRoleToDBCluster",
-        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
     )) {
         Err(err) => assert_eq!(err.code(), "DBClusterRoleAlreadyExists"),
-        Ok(_) => panic!("attached the same role twice"),
+        Ok(_) => panic!("attached the same role and feature twice"),
     }
+
+    // The same role for a DIFFERENT feature is a different association,
+    // which is how one role gets attached for both import and export.
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Export"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert_eq!(
+        body.matches(&format!("<RoleArn>{role}</RoleArn>")).count(),
+        2,
+        "the second feature was rejected as a duplicate: {body}"
+    );
 
     // Removing a role that was never attached is the declared absence.
     match svc.handle_extra_action(&req(
@@ -4828,16 +4850,64 @@ fn cluster_roles_are_recorded_and_reported() {
         Ok(_) => panic!("removed a role that was never attached"),
     }
 
+    // Removing one feature leaves the other: matching on the ARN alone
+    // deleted whichever entry came first.
     ok_on(
         &svc,
         "RemoveRoleFromDBCluster",
-        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Export"),
+        ],
+    );
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("<FeatureName>s3Export</FeatureName>"),
+        "the wrong association was removed: {body}"
+    );
+
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
     );
     let body = body_of_action(&svc, "DescribeDBClusters", &[]);
     assert!(
         !body.contains("<AssociatedRoles>"),
         "the association outlived its removal: {body}"
     );
+
+    // AWS caps roles per cluster at five, and the Add op declares the
+    // quota fault.
+    for n in 0..5 {
+        ok_on(
+            &svc,
+            "AddRoleToDBCluster",
+            &[
+                ("DBClusterIdentifier", "clu-1"),
+                ("RoleArn", &format!("arn:aws:iam::000000000000:role/r{n}")),
+            ],
+        );
+    }
+    match svc.handle_extra_action(&req(
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", "arn:aws:iam::000000000000:role/one-too-many"),
+        ],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterRoleQuotaExceeded"),
+        Ok(_) => panic!("attached a sixth role"),
+    }
 }
 
 #[test]

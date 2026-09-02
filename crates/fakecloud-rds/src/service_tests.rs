@@ -2984,6 +2984,84 @@ async fn instance_roles_are_recorded_and_reported() {
     );
 }
 
+/// A restore takes no IAM roles.
+///
+/// The snapshot carries a clone of the source cluster, and neither
+/// restore operation has a role member, so a restored cluster reporting
+/// the source's associations reads as a permanent diff against a config
+/// that declares none.
+#[tokio::test]
+async fn a_restored_cluster_inherits_no_roles() {
+    let svc = make_service();
+    {
+        let mut accounts = svc.state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_snapshots".to_string())
+            .or_default()
+            .insert(
+                "snap-1".to_string(),
+                serde_json::json!({
+                    "DBClusterSnapshotIdentifier": "snap-1",
+                    "DBClusterIdentifier": "src-clu",
+                    "Status": "available",
+                    "Engine": "aurora-mysql",
+                    // As CreateDBClusterSnapshot clones it off the
+                    // source cluster.
+                    "AssociatedRoles": [{
+                        "RoleArn": "arn:aws:iam::123456789012:role/s3-import",
+                        "FeatureName": "s3Import",
+                        "Status": "ACTIVE",
+                    }],
+                }),
+            );
+    }
+
+    let req = request(
+        "RestoreDBClusterFromSnapshot",
+        &[
+            ("DBClusterIdentifier", "restored"),
+            ("SnapshotIdentifier", "snap-1"),
+        ],
+    );
+    svc.restore_db_cluster_from_snapshot(&req).await.unwrap();
+
+    let restored = cluster_entry(&svc, "restored");
+    assert!(
+        restored.get("AssociatedRoles").is_none(),
+        "the restored cluster inherited the source's roles: {restored}"
+    );
+
+    // Same for a point-in-time restore, which clones the source cluster
+    // directly.
+    seed_cluster_entry(
+        &svc,
+        "pitr-src",
+        serde_json::json!({
+            "AssociatedRoles": [{
+                "RoleArn": "arn:aws:iam::123456789012:role/s3-import",
+                "FeatureName": "s3Import",
+                "Status": "ACTIVE",
+            }],
+        }),
+    );
+    let req = request(
+        "RestoreDBClusterToPointInTime",
+        &[
+            ("DBClusterIdentifier", "pitr-restored"),
+            ("SourceDBClusterIdentifier", "pitr-src"),
+            ("UseLatestRestorableTime", "true"),
+        ],
+    );
+    svc.restore_db_cluster_to_point_in_time(&req).await.unwrap();
+    let restored = cluster_entry(&svc, "pitr-restored");
+    assert!(
+        restored.get("AssociatedRoles").is_none(),
+        "the PITR target inherited the source's roles: {restored}"
+    );
+}
+
 #[tokio::test]
 async fn cluster_snapshot_restore_maps_an_aurora_family_to_its_engine() {
     // A metadata-only snapshot (no writer recorded) still must not hand

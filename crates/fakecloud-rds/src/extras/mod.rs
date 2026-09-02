@@ -147,6 +147,11 @@ fn endpoint_identifier(req: &AwsRequest, account_id: &str) -> String {
         .unwrap_or(raw)
 }
 
+/// AWS caps IAM roles per cluster and per instance at five, and both Add
+/// operations declare the quota fault. Without the cap a client testing
+/// its quota handling never saw it.
+const MAX_ASSOCIATED_ROLES: usize = 5;
+
 /// A stored endpoint, in the shape a CUSTOM endpoint reports.
 ///
 /// Rows written before `CustomEndpointType` was derived carry the
@@ -3083,8 +3088,15 @@ impl RdsService {
                         })
                         .and_then(|value| value.as_array_mut())
                         .ok_or_else(|| cluster_not_found(&id))?;
+                    // Keyed on the (role, feature) PAIR, as AWS keys it:
+                    // one role is commonly attached for both s3Import and
+                    // s3Export, and matching on the ARN alone rejected
+                    // the second feature as a duplicate -- then removed
+                    // whichever entry came first when asked to detach
+                    // one of them.
                     let position = roles.iter().position(|role| {
                         entry_str(role, "RoleArn") == Some(role_arn.as_str())
+                            && entry_str(role, "FeatureName") == feature_name.as_deref()
                     });
                     match (adding, position) {
                         (true, Some(_)) => {
@@ -3093,6 +3105,16 @@ impl RdsService {
                                 "DBClusterRoleAlreadyExists",
                                 format!(
                                     "Role {role_arn} is already associated with DB cluster {id}."
+                                ),
+                            ));
+                        }
+                        (true, None) if roles.len() >= MAX_ASSOCIATED_ROLES => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBClusterRoleQuotaExceeded",
+                                format!(
+                                    "DB cluster {id} already has the maximum number of \
+                                     IAM roles associated with it."
                                 ),
                             ));
                         }
@@ -3142,10 +3164,14 @@ impl RdsService {
                     let instance = state.instances.get_mut(&id).ok_or_else(|| {
                         crate::service::service_helpers::db_instance_not_found(&id)
                     })?;
+                    // The pair again -- and FeatureName is a REQUIRED
+                    // input here, so ignoring it was strictly wrong.
                     let position = instance
                         .associated_roles
                         .iter()
-                        .position(|role| role.role_arn == role_arn);
+                        .position(|role| {
+                            role.role_arn == role_arn && role.feature_name == feature_name
+                        });
                     match (adding, position) {
                         (true, Some(_)) => {
                             return Err(AwsServiceError::aws_error(
@@ -3153,6 +3179,16 @@ impl RdsService {
                                 "DBInstanceRoleAlreadyExists",
                                 format!(
                                     "Role {role_arn} is already associated with DB instance {id}."
+                                ),
+                            ));
+                        }
+                        (true, None) if instance.associated_roles.len() >= MAX_ASSOCIATED_ROLES => {
+                            return Err(AwsServiceError::aws_error(
+                                StatusCode::BAD_REQUEST,
+                                "DBInstanceRoleQuotaExceeded",
+                                format!(
+                                    "DB instance {id} already has the maximum number of \
+                                     IAM roles associated with it."
                                 ),
                             ));
                         }

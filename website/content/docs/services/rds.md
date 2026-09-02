@@ -266,7 +266,11 @@ Real RDS rejects a filter name an operation doesn't support with `InvalidParamet
 
 `AddRoleToDBCluster`, `RemoveRoleFromDBCluster`, `AddRoleToDBInstance` and `RemoveRoleFromDBInstance` record the association and report it back as `AssociatedRoles` on `DescribeDBClusters` / `DescribeDBInstances`, with `Status: ACTIVE`. They previously accepted any request and answered 200 without storing anything, so a role could be attached to a cluster that did not exist and the listing never showed it.
 
-The faults the model declares are raised: the resource not existing (`DBClusterNotFoundFault` / `DBInstanceNotFound`), attaching a role that is already attached (`DBClusterRoleAlreadyExists` / `DBInstanceRoleAlreadyExists`), and removing one that is not (`DBClusterRoleNotFound` / `DBInstanceRoleNotFound`).
+An association is keyed on the (role, feature) pair, as AWS keys it, so one role can be attached for both `s3Import` and `s3Export` and removing one feature leaves the other. Roles are capped at five per cluster and per instance.
+
+The faults the model declares are raised: the resource not existing (`DBClusterNotFoundFault` / `DBInstanceNotFound`), attaching a pair that is already attached (`DBClusterRoleAlreadyExists` / `DBInstanceRoleAlreadyExists`), removing one that is not (`DBClusterRoleNotFound` / `DBInstanceRoleNotFound`), and exceeding the cap (`DBClusterRoleQuotaExceeded` / `DBInstanceRoleQuotaExceeded`).
+
+A restored cluster carries no associations: neither `RestoreDBClusterFromSnapshot` nor `RestoreDBClusterToPointInTime` takes roles, and the snapshot holds a clone of the source cluster.
 
 ## Gotchas
 
