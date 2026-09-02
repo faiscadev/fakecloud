@@ -275,7 +275,16 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         "monitoring" => &["ValidationError", "InvalidParameterValue"],
         "iam" => &["ValidationError", "NoSuchEntity"],
         "cloudformation" => &["ValidationError"],
-        "rds" => &["InvalidParameterValue"],
+        // RDS also publishes InvalidParameterCombination (parameters that
+        // conflict) and MissingParameter (an omitted required one) in the
+        // same "Common Errors" reference, and neither appears anywhere in
+        // the RDS Smithy file. Source: RDS API Reference, "Common Errors"
+        // (https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/CommonErrors.html).
+        "rds" => &[
+            "InvalidParameterValue",
+            "InvalidParameterCombination",
+            "MissingParameter",
+        ],
         "elasticache" => &["InvalidParameterValue"],
         "kms" => &["ValidationException"],
         "ssm" => &["InvalidNextToken", "ValidationException"],
@@ -386,25 +395,6 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "ResourceLimitExceeded",
             "ConflictException",
             "ValidationException",
-        ],
-        // RDS's Query API publishes "Common Errors" that every operation
-        // can return -- InvalidParameterValue for a malformed parameter,
-        // InvalidParameterCombination for parameters that conflict,
-        // MissingParameter for an omitted required one. Source: RDS API
-        // Reference, "Common Errors"
-        // (https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/CommonErrors.html).
-        // None of them appear ANYWHERE in the RDS Smithy file -- not in
-        // any per-operation `errors:` list and not as a shape -- so a
-        // handler that rejects a malformed instance class or an
-        // out-of-enum SourceType the way AWS does was being classified as
-        // returning an undeclared shape. Same reasoning as the S3 and EC2
-        // entries above: align the classifier with the published contract
-        // rather than the incomplete Smithy enumeration. Anything outside
-        // this list is still treated as undeclared.
-        "rds" => &[
-            "InvalidParameterValue",
-            "InvalidParameterCombination",
-            "MissingParameter",
         ],
         _ => &[],
     }
