@@ -29,7 +29,7 @@
 //! per-operation matchers below do — a caller filtering on something we
 //! don't recognise gets an empty result rather than the whole list.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use fakecloud_core::service::AwsRequest;
 
@@ -106,15 +106,17 @@ impl RdsFilter {
 pub(crate) fn warn_unknown_filters(filters: &[RdsFilter], supported: &[&str]) {
     // Deduped within the request: a caller may repeat the same name
     // across entries, and one line per entry is the same noise the
-    // per-row report made, just smaller. A local list keeps this bounded
-    // by the request rather than by anything the caller can grow.
-    let mut reported: Vec<&str> = Vec::new();
+    // per-row report made, just smaller. A local set keeps this bounded
+    // by the request rather than by anything the caller can grow, and
+    // keeps the pass linear -- the names are request-controlled, so a
+    // scan per name would let a long list cost quadratic time before
+    // the Describe even starts.
+    let mut reported: HashSet<&str> = HashSet::new();
     for filter in filters {
         let name = filter.name.as_str();
-        if supported.contains(&name) || reported.contains(&name) {
+        if supported.contains(&name) || !reported.insert(name) {
             continue;
         }
-        reported.push(name);
         tracing::warn!(
             filter = %name,
             "unrecognized RDS filter name; matching no resource"
