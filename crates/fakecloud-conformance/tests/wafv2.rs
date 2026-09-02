@@ -99,6 +99,10 @@ async fn make_regex_set(server: &TestServer, name: &str) -> (String, String, Str
     )
 }
 
+#[test_action("wafv2", "GetRevenueStatistics", checksum = "1b2cbdca")]
+#[test_action("wafv2", "GetRevenueStatisticsSummary", checksum = "719fc46d")]
+#[test_action("wafv2", "GetRevenueStatisticsTimeSeries", checksum = "958d54fd")]
+#[test_action("wafv2", "ListSettlementRecords", checksum = "fbe562ab")]
 #[test_action("wafv2", "CreateWebACL", checksum = "d660c07f")]
 #[tokio::test]
 async fn waf_create_web_acl() {
