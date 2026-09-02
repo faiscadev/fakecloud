@@ -118,9 +118,10 @@ fn parse_yaml(body: &str) -> Result<Json, String> {
 /// stack. Counting only the flow openers would leave the cheaper shape wide
 /// open on an unauthenticated CreateStack.
 ///
-/// Quoted scalars and `#` comments are skipped, so brackets that are content
-/// rather than structure — an embedded IAM policy document, an inline nested
-/// template — cannot push a shallow template over the limit.
+/// Quoted scalars, block scalars (`|` / `>`) and `#` comments are skipped, so
+/// brackets that are content rather than structure — an embedded IAM policy
+/// document, a SAM `InlineCode` body, EC2 `UserData` — cannot push a shallow
+/// template over the limit.
 fn exceeds_nesting_limit(body: &str) -> bool {
     let mut flow_depth = 0usize;
     // A quote only *opens* where a scalar can start — at the beginning of a
@@ -151,12 +152,26 @@ fn exceeds_nesting_limit(body: &str) -> bool {
     let mut at_value_start = true;
     let mut suppressed = 0usize;
     let mut quote_lines = 0usize;
+    // Indentation of the key that opened a block scalar (`Body: |`), while its
+    // content is being skipped. Block scalars are everywhere in real templates
+    // — SAM `InlineCode`, EC2 `UserData`, inline policy documents — and their
+    // content is a string, so its brackets are not nesting. YAML will not
+    // recurse through them either, so skipping cannot hide a bomb.
+    let mut block_scalar_indent: Option<usize> = None;
     for line in body.lines() {
+        let line_indent = line.len() - line.trim_start().len();
+        if let Some(opener_indent) = block_scalar_indent {
+            // Blank lines and anything more-indented than the key belong to
+            // the block scalar.
+            if line.trim().is_empty() || line_indent > opener_indent {
+                continue;
+            }
+            block_scalar_indent = None;
+        }
         // Block depth: the line's indentation plus its compact `- ` markers.
         // Each level of block nesting costs at least one column, so the
         // indentation is itself an upper bound on the depth reached here.
-        let indent = line.len() - line.trim_start().len();
-        let mut block_depth = indent;
+        let mut block_depth = line_indent;
         let mut rest = line.trim_start();
         while let Some(tail) = rest.strip_prefix("- ") {
             block_depth += 1;
@@ -214,6 +229,12 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                 },
             }
         }
+        // A block scalar header (`Body: |`, `Body: >-`) means every
+        // more-indented line after it is string content.
+        if quote.is_none() && opens_block_scalar(line) {
+            block_scalar_indent = Some(line_indent);
+        }
+
         // A new line is itself a value-start position. The escape state does
         // NOT survive it: a trailing backslash in a double-quoted scalar
         // escapes the line break itself, not the first byte of the next line,
@@ -243,6 +264,15 @@ fn exceeds_nesting_limit(body: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Whether a line opens a YAML block scalar: a `|` or `>` at end of line,
+/// optionally followed by the chomping/indentation indicators (`-`, `+`, a
+/// digit). Everything more-indented after it is string content.
+fn opens_block_scalar(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    let head = trimmed.trim_end_matches(|c: char| c == '-' || c == '+' || c.is_ascii_digit());
+    head.ends_with('|') || head.ends_with('>')
 }
 
 /// How many physical lines a quoted scalar may span before the pre-scan stops
@@ -932,6 +962,42 @@ Resources:
             !exceeds_nesting_limit(body),
             "a shallow template must not trip the guard"
         );
+    }
+
+    #[test]
+    fn block_scalar_content_is_not_counted() {
+        // SAM `InlineCode`, EC2 `UserData` and inline policy documents are all
+        // block scalars. Their braces are string content, and YAML does not
+        // recurse through them, so counting them only produces false
+        // rejections of perfectly shallow templates.
+        let code: String = std::iter::repeat_n("      if (x) { y({ z: 1 }); \n", 200).collect();
+        let body = format!(
+            "Resources:\n  Fn:\n    Type: AWS::Serverless::Function\n    Properties:\n      InlineCode: |\n{code}      Runtime: nodejs20.x\n"
+        );
+        assert!(
+            !exceeds_nesting_limit(&body),
+            "block scalar content is a string, not nesting"
+        );
+
+        // The chomping indicators are part of the header too.
+        for header in ["|", "|-", "|+", ">", ">-", ">2"] {
+            let b = format!(
+                "Resources:\n  Q:\n    Body: {header}\n{}      done: true\n",
+                "      {{{{\n".repeat(200)
+            );
+            assert!(
+                !exceeds_nesting_limit(&b),
+                "header {header} should open a block scalar"
+            );
+        }
+
+        // Dedenting back out ends the block, so real nesting after it still
+        // counts.
+        let after = format!(
+            "Resources:\n  Q:\n    Body: |\n      {{{{\n    Other: {}\n",
+            "[".repeat(MAX_NESTING_DEPTH + 50)
+        );
+        assert!(exceeds_nesting_limit(&after));
     }
 
     #[test]
