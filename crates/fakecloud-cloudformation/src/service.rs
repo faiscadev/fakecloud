@@ -631,10 +631,6 @@ struct CreateStackContext {
     notification_arns: Vec<String>,
     imported_names: Vec<String>,
     resource_defs: Vec<template::ResourceDefinition>,
-    /// Set when the body was template-shaped but wouldn't parse. The stack is
-    /// already inserted by then, so the failure surfaces as CREATE_FAILED
-    /// rather than a synchronous error.
-    template_error: Option<String>,
 }
 
 /// Owned clones of the service-state + container-runtime handles a provisioner
@@ -1344,6 +1340,42 @@ impl CloudFormationService {
         result
     }
 
+    /// Carry `ParameterKey=X,UsePreviousValue=true` entries forward from the
+    /// stack's stored parameters.
+    ///
+    /// Those entries carry no `ParameterValue` on the wire, so
+    /// `extract_parameters` skips them; without this refill the stack's stored
+    /// parameters get overwritten by a map missing them and a `Ref` to one
+    /// resolves to the bare parameter name. Shared by UpdateStack and
+    /// CreateChangeSet, which both send this pairing routinely (it is the
+    /// normal companion to `--use-previous-template`) and were drifting apart
+    /// with one copy each.
+    ///
+    /// The insert is unconditional because template defaults have already been
+    /// merged into `parameters` by the time this runs: a `contains_key` guard
+    /// would skip a defaulted parameter and silently revert an explicitly-set
+    /// value. `UsePreviousValue` and `ParameterValue` are mutually exclusive on
+    /// the wire, so nothing user-supplied is clobbered.
+    pub(crate) fn refill_use_previous_values(
+        raw: &BTreeMap<String, String>,
+        previous: &BTreeMap<String, String>,
+        parameters: &mut BTreeMap<String, String>,
+    ) {
+        for i in 1.. {
+            let Some(key) = raw.get(&format!("Parameters.member.{i}.ParameterKey")) else {
+                break;
+            };
+            let use_previous = raw
+                .get(&format!("Parameters.member.{i}.UsePreviousValue"))
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"));
+            if use_previous {
+                if let Some(prev) = previous.get(key) {
+                    parameters.insert(key.clone(), prev.clone());
+                }
+            }
+        }
+    }
+
     /// Fill in declared `Parameters.<Name>.Default` for any parameter the
     /// caller didn't supply. Without this a `Ref` to an omitted-but-defaulted
     /// parameter baked the bare parameter name instead of its default -- common
@@ -1613,52 +1645,9 @@ impl CloudFormationService {
             )
         })?;
 
-        // TemplateBody isn't `@required` in Smithy (TemplateURL is the alternative).
-        // Accept an empty body and parse it as an empty template so the probe's
-        // Success variants with `TemplateBody="test"` still land on the happy path.
-        //
-        // Resolve `TemplateURL` first, though: `aws cloudformation create-stack
-        // --template-url` (what `aws cloudformation deploy`, SAM and CDK send
-        // once a bucket is configured) otherwise arrives with an empty body and
-        // produces a CREATE_COMPLETE stack holding nothing -- the #2480 no-op,
-        // reached without any malformed template. A value that isn't URL-shaped
-        // is a synthetic probe input and keeps the lenient path.
-        // URL-shaped, not necessarily readable: an unreadable one is reported
-        // below rather than ignored. A value that isn't meant as a URL (the
-        // probe's `"t"`) is filtered out here and keeps the lenient path.
-        let url_param =
-            Self::get_param(req, "TemplateURL").filter(|url| crate::extras::looks_like_url(url));
-        let empty = String::new();
-        let inline_body = params
-            .get("TemplateBody")
-            .filter(|body| !body.trim().is_empty());
-        // Resolved only when the URL would actually be used. An inline body
-        // wins, and `resolve_template_url` takes the S3 write lock, so
-        // resolving eagerly would lock and materialize account state for a
-        // result about to be discarded (including on a request that is about
-        // to be rejected as a duplicate stack).
-        //
-        // A URL that resolves to nothing (uploaded to another account, a
-        // public AWS-hosted quickstart, a key mismatch, an empty object) must
-        // fail the stack rather than fall back to an empty body and produce
-        // the #2480 empty CREATE_COMPLETE. UpdateStack raises this
-        // synchronously; here the stack is already async, so it rolls to
-        // CREATE_FAILED.
-        let resolved_from_url = match (&inline_body, &url_param) {
-            (None, Some(url)) => Some(self.resolve_template_url(&req.account_id, url)),
-            _ => None,
-        };
-        let template_body = match (inline_body, &resolved_from_url) {
-            (Some(body), _) => body,
-            (None, Some(Ok(body))) => body,
-            _ => params.get("TemplateBody").unwrap_or(&empty),
-        };
-        let url_fetch_error = match &resolved_from_url {
-            Some(Err(err)) => Some(err.clone()),
-            _ => None,
-        };
-
-        // Check if stack already exists and is not deleted
+        // Check if stack already exists and is not deleted. Done before the
+        // template is resolved: `resolve_template_url` takes the S3 write lock,
+        // and a duplicate request is rejected here regardless of its body.
         {
             let accounts = self.state.read();
             let empty = CloudFormationState::new(&req.account_id, &req.region);
@@ -1673,6 +1662,45 @@ impl CloudFormationService {
                 }
             }
         }
+
+        // TemplateBody isn't `@required` in Smithy (TemplateURL is the
+        // alternative). Accept an empty body and parse it as an empty template
+        // so the probe's Success variants with `TemplateBody="test"` still land
+        // on the happy path.
+        //
+        // `TemplateURL` has to be resolved, though: `aws cloudformation
+        // create-stack --template-url` (what `aws cloudformation deploy`, SAM
+        // and CDK send once a bucket is configured) otherwise arrives with an
+        // empty body and produces a CREATE_COMPLETE stack holding nothing --
+        // the #2480 no-op, reached without any malformed template. A value that
+        // isn't URL-shaped is a synthetic probe input and keeps the lenient
+        // path.
+        let url_param =
+            Self::get_param(req, "TemplateURL").filter(|url| crate::extras::looks_like_url(url));
+        let empty = String::new();
+        let inline_body = params
+            .get("TemplateBody")
+            .filter(|body| !body.trim().is_empty());
+        // Resolved only when the URL would actually be used: an inline body
+        // wins, and `resolve_template_url` takes the S3 write lock.
+        //
+        // A URL that resolves to nothing (uploaded to another account, a
+        // public AWS-hosted quickstart, a key mismatch, an empty object) is
+        // reported rather than falling back to an empty body, which would
+        // rebuild the #2480 empty CREATE_COMPLETE.
+        let resolved_from_url = match (&inline_body, &url_param) {
+            (None, Some(url)) => Some(self.resolve_template_url(&req.account_id, url)),
+            _ => None,
+        };
+        let template_body = match (inline_body, &resolved_from_url) {
+            (Some(body), _) => body,
+            (None, Some(Ok(body))) => body,
+            _ => params.get("TemplateBody").unwrap_or(&empty),
+        };
+        let url_fetch_error = match &resolved_from_url {
+            Some(Err(err)) => Some(err.clone()),
+            _ => None,
+        };
 
         let tags = Self::extract_tags(&params);
         let mut parameters = Self::extract_parameters(&params);
@@ -1746,7 +1774,25 @@ impl CloudFormationService {
         };
         // An unresolvable TemplateURL outranks the parse result: the body is
         // empty only because the fetch failed, so report that instead.
-        let template_error = url_fetch_error.or(template_error);
+        //
+        // Reject synchronously, before any stack record is inserted. Real
+        // CloudFormation validates the template first and returns an error
+        // with no stack created; rolling a persisted stack to CREATE_FAILED
+        // instead left the name taken, so fixing the typo and redeploying hit
+        // AlreadyExistsException and the user had to delete-stack first. This
+        // also matches UpdateStack and CreateChangeSet, which already reject
+        // the same condition synchronously.
+        //
+        // Conformance-safe: both inputs are gated (`is_template_document`,
+        // `looks_like_url`) so the probe's placeholder bodies and `"t"` URLs
+        // never reach here.
+        if let Some(reason) = url_fetch_error.or(template_error) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                reason,
+            ));
+        }
 
         // Refuse if any Fn::ImportValue references an unknown export. CFN
         // checks this before provisioning; we mirror that so callers get
@@ -1811,7 +1857,6 @@ impl CloudFormationService {
             notification_arns,
             imported_names,
             resource_defs: parsed.resources,
-            template_error,
         };
 
         // Custom resources (`Custom::*` / `AWS::CloudFormation::CustomResource`)
@@ -1883,25 +1928,7 @@ impl CloudFormationService {
             notification_arns,
             imported_names,
             resource_defs,
-            template_error,
         } = ctx;
-
-        // The template didn't parse. Everything below would provision nothing
-        // and report CREATE_COMPLETE, which is exactly the silent no-op #2480
-        // reported; fail the stack with the parser's reason instead.
-        if let Some(reason) = template_error {
-            Self::mark_create_failed(
-                &state,
-                &delivery,
-                &account_id,
-                &stack_name,
-                &stack_id,
-                &notification_arns,
-                &reason,
-            );
-            save_snapshot_static(state.clone(), snapshot_store, snapshot_lock).await;
-            return;
-        }
 
         // Capture the container-spawn handles before the provisioner is moved
         // into spawn_blocking, so the post-provision drain (below) can back
@@ -2406,33 +2433,11 @@ impl CloudFormationService {
                 .unwrap_or_default()
         };
 
-        // `ParameterKey=X,UsePreviousValue=true` carries no value on the wire;
-        // its meaning is "keep what the stack already has". `extract_parameters`
-        // skips those entries, so fill them in here — otherwise the stack's
-        // stored parameters are overwritten with a map missing them, and a
-        // `Ref` to one resolves to the bare parameter name.
-        {
-            let raw = Self::get_all_params(req);
-            for i in 1.. {
-                let Some(key) = raw.get(&format!("Parameters.member.{i}.ParameterKey")) else {
-                    break;
-                };
-                let use_previous = raw
-                    .get(&format!("Parameters.member.{i}.UsePreviousValue"))
-                    .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                // Unconditional: `UpdateStackInput::from_params` has already
-                // merged template defaults, so a parameter that declares one
-                // is present here and a `contains_key` guard would skip it —
-                // silently reverting an explicitly-set value to the default.
-                // `UsePreviousValue` and `ParameterValue` are mutually
-                // exclusive on the wire, so nothing user-supplied is lost.
-                if use_previous {
-                    if let Some(prev) = previous_parameters.get(key) {
-                        input.parameters.insert(key.clone(), prev.clone());
-                    }
-                }
-            }
-        }
+        Self::refill_use_previous_values(
+            &Self::get_all_params(req),
+            &previous_parameters,
+            &mut input.parameters,
+        );
 
         // `UsePreviousTemplate=true` and `TemplateURL` both arrive with an
         // empty `TemplateBody`. Resolve them to a real template before
@@ -2475,7 +2480,7 @@ impl CloudFormationService {
             };
             // No usable URL: `UsePreviousTemplate`, whose meaning is the
             // stack's stored template.
-            input.template_body = from_url.unwrap_or(previous_template);
+            input.template_body = from_url.unwrap_or_else(|| previous_template.clone());
             // The body was empty when `UpdateStackInput::from_params` merged
             // parameter defaults, so nothing was merged. Redo it now that the
             // real template (and its `Parameters` block) is in hand, or a
@@ -2519,7 +2524,20 @@ impl CloudFormationService {
                 ),
             ));
         }
-        if input.template_body.trim().is_empty() && !found_stack_id.is_empty() {
+        // Only for a stack that actually reached a completed state. A stack
+        // left in a failure state (an empty stored template plus CREATE_FAILED)
+        // would otherwise report UPDATE_COMPLETE and have its reason cleared,
+        // so a stack that was never provisioned would look successfully
+        // updated.
+        let completed = {
+            let accounts = self.state.read();
+            accounts.get(&req.account_id).is_some_and(|s| {
+                s.stacks
+                    .values()
+                    .any(|st| st.stack_id == found_stack_id && st.status.ends_with("_COMPLETE"))
+            })
+        };
+        if input.template_body.trim().is_empty() && !found_stack_id.is_empty() && completed {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);
             if let Some(stack) = state
@@ -2892,7 +2910,44 @@ impl CloudFormationService {
             &resources_snapshot,
             &self.state,
         );
-        Self::ensure_export_uniqueness(&self.state, &req.account_id, &input.stack_name, &outputs)?;
+        // The stack was already flipped to UPDATE_COMPLETE above, so a
+        // collision here would leave it reporting success with no reason while
+        // the caller sees an error. Roll it back before returning.
+        if let Err(err) = Self::ensure_export_uniqueness(
+            &self.state,
+            &req.account_id,
+            &input.stack_name,
+            &outputs,
+        ) {
+            let reason = err.message();
+            {
+                let mut accounts = self.state.write();
+                let state = accounts.get_or_create(&req.account_id);
+                if let Some(stack) = state
+                    .stacks
+                    .values_mut()
+                    .find(|s| s.stack_id == stack_id && s.status != "DELETE_COMPLETE")
+                {
+                    stack.status = "UPDATE_ROLLBACK_COMPLETE".to_string();
+                    stack.status_reason = Some(reason.clone());
+                    // The update already overwrote these ~130 lines up. A
+                    // stack reporting a rollback while holding the new
+                    // template would hand `GetTemplate` the template that
+                    // supposedly rolled back, so put the previous ones back.
+                    stack.template = previous_template.clone();
+                    stack.parameters = previous_parameters.clone();
+                }
+                record_stack_status_event_with_reason(
+                    state,
+                    &stack_id,
+                    &input.stack_name,
+                    "AWS::CloudFormation::Stack",
+                    "UPDATE_ROLLBACK_COMPLETE",
+                    Some(&reason),
+                );
+            }
+            return Err(err);
+        }
         {
             let mut accounts = self.state.write();
             let state = accounts.get_or_create(&req.account_id);

@@ -118,8 +118,9 @@ fn parse_yaml(body: &str) -> Result<Json, String> {
 /// stack. Counting only the flow openers would leave the cheaper shape wide
 /// open on an unauthenticated CreateStack.
 ///
-/// Quoted content is not tracked: over-counting inside a string can only
-/// reject a body already far past any real template's depth.
+/// Quoted scalars and `#` comments are skipped, so brackets that are content
+/// rather than structure — an embedded IAM policy document, an inline nested
+/// template — cannot push a shallow template over the limit.
 fn exceeds_nesting_limit(body: &str) -> bool {
     let mut flow_depth = 0usize;
     for line in body.lines() {
@@ -141,18 +142,49 @@ fn exceeds_nesting_limit(body: &str) -> bool {
         }
 
         // Flow depth carries across lines, since a flow collection may span
-        // them.
+        // them. Brackets inside a quoted scalar are content, not structure --
+        // an embedded IAM policy or inline nested template can carry hundreds
+        // of braces in one string -- so quotes are tracked and their contents
+        // skipped. A `#` outside quotes starts a comment.
+        //
+        // Quote state is per line, and a line that ends mid-quote is treated
+        // as unreadable: its contribution is rolled back rather than carried.
+        // YAML allows a bare apostrophe in a plain scalar (`baz: don't`), so
+        // neither carrying the state (a phantom quote would swallow the rest
+        // of the document) nor keeping the delta (the unmatched `{` would leak
+        // upward until a valid template trips the limit) is safe.
+        let depth_at_line_start = flow_depth;
+        let mut quote: Option<u8> = None;
+        let mut escaped = false;
         for b in line.bytes() {
-            match b {
-                b'[' | b'{' => {
-                    flow_depth += 1;
-                    if flow_depth > MAX_NESTING_DEPTH {
-                        return true;
+            match quote {
+                Some(q) => {
+                    // Only double-quoted YAML scalars honour backslash
+                    // escapes; in single-quoted ones a backslash is literal.
+                    if escaped {
+                        escaped = false;
+                    } else if q == b'"' && b == b'\\' {
+                        escaped = true;
+                    } else if b == q {
+                        quote = None;
                     }
                 }
-                b']' | b'}' => flow_depth = flow_depth.saturating_sub(1),
-                _ => {}
+                None => match b {
+                    b'"' | b'\'' => quote = Some(b),
+                    b'#' => break,
+                    b'[' | b'{' => {
+                        flow_depth += 1;
+                        if flow_depth > MAX_NESTING_DEPTH {
+                            return true;
+                        }
+                    }
+                    b']' | b'}' => flow_depth = flow_depth.saturating_sub(1),
+                    _ => {}
+                },
             }
+        }
+        if quote.is_some() {
+            flow_depth = depth_at_line_start;
         }
     }
     false
@@ -184,10 +216,35 @@ pub fn is_template_document(body: &str) -> bool {
         // mapping is a common YAML slip that the template parser rejects. It
         // is still unmistakably someone's template, so it must fail loudly
         // rather than degrade to an empty stack.
-        return value.get("Resources").is_some();
+        //
+        // The other top-level sections count too. A template that declares
+        // `Parameters` or `AWSTemplateFormatVersion` but omits `Resources` is
+        // rejected by the parser ("Template must contain a Resources
+        // section"), and judging it on `Resources` alone would send that error
+        // down the lenient path — accepting an empty stack, or on update
+        // removing every existing resource. `Description` is deliberately not
+        // in the list: on its own it is too generic to mark a body as a
+        // template.
+        return TEMPLATE_SECTIONS
+            .iter()
+            .any(|section| value.get(section).is_some());
     }
     looks_like_template_text(body)
 }
+
+/// Top-level sections that mark a parsed object as someone's CloudFormation
+/// template, per the template anatomy AWS documents.
+const TEMPLATE_SECTIONS: &[&str] = &[
+    "AWSTemplateFormatVersion",
+    "Conditions",
+    "Mappings",
+    "Metadata",
+    "Outputs",
+    "Parameters",
+    "Resources",
+    "Rules",
+    "Transform",
+];
 
 /// Text-level shape check for a body that would not parse: does it *look* like
 /// someone's template? Keyed on a top-level `Resources` section, the one
@@ -210,22 +267,28 @@ fn looks_like_template_text(body: &str) -> bool {
 }
 
 fn declares_resources(line: &str) -> bool {
-    let rest = line
+    let unquoted = line
         .strip_prefix('"')
         .or_else(|| line.strip_prefix('\''))
         .unwrap_or(line);
-    let Some(rest) = rest.strip_prefix("Resources") else {
-        return false;
-    };
-    let rest = rest
-        .strip_prefix('"')
-        .or_else(|| rest.strip_prefix('\''))
-        .unwrap_or(rest);
-    // Require the colon. A real top-level key always has one, and without it
-    // any unparseable body that merely contains a `Resources` line (a pasted
-    // log, a CSV header) would be classified as a template — turning a lenient
-    // degrade into a hard error.
-    rest.trim_start().starts_with(':')
+    // The same section list the parsed branch uses. Keying only on
+    // `Resources:` would miss a template whose syntax error sits in (or
+    // truncates at) the `Parameters` / `Mappings` block above it, sending it
+    // back down the silent-empty-stack path.
+    TEMPLATE_SECTIONS.iter().any(|section| {
+        let Some(rest) = unquoted.strip_prefix(section) else {
+            return false;
+        };
+        let rest = rest
+            .strip_prefix('"')
+            .or_else(|| rest.strip_prefix('\''))
+            .unwrap_or(rest);
+        // Require the colon. A real top-level key always has one, and without
+        // it any unparseable body that merely contains one of these words (a
+        // pasted log, a CSV header) would be classified as a template —
+        // turning a lenient degrade into a hard error.
+        rest.trim_start().starts_with(':')
+    })
 }
 
 /// Convenience wrapper for callers that only want a template-shaped object and
@@ -723,6 +786,78 @@ Resources:
         assert!(is_template_document(
             "Resources:\n  Q:\n    Timeout: .nan\n"
         ));
+    }
+
+    #[test]
+    fn apostrophes_in_plain_scalars_do_not_leak_depth() {
+        // YAML allows a bare apostrophe in a plain scalar. A per-line quote
+        // scanner sees it open a quote that never closes, so the line's `{`
+        // went uncounted-closed and leaked +1 upward; enough such lines
+        // falsely rejected a valid template.
+        let mut body = String::from("Resources:\n");
+        for i in 0..(MAX_NESTING_DEPTH + 50) {
+            body.push_str(&format!("  Q{i}: {{bar: \"x\", baz: don't}}\n"));
+        }
+        assert!(
+            !exceeds_nesting_limit(&body),
+            "a shallow template must not trip the depth guard"
+        );
+        // A real multi-line flow bomb is still caught.
+        let bomb = "[\n".repeat(MAX_NESTING_DEPTH + 50);
+        assert!(exceeds_nesting_limit(&bomb));
+    }
+
+    #[test]
+    fn unparseable_body_is_recognised_by_any_top_level_section() {
+        // The syntax error sits in `Parameters`, before `Resources:` is ever
+        // reached — a text scan keyed only on `Resources:` would call this a
+        // placeholder and silently build an empty stack.
+        let body =
+            "Parameters:\n\tEnv:\n\t\tType: String\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n";
+        assert!(parse_template_body(body).is_err());
+        assert!(is_template_document(body));
+
+        // Truncated before `Resources:` appears at all.
+        let truncated = "AWSTemplateFormatVersion: '2010-09-09'\nParameters:\n\tEnv:\n";
+        assert!(parse_template_body(truncated).is_err());
+        assert!(is_template_document(truncated));
+    }
+
+    #[test]
+    fn other_top_level_sections_mark_a_template_document() {
+        // Parses fine, but the template parser rejects it for having no
+        // `Resources`. Judging on `Resources` alone would send that error down
+        // the lenient path — an empty stack on create, and on update the
+        // removal of every existing resource.
+        for body in [
+            "Parameters:\n  Env:\n    Type: String\n",
+            "AWSTemplateFormatVersion: '2010-09-09'\n",
+            "Outputs:\n  A:\n    Value: x\n",
+            "Transform: AWS::Serverless-2016-10-31\n",
+        ] {
+            assert!(parse_template_body(body).is_ok(), "{body:?}");
+            assert!(is_template_document(body), "{body:?}");
+        }
+    }
+
+    #[test]
+    fn embedded_json_in_a_quoted_string_does_not_trip_the_depth_guard() {
+        // An inline IAM policy or nested template can carry hundreds of braces
+        // inside one quoted scalar while nesting only a few levels.
+        let blob = "{".repeat(MAX_NESTING_DEPTH + 50);
+        let body = format!("Resources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      Policy: \"{blob}\"\n");
+        assert!(
+            parse_template_body(&body).is_ok(),
+            "brackets inside a quoted scalar are content, not structure"
+        );
+        // A `#` comment is skipped too.
+        let commented = format!(
+            "Resources: # {}\n  Q:\n    Type: AWS::SQS::Queue\n",
+            "[".repeat(MAX_NESTING_DEPTH + 50)
+        );
+        assert!(parse_template_body(&commented).is_ok());
+        // Real structural nesting is still refused.
+        assert!(parse_template_body(&"[".repeat(MAX_NESTING_DEPTH + 50)).is_err());
     }
 
     #[test]

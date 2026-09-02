@@ -219,30 +219,29 @@ async fn unparseable_template_document_fails_the_stack() {
     let server = TestServer::start().await;
     let cfn = server.cloudformation_client().await;
 
-    cfn.create_stack()
+    // Rejected synchronously, as real CloudFormation does: the template is
+    // validated before anything is created.
+    let err = cfn
+        .create_stack()
         .stack_name("broken-template")
         .template_body(BROKEN_TEMPLATE)
         .send()
         .await
-        .expect("create_stack returns a StackId; the failure is asynchronous");
+        .expect_err("a template that cannot be parsed must not be accepted");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("NoTypeHere"),
+        "the error should name the offending resource, got {msg}"
+    );
 
-    let described = cfn
-        .describe_stacks()
+    // No stack record is left behind, so the name is still free — fixing the
+    // typo and redeploying must not hit AlreadyExistsException.
+    cfn.create_stack()
         .stack_name("broken-template")
+        .template_body(REPRO_TEMPLATE)
         .send()
         .await
-        .expect("describe_stacks");
-    let stack = described.stacks().first().expect("stack present");
-    assert_eq!(
-        stack.stack_status().unwrap().as_str(),
-        "CREATE_FAILED",
-        "a template that cannot be parsed must not report CREATE_COMPLETE"
-    );
-    let reason = stack.stack_status_reason().unwrap_or_default();
-    assert!(
-        reason.contains("NoTypeHere"),
-        "the status reason should name the offending resource, got {reason:?}"
-    );
+        .expect("the name must still be usable after a rejected template");
 }
 
 /// A template broken by a *syntax* error (a tab where YAML demands spaces) is
@@ -257,28 +256,17 @@ async fn syntactically_broken_template_fails_the_stack() {
     let server = TestServer::start().await;
     let cfn = server.cloudformation_client().await;
 
-    cfn.create_stack()
+    let err = cfn
+        .create_stack()
         .stack_name("tab-indented")
         .template_body(TAB_INDENTED_TEMPLATE)
         .send()
         .await
-        .expect("create_stack returns a StackId; the failure is asynchronous");
-
-    let described = cfn
-        .describe_stacks()
-        .stack_name("tab-indented")
-        .send()
-        .await
-        .expect("describe_stacks");
-    let stack = described.stacks().first().expect("stack present");
-    assert_eq!(
-        stack.stack_status().unwrap().as_str(),
-        "CREATE_FAILED",
-        "a template with a YAML syntax error must not report CREATE_COMPLETE"
-    );
+        .expect_err("a YAML syntax error must not be accepted");
+    let msg = format!("{err:?}");
     assert!(
-        stack.stack_status_reason().is_some_and(|r| !r.is_empty()),
-        "the parser's message should reach StackStatusReason"
+        msg.contains("Invalid YAML template"),
+        "the parser's message should reach the caller, got {msg}"
     );
 }
 

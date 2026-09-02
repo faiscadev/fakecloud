@@ -274,6 +274,37 @@ pub(crate) fn looks_like_url(value: &str) -> bool {
 /// `http://127.0.0.1:4566/bucket/key`) and virtual-hosted
 /// (`https://bucket.s3.amazonaws.com/key`) forms, and drops any query string.
 /// Returns `None` if the shape isn't recognized.
+/// Percent-decode an S3 object key taken from a URL path.
+///
+/// A key with a space, `#` or other reserved character arrives encoded
+/// (`my%20template.yaml`), and looking up the literal encoded text reports the
+/// template missing. Note this is NOT form decoding: `+` is a literal plus in
+/// a path segment, not a space, so it is left alone. A malformed escape is
+/// left as-is rather than dropped, so the lookup fails on the key the caller
+/// actually wrote.
+fn percent_decode_key(key: &str) -> String {
+    if !key.contains('%') {
+        return key.to_string();
+    }
+    let bytes = key.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16);
+            let lo = (bytes[i + 2] as char).to_digit(16);
+            if let (Some(hi), Some(lo)) = (hi, lo) {
+                out.push(((hi << 4) | lo) as u8);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
     let (scheme, rest) = match url.split_once("://") {
         Some((scheme, rest)) => (Some(scheme), rest),
@@ -291,7 +322,7 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
         if bucket.is_empty() || key.is_empty() {
             return None;
         }
-        return Some((bucket.to_string(), key.to_string()));
+        return Some((bucket.to_string(), percent_decode_key(key)));
     }
     let (host, after) = rest.split_once('/')?;
     let path = after.split(['?', '#']).next().unwrap_or(after);
@@ -303,7 +334,7 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
         // `https://bucket.s3.amazonaws.com/` "parses" with no key and the
         // caller reports a missing object rather than an unusable URL.
         if !bucket.is_empty() && !path.is_empty() {
-            return Some((bucket.to_string(), path.to_string()));
+            return Some((bucket.to_string(), percent_decode_key(path)));
         }
         return None;
     }
@@ -312,7 +343,7 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
     if bucket.is_empty() || key.is_empty() {
         return None;
     }
-    Some((bucket.to_string(), key.to_string()))
+    Some((bucket.to_string(), percent_decode_key(key)))
 }
 
 impl CloudFormationService {
@@ -456,28 +487,16 @@ impl CloudFormationService {
 
                 let mut cs_params = CloudFormationService::extract_parameters(&params);
                 CloudFormationService::merge_parameter_defaults(&mut cs_params, &template_body);
-                // `ParameterKey=X,UsePreviousValue=true` carries no value, so
-                // `extract_parameters` skips it. ExecuteChangeSet assigns
-                // `stack.parameters = cs_params`, so without this refill the
-                // parameter is dropped (or reset to its template default) and
-                // every `Ref` to it resolves wrong. `aws cloudformation
-                // deploy` sends this pairing routinely. Unconditional, since
-                // the default merge above may already have filled the key.
+                // ExecuteChangeSet assigns `stack.parameters = cs_params`, so
+                // a `UsePreviousValue` entry that isn't refilled here is
+                // dropped (or reset to its template default) and every `Ref`
+                // to it resolves wrong.
                 if let Some((_, prev_params)) = &previous {
-                    for i in 1.. {
-                        let Some(key) = params.get(&format!("Parameters.member.{i}.ParameterKey"))
-                        else {
-                            break;
-                        };
-                        let use_previous = params
-                            .get(&format!("Parameters.member.{i}.UsePreviousValue"))
-                            .is_some_and(|v| v.eq_ignore_ascii_case("true"));
-                        if use_previous {
-                            if let Some(prev) = prev_params.get(key) {
-                                cs_params.insert(key.clone(), prev.clone());
-                            }
-                        }
-                    }
+                    CloudFormationService::refill_use_previous_values(
+                        &params,
+                        prev_params,
+                        &mut cs_params,
+                    );
                 }
                 let cs_tags = CloudFormationService::extract_tags(&params);
                 let cs_notif = CloudFormationService::extract_notification_arns(&params);
@@ -2728,6 +2747,28 @@ mod tests {
             .resolve_template_url("000000000000", "https://s3.amazonaws.com/b/missing.yaml")
             .expect_err("missing object");
         assert!(err.starts_with("Template not found at"), "{err}");
+    }
+
+    #[test]
+    fn parse_s3_url_percent_decodes_the_key() {
+        assert_eq!(
+            parse_s3_url("https://s3.amazonaws.com/b/my%20template.yaml"),
+            Some(("b".to_string(), "my template.yaml".to_string()))
+        );
+        assert_eq!(
+            parse_s3_url("s3://b/dir/caf%C3%A9.yaml"),
+            Some(("b".to_string(), "dir/café.yaml".to_string()))
+        );
+        // `+` is a literal plus in a path segment, not a space.
+        assert_eq!(
+            parse_s3_url("https://s3.amazonaws.com/b/a+b.yaml"),
+            Some(("b".to_string(), "a+b.yaml".to_string()))
+        );
+        // A malformed escape is left alone rather than dropped.
+        assert_eq!(
+            parse_s3_url("https://s3.amazonaws.com/b/100%.yaml"),
+            Some(("b".to_string(), "100%.yaml".to_string()))
+        );
     }
 
     #[test]
