@@ -88,6 +88,49 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
     labels
 }
 
+/// A cluster's built-in writer and reader endpoints.
+///
+/// AWS reports these from `DescribeDBClusterEndpoints` next to the custom
+/// ones, but they are part of the cluster: there is no API to create or
+/// delete them, and they carry no `DBClusterEndpointIdentifier`. They are
+/// synthesized from the cluster's stored endpoints rather than seeded
+/// into the endpoints store so that deleting a custom endpoint can never
+/// remove one, and so a cluster created before this existed still
+/// reports them.
+fn built_in_cluster_endpoints(
+    cluster_id: &str,
+    cluster: &Value,
+    region: &str,
+    account_id: &str,
+) -> Vec<(String, Value)> {
+    let status = entry_str(cluster, "Status")
+        .unwrap_or("available")
+        .to_string();
+    [("WRITER", "Endpoint"), ("READER", "ReaderEndpoint")]
+        .into_iter()
+        .filter_map(|(kind, field)| {
+            let address = entry_str(cluster, field)?;
+            let value = json!({
+                "DBClusterIdentifier": cluster_id,
+                "Endpoint": address,
+                "EndpointType": kind,
+                "Status": status,
+                "DBClusterEndpointArn": Arn::new(
+                    "rds",
+                    region,
+                    account_id,
+                    &format!("cluster-endpoint:{cluster_id}-{}", kind.to_lowercase()),
+                )
+                .with_partition(partition_for(region))
+                .to_string(),
+            });
+            // Sorted ahead of any custom endpoint of the same cluster,
+            // and stable across calls.
+            Some((format!("\u{0}{cluster_id}:{kind}"), value))
+        })
+        .collect()
+}
+
 /// True when a stored cluster endpoint satisfies every filter. The names
 /// come from the `DescribeDBClusterEndpoints` docs:
 /// `db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`,
@@ -1492,9 +1535,17 @@ impl RdsService {
                 // side normalizes the request's identifier, so an
                 // endpoint created with the ARN form would otherwise
                 // never match a lookup by the bare id.
-                let cluster = crate::filters::normalized_identifier(
+                // The same fail-closed reduction the Describe side uses.
+                // `normalized_identifier` alone reports None for an ARN
+                // it can't resolve, which would store an EMPTY cluster id
+                // (leaving the endpoint unreachable by any lookup), and
+                // it would reduce ANOTHER account's cluster ARN to the
+                // bare id, aliasing the endpoint onto this account's
+                // same-named cluster.
+                let cluster = crate::filters::requested_identifier(
                     get_param(req, "DBClusterIdentifier"),
                     "cluster",
+                    &aid,
                 )
                 .unwrap_or_default();
                 // AWS maps the REQUEST's EndpointType (READER / WRITER /
@@ -1591,21 +1642,54 @@ impl RdsService {
                 if let Some(cluster) = wanted_cluster.as_deref() {
                     cluster_entry(self, &aid, cluster)?;
                 }
-                list_extras_filtered_xml(
-                    self,
-                    &aid,
-                    "cluster_endpoints",
+                let keep = |v: &Value| {
+                    wanted_endpoint.as_deref().is_none_or(|wanted| {
+                        entry_str(v, "DBClusterEndpointIdentifier") == Some(wanted)
+                    }) && wanted_cluster.as_deref().is_none_or(|wanted| {
+                        entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                    }) && cluster_endpoint_matches_filters(v, &filters)
+                };
+                let entries = {
+                    let accounts = self.state_handle().read();
+                    // AWS reports every cluster's built-in writer and
+                    // reader endpoints alongside the custom ones. They
+                    // are not creatable or deletable, so they live on the
+                    // cluster rather than in the endpoints store -- but
+                    // without them `db-cluster-endpoint-type=reader`
+                    // (which the docs advertise) could never match
+                    // anything, since CreateDBClusterEndpoint only ever
+                    // makes CUSTOM endpoints.
+                    let mut entries: Vec<(String, Value)> = accounts
+                        .get(&aid)
+                        .and_then(|state| state.extras.get("clusters"))
+                        .map(|clusters| {
+                            clusters
+                                .iter()
+                                .flat_map(|(id, cluster)| {
+                                    built_in_cluster_endpoints(id, cluster, region, &aid)
+                                })
+                                .filter(|(_, v)| keep(v))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    entries.extend(sorted_entries(
+                        &accounts,
+                        &aid,
+                        "cluster_endpoints",
+                        keep,
+                    ));
+                    entries
+                };
+                // One order for the whole listing, custom and built-in
+                // alike, so the pagination cursor stays meaningful.
+                let mut entries = entries;
+                entries.sort_by(|(a, _), (b, _)| a.cmp(b));
+                list_items_xml(
+                    entries,
                     "DBClusterEndpoints",
                     "DBClusterEndpointList",
                     "DescribeDBClusterEndpoints",
                     req,
-                    |v| {
-                        wanted_endpoint.as_deref().is_none_or(|wanted| {
-                            entry_str(v, "DBClusterEndpointIdentifier") == Some(wanted)
-                        }) && wanted_cluster.as_deref().is_none_or(|wanted| {
-                            entry_str(v, "DBClusterIdentifier") == Some(wanted)
-                        }) && cluster_endpoint_matches_filters(v, &filters)
-                    },
                     cluster_endpoint_xml,
                     &rid,
                 )

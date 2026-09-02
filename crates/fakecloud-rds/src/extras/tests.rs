@@ -3940,6 +3940,165 @@ fn create_cluster_endpoint_stores_a_reduced_cluster_identifier() {
     );
 }
 
+/// AWS reports a cluster's built-in writer and reader endpoints, which
+/// is what makes `db-cluster-endpoint-type=reader` able to match --
+/// CreateDBClusterEndpoint only ever makes CUSTOM ones.
+#[test]
+fn describe_db_cluster_endpoints_reports_the_built_in_endpoints() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        body.contains("<EndpointType>WRITER</EndpointType>"),
+        "the cluster's writer endpoint is missing: {body}"
+    );
+    assert!(
+        body.contains("<EndpointType>READER</EndpointType>"),
+        "the cluster's reader endpoint is missing: {body}"
+    );
+    assert!(
+        body.contains("<EndpointType>CUSTOM</EndpointType>"),
+        "{body}"
+    );
+
+    // The documented filter values now select each kind.
+    for (value, expect_id) in [("reader", false), ("custom", true)] {
+        let body = body_of_action(
+            &svc,
+            "DescribeDBClusterEndpoints",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-endpoint-type"),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        );
+        assert!(
+            !body.contains("<DBClusterEndpoints>\n\n    </DBClusterEndpoints>"),
+            "db-cluster-endpoint-type={value} selected nothing: {body}"
+        );
+        assert_eq!(
+            body.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+            expect_id,
+            "db-cluster-endpoint-type={value} selected the wrong rows: {body}"
+        );
+    }
+
+    // Built-ins follow the cluster, so they narrow with it.
+    create_cluster(&svc, "clu-2");
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[("DBClusterIdentifier", "clu-2")],
+    );
+    assert!(
+        body.contains("<DBClusterIdentifier>clu-2</DBClusterIdentifier>"),
+        "{body}"
+    );
+    assert!(
+        !body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"),
+        "another cluster's endpoints leaked in: {body}"
+    );
+}
+
+/// The create side fails closed on an identifier it can't resolve, like
+/// the Describe side: an empty stored cluster id would leave the
+/// endpoint unreachable, and reducing a FOREIGN ARN would alias it onto
+/// this account's same-named cluster.
+#[test]
+fn create_cluster_endpoint_does_not_reduce_an_unresolvable_cluster_arn() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-foreign"),
+            (
+                "DBClusterIdentifier",
+                "arn:aws:rds:us-east-1:999999999999:cluster:clu-1",
+            ),
+            ("EndpointType", "READER"),
+        ],
+    );
+
+    // It must NOT have attached itself to this account's clu-1.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>ep-foreign</DBClusterEndpointIdentifier>"),
+        "a foreign cluster ARN aliased onto this account's cluster: {body}"
+    );
+
+    // And a wrong-type ARN is kept verbatim rather than stored empty.
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-wrongtype"),
+            (
+                "DBClusterIdentifier",
+                "arn:aws:rds:us-east-1:000000000000:db:mydb",
+            ),
+            ("EndpointType", "READER"),
+        ],
+    );
+    let stored = extras_value(&svc, "cluster_endpoints", "ep-wrongtype");
+    assert_eq!(
+        stored["DBClusterIdentifier"].as_str(),
+        Some("arn:aws:rds:us-east-1:000000000000:db:mydb"),
+        "a wrong-type ARN was silently replaced with an empty cluster id"
+    );
+}
+
+/// A record persisted by an older build carries `COMPLETED`; the docs
+/// promise lowercase, and a client filtering client-side on `completed`
+/// would otherwise skip it.
+#[test]
+fn backtrack_status_reads_back_lowercase_for_a_legacy_record() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        accounts
+            .default_mut()
+            .extras
+            .entry("cluster_backtracks".to_string())
+            .or_default()
+            .insert(
+                "bt-legacy".to_string(),
+                json!({
+                    "BacktrackIdentifier": "bt-legacy",
+                    "DBClusterIdentifier": "clu-1",
+                    "Status": "COMPLETED",
+                }),
+            );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
+    assert!(
+        body.contains("<Status>completed</Status>"),
+        "a legacy record read back uppercase: {body}"
+    );
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();

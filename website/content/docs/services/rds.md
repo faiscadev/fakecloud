@@ -208,7 +208,7 @@ Override knobs (env vars, both optional):
 
 ## Describe filters
 
-The `Filters` parameter is honored on the Describe operations in the table below. `DescribePendingMaintenanceActions` accepts the parameter and returns the unfiltered list. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Names and values are case-sensitive, and wildcards are not supported (same as AWS).
+The `Filters` parameter is honored on the Describe operations in the table below. `DescribePendingMaintenanceActions` accepts the parameter and returns the unfiltered list. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed. Filter names are case-sensitive and wildcards are not supported (same as AWS); values are case-sensitive too, except for the four enum-valued endpoint and backtrack filters noted below.
 
 | Operation | Supported filter names |
 | --- | --- |
@@ -221,6 +221,8 @@ The `Filters` parameter is honored on the Describe operations in the table below
 | `DescribeDBShardGroups` | `db-shard-group-id` |
 
 `DescribeDBClusterBacktracks` returns the backtracks `BacktrackDBCluster` recorded, scoped to the cluster named in the request; an unknown cluster raises `DBClusterNotFoundFault`. AWS marks `DBClusterIdentifier` required, but the only errors the RDS model declares on this operation are `DBClusterNotFoundFault` and `DBClusterBacktrackNotFoundFault`, so omitting it selects no cluster's backtracks rather than emitting an error shape that isn't in the model. Backtrack `Status` is reported lowercase (`completed`), matching the values the `db-cluster-backtrack-status` filter documents.
+
+`DescribeDBClusterEndpoints` reports each cluster's built-in writer and reader endpoints alongside the custom ones, as AWS does. They belong to the cluster rather than the endpoint store -- there is no API that creates or deletes them, and they carry no `DBClusterEndpointIdentifier` -- so `db-cluster-endpoint-type=reader` matches them and `custom` matches the ones you created.
 
 `CreateDBClusterEndpoint` only ever creates custom endpoints, so the request's `EndpointType` (`READER`, `WRITER`, `ANY`) is reported back as `CustomEndpointType` with `EndpointType` set to `CUSTOM`, matching AWS -- `CustomEndpointType` is an output member, not something a caller sends. `ModifyDBClusterEndpoint` retargets it the same way. `StaticMembers` and `ExcludedMembers` are persisted and reported too, along with the endpoint's ARN and resource id, so a caller can read back what it set and `db-cluster-endpoint-custom-type` has something to match.
 

@@ -416,7 +416,10 @@ pub(super) fn cluster_backtrack_xml(v: &Value) -> String {
         "          <BacktrackIdentifier>{}</BacktrackIdentifier>\n          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <Status>{}</Status>",
         xml_escape(v["BacktrackIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or("")),
-        xml_escape(v["Status"].as_str().unwrap_or("completed")),
+        // Lowercased at render, not just on write: a record persisted
+        // by an older build carries `COMPLETED`, and a client doing the
+        // natural `Status=='completed'` check client-side would skip it.
+        xml_escape(&v["Status"].as_str().unwrap_or("completed").to_lowercase()),
     );
     for key in [
         "BacktrackTo",

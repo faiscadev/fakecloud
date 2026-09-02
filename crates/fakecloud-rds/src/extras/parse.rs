@@ -184,7 +184,7 @@ pub(super) fn list_extras_xml(
 /// `extras` is a `BTreeMap`, so iteration is already key-ordered -- two
 /// identical requests answer with the rows in the same order, which is
 /// what makes the key usable as a pagination cursor.
-fn sorted_entries(
+pub(super) fn sorted_entries(
     accounts: &fakecloud_core::multi_account::MultiAccountState<crate::state::RdsState>,
     aid: &str,
     category: &str,
@@ -239,6 +239,21 @@ pub(super) fn list_extras_filtered_xml(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state_handle().read();
     let entries = sorted_entries(&accounts, aid, category, keep);
+    drop(accounts);
+    list_items_xml(entries, wrapper, member_tag, action, req, render, rid)
+}
+
+/// The rendering + pagination half of [`list_extras_filtered_xml`], for a
+/// listing whose rows don't all come from one extras category.
+pub(super) fn list_items_xml(
+    entries: Vec<(String, Value)>,
+    wrapper: &str,
+    member_tag: &str,
+    action: &str,
+    req: &AwsRequest,
+    render: impl Fn(&Value) -> String,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
     // The map key is unique and the rows are in key order, so it is a
     // stable cursor. Without this a client that asked for a page got the
     // whole list back and no Marker to continue from.
