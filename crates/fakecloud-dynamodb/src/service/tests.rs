@@ -5715,8 +5715,18 @@ fn set_arithmetic_on_missing_operand_errors() {
 // Vector indexes and SearchVectors
 // ---------------------------------------------------------------------
 
+/// An item attribute holding a vector: a DynamoDB `L` of `N`.
 fn vec_attr(values: &[f64]) -> Value {
     json!({ "L": values.iter().map(|v| json!({ "N": v.to_string() })).collect::<Vec<Value>>() })
+}
+
+/// A request `SearchVector`: `SearchVectorList` is a bare list of
+/// `AttributeValue`, not an `L`-wrapped attribute.
+fn search_vec(values: &[f64]) -> Value {
+    json!(values
+        .iter()
+        .map(|v| json!({ "N": v.to_string() }))
+        .collect::<Vec<Value>>())
 }
 
 fn create_vector_table(svc: &DynamoDbService, distance_function: &str) {
@@ -5866,7 +5876,7 @@ fn search_vectors_ranks_by_cosine_similarity() {
         json!({
             "TableName": "vec-table",
             "IndexName": "embedding-index",
-            "SearchVector": vec_attr(&[1.0, 0.0]),
+            "SearchVector": search_vec(&[1.0, 0.0]),
             "TopK": 2,
         }),
     );
@@ -5891,7 +5901,7 @@ fn search_vectors_ranks_euclidean_nearest_first() {
         json!({
             "TableName": "vec-table",
             "IndexName": "embedding-index",
-            "SearchVector": vec_attr(&[0.0, 0.0]),
+            "SearchVector": search_vec(&[0.0, 0.0]),
             "TopK": 5,
         }),
     );
@@ -5920,7 +5930,7 @@ fn search_vectors_skips_items_without_a_usable_vector() {
         json!({
             "TableName": "vec-table",
             "IndexName": "embedding-index",
-            "SearchVector": vec_attr(&[1.0, 0.0]),
+            "SearchVector": search_vec(&[1.0, 0.0]),
             "TopK": 10,
         }),
     );
@@ -5940,7 +5950,7 @@ fn search_vectors_honors_projection_and_consumed_capacity() {
         json!({
             "TableName": "vec-table",
             "IndexName": "embedding-index",
-            "SearchVector": vec_attr(&[1.0, 0.0]),
+            "SearchVector": search_vec(&[1.0, 0.0]),
             "TopK": 1,
             "ProjectionExpression": "pk",
             "ReturnConsumedCapacity": "TOTAL",
@@ -5970,7 +5980,7 @@ fn search_vectors_validates_index_and_vector() {
         json!({
             "TableName": "vec-table",
             "IndexName": "no-such-index",
-            "SearchVector": vec_attr(&[1.0, 0.0]),
+            "SearchVector": search_vec(&[1.0, 0.0]),
             "TopK": 1,
         }),
     )));
@@ -5982,7 +5992,7 @@ fn search_vectors_validates_index_and_vector() {
         json!({
             "TableName": "vec-table",
             "IndexName": "embedding-index",
-            "SearchVector": vec_attr(&[1.0, 0.0, 0.0]),
+            "SearchVector": search_vec(&[1.0, 0.0, 0.0]),
             "TopK": 1,
         }),
     )));
@@ -5993,7 +6003,7 @@ fn search_vectors_validates_index_and_vector() {
         let mut body = json!({
             "TableName": "vec-table",
             "IndexName": "embedding-index",
-            "SearchVector": vec_attr(&[1.0, 0.0]),
+            "SearchVector": search_vec(&[1.0, 0.0]),
         });
         if !top_k.is_null() {
             body["TopK"] = top_k;

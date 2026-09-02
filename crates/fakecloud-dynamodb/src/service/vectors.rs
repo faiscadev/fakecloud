@@ -8,14 +8,26 @@
 
 use super::*;
 
-/// Read a DynamoDB `L` of `N` values into a numeric vector. Returns `None`
-/// when the attribute is absent or is not a list of numbers, which is how an
-/// item without a usable vector is skipped rather than scored as zeroes.
-fn as_vector(value: Option<&AttributeValue>) -> Option<Vec<f64>> {
-    let list = value?.get("L")?.as_array()?;
+/// Read a list of DynamoDB `N` values into a numeric vector.
+fn numbers_from(list: &[AttributeValue]) -> Option<Vec<f64>> {
     list.iter()
         .map(|e| e.get("N")?.as_str()?.parse::<f64>().ok())
         .collect()
+}
+
+/// Read an item's vector attribute, which is a DynamoDB `L` of `N` values.
+/// Returns `None` when the attribute is absent or is not a list of numbers,
+/// which is how an item without a usable vector is skipped rather than scored
+/// as zeroes.
+fn item_vector(value: Option<&AttributeValue>) -> Option<Vec<f64>> {
+    numbers_from(value?.get("L")?.as_array()?)
+}
+
+/// Read the request's `SearchVector`. It is modeled as `SearchVectorList` —
+/// a bare list of `AttributeValue` — not an `L`-wrapped attribute, so it is
+/// parsed differently from the item attribute it is compared against.
+fn search_vector(value: Option<&Value>) -> Option<Vec<f64>> {
+    numbers_from(value?.as_array()?)
 }
 
 fn dot(a: &[f64], b: &[f64]) -> f64 {
@@ -52,7 +64,7 @@ impl DynamoDbService {
         let table_name = require_str(&body, "TableName")?;
         let index_name = require_str(&body, "IndexName")?;
 
-        let query_vector = as_vector(body.get("SearchVector")).ok_or_else(|| {
+        let query_vector = search_vector(body.get("SearchVector")).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationException",
@@ -114,7 +126,7 @@ impl DynamoDbService {
             .items
             .iter()
             .filter_map(|item| {
-                let candidate = as_vector(item.get(&index.vector_attribute))?;
+                let candidate = item_vector(item.get(&index.vector_attribute))?;
                 // Items whose vector does not match the index width are not
                 // indexed, so they cannot be returned.
                 if candidate.len() as i64 != index.dimensions {
