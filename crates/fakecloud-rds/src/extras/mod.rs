@@ -3129,6 +3129,12 @@ impl RdsService {
                         entry_str(role, "RoleArn") == Some(role_arn.as_str())
                             && entry_str(role, "FeatureName") == feature_name.as_deref()
                     };
+                    // The exact key first: (role, no feature) identifies a
+                    // feature-less association precisely, so removing it
+                    // is not a guess even when other associations carry
+                    // the same ARN under a feature. The fallback below is
+                    // only for when no association carries the key the
+                    // caller named.
                     let position = roles.iter().position(&exact).or_else(|| {
                         // FeatureName is OPTIONAL on the cluster
                         // operations. A remove that names only the role

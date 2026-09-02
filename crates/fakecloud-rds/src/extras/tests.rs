@@ -5048,6 +5048,63 @@ fn removing_a_cluster_role_without_a_feature_resolves_only_when_unambiguous() {
     );
 }
 
+/// A feature-less association is an exact match, not a guess.
+///
+/// When a role is attached BOTH without a feature and with one, a remove
+/// that names no feature identifies the feature-less association
+/// exactly: (role, no feature) is a key one association carries. The
+/// ambiguity fallback is for when no exact match exists, so it must not
+/// fire here and must not touch the feature-bound association.
+#[test]
+fn removing_a_cluster_role_prefers_the_exact_feature_less_association() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    let role = "arn:aws:iam::000000000000:role/s3";
+
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+
+    // The feature-bound one survives, and it is the only one left.
+    let body = body_of_action(&svc, "DescribeDBClusters", &[]);
+    assert_eq!(
+        body.matches(&format!("<RoleArn>{role}</RoleArn>")).count(),
+        1,
+        "the wrong association was removed: {body}"
+    );
+    assert!(
+        body.contains("<FeatureName>s3Import</FeatureName>"),
+        "the feature-bound association was removed: {body}"
+    );
+
+    // And now that it is the only one carrying the ARN, naming just the
+    // role resolves it through the unambiguous fallback.
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("RoleArn", role)],
+    );
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(stored.get("AssociatedRoles").is_none(), "{stored}");
+}
+
 #[test]
 fn describe_db_shard_groups_honors_the_id_filter() {
     let svc = svc();
