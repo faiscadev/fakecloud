@@ -88,6 +88,57 @@ fn cluster_snapshot_type_labels(entry: &Value, caller: &str, owned: bool) -> Vec
     labels
 }
 
+/// True when a stored cluster endpoint satisfies every filter. The names
+/// come from the `DescribeDBClusterEndpoints` docs:
+/// `db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`,
+/// `db-cluster-endpoint-id` and `db-cluster-endpoint-status`.
+fn cluster_endpoint_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-endpoint-id" => filter.matches(entry_str(entry, "DBClusterEndpointIdentifier")),
+        "db-cluster-endpoint-type" => filter.matches(entry_str(entry, "EndpointType")),
+        "db-cluster-endpoint-custom-type" => filter.matches(entry_str(entry, "CustomEndpointType")),
+        // AWS defaults a stored endpoint to `available`, and so does the
+        // renderer -- so the filter has to see the same default rather
+        // than skipping a row that simply never recorded a status.
+        "db-cluster-endpoint-status" => {
+            filter.matches(entry_str(entry, "Status").or(Some("available")))
+        }
+        other => {
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
+    })
+}
+
+/// True when a stored shard group satisfies every filter. The model
+/// documents no filter names for `DescribeDBShardGroups`; AWS accepts
+/// the resource's own id, as the sibling Describes do.
+fn shard_group_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-shard-group-id" => filter.matches(entry_str(entry, "DBShardGroupIdentifier")),
+        other => {
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
+    })
+}
+
+/// True when a stored backtrack satisfies every filter. The names come
+/// from the `DescribeDBClusterBacktracks` docs:
+/// `db-cluster-backtrack-id` and `db-cluster-backtrack-status`.
+fn backtrack_matches_filters(entry: &Value, filters: &[RdsFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-backtrack-id" => filter.matches(entry_str(entry, "BacktrackIdentifier")),
+        "db-cluster-backtrack-status" => {
+            filter.matches(entry_str(entry, "Status").or(Some("completed")))
+        }
+        other => {
+            tracing::warn!(filter = %other, "unrecognized RDS filter name; matching no resource");
+            false
+        }
+    })
+}
+
 /// True when a stored cluster snapshot satisfies every filter. The names
 /// come from the `DescribeDBClusterSnapshots` docs: `db-cluster-id`,
 /// `db-cluster-snapshot-id`, `engine` and `snapshot-type`.
@@ -1108,7 +1159,49 @@ impl RdsService {
             }
             "DescribeDBClusterAutomatedBackups" => Ok(xml_response("DescribeDBClusterAutomatedBackups", "    <DBClusterAutomatedBackups/>".to_string(), &rid)),
             "DeleteDBClusterAutomatedBackup" => Ok(xml_response("DeleteDBClusterAutomatedBackup", "    <DBClusterAutomatedBackup/>".to_string(), &rid)),
-            "DescribeDBClusterBacktracks" => Ok(xml_response("DescribeDBClusterBacktracks", "    <DBClusterBacktracks/>".to_string(), &rid)),
+            "DescribeDBClusterBacktracks" => {
+                // BacktrackDBCluster has always recorded these; this
+                // operation answered with a hardcoded empty list, so
+                // every backtrack a caller performed was invisible.
+                // AWS marks DBClusterIdentifier required, but the only
+                // errors declared on this operation are
+                // DBClusterNotFoundFault and
+                // DBClusterBacktrackNotFoundFault --
+                // InvalidParameterValue appears nowhere in the RDS
+                // model, so rejecting the omission would put an
+                // undeclared error shape on the wire. A request that
+                // names no cluster selects no cluster's backtracks.
+                let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_default();
+                // A cluster that was named but doesn't exist gets the
+                // declared fault, as on AWS, rather than an empty list a
+                // caller would read as "no backtracks".
+                if !cluster.is_empty() {
+                    cluster_entry(self, &aid, &cluster)?;
+                }
+                let filters = crate::filters::parse_filters(req);
+                let wanted = get_param(req, "BacktrackIdentifier");
+                list_extras_filtered_xml(
+                    self,
+                    &aid,
+                    "cluster_backtracks",
+                    "DBClusterBacktracks",
+                    // The named member tag, not `<member>`: the list
+                    // carries xmlName `DBClusterBacktrack`, and the SDK
+                    // unmarshals an empty list from the generic tag.
+                    "DBClusterBacktrack",
+                    "DescribeDBClusterBacktracks",
+                    |v| {
+                        !cluster.is_empty()
+                            && entry_str(v, "DBClusterIdentifier") == Some(cluster.as_str())
+                            && wanted.as_deref().is_none_or(|wanted| {
+                                entry_str(v, "BacktrackIdentifier") == Some(wanted)
+                            })
+                            && backtrack_matches_filters(v, &filters)
+                    },
+                    cluster_backtrack_xml,
+                    &rid,
+                )
+            }
 
             // ── DB Cluster parameter groups ──
             "CreateDBClusterParameterGroup" | "CopyDBClusterParameterGroup" => {
@@ -1314,7 +1407,23 @@ impl RdsService {
                 let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
                 let cluster = get_param(req, "DBClusterIdentifier").unwrap_or_default();
                 let kind = get_param(req, "EndpointType").unwrap_or_else(|| "READER".to_string());
-                let entry = json!({"DBClusterEndpointIdentifier": id, "DBClusterIdentifier": cluster, "Endpoint": format!("{id}.cluster-custom.{region}.rds.amazonaws.com"), "EndpointType": kind, "Status": "available"});
+                let mut entry = json!({"DBClusterEndpointIdentifier": id, "DBClusterIdentifier": cluster, "Endpoint": format!("{id}.cluster-custom.{region}.rds.amazonaws.com"), "EndpointType": kind, "Status": "available", "DBClusterEndpointResourceIdentifier": format!("cluster-endpoint-{}", rand_id()), "DBClusterEndpointArn": Arn::new("rds", region, &aid, &format!("cluster-endpoint:{id}")).with_partition(partition_for(region)).to_string()});
+                // `db-cluster-endpoint-custom-type` filters on this, and
+                // the members define what a CUSTOM endpoint routes to --
+                // dropping them left the endpoint unreadable.
+                if let Some(obj) = entry.as_object_mut() {
+                    if let Some(custom) = get_param(req, "CustomEndpointType") {
+                        obj.insert("CustomEndpointType".to_string(), json!(custom));
+                    }
+                    let static_members = parse_member_list(req, "StaticMembers");
+                    if !static_members.is_empty() {
+                        obj.insert("StaticMembers".to_string(), json!(static_members));
+                    }
+                    let excluded_members = parse_member_list(req, "ExcludedMembers");
+                    if !excluded_members.is_empty() {
+                        obj.insert("ExcludedMembers".to_string(), json!(excluded_members));
+                    }
+                }
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 store(&mut state.extras, "cluster_endpoints").insert(id.clone(), entry.clone());
@@ -1341,6 +1450,9 @@ impl RdsService {
                     if let Some(kind) = get_param(req, "EndpointType") {
                         obj.insert("EndpointType".to_string(), json!(kind));
                     }
+                    if let Some(custom) = get_param(req, "CustomEndpointType") {
+                        obj.insert("CustomEndpointType".to_string(), json!(custom));
+                    }
                     if !static_members.is_empty() {
                         obj.insert("StaticMembers".to_string(), json!(static_members));
                     }
@@ -1358,7 +1470,30 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("cluster_endpoints") { m.remove(&id); }
                 Ok(xml_response("DeleteDBClusterEndpoint", format!("    <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>", xml_escape(&id)), &rid))
             }
-            "DescribeDBClusterEndpoints" => list_extras_xml(self, &aid, "cluster_endpoints", "DBClusterEndpoints", "DBClusterEndpointList", "DescribeDBClusterEndpoints", cluster_endpoint_xml, &rid),
+            "DescribeDBClusterEndpoints" => {
+                let filters = crate::filters::parse_filters(req);
+                // The identifier parameters narrow the same way the
+                // filters do; AWS applies both.
+                let wanted_endpoint = get_param(req, "DBClusterEndpointIdentifier");
+                let wanted_cluster = get_param(req, "DBClusterIdentifier");
+                list_extras_filtered_xml(
+                    self,
+                    &aid,
+                    "cluster_endpoints",
+                    "DBClusterEndpoints",
+                    "DBClusterEndpointList",
+                    "DescribeDBClusterEndpoints",
+                    |v| {
+                        wanted_endpoint.as_deref().is_none_or(|wanted| {
+                            entry_str(v, "DBClusterEndpointIdentifier") == Some(wanted)
+                        }) && wanted_cluster.as_deref().is_none_or(|wanted| {
+                            entry_str(v, "DBClusterIdentifier") == Some(wanted)
+                        }) && cluster_endpoint_matches_filters(v, &filters)
+                    },
+                    cluster_endpoint_xml,
+                    &rid,
+                )
+            }
 
             // ── DB Proxies ──
             "CreateDBProxy" => {
@@ -2274,7 +2409,25 @@ impl RdsService {
                 if let Some(m) = state.extras.get_mut("shard_groups") { m.remove(&id); }
                 Ok(xml_response("DeleteDBShardGroup", "    <DBShardGroup/>".to_string(), &rid))
             }
-            "DescribeDBShardGroups" => list_extras_xml(self, &aid, "shard_groups", "DBShardGroups", "DBShardGroup", "DescribeDBShardGroups", shard_group_xml, &rid),
+            "DescribeDBShardGroups" => {
+                let filters = crate::filters::parse_filters(req);
+                let wanted = get_param(req, "DBShardGroupIdentifier");
+                list_extras_filtered_xml(
+                    self,
+                    &aid,
+                    "shard_groups",
+                    "DBShardGroups",
+                    "DBShardGroup",
+                    "DescribeDBShardGroups",
+                    |v| {
+                        wanted.as_deref().is_none_or(|wanted| {
+                            entry_str(v, "DBShardGroupIdentifier") == Some(wanted)
+                        }) && shard_group_matches_filters(v, &filters)
+                    },
+                    shard_group_xml,
+                    &rid,
+                )
+            }
 
             // ── Custom engine versions ──
             "CreateCustomDBEngineVersion" | "ModifyCustomDBEngineVersion" => {

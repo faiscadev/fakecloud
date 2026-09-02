@@ -167,11 +167,52 @@ pub(super) fn list_extras_xml(
     render: impl Fn(&Value) -> String,
     rid: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
+    list_extras_filtered_xml(
+        svc,
+        aid,
+        category,
+        wrapper,
+        member_tag,
+        action,
+        |_| true,
+        render,
+        rid,
+    )
+}
+
+/// [`list_extras_xml`] with a predicate, for the Describe operations that
+/// model `Filters`.
+///
+/// Rows come out in key order rather than the backing map's iteration
+/// order: a `HashMap` walk means two identical requests can answer with
+/// the rows in different orders, which a client diffing a listing sees
+/// as spurious churn.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn list_extras_filtered_xml(
+    svc: &RdsService,
+    aid: &str,
+    category: &str,
+    wrapper: &str,
+    member_tag: &str,
+    action: &str,
+    keep: impl Fn(&Value) -> bool,
+    render: impl Fn(&Value) -> String,
+    rid: &str,
+) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state_handle().read();
     let items: Vec<Value> = accounts
         .get(aid)
         .and_then(|s| s.extras.get(category))
-        .map(|m| m.values().cloned().collect())
+        .map(|m| {
+            let mut entries: Vec<(&String, &Value)> = m.iter().collect();
+            entries.sort_by_key(|(key, _)| *key);
+            entries
+                .into_iter()
+                .map(|(_, v)| v)
+                .filter(|v| keep(v))
+                .cloned()
+                .collect()
+        })
         .unwrap_or_default();
     let body = items
         .iter()

@@ -371,14 +371,63 @@ pub(super) fn cluster_pg_member_xml(v: &Value) -> String {
 }
 
 pub(super) fn cluster_endpoint_xml(v: &Value) -> String {
-    format!(
+    let mut out = format!(
         "          <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>\n          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <Endpoint>{}</Endpoint>\n          <EndpointType>{}</EndpointType>\n          <Status>{}</Status>",
         xml_escape(v["DBClusterEndpointIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["Endpoint"].as_str().unwrap_or("")),
         xml_escape(v["EndpointType"].as_str().unwrap_or("")),
         xml_escape(v["Status"].as_str().unwrap_or("available")),
-    )
+    );
+    // Only a CUSTOM endpoint carries a custom type, and only these
+    // fields the caller actually set are rendered -- the rest of the
+    // shape is optional on AWS too. `db-cluster-endpoint-custom-type`
+    // filters on this, so it has to reach the wire.
+    for (key, tag) in [
+        ("CustomEndpointType", "CustomEndpointType"),
+        (
+            "DBClusterEndpointResourceIdentifier",
+            "DBClusterEndpointResourceIdentifier",
+        ),
+        ("DBClusterEndpointArn", "DBClusterEndpointArn"),
+    ] {
+        if let Some(value) = v[key].as_str() {
+            out.push_str(&format!("\n          <{tag}>{}</{tag}>", xml_escape(value)));
+        }
+    }
+    // Stored by ModifyDBClusterEndpoint but never rendered until now, so
+    // a caller could not read back what it had just set.
+    for key in ["StaticMembers", "ExcludedMembers"] {
+        if let Some(members) = v[key].as_array() {
+            let inner = members
+                .iter()
+                .filter_map(|m| m.as_str())
+                .map(|m| format!("\n            <member>{}</member>", xml_escape(m)))
+                .collect::<String>();
+            out.push_str(&format!("\n          <{key}>{inner}\n          </{key}>"));
+        }
+    }
+    out
+}
+
+/// Renders one `<DBClusterBacktrack>` member.
+pub(super) fn cluster_backtrack_xml(v: &Value) -> String {
+    let mut out = format!(
+        "          <BacktrackIdentifier>{}</BacktrackIdentifier>\n          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <Status>{}</Status>",
+        xml_escape(v["BacktrackIdentifier"].as_str().unwrap_or("")),
+        xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or("")),
+        xml_escape(v["Status"].as_str().unwrap_or("completed")),
+    );
+    for key in [
+        "BacktrackTo",
+        "BacktrackedFrom",
+        "BacktrackRequestCreationTime",
+    ] {
+        if let Some(value) = v[key].as_str() {
+            out.push_str(&format!("\n          <{key}>{}</{key}>", xml_escape(value)));
+        }
+    }
+    out
 }
 
 pub(super) fn proxy_xml(v: &Value) -> String {

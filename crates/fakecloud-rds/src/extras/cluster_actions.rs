@@ -727,12 +727,18 @@ pub(super) fn backtrack_db_cluster_action(
             }
         }
         // Append a backtrack record so DescribeDBClusterBacktracks returns it.
+        let now = chrono::Utc::now().to_rfc3339();
         let record = json!({
             "BacktrackIdentifier": backtrack_id,
             "DBClusterIdentifier": id,
             "BacktrackTo": backtrack_to,
-            "BacktrackedFrom": chrono::Utc::now().to_rfc3339(),
-            "Status": "COMPLETED",
+            "BacktrackedFrom": now,
+            "BacktrackRequestCreationTime": now,
+            // Lowercase, as AWS reports it and as the documented
+            // `db-cluster-backtrack-status` filter values are spelled --
+            // the filter is case-sensitive, so `COMPLETED` could never
+            // be selected by the value the docs tell a caller to send.
+            "Status": "completed",
         });
         store(&mut state.extras, "cluster_backtracks").insert(backtrack_id.clone(), record);
     }

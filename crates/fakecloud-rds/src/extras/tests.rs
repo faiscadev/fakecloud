@@ -3053,6 +3053,259 @@ fn db_cluster_id_filter_matches_a_cross_account_copys_source_cluster() {
     );
 }
 
+/// BacktrackDBCluster has always recorded its backtracks; the Describe
+/// answered with a hardcoded empty list, so every one was invisible.
+#[test]
+fn describe_db_cluster_backtracks_returns_recorded_backtracks() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        if let Some(entry) = accounts
+            .default_mut()
+            .extras
+            .get_mut("clusters")
+            .and_then(|m| m.get_mut("clu-1"))
+            .and_then(|v| v.as_object_mut())
+        {
+            entry.insert("Engine".to_string(), json!("aurora-mysql"));
+            entry.insert("Status".to_string(), json!("available"));
+        }
+    }
+
+    ok_on(
+        &svc,
+        "BacktrackDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("BacktrackTo", "2026-01-01T00:00:00Z"),
+        ],
+    );
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", "clu-1")],
+    );
+    // The NAMED member tag: the list carries xmlName
+    // `DBClusterBacktrack`, and an SDK unmarshals an empty list from the
+    // generic `<member>`.
+    assert!(
+        body.contains("<DBClusterBacktrack>"),
+        "backtrack not rendered under its named member tag: {body}"
+    );
+    assert!(
+        body.contains("<DBClusterIdentifier>clu-1</DBClusterIdentifier>"),
+        "the recorded backtrack was not returned: {body}"
+    );
+    // Lowercase, as AWS reports it and as the documented filter values
+    // are spelled -- the filter is case-sensitive.
+    assert!(
+        body.contains("<Status>completed</Status>"),
+        "status case does not match the documented filter values: {body}"
+    );
+
+    // The documented filters select it, and a non-matching value doesn't.
+    let filtered = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("Filters.Filter.1.Name", "db-cluster-backtrack-status"),
+            ("Filters.Filter.1.Values.Value.1", "completed"),
+        ],
+    );
+    assert!(filtered.contains("<DBClusterBacktrack>"), "{filtered}");
+
+    let filtered = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("Filters.Filter.1.Name", "db-cluster-backtrack-status"),
+            ("Filters.Filter.1.Values.Value.1", "failed"),
+        ],
+    );
+    assert!(
+        !filtered.contains("<DBClusterBacktrack>"),
+        "a non-matching status still returned the backtrack: {filtered}"
+    );
+
+    // Another cluster's backtracks are not this cluster's.
+    create_cluster(&svc, "clu-2");
+    let other = body_of_action(
+        &svc,
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", "clu-2")],
+    );
+    assert!(
+        !other.contains("<DBClusterBacktrack>"),
+        "a backtrack leaked across clusters: {other}"
+    );
+
+    // A cluster that doesn't exist gets the declared fault, not an empty
+    // list a caller would read as "no backtracks".
+    match svc.handle_extra_action(&req(
+        "DescribeDBClusterBacktracks",
+        &[("DBClusterIdentifier", "ghost")],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterNotFoundFault"),
+        Ok(_) => panic!("an unknown cluster returned a list"),
+    }
+}
+
+/// The endpoint filters name fields that have to reach state and the
+/// wire before they can select anything.
+#[test]
+fn describe_db_cluster_endpoints_honors_filters() {
+    let svc = svc();
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-custom"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "CUSTOM"),
+            ("CustomEndpointType", "READER"),
+            ("StaticMembers.member.1", "inst-1"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterEndpointIdentifier", "ep-reader"),
+            ("DBClusterIdentifier", "clu-1"),
+            ("EndpointType", "READER"),
+        ],
+    );
+
+    // Stored AND rendered: a caller has to be able to read back what it
+    // set, and the filter has to have something to match.
+    let all = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+    assert!(
+        all.contains("<CustomEndpointType>READER</CustomEndpointType>"),
+        "the custom type never reached the wire: {all}"
+    );
+    assert!(
+        all.contains("<member>inst-1</member>"),
+        "static members never reached the wire: {all}"
+    );
+
+    for (name, value, expected, unexpected) in [
+        (
+            "db-cluster-endpoint-type",
+            "CUSTOM",
+            "ep-custom",
+            "ep-reader",
+        ),
+        (
+            "db-cluster-endpoint-custom-type",
+            "READER",
+            "ep-custom",
+            "ep-reader",
+        ),
+        (
+            "db-cluster-endpoint-id",
+            "ep-reader",
+            "ep-reader",
+            "ep-custom",
+        ),
+    ] {
+        let body = body_of_action(
+            &svc,
+            "DescribeDBClusterEndpoints",
+            &[
+                ("Filters.Filter.1.Name", name),
+                ("Filters.Filter.1.Values.Value.1", value),
+            ],
+        );
+        assert!(
+            body.contains(&format!(
+                "<DBClusterEndpointIdentifier>{expected}</DBClusterEndpointIdentifier>"
+            )),
+            "{name}={value} dropped {expected}: {body}"
+        );
+        assert!(
+            !body.contains(&format!(
+                "<DBClusterEndpointIdentifier>{unexpected}</DBClusterEndpointIdentifier>"
+            )),
+            "{name}={value} kept {unexpected}: {body}"
+        );
+    }
+
+    // Status defaults to `available` on both the stored row and the
+    // renderer, so the filter has to see that same default -- and a
+    // status the endpoints are NOT in selects nothing.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-status"),
+            ("Filters.Filter.1.Values.Value.1", "available"),
+        ],
+    );
+    assert!(body.contains("<DBClusterEndpointIdentifier>ep-custom</DBClusterEndpointIdentifier>"));
+    assert!(body.contains("<DBClusterEndpointIdentifier>ep-reader</DBClusterEndpointIdentifier>"));
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "db-cluster-endpoint-status"),
+            ("Filters.Filter.1.Values.Value.1", "creating"),
+        ],
+    );
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>"),
+        "a status no endpoint is in still returned rows: {body}"
+    );
+
+    // An unrecognized name matches nothing rather than returning the
+    // full list, as on the sibling Describes.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[
+            ("Filters.Filter.1.Name", "not-a-filter"),
+            ("Filters.Filter.1.Values.Value.1", "ep-custom"),
+        ],
+    );
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>"),
+        "an unknown filter name returned rows: {body}"
+    );
+}
+
+#[test]
+fn describe_db_shard_groups_honors_the_id_filter() {
+    let svc = svc();
+    for id in ["sg-1", "sg-2"] {
+        ok_on(
+            &svc,
+            "CreateDBShardGroup",
+            &[
+                ("DBShardGroupIdentifier", id),
+                ("DBClusterIdentifier", "clu-1"),
+            ],
+        );
+    }
+
+    let body = body_of_action(
+        &svc,
+        "DescribeDBShardGroups",
+        &[
+            ("Filters.Filter.1.Name", "db-shard-group-id"),
+            ("Filters.Filter.1.Values.Value.1", "sg-2"),
+        ],
+    );
+    assert!(body.contains("<DBShardGroupIdentifier>sg-2</DBShardGroupIdentifier>"));
+    assert!(
+        !body.contains("<DBShardGroupIdentifier>sg-1</DBShardGroupIdentifier>"),
+        "the filter kept an unmatched shard group: {body}"
+    );
+}
+
 #[test]
 fn copy_db_snapshot_prefers_the_account_the_arn_names() {
     // A foreign ARN must not silently copy this account's same-named
