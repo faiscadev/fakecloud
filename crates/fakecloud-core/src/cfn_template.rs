@@ -190,7 +190,11 @@ fn exceeds_nesting_limit(body: &str) -> bool {
         // of braces in one string -- so quotes are tracked and their contents
         // skipped. A `#` outside quotes starts a comment.
         //
-        for b in line.bytes() {
+        // Where a `#` comment begins on this line, if any. The block-scalar
+        // header check below must look at the content before it.
+        let mut content_end = line.len();
+        let mut prev_byte = b' ';
+        for (idx, b) in line.bytes().enumerate() {
             match quote {
                 Some(q) => {
                     // Only double-quoted YAML scalars honour backslash
@@ -211,7 +215,12 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                         quote = Some(b);
                         at_value_start = false;
                     }
-                    b'#' => break,
+                    // YAML starts a comment at `#` only at the beginning of
+                    // a line or after whitespace; `a: b#c` is a plain scalar.
+                    b'#' if matches!(prev_byte, b' ' | b'\t') || idx == 0 => {
+                        content_end = idx;
+                        break;
+                    }
                     b'[' | b'{' => {
                         flow_depth += 1;
                         if flow_depth > MAX_NESTING_DEPTH {
@@ -228,10 +237,11 @@ fn exceeds_nesting_limit(body: &str) -> bool {
                     _ => at_value_start = false,
                 },
             }
+            prev_byte = b;
         }
         // A block scalar header (`Body: |`, `Body: >-`) means every
         // more-indented line after it is string content.
-        if quote.is_none() && opens_block_scalar(line) {
+        if quote.is_none() && opens_block_scalar(&line[..content_end]) {
             block_scalar_indent = Some(line_indent);
         }
 
@@ -266,9 +276,15 @@ fn exceeds_nesting_limit(body: &str) -> bool {
     false
 }
 
-/// Whether a line opens a YAML block scalar: a `|` or `>` at end of line,
-/// optionally followed by the chomping/indentation indicators (`-`, `+`, a
-/// digit). Everything more-indented after it is string content.
+/// Whether a line opens a YAML block scalar: a `|` or `>` at the end of the
+/// line's *content*, optionally followed by the chomping/indentation
+/// indicators (`-`, `+`, a digit). Everything more-indented after it is string
+/// content.
+///
+/// The caller passes the line with any trailing `#` comment removed, which
+/// matters in both directions: `Body: | # note` really does open a block
+/// scalar, and `Resources: # |` really does not — treating the latter as one
+/// would skip every indented line after it and step around the depth guard.
 fn opens_block_scalar(line: &str) -> bool {
     let trimmed = line.trim_end();
     let head = trimmed.trim_end_matches(|c: char| c == '-' || c == '+' || c.is_ascii_digit());
@@ -998,6 +1014,36 @@ Resources:
             "[".repeat(MAX_NESTING_DEPTH + 50)
         );
         assert!(exceeds_nesting_limit(&after));
+    }
+
+    #[test]
+    fn block_scalar_headers_are_read_past_comments() {
+        // `Body: | # note` really does open a block scalar. Missing it would
+        // count the string content and falsely reject a shallow template.
+        let commented_header = format!(
+            "Resources:\n  Q:\n    Body: | # inline note\n{}      done: true\n",
+            "      {{{{\n".repeat(200)
+        );
+        assert!(!exceeds_nesting_limit(&commented_header));
+
+        // `Resources: # |` really does NOT. Treating it as one would skip
+        // every indented line after it and step around the guard entirely.
+        let commented_key = format!(
+            "Resources: # |\n  Q:\n    V: {}\n",
+            "[".repeat(MAX_NESTING_DEPTH + 50)
+        );
+        assert!(
+            exceeds_nesting_limit(&commented_key),
+            "a comment ending in `|` must not open a block scalar"
+        );
+
+        // A `#` that is not a comment (no preceding space) must not truncate
+        // the scan either.
+        let hash_in_scalar = format!(
+            "Resources:\n  Q:\n    V: a#b{}\n",
+            "[".repeat(MAX_NESTING_DEPTH + 50)
+        );
+        assert!(exceeds_nesting_limit(&hash_in_scalar));
     }
 
     #[test]
