@@ -3071,7 +3071,11 @@ impl RdsService {
                 let role_arn = get_param(req, "RoleArn")
                     .filter(|value| !value.is_empty())
                     .unwrap_or_default();
-                let feature_name = get_param(req, "FeatureName");
+                // An explicitly empty FeatureName is absent, as it is
+                // for RoleArn: treated as present it would block the
+                // remove-by-ARN path and store an empty <FeatureName/>
+                // into the association.
+                let feature_name = get_param(req, "FeatureName").filter(|value| !value.is_empty());
                 let adding = action == "AddRoleToDBCluster";
                 {
                     let mut accounts = write_state!();
@@ -3228,7 +3232,9 @@ impl RdsService {
                 let role_arn = get_param(req, "RoleArn")
                     .filter(|value| !value.is_empty())
                     .unwrap_or_default();
-                let feature_name = get_param(req, "FeatureName").unwrap_or_default();
+                let feature_name = get_param(req, "FeatureName")
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or_default();
                 let adding = action == "AddRoleToDBInstance";
                 {
                     let mut accounts = write_state!();

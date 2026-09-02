@@ -4999,6 +4999,33 @@ fn removing_a_cluster_role_without_a_feature_resolves_only_when_unambiguous() {
     let stored = extras_value(&svc, "clusters", "clu-1");
     assert!(stored.get("AssociatedRoles").is_none(), "{stored}");
 
+    // An explicitly EMPTY FeatureName is absent, not a feature named "":
+    // treated as present it blocks this path and stores an empty
+    // <FeatureName/> into the association.
+    ok_on(
+        &svc,
+        "AddRoleToDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", "s3Import"),
+        ],
+    );
+    ok_on(
+        &svc,
+        "RemoveRoleFromDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("RoleArn", role),
+            ("FeatureName", ""),
+        ],
+    );
+    let stored = extras_value(&svc, "clusters", "clu-1");
+    assert!(
+        stored.get("AssociatedRoles").is_none(),
+        "an empty FeatureName blocked the remove: {stored}"
+    );
+
     // Two features on one role: naming only the role is ambiguous, and
     // guessing is how the ARN-only matching removed the wrong one.
     for feature in ["s3Import", "s3Export"] {
