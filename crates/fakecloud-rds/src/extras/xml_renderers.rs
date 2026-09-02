@@ -371,9 +371,20 @@ pub(super) fn cluster_pg_member_xml(v: &Value) -> String {
 }
 
 pub(super) fn cluster_endpoint_xml(v: &Value) -> String {
+    // The identifier is rendered only when the endpoint has one: a
+    // cluster's built-in writer/reader endpoints do not, and an empty
+    // element would read as an endpoint named "" -- which a caller
+    // enumerating identifiers would then try to delete.
     let mut out = format!(
-        "          <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>\n          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <Endpoint>{}</Endpoint>\n          <EndpointType>{}</EndpointType>\n          <Status>{}</Status>",
-        xml_escape(v["DBClusterEndpointIdentifier"].as_str().unwrap_or("")),
+        "{}          <DBClusterIdentifier>{}</DBClusterIdentifier>\n          <Endpoint>{}</Endpoint>\n          <EndpointType>{}</EndpointType>\n          <Status>{}</Status>",
+        v["DBClusterEndpointIdentifier"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(|id| format!(
+                "          <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>\n",
+                xml_escape(id)
+            ))
+            .unwrap_or_default(),
         xml_escape(v["DBClusterIdentifier"].as_str().unwrap_or("")),
         xml_escape(v["Endpoint"].as_str().unwrap_or("")),
         xml_escape(v["EndpointType"].as_str().unwrap_or("")),

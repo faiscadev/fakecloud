@@ -126,38 +126,39 @@ fn as_custom_endpoint(mut entry: Value) -> Value {
 /// remove one, and so a cluster created before this existed still
 /// reports them.
 fn built_in_cluster_endpoints(cluster_id: &str, cluster: &Value) -> Vec<(String, Value)> {
-    let status = entry_str(cluster, "Status")
-        .unwrap_or("available")
-        .to_string();
+    // DBClusterEndpoint.Status is its own enum (creating / available /
+    // deleting / inactive / modifying). A cluster's status has values
+    // outside it -- backing-up, upgrading, failing-over, starting,
+    // stopped -- and a caller polling the endpoint for one of the five
+    // would either loop forever or fail to parse the enum.
+    let status = match entry_str(cluster, "Status").unwrap_or("available") {
+        state @ ("creating" | "available" | "deleting" | "inactive" | "modifying") => state,
+        "stopped" => "inactive",
+        _ => "modifying",
+    }
+    .to_string();
     [("WRITER", "Endpoint"), ("READER", "ReaderEndpoint")]
         .into_iter()
         .filter_map(|(kind, field)| {
             let address = entry_str(cluster, field)?;
-            let mut value = json!({
-                // AWS reports the built-ins under the CLUSTER's own
-                // identifier and resource id -- they are the cluster's
-                // endpoints, so `db-cluster-endpoint-id=<cluster>`
-                // selects them, as it does on AWS.
-                "DBClusterEndpointIdentifier": cluster_id,
+            // Only the four members AWS reports for a built-in. It has
+            // no identifier, no resource id and no ARN of its own:
+            // borrowing the cluster's would make
+            // `--db-cluster-endpoint-identifier <cluster>` return rows
+            // AWS doesn't, and would hand a cleanup script that deletes
+            // every reported identifier the cluster's own name.
+            // `cluster-endpoint:{cluster}-writer` is likewise the ARN of
+            // a CUSTOM endpoint literally named that, and the cluster's
+            // resource id is a different namespace from the
+            // `cluster-endpoint-` one this API mints. All three members
+            // are optional; reporting nothing beats reporting a
+            // borrowed or fabricated value.
+            let value = json!({
                 "DBClusterIdentifier": cluster_id,
                 "Endpoint": address,
                 "EndpointType": kind,
                 "Status": status,
             });
-            // No ARN: a built-in has no identifier of its own to build
-            // one from, and `cluster-endpoint:{cluster}-writer` would be
-            // the ARN of a CUSTOM endpoint literally named that -- two
-            // different endpoints reporting one ARN. The member is
-            // optional, so reporting nothing beats reporting a
-            // fabricated collision.
-            if let Some(resource_id) = entry_str(cluster, "DbClusterResourceId") {
-                if let Some(object) = value.as_object_mut() {
-                    object.insert(
-                        "DBClusterEndpointResourceIdentifier".to_string(),
-                        json!(resource_id),
-                    );
-                }
-            }
             // Sorted ahead of any custom endpoint of the same cluster,
             // and stable across calls.
             Some((format!("\u{0}{cluster_id}:{kind}"), value))
@@ -1658,14 +1659,34 @@ impl RdsService {
                         obj.insert("ExcludedMembers".to_string(), json!(excluded_members));
                     }
                 }
-                let updated = entry.clone();
+                // Through the same read-time normalization the listing
+                // applies: without it a modify of a row persisted by an
+                // older build answers EndpointType=READER while
+                // DescribeDBClusterEndpoints answers CUSTOM for that very
+                // row, so a read-after-modify records a value the next
+                // refresh disagrees with.
+                let updated = as_custom_endpoint(entry.clone());
                 Ok(xml_response("ModifyDBClusterEndpoint", cluster_endpoint_xml(&updated), &rid))
             }
             "DeleteDBClusterEndpoint" => {
                 let id = get_param(req, "DBClusterEndpointIdentifier").ok_or_else(|| missing("DBClusterEndpointIdentifier"))?;
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
-                if let Some(m) = state.extras.get_mut("cluster_endpoints") { m.remove(&id); }
+                // Declared on this operation. Reporting success for an
+                // endpoint that never existed tells a caller it deleted
+                // something -- including a built-in endpoint, which has
+                // no identifier and cannot be deleted at all.
+                let removed = state
+                    .extras
+                    .get_mut("cluster_endpoints")
+                    .and_then(|m| m.remove(&id));
+                if removed.is_none() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::NOT_FOUND,
+                        "DBClusterEndpointNotFoundFault",
+                        format!("DBClusterEndpoint {id} not found."),
+                    ));
+                }
                 Ok(xml_response("DeleteDBClusterEndpoint", format!("    <DBClusterEndpointIdentifier>{}</DBClusterEndpointIdentifier>", xml_escape(&id)), &rid))
             }
             "DescribeDBClusterEndpoints" => {
@@ -2410,7 +2431,10 @@ impl RdsService {
 
             // ── Blue/Green deployments ──
             "CreateBlueGreenDeployment" => {
-                let id = format!("bgd-{}", uuid::Uuid::new_v4().simple());
+                // AWS blue/green ids are a short token, not a full
+                // uuid, and the green identifier built from one below
+                // has to stay inside the 63-character limit.
+                let id = format!("bgd-{}", &uuid::Uuid::new_v4().simple().to_string()[..17]);
                 let arn = Arn::new("rds", region, &aid, &format!("blue-green-deployment:{id}"))
                     .to_string();
                 let source_arn = get_param(req, "Source")
@@ -2421,7 +2445,10 @@ impl RdsService {
                     .map(|s| s.to_string())
                     .unwrap_or_default();
                 let target_id = get_param(req, "TargetDBInstanceName")
-                    .unwrap_or_else(|| format!("{source_id}-green-{}", rand_id()));
+                    .unwrap_or_else(|| format!(
+                            "{source_id}-green-{}",
+                            &uuid::Uuid::new_v4().simple().to_string()[..8]
+                        ));
                 let mut accounts = write_state!();
                 let state = accounts.get_or_create(&aid);
                 let source_arn_full = if source_arn.starts_with("arn:") {

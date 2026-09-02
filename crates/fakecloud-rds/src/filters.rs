@@ -15,7 +15,9 @@
 //!
 //! Semantics, per the AWS docs: filters are AND-ed with each other and
 //! with the operation's own identifier parameter; the values inside one
-//! filter are OR-ed. Names and values are case-sensitive, and wildcards
+//! filter are OR-ed. Names are case-sensitive, and so are values except on the few
+//! enum-valued filters AWS documents in a different case than it
+//! returns (see `matches_ignore_case`), and wildcards
 //! are not supported.
 //!
 //! Real RDS rejects a filter name an operation doesn't support with

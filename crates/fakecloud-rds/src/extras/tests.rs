@@ -4099,38 +4099,17 @@ fn backtrack_status_reads_back_lowercase_for_a_legacy_record() {
     );
 }
 
-/// The built-ins are the CLUSTER's endpoints: AWS reports them under its
-/// identifier, so a lookup by that id finds them.
+/// A built-in endpoint has no identifier, resource id or ARN of its own.
+///
+/// Borrowing the cluster's would make a lookup by identifier return rows
+/// AWS doesn't -- and would hand a cleanup script that deletes every
+/// identifier it sees the cluster's own name.
 #[test]
-fn built_in_endpoints_report_the_cluster_identifier() {
+fn built_in_endpoints_carry_no_identifier_of_their_own() {
     let svc = svc();
     create_cluster(&svc, "clu-1");
 
-    let body = body_of_action(
-        &svc,
-        "DescribeDBClusterEndpoints",
-        &[("DBClusterEndpointIdentifier", "clu-1")],
-    );
-    assert_eq!(
-        body.matches("<DBClusterEndpointIdentifier>clu-1</DBClusterEndpointIdentifier>")
-            .count(),
-        2,
-        "the cluster's two built-in endpoints were not both reported: {body}"
-    );
-    assert!(
-        !body.contains("<DBClusterEndpointIdentifier></DBClusterEndpointIdentifier>"),
-        "a built-in reported an empty identifier: {body}"
-    );
-
-    // The documented filter reaches them the same way.
-    let body = body_of_action(
-        &svc,
-        "DescribeDBClusterEndpoints",
-        &[
-            ("Filters.Filter.1.Name", "db-cluster-endpoint-id"),
-            ("Filters.Filter.1.Values.Value.1", "clu-1"),
-        ],
-    );
+    let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
     assert!(
         body.contains("<EndpointType>WRITER</EndpointType>"),
         "{body}"
@@ -4139,14 +4118,69 @@ fn built_in_endpoints_report_the_cluster_identifier() {
         body.contains("<EndpointType>READER</EndpointType>"),
         "{body}"
     );
-
-    // No fabricated ARN: `cluster-endpoint:clu-1-writer` is the ARN of a
-    // CUSTOM endpoint literally named that, so reporting it here would
-    // give two different endpoints one ARN.
+    // Not an empty element either: that reads as an endpoint named "".
+    assert!(
+        !body.contains("<DBClusterEndpointIdentifier>"),
+        "a built-in reported an identifier: {body}"
+    );
     assert!(
         !body.contains("<DBClusterEndpointArn>"),
         "a built-in reported an ARN it cannot own: {body}"
     );
+    assert!(
+        !body.contains("<DBClusterEndpointResourceIdentifier>"),
+        "a built-in reported the cluster's resource id: {body}"
+    );
+
+    // So a lookup by the cluster's name as an ENDPOINT id finds nothing,
+    // and deleting that name reports the declared fault rather than
+    // pretending it removed a built-in.
+    let body = body_of_action(
+        &svc,
+        "DescribeDBClusterEndpoints",
+        &[("DBClusterEndpointIdentifier", "clu-1")],
+    );
+    assert!(!body.contains("<EndpointType>"), "{body}");
+    match svc.handle_extra_action(&req(
+        "DeleteDBClusterEndpoint",
+        &[("DBClusterEndpointIdentifier", "clu-1")],
+    )) {
+        Err(err) => assert_eq!(err.code(), "DBClusterEndpointNotFoundFault"),
+        Ok(_) => panic!("deleting a built-in endpoint reported success"),
+    }
+}
+
+/// `DBClusterEndpoint.Status` is its own enum; a cluster's status has
+/// values outside it.
+#[test]
+fn built_in_endpoint_status_stays_inside_the_endpoint_enum() {
+    let svc = svc();
+    create_cluster(&svc, "clu-1");
+    for (cluster_status, expected) in [
+        ("backing-up", "modifying"),
+        ("upgrading", "modifying"),
+        ("stopped", "inactive"),
+        ("available", "available"),
+    ] {
+        {
+            let state = svc.state_handle();
+            let mut accounts = state.write();
+            if let Some(entry) = accounts
+                .default_mut()
+                .extras
+                .get_mut("clusters")
+                .and_then(|m| m.get_mut("clu-1"))
+                .and_then(|v| v.as_object_mut())
+            {
+                entry.insert("Status".to_string(), json!(cluster_status));
+            }
+        }
+        let body = body_of_action(&svc, "DescribeDBClusterEndpoints", &[]);
+        assert!(
+            body.contains(&format!("<Status>{expected}</Status>")),
+            "cluster status {cluster_status} left the endpoint enum: {body}"
+        );
+    }
 }
 
 /// An endpoint persisted before `CustomEndpointType` was derived carries
