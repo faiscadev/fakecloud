@@ -344,10 +344,18 @@ impl CloudFormationService {
     /// Telling the caller a broken template is fine is the whole failure this
     /// pair of operations is supposed to catch -- it is what gave #2480 its
     /// false green light. `ValidationError` is not in either op's Smithy
-    /// `errors` list, but the gate is `is_template_document`, and the
-    /// conformance probe only ever sends placeholder scalars, which are not
-    /// template documents and never reach it. CreateStack already ships the
-    /// same reasoning.
+    /// `errors` list, so the gate is `is_template_document`: the probe's
+    /// placeholder scalars (`test`, `t`) are not template documents and turn
+    /// into the empty summary instead.
+    ///
+    /// That gate is not airtight, and the difference matters. A
+    /// proptest-generated all-digit body such as `"42"` YAML-parses to a
+    /// number, so `is_template_document` accepts it and this function does
+    /// report. It stays conformant only because `service_common_errors` lists
+    /// `ValidationError` for cloudformation
+    /// (`fakecloud-conformance/src/probe/response.rs`) -- that allowlist entry
+    /// is load-bearing here, not incidental. CreateStack ships the same
+    /// reasoning.
     fn reject_unparseable_template(body: &str) -> Result<(), AwsServiceError> {
         if body.trim().is_empty() {
             return Ok(());
@@ -485,6 +493,29 @@ impl CloudFormationService {
             };
         }
         Ok(String::new())
+    }
+
+    /// The template body a stack-set operation carries: inline if given,
+    /// otherwise fetched from `TemplateURL`.
+    ///
+    /// Returns an empty string when there is neither, or when the URL cannot
+    /// be fetched. Neither `CreateStackSet` nor `UpdateStackSet` declares an
+    /// error for an unusable URL, and the conformance probe sends
+    /// `TemplateURL="t"` -- which `looks_like_url` rejects before any fetch is
+    /// attempted -- so this stays lenient by design.
+    fn stack_set_template_body(
+        &self,
+        account_id: &str,
+        params: &BTreeMap<String, String>,
+    ) -> String {
+        if let Some(body) = params.get("TemplateBody").filter(|b| !b.trim().is_empty()) {
+            return body.clone();
+        }
+        params
+            .get("TemplateURL")
+            .filter(|u| looks_like_url(u))
+            .and_then(|url| self.resolve_template_url(account_id, url).ok())
+            .unwrap_or_default()
     }
 
     /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
@@ -1491,11 +1522,19 @@ impl CloudFormationService {
                     .ok_or_else(|| missing("StackSetName"))?
                     .clone();
                 let id = format!("{name}:{}", rand_id());
+                // Resolve a TemplateURL too. Storing only the inline body left
+                // every URL-created stack set with an empty template, so
+                // `get-template-summary --stack-set-name` reported a
+                // confidently empty summary -- the false green light this
+                // work exists to remove. A fetch that fails still stores the
+                // empty body rather than erroring: CreateStackSet declares no
+                // error for it, and the probe's `"t"` is not a URL shape.
+                let template_body = self.stack_set_template_body(&aid, &params);
                 let entry = json!({
                     "StackSetId": id,
                     "StackSetName": name,
                     "Status": "ACTIVE",
-                    "TemplateBody": params.get("TemplateBody").cloned().unwrap_or_default(),
+                    "TemplateBody": template_body,
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
@@ -1548,6 +1587,22 @@ impl CloudFormationService {
             }
             "UpdateStackSet" => {
                 require_scalar(&params, "StackSetName")?;
+                // Persist the new template. Answering with an OperationId and
+                // storing nothing meant a stack set updated to a new template
+                // kept summarizing the ORIGINAL one forever -- stale is worse
+                // than empty, because it looks right.
+                //
+                // `UsePreviousTemplate` (and supplying neither body nor URL)
+                // keeps what is stored, which is what the parameter means.
+                let updated = self.stack_set_template_body(&aid, &params);
+                if !updated.is_empty() {
+                    let name = params.get("StackSetName").cloned().unwrap_or_default();
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&aid);
+                    if let Some(entry) = store(&mut state.extras, "stack_sets").get_mut(&name) {
+                        entry["TemplateBody"] = json!(updated);
+                    }
+                }
                 let op_id = rand_id();
                 Ok(xml_response(
                     "UpdateStackSet",
@@ -3365,6 +3420,44 @@ mod tests {
                 "{key}: {xml}"
             );
         }
+    }
+
+    #[test]
+    fn updating_a_stack_set_updates_what_it_summarizes() {
+        let svc = svc();
+        let created = introspect(
+            &svc,
+            "CreateStackSet",
+            &[("StackSetName", "set1"), ("TemplateBody", GOOD_TEMPLATE)],
+        );
+        assert!(created.contains("<StackSetId>"), "{created}");
+
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "set1")]);
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
+
+        // Update it to a different template.
+        let updated_template = "Resources:\n  T:\n    Type: AWS::SNS::Topic\n";
+        introspect(
+            &svc,
+            "UpdateStackSet",
+            &[("StackSetName", "set1"), ("TemplateBody", updated_template)],
+        );
+
+        // Stale is worse than empty: it looks right.
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "set1")]);
+        assert!(
+            xml.contains("<member>AWS::SNS::Topic</member>"),
+            "the summary must follow the update: {xml}"
+        );
+        assert!(
+            !xml.contains("AWS::SQS::Queue"),
+            "the original template must not survive the update: {xml}"
+        );
+
+        // Supplying no template keeps what is stored -- UsePreviousTemplate.
+        introspect(&svc, "UpdateStackSet", &[("StackSetName", "set1")]);
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "set1")]);
+        assert!(xml.contains("<member>AWS::SNS::Topic</member>"), "{xml}");
     }
 
     #[test]
