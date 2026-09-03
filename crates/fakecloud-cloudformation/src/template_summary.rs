@@ -61,17 +61,24 @@ fn is_aws_iam_type(resource_type: &str) -> bool {
     resource_type.starts_with("AWS::IAM::")
 }
 
-/// Explicit-name properties. A template that names an IAM resource needs
-/// `CAPABILITY_NAMED_IAM` rather than plain `CAPABILITY_IAM`, because the name
-/// can collide with an existing principal.
-const IAM_NAME_PROPERTIES: &[&str] = &[
-    "RoleName",
-    "UserName",
-    "GroupName",
-    "PolicyName",
-    "ManagedPolicyName",
-    "InstanceProfileName",
-    "ServerCertificateName",
+/// The property that gives each IAM resource type an explicit name, keyed by
+/// type. Naming one needs `CAPABILITY_NAMED_IAM` rather than plain
+/// `CAPABILITY_IAM`, because the name can collide with an existing principal.
+///
+/// Per type, not one shared list: `AWS::IAM::AccessKey` and
+/// `AWS::IAM::UserToGroupAddition` also carry `UserName` / `GroupName`, but
+/// those REFERENCE an existing principal rather than naming a new one, so a
+/// shared list reported CAPABILITY_NAMED_IAM for templates that only need
+/// CAPABILITY_IAM. Types absent from this table have no explicit-name
+/// property.
+const IAM_NAME_PROPERTIES: &[(&str, &str)] = &[
+    ("AWS::IAM::Role", "RoleName"),
+    ("AWS::IAM::User", "UserName"),
+    ("AWS::IAM::Group", "GroupName"),
+    ("AWS::IAM::Policy", "PolicyName"),
+    ("AWS::IAM::ManagedPolicy", "ManagedPolicyName"),
+    ("AWS::IAM::InstanceProfile", "InstanceProfileName"),
+    ("AWS::IAM::ServerCertificate", "ServerCertificateName"),
 ];
 
 /// The structural problem with a template, if any -- the level
@@ -276,13 +283,17 @@ fn has_named_iam(value: &Value) -> bool {
         return false;
     };
     resources.values().any(|r| {
-        let is_iam = r
-            .get("Type")
-            .and_then(Value::as_str)
-            .is_some_and(is_aws_iam_type);
-        is_iam
-            && r.get("Properties")
-                .is_some_and(|p| IAM_NAME_PROPERTIES.iter().any(|name| p.get(name).is_some()))
+        let Some(resource_type) = r.get("Type").and_then(Value::as_str) else {
+            return false;
+        };
+        let Some((_, name_property)) = IAM_NAME_PROPERTIES
+            .iter()
+            .find(|(ty, _)| *ty == resource_type)
+        else {
+            return false;
+        };
+        r.get("Properties")
+            .is_some_and(|p| p.get(name_property).is_some())
     })
 }
 
@@ -631,6 +642,28 @@ Resources:
         // A real one still does.
         let aws = "Resources:\n  R:\n    Type: AWS::IAM::Role\n";
         assert_eq!(summarize(aws).capabilities, ["CAPABILITY_IAM"]);
+    }
+
+    #[test]
+    fn a_referenced_principal_is_not_a_named_resource() {
+        // `AccessKey.UserName` and `UserToGroupAddition.GroupName` point at an
+        // EXISTING principal; they do not name a new one, so they need only
+        // the plain capability.
+        for body in [
+            "Resources:\n  K:\n    Type: AWS::IAM::AccessKey\n    Properties:\n      UserName: existing\n",
+            "Resources:\n  A:\n    Type: AWS::IAM::UserToGroupAddition\n    Properties:\n      GroupName: existing\n      Users: [x]\n",
+        ] {
+            assert_eq!(
+                summarize(body).capabilities,
+                ["CAPABILITY_IAM"],
+                "referencing a principal must not require NAMED_IAM: {body}"
+            );
+        }
+
+        // Naming a NEW user still does.
+        let named_user =
+            "Resources:\n  U:\n    Type: AWS::IAM::User\n    Properties:\n      UserName: brand-new\n";
+        assert_eq!(summarize(named_user).capabilities, ["CAPABILITY_NAMED_IAM"]);
     }
 
     #[test]

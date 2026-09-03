@@ -421,12 +421,19 @@ impl CloudFormationService {
         // would drop the service off its baseline.
         if let Some(name) = params.get("StackName") {
             let accounts = self.state.read();
-            // A deleted stack is still summarizable BY ITS UNIQUE ID -- AWS
-            // keeps deleted stacks addressable that way for 90 days, which is
-            // how a caller inspects what a since-deleted stack contained. By
-            // NAME, though, a deleted stack is gone: the name is free for
+            // A deleted stack is still summarizable BY ITS UNIQUE ID, which
+            // is how a caller inspects what a since-deleted stack contained.
+            // By NAME, though, a deleted stack is gone: the name is free for
             // reuse, so answering with the dead stack's template would
             // describe something the caller is not asking about.
+            //
+            // AWS drops deleted stacks from this lookup after 90 days. We do
+            // not: a deleted record stays addressable by id for as long as the
+            // state lives. Emulator state is created and thrown away far
+            // inside that window, so an age cutoff would only ever be dead
+            // code here -- and it would cost a deletion timestamp on every
+            // stack record to express. Deliberate divergence, not an
+            // oversight.
             if let Some(body) = accounts.get(account_id).and_then(|st| {
                 st.stacks
                     .values()
