@@ -2347,6 +2347,7 @@ use for_each::*;
 use intrinsics::*;
 use mappings::*;
 
+pub(crate) use for_each::expand_for_each;
 pub use parser::{
     collect_import_value_names, parse_outputs, parse_template, parse_template_with_physical_ids,
     parse_template_with_resolution,

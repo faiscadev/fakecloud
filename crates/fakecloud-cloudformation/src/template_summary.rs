@@ -26,6 +26,7 @@
 
 use fakecloud_aws::xml::xml_escape;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// One declared template parameter, with the constraints AWS reports.
 #[derive(Debug, Default, Clone, PartialEq)]
@@ -101,9 +102,40 @@ const IAM_NAME_PROPERTIES: &[(&str, &str)] = &[
 /// those templates -- and CDK and `sam deploy` call `GetTemplateSummary`
 /// during deploy, so rejecting them would break the deploy before it starts.
 ///
-/// What it does check is what AWS checks without values: the body parses in
-/// its dialect, there is a `Resources` mapping with at least one entry, and
-/// every resource carries a `Type`.
+/// # The invariant
+///
+/// **This must never reject a template that `CreateStack` accepts.** It is a
+/// second validator sitting beside `template::parse_template`, and a second
+/// validator that disagrees with the first is worse than none: a template that
+/// deploys cleanly would fail its own `GetTemplateSummary`, and CDK and `sam
+/// deploy` call that operation *during* deploy. The safe direction is strictly
+/// weaker -- reject only what the deploy path would also reject.
+///
+/// Three ways an earlier version of this function broke that invariant, all
+/// because it walked the RAW `Resources` map while `parse_template`
+/// (template/parser.rs) transforms it first:
+///
+/// - `parse_template` runs `expand_for_each` BEFORE reading `Resources`, so an
+///   `Fn::ForEach::X` entry -- a JSON *array*, not a resource -- is expanded
+///   into real resources. Checking the raw map saw the array and reported
+///   `[/Resources/Fn::ForEach::X] must be an object`, rejecting a valid
+///   `AWS::LanguageExtensions` template that deploys fine.
+/// - `parse_template` skips condition-false resources before checking `Type`,
+///   so a `{Condition: Never, Properties: {}}` entry legitimately has none.
+/// - `parse_template` accepts an empty `Resources: {}` map; only the section's
+///   presence is required.
+///
+/// So: ForEach entries are expanded first, a resource carrying a `Condition`
+/// is exempt from the `Type` check (conditions need parameter VALUES to
+/// evaluate, and this pass deliberately has none -- exempting is the lenient
+/// direction), and an empty map passes.
+///
+/// A parameter declaration missing `Type` is likewise NOT checked here.
+/// AWS does reject it, but this emulator's `CreateStack` never reads a
+/// parameter's `Type` at all (`merge_parameter_defaults` reads only
+/// `Default`), so reporting it would break the invariant in the same way --
+/// and would make an already-deployed stack fail its own summary. Closing that
+/// gap means changing `CreateStack` too, in one change, so both agree.
 pub(crate) fn structural_error(body: &str) -> Option<String> {
     let value = match fakecloud_core::cfn_template::parse_template_body(body) {
         Ok(value) => value,
@@ -117,14 +149,22 @@ pub(crate) fn structural_error(body: &str) -> Option<String> {
             "Template format error: At least one Resources member must be defined.".to_string(),
         );
     };
-    let Some(resources) = resources.as_object() else {
+
+    // Expand exactly as the deploy path does, so a ForEach entry is judged as
+    // the resources it produces rather than as the array it is written as. An
+    // expansion failure is NOT reported: it needs parameter values this pass
+    // does not have, and guessing would reject a deployable template.
+    let expanded = crate::template::expand_for_each(&value, &BTreeMap::new(), &BTreeMap::new())
+        .ok()
+        .unwrap_or_else(|| value.clone());
+    let resources = expanded
+        .get("Resources")
+        .and_then(Value::as_object)
+        .or_else(|| resources.as_object());
+    let Some(resources) = resources else {
         return Some("Template format error: [/Resources] must be an object.".to_string());
     };
-    if resources.is_empty() {
-        return Some(
-            "Template format error: At least one Resources member must be defined.".to_string(),
-        );
-    }
+
     for (logical_id, resource) in resources {
         // Shape first. `Resources: {Q: not-an-object}` reported "must contain
         // a Type member", which points the reader at a member they cannot add
@@ -133,6 +173,12 @@ pub(crate) fn structural_error(body: &str) -> Option<String> {
             return Some(format!(
                 "Template format error: [/Resources/{logical_id}] must be an object."
             ));
+        }
+        // A conditional resource is exempt: the deploy path drops it before
+        // ever looking for a Type when the condition is false, and deciding
+        // which way the condition goes needs parameter values.
+        if resource.get("Condition").is_some() {
+            continue;
         }
         let has_type = resource
             .get("Type")
@@ -143,33 +189,6 @@ pub(crate) fn structural_error(body: &str) -> Option<String> {
                 "Template format error: Every Resources object must contain a Type member. \
                  Resource {logical_id} does not."
             ));
-        }
-    }
-
-    // `Type` is required in a parameter declaration; CloudFormation rejects a
-    // template without it rather than inferring one. Defaulting to String here
-    // would report a clean summary for a template that create-stack then
-    // refuses -- the false-green this PR exists to close.
-    if let Some(declared) = value.get("Parameters") {
-        let Some(declared) = declared.as_object() else {
-            return Some("Template format error: [/Parameters] must be an object.".to_string());
-        };
-        for (name, spec) in declared {
-            if !spec.is_object() {
-                return Some(format!(
-                    "Template format error: [/Parameters/{name}] must be an object."
-                ));
-            }
-            let has_type = spec
-                .get("Type")
-                .and_then(Value::as_str)
-                .is_some_and(|t| !t.is_empty());
-            if !has_type {
-                return Some(format!(
-                    "Template format error: Every Parameters object must contain a Type member. \
-                     Parameter {name} does not."
-                ));
-            }
         }
     }
 
@@ -650,10 +669,6 @@ Resources:
         let err = structural_error("Parameters:\n  P:\n    Type: String\n").unwrap();
         assert!(err.contains("At least one Resources member"), "{err}");
 
-        // Resources present but empty.
-        let err = structural_error("Resources: {}\n").unwrap();
-        assert!(err.contains("At least one Resources member"), "{err}");
-
         // A resource with no Type.
         let err = structural_error("Resources:\n  Q:\n    Properties: {}\n").unwrap();
         assert!(err.contains("must contain a Type member"), "{err}");
@@ -733,39 +748,51 @@ Resources:
         assert!(reason.contains("AWS::Serverless-2016-10-31"), "{reason}");
     }
 
+    /// The invariant: `structural_error` must never reject a body that
+    /// `CreateStack` accepts, or a deployed stack fails its own summary and
+    /// CDK / `sam deploy` break during deploy.
     #[test]
-    fn a_parameter_without_a_type_is_rejected() {
-        // AWS requires Type in a parameter declaration; inferring String here
-        // would validate a template create-stack then refuses.
-        let body = "Parameters:\n  Env:\n    Description: no type\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n";
-        let err = structural_error(body).expect("a typeless parameter must be reported");
-        assert!(err.contains("Parameter Env does not"), "{err}");
+    fn structural_check_never_rejects_what_createstack_accepts() {
+        // `Fn::ForEach` -- the entry is an ARRAY, not a resource, and the
+        // deploy path expands it before reading Resources.
+        let for_each = r#"
+Transform: AWS::LanguageExtensions
+Resources:
+  'Fn::ForEach::Buckets':
+    - Id
+    - [A, B]
+    - '${Id}Bucket':
+        Type: AWS::S3::Bucket
+"#;
+        assert_eq!(
+            structural_error(for_each),
+            None,
+            "a ForEach template deploys, so it must summarize"
+        );
 
-        // With a Type it passes.
-        let ok =
-            "Parameters:\n  Env:\n    Type: String\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n";
-        assert_eq!(structural_error(ok), None);
+        // A condition-false resource legitimately carries no Type; the deploy
+        // path drops it before ever looking.
+        let conditional = "Conditions:\n  Never: {'Fn::Equals': [a, b]}\nResources:\n  X:\n    Condition: Never\n    Properties: {}\n  Y:\n    Type: AWS::SQS::Queue\n";
+        assert_eq!(structural_error(conditional), None);
+
+        // `Resources: {}` -- parse_template requires the section, not entries.
+        assert_eq!(structural_error("Resources: {}\n"), None);
+
+        // A parameter with no Type: AWS rejects it, but this emulator's
+        // CreateStack never reads a parameter's Type, so reporting it here
+        // would make an already-deployed stack unsummarizable.
+        let typeless_param =
+            "Parameters:\n  Env:\n    Default: dev\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n";
+        assert_eq!(structural_error(typeless_param), None);
     }
 
     #[test]
-    fn a_non_object_entry_is_reported_by_its_shape() {
+    fn a_non_object_resource_is_reported_by_its_shape() {
         // Not "must contain a Type member" -- the entry is a scalar, so there
         // is no member to add.
-        let resource = structural_error("Resources:\n  Q: not-an-object\n")
+        let err = structural_error("Resources:\n  Q: not-an-object\n")
             .expect("a scalar resource must be reported");
-        assert!(
-            resource.contains("[/Resources/Q] must be an object"),
-            "{resource}"
-        );
-
-        let parameter = structural_error(
-            "Parameters:\n  Env: not-an-object\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n",
-        )
-        .expect("a scalar parameter must be reported");
-        assert!(
-            parameter.contains("[/Parameters/Env] must be an object"),
-            "{parameter}"
-        );
+        assert!(err.contains("[/Resources/Q] must be an object"), "{err}");
     }
 
     #[test]
