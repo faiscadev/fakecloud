@@ -71,24 +71,38 @@ fn is_aws_iam_type(resource_type: &str) -> bool {
     resource_type.starts_with("AWS::IAM::")
 }
 
-/// The property that gives each IAM resource type an explicit name, keyed by
+/// The property that gives each IAM resource type a CUSTOM name, keyed by
 /// type. Naming one needs `CAPABILITY_NAMED_IAM` rather than plain
 /// `CAPABILITY_IAM`, because the name can collide with an existing principal.
 ///
+/// Only an **optional** name property counts. AWS asks for the named
+/// capability when a template supplies a *custom* name -- one CloudFormation
+/// would otherwise have generated. A required name property is not a choice
+/// the author made, so it does not force the narrower capability:
+/// `AWS::IAM::Policy.PolicyName` is `Required: Yes`, and treating it as custom
+/// made `CAPABILITY_NAMED_IAM` the answer for the single most common IAM
+/// template shape (a role plus an inline policy), leaving plain
+/// `CAPABILITY_IAM` unreachable.
+///
+/// Required/optional per the CloudFormation Template Reference, checked
+/// rather than recalled: `Policy.PolicyName` Required: Yes (so it is absent
+/// here); `SAMLProvider.Name`, `VirtualMFADevice.VirtualMfaDeviceName` and
+/// `ServiceLinkedRole.CustomSuffix` all Required: No (so they belong).
+///
 /// Per type, not one shared list: `AWS::IAM::AccessKey` and
 /// `AWS::IAM::UserToGroupAddition` also carry `UserName` / `GroupName`, but
-/// those REFERENCE an existing principal rather than naming a new one, so a
-/// shared list reported CAPABILITY_NAMED_IAM for templates that only need
-/// CAPABILITY_IAM. Types absent from this table have no explicit-name
-/// property.
+/// those REFERENCE an existing principal rather than naming a new one. Types
+/// absent from this table have no custom-name property.
 const IAM_NAME_PROPERTIES: &[(&str, &str)] = &[
     ("AWS::IAM::Role", "RoleName"),
     ("AWS::IAM::User", "UserName"),
     ("AWS::IAM::Group", "GroupName"),
-    ("AWS::IAM::Policy", "PolicyName"),
     ("AWS::IAM::ManagedPolicy", "ManagedPolicyName"),
     ("AWS::IAM::InstanceProfile", "InstanceProfileName"),
     ("AWS::IAM::ServerCertificate", "ServerCertificateName"),
+    ("AWS::IAM::SAMLProvider", "Name"),
+    ("AWS::IAM::VirtualMFADevice", "VirtualMfaDeviceName"),
+    ("AWS::IAM::ServiceLinkedRole", "CustomSuffix"),
 ];
 
 /// The structural problem with a template, if any -- the level
@@ -341,6 +355,24 @@ fn iam_resource_types(value: &Value) -> Vec<String> {
         .filter(|t| is_aws_iam_type(t))
         .map(str::to_string)
         .collect();
+
+    // A SAM function with no explicit `Role` expands into an
+    // `AWS::IAM::Role` -- `template/sam_events.rs` builds one on exactly this
+    // condition. The role is invisible in the raw template, so without this a
+    // plain SAM template reported CAPABILITY_AUTO_EXPAND alone, and a tool
+    // deriving `--capabilities` from the summary got rejected by real AWS for
+    // the missing CAPABILITY_IAM.
+    let synthesizes_role = resources.values().any(|r| {
+        r.get("Type").and_then(Value::as_str) == Some("AWS::Serverless::Function")
+            && !r
+                .get("Properties")
+                .and_then(|p| p.get("Role"))
+                .is_some_and(|role| !role.is_null())
+    });
+    if synthesizes_role {
+        types.push("AWS::IAM::Role".to_string());
+    }
+
     types.sort();
     types.dedup();
     types
@@ -360,8 +392,13 @@ fn has_named_iam(value: &Value) -> bool {
         else {
             return false;
         };
+        // Present-but-empty is not a name. `RoleName:` (blank) parses to Null
+        // and `RoleName: ""` to an empty string; neither names anything, and
+        // reporting NAMED_IAM for them contradicts the null-is-absent rule
+        // `scalar_to_string` already applies to defaults.
         r.get("Properties")
-            .is_some_and(|p| p.get(name_property).is_some())
+            .and_then(|p| p.get(name_property))
+            .is_some_and(|v| !v.is_null() && v.as_str() != Some(""))
     })
 }
 
@@ -387,18 +424,26 @@ fn capabilities(iam: &[String], transforms: &[String], named_iam: bool) -> Vec<S
 /// AWS explains WHICH resources forced the capability, which is the part that
 /// makes the error actionable when a deploy is rejected for missing it.
 fn capabilities_reason(iam: &[String], transforms: &[String]) -> Option<String> {
-    // Transforms count too. Reporting CAPABILITY_AUTO_EXPAND with no reason
-    // left every SAM or macro template explaining a rejected deploy with an
-    // empty string.
-    let mut forced: Vec<String> = iam.to_vec();
-    forced.extend_from_slice(transforms);
-    if forced.is_empty() {
-        return None;
+    // Resources when there are any: AWS words this field as "resource(s)", and
+    // splicing a transform NAME into that list claimed a transform was a
+    // resource.
+    if !iam.is_empty() {
+        return Some(format!(
+            "The following resource(s) require capabilities: [{}]",
+            iam.join(", ")
+        ));
     }
-    Some(format!(
-        "The following resource(s) require capabilities: [{}]",
-        forced.join(", ")
-    ))
+    // A transform-only template (`AWS::Include`, a bare macro) still forces
+    // CAPABILITY_AUTO_EXPAND, and reporting it with an empty reason left the
+    // caller nothing to act on. AWS publishes no example of its wording for
+    // this case, so the phrasing here is ours -- but it names the right thing.
+    if !transforms.is_empty() {
+        return Some(format!(
+            "The following transform(s) require capabilities: [{}]",
+            transforms.join(", ")
+        ));
+    }
+    None
 }
 
 fn members_xml(indent: &str, tag: &str, values: &[String]) -> String {
@@ -579,8 +624,16 @@ Resources:
     Type: AWS::Serverless::Function
 "#;
         let s = summarize(sam);
-        assert_eq!(s.capabilities, ["CAPABILITY_AUTO_EXPAND"]);
+        // IAM as well: a SAM function with no explicit Role expands into an
+        // AWS::IAM::Role, so AUTO_EXPAND alone would under-report and a
+        // caller deriving --capabilities from this gets rejected by AWS.
+        assert_eq!(s.capabilities, ["CAPABILITY_IAM", "CAPABILITY_AUTO_EXPAND"]);
         assert_eq!(s.declared_transforms, ["AWS::Serverless-2016-10-31"]);
+
+        // An explicit Role means SAM synthesizes nothing, so only the
+        // transform forces a capability.
+        let explicit = "Transform: AWS::Serverless-2016-10-31\nResources:\n  Fn:\n    Type: AWS::Serverless::Function\n    Properties:\n      Role: arn:aws:iam::123456789012:role/r\n";
+        assert_eq!(summarize(explicit).capabilities, ["CAPABILITY_AUTO_EXPAND"]);
 
         // A list of transforms is also legal.
         let many = "Transform: [AWS::Include, MyMacro]\nResources: {}\n";
@@ -740,12 +793,59 @@ Resources:
 
     #[test]
     fn a_transform_only_template_explains_its_capability() {
-        // CAPABILITY_AUTO_EXPAND with no reason left every SAM or macro
-        // template explaining a rejected deploy with an empty string.
-        let s = summarize("Transform: AWS::Serverless-2016-10-31\nResources:\n  F:\n    Type: AWS::Serverless::Function\n");
+        // CAPABILITY_AUTO_EXPAND with no reason left every macro template
+        // explaining a rejected deploy with an empty string. A template with
+        // a transform but no IAM resource has only the transform to name.
+        let s = summarize("Transform: AWS::Include\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n");
         assert_eq!(s.capabilities, ["CAPABILITY_AUTO_EXPAND"]);
         let reason = s.capabilities_reason.expect("a reason must be given");
-        assert!(reason.contains("AWS::Serverless-2016-10-31"), "{reason}");
+        assert!(reason.contains("AWS::Include"), "{reason}");
+        // ...and it must not call that transform a resource.
+        assert!(
+            !reason.contains("resource(s)"),
+            "a transform is not a resource: {reason}"
+        );
+    }
+
+    #[test]
+    fn a_required_name_property_is_not_a_custom_name() {
+        // AWS::IAM::Policy.PolicyName is Required: Yes, so supplying it is not
+        // a choice the author made. The commonest IAM shape -- a role plus an
+        // inline policy -- needs only CAPABILITY_IAM.
+        let role_and_policy = "Resources:\n  R:\n    Type: AWS::IAM::Role\n  P:\n    Type: AWS::IAM::Policy\n    Properties:\n      PolicyName: app\n";
+        assert_eq!(summarize(role_and_policy).capabilities, ["CAPABILITY_IAM"]);
+
+        // Optional name properties still force the narrower capability.
+        for (ty, prop) in [
+            ("AWS::IAM::SAMLProvider", "Name"),
+            ("AWS::IAM::VirtualMFADevice", "VirtualMfaDeviceName"),
+            ("AWS::IAM::ServiceLinkedRole", "CustomSuffix"),
+        ] {
+            let body = format!(
+                "Resources:\n  X:\n    Type: {ty}\n    Properties:\n      {prop}: custom\n"
+            );
+            assert_eq!(
+                summarize(&body).capabilities,
+                ["CAPABILITY_NAMED_IAM"],
+                "{ty}.{prop} is optional, so supplying it is a custom name"
+            );
+        }
+    }
+
+    #[test]
+    fn a_blank_name_property_is_not_a_name() {
+        // `RoleName:` parses to Null and `RoleName: ""` to an empty string;
+        // neither names anything.
+        for body in [
+            "Resources:\n  R:\n    Type: AWS::IAM::Role\n    Properties:\n      RoleName:\n",
+            "Resources:\n  R:\n    Type: AWS::IAM::Role\n    Properties:\n      RoleName: \"\"\n",
+        ] {
+            assert_eq!(
+                summarize(body).capabilities,
+                ["CAPABILITY_IAM"],
+                "a blank name must not force NAMED_IAM: {body}"
+            );
+        }
     }
 
     /// The invariant: `structural_error` must never reject a body that
