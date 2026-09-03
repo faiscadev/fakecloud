@@ -243,6 +243,8 @@ pub(crate) fn seed_public_images(state: &mut Ec2State) {
                 launch_permission_groups: vec!["all".to_string()],
                 boot_mode: None,
                 owner_id: Some((*owner).to_string()),
+                supported_instance_types: Vec::new(),
+                unsupported_instance_types: Vec::new(),
                 owner_alias: alias.map(str::to_string),
                 creation_date: Some((*created).to_string()),
                 root_device_name: Some((*root_dev).to_string()),

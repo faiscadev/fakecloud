@@ -678,7 +678,7 @@ async fn bootstrap_external_service_fixtures(
         .unwrap();
 }
 
-#[test_action("ecs", "CreateService", checksum = "36ee4e2e")]
+#[test_action("ecs", "CreateService", checksum = "35b52df2")]
 #[tokio::test]
 async fn ecs_create_service() {
     let server = TestServer::start().await;
@@ -696,7 +696,7 @@ async fn ecs_create_service() {
     assert_eq!(resp.service().unwrap().service_name(), Some("svc-a"));
 }
 
-#[test_action("ecs", "DescribeServices", checksum = "fbab82a6")]
+#[test_action("ecs", "DescribeServices", checksum = "a4c86e2d")]
 #[tokio::test]
 async fn ecs_describe_services() {
     let server = TestServer::start().await;
@@ -757,7 +757,7 @@ async fn ecs_list_services_by_namespace() {
     resp.service_arns();
 }
 
-#[test_action("ecs", "UpdateService", checksum = "8d9f68e7")]
+#[test_action("ecs", "UpdateService", checksum = "187bdef9")]
 #[tokio::test]
 async fn ecs_update_service() {
     let server = TestServer::start().await;
@@ -783,7 +783,7 @@ async fn ecs_update_service() {
     assert_eq!(resp.service().unwrap().desired_count(), 2);
 }
 
-#[test_action("ecs", "DeleteService", checksum = "7831c3f4")]
+#[test_action("ecs", "DeleteService", checksum = "8c820bd3")]
 #[tokio::test]
 async fn ecs_delete_service() {
     let server = TestServer::start().await;
@@ -1507,7 +1507,7 @@ async fn ecs_list_service_deployments() {
     resp.service_deployments();
 }
 
-#[test_action("ecs", "DescribeServiceDeployments", checksum = "9019dae8")]
+#[test_action("ecs", "DescribeServiceDeployments", checksum = "b1eeff34")]
 #[tokio::test]
 async fn ecs_describe_service_deployments() {
     let server = TestServer::start().await;
