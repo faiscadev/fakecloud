@@ -421,11 +421,17 @@ impl CloudFormationService {
         // would drop the service off its baseline.
         if let Some(name) = params.get("StackName") {
             let accounts = self.state.read();
+            // A deleted stack is still summarizable BY ITS UNIQUE ID -- AWS
+            // keeps deleted stacks addressable that way for 90 days, which is
+            // how a caller inspects what a since-deleted stack contained. By
+            // NAME, though, a deleted stack is gone: the name is free for
+            // reuse, so answering with the dead stack's template would
+            // describe something the caller is not asking about.
             if let Some(body) = accounts.get(account_id).and_then(|st| {
                 st.stacks
                     .values()
                     .find(|s| {
-                        (&s.name == name || &s.stack_id == name) && s.status != "DELETE_COMPLETE"
+                        &s.stack_id == name || (&s.name == name && s.status != "DELETE_COMPLETE")
                     })
                     .map(|s| s.template.clone())
             }) {
@@ -3352,6 +3358,51 @@ mod tests {
                 "{key}: {xml}"
             );
         }
+    }
+
+    #[test]
+    fn a_deleted_stack_is_summarizable_by_id_but_not_by_name() {
+        let svc = svc();
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .stacks
+            .insert(
+                "gone".to_string(),
+                crate::state::Stack {
+                    name: "gone".to_string(),
+                    stack_id: "arn:aws:cloudformation:us-east-1:000000000000:stack/gone/9"
+                        .to_string(),
+                    template: GOOD_TEMPLATE.to_string(),
+                    status: "DELETE_COMPLETE".to_string(),
+                    status_reason: None,
+                    resources: vec![],
+                    parameters: BTreeMap::new(),
+                    tags: BTreeMap::new(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    description: None,
+                    notification_arns: vec![],
+                    outputs: vec![],
+                    enable_termination_protection: false,
+                },
+            );
+
+        // By unique id: AWS keeps deleted stacks addressable this way.
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[(
+                "StackName",
+                "arn:aws:cloudformation:us-east-1:000000000000:stack/gone/9",
+            )],
+        );
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
+
+        // By name: the name is free for reuse, so the dead stack must not
+        // answer for it.
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackName", "gone")]);
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
     }
 
     #[test]

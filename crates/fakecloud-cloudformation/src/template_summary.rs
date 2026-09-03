@@ -41,6 +41,16 @@ pub(crate) struct TemplateSummary {
     pub metadata: Option<String>,
 }
 
+/// Whether a resource type is one of AWS's own IAM types.
+///
+/// An exact prefix, not a substring: a third-party or custom type whose name
+/// merely contains `::IAM::` (`MyOrg::IAM::Thing`, `Custom::IAM::Wrapper`)
+/// does not require an IAM capability, and matching it would report a
+/// capability the caller does not need -- and name it in the reason.
+fn is_aws_iam_type(resource_type: &str) -> bool {
+    resource_type.starts_with("AWS::IAM::")
+}
+
 /// Explicit-name properties. A template that names an IAM resource needs
 /// `CAPABILITY_NAMED_IAM` rather than plain `CAPABILITY_IAM`, because the name
 /// can collide with an existing principal.
@@ -51,6 +61,7 @@ const IAM_NAME_PROPERTIES: &[&str] = &[
     "PolicyName",
     "ManagedPolicyName",
     "InstanceProfileName",
+    "ServerCertificateName",
 ];
 
 /// The structural problem with a template, if any -- the level
@@ -228,7 +239,7 @@ fn iam_resource_types(value: &Value) -> Vec<String> {
     let mut types: Vec<String> = resources
         .values()
         .filter_map(|r| r.get("Type").and_then(Value::as_str))
-        .filter(|t| t.contains("::IAM::"))
+        .filter(|t| is_aws_iam_type(t))
         .map(str::to_string)
         .collect();
     types.sort();
@@ -244,7 +255,7 @@ fn has_named_iam(value: &Value) -> bool {
         let is_iam = r
             .get("Type")
             .and_then(Value::as_str)
-            .is_some_and(|t| t.contains("::IAM::"));
+            .is_some_and(is_aws_iam_type);
         is_iam
             && r.get("Properties")
                 .is_some_and(|p| IAM_NAME_PROPERTIES.iter().any(|name| p.get(name).is_some()))
@@ -581,6 +592,30 @@ Resources:
             structural_error("Resources:\n  Q:\n    Type: AWS::SQS::Queue\n"),
             None
         );
+    }
+
+    #[test]
+    fn only_aws_iam_types_force_an_iam_capability() {
+        // A third-party type whose name merely contains `::IAM::` is not an
+        // AWS IAM resource; reporting a capability for it would name a
+        // resource the caller does not need to acknowledge.
+        let third_party =
+            "Resources:\n  T:\n    Type: MyOrg::IAM::Thing\n    Properties:\n      RoleName: x\n";
+        let s = summarize(third_party);
+        assert!(s.capabilities.is_empty(), "{:?}", s.capabilities);
+        assert_eq!(s.capabilities_reason, None);
+
+        // A real one still does.
+        let aws = "Resources:\n  R:\n    Type: AWS::IAM::Role\n";
+        assert_eq!(summarize(aws).capabilities, ["CAPABILITY_IAM"]);
+    }
+
+    #[test]
+    fn a_named_server_certificate_needs_the_named_capability() {
+        let s = summarize(
+            "Resources:\n  C:\n    Type: AWS::IAM::ServerCertificate\n    Properties:\n      ServerCertificateName: explicit\n",
+        );
+        assert_eq!(s.capabilities, ["CAPABILITY_NAMED_IAM"]);
     }
 
     #[test]
