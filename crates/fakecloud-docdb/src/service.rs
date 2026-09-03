@@ -8,6 +8,9 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
+use fakecloud_core::query_filters::{
+    parse_filters, sibling_rds_arn, warn_unknown_filters, QueryFilter,
+};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -380,6 +383,76 @@ fn is_mutating(action: &str) -> bool {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// The filter names DocumentDB documents per operation. A name outside
+/// the set matches nothing -- DocumentDB, like RDS, declares no
+/// `InvalidParameterValue`-equivalent on these operations, so rejecting
+/// would put an undeclared error shape on the wire.
+const CLUSTER_FILTERS: &[&str] = &["db-cluster-id"];
+const INSTANCE_FILTERS: &[&str] = &["db-cluster-id", "db-instance-id"];
+const GLOBAL_CLUSTER_FILTERS: &[&str] = &["db-cluster-id"];
+
+/// True when a cluster satisfies every filter.
+///
+/// `db-cluster-id` accepts identifiers and ARNs, so both forms are
+/// offered to the match.
+fn cluster_matches_filters(cluster: &DbCluster, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => filter.matches_any([
+            Some(cluster.db_cluster_identifier.as_str()),
+            Some(cluster.db_cluster_arn.as_str()),
+        ]),
+        _ => false,
+    })
+}
+
+/// True when a global cluster satisfies every filter.
+///
+/// `db-cluster-id` accepts cluster identifiers and ARNs. A global
+/// cluster is named by its own identifier and reached through the member
+/// clusters it spans, so both are offered: filtering by a member's ARN
+/// selects the global cluster containing it, which is the only way a
+/// caller holding a regional cluster ARN can find its global parent.
+fn global_cluster_matches_filters(global: &GlobalCluster, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => {
+            filter.matches_any([
+                Some(global.global_cluster_identifier.as_str()),
+                Some(global.global_cluster_arn.as_str()),
+            ]) || global
+                .members
+                .iter()
+                .any(|member| filter.matches(Some(member.db_cluster_arn.as_str())))
+        }
+        _ => false,
+    })
+}
+
+/// True when an instance satisfies every filter. `db-cluster-id` selects
+/// the instances of the named cluster; `db-instance-id` the instance
+/// itself. Both accept identifiers and ARNs -- the cluster ARN is
+/// rebuilt from the instance's own, which shares its partition, region
+/// and account.
+fn instance_matches_filters(instance: &DbInstance, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => {
+            let cluster_arn = sibling_rds_arn(
+                &instance.db_instance_arn,
+                "cluster",
+                &instance.db_cluster_identifier,
+            );
+            filter.matches_any([
+                Some(instance.db_cluster_identifier.as_str()),
+                cluster_arn.as_deref(),
+            ])
+        }
+        "db-instance-id" => filter.matches_any([
+            Some(instance.db_instance_identifier.as_str()),
+            Some(instance.db_instance_arn.as_str()),
+        ]),
+        _ => false,
+    })
+}
+
 impl DocDbService {
     fn create_db_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(req, "DBClusterIdentifier")?;
@@ -464,6 +537,10 @@ impl DocDbService {
     }
 
     fn describe_db_clusters(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // `Filters` was accepted and ignored, so a caller narrowing a
+        // listing got every cluster in the account back.
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, CLUSTER_FILTERS);
         let filter = optional_query_param(req, "DBClusterIdentifier");
         let accounts = self.state.read();
         let empty = DocDbState::new(&req.account_id, &req.region);
@@ -475,6 +552,11 @@ impl DocDbService {
             },
             None => st.clusters.values().collect(),
         };
+        // AND-ed with the identifier parameter, as AWS applies them.
+        let clusters: Vec<&DbCluster> = clusters
+            .into_iter()
+            .filter(|c| cluster_matches_filters(c, &filters))
+            .collect();
         let inner: String = clusters
             .iter()
             .map(|c| format!("<DBCluster>{}</DBCluster>", xml::db_cluster(c)))
@@ -709,6 +791,8 @@ impl DocDbService {
     }
 
     fn describe_db_instances(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, INSTANCE_FILTERS);
         let filter = optional_query_param(req, "DBInstanceIdentifier");
         let accounts = self.state.read();
         let empty = DocDbState::new(&req.account_id, &req.region);
@@ -720,6 +804,10 @@ impl DocDbService {
             },
             None => st.instances.values().collect(),
         };
+        let instances: Vec<&DbInstance> = instances
+            .into_iter()
+            .filter(|i| instance_matches_filters(i, &filters))
+            .collect();
         let inner: String = instances
             .iter()
             .map(|i| format!("<DBInstance>{}</DBInstance>", xml::db_instance(i)))
@@ -1559,6 +1647,8 @@ impl DocDbService {
         // (the member's modelled length minimum is 1): AWS resolves it to no
         // cluster and returns GlobalClusterNotFoundFault, so honour the raw
         // presence rather than collapsing empty to "no filter".
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, GLOBAL_CLUSTER_FILTERS);
         let filter = req.query_params.get("GlobalClusterIdentifier").cloned();
         let accounts = self.state.read();
         let empty = DocDbState::new(&req.account_id, &req.region);
@@ -1570,6 +1660,10 @@ impl DocDbService {
             },
             None => st.global_clusters.values().collect(),
         };
+        let globals: Vec<&GlobalCluster> = globals
+            .into_iter()
+            .filter(|g| global_cluster_matches_filters(g, &filters))
+            .collect();
         let inner: String = globals
             .iter()
             .map(|g| format!("<GlobalCluster>{}</GlobalCluster>", xml::global_cluster(g)))

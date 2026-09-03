@@ -64,6 +64,190 @@ fn body(resp: &AwsResponse) -> String {
     }
 }
 
+/// `Filters` was accepted and ignored, so a caller narrowing a listing
+/// got every resource in the account back.
+#[tokio::test]
+async fn describe_db_clusters_honors_the_db_cluster_id_filter() {
+    let svc = service();
+    for id in ["clu-a", "clu-b"] {
+        call(
+            &svc,
+            "CreateDBCluster",
+            &[("DBClusterIdentifier", id), ("Engine", "docdb")],
+        )
+        .await;
+    }
+
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-b"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterIdentifier>clu-b</DBClusterIdentifier>"),
+        "{xml}"
+    );
+    assert!(
+        !xml.contains("<DBClusterIdentifier>clu-a</DBClusterIdentifier>"),
+        "the filter kept an unmatched cluster: {xml}"
+    );
+
+    // The ARN form selects the same cluster -- AWS documents this filter
+    // as accepting identifiers and ARNs.
+    let arn = xml
+        .split("<DBClusterArn>")
+        .nth(1)
+        .and_then(|rest| rest.split("</DBClusterArn>").next())
+        .expect("an ARN")
+        .to_string();
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", &arn),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterIdentifier>clu-b</DBClusterIdentifier>"),
+        "{xml}"
+    );
+
+    // An unrecognized name matches nothing rather than returning the
+    // full list: DocumentDB declares no InvalidParameterValue-equivalent
+    // on this operation, so rejecting would be an undeclared shape.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "not-a-filter"),
+                ("Filters.Filter.1.Values.Value.1", "clu-b"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        !xml.contains("<DBClusterIdentifier>"),
+        "an unknown filter returned rows: {xml}"
+    );
+}
+
+#[tokio::test]
+async fn describe_db_instances_filters_by_cluster_and_instance() {
+    let svc = service();
+    for cluster in ["clu-a", "clu-b"] {
+        call(
+            &svc,
+            "CreateDBCluster",
+            &[("DBClusterIdentifier", cluster), ("Engine", "docdb")],
+        )
+        .await;
+    }
+    for (instance, cluster) in [("inst-a", "clu-a"), ("inst-b", "clu-b")] {
+        call(
+            &svc,
+            "CreateDBInstance",
+            &[
+                ("DBInstanceIdentifier", instance),
+                ("DBClusterIdentifier", cluster),
+                ("DBInstanceClass", "db.r5.large"),
+                ("Engine", "docdb"),
+            ],
+        )
+        .await;
+    }
+
+    // By the instance's own id.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "db-instance-id"),
+                ("Filters.Filter.1.Values.Value.1", "inst-b"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBInstanceIdentifier>inst-b</DBInstanceIdentifier>"),
+        "{xml}"
+    );
+    assert!(
+        !xml.contains("<DBInstanceIdentifier>inst-a</DBInstanceIdentifier>"),
+        "{xml}"
+    );
+
+    // By the cluster it belongs to.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-a"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBInstanceIdentifier>inst-a</DBInstanceIdentifier>"),
+        "{xml}"
+    );
+    assert!(
+        !xml.contains("<DBInstanceIdentifier>inst-b</DBInstanceIdentifier>"),
+        "{xml}"
+    );
+}
+
+#[tokio::test]
+async fn describe_global_clusters_filters_by_member_cluster() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateGlobalCluster",
+        &[("GlobalClusterIdentifier", "glob-1"), ("Engine", "docdb")],
+    )
+    .await;
+    call(
+        &svc,
+        "CreateGlobalCluster",
+        &[("GlobalClusterIdentifier", "glob-2"), ("Engine", "docdb")],
+    )
+    .await;
+
+    // By the global cluster's own identifier.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeGlobalClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "glob-2"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<GlobalClusterIdentifier>glob-2</GlobalClusterIdentifier>"),
+        "{xml}"
+    );
+    assert!(
+        !xml.contains("<GlobalClusterIdentifier>glob-1</GlobalClusterIdentifier>"),
+        "the filter kept an unmatched global cluster: {xml}"
+    );
+}
+
 #[tokio::test]
 async fn envelope_shape_is_correct() {
     let svc = service();
