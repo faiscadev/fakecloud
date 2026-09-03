@@ -5710,3 +5710,329 @@ fn set_arithmetic_on_missing_operand_errors() {
     let ok = evaluate_arithmetic_rhs("a", ":v", true, &item, &names, &values);
     assert!(ok.is_ok());
 }
+
+// ---------------------------------------------------------------------
+// Vector indexes and SearchVectors
+// ---------------------------------------------------------------------
+
+/// An item attribute holding a vector: a DynamoDB `L` of `N`.
+fn vec_attr(values: &[f64]) -> Value {
+    json!({ "L": values.iter().map(|v| json!({ "N": v.to_string() })).collect::<Vec<Value>>() })
+}
+
+/// A request `SearchVector`: `SearchVectorList` is a bare list of
+/// `AttributeValue`, not an `L`-wrapped attribute.
+fn search_vec(values: &[f64]) -> Value {
+    json!(values
+        .iter()
+        .map(|v| json!({ "N": v.to_string() }))
+        .collect::<Vec<Value>>())
+}
+
+fn create_vector_table(svc: &DynamoDbService, distance_function: &str) {
+    let req = make_request(
+        "CreateTable",
+        json!({
+            "TableName": "vec-table",
+            "KeySchema": [{ "AttributeName": "pk", "KeyType": "HASH" }],
+            "AttributeDefinitions": [{ "AttributeName": "pk", "AttributeType": "S" }],
+            "BillingMode": "PAY_PER_REQUEST",
+            "VectorIndexes": [{
+                "IndexName": "embedding-index",
+                "VectorAttribute": { "AttributeName": "embedding" },
+                "Dimensions": 2,
+                "DistanceFunction": distance_function,
+                "SearchSchema": [{ "AttributeName": "pk", "SearchSchemaElementType": "FILTERABLE" }],
+                "Projection": { "ProjectionType": "ALL" },
+            }],
+        }),
+    );
+    svc.create_table(&req).unwrap();
+}
+
+fn put_vector_item(svc: &DynamoDbService, pk: &str, embedding: &[f64]) {
+    let req = make_request(
+        "PutItem",
+        json!({
+            "TableName": "vec-table",
+            "Item": { "pk": { "S": pk }, "embedding": vec_attr(embedding) },
+        }),
+    );
+    svc.put_item(&req).unwrap();
+}
+
+/// `AwsResponse` isn't `Debug`, so `unwrap_err` can't be used directly.
+fn err_of(r: Result<AwsResponse, AwsServiceError>) -> AwsServiceError {
+    match r {
+        Ok(_) => panic!("expected an error"),
+        Err(e) => e,
+    }
+}
+
+fn search(svc: &DynamoDbService, body: Value) -> Value {
+    let resp = svc
+        .search_vectors(&make_request("SearchVectors", body))
+        .unwrap();
+    serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+}
+
+#[test]
+fn create_table_stores_vector_indexes_and_describe_returns_them() {
+    let svc = make_service();
+    create_vector_table(&svc, "COSINE");
+
+    let resp = svc
+        .describe_table(&make_request(
+            "DescribeTable",
+            json!({ "TableName": "vec-table" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    let idx = &body["Table"]["VectorIndexes"][0];
+    assert_eq!(idx["IndexName"], "embedding-index");
+    assert_eq!(idx["Dimensions"], 2);
+    assert_eq!(idx["DistanceFunction"], "COSINE");
+    assert_eq!(idx["VectorAttribute"]["AttributeName"], "embedding");
+    assert_eq!(idx["IndexStatus"], "ACTIVE");
+    assert_eq!(idx["SearchSchema"][0]["AttributeName"], "pk");
+    assert!(idx["IndexArn"]
+        .as_str()
+        .unwrap()
+        .ends_with("/vector-index/embedding-index"));
+
+    // A table with no vector index omits the member rather than sending [].
+    create_test_table(&svc);
+    let resp = svc
+        .describe_table(&make_request(
+            "DescribeTable",
+            json!({ "TableName": "test-table" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(body["Table"].get("VectorIndexes").is_none());
+}
+
+#[test]
+fn update_table_creates_and_deletes_vector_indexes() {
+    let svc = make_service();
+    create_test_table(&svc);
+
+    svc.update_table(&make_request(
+        "UpdateTable",
+        json!({
+            "TableName": "test-table",
+            "VectorIndexUpdates": [{ "Create": {
+                "IndexName": "added",
+                "VectorAttribute": { "AttributeName": "vec" },
+                "Dimensions": 3,
+                "DistanceFunction": "EUCLIDEAN",
+                "Projection": { "ProjectionType": "ALL" },
+            }}],
+        }),
+    ))
+    .unwrap();
+    let resp = svc
+        .describe_table(&make_request(
+            "DescribeTable",
+            json!({ "TableName": "test-table" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert_eq!(body["Table"]["VectorIndexes"][0]["IndexName"], "added");
+    assert_eq!(
+        body["Table"]["VectorIndexes"][0]["DistanceFunction"],
+        "EUCLIDEAN"
+    );
+
+    svc.update_table(&make_request(
+        "UpdateTable",
+        json!({
+            "TableName": "test-table",
+            "VectorIndexUpdates": [{ "Delete": { "IndexName": "added" } }],
+        }),
+    ))
+    .unwrap();
+    let resp = svc
+        .describe_table(&make_request(
+            "DescribeTable",
+            json!({ "TableName": "test-table" }),
+        ))
+        .unwrap();
+    let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+    assert!(body["Table"].get("VectorIndexes").is_none());
+}
+
+#[test]
+fn search_vectors_ranks_by_cosine_similarity() {
+    let svc = make_service();
+    create_vector_table(&svc, "COSINE");
+    // `near` points the same way as the query, `far` points away.
+    put_vector_item(&svc, "near", &[1.0, 0.0]);
+    put_vector_item(&svc, "diag", &[1.0, 1.0]);
+    put_vector_item(&svc, "far", &[-1.0, 0.0]);
+
+    let body = search(
+        &svc,
+        json!({
+            "TableName": "vec-table",
+            "IndexName": "embedding-index",
+            "SearchVector": search_vec(&[1.0, 0.0]),
+            "TopK": 2,
+        }),
+    );
+    let results = body["SearchResults"].as_array().unwrap();
+    assert_eq!(results.len(), 2, "TopK caps the result set");
+    assert_eq!(results[0]["Item"]["pk"]["S"], "near");
+    assert_eq!(results[1]["Item"]["pk"]["S"], "diag");
+    // An identical direction scores 1.0 under cosine.
+    assert!((results[0]["Score"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert!(results[0]["Score"].as_f64().unwrap() > results[1]["Score"].as_f64().unwrap());
+}
+
+#[test]
+fn search_vectors_ranks_euclidean_nearest_first() {
+    let svc = make_service();
+    create_vector_table(&svc, "EUCLIDEAN");
+    put_vector_item(&svc, "close", &[0.0, 1.0]);
+    put_vector_item(&svc, "distant", &[10.0, 10.0]);
+
+    let body = search(
+        &svc,
+        json!({
+            "TableName": "vec-table",
+            "IndexName": "embedding-index",
+            "SearchVector": search_vec(&[0.0, 0.0]),
+            "TopK": 5,
+        }),
+    );
+    let results = body["SearchResults"].as_array().unwrap();
+    // Euclidean is a distance: nearest first, and the score rises with it.
+    assert_eq!(results[0]["Item"]["pk"]["S"], "close");
+    assert!((results[0]["Score"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert!(results[1]["Score"].as_f64().unwrap() > results[0]["Score"].as_f64().unwrap());
+}
+
+#[test]
+fn search_vectors_skips_items_without_a_usable_vector() {
+    let svc = make_service();
+    create_vector_table(&svc, "COSINE");
+    put_vector_item(&svc, "good", &[1.0, 0.0]);
+    // No embedding at all, and an embedding of the wrong width.
+    svc.put_item(&make_request(
+        "PutItem",
+        json!({ "TableName": "vec-table", "Item": { "pk": { "S": "no-vector" } } }),
+    ))
+    .unwrap();
+    put_vector_item(&svc, "wrong-width", &[1.0, 0.0, 0.0]);
+
+    let body = search(
+        &svc,
+        json!({
+            "TableName": "vec-table",
+            "IndexName": "embedding-index",
+            "SearchVector": search_vec(&[1.0, 0.0]),
+            "TopK": 10,
+        }),
+    );
+    let results = body["SearchResults"].as_array().unwrap();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["Item"]["pk"]["S"], "good");
+}
+
+#[test]
+fn search_vectors_honors_projection_and_consumed_capacity() {
+    let svc = make_service();
+    create_vector_table(&svc, "COSINE");
+    put_vector_item(&svc, "only", &[1.0, 0.0]);
+
+    let body = search(
+        &svc,
+        json!({
+            "TableName": "vec-table",
+            "IndexName": "embedding-index",
+            "SearchVector": search_vec(&[1.0, 0.0]),
+            "TopK": 1,
+            "ProjectionExpression": "pk",
+            "ReturnConsumedCapacity": "TOTAL",
+        }),
+    );
+    let item = &body["SearchResults"][0]["Item"];
+    assert_eq!(item["pk"]["S"], "only");
+    assert!(
+        item.get("embedding").is_none(),
+        "projection drops embedding"
+    );
+    assert!(
+        body["ConsumedCapacity"]["VectorSearchRequestBytes"]
+            .as_f64()
+            .unwrap()
+            > 0.0
+    );
+}
+
+#[test]
+fn search_vectors_validates_index_and_vector() {
+    let svc = make_service();
+    create_vector_table(&svc, "COSINE");
+
+    let err = err_of(svc.search_vectors(&make_request(
+        "SearchVectors",
+        json!({
+            "TableName": "vec-table",
+            "IndexName": "no-such-index",
+            "SearchVector": search_vec(&[1.0, 0.0]),
+            "TopK": 1,
+        }),
+    )));
+    assert_eq!(err.code(), "ResourceNotFoundException");
+
+    // A query vector of the wrong width cannot be compared at all.
+    let err = err_of(svc.search_vectors(&make_request(
+        "SearchVectors",
+        json!({
+            "TableName": "vec-table",
+            "IndexName": "embedding-index",
+            "SearchVector": search_vec(&[1.0, 0.0, 0.0]),
+            "TopK": 1,
+        }),
+    )));
+    assert_eq!(err.code(), "ValidationException");
+
+    // TopK is required and at least 1.
+    for top_k in [json!(0), Value::Null] {
+        let mut body = json!({
+            "TableName": "vec-table",
+            "IndexName": "embedding-index",
+            "SearchVector": search_vec(&[1.0, 0.0]),
+        });
+        if !top_k.is_null() {
+            body["TopK"] = top_k;
+        }
+        let err = err_of(svc.search_vectors(&make_request("SearchVectors", body)));
+        assert_eq!(err.code(), "ValidationException");
+    }
+}
+
+#[test]
+fn create_table_rejects_a_malformed_vector_index() {
+    let svc = make_service();
+    for bad in [
+        json!({ "VectorAttribute": { "AttributeName": "v" }, "Dimensions": 2 }),
+        json!({ "IndexName": "i", "Dimensions": 2 }),
+        json!({ "IndexName": "i", "VectorAttribute": { "AttributeName": "v" }, "Dimensions": 0 }),
+        json!({ "IndexName": "i", "VectorAttribute": { "AttributeName": "v" }, "Dimensions": 2,
+                "DistanceFunction": "MANHATTAN" }),
+    ] {
+        let err = err_of(svc.create_table(&make_request(
+            "CreateTable",
+            json!({
+                "TableName": "bad-vec",
+                "KeySchema": [{ "AttributeName": "pk", "KeyType": "HASH" }],
+                "AttributeDefinitions": [{ "AttributeName": "pk", "AttributeType": "S" }],
+                "BillingMode": "PAY_PER_REQUEST",
+                "VectorIndexes": [bad.clone()],
+            }),
+        )));
+        assert_eq!(err.code(), "ValidationException", "{bad}");
+    }
+}

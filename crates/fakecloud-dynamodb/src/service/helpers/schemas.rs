@@ -245,6 +245,81 @@ pub(crate) fn parse_expression_attribute_values(body: &Value) -> HashMap<String,
     values
 }
 
+/// `VectorDistanceFunction` values.
+pub const VECTOR_DISTANCE_FUNCTIONS: &[&str] = &["COSINE", "DOT_PRODUCT", "EUCLIDEAN"];
+
+/// Parse a `VectorIndexes` list (CreateTable) or a `Create` action body
+/// (UpdateTable) into stored indexes. `table_arn` seeds each `IndexArn`.
+pub fn parse_vector_indexes(
+    val: &Value,
+    table_arn: &str,
+) -> Result<Vec<VectorIndex>, AwsServiceError> {
+    let Some(arr) = val.as_array() else {
+        return Ok(Vec::new());
+    };
+    arr.iter()
+        .map(|v| parse_vector_index(v, table_arn))
+        .collect()
+}
+
+pub fn parse_vector_index(v: &Value, table_arn: &str) -> Result<VectorIndex, AwsServiceError> {
+    let invalid = |msg: String| {
+        AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
+    };
+    let index_name = v["IndexName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| invalid("VectorIndex.IndexName is required".to_string()))?
+        .to_string();
+    let vector_attribute = v["VectorAttribute"]["AttributeName"]
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            invalid("VectorIndex.VectorAttribute.AttributeName is required".to_string())
+        })?
+        .to_string();
+    let dimensions = v["Dimensions"]
+        .as_i64()
+        .filter(|d| *d > 0)
+        .ok_or_else(|| invalid("VectorIndex.Dimensions must be a positive integer".to_string()))?;
+    let distance_function = v["DistanceFunction"]
+        .as_str()
+        .unwrap_or("COSINE")
+        .to_string();
+    if !VECTOR_DISTANCE_FUNCTIONS.contains(&distance_function.as_str()) {
+        return Err(invalid(format!(
+            "VectorIndex.DistanceFunction has an invalid value '{distance_function}'"
+        )));
+    }
+    let search_schema = v["SearchSchema"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    Some((
+                        e["AttributeName"].as_str()?.to_string(),
+                        e["SearchSchemaElementType"]
+                            .as_str()
+                            .unwrap_or("FILTERABLE")
+                            .to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(VectorIndex {
+        index_arn: format!("{table_arn}/vector-index/{index_name}"),
+        index_name,
+        vector_attribute,
+        dimensions,
+        distance_function,
+        search_schema,
+        projection: parse_projection(&v["Projection"]),
+        // Creation is synchronous here, so the index is queryable immediately.
+        status: "ACTIVE".to_string(),
+    })
+}
+
 #[cfg(test)]
 mod schema_validation_tests {
     use super::*;

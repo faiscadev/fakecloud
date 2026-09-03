@@ -446,6 +446,7 @@ mod tests {
             deletion_protection_enabled: false,
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
+            vector_indexes: Vec::new(),
         };
         let rec = StreamRecord {
             event_id: "e1".into(),
