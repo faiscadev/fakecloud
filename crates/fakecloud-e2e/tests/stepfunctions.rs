@@ -4563,3 +4563,157 @@ async fn sfn_pass_evaluates_parameters() {
     let output: serde_json::Value = serde_json::from_str(desc.output().unwrap()).unwrap();
     assert_eq!(output, json!({"renamed": 42, "constant": "fixed"}));
 }
+
+/// Step Functions' DynamoDB integration writes straight into table state, so
+/// it has to keep the table's primary-key index in step the same way the
+/// DynamoDB API does. A Task-driven putItem followed by a deleteItem leaves
+/// the table with the same number of rows it started with, which is exactly
+/// the shape that hid a stale index: the row count matched again while every
+/// recorded position had moved. A GetItem for the deleted key then answered
+/// with a different row's data (#2502 follow-up).
+#[tokio::test]
+async fn sfn_dynamodb_put_then_delete_keeps_key_lookups_correct() {
+    let server = TestServer::start().await;
+    let sfn = server.sfn_client().await;
+    let ddb = server.dynamodb_client().await;
+
+    ddb.create_table()
+        .table_name("sfn-index-table")
+        .attribute_definitions(
+            aws_sdk_dynamodb::types::AttributeDefinition::builder()
+                .attribute_name("pk")
+                .attribute_type(aws_sdk_dynamodb::types::ScalarAttributeType::S)
+                .build()
+                .unwrap(),
+        )
+        .key_schema(
+            aws_sdk_dynamodb::types::KeySchemaElement::builder()
+                .attribute_name("pk")
+                .key_type(aws_sdk_dynamodb::types::KeyType::Hash)
+                .build()
+                .unwrap(),
+        )
+        .billing_mode(aws_sdk_dynamodb::types::BillingMode::PayPerRequest)
+        .send()
+        .await
+        .unwrap();
+
+    // Seed through the normal API so the table has a populated key index.
+    ddb.put_item()
+        .table_name("sfn-index-table")
+        .item(
+            "pk",
+            aws_sdk_dynamodb::types::AttributeValue::S("a".to_string()),
+        )
+        .item(
+            "data",
+            aws_sdk_dynamodb::types::AttributeValue::S("seeded".to_string()),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let definition = json!({
+        "StartAt": "PutB",
+        "States": {
+            "PutB": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::dynamodb:putItem",
+                "Parameters": {
+                    "TableName": "sfn-index-table",
+                    "Item": {"pk": {"S": "b"}, "data": {"S": "from-sfn"}}
+                },
+                "ResultPath": "$.put",
+                "Next": "DeleteA"
+            },
+            "DeleteA": {
+                "Type": "Task",
+                "Resource": "arn:aws:states:::dynamodb:deleteItem",
+                "Parameters": {
+                    "TableName": "sfn-index-table",
+                    "Key": {"pk": {"S": "a"}}
+                },
+                "End": true
+            }
+        }
+    })
+    .to_string();
+
+    let create = sfn
+        .create_state_machine()
+        .name("ddb-index-sm")
+        .definition(definition)
+        .role_arn("arn:aws:iam::123456789012:role/test-role")
+        .send()
+        .await
+        .unwrap();
+    let start = sfn
+        .start_execution()
+        .state_machine_arn(create.state_machine_arn())
+        .input(r#"{}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        wait_for_execution(&sfn, start.execution_arn()).await,
+        "SUCCEEDED"
+    );
+
+    // The deleted key must be gone, not answered with the surviving row.
+    let gone = ddb
+        .get_item()
+        .table_name("sfn-index-table")
+        .key(
+            "pk",
+            aws_sdk_dynamodb::types::AttributeValue::S("a".to_string()),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        gone.item().is_none(),
+        "deleted key still resolves: {gone:?}"
+    );
+
+    let kept = ddb
+        .get_item()
+        .table_name("sfn-index-table")
+        .key(
+            "pk",
+            aws_sdk_dynamodb::types::AttributeValue::S("b".to_string()),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        kept.item().unwrap().get("data").unwrap().as_s().unwrap(),
+        "from-sfn"
+    );
+
+    // Writing the Step-Functions-created key must overwrite it, not duplicate.
+    ddb.put_item()
+        .table_name("sfn-index-table")
+        .item(
+            "pk",
+            aws_sdk_dynamodb::types::AttributeValue::S("b".to_string()),
+        )
+        .item(
+            "data",
+            aws_sdk_dynamodb::types::AttributeValue::S("overwritten".to_string()),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let scan = ddb
+        .scan()
+        .table_name("sfn-index-table")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(scan.count(), 1, "table rows: {:?}", scan.items());
+    assert_eq!(
+        scan.items()[0].get("data").unwrap().as_s().unwrap(),
+        "overwritten"
+    );
+}

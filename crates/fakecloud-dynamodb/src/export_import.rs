@@ -284,7 +284,7 @@ fn build_table(
         attribute_definitions,
         provisioned_throughput,
         items,
-        // Rebuilt lazily on first use (items is assigned in bulk here).
+        // Left unbuilt here; the `recalculate_stats()` below builds it.
         key_index: Default::default(),
         gsi: crate::parse_gsi(&shape["GlobalSecondaryIndexes"], &billing_mode),
         lsi: crate::parse_lsi(&shape["LocalSecondaryIndexes"]),

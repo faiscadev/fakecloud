@@ -606,12 +606,11 @@ pub(crate) fn invoke_dynamodb_put_item(
         )
     })?;
 
-    // Replace existing item with same key, or insert new
-    if let Some(idx) = table.find_item_index(&item_map) {
-        table.items[idx] = item_map;
-    } else {
-        table.items.push(item_map);
-    }
+    // Replace existing item with same key, or insert new. Goes through the
+    // table helper so `items`, the key index and the cached item_count /
+    // size_bytes stay in step -- a bare `items.push` here left the index
+    // pointing at the wrong rows for every later write (#2502).
+    table.put_item_at_key(item_map);
 
     Ok(json!({}))
 }
@@ -656,9 +655,7 @@ pub(crate) fn invoke_dynamodb_delete_item(
         )
     })?;
 
-    if let Some(idx) = table.find_item_index(&key_map) {
-        table.items.remove(idx);
-    }
+    table.remove_item_by_key(&key_map);
 
     Ok(json!({}))
 }
@@ -719,18 +716,23 @@ pub(crate) fn invoke_dynamodb_update_item(
             .cloned()
             .unwrap_or_default();
 
+        table.ensure_key_index();
         if let Some(idx) = table.find_item_index(&key_map) {
+            let slot_before = table.snapshot_item_at(idx);
             apply_update_expression(
                 &mut table.items[idx],
                 update_expr,
                 &attr_values,
                 &attr_names,
             );
+            // Settles the cached size, and re-points the index if the
+            // expression rewrote a key attribute.
+            table.sync_item_at(idx, slot_before);
         } else {
             // Create new item with key + update expression values
             let mut new_item = key_map;
             apply_update_expression(&mut new_item, update_expr, &attr_values, &attr_names);
-            table.items.push(new_item);
+            table.put_item_at_key(new_item);
         }
     }
 

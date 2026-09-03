@@ -5710,3 +5710,79 @@ fn set_arithmetic_on_missing_operand_errors() {
     let ok = evaluate_arithmetic_rhs("a", ":v", true, &item, &names, &values);
     assert!(ok.is_ok());
 }
+
+/// An UpdateExpression is applied clause by clause, so one that rewrites the
+/// primary key and *then* fails leaves the row stored under its new key. The
+/// key index has to follow it, or the old key still resolves to that row and a
+/// later write clobbers it (#2502 follow-up).
+#[tokio::test]
+async fn update_item_failing_after_a_key_rewrite_leaves_no_stale_index_entry() {
+    let svc = make_service();
+    create_test_table(&svc);
+
+    call_dynamodb(
+        &svc,
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": {"pk": {"S": "old"}, "count": {"S": "not-a-number"}}
+        }),
+    )
+    .await;
+
+    // `SET pk = :new` lands, then the arithmetic on a string operand fails.
+    let err = svc
+        .handle(make_request(
+            "UpdateItem",
+            json!({
+                "TableName": "test-table",
+                "Key": {"pk": {"S": "old"}},
+                "UpdateExpression": "SET pk = :new, #c = #c + :one",
+                "ExpressionAttributeNames": {"#c": "count"},
+                "ExpressionAttributeValues": {":new": {"S": "new"}, ":one": {"N": "1"}}
+            }),
+        ))
+        .await
+        .err()
+        .expect("the arithmetic on a string operand must be rejected");
+    assert!(
+        err.to_string().contains("incorrect data type"),
+        "unexpected error: {err}"
+    );
+
+    // Whatever landed, the old key must not resolve to the rewritten row.
+    let got = call_dynamodb(
+        &svc,
+        "GetItem",
+        json!({"TableName": "test-table", "Key": {"pk": {"S": "old"}}}),
+    )
+    .await;
+    let by_old_key = got.get("Item").and_then(|i| i.get("pk")).cloned();
+    assert!(
+        by_old_key.is_none() || by_old_key == Some(json!({"S": "old"})),
+        "the old key resolved to a row carrying a different key: {got}"
+    );
+
+    // And a write to the old key must not destroy the rewritten row.
+    call_dynamodb(
+        &svc,
+        "PutItem",
+        json!({
+            "TableName": "test-table",
+            "Item": {"pk": {"S": "old"}, "marker": {"S": "fresh"}}
+        }),
+    )
+    .await;
+    let scan = call_dynamodb(&svc, "Scan", json!({"TableName": "test-table"})).await;
+    let rows = scan["Items"].as_array().unwrap();
+    let keys: Vec<&str> = rows.iter().filter_map(|r| r["pk"]["S"].as_str()).collect();
+    assert!(
+        keys.contains(&"old"),
+        "the fresh write went missing: {scan}"
+    );
+    assert_eq!(
+        keys.len(),
+        rows.len(),
+        "a row lost its key attribute: {scan}"
+    );
+}

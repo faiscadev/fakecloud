@@ -46,6 +46,7 @@ impl DynamoDbService {
             validate_item_attribute_values(&item)?;
 
             let key = extract_key(table, &item);
+            table.ensure_key_index();
             let existing_idx = table.find_item_index(&key);
 
             if let Some(cond) = condition.as_deref() {
@@ -263,6 +264,7 @@ impl DynamoDbService {
             let condition =
                 resolve_write_condition(&body, &mut expr_attr_names, &mut expr_attr_values)?;
 
+            table.ensure_key_index();
             let existing_idx = table.find_item_index(&key);
 
             if let Some(cond) = condition.as_deref() {
@@ -354,6 +356,10 @@ impl DynamoDbService {
         let table = get_table_mut(&mut state.tables, table_name)?;
 
         validate_key_attributes_in_key(table, &key)?;
+        // Build the index up front: the `&self` lookup below cannot, so
+        // without this an UpdateItem-only workload against a restored table
+        // would scan forever.
+        table.ensure_key_index();
 
         let mut expr_attr_names = parse_expression_attribute_names(&body);
         let mut expr_attr_values = parse_expression_attribute_values(&body);
@@ -400,14 +406,14 @@ impl DynamoDbService {
                 }
                 // Registers the row in the key index and the stats; the
                 // attribute updates below then mutate it in place, and the
-                // size delta for that is settled by `sync_item_size_at`.
+                // deltas for that are settled by `sync_item_at`.
                 table.put_item_at_key(new_item).0
             }
         };
 
-        // The size this row contributes before the update is applied; paired
-        // with `sync_item_size_at` after it to keep size_bytes exact.
-        let size_before = table.item_size_at(idx);
+        // What this row contributes before the update is applied; paired with
+        // `sync_item_at` after it to keep size_bytes and the key index exact.
+        let slot_before = table.snapshot_item_at(idx);
 
         // Capture old item for stream/kinesis (before update)
         let needs_change_capture = table.stream_enabled
@@ -434,20 +440,31 @@ impl DynamoDbService {
             None
         };
 
-        if let Some(expr) = update_expression {
+        // An UpdateExpression is applied clause by clause and can fail partway
+        // (a type error on a later operand), leaving the row already rewritten
+        // -- possibly under a different key. Settle the cached size and the
+        // index against whatever landed before propagating, or a later write
+        // addresses the row under a key it no longer has.
+        let applied = if let Some(expr) = update_expression {
             apply_update_expression(
                 &mut table.items[idx],
                 expr,
                 &expr_attr_names,
                 &expr_attr_values,
-            )?;
+            )
         } else if let Some(updates) = body["AttributeUpdates"].as_object() {
             // Legacy AttributeUpdates (pre-2014 UpdateItem), still emitted by
             // the AWS SDK for Java v1, older boto3, and the Terraform provider.
             // Without this an UpdateItem using AttributeUpdates wrote nothing and
             // (on a missing key) left a key-only stub item -- silent data loss
             // (bug-audit 2026-06-20, 1.2).
-            apply_attribute_updates(&mut table.items[idx], updates)?;
+            apply_attribute_updates(&mut table.items[idx], updates)
+        } else {
+            Ok(())
+        };
+        if let Err(err) = applied {
+            table.sync_item_at(idx, slot_before);
+            return Err(err);
         }
 
         // Compute the ReturnValues payload per AWS semantics:
@@ -512,9 +529,9 @@ impl DynamoDbService {
         });
 
         // The update rewrote the item at `idx` in place; only that row's
-        // contribution to size_bytes can have changed, so settle it rather
-        // than re-summing the whole table (#2502).
-        table.sync_item_size_at(idx, size_before);
+        // contribution to size_bytes and its indexed key can have changed, so
+        // settle those rather than re-summing the whole table (#2502).
+        table.sync_item_at(idx, slot_before);
 
         let icm = build_item_collection_metrics(&return_icm, table, &key);
 

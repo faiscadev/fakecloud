@@ -944,6 +944,10 @@ impl DynamoDbService {
 
                     let table =
                         get_table_mut(&mut state.tables, table_name).map_err(|e| (op_idx, e))?;
+                    // The `&self` lookups below cannot build the index, so a
+                    // restored table would scan on every transactional update
+                    // without this.
+                    table.ensure_key_index();
                     let old_image = table.find_item_index(&key).map(|i| table.items[i].clone());
                     let is_modify = old_image.is_some();
                     let idx = match table.find_item_index(&key) {
@@ -956,7 +960,7 @@ impl DynamoDbService {
                             table.put_item_at_key(new_item).0
                         }
                     };
-                    let size_before = table.item_size_at(idx);
+                    let slot_before = table.snapshot_item_at(idx);
 
                     if let Some(expr) = update_expression {
                         apply_update_expression(
@@ -968,7 +972,7 @@ impl DynamoDbService {
                         .map_err(|e| (op_idx, e))?;
                     }
                     let new_image = table.items[idx].clone();
-                    table.sync_item_size_at(idx, size_before);
+                    table.sync_item_at(idx, slot_before);
                     let event_name = if is_modify { "MODIFY" } else { "INSERT" };
                     if let Some(record) = crate::streams::generate_stream_record(
                         table,
