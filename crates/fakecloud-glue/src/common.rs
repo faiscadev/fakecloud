@@ -238,6 +238,32 @@ pub(crate) fn validate_constraints(action: &str, body: &Value) -> Result<(), Aws
                     return Err(invalid_input(format!("{} exceeds maximum {max}", c.field)));
                 }
             }
+        } else {
+            // `@length` on a list or map constrains its cardinality, not a
+            // string length, so those shapes are checked by element count.
+            let count = match v {
+                Value::Array(a) => Some(a.len() as u64),
+                Value::Object(o) => Some(o.len() as u64),
+                _ => None,
+            };
+            if let Some(count) = count {
+                if let Some(min) = c.len_min {
+                    if count < min {
+                        return Err(invalid_input(format!(
+                            "{} must have at least {min} entries",
+                            c.field
+                        )));
+                    }
+                }
+                if let Some(max) = c.len_max {
+                    if count > max {
+                        return Err(invalid_input(format!(
+                            "{} must have at most {max} entries",
+                            c.field
+                        )));
+                    }
+                }
+            }
         }
     }
     Ok(())

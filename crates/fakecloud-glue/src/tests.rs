@@ -1528,8 +1528,55 @@ fn form_type_in_use_cannot_be_deleted() {
         "ConflictException"
     );
 
-    // Once nothing references it, it goes.
     svc.delete_asset(&req("DeleteAsset", json!({ "Identifier": "a-1" })))
+        .unwrap();
+
+    // An asset type referencing it holds it too. Asset-type forms name the
+    // reference `FormTypeIdentifier`, one level inside the Forms map.
+    svc.put_asset_type(&req(
+        "PutAssetType",
+        json!({ "Name": "typed", "Forms": { "f1": { "FormTypeIdentifier": ft.clone() } } }),
+    ))
+    .unwrap();
+    assert_eq!(
+        err_code(svc.delete_form_type(&req("DeleteFormType", json!({ "Identifier": ft.clone() })))),
+        "ConflictException",
+        "an asset type's form reference must block the delete"
+    );
+    let typed_id = body_of(
+        svc.put_asset_type(&req(
+            "PutAssetType",
+            json!({ "Name": "typed", "Forms": { "f1": { "FormTypeIdentifier": "other" } } }),
+        ))
+        .unwrap(),
+    )["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.delete_asset_type(&req("DeleteAssetType", json!({ "Identifier": typed_id })))
+        .unwrap();
+
+    // An attachment referencing it holds it as well.
+    let plain_type = make_asset_type(&svc, "plain");
+    make_asset_with_items(&svc, &plain_type, "a-2");
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-2",
+            "AttachmentName": "readme",
+            "Content": "hello",
+            "FormTypeId": ft.clone(),
+        }),
+    ))
+    .unwrap();
+    assert_eq!(
+        err_code(svc.delete_form_type(&req("DeleteFormType", json!({ "Identifier": ft.clone() })))),
+        "ConflictException",
+        "an attachment's form reference must block the delete"
+    );
+
+    // Once nothing references it, it goes.
+    svc.delete_asset(&req("DeleteAsset", json!({ "Identifier": "a-2" })))
         .unwrap();
     assert!(svc
         .delete_form_type(&req("DeleteFormType", json!({ "Identifier": ft })))
@@ -1834,4 +1881,147 @@ fn data_catalog_export_configuration_round_trips() {
         ))),
         "InvalidInputException"
     );
+}
+
+#[test]
+fn get_asset_reports_attachments_and_iterable_forms() {
+    let svc = GlueService::default();
+    let ft = make_form_type(&svc, "note");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    // A form whose content is a JSON array is the iterable one.
+    let asset = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "a-1" })))
+            .unwrap(),
+    );
+    assert_eq!(asset["IterableForms"]["rows"]["FormTypeId"], "ft-1");
+    assert!(asset.get("Attachments").is_none());
+
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "AttachmentName": "readme",
+            "Content": "hello",
+            "FormTypeId": ft.clone(),
+        }),
+    ))
+    .unwrap();
+    // An item-scoped attachment belongs to its item, not to the asset.
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "i-1",
+            "AttachmentName": "scoped",
+            "Content": "inner",
+            "FormTypeId": ft,
+        }),
+    ))
+    .unwrap();
+
+    let asset = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "a-1" })))
+            .unwrap(),
+    );
+    assert_eq!(asset["Attachments"]["readme"]["Content"], "hello");
+    assert!(
+        asset["Attachments"].get("scoped").is_none(),
+        "an item-scoped attachment must not surface as an asset attachment"
+    );
+}
+
+#[test]
+fn search_assets_evaluates_the_filter_clause() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    make_asset(&svc, &type_id, "a-1", "sales", Some("quarterly revenue"));
+    make_asset(&svc, &type_id, "a-2", "hr", Some("headcount"));
+
+    let search = |clause: Value| -> Vec<String> {
+        let out = body_of(
+            svc.search_assets(&req("SearchAssets", json!({ "FilterClause": clause })))
+                .unwrap(),
+        );
+        out["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["Id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        search(json!({
+            "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "sales" }
+        })),
+        vec!["a-1".to_string()]
+    );
+
+    // The two list arms nest.
+    assert_eq!(
+        search(json!({
+            "OrAnyFilters": [
+                { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "sales" } },
+                { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "hr" } },
+            ]
+        }))
+        .len(),
+        2
+    );
+    assert!(search(json!({
+        "AndAllFilters": [
+            { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "sales" } },
+            { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "hr" } },
+        ]
+    }))
+    .is_empty());
+
+    // notExists matches the assets that lack the attribute entirely.
+    make_asset(&svc, &type_id, "a-3", "ops", None);
+    assert_eq!(
+        search(json!({
+            "AttributeFilter": { "Attribute": "AssetDescription", "Operator": "notExists" }
+        })),
+        vec!["a-3".to_string()]
+    );
+
+    // SearchText and the filter both have to hold.
+    let out = body_of(
+        svc.search_assets(&req(
+            "SearchAssets",
+            json!({
+                "SearchText": "sales",
+                "FilterClause": {
+                    "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "hr" }
+                },
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(out["Items"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn list_and_map_constraints_are_checked_by_cardinality() {
+    use crate::common::validate_constraints;
+
+    // GlossaryTermIdentifiers is a list with a @length maximum; a string-length
+    // check would never fire on it.
+    let one = json!({ "AssetIdentifier": "a", "GlossaryTermIdentifiers": ["t-1"] });
+    assert!(validate_constraints("AssociateGlossaryTerms", &one).is_ok());
+
+    let too_many: Vec<String> = (0..1000).map(|i| format!("t-{i}")).collect();
+    let over = json!({ "AssetIdentifier": "a", "GlossaryTermIdentifiers": too_many });
+    let bounded = crate::constraints::constraints_for("AssociateGlossaryTerms")
+        .iter()
+        .any(|c| c.field == "GlossaryTermIdentifiers" && c.len_max.is_some());
+    if bounded {
+        assert!(
+            validate_constraints("AssociateGlossaryTerms", &over).is_err(),
+            "an oversized list must be rejected"
+        );
+    }
 }

@@ -30,6 +30,110 @@ fn str_list(body: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Evaluate a `SearchFilterClause`. The shape is a union, so exactly one of
+/// `AndAllFilters`, `OrAnyFilters`, `AttributeFilter`, or `MapFilter` is set,
+/// and clauses nest through the two list arms.
+fn matches_filter_clause(asset: &Value, clause: &Value) -> bool {
+    if let Some(all) = clause.get("AndAllFilters").and_then(Value::as_array) {
+        return all.iter().all(|c| matches_filter_clause(asset, c));
+    }
+    if let Some(any) = clause.get("OrAnyFilters").and_then(Value::as_array) {
+        return any.iter().any(|c| matches_filter_clause(asset, c));
+    }
+    if let Some(f) = clause.get("AttributeFilter") {
+        return matches_attribute_filter(asset, f);
+    }
+    if let Some(f) = clause.get("MapFilter") {
+        // A map filter addresses one key inside a form on the asset.
+        let (Some(key), Some(attr)) = (
+            f.get("Key").and_then(Value::as_str),
+            f.get("Attribute").and_then(Value::as_str),
+        ) else {
+            return true;
+        };
+        let value = asset
+            .get("Forms")
+            .and_then(|forms| forms.get(attr))
+            .and_then(|form| form_field(form, key));
+        return compare(
+            value.as_deref(),
+            f.get("Operator")
+                .and_then(Value::as_str)
+                .unwrap_or("equals"),
+            f.get("Value").and_then(Value::as_str),
+        );
+    }
+    // An empty clause constrains nothing.
+    true
+}
+
+/// One key of a form's JSON content, as a string.
+fn form_field(form: &Value, key: &str) -> Option<String> {
+    let content = match form.get("Content") {
+        Some(Value::String(s)) => serde_json::from_str::<Value>(s.as_str()).ok()?,
+        other => other.cloned()?,
+    };
+    let v = content.get(key)?;
+    Some(match v {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    })
+}
+
+fn matches_attribute_filter(asset: &Value, f: &Value) -> bool {
+    let Some(attribute) = f.get("Attribute").and_then(Value::as_str) else {
+        return true;
+    };
+    // Search attributes name the response field, which is not always the name
+    // the asset is stored under.
+    let stored = match attribute {
+        "AssetName" => "Name",
+        "AssetDescription" => "Description",
+        other => other,
+    };
+    let value = asset.get(stored).and_then(|v| match v {
+        Value::String(s) => Some(s.clone()),
+        Value::Null => None,
+        other => Some(other.to_string()),
+    });
+    compare(
+        value.as_deref(),
+        f.get("Operator")
+            .and_then(Value::as_str)
+            .unwrap_or("equals"),
+        f.get("Value").and_then(Value::as_str),
+    )
+}
+
+/// The modeled `SearchFilterOperator` set. Ordering comparisons fall back to
+/// string ordering when either side is not a number, which is how mixed
+/// attribute types have to be handled without a schema for each one.
+fn compare(actual: Option<&str>, operator: &str, wanted: Option<&str>) -> bool {
+    if operator == "notExists" {
+        return actual.is_none();
+    }
+    let (Some(actual), Some(wanted)) = (actual, wanted) else {
+        return false;
+    };
+    if operator == "equals" {
+        return actual == wanted;
+    }
+    let ordering = match (actual.parse::<f64>(), wanted.parse::<f64>()) {
+        (Ok(a), Ok(b)) => a.partial_cmp(&b),
+        _ => Some(actual.cmp(wanted)),
+    };
+    let Some(ordering) = ordering else {
+        return false;
+    };
+    match operator {
+        "greaterThan" => ordering.is_gt(),
+        "greaterThanOrEquals" => ordering.is_ge(),
+        "lessThan" => ordering.is_lt(),
+        "lessThanOrEquals" => ordering.is_le(),
+        _ => false,
+    }
+}
+
 impl GlueService {
     // ---- glossaries ----
 
@@ -482,6 +586,14 @@ impl GlueService {
                 out["GlossaryTerms"] = json!(terms);
             }
         }
+        // Attachments and iterable forms are modeled on the response too, so
+        // PutAttachment and an iterable form are visible from the asset alone.
+        if let Some(attachments) = crate::business_forms::asset_attachments(state, id) {
+            out["Attachments"] = attachments;
+        }
+        if let Some(forms) = crate::business_forms::asset_iterable_forms(a) {
+            out["IterableForms"] = forms;
+        }
         Ok(AwsResponse::ok_json(out))
     }
 
@@ -519,21 +631,26 @@ impl GlueService {
             }
         }
 
+        let filter = body.get("FilterClause").filter(|v| v.is_object());
+
         let accounts = self.state.read();
         let empty = Default::default();
         let state = accounts.get(&req.account_id).unwrap_or(&empty);
         let mut items: Vec<Value> = state
             .assets
             .values()
-            // A real substring match over the asset's name and description —
-            // an empty SearchText matches everything, as AWS does.
+            // A real substring match over the asset's name and description --
+            // an empty SearchText matches everything, as AWS does. A
+            // FilterClause narrows further, and both must hold.
             .filter(|a| {
-                if search_text.is_empty() {
-                    return true;
+                if !search_text.is_empty() {
+                    let name = a["Name"].as_str().unwrap_or_default().to_lowercase();
+                    let desc = a["Description"].as_str().unwrap_or_default().to_lowercase();
+                    if !name.contains(&search_text) && !desc.contains(&search_text) {
+                        return false;
+                    }
                 }
-                let name = a["Name"].as_str().unwrap_or_default().to_lowercase();
-                let desc = a["Description"].as_str().unwrap_or_default().to_lowercase();
-                name.contains(&search_text) || desc.contains(&search_text)
+                filter.is_none_or(|f| matches_filter_clause(a, f))
             })
             .map(|a| {
                 let mut item = json!({

@@ -130,10 +130,18 @@ impl GlueService {
                         .any(|e| e.get("FormTypeId").and_then(Value::as_str) == Some(id.as_str()))
                 })
         });
-        let used_by_type = state
-            .asset_types
-            .values()
-            .any(|t| t["FormTypeId"].as_str() == Some(id.as_str()));
+        // An asset type's forms are a map of form name -> { FormTypeIdentifier },
+        // so the reference lives one level down under a different member name
+        // than an asset's own forms use.
+        let used_by_type = state.asset_types.values().any(|t| {
+            t.get("Forms")
+                .and_then(Value::as_object)
+                .is_some_and(|forms| {
+                    forms.values().any(|e| {
+                        e.get("FormTypeIdentifier").and_then(Value::as_str) == Some(id.as_str())
+                    })
+                })
+        });
         let used_by_attachment = state
             .attachments
             .values()
@@ -465,4 +473,41 @@ pub(crate) fn iterable_item_exists(
     iterable_items(state, asset_id, form)
         .iter()
         .any(|it| item_matches(it, item))
+}
+
+/// An asset's attachments as an `AssetFormMap`, keyed by attachment name.
+/// Only the asset-level ones: item-scoped attachments belong to their item.
+pub(crate) fn asset_attachments(state: &GlueState, asset_id: &str) -> Option<Value> {
+    let prefix = format!("{asset_id}\u{0}");
+    let map: serde_json::Map<String, Value> = state
+        .attachments
+        .iter()
+        .filter(|(k, _)| k.starts_with(&prefix) && k[prefix.len()..].find('\u{0}').is_none())
+        .map(|(_, a)| {
+            (
+                a["AttachmentName"].as_str().unwrap_or_default().to_string(),
+                json!({ "FormTypeId": a["FormTypeId"], "Content": a["Content"] }),
+            )
+        })
+        .collect();
+    (!map.is_empty()).then(|| Value::Object(map))
+}
+
+/// The asset's iterable forms as an `IterableFormMap`. A form is iterable when
+/// its content is a JSON array, which is what distinguishes it from a plain
+/// single-valued form.
+pub(crate) fn asset_iterable_forms(asset: &Value) -> Option<Value> {
+    let forms = asset.get("Forms")?.as_object()?;
+    let map: serde_json::Map<String, Value> = forms
+        .iter()
+        .filter(|(_, entry)| {
+            let parsed = match entry.get("Content") {
+                Some(Value::String(s)) => serde_json::from_str::<Value>(s.as_str()).ok(),
+                other => other.cloned(),
+            };
+            parsed.as_ref().is_some_and(Value::is_array)
+        })
+        .map(|(name, entry)| (name.clone(), json!({ "FormTypeId": entry["FormTypeId"] })))
+        .collect();
+    (!map.is_empty()).then(|| Value::Object(map))
 }
