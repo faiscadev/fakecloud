@@ -126,6 +126,14 @@ pub(crate) fn structural_error(body: &str) -> Option<String> {
         );
     }
     for (logical_id, resource) in resources {
+        // Shape first. `Resources: {Q: not-an-object}` reported "must contain
+        // a Type member", which points the reader at a member they cannot add
+        // -- the entry is a scalar, not a resource.
+        if !resource.is_object() {
+            return Some(format!(
+                "Template format error: [/Resources/{logical_id}] must be an object."
+            ));
+        }
         let has_type = resource
             .get("Type")
             .and_then(Value::as_str)
@@ -137,6 +145,34 @@ pub(crate) fn structural_error(body: &str) -> Option<String> {
             ));
         }
     }
+
+    // `Type` is required in a parameter declaration; CloudFormation rejects a
+    // template without it rather than inferring one. Defaulting to String here
+    // would report a clean summary for a template that create-stack then
+    // refuses -- the false-green this PR exists to close.
+    if let Some(declared) = value.get("Parameters") {
+        let Some(declared) = declared.as_object() else {
+            return Some("Template format error: [/Parameters] must be an object.".to_string());
+        };
+        for (name, spec) in declared {
+            if !spec.is_object() {
+                return Some(format!(
+                    "Template format error: [/Parameters/{name}] must be an object."
+                ));
+            }
+            let has_type = spec
+                .get("Type")
+                .and_then(Value::as_str)
+                .is_some_and(|t| !t.is_empty());
+            if !has_type {
+                return Some(format!(
+                    "Template format error: Every Parameters object must contain a Type member. \
+                     Parameter {name} does not."
+                ));
+            }
+        }
+    }
+
     None
 }
 
@@ -195,6 +231,10 @@ fn parameters(value: &Value) -> Vec<SummaryParameter> {
             // reported in its JSON spelling, which is how it arrives on the
             // wire everywhere else in this crate.
             default_value: spec.get("Default").and_then(scalar_to_string),
+            // A validated template always carries a Type -- `structural_error`
+            // rejects one that does not. This fallback is for the lenient
+            // path only, where `summarize` runs on a body no structural check
+            // ever saw, and must not invent a type on the validated path.
             parameter_type: spec
                 .get("Type")
                 .and_then(Value::as_str)
@@ -691,6 +731,41 @@ Resources:
         assert_eq!(s.capabilities, ["CAPABILITY_AUTO_EXPAND"]);
         let reason = s.capabilities_reason.expect("a reason must be given");
         assert!(reason.contains("AWS::Serverless-2016-10-31"), "{reason}");
+    }
+
+    #[test]
+    fn a_parameter_without_a_type_is_rejected() {
+        // AWS requires Type in a parameter declaration; inferring String here
+        // would validate a template create-stack then refuses.
+        let body = "Parameters:\n  Env:\n    Description: no type\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n";
+        let err = structural_error(body).expect("a typeless parameter must be reported");
+        assert!(err.contains("Parameter Env does not"), "{err}");
+
+        // With a Type it passes.
+        let ok =
+            "Parameters:\n  Env:\n    Type: String\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n";
+        assert_eq!(structural_error(ok), None);
+    }
+
+    #[test]
+    fn a_non_object_entry_is_reported_by_its_shape() {
+        // Not "must contain a Type member" -- the entry is a scalar, so there
+        // is no member to add.
+        let resource = structural_error("Resources:\n  Q: not-an-object\n")
+            .expect("a scalar resource must be reported");
+        assert!(
+            resource.contains("[/Resources/Q] must be an object"),
+            "{resource}"
+        );
+
+        let parameter = structural_error(
+            "Parameters:\n  Env: not-an-object\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n",
+        )
+        .expect("a scalar parameter must be reported");
+        assert!(
+            parameter.contains("[/Parameters/Env] must be an object"),
+            "{parameter}"
+        );
     }
 
     #[test]
