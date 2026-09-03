@@ -100,6 +100,10 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "ListResourcesForWebACL",
     "ListRuleGroups",
     "ListTagsForResource",
+    "GetRevenueStatistics",
+    "GetRevenueStatisticsSummary",
+    "GetRevenueStatisticsTimeSeries",
+    "ListSettlementRecords",
     "ListWebACLs",
     "PutLoggingConfiguration",
     "PutManagedRuleSetVersions",
@@ -125,6 +129,7 @@ mod capacity;
 mod ip_sets;
 mod logging;
 mod mobile_sdk;
+mod monetization;
 mod permission_policy;
 mod regex_pattern_sets;
 mod rule_groups;
@@ -249,6 +254,10 @@ impl AwsService for Wafv2Service {
         let result = match req.action.as_str() {
             "CreateWebACL" => self.create_web_acl(&req),
             "GetWebACL" => self.get_web_acl(&req),
+            "GetRevenueStatistics" => self.get_revenue_statistics(&req),
+            "GetRevenueStatisticsSummary" => self.get_revenue_statistics_summary(&req),
+            "GetRevenueStatisticsTimeSeries" => self.get_revenue_statistics_time_series(&req),
+            "ListSettlementRecords" => self.list_settlement_records(&req),
             "ListWebACLs" => self.list_web_acls(&req),
             "UpdateWebACL" => self.update_web_acl(&req),
             "DeleteWebACL" => self.delete_web_acl(&req),
