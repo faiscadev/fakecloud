@@ -3682,6 +3682,28 @@ async fn ec2_describe_image_attribute() {
     assert_eq!(r.image_id(), Some(id.as_str()));
 }
 
+#[test_action("ec2", "CreateApplicationStatusCheck", checksum = "b2cad0c2")]
+#[test_action("ec2", "DescribeApplicationStatusChecks", checksum = "95788e0d")]
+#[test_action("ec2", "ModifyApplicationStatusCheck", checksum = "9645f038")]
+#[test_action("ec2", "DeleteApplicationStatusCheck", checksum = "136ed6af")]
+#[test_action("ec2", "AssociateApplicationStatusCheck", checksum = "3881384f")]
+#[test_action("ec2", "DisassociateApplicationStatusCheck", checksum = "6d7d99ac")]
+#[test_action(
+    "ec2",
+    "DescribeApplicationStatusCheckAssociations",
+    checksum = "602b3ba1"
+)]
+#[test_action("ec2", "DescribeApplicationStatus", checksum = "df135216")]
+#[test_action(
+    "ec2",
+    "EnableApplicationStatusCheckSuppression",
+    checksum = "a706e1c9"
+)]
+#[test_action(
+    "ec2",
+    "DisableApplicationStatusCheckSuppression",
+    checksum = "0cd2a801"
+)]
 #[test_action("ec2", "ReplaceImageInstanceTypeSpecification", checksum = "6203df8a")]
 #[test_action("ec2", "ModifyImageAttribute", checksum = "08749225")]
 #[tokio::test]

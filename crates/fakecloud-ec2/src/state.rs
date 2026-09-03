@@ -569,6 +569,47 @@ pub struct Snapshot {
 }
 
 /// An AMI (machine image).
+/// An application status check: an HTTP/HTTPS probe EC2 runs against
+/// instances, associated either by instance id or by tag.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationStatusCheck {
+    pub id: String,
+    /// `AggregationStatusEnum` — whether this check counts toward an
+    /// instance's aggregate application status.
+    pub aggregation: String,
+    /// `NetworkProtocolEnum` (http | https).
+    pub protocol: String,
+    pub port: i64,
+    pub path: Option<String>,
+    pub device_index: Option<i64>,
+    pub ip_version: Option<String>,
+    pub ip_scope: Option<String>,
+    pub interval: Option<i64>,
+    pub timeout: Option<i64>,
+    pub failure_threshold: Option<i64>,
+    pub success_threshold: Option<i64>,
+    pub status_code_matcher: Option<String>,
+    pub initialization_grace_period_seconds: Option<i64>,
+    /// Instance ids this check is associated with.
+    pub instance_ids: Vec<String>,
+    /// Tag key/value pairs this check is associated with.
+    pub tag_associations: Vec<(String, String)>,
+    pub tags: BTreeMap<String, String>,
+    /// RFC 3339 timestamps, matching how the rest of the EC2 state stores
+    /// times.
+    pub creation_time: String,
+    pub modify_time: String,
+    pub deletion_time: Option<String>,
+}
+
+/// A suppression window on one instance's application status.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApplicationStatusSuppression {
+    pub instance_id: String,
+    pub suppress_at: String,
+    pub resume_at: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Image {
     pub image_id: String,
@@ -1665,6 +1706,13 @@ pub struct Ec2State {
     pub snapshot_block_public_access: String,
     #[serde(default)]
     pub images: BTreeMap<String, Image>,
+    /// Application status checks keyed by `ApplicationStatusCheckId`.
+    #[serde(default)]
+    pub application_status_checks: BTreeMap<String, ApplicationStatusCheck>,
+    /// Instances whose application status is suppressed, with the moment the
+    /// suppression lifts (`None` = until explicitly disabled).
+    #[serde(default)]
+    pub application_status_suppressions: BTreeMap<String, ApplicationStatusSuppression>,
     /// Watermarks attached to AMIs: image_id -> watermark_key -> watermark_name.
     #[serde(default)]
     pub image_watermarks: BTreeMap<String, BTreeMap<String, String>>,

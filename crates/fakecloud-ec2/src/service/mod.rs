@@ -1,5 +1,6 @@
 //! EC2 service entrypoint: `ec2Query` dispatch over the per-account state.
 
+mod app_status;
 mod capacity;
 mod cvpn;
 mod dhcp;
@@ -269,6 +270,16 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeImages",
     "CopyImage",
     "DescribeImageAttribute",
+    "CreateApplicationStatusCheck",
+    "DescribeApplicationStatusChecks",
+    "ModifyApplicationStatusCheck",
+    "DeleteApplicationStatusCheck",
+    "AssociateApplicationStatusCheck",
+    "DisassociateApplicationStatusCheck",
+    "DescribeApplicationStatusCheckAssociations",
+    "DescribeApplicationStatus",
+    "EnableApplicationStatusCheckSuppression",
+    "DisableApplicationStatusCheckSuppression",
     "ModifyImageAttribute",
     "ReplaceImageInstanceTypeSpecification",
     "ResetImageAttribute",
@@ -1577,6 +1588,34 @@ impl AwsService for Ec2Service {
             "DescribeImages" => image::describe_images(self, &request),
             "CopyImage" => image::copy_image(self, &request),
             "DescribeImageAttribute" => image::describe_image_attribute(self, &request),
+            "CreateApplicationStatusCheck" => {
+                app_status::create_application_status_check(self, &request)
+            }
+            "DescribeApplicationStatusChecks" => {
+                app_status::describe_application_status_checks(self, &request)
+            }
+            "ModifyApplicationStatusCheck" => {
+                app_status::modify_application_status_check(self, &request)
+            }
+            "DeleteApplicationStatusCheck" => {
+                app_status::delete_application_status_check(self, &request)
+            }
+            "AssociateApplicationStatusCheck" => {
+                app_status::associate_application_status_check(self, &request)
+            }
+            "DisassociateApplicationStatusCheck" => {
+                app_status::disassociate_application_status_check(self, &request)
+            }
+            "DescribeApplicationStatusCheckAssociations" => {
+                app_status::describe_application_status_check_associations(self, &request)
+            }
+            "DescribeApplicationStatus" => app_status::describe_application_status(self, &request),
+            "EnableApplicationStatusCheckSuppression" => {
+                app_status::enable_application_status_check_suppression(self, &request)
+            }
+            "DisableApplicationStatusCheckSuppression" => {
+                app_status::disable_application_status_check_suppression(self, &request)
+            }
             "ModifyImageAttribute" => image::modify_image_attribute(self, &request),
             "ReplaceImageInstanceTypeSpecification" => {
                 image::replace_image_instance_type_specification(self, &request)
