@@ -1,5 +1,6 @@
 use crate::service::RdsService;
 use crate::state::{RdsState, SharedRdsState};
+use base64::Engine as _;
 use fakecloud_core::multi_account::MultiAccountState;
 use fakecloud_core::service::AwsRequest;
 use http::Method;
@@ -90,6 +91,281 @@ fn describe_events_returns_emitted_events() {
     assert!(body.contains("instance-a"), "missing instance-a in {body}");
     assert!(body.contains("instance-b"), "missing instance-b in {body}");
     assert!(body.contains("DB instance created"));
+}
+
+/// The SourceType list must track the model's enum.
+///
+/// It had drifted: `db-shard-group` and `zero-etl` are real values that
+/// DescribeEvents rejected as invalid.
+#[test]
+fn describe_events_accepts_every_modeled_source_type() {
+    let svc = svc();
+    for source_type in [
+        "db-instance",
+        "db-parameter-group",
+        "db-security-group",
+        "db-snapshot",
+        "db-cluster",
+        "db-cluster-snapshot",
+        "custom-engine-version",
+        "db-proxy",
+        "blue-green-deployment",
+        "db-shard-group",
+        "zero-etl",
+    ] {
+        ok_on(&svc, "DescribeEvents", &[("SourceType", source_type)]);
+    }
+
+    // A value outside the enum is still rejected -- the probe's negative
+    // variant asserts that, and it is the only reason this list exists.
+    assert!(
+        svc.handle_extra_action(&req("DescribeEvents", &[("SourceType", "not-a-source")]))
+            .is_err(),
+        "an invalid SourceType was accepted"
+    );
+}
+
+/// Pagination parameters are lenient, as `service_helpers::paginate` is
+/// and for its reason: no Describe operation declares an
+/// InvalidParameterValue-equivalent, so rejecting put an undeclared
+/// shape on the wire.
+#[test]
+fn describe_events_is_lenient_about_pagination_parameters() {
+    let svc = svc();
+
+    // Events have to EXIST for any of this to be distinguishable: with
+    // an empty ring every marker yields an empty page, so the assertions
+    // below would hold no matter what the code did.
+    for id in ["clu-a", "clu-b", "clu-c"] {
+        create_cluster(&svc, id);
+    }
+    let all = body_of_action(&svc, "DescribeEvents", &[]);
+    assert!(
+        all.matches("<Event>").count() >= 3,
+        "expected an event per cluster: {all}"
+    );
+
+    // Junk and out-of-range MaxRecords clamp rather than reject -- and
+    // still return rows, so the clamp lands inside 1..=100 rather than
+    // on zero.
+    for max_records in ["not-a-number", "0", "-5", "9999"] {
+        let body = body_of_action(&svc, "DescribeEvents", &[("MaxRecords", max_records)]);
+        assert!(
+            body.contains("<Event>"),
+            "MaxRecords={max_records} returned nothing: {body}"
+        );
+    }
+
+    // A marker that resolves to no row points past the end: an empty
+    // page, not an error, and not the first page. Both halves of that
+    // contract: a marker that DECODES but names no row, and one that is
+    // not decodable base64 at all -- the second used to collapse to
+    // "no marker" and restart the walk at page one.
+    for marker in ["bm90LWFuLWV2ZW50", "not-base64!!", "///"] {
+        let body = body_of_action(&svc, "DescribeEvents", &[("Marker", marker)]);
+        assert!(body.contains("<Events>"), "{body}");
+        assert!(
+            !body.contains("<Event>"),
+            "marker {marker:?} returned the first page: {body}"
+        );
+    }
+
+    // And a real marker resumes AFTER the row it names rather than
+    // repeating it.
+    let first = body_of_action(&svc, "DescribeEvents", &[("MaxRecords", "1")]);
+    let marker = first
+        .split("<Marker>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Marker>").next())
+        .expect("a marker for the next page")
+        .to_string();
+    let first_id = first
+        .split("<SourceIdentifier>")
+        .nth(1)
+        .and_then(|rest| rest.split("</SourceIdentifier>").next())
+        .expect("an event")
+        .to_string();
+    let second = body_of_action(
+        &svc,
+        "DescribeEvents",
+        &[("MaxRecords", "1"), ("Marker", &marker)],
+    );
+    let second_id = second
+        .split("<SourceIdentifier>")
+        .nth(1)
+        .and_then(|rest| rest.split("</SourceIdentifier>").next())
+        .expect("an event")
+        .to_string();
+    assert_ne!(
+        first_id, second_id,
+        "the second page repeated the first row: {second}"
+    );
+}
+
+/// Events that share a timestamp, source and event code still paginate.
+///
+/// `event_id` is the RDS event CODE (`RDS-EVENT-0042`), not a unique id,
+/// so a key of timestamp + source + code can repeat. A repeated key
+/// resolves to the first match, which pages that row forever under
+/// MaxRecords=1 -- an SDK paginator hangs rather than erroring.
+#[test]
+fn describe_events_paginates_past_identical_rows() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let events = &mut accounts.default_mut().events;
+        let date = chrono::Utc::now();
+        for n in 0..3 {
+            events.push(crate::state::RdsEventRecord {
+                source_identifier: "clu-1".to_string(),
+                source_type: "db-cluster".to_string(),
+                source_arn: "arn:aws:rds:us-east-1:000000000000:cluster:clu-1".to_string(),
+                event_id: "RDS-EVENT-0042".to_string(),
+                event_categories: vec!["creation".to_string()],
+                // Everything the KEY is built from is identical -- the
+                // collision this guards against. The message differs so
+                // the rows are still tellable apart on the wire, which
+                // is what lets the walk prove it returned each one once.
+                message: format!("row-{n}"),
+                date,
+            });
+        }
+    }
+
+    // The rows in one request, for the walk to be compared against.
+    let messages = |body: &str| -> Vec<String> {
+        body.split("<Message>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</Message>").next())
+            .map(str::to_string)
+            .collect()
+    };
+    let unpaged = messages(&body_of_action(&svc, "DescribeEvents", &[]));
+    assert_eq!(unpaged.len(), 3, "expected the three seeded events");
+
+    // Walk one row at a time. Every page must advance.
+    let mut marker: Option<String> = None;
+    let mut seen: Vec<String> = Vec::new();
+    let mut pages = 0;
+    loop {
+        let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let body = body_of_action(&svc, "DescribeEvents", &params);
+        let rows = messages(&body);
+        if rows.is_empty() {
+            break;
+        }
+        seen.extend(rows);
+        pages += 1;
+        assert!(
+            pages <= 3,
+            "pagination revisited a duplicate row instead of advancing"
+        );
+        marker = body
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if marker.is_none() {
+            break;
+        }
+    }
+
+    // Each row once, in the unpaginated order -- counting pages alone
+    // would pass on a walk that returned the same row three times.
+    assert_eq!(
+        seen, unpaged,
+        "the walk did not reproduce the unpaginated listing"
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(unique.len(), 3, "a row was returned twice: {seen:?}");
+    assert_eq!(pages, 3, "expected one page per identical event");
+}
+
+/// A walk sees one result set even as the default window slides.
+///
+/// `StartTime` defaults to `Duration` minutes ago and is recomputed per
+/// request. An event sitting near that boundary ages out between pages,
+/// and an unresolvable marker ends the walk -- so a backlog truncated
+/// silently. The marker carries the window it was issued under.
+#[test]
+fn describe_events_freezes_its_window_across_a_walk() {
+    let svc = svc();
+    {
+        let state = svc.state_handle();
+        let mut accounts = state.write();
+        let events = &mut accounts.default_mut().events;
+        let now = chrono::Utc::now();
+        // The first event sits just inside the default 60-minute window
+        // and falls out of it almost immediately.
+        for (n, age_seconds) in [(0, 3599), (1, 30), (2, 5)] {
+            events.push(crate::state::RdsEventRecord {
+                source_identifier: format!("clu-{n}"),
+                source_type: "db-cluster".to_string(),
+                source_arn: format!("arn:aws:rds:us-east-1:000000000000:cluster:clu-{n}"),
+                event_id: "RDS-EVENT-0042".to_string(),
+                event_categories: vec!["creation".to_string()],
+                message: "seeded".to_string(),
+                date: now - chrono::Duration::seconds(age_seconds),
+            });
+        }
+    }
+
+    // Page one under the default window; its marker names the oldest
+    // event, which a later request would no longer include.
+    let first = body_of_action(&svc, "DescribeEvents", &[("MaxRecords", "1")]);
+    assert!(
+        first.contains("<SourceIdentifier>clu-0</SourceIdentifier>"),
+        "{first}"
+    );
+    let marker = first
+        .split("<Marker>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Marker>").next())
+        .expect("a marker for the next page")
+        .to_string();
+
+    // The marker CARRIES the window: decoding it must yield the two
+    // timestamps the first page was computed under. Asserting the
+    // mechanism directly, because the symptom below depends on how much
+    // wall-clock passes between the two requests.
+    let decoded = String::from_utf8(
+        base64::engine::general_purpose::STANDARD
+            .decode(marker.as_bytes())
+            .expect("the marker is base64"),
+    )
+    .expect("the marker is utf-8");
+    let mut fields = decoded.splitn(3, '|');
+    let window_start = fields.next().expect("a window start");
+    let window_end = fields.next().expect("a window end");
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(window_start).is_ok(),
+        "the marker carries no window start: {decoded}"
+    );
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(window_end).is_ok(),
+        "the marker carries no window end: {decoded}"
+    );
+
+    // The marker resolves against the FROZEN window, so the walk
+    // continues instead of returning an empty page.
+    let second = body_of_action(
+        &svc,
+        "DescribeEvents",
+        &[("MaxRecords", "1"), ("Marker", &marker)],
+    );
+    assert!(
+        second.contains("<SourceIdentifier>clu-1</SourceIdentifier>"),
+        "the walk truncated when the window slid: {second}"
+    );
 }
 
 #[test]

@@ -10,6 +10,7 @@
 //! `RdsState`. Returns valid Query-protocol XML responses with
 //! stable IDs so SDK callers can chain operations.
 
+use base64::Engine as _;
 use http::StatusCode;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -4213,18 +4214,25 @@ pub(crate) fn cluster_snapshot_status_detail_xml(
     )
 }
 
-/// AWS-spec `SourceType` enum values for the `DescribeEvents` filter.
-/// Anything else triggers `InvalidParameterValue`.
+/// The `SourceType` enum values, exactly as the Smithy model lists them.
+///
+/// This list had drifted: it was missing `db-shard-group` and `zero-etl`,
+/// so DescribeEvents rejected two values the model defines. It has to
+/// track `com.amazonaws.rds#SourceType` -- a value missing from here is
+/// reported as invalid, and one that does not belong here is accepted
+/// and then matches no stored event.
 const VALID_DESCRIBE_EVENTS_SOURCE_TYPES: &[&str] = &[
     "db-instance",
-    "db-cluster",
     "db-parameter-group",
     "db-security-group",
     "db-snapshot",
+    "db-cluster",
     "db-cluster-snapshot",
+    "custom-engine-version",
     "db-proxy",
     "blue-green-deployment",
-    "custom-engine-version",
+    "db-shard-group",
+    "zero-etl",
 ];
 
 impl RdsService {
@@ -4256,14 +4264,45 @@ impl RdsService {
             .and_then(|s| s.parse().ok())
             .unwrap_or(60);
         let now = chrono::Utc::now();
-        let start_time = get_param(req, "StartTime")
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or_else(|| now - chrono::Duration::minutes(duration_minutes));
-        let end_time = get_param(req, "EndTime")
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or(now);
+        // The marker carries the window it was issued under, so a walk
+        // sees ONE result set. `StartTime` defaults to `Duration`
+        // minutes ago and is recomputed per request, so the window slides
+        // forward between pages: a marker naming a row near the boundary
+        // resolved to nothing by the time page two arrived, and an
+        // unresolvable marker ends the walk -- silently truncating a
+        // backlog. Freezing it also keeps the occurrence ordinals stable,
+        // which renumber if an earlier duplicate ages out.
+        let frozen_window = get_param(req, "Marker")
+            .filter(|value| !value.is_empty())
+            .and_then(|marker| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(marker.as_bytes())
+                    .ok()
+            })
+            .and_then(|decoded| String::from_utf8(decoded).ok())
+            .and_then(|key| {
+                let mut fields = key.splitn(3, '|');
+                let start = chrono::DateTime::parse_from_rfc3339(fields.next()?).ok()?;
+                let end = chrono::DateTime::parse_from_rfc3339(fields.next()?).ok()?;
+                Some((
+                    start.with_timezone(&chrono::Utc),
+                    end.with_timezone(&chrono::Utc),
+                ))
+            });
+        let (start_time, end_time) = match frozen_window {
+            Some(window) => window,
+            None => {
+                let start = get_param(req, "StartTime")
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or_else(|| now - chrono::Duration::minutes(duration_minutes));
+                let end = get_param(req, "EndTime")
+                    .and_then(|s| chrono::DateTime::parse_from_rfc3339(&s).ok())
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .unwrap_or(now);
+                (start, end)
+            }
+        };
 
         let state = self.state_handle().read();
         let mut events = state
@@ -4291,48 +4330,54 @@ impl RdsService {
             })
             .collect();
 
-        // MaxRecords (1..=100, default 100) and Marker pagination. We key
-        // the marker by the event's RFC3339 timestamp + identifier so
-        // duplicate dates still paginate deterministically.
-        let max_records: usize = match get_param(req, "MaxRecords") {
-            Some(raw) => {
-                let parsed: i32 = raw.parse().map_err(|_| {
-                    AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterValue",
-                        "MaxRecords must be a valid integer.",
-                    )
-                })?;
-                if !(1..=100).contains(&parsed) {
-                    return Err(AwsServiceError::aws_error(
-                        StatusCode::BAD_REQUEST,
-                        "InvalidParameterValue",
-                        "MaxRecords must be between 1 and 100.",
-                    ));
-                }
-                parsed as usize
-            }
-            None => 100,
-        };
+        // Paginated through `service_helpers::paginate` rather than by
+        // hand. This handler used to roll its own -- rejecting an
+        // out-of-range MaxRecords and an unparseable Marker with
+        // InvalidParameterValue, which no Describe declares -- and then
+        // duplicated the helper almost line for line once that was
+        // fixed. Calling it keeps the two from drifting apart again, and
+        // brings the clamp (1..=100) and the "unresolvable marker points
+        // past the end" rule with it.
+        //
+        // The key is the ROW, not its index: an index is a position in a
+        // freshly filtered-and-sorted list, and RDS emits an event on
+        // nearly every write, so anything happening between two pages
+        // shifted it and made the walk skip or repeat rows. The
+        // occurrence ordinal makes the key unique -- `event_id` is the
+        // RDS event CODE (`RDS-EVENT-0042`), so a timestamp and source
+        // identifier alone can repeat, and a duplicate key resolves to
+        // the first match and pages that row forever under MaxRecords=1.
+        let mut seen_keys: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let keyed: Vec<(String, crate::state::RdsEventRecord)> = filtered
+            .into_iter()
+            .map(|e| {
+                // The window leads the key so a marker issued under it
+                // resolves against rows built under the same one.
+                let base = format!(
+                    "{}|{}|{}|{}|{}",
+                    start_time.to_rfc3339(),
+                    end_time.to_rfc3339(),
+                    e.date.to_rfc3339(),
+                    e.source_identifier,
+                    e.event_id
+                );
+                let ordinal = seen_keys.entry(base.clone()).or_insert(0);
+                let key = format!("{base}|{ordinal}");
+                *ordinal += 1;
+                (key, e)
+            })
+            .collect();
 
-        let start_index = match get_param(req, "Marker") {
-            Some(marker) => marker.parse::<usize>().map_err(|_| {
-                AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "InvalidParameterValue",
-                    "Marker is invalid.",
-                )
-            })?,
-            None => 0,
-        };
-        let end_index = std::cmp::min(start_index.saturating_add(max_records), filtered.len());
-        let next_marker = if end_index < filtered.len() {
-            Some(end_index.to_string())
-        } else {
-            None
-        };
-        let page = filtered.get(start_index..end_index).unwrap_or(&[]);
-
+        let paginated = crate::service::service_helpers::paginate(
+            keyed,
+            get_param(req, "Marker").filter(|value| !value.is_empty()),
+            get_param(req, "MaxRecords").filter(|value| !value.is_empty()),
+            |(key, _)| key.as_str(),
+        )?;
+        let next_marker = paginated.next_marker.clone();
+        let page: Vec<crate::state::RdsEventRecord> =
+            paginated.items.into_iter().map(|(_, e)| e).collect();
         let mut body = String::new();
         if let Some(m) = next_marker {
             body.push_str(&format!("    <Marker>{}</Marker>\n", xml_escape(&m)));

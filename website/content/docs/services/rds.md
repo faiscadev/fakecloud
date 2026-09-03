@@ -272,6 +272,12 @@ The faults the model declares are raised: the resource not existing (`DBClusterN
 
 A restored cluster carries no associations: neither `RestoreDBClusterFromSnapshot` nor `RestoreDBClusterToPointInTime` takes roles, and the snapshot holds a clone of the source cluster.
 
+## Events and instance classes
+
+`DescribeEvents` accepts every `SourceType` the Smithy model defines, including `db-shard-group` and `zero-etl`. A value outside that set is rejected with `InvalidParameterValue`. `MaxRecords` and `Marker` are lenient, matching the other paginated Describes -- an out-of-range or unparseable `MaxRecords` clamps to 1..100, and a marker that resolves to no row returns an empty page rather than an error. The marker names the event to resume after, not an index: RDS emits an event on nearly every write, so an index would shift between pages and skip or repeat rows. Because `EventId` is the RDS event code rather than a unique id, the key carries an occurrence ordinal so that events sharing a timestamp, source and code still page apart. The marker also carries the time window it was issued under, so a walk sees one result set: `StartTime` defaults to `Duration` minutes ago and would otherwise be recomputed per request, sliding forward between pages until an event near the boundary aged out and silently truncated the walk.
+
+A malformed `DBInstanceClass` on `CreateDBInstance` or `ModifyDBInstance` raises `InvalidParameterValue`, as AWS does; a well-formed class that cannot be provided raises `InsufficientDBInstanceCapacity`. `InvalidParameterValue`, `InvalidParameterCombination` and `MissingParameter` are RDS's published Common Errors -- every operation can return them -- but they appear nowhere in the Smithy file, so the conformance classifier carries them in its per-service common-error list rather than these handlers being bent to a declared-but-wrong shape.
+
 ## Gotchas
 
 - **Persistence snapshots are one-way across the v3 bump.** RDS state written by this version declares snapshot schema v3 (final snapshots are typed `manual`, matching AWS; earlier builds wrote `automated`). An older fakecloud refuses to load a v3 file and exits, so downgrade by removing `<data-path>/rds/snapshot.json` first.
