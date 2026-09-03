@@ -339,6 +339,60 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
 }
 
 impl CloudFormationService {
+    /// The template body `ValidateTemplate` / `GetTemplateSummary` should
+    /// describe.
+    ///
+    /// Both accept the body inline, by `TemplateURL`, or -- for
+    /// `GetTemplateSummary` -- by naming an existing stack or stack set, whose
+    /// stored template is then summarized. Anything unresolvable yields an
+    /// empty string, which summarizes to the empty report: these are read-only
+    /// introspection calls and neither declares `ValidationError`, so a
+    /// synthetic or missing input must not become an undeclared error.
+    fn template_for_introspection(
+        &self,
+        account_id: &str,
+        params: &BTreeMap<String, String>,
+    ) -> String {
+        if let Some(body) = params.get("TemplateBody").filter(|b| !b.trim().is_empty()) {
+            return body.clone();
+        }
+        if let Some(body) = params
+            .get("TemplateURL")
+            .filter(|u| looks_like_url(u))
+            .and_then(|url| self.resolve_template_url(account_id, url).ok())
+        {
+            return body;
+        }
+        // `StackName` accepts a name or an ARN, matching DescribeStacks.
+        if let Some(name) = params.get("StackName") {
+            let accounts = self.state.read();
+            if let Some(body) = accounts.get(account_id).and_then(|st| {
+                st.stacks
+                    .values()
+                    .find(|s| {
+                        (&s.name == name || &s.stack_id == name) && s.status != "DELETE_COMPLETE"
+                    })
+                    .map(|s| s.template.clone())
+            }) {
+                return body;
+            }
+        }
+        if let Some(name) = params.get("StackSetName") {
+            let accounts = self.state.read();
+            if let Some(body) = accounts.get(account_id).and_then(|st| {
+                st.extras
+                    .get("stack_sets")
+                    .and_then(|sets| sets.get(name))
+                    .and_then(|set| set.get("TemplateBody"))
+                    .and_then(|b| b.as_str())
+                    .map(str::to_string)
+            }) {
+                return body;
+            }
+        }
+        String::new()
+    }
+
     /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
     /// it can fail. AWS reports an unusable URL shape and a missing object
     /// differently, and collapsing them into one message sends the caller
@@ -2619,22 +2673,29 @@ impl CloudFormationService {
                     &rid,
                 ))
             }
-            "ValidateTemplate" => Ok(xml_response(
-                "ValidateTemplate",
-                "    <Description>Validated</Description>\n    <Capabilities/>\n    <Parameters/>"
-                    .to_string(),
-                &rid,
-            )),
+            "ValidateTemplate" => {
+                let body = self.template_for_introspection(&aid, &params);
+                let summary = crate::template_summary::summarize(&body);
+                Ok(xml_response(
+                    "ValidateTemplate",
+                    crate::template_summary::validate_template_xml(&summary),
+                    &rid,
+                ))
+            }
             "EstimateTemplateCost" => Ok(xml_response(
                 "EstimateTemplateCost",
                 "    <Url>https://calculator.aws/#/estimate</Url>".to_string(),
                 &rid,
             )),
-            "GetTemplateSummary" => Ok(xml_response(
-                "GetTemplateSummary",
-                "    <Parameters/>\n    <ResourceTypes/>\n    <Capabilities/>".to_string(),
-                &rid,
-            )),
+            "GetTemplateSummary" => {
+                let body = self.template_for_introspection(&aid, &params);
+                let summary = crate::template_summary::summarize(&body);
+                Ok(xml_response(
+                    "GetTemplateSummary",
+                    crate::template_summary::get_template_summary_xml(&summary),
+                    &rid,
+                ))
+            }
             "CancelUpdateStack" => {
                 params
                     .get("StackName")
