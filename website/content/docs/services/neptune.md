@@ -62,6 +62,20 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 `DBParameterGroupNotFound`, `DBSubnetGroupNotFoundFault`,
 `GlobalClusterNotFoundFault`, `SubscriptionNotFound`, and the rest.
 
+## Describe filters
+
+`Filters` is honored on the operations Neptune documents filter names for. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
+
+| Operation | Supported filter names |
+| --- | --- |
+| `DescribeDBClusters` | `db-cluster-id`, `engine` |
+| `DescribeDBInstances` | `db-cluster-id`, `engine` |
+| `DescribeDBClusterEndpoints` | `db-cluster-endpoint-id`, `db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-status` |
+
+`db-cluster-id` accepts identifiers and ARNs. The endpoint enum filters match case-insensitively: AWS returns those values uppercase (`READER`, `CUSTOM`) while documenting the filter values lowercase, so an exact comparison would return nothing for a caller copying the documented command.
+
+An unrecognized filter name matches no resource rather than raising: Neptune declares no `InvalidParameterValue`-equivalent on these operations, so returning one would put an error shape on the wire that the operation never declares. The name is logged at `warn`.
+
 ## Honest gap: no data plane
 
 fakecloud does not run a real Neptune (Gremlin/SPARQL graph) engine. RDS

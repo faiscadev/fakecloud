@@ -8,6 +8,9 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
+use fakecloud_core::query_filters::{
+    parse_filters, sibling_rds_arn, warn_unknown_filters, QueryFilter,
+};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -425,6 +428,75 @@ fn is_mutating(action: &str) -> bool {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// The filter names Neptune documents per operation. A name outside the
+/// set matches nothing -- Neptune, like RDS, declares no
+/// `InvalidParameterValue`-equivalent on these operations, so rejecting
+/// would put an undeclared error shape on the wire.
+const CLUSTER_FILTERS: &[&str] = &["db-cluster-id", "engine"];
+const INSTANCE_FILTERS: &[&str] = &["db-cluster-id", "engine"];
+const CLUSTER_ENDPOINT_FILTERS: &[&str] = &[
+    "db-cluster-endpoint-id",
+    "db-cluster-endpoint-type",
+    "db-cluster-endpoint-custom-type",
+    "db-cluster-endpoint-status",
+];
+
+/// True when a cluster satisfies every filter. `db-cluster-id` accepts
+/// identifiers and ARNs.
+fn cluster_matches_filters(cluster: &DbCluster, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => filter.matches_any([
+            Some(cluster.db_cluster_identifier.as_str()),
+            Some(cluster.db_cluster_arn.as_str()),
+        ]),
+        "engine" => filter.matches(Some(cluster.engine.as_str())),
+        _ => false,
+    })
+}
+
+/// True when an instance satisfies every filter. The cluster ARN is
+/// rebuilt from the instance's own, which shares its partition, region
+/// and account.
+fn instance_matches_filters(instance: &DbInstance, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => {
+            let cluster_arn = sibling_rds_arn(
+                &instance.db_instance_arn,
+                "cluster",
+                &instance.db_cluster_identifier,
+            );
+            filter.matches_any([
+                Some(instance.db_cluster_identifier.as_str()),
+                cluster_arn.as_deref(),
+            ])
+        }
+        "engine" => filter.matches(Some(instance.engine.as_str())),
+        _ => false,
+    })
+}
+
+/// True when a cluster endpoint satisfies every filter.
+///
+/// The enum-valued names match case-insensitively: AWS returns these
+/// uppercase (`READER`, `CUSTOM`) while documenting the filter values
+/// lowercase, so an exact comparison returns nothing for a caller
+/// copying the documented command.
+fn cluster_endpoint_matches_filters(endpoint: &DbClusterEndpoint, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-endpoint-id" => {
+            filter.matches(Some(endpoint.db_cluster_endpoint_identifier.as_str()))
+        }
+        "db-cluster-endpoint-type" => {
+            filter.matches_ignore_case(Some(endpoint.endpoint_type.as_str()))
+        }
+        "db-cluster-endpoint-custom-type" => {
+            filter.matches_ignore_case(Some(endpoint.custom_endpoint_type.as_str()))
+        }
+        "db-cluster-endpoint-status" => filter.matches_ignore_case(Some(endpoint.status.as_str())),
+        _ => false,
+    })
+}
+
 impl NeptuneService {
     fn create_db_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(req, "DBClusterIdentifier")?;
@@ -516,6 +588,10 @@ impl NeptuneService {
     }
 
     fn describe_db_clusters(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // `Filters` was accepted and ignored, so a caller narrowing a
+        // listing got every cluster in the account back.
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, CLUSTER_FILTERS);
         let filter = optional_query_param(req, "DBClusterIdentifier");
         let accounts = self.state.read();
         let empty = NeptuneState::new(&req.account_id, &req.region);
@@ -527,6 +603,11 @@ impl NeptuneService {
             },
             None => st.clusters.values().collect(),
         };
+        // AND-ed with the identifier parameter, as AWS applies them.
+        let clusters: Vec<&DbCluster> = clusters
+            .into_iter()
+            .filter(|c| cluster_matches_filters(c, &filters))
+            .collect();
         let inner: String = clusters
             .iter()
             .map(|c| format!("<DBCluster>{}</DBCluster>", xml::db_cluster(c)))
@@ -888,6 +969,8 @@ impl NeptuneService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, CLUSTER_ENDPOINT_FILTERS);
         let endpoint_filter = optional_query_param(req, "DBClusterEndpointIdentifier");
         let cluster_filter = optional_query_param(req, "DBClusterIdentifier");
         let accounts = self.state.read();
@@ -906,6 +989,7 @@ impl NeptuneService {
                     && cluster_filter
                         .as_ref()
                         .is_none_or(|c| &e.db_cluster_identifier == c)
+                    && cluster_endpoint_matches_filters(e, &filters)
             })
             .collect();
         let inner: String = endpoints
@@ -1002,6 +1086,8 @@ impl NeptuneService {
     }
 
     fn describe_db_instances(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, INSTANCE_FILTERS);
         let filter = optional_query_param(req, "DBInstanceIdentifier");
         let accounts = self.state.read();
         let empty = NeptuneState::new(&req.account_id, &req.region);
@@ -1013,6 +1099,10 @@ impl NeptuneService {
             },
             None => st.instances.values().collect(),
         };
+        let instances: Vec<&DbInstance> = instances
+            .into_iter()
+            .filter(|i| instance_matches_filters(i, &filters))
+            .collect();
         let inner: String = instances
             .iter()
             .map(|i| format!("<DBInstance>{}</DBInstance>", xml::db_instance(i)))

@@ -64,6 +64,164 @@ fn body(resp: &AwsResponse) -> String {
     }
 }
 
+/// `Filters` was accepted and ignored, so a caller narrowing a listing
+/// got every resource in the account back.
+#[tokio::test]
+async fn describe_db_clusters_honors_its_filters() {
+    let svc = service();
+    for id in ["clu-a", "clu-b"] {
+        call(
+            &svc,
+            "CreateDBCluster",
+            &[("DBClusterIdentifier", id), ("Engine", "neptune")],
+        )
+        .await;
+    }
+
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-b"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterIdentifier>clu-b</DBClusterIdentifier>"),
+        "{xml}"
+    );
+    assert!(
+        !xml.contains("<DBClusterIdentifier>clu-a</DBClusterIdentifier>"),
+        "the filter kept an unmatched cluster: {xml}"
+    );
+
+    // The ARN form selects the same cluster.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                (
+                    "Filters.Filter.1.Values.Value.1",
+                    "arn:aws:rds:us-east-1:123456789012:cluster:clu-b",
+                ),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterIdentifier>clu-b</DBClusterIdentifier>"),
+        "{xml}"
+    );
+
+    // `engine` selects both; a different engine selects neither.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "engine"),
+                ("Filters.Filter.1.Values.Value.1", "neptune"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(xml.matches("<DBClusterIdentifier>").count(), 2, "{xml}");
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "engine"),
+                ("Filters.Filter.1.Values.Value.1", "aurora"),
+            ],
+        )
+        .await,
+    );
+    assert!(!xml.contains("<DBClusterIdentifier>"), "{xml}");
+
+    // An unrecognized name matches nothing rather than returning the
+    // full list.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "not-a-filter"),
+                ("Filters.Filter.1.Values.Value.1", "clu-b"),
+            ],
+        )
+        .await,
+    );
+    assert!(!xml.contains("<DBClusterIdentifier>"), "{xml}");
+}
+
+#[tokio::test]
+async fn describe_db_cluster_endpoints_honors_its_filters() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("Engine", "neptune")],
+    )
+    .await;
+    call(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("EndpointType", "READER"),
+        ],
+    )
+    .await;
+
+    // The documented values are lowercase while the API returns them
+    // uppercase, so an exact comparison would select nothing for a
+    // caller copying the documented command.
+    for (name, value) in [
+        ("db-cluster-endpoint-id", "ep-1"),
+        ("db-cluster-endpoint-status", "available"),
+    ] {
+        let xml = body(
+            &call(
+                &svc,
+                "DescribeDBClusterEndpoints",
+                &[
+                    ("Filters.Filter.1.Name", name),
+                    ("Filters.Filter.1.Values.Value.1", value),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            xml.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+            "{name}={value} selected nothing: {xml}"
+        );
+    }
+
+    // A status the endpoint is not in selects nothing.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusterEndpoints",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-endpoint-status"),
+                ("Filters.Filter.1.Values.Value.1", "deleting"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        !xml.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "a non-matching status still returned the endpoint: {xml}"
+    );
+}
+
 #[tokio::test]
 async fn envelope_shape_is_correct() {
     let svc = service();

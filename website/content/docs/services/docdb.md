@@ -54,6 +54,20 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 `DBParameterGroupNotFound`, `DBSubnetGroupNotFoundFault`,
 `GlobalClusterNotFoundFault`, `SubscriptionNotFound`, and the rest.
 
+## Describe filters
+
+`Filters` is honored on the operations DocumentDB documents filter names for. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
+
+| Operation | Supported filter names |
+| --- | --- |
+| `DescribeDBClusters` | `db-cluster-id` |
+| `DescribeDBInstances` | `db-cluster-id`, `db-instance-id` |
+| `DescribeGlobalClusters` | `db-cluster-id` |
+
+Each accepts identifiers and ARNs, as AWS documents. On `DescribeGlobalClusters`, filtering by a *member* cluster's ARN selects the global cluster containing it -- that is how a caller holding a regional cluster ARN finds its global parent.
+
+An unrecognized filter name matches no resource rather than raising: DocumentDB declares no `InvalidParameterValue`-equivalent on these operations, so returning one would put an error shape on the wire that the operation never declares. The name is logged at `warn`, since nothing on the wire explains the empty result.
+
 ## Honest gap: no data plane
 
 fakecloud does not run a real DocumentDB (MongoDB-compatible) engine. RDS
