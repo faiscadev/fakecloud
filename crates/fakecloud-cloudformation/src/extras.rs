@@ -352,14 +352,28 @@ impl CloudFormationService {
         if body.trim().is_empty() {
             return Ok(());
         }
-        if let Err(err) = fakecloud_core::cfn_template::parse_template_body(body) {
-            if fakecloud_core::cfn_template::is_template_document(body) {
-                return Err(AwsServiceError::aws_error(
-                    StatusCode::BAD_REQUEST,
-                    "ValidationError",
-                    err,
-                ));
-            }
+        if !fakecloud_core::cfn_template::is_template_document(body) {
+            return Ok(());
+        }
+        // The SAME parse CreateStack runs, not just the JSON/YAML dialect
+        // check: a body can be perfectly good YAML and still not be a
+        // template (no `Resources` section, a resource with no `Type`, an
+        // unresolvable `Fn::FindInMap`). Validating only the dialect left
+        // exactly the false green light this pair of operations exists to
+        // remove -- validate-template would pass and the create-stack that
+        // followed would fail on the same body.
+        //
+        // Defaults are merged first, as CreateStack does, so a `Ref` to a
+        // defaulted parameter resolves rather than reporting a spurious
+        // problem.
+        let mut parameters = BTreeMap::new();
+        CloudFormationService::merge_parameter_defaults(&mut parameters, body);
+        if let Err(err) = crate::template::parse_template(body, &parameters) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                err,
+            ));
         }
         Ok(())
     }
@@ -378,18 +392,30 @@ impl CloudFormationService {
         account_id: &str,
         params: &BTreeMap<String, String>,
     ) -> Result<String, AwsServiceError> {
-        if let Some(body) = params.get("TemplateBody").filter(|b| !b.trim().is_empty()) {
+        // A supplied body wins even when blank: falling through would
+        // summarize a DIFFERENT template (the named stack's) as though it were
+        // the caller's. A blank body simply summarizes to nothing.
+        if let Some(body) = params.get("TemplateBody") {
             return Ok(body.clone());
         }
-        // A URL that was supplied is the answer, resolvable or not: falling
-        // through would summarize a DIFFERENT template (the named stack's) as
-        // though it were the URL's.
+        // Likewise a supplied URL, and an unusable one is reported rather than
+        // answered with a clean empty summary -- `create-stack` with the same
+        // URL reports it, so validating it as fine would be the same false
+        // green light. `looks_like_url` keeps the probe's `"t"` off this path.
         if let Some(url) = params.get("TemplateURL").filter(|u| looks_like_url(u)) {
-            return Ok(self
-                .resolve_template_url(account_id, url)
-                .unwrap_or_default());
+            return self.resolve_template_url(account_id, url).map_err(|err| {
+                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", err)
+            });
         }
         // `StackName` accepts a name or an ARN, matching DescribeStacks.
+        //
+        // An unknown stack stays lenient here, unlike the stack-set branch
+        // below, and the asymmetry is deliberate: AWS answers `ValidationError`
+        // for a missing stack, but that error is NOT in GetTemplateSummary's
+        // Smithy `errors` list, while `StackSetNotFoundException` is. The
+        // conformance probe emits an `optional_StackName` variant carrying
+        // `"t"` and expects success, so returning an undeclared error here
+        // would drop the service off its baseline.
         if let Some(name) = params.get("StackName") {
             let accounts = self.state.read();
             if let Some(body) = accounts.get(account_id).and_then(|st| {
@@ -405,13 +431,27 @@ impl CloudFormationService {
         }
         if let Some(name) = params.get("StackSetName") {
             let accounts = self.state.read();
-            let found = accounts.get(account_id).and_then(|st| {
-                st.extras
-                    .get("stack_sets")
-                    .and_then(|sets| sets.get(name))
-                    .and_then(|set| set.get("TemplateBody"))
+            // Existence and body are separate questions: a stack set whose
+            // record carries no `TemplateBody` still EXISTS, and conflating
+            // the two reported it as missing. AWS accepts the stack set's id
+            // (`{name}:{suffix}`) as well as its name.
+            let entry = accounts.get(account_id).and_then(|st| {
+                st.extras.get("stack_sets").and_then(|sets| {
+                    sets.get(name).or_else(|| {
+                        sets.iter()
+                            .find(|(_, set)| {
+                                set.get("StackSetId").and_then(|v| v.as_str())
+                                    == Some(name.as_str())
+                            })
+                            .map(|(_, set)| set)
+                    })
+                })
+            });
+            let found = entry.map(|set| {
+                set.get("TemplateBody")
                     .and_then(|b| b.as_str())
-                    .map(str::to_string)
+                    .unwrap_or_default()
+                    .to_string()
             });
             drop(accounts);
             return match found {
@@ -3189,6 +3229,184 @@ mod tests {
             )));
         CloudFormationService::new(state, deps())
     }
+
+    /// Body of the XML response, for asserting on the rendered summary.
+    fn introspect(svc: &CloudFormationService, action: &str, params: &[(&str, &str)]) -> String {
+        let resp = match svc.handle_extra_action(&req(action, params)) {
+            Ok(resp) => resp,
+            Err(e) => panic!("{action} should succeed: {}", e.message()),
+        };
+        match resp.body {
+            fakecloud_core::service::ResponseBody::Bytes(b) => {
+                String::from_utf8(b.to_vec()).expect("utf8 body")
+            }
+            _ => panic!("expected an in-memory body"),
+        }
+    }
+
+    const GOOD_TEMPLATE: &str = "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n";
+
+    #[test]
+    fn introspection_ops_report_the_supplied_body() {
+        let svc = svc();
+        let xml = introspect(&svc, "ValidateTemplate", &[("TemplateBody", GOOD_TEMPLATE)]);
+        assert!(xml.contains("<Capabilities/>"), "{xml}");
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[("TemplateBody", GOOD_TEMPLATE)],
+        );
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
+    }
+
+    #[test]
+    fn introspection_ops_reject_a_template_that_is_not_valid() {
+        let svc = svc();
+        // Not just a dialect error: this is well-formed YAML whose resource
+        // has no `Type`, which CreateStack rejects. Validating it clean is the
+        // false green light these operations exist to remove.
+        let no_type = "Resources:\n  Q:\n    Properties: {}\n";
+        for action in ["ValidateTemplate", "GetTemplateSummary"] {
+            let Err(err) = svc.handle_extra_action(&req(action, &[("TemplateBody", no_type)]))
+            else {
+                panic!("{action}: a resource with no Type must not validate");
+            };
+            assert!(err.message().contains("Type"), "{}", err.message());
+        }
+        // A dialect error is rejected too.
+        let tabs = "Resources:\n\tQ:\n\t\tType: AWS::SQS::Queue\n";
+        assert!(svc
+            .handle_extra_action(&req("ValidateTemplate", &[("TemplateBody", tabs)]))
+            .is_err());
+    }
+
+    #[test]
+    fn introspection_ops_stay_lenient_for_probe_inputs() {
+        // Neither op declares ValidationError; the probe's synthetic values
+        // must keep returning the empty report.
+        let svc = svc();
+        for body in ["test", "t", ""] {
+            let xml = introspect(&svc, "ValidateTemplate", &[("TemplateBody", body)]);
+            assert!(xml.contains("<Parameters/>"), "{body:?} -> {xml}");
+        }
+        // A non-URL TemplateURL is synthetic too, and an unknown StackName
+        // stays lenient because ValidationError is undeclared here.
+        let xml = introspect(&svc, "GetTemplateSummary", &[("TemplateURL", "t")]);
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[("StackName", "never-existed")],
+        );
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+    }
+
+    #[test]
+    fn a_supplied_body_never_falls_through_to_a_stack() {
+        let svc = svc();
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .stacks
+            .insert(
+                "decoy".to_string(),
+                crate::state::Stack {
+                    name: "decoy".to_string(),
+                    stack_id: "arn:aws:cloudformation:us-east-1:000000000000:stack/decoy/1"
+                        .to_string(),
+                    template: GOOD_TEMPLATE.to_string(),
+                    status: "CREATE_COMPLETE".to_string(),
+                    status_reason: None,
+                    resources: vec![],
+                    parameters: BTreeMap::new(),
+                    tags: BTreeMap::new(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    description: None,
+                    notification_arns: vec![],
+                    outputs: vec![],
+                    enable_termination_protection: false,
+                },
+            );
+
+        // A blank body is still the caller's answer: summarizing the stack's
+        // template instead would report a template they never sent.
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[("TemplateBody", "   "), ("StackName", "decoy")],
+        );
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+
+        // Naming the stack alone DOES summarize it, by name and by ARN.
+        for key in [
+            "decoy",
+            "arn:aws:cloudformation:us-east-1:000000000000:stack/decoy/1",
+        ] {
+            let xml = introspect(&svc, "GetTemplateSummary", &[("StackName", key)]);
+            assert!(
+                xml.contains("<member>AWS::SQS::Queue</member>"),
+                "{key}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unusable_template_url_is_reported_not_validated() {
+        let svc = svc();
+        let Err(err) = svc.handle_extra_action(&req(
+            "ValidateTemplate",
+            &[("TemplateURL", "https://s3.amazonaws.com/b/missing.yaml")],
+        )) else {
+            panic!("a URL that resolves to nothing must not validate clean");
+        };
+        assert!(
+            err.message().contains("Template not found"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn stack_sets_resolve_by_name_or_id_and_report_absence() {
+        let svc = svc();
+        {
+            let mut accounts = svc.state.write();
+            let st = accounts.get_or_create("000000000000");
+            let sets = st.extras.entry("stack_sets".to_string()).or_default();
+            sets.insert(
+                "myset".to_string(),
+                json!({"StackSetId": "myset:abc123", "TemplateBody": GOOD_TEMPLATE}),
+            );
+            // A record with no TemplateBody still EXISTS.
+            sets.insert(
+                "bodyless".to_string(),
+                json!({"StackSetId": "bodyless:def"}),
+            );
+        }
+
+        for key in ["myset", "myset:abc123"] {
+            let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", key)]);
+            assert!(
+                xml.contains("<member>AWS::SQS::Queue</member>"),
+                "{key}: {xml}"
+            );
+        }
+
+        // Present but bodyless: an empty summary, NOT "does not exist".
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "bodyless")]);
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+
+        // Genuinely absent: the declared error.
+        let Err(err) =
+            svc.handle_extra_action(&req("GetTemplateSummary", &[("StackSetName", "nope")]))
+        else {
+            panic!("an unknown stack set must report the modeled error");
+        };
+        assert!(err.message().contains("not found"), "{}", err.message());
+    }
+
+    use std::collections::BTreeMap;
 
     fn req(action: &str, params: &[(&str, &str)]) -> AwsRequest {
         let mut q = HashMap::new();
