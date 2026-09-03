@@ -355,20 +355,15 @@ impl CloudFormationService {
         if !fakecloud_core::cfn_template::is_template_document(body) {
             return Ok(());
         }
-        // The SAME parse CreateStack runs, not just the JSON/YAML dialect
-        // check: a body can be perfectly good YAML and still not be a
-        // template (no `Resources` section, a resource with no `Type`, an
-        // unresolvable `Fn::FindInMap`). Validating only the dialect left
-        // exactly the false green light this pair of operations exists to
-        // remove -- validate-template would pass and the create-stack that
-        // followed would fail on the same body.
-        //
-        // Defaults are merged first, as CreateStack does, so a `Ref` to a
-        // defaulted parameter resolves rather than reporting a spurious
-        // problem.
-        let mut parameters = BTreeMap::new();
-        CloudFormationService::merge_parameter_defaults(&mut parameters, body);
-        if let Err(err) = crate::template::parse_template(body, &parameters) {
+        // Structural validity, which is what AWS checks here: the dialect
+        // parses, there is a `Resources` mapping, every resource has a `Type`.
+        // NOT CreateStack's full parse -- that resolves parameter *values*, so
+        // a template using `!FindInMap [Config, !Ref Env, Size]` with no
+        // default for `Env` would be reported invalid even though real
+        // validate-template accepts it and the stack deploys fine. CDK and
+        // `sam deploy` call GetTemplateSummary during deploy, so that would
+        // break the deploy before it started.
+        if let Some(err) = crate::template_summary::structural_error(body) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ValidationError",
@@ -391,6 +386,7 @@ impl CloudFormationService {
         &self,
         account_id: &str,
         params: &BTreeMap<String, String>,
+        allow_stack_sources: bool,
     ) -> Result<String, AwsServiceError> {
         // A supplied body wins even when blank: falling through would
         // summarize a DIFFERENT template (the named stack's) as though it were
@@ -406,6 +402,13 @@ impl CloudFormationService {
             return self.resolve_template_url(account_id, url).map_err(|err| {
                 AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", err)
             });
+        }
+        // Only GetTemplateSummary takes a stack or stack set. They are not
+        // members of `ValidateTemplateInput`, and ValidateTemplate declares no
+        // errors at all -- answering `StackSetNotFoundException` from it would
+        // be an undeclared error on an operation that models none.
+        if !allow_stack_sources {
+            return Ok(String::new());
         }
         // `StackName` accepts a name or an ARN, matching DescribeStacks.
         //
@@ -2752,7 +2755,7 @@ impl CloudFormationService {
                 ))
             }
             "ValidateTemplate" => {
-                let body = self.template_for_introspection(&aid, &params)?;
+                let body = self.template_for_introspection(&aid, &params, false)?;
                 Self::reject_unparseable_template(&body)?;
                 let summary = crate::template_summary::summarize(&body);
                 Ok(xml_response(
@@ -2767,7 +2770,7 @@ impl CloudFormationService {
                 &rid,
             )),
             "GetTemplateSummary" => {
-                let body = self.template_for_introspection(&aid, &params)?;
+                let body = self.template_for_introspection(&aid, &params, true)?;
                 Self::reject_unparseable_template(&body)?;
                 let summary = crate::template_summary::summarize(&body);
                 Ok(xml_response(

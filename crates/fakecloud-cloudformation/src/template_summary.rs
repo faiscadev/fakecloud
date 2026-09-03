@@ -53,6 +53,56 @@ const IAM_NAME_PROPERTIES: &[&str] = &[
     "InstanceProfileName",
 ];
 
+/// The structural problem with a template, if any -- the level
+/// `ValidateTemplate` and `GetTemplateSummary` actually check.
+///
+/// Deliberately NOT the full `template::parse_template` that CreateStack runs.
+/// That resolves parameter *values*, so a template whose structure depends on
+/// a parameter the caller never supplies (`!FindInMap [Config, !Ref Env, Size]`
+/// with no default for `Env`, or `Fn::ForEach` over a `Ref`) would be reported
+/// as invalid. Real `validate-template` never resolves values and accepts
+/// those templates -- and CDK and `sam deploy` call `GetTemplateSummary`
+/// during deploy, so rejecting them would break the deploy before it starts.
+///
+/// What it does check is what AWS checks without values: the body parses in
+/// its dialect, there is a `Resources` mapping with at least one entry, and
+/// every resource carries a `Type`.
+pub(crate) fn structural_error(body: &str) -> Option<String> {
+    let value = match fakecloud_core::cfn_template::parse_template_body(body) {
+        Ok(value) => value,
+        Err(err) => return Some(err),
+    };
+    let Some(obj) = value.as_object() else {
+        return Some("Template format error: unsupported structure.".to_string());
+    };
+    let Some(resources) = obj.get("Resources") else {
+        return Some(
+            "Template format error: At least one Resources member must be defined.".to_string(),
+        );
+    };
+    let Some(resources) = resources.as_object() else {
+        return Some("Template format error: [/Resources] must be an object.".to_string());
+    };
+    if resources.is_empty() {
+        return Some(
+            "Template format error: At least one Resources member must be defined.".to_string(),
+        );
+    }
+    for (logical_id, resource) in resources {
+        let has_type = resource
+            .get("Type")
+            .and_then(Value::as_str)
+            .is_some_and(|t| !t.is_empty());
+        if !has_type {
+            return Some(format!(
+                "Template format error: Every Resources object must contain a Type member. \
+                 Resource {logical_id} does not."
+            ));
+        }
+    }
+    None
+}
+
 /// Build the summary. A body that does not parse, or parses to something that
 /// is not a mapping, yields the empty summary.
 pub(crate) fn summarize(template_body: &str) -> TemplateSummary {
@@ -224,13 +274,17 @@ fn capabilities(value: &Value) -> Vec<String> {
 /// AWS explains WHICH resources forced the capability, which is the part that
 /// makes the error actionable when a deploy is rejected for missing it.
 fn capabilities_reason(value: &Value) -> Option<String> {
-    let iam = iam_resource_types(value);
-    if iam.is_empty() {
+    // Transforms count too. Reporting CAPABILITY_AUTO_EXPAND with no reason
+    // left every SAM or macro template explaining a rejected deploy with an
+    // empty string.
+    let mut forced: Vec<String> = iam_resource_types(value);
+    forced.extend(declared_transforms(value));
+    if forced.is_empty() {
         return None;
     }
     Some(format!(
         "The following resource(s) require capabilities: [{}]",
-        iam.join(", ")
+        forced.join(", ")
     ))
 }
 
@@ -466,6 +520,77 @@ Resources:
         // A real default still reports, including a non-string one.
         let s = summarize("Parameters:\n  N:\n    Type: Number\n    Default: 3\nResources: {}\n");
         assert_eq!(s.parameters[0].default_value.as_deref(), Some("3"));
+    }
+
+    #[test]
+    fn structural_check_does_not_resolve_parameter_values() {
+        // The over-correction this guards against: running CreateStack's full
+        // parse here rejected a template whose structure depends on a
+        // parameter the caller never supplies. Real validate-template never
+        // resolves values, and CDK / `sam deploy` call GetTemplateSummary
+        // during deploy -- rejecting these would break the deploy up front.
+        let unresolved_findinmap = r#"
+Parameters:
+  Env:
+    Type: String
+Mappings:
+  Config:
+    dev:
+      Size: t2.micro
+Resources:
+  I:
+    Type: AWS::EC2::Instance
+    Properties:
+      InstanceType: !FindInMap [Config, !Ref Env, Size]
+"#;
+        assert_eq!(structural_error(unresolved_findinmap), None);
+
+        // A `Ref` to a parameter with no default is likewise fine.
+        let unresolved_ref = "Parameters:\n  P:\n    Type: String\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n    Properties:\n      QueueName: !Ref P\n";
+        assert_eq!(structural_error(unresolved_ref), None);
+    }
+
+    #[test]
+    fn structural_check_catches_what_aws_catches() {
+        // No Resources section at all.
+        let err = structural_error("Parameters:\n  P:\n    Type: String\n").unwrap();
+        assert!(err.contains("At least one Resources member"), "{err}");
+
+        // Resources present but empty.
+        let err = structural_error("Resources: {}\n").unwrap();
+        assert!(err.contains("At least one Resources member"), "{err}");
+
+        // A resource with no Type.
+        let err = structural_error("Resources:\n  Q:\n    Properties: {}\n").unwrap();
+        assert!(err.contains("must contain a Type member"), "{err}");
+        assert!(
+            err.contains('Q'),
+            "the offending resource should be named: {err}"
+        );
+
+        // Resources is a sequence, not a mapping.
+        let err = structural_error("Resources:\n  - Type: AWS::SQS::Queue\n").unwrap();
+        assert!(err.contains("[/Resources]"), "{err}");
+
+        // A dialect error still reports.
+        let err = structural_error("Resources:\n\tQ:\n\t\tType: AWS::SQS::Queue\n").unwrap();
+        assert!(err.contains("Invalid YAML template"), "{err}");
+
+        // A good template has nothing to report.
+        assert_eq!(
+            structural_error("Resources:\n  Q:\n    Type: AWS::SQS::Queue\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_transform_only_template_explains_its_capability() {
+        // CAPABILITY_AUTO_EXPAND with no reason left every SAM or macro
+        // template explaining a rejected deploy with an empty string.
+        let s = summarize("Transform: AWS::Serverless-2016-10-31\nResources:\n  F:\n    Type: AWS::Serverless::Function\n");
+        assert_eq!(s.capabilities, ["CAPABILITY_AUTO_EXPAND"]);
+        let reason = s.capabilities_reason.expect("a reason must be given");
+        assert!(reason.contains("AWS::Serverless-2016-10-31"), "{reason}");
     }
 
     #[test]
