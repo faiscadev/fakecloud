@@ -123,7 +123,7 @@ impl GlueService {
             .get(&req.account_id)
             .map(|s| s.glossaries.values().cloned().collect())
             .unwrap_or_default();
-        let (page, token) = paginate_body(&body, items)?;
+        let (page, token) = paginate_body(&req.action, &body, items)?;
         let mut out = json!({ "Items": page });
         if let Some(t) = token {
             out["NextToken"] = json!(t);
@@ -232,7 +232,7 @@ impl GlueService {
             .filter(|t| t["GlossaryId"].as_str() == Some(glossary_id.as_str()))
             .cloned()
             .collect();
-        let (page, token) = paginate_body(&body, items)?;
+        let (page, token) = paginate_body(&req.action, &body, items)?;
         let mut out = json!({ "Items": page });
         if let Some(t) = token {
             out["NextToken"] = json!(t);
@@ -254,11 +254,31 @@ impl GlueService {
             return Err(invalid_input("GlossaryTermIdentifiers must not be empty"));
         }
 
+        // Terms attach to the asset itself, or to one item of an iterable form
+        // on it when the request names both.
+        let form = body
+            .get("IterableFormName")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let item = body
+            .get("ItemIdentifier")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
         if !state.assets.contains_key(&asset_id) {
             return Err(entity_not_found(format!("Asset {asset_id} not found")));
         }
+        let scope = match (form.as_deref(), item.as_deref()) {
+            (Some(f), Some(i)) => {
+                if !crate::business_forms::iterable_item_exists(state, &asset_id, f, i) {
+                    return Err(entity_not_found(format!("Item {i} not found in form {f}")));
+                }
+                crate::business_forms::item_key(&asset_id, f, i)
+            }
+            _ => asset_id.clone(),
+        };
         // Associating a term that does not exist would leave the asset
         // pointing at nothing, so every id is checked first.
         if associate {
@@ -268,10 +288,7 @@ impl GlueService {
                 }
             }
         }
-        let entry = state
-            .asset_glossary_terms
-            .entry(asset_id.clone())
-            .or_default();
+        let entry = state.asset_glossary_terms.entry(scope).or_default();
         for t in &term_ids {
             if associate {
                 if !entry.contains(t) {
@@ -282,10 +299,17 @@ impl GlueService {
             }
         }
         let current = entry.clone();
-        Ok(AwsResponse::ok_json(json!({
+        let mut out = json!({
             "AssetIdentifier": asset_id,
             "GlossaryTerms": current,
-        })))
+        });
+        if let Some(f) = form {
+            out["IterableFormName"] = json!(f);
+        }
+        if let Some(i) = item {
+            out["ItemIdentifier"] = json!(i);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     pub(crate) fn associate_glossary_terms(
@@ -378,7 +402,7 @@ impl GlueService {
                     .collect()
             })
             .unwrap_or_default();
-        let (page, token) = paginate_body(&body, items)?;
+        let (page, token) = paginate_body(&req.action, &body, items)?;
         let mut out = json!({ "Items": page });
         if let Some(t) = token {
             out["NextToken"] = json!(t);
@@ -469,7 +493,14 @@ impl GlueService {
         // These deletes declare no EntityNotFoundException in the Smithy
         // model, so removing an absent asset is a no-op rather than an error.
         state.assets.remove(&id);
+        // Item-scoped associations and attachments are keyed by a composite
+        // that starts with the asset id, so they go with the asset.
+        let prefix = format!("{id}\u{0}");
         state.asset_glossary_terms.remove(&id);
+        state
+            .asset_glossary_terms
+            .retain(|k, _| !k.starts_with(&prefix));
+        state.attachments.retain(|k, _| !k.starts_with(&prefix));
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -538,7 +569,7 @@ impl GlueService {
             }
         });
 
-        let (page, token) = paginate_body(&body, items)?;
+        let (page, token) = paginate_body(&req.action, &body, items)?;
         let mut out = json!({ "Items": page });
         if let Some(t) = token {
             out["NextToken"] = json!(t);

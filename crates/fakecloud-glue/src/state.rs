@@ -72,9 +72,22 @@ pub struct GlueState {
     /// Asset types, keyed by asset-type id.
     #[serde(default)]
     pub asset_types: JsonStore,
-    /// Glossary terms associated to an asset: asset id -> term ids.
+    /// Glossary terms associated to an asset: asset id -> term ids. Terms can
+    /// also be scoped to one item of an iterable form, in which case the key is
+    /// the composite built by `business_forms::item_key`.
     #[serde(default)]
     pub asset_glossary_terms: BTreeMap<String, Vec<String>>,
+    /// Business-catalog form types, keyed by form-type id.
+    #[serde(default)]
+    pub form_types: JsonStore,
+    /// Attachments on assets and on iterable-form items, keyed by the
+    /// composite built by `business_forms::attachment_key`.
+    #[serde(default)]
+    pub attachments: JsonStore,
+    /// The account's single data-catalog export configuration, if it has been
+    /// put. `GetDataCatalogExportConfiguration` reports not-found until then.
+    #[serde(default)]
+    pub data_catalog_export: Option<Value>,
     #[serde(default)]
     pub crawlers: JsonStore,
     #[serde(default)]

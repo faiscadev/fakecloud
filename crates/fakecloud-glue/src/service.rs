@@ -319,6 +319,16 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UpdateUsageProfile",
     "UpdateUserDefinedFunction",
     "UpdateWorkflow",
+    "PutFormType",
+    "GetFormType",
+    "DeleteFormType",
+    "ListFormTypes",
+    "PutAttachment",
+    "DeleteAttachment",
+    "BatchGetIterableForms",
+    "ListIterableForms",
+    "GetDataCatalogExportConfiguration",
+    "PutDataCatalogExportConfiguration",
 ];
 
 pub struct GlueService {
@@ -429,6 +439,16 @@ impl AwsService for GlueService {
         crate::common::validate_constraints(&req.action, &req.json_body())?;
         let mutates = is_mutating_action(&req.action);
         let result = match req.action.as_str() {
+            "PutFormType" => self.put_form_type(&req),
+            "GetFormType" => self.get_form_type(&req),
+            "DeleteFormType" => self.delete_form_type(&req),
+            "ListFormTypes" => self.list_form_types(&req),
+            "PutAttachment" => self.put_attachment(&req),
+            "DeleteAttachment" => self.delete_attachment(&req),
+            "BatchGetIterableForms" => self.batch_get_iterable_forms(&req),
+            "ListIterableForms" => self.list_iterable_forms(&req),
+            "GetDataCatalogExportConfiguration" => self.get_data_catalog_export_configuration(&req),
+            "PutDataCatalogExportConfiguration" => self.put_data_catalog_export_configuration(&req),
             "BatchCreatePartition" => self.batch_create_partition(&req),
             "BatchDeleteConnection" => self.batch_delete_connection(&req),
             "BatchDeletePartition" => self.batch_delete_partition(&req),
@@ -1118,7 +1138,7 @@ impl GlueService {
             .and_then(|s| s.dbs_in(&req.region))
             .map(|map| map.values().map(database_json).collect())
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, dbs)?;
+        let (page, token) = crate::common::paginate_body(&req.action, &body, dbs)?;
         let mut resp = json!({ "DatabaseList": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
@@ -1265,7 +1285,7 @@ impl GlueService {
                 }
             }
         }
-        let (page, token) = crate::common::paginate_body(&body, tables)?;
+        let (page, token) = crate::common::paginate_body(&req.action, &body, tables)?;
         let mut resp = json!({ "TableList": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
@@ -1476,7 +1496,7 @@ impl GlueService {
                     .collect()
             })
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, parts)?;
+        let (page, token) = crate::common::paginate_body(&req.action, &body, parts)?;
         let mut resp = json!({ "Partitions": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);

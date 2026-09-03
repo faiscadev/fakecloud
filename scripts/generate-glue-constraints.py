@@ -110,6 +110,26 @@ def main():
             out.append("            },\n")
         out.append("        ],\n")
     out.append("        _ => &[],\n    }\n}\n")
+
+    # Operations that declare InvalidInputException. Pagination uses this to
+    # decide whether a malformed NextToken can be reported as an error at all.
+    declaring = sorted(
+        sid.split("#")[1]
+        for sid, shape in shapes.items()
+        if shape.get("type") == "operation"
+        and any(
+            e["target"].endswith("#InvalidInputException")
+            for e in shape.get("errors", [])
+        )
+    )
+    out.append(
+        "\n/// Whether an operation declares `InvalidInputException` in the Smithy\n"
+        "/// model. Operations that do not cannot report one, whatever the input.\n"
+        "pub(crate) fn declares_invalid_input(action: &str) -> bool {\n"
+        "    matches!(\n        action,\n"
+    )
+    out.append("        " + "\n            | ".join(f'"{n}"' for n in declaring) + "\n")
+    out.append("    )\n}\n")
     OUT.write_text("".join(out))
     print(f"wrote {OUT.relative_to(ROOT)}: {count} operations", file=sys.stderr)
 
