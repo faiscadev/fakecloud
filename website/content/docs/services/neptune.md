@@ -64,7 +64,7 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 
 ## Describe filters
 
-`Filters` is honored on the three operations in the table below -- the ones Neptune documents filter names for. The other Describes model the parameter but AWS documents it as *not currently supported* there, so it is accepted and ignored, matching AWS. `DescribeGlobalClusters` takes no `Filters` member at all. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
+`Filters` is honored on the three operations in the table below -- the ones Neptune documents filter names for. Most other Describes model the parameter but AWS documents it as *not currently supported* there, so it is accepted and ignored, matching AWS. The exception is `DescribePendingMaintenanceActions`, which does document `db-cluster-id` and `db-instance-id`: it reports no pending actions at all, so there is nothing for a filter to narrow. `DescribeGlobalClusters` takes no `Filters` member at all. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
 
 | Operation | Supported filter names |
 | --- | --- |

@@ -420,6 +420,19 @@ fn member_is(member: &GlobalClusterMember, wanted: &str) -> bool {
     member.db_cluster_arn == wanted || member_identifier(&member.db_cluster_arn) == Some(wanted)
 }
 
+/// Keeps a global cluster's writer valid after a member leaves.
+///
+/// Removing the writer used to leave every remaining member at
+/// `IsWriter=false` -- the writerless state the failover path refuses to
+/// create. The oldest remaining member takes over, as a promotion would.
+fn ensure_writer(global: &mut GlobalCluster) {
+    if !global.members.is_empty() && !global.members.iter().any(|m| m.is_writer) {
+        if let Some(first) = global.members.first_mut() {
+            first.is_writer = true;
+        }
+    }
+}
+
 /// True when a global cluster satisfies every filter.
 ///
 /// `db-cluster-id` accepts cluster identifiers and ARNs. A global
@@ -442,16 +455,12 @@ fn global_cluster_matches_filters(global: &GlobalCluster, filters: &[QueryFilter
                     member_identifier(&member.db_cluster_arn),
                 ])
             });
-            // The global cluster's own name is offered too. AWS's wording
-            // ("one or more global DB clusters to describe" filtered by
-            // `db-cluster-id`) reads both ways, and accepting both only
-            // ever returns a global cluster the caller named -- either
-            // through a member it spans or by its own identifier.
+            // MEMBERS only. The filter is `db-cluster-id` and the model
+            // describes it as "the clusters identified by these ARNs" --
+            // DB clusters, not the global cluster wrapping them. Also
+            // accepting the global cluster's own name returned rows AWS
+            // would not.
             matches_member
-                || filter.matches_any([
-                    Some(global.global_cluster_identifier.as_str()),
-                    Some(global.global_cluster_arn.as_str()),
-                ])
         }
         _ => false,
     })
@@ -683,8 +692,21 @@ impl DocDbService {
         let renamed = optional_query_param(req, "NewDBClusterIdentifier");
         let mut cluster = cluster.clone();
         if let Some(new_id) = renamed.filter(|n| n != &id) {
+            let old_arn = cluster.db_cluster_arn.clone();
             cluster.db_cluster_identifier = new_id.clone();
             cluster.db_cluster_arn = cluster_arn(&req.region, &req.account_id, &new_id);
+            // A rename moves the ARN, so any global cluster holding the
+            // old one has to follow. Left behind it is the same dangling
+            // member the delete sweep removes: the listing reports an
+            // ARN nothing resolves to, `db-cluster-id` misses the new
+            // name, and the old name still selects the global cluster.
+            for global in st.global_clusters.values_mut() {
+                for member in &mut global.members {
+                    if member.db_cluster_arn == old_arn {
+                        member.db_cluster_arn = cluster.db_cluster_arn.clone();
+                    }
+                }
+            }
             st.clusters.remove(&id);
             st.clusters.insert(new_id, cluster.clone());
         } else {
@@ -730,6 +752,7 @@ impl DocDbService {
             global
                 .members
                 .retain(|m| m.db_cluster_arn != cluster.db_cluster_arn);
+            ensure_writer(global);
         }
         Ok(ok_xml(
             "DeleteDBCluster",
@@ -1710,6 +1733,21 @@ impl DocDbService {
         let id = required_query_param(req, "GlobalClusterIdentifier")?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        // AWS refuses while member clusters remain, and the fault is
+        // declared here. Deleting anyway pulled the global cluster out
+        // from under the clusters that still pointed at it -- reachable
+        // only now that membership is recorded at all.
+        if st
+            .global_clusters
+            .get(&id)
+            .is_some_and(|global| !global.members.is_empty())
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidGlobalClusterStateFault",
+                format!("Global cluster {id} still has member clusters."),
+            ));
+        }
         let global = st
             .global_clusters
             .remove(&id)
@@ -1766,7 +1804,15 @@ impl DocDbService {
             .global_clusters
             .get_mut(&id)
             .ok_or_else(|| global_cluster_not_found(&id))?;
-        global.members.retain(|m| m.db_cluster_arn != db_cluster);
+        // Identifier or ARN, matching the CLI's documented form -- an
+        // exact ARN comparison made `--db-cluster-identifier clu-a` a
+        // silent no-op that answered 200 while the member stayed. A
+        // target naming no member is the declared fault.
+        if !global.members.iter().any(|m| member_is(m, &db_cluster)) {
+            return Err(db_cluster_not_found(&db_cluster));
+        }
+        global.members.retain(|m| !member_is(m, &db_cluster));
+        ensure_writer(global);
         let global = global.clone();
         Ok(ok_xml(
             "RemoveFromGlobalCluster",

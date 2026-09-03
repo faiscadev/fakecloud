@@ -226,7 +226,9 @@ async fn describe_global_clusters_filters_by_member_cluster() {
     )
     .await;
 
-    // By the global cluster's own identifier.
+    // `db-cluster-id` names a DB CLUSTER, not the global cluster
+    // wrapping it, so the global cluster's own identifier selects
+    // nothing -- matching it would return rows AWS does not.
     let xml = body(
         &call(
             &svc,
@@ -239,12 +241,8 @@ async fn describe_global_clusters_filters_by_member_cluster() {
         .await,
     );
     assert!(
-        xml.contains("<GlobalClusterIdentifier>glob-2</GlobalClusterIdentifier>"),
-        "{xml}"
-    );
-    assert!(
-        !xml.contains("<GlobalClusterIdentifier>glob-1</GlobalClusterIdentifier>"),
-        "the filter kept an unmatched global cluster: {xml}"
+        !xml.contains("<GlobalClusterIdentifier>"),
+        "a global cluster's own identifier matched db-cluster-id: {xml}"
     );
 
     // And by a MEMBER cluster -- the point of the filter, and the only

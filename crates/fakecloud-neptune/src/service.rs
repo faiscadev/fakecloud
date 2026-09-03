@@ -489,9 +489,11 @@ fn cluster_endpoint_matches_filters(endpoint: &DbClusterEndpoint, filters: &[Que
         "db-cluster-endpoint-type" => {
             filter.matches_ignore_case(Some(endpoint.endpoint_type.as_str()))
         }
-        "db-cluster-endpoint-custom-type" => {
-            filter.matches_ignore_case(Some(endpoint.custom_endpoint_type.as_str()))
-        }
+        // An endpoint with no custom type -- every non-CUSTOM one --
+        // matches no value of this filter rather than matching "".
+        "db-cluster-endpoint-custom-type" => filter.matches_ignore_case(
+            Some(endpoint.custom_endpoint_type.as_str()).filter(|v| !v.is_empty()),
+        ),
         "db-cluster-endpoint-status" => filter.matches_ignore_case(Some(endpoint.status.as_str())),
         _ => false,
     })
@@ -900,9 +902,17 @@ impl NeptuneService {
                 req.region
             ),
             status: "available".to_string(),
-            endpoint_type,
-            custom_endpoint_type: optional_query_param(req, "CustomEndpointType")
-                .unwrap_or_else(|| "ANY".to_string()),
+            endpoint_type: endpoint_type.clone(),
+            // Only a CUSTOM endpoint carries a custom type. Defaulting
+            // every endpoint to ANY meant
+            // `db-cluster-endpoint-custom-type=any` selected READER and
+            // WRITER endpoints too -- the filter honored, but on
+            // invented data.
+            custom_endpoint_type: if endpoint_type.eq_ignore_ascii_case("CUSTOM") {
+                optional_query_param(req, "CustomEndpointType").unwrap_or_else(|| "ANY".to_string())
+            } else {
+                String::new()
+            },
             static_members: collect_list(req, "StaticMembers", &["member"]),
             excluded_members: collect_list(req, "ExcludedMembers", &["member"]),
             db_cluster_endpoint_arn: format!(
