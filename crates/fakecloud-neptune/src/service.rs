@@ -902,17 +902,14 @@ impl NeptuneService {
                 req.region
             ),
             status: "available".to_string(),
-            endpoint_type: endpoint_type.clone(),
-            // Only a CUSTOM endpoint carries a custom type. Defaulting
-            // every endpoint to ANY meant
-            // `db-cluster-endpoint-custom-type=any` selected READER and
-            // WRITER endpoints too -- the filter honored, but on
-            // invented data.
-            custom_endpoint_type: if endpoint_type.eq_ignore_ascii_case("CUSTOM") {
-                optional_query_param(req, "CustomEndpointType").unwrap_or_else(|| "ANY".to_string())
-            } else {
-                String::new()
-            },
+            // This operation only ever creates CUSTOM endpoints: the
+            // request's EndpointType (READER / WRITER / ANY) IS the
+            // custom type, and the endpoint reads back as CUSTOM. Same
+            // mapping as RDS -- CustomEndpointType is not an input
+            // member in either model, so reading one off the request
+            // could never fire for an SDK or CLI caller.
+            endpoint_type: "CUSTOM".to_string(),
+            custom_endpoint_type: endpoint_type.clone(),
             static_members: collect_list(req, "StaticMembers", &["member"]),
             excluded_members: collect_list(req, "ExcludedMembers", &["member"]),
             db_cluster_endpoint_arn: format!(
@@ -939,11 +936,13 @@ impl NeptuneService {
             .cluster_endpoints
             .get_mut(&endpoint_id)
             .ok_or_else(|| cluster_endpoint_not_found(&endpoint_id))?;
+        // The request's EndpointType retargets the custom endpoint; the
+        // endpoint itself stays CUSTOM. Reading an unmodeled
+        // CustomEndpointType off the request could produce a combination
+        // create cannot: a READER endpoint carrying a custom type.
         if let Some(v) = optional_query_param(req, "EndpointType") {
-            endpoint.endpoint_type = v;
-        }
-        if let Some(v) = optional_query_param(req, "CustomEndpointType") {
             endpoint.custom_endpoint_type = v;
+            endpoint.endpoint_type = "CUSTOM".to_string();
         }
         if !static_members.is_empty() {
             endpoint.static_members = static_members;

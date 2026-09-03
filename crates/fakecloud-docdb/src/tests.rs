@@ -421,6 +421,102 @@ async fn failover_global_cluster_rejects_an_unknown_target() {
     .await;
 }
 
+/// A rename carries every reference to the cluster with it.
+///
+/// The identifier appears in a global cluster's member ARN and on each
+/// of the cluster's instances; leaving either behind means the new name
+/// matches nothing and the old one still does.
+#[tokio::test]
+async fn renaming_a_cluster_carries_its_references() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateGlobalCluster",
+        &[("GlobalClusterIdentifier", "glob-1"), ("Engine", "docdb")],
+    )
+    .await;
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-old"),
+            ("Engine", "docdb"),
+            ("GlobalClusterIdentifier", "glob-1"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "CreateDBInstance",
+        &[
+            ("DBInstanceIdentifier", "inst-1"),
+            ("DBClusterIdentifier", "clu-old"),
+            ("DBInstanceClass", "db.r5.large"),
+            ("Engine", "docdb"),
+        ],
+    )
+    .await;
+
+    call(
+        &svc,
+        "ModifyDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-old"),
+            ("NewDBClusterIdentifier", "clu-new"),
+        ],
+    )
+    .await;
+
+    // The global cluster follows the rename.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeGlobalClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-new"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<GlobalClusterIdentifier>glob-1</GlobalClusterIdentifier>"),
+        "the member ARN kept the old name: {xml}"
+    );
+    let stale = body(
+        &call(
+            &svc,
+            "DescribeGlobalClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-old"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        !stale.contains("<GlobalClusterIdentifier>"),
+        "the old name still selected the global cluster: {stale}"
+    );
+
+    // And so do the cluster's instances.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-new"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBInstanceIdentifier>inst-1</DBInstanceIdentifier>"),
+        "the instance kept the old cluster name: {xml}"
+    );
+}
+
 #[tokio::test]
 async fn envelope_shape_is_correct() {
     let svc = service();

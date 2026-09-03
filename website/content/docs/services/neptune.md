@@ -74,6 +74,8 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 
 `db-cluster-id` accepts identifiers and ARNs. The endpoint enum filters match case-insensitively: AWS returns those values uppercase (`READER`, `CUSTOM`) while documenting the filter values lowercase, so an exact comparison would return nothing for a caller copying the documented command.
 
+`CreateDBClusterEndpoint` only ever creates custom endpoints, so the request's `EndpointType` (`READER`, `WRITER`, `ANY`) is reported back as `CustomEndpointType` with `EndpointType` set to `CUSTOM`, matching AWS and the RDS behaviour -- `CustomEndpointType` is an output member, not something a caller sends. `ModifyDBClusterEndpoint` retargets it the same way.
+
 An unrecognized filter name matches no resource rather than raising: Neptune declares no `InvalidParameterValue`-equivalent on these operations, so returning one would put an error shape on the wire that the operation never declares. The name is logged at `warn`.
 
 ## Honest gap: no data plane

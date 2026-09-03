@@ -188,8 +188,14 @@ async fn describe_db_cluster_endpoints_honors_its_filters() {
     for (name, value) in [
         ("db-cluster-endpoint-id", "ep-1"),
         ("db-cluster-endpoint-status", "available"),
-        ("db-cluster-endpoint-type", "reader"),
-        ("db-cluster-endpoint-type", "READER"),
+        // The endpoint reads back as CUSTOM; the READER it was created
+        // with is its custom type. Both spellings of each, since the
+        // documented filter values are lowercase while the API returns
+        // uppercase.
+        ("db-cluster-endpoint-type", "custom"),
+        ("db-cluster-endpoint-type", "CUSTOM"),
+        ("db-cluster-endpoint-custom-type", "reader"),
+        ("db-cluster-endpoint-custom-type", "READER"),
     ] {
         let xml = body(
             &call(
@@ -505,7 +511,13 @@ async fn cluster_endpoint_lifecycle() {
     .await;
     let xml = body(&resp);
     assert!(xml.contains("<DBClusterEndpointIdentifier>custom-ep</DBClusterEndpointIdentifier>"));
-    assert!(xml.contains("<EndpointType>READER</EndpointType>"));
+    // The request's EndpointType is the CUSTOM type; the endpoint reads
+    // back as CUSTOM, matching the model and the RDS behaviour.
+    assert!(xml.contains("<EndpointType>CUSTOM</EndpointType>"), "{xml}");
+    assert!(
+        xml.contains("<CustomEndpointType>READER</CustomEndpointType>"),
+        "{xml}"
+    );
     assert!(xml.contains(".cluster-custom-"));
     assert!(xml.contains("arn:aws:rds:us-east-1:123456789012:cluster-endpoint:custom-ep"));
 
@@ -519,7 +531,13 @@ async fn cluster_endpoint_lifecycle() {
         ],
     )
     .await;
-    assert!(body(&resp).contains("<EndpointType>ANY</EndpointType>"));
+    // Modify retargets the custom endpoint; it stays CUSTOM.
+    let xml = body(&resp);
+    assert!(
+        xml.contains("<CustomEndpointType>ANY</CustomEndpointType>"),
+        "{xml}"
+    );
+    assert!(xml.contains("<EndpointType>CUSTOM</EndpointType>"), "{xml}");
 
     // Describe.
     let resp = call(&svc, "DescribeDBClusterEndpoints", &[]).await;

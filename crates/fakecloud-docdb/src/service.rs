@@ -707,6 +707,16 @@ impl DocDbService {
                     }
                 }
             }
+            // The cluster's instances point at it by identifier, so a
+            // rename has to carry them along too -- otherwise
+            // `DescribeDBInstances --filters Name=db-cluster-id` misses
+            // them under the new name and finds them under the old one,
+            // the same dangling reference the member sweep above fixes.
+            for instance in st.instances.values_mut() {
+                if instance.db_cluster_identifier == id {
+                    instance.db_cluster_identifier = new_id.clone();
+                }
+            }
             st.clusters.remove(&id);
             st.clusters.insert(new_id, cluster.clone());
         } else {
