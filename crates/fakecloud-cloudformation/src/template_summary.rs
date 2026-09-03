@@ -57,6 +57,15 @@ pub(crate) struct TemplateSummary {
 /// merely contains `::IAM::` (`MyOrg::IAM::Thing`, `Custom::IAM::Wrapper`)
 /// does not require an IAM capability, and matching it would report a
 /// capability the caller does not need -- and name it in the reason.
+///
+/// Every `AWS::IAM::` type counts, with no per-type allowlist, because AWS
+/// states the rule generically -- "CloudFormation checks your template for IAM
+/// resources that it might create" -- and publishes no enumeration to narrow
+/// it to. A hand-written allowlist would encode a distinction AWS does not
+/// document and would under-report each IAM type added after it was written.
+/// Under-reporting is the costlier direction: it means validation passes and
+/// the deploy is then rejected, which is what #2480 was about. Over-reporting
+/// costs one extra `--capabilities` flag.
 fn is_aws_iam_type(resource_type: &str) -> bool {
     resource_type.starts_with("AWS::IAM::")
 }
