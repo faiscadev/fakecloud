@@ -406,6 +406,20 @@ fn cluster_matches_filters(cluster: &DbCluster, filters: &[QueryFilter]) -> bool
     })
 }
 
+/// The identifier a member ARN carries, for matching a caller's bare id
+/// against it.
+fn member_identifier(db_cluster_arn: &str) -> Option<&str> {
+    db_cluster_arn
+        .rsplit(':')
+        .next()
+        .filter(|id| !id.is_empty())
+}
+
+/// True when a member is the one the caller named, by identifier or ARN.
+fn member_is(member: &GlobalClusterMember, wanted: &str) -> bool {
+    member.db_cluster_arn == wanted || member_identifier(&member.db_cluster_arn) == Some(wanted)
+}
+
 /// True when a global cluster satisfies every filter.
 ///
 /// `db-cluster-id` accepts cluster identifiers and ARNs. A global
@@ -423,9 +437,10 @@ fn global_cluster_matches_filters(global: &GlobalCluster, filters: &[QueryFilter
             // returned nothing. A member carries only its ARN, so the
             // identifier is its last segment.
             let matches_member = global.members.iter().any(|member| {
-                let arn = member.db_cluster_arn.as_str();
-                let id = arn.rsplit(':').next().filter(|id| !id.is_empty());
-                filter.matches_any([Some(arn), id])
+                filter.matches_any([
+                    Some(member.db_cluster_arn.as_str()),
+                    member_identifier(&member.db_cluster_arn),
+                ])
             });
             // The global cluster's own name is offered too. AWS's wording
             // ("one or more global DB clusters to describe" filtered by
@@ -543,6 +558,27 @@ impl DocDbService {
             cluster_create_time: Utc::now(),
             tags: parse_tags(req),
         };
+        // `CreateDBCluster --global-cluster-identifier` is how a cluster
+        // normally joins a global cluster; only the CreateGlobalCluster
+        // source path recorded a member, so the common flow (create the
+        // global cluster, then create clusters into it) left
+        // `GlobalClusterMembers` empty. An identifier naming no global
+        // cluster raises the fault the operation declares.
+        if let Some(global_id) =
+            optional_query_param(req, "GlobalClusterIdentifier").filter(|value| !value.is_empty())
+        {
+            let global = st
+                .global_clusters
+                .get_mut(&global_id)
+                .ok_or_else(|| global_cluster_not_found(&global_id))?;
+            // The first cluster in is the writer; later ones are
+            // secondaries, as on AWS.
+            let is_writer = global.members.is_empty();
+            global.members.push(GlobalClusterMember {
+                db_cluster_arn: cluster.db_cluster_arn.clone(),
+                is_writer,
+            });
+        }
         st.clusters.insert(id, cluster.clone());
         Ok(ok_xml(
             "CreateDBCluster",
@@ -685,6 +721,15 @@ impl DocDbService {
             .collect();
         for mid in member_ids {
             st.instances.remove(&mid);
+        }
+        // Drop it from any global cluster it belonged to. Left behind,
+        // the dangling ARN kept being reported under
+        // `GlobalClusterMembers` and kept selecting the global cluster
+        // through the `db-cluster-id` filter.
+        for global in st.global_clusters.values_mut() {
+            global
+                .members
+                .retain(|m| m.db_cluster_arn != cluster.db_cluster_arn);
         }
         Ok(ok_xml(
             "DeleteDBCluster",
@@ -1561,13 +1606,23 @@ impl DocDbService {
         // discarded, so every global cluster reported an empty
         // `GlobalClusterMembers` -- and `db-cluster-id` had nothing to
         // match a member against.
-        let source_member = source.as_ref().and_then(|arn| {
-            let src_id = arn.rsplit(':').next().unwrap_or(arn);
-            st.clusters.get(src_id).map(|c| GlobalClusterMember {
-                db_cluster_arn: c.db_cluster_arn.clone(),
-                is_writer: true,
-            })
-        });
+        let source_member = match &source {
+            Some(arn) => {
+                let src_id = arn.rsplit(':').next().unwrap_or(arn);
+                // AWS raises DBClusterNotFoundFault here. Resolving to
+                // None instead created the global cluster with no member
+                // and a default engine that may not be the source's.
+                let cluster = st
+                    .clusters
+                    .get(src_id)
+                    .ok_or_else(|| db_cluster_not_found(src_id))?;
+                Some(GlobalClusterMember {
+                    db_cluster_arn: cluster.db_cluster_arn.clone(),
+                    is_writer: true,
+                })
+            }
+            None => None,
+        };
         let (engine, engine_version) = match &source {
             Some(arn) => {
                 let src_id = arn.rsplit(':').next().unwrap_or(arn);
@@ -1732,8 +1787,16 @@ impl DocDbService {
             .global_clusters
             .get_mut(&id)
             .ok_or_else(|| global_cluster_not_found(&id))?;
+        // A target that names no member is the declared fault, not a
+        // silent success: assigning `is_writer` unconditionally cleared
+        // it on EVERY member when nothing matched, leaving the global
+        // cluster with no writer at all. `TargetDbClusterIdentifier`
+        // takes an identifier or an ARN.
+        if !global.members.iter().any(|m| member_is(m, &target)) {
+            return Err(db_cluster_not_found(&target));
+        }
         for m in &mut global.members {
-            m.is_writer = m.db_cluster_arn == target;
+            m.is_writer = member_is(m, &target);
         }
         let global = global.clone();
         Ok(ok_xml(
@@ -1755,8 +1818,12 @@ impl DocDbService {
             .global_clusters
             .get_mut(&id)
             .ok_or_else(|| global_cluster_not_found(&id))?;
+        // Same as the failover path above.
+        if !global.members.iter().any(|m| member_is(m, &target)) {
+            return Err(db_cluster_not_found(&target));
+        }
         for m in &mut global.members {
-            m.is_writer = m.db_cluster_arn == target;
+            m.is_writer = member_is(m, &target);
         }
         let global = global.clone();
         Ok(ok_xml(

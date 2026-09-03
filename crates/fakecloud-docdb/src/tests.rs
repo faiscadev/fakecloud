@@ -293,6 +293,136 @@ async fn describe_global_clusters_filters_by_member_cluster() {
     }
 }
 
+/// A cluster joins a global cluster at create time and leaves it on
+/// delete -- the membership the `db-cluster-id` filter matches against.
+#[tokio::test]
+async fn global_cluster_membership_follows_its_clusters() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateGlobalCluster",
+        &[("GlobalClusterIdentifier", "glob-1"), ("Engine", "docdb")],
+    )
+    .await;
+    // The normal flow: create the cluster INTO the global cluster.
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("Engine", "docdb"),
+            ("GlobalClusterIdentifier", "glob-1"),
+        ],
+    )
+    .await;
+
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeGlobalClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-1"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<GlobalClusterIdentifier>glob-1</GlobalClusterIdentifier>"),
+        "a cluster created into a global cluster was not a member: {xml}"
+    );
+
+    // Deleting the cluster removes it from the global cluster rather
+    // than leaving a dangling member ARN.
+    call(&svc, "DeleteDBCluster", &[("DBClusterIdentifier", "clu-1")]).await;
+    let xml = body(&call(&svc, "DescribeGlobalClusters", &[]).await);
+    assert!(
+        !xml.contains("cluster:clu-1"),
+        "a deleted cluster stayed a member: {xml}"
+    );
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeGlobalClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-1"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        !xml.contains("<GlobalClusterIdentifier>"),
+        "a deleted cluster still selected its global cluster: {xml}"
+    );
+
+    // An unknown global cluster is the declared fault, not a silent
+    // create.
+    let err = call_err(
+        &svc,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-2"),
+            ("Engine", "docdb"),
+            ("GlobalClusterIdentifier", "no-such-global"),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "GlobalClusterNotFoundFault");
+}
+
+/// A failover target that names no member must not clear every writer.
+#[tokio::test]
+async fn failover_global_cluster_rejects_an_unknown_target() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateGlobalCluster",
+        &[("GlobalClusterIdentifier", "glob-1"), ("Engine", "docdb")],
+    )
+    .await;
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("Engine", "docdb"),
+            ("GlobalClusterIdentifier", "glob-1"),
+        ],
+    )
+    .await;
+
+    let err = call_err(
+        &svc,
+        "FailoverGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "glob-1"),
+            ("TargetDbClusterIdentifier", "not-a-member"),
+        ],
+    )
+    .await;
+    assert_eq!(err.code(), "DBClusterNotFoundFault");
+
+    // The writer is intact -- the unconditional assignment used to clear
+    // it on every member when nothing matched.
+    let xml = body(&call(&svc, "DescribeGlobalClusters", &[]).await);
+    assert!(
+        xml.contains("<IsWriter>true</IsWriter>"),
+        "the failed failover left the global cluster with no writer: {xml}"
+    );
+
+    // The bare identifier works as a target, as does the ARN.
+    call(
+        &svc,
+        "FailoverGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "glob-1"),
+            ("TargetDbClusterIdentifier", "clu-1"),
+        ],
+    )
+    .await;
+}
+
 #[tokio::test]
 async fn envelope_shape_is_correct() {
     let svc = service();
