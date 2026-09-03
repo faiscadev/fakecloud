@@ -9,10 +9,20 @@
 //! template that would then provision nothing -- the first command in the
 //! #2480 report, giving a false green light before the real failure.
 //!
-//! Everything here is lenient by construction: a body that isn't a template
-//! (the conformance probe sends `TemplateBody="test"`) yields an empty summary
-//! rather than an error, because neither operation declares `ValidationError`
-//! in its Smithy `errors` list.
+//! Two levels of leniency, which the service layer relies on:
+//!
+//! - A body that is not a template at all -- the conformance probe sends
+//!   `TemplateBody="test"` -- yields the empty summary. Neither operation
+//!   declares `ValidationError` in its Smithy `errors` list, so it must not
+//!   become one.
+//! - A body that IS unmistakably a template but is structurally invalid gets a
+//!   problem back from [`structural_error`], which the handlers turn into a
+//!   `ValidationError`. That path is gated on
+//!   `cfn_template::is_template_document`, so the probe's inputs never reach
+//!   it.
+//!
+//! Nothing here errors on its own; `summarize` always returns a summary and
+//! `structural_error` always returns an `Option`.
 
 use fakecloud_aws::xml::xml_escape;
 use serde_json::Value;
@@ -129,15 +139,29 @@ pub(crate) fn summarize(template_body: &str) -> TemplateSummary {
         .get("AWSTemplateFormatVersion")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let metadata = value.get("Metadata").map(ToString::to_string);
+    // Same reasoning as a null parameter default: a blank `Metadata:` parses
+    // to Null, and reporting the literal "null" invents content the template
+    // never carried.
+    let metadata = value
+        .get("Metadata")
+        .filter(|m| !m.is_null())
+        .map(ToString::to_string);
+
+    // Computed once and shared: `capabilities` and `capabilities_reason` both
+    // need the IAM types and the transforms, and deriving them separately in
+    // three places both re-walked the template and gave the three copies room
+    // to drift apart.
+    let transforms = declared_transforms(&value);
+    let iam = iam_resource_types(&value);
+    let named_iam = has_named_iam(&value);
 
     TemplateSummary {
         description,
         parameters: parameters(&value),
-        capabilities: capabilities(&value),
-        capabilities_reason: capabilities_reason(&value),
+        capabilities: capabilities(&iam, &transforms, named_iam),
+        capabilities_reason: capabilities_reason(&iam, &transforms),
         resource_types: resource_types(&value),
-        declared_transforms: declared_transforms(&value),
+        declared_transforms: transforms,
         version,
         metadata,
     }
@@ -262,13 +286,12 @@ fn has_named_iam(value: &Value) -> bool {
     })
 }
 
-fn capabilities(value: &Value) -> Vec<String> {
+fn capabilities(iam: &[String], transforms: &[String], named_iam: bool) -> Vec<String> {
     let mut caps = Vec::new();
-    let iam = iam_resource_types(value);
     if !iam.is_empty() {
         // The two IAM capabilities are exclusive: naming a resource implies
         // the broader grant, and AWS reports only the narrower-scoped name.
-        if has_named_iam(value) {
+        if named_iam {
             caps.push("CAPABILITY_NAMED_IAM".to_string());
         } else {
             caps.push("CAPABILITY_IAM".to_string());
@@ -276,7 +299,7 @@ fn capabilities(value: &Value) -> Vec<String> {
     }
     // A transform (SAM, `AWS::Include`, a macro) rewrites the template before
     // provisioning, so the caller has to accept expansion.
-    if !declared_transforms(value).is_empty() {
+    if !transforms.is_empty() {
         caps.push("CAPABILITY_AUTO_EXPAND".to_string());
     }
     caps
@@ -284,12 +307,12 @@ fn capabilities(value: &Value) -> Vec<String> {
 
 /// AWS explains WHICH resources forced the capability, which is the part that
 /// makes the error actionable when a deploy is rejected for missing it.
-fn capabilities_reason(value: &Value) -> Option<String> {
+fn capabilities_reason(iam: &[String], transforms: &[String]) -> Option<String> {
     // Transforms count too. Reporting CAPABILITY_AUTO_EXPAND with no reason
     // left every SAM or macro template explaining a rejected deploy with an
     // empty string.
-    let mut forced: Vec<String> = iam_resource_types(value);
-    forced.extend(declared_transforms(value));
+    let mut forced: Vec<String> = iam.to_vec();
+    forced.extend_from_slice(transforms);
     if forced.is_empty() {
         return None;
     }
@@ -626,6 +649,19 @@ Resources:
         assert_eq!(s.capabilities, ["CAPABILITY_AUTO_EXPAND"]);
         let reason = s.capabilities_reason.expect("a reason must be given");
         assert!(reason.contains("AWS::Serverless-2016-10-31"), "{reason}");
+    }
+
+    #[test]
+    fn blank_metadata_is_absent_not_the_string_null() {
+        let s = summarize("Metadata:\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n");
+        assert_eq!(
+            s.metadata, None,
+            "a blank Metadata must not report \"null\""
+        );
+
+        // Real metadata still reports.
+        let s = summarize("Metadata:\n  Build: 42\nResources:\n  Q:\n    Type: AWS::SQS::Queue\n");
+        assert!(s.metadata.is_some_and(|m| m.contains("Build")));
     }
 
     #[test]
