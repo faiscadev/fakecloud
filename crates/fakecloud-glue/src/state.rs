@@ -63,6 +63,18 @@ pub struct GlueState {
     // --- generic JSON-backed control-plane resource families ---
     #[serde(default)]
     pub assets: JsonStore,
+    /// Business-catalog glossaries, keyed by glossary id.
+    #[serde(default)]
+    pub glossaries: JsonStore,
+    /// Glossary terms, keyed by term id. Each carries its owning `GlossaryId`.
+    #[serde(default)]
+    pub glossary_terms: JsonStore,
+    /// Asset types, keyed by asset-type id.
+    #[serde(default)]
+    pub asset_types: JsonStore,
+    /// Glossary terms associated to an asset: asset id -> term ids.
+    #[serde(default)]
+    pub asset_glossary_terms: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     pub crawlers: JsonStore,
     #[serde(default)]
