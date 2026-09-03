@@ -125,7 +125,7 @@ pub fn warn_unknown_filters(filters: &[QueryFilter], supported: &[&str]) {
         }
         tracing::warn!(
             filter = %name,
-            "unrecognized RDS filter name; matching no resource"
+            "unrecognized filter name; matching no resource"
         );
     }
 }

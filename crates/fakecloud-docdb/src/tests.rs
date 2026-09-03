@@ -246,6 +246,51 @@ async fn describe_global_clusters_filters_by_member_cluster() {
         !xml.contains("<GlobalClusterIdentifier>glob-1</GlobalClusterIdentifier>"),
         "the filter kept an unmatched global cluster: {xml}"
     );
+
+    // And by a MEMBER cluster -- the point of the filter, and the only
+    // way a caller holding a regional cluster reaches its global parent.
+    // Both the bare identifier and the ARN, as AWS documents.
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[("DBClusterIdentifier", "member-a"), ("Engine", "docdb")],
+    )
+    .await;
+    call(
+        &svc,
+        "CreateGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "glob-3"),
+            ("Engine", "docdb"),
+            ("SourceDBClusterIdentifier", "member-a"),
+        ],
+    )
+    .await;
+
+    for value in [
+        "member-a",
+        "arn:aws:rds:us-east-1:123456789012:cluster:member-a",
+    ] {
+        let xml = body(
+            &call(
+                &svc,
+                "DescribeGlobalClusters",
+                &[
+                    ("Filters.Filter.1.Name", "db-cluster-id"),
+                    ("Filters.Filter.1.Values.Value.1", value),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            xml.contains("<GlobalClusterIdentifier>glob-3</GlobalClusterIdentifier>"),
+            "member {value} did not select its global cluster: {xml}"
+        );
+        assert!(
+            !xml.contains("<GlobalClusterIdentifier>glob-1</GlobalClusterIdentifier>"),
+            "member {value} selected an unrelated global cluster: {xml}"
+        );
+    }
 }
 
 #[tokio::test]

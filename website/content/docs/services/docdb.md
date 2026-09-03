@@ -56,7 +56,7 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 
 ## Describe filters
 
-`Filters` is honored on the operations DocumentDB documents filter names for. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
+`Filters` is honored on the three operations in the table below -- the ones DocumentDB documents filter names for. `DescribeDBClusterSnapshots` and the other Describes model the parameter but AWS documents it as *not currently supported* there, so it is accepted and ignored, matching AWS. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
 
 | Operation | Supported filter names |
 | --- | --- |

@@ -182,10 +182,14 @@ async fn describe_db_cluster_endpoints_honors_its_filters() {
 
     // The documented values are lowercase while the API returns them
     // uppercase, so an exact comparison would select nothing for a
-    // caller copying the documented command.
+    // caller copying the documented command. `db-cluster-endpoint-type`
+    // is the case that actually folds: it is stored as sent (READER) and
+    // queried as documented (reader).
     for (name, value) in [
         ("db-cluster-endpoint-id", "ep-1"),
         ("db-cluster-endpoint-status", "available"),
+        ("db-cluster-endpoint-type", "reader"),
+        ("db-cluster-endpoint-type", "READER"),
     ] {
         let xml = body(
             &call(

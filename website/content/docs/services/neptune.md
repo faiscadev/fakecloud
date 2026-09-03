@@ -64,7 +64,7 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 
 ## Describe filters
 
-`Filters` is honored on the operations Neptune documents filter names for. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
+`Filters` is honored on the three operations in the table below -- the ones Neptune documents filter names for. The other Describes model the parameter but AWS documents it as *not currently supported* there, so it is accepted and ignored, matching AWS. `DescribeGlobalClusters` takes no `Filters` member at all. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
 
 | Operation | Supported filter names |
 | --- | --- |

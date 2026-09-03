@@ -16,8 +16,9 @@ use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
     ClusterMember, DbCluster, DbClusterParameterGroup, DbClusterSnapshot, DbInstance,
-    DbSubnetGroup, DocDbSnapshot, DocDbState, EventSubscription, GlobalCluster, ParameterValue,
-    SharedDocDbState, Subnet, Tag, DOCDB_SNAPSHOT_SCHEMA_VERSION,
+    DbSubnetGroup, DocDbSnapshot, DocDbState, EventSubscription, GlobalCluster,
+    GlobalClusterMember, ParameterValue, SharedDocDbState, Subnet, Tag,
+    DOCDB_SNAPSHOT_SCHEMA_VERSION,
 };
 use crate::xml;
 
@@ -415,13 +416,27 @@ fn cluster_matches_filters(cluster: &DbCluster, filters: &[QueryFilter]) -> bool
 fn global_cluster_matches_filters(global: &GlobalCluster, filters: &[QueryFilter]) -> bool {
     filters.iter().all(|filter| match filter.name.as_str() {
         "db-cluster-id" => {
-            filter.matches_any([
-                Some(global.global_cluster_identifier.as_str()),
-                Some(global.global_cluster_arn.as_str()),
-            ]) || global
-                .members
-                .iter()
-                .any(|member| filter.matches(Some(member.db_cluster_arn.as_str())))
+            // Members by identifier as well as ARN: AWS documents this
+            // filter as accepting "cluster identifiers and cluster
+            // ARNs", and the bare id is the common form -- matching only
+            // the ARN meant `--filters Name=db-cluster-id,Values=clu-a`
+            // returned nothing. A member carries only its ARN, so the
+            // identifier is its last segment.
+            let matches_member = global.members.iter().any(|member| {
+                let arn = member.db_cluster_arn.as_str();
+                let id = arn.rsplit(':').next().filter(|id| !id.is_empty());
+                filter.matches_any([Some(arn), id])
+            });
+            // The global cluster's own name is offered too. AWS's wording
+            // ("one or more global DB clusters to describe" filtered by
+            // `db-cluster-id`) reads both ways, and accepting both only
+            // ever returns a global cluster the caller named -- either
+            // through a member it spans or by its own identifier.
+            matches_member
+                || filter.matches_any([
+                    Some(global.global_cluster_identifier.as_str()),
+                    Some(global.global_cluster_arn.as_str()),
+                ])
         }
         _ => false,
     })
@@ -1541,6 +1556,18 @@ impl DocDbService {
         }
         // Optionally seed from an existing source cluster.
         let source = optional_query_param(req, "SourceDBClusterIdentifier");
+        // The source cluster becomes the global cluster's first member,
+        // as it does on AWS. It was resolved for its engine and then
+        // discarded, so every global cluster reported an empty
+        // `GlobalClusterMembers` -- and `db-cluster-id` had nothing to
+        // match a member against.
+        let source_member = source.as_ref().and_then(|arn| {
+            let src_id = arn.rsplit(':').next().unwrap_or(arn);
+            st.clusters.get(src_id).map(|c| GlobalClusterMember {
+                db_cluster_arn: c.db_cluster_arn.clone(),
+                is_writer: true,
+            })
+        });
         let (engine, engine_version) = match &source {
             Some(arn) => {
                 let src_id = arn.rsplit(':').next().unwrap_or(arn);
@@ -1574,7 +1601,7 @@ impl DocDbService {
             deletion_protection: optional_query_param(req, "DeletionProtection")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            members: Vec::new(),
+            members: source_member.into_iter().collect(),
             tags: parse_tags(req),
         };
         st.global_clusters.insert(id, global.clone());
