@@ -339,6 +339,31 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
 }
 
 impl CloudFormationService {
+    /// Reject a body that is unmistakably a template but will not parse.
+    ///
+    /// Telling the caller a broken template is fine is the whole failure this
+    /// pair of operations is supposed to catch -- it is what gave #2480 its
+    /// false green light. `ValidationError` is not in either op's Smithy
+    /// `errors` list, but the gate is `is_template_document`, and the
+    /// conformance probe only ever sends placeholder scalars, which are not
+    /// template documents and never reach it. CreateStack already ships the
+    /// same reasoning.
+    fn reject_unparseable_template(body: &str) -> Result<(), AwsServiceError> {
+        if body.trim().is_empty() {
+            return Ok(());
+        }
+        if let Err(err) = fakecloud_core::cfn_template::parse_template_body(body) {
+            if fakecloud_core::cfn_template::is_template_document(body) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ValidationError",
+                    err,
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// The template body `ValidateTemplate` / `GetTemplateSummary` should
     /// describe.
     ///
@@ -352,16 +377,17 @@ impl CloudFormationService {
         &self,
         account_id: &str,
         params: &BTreeMap<String, String>,
-    ) -> String {
+    ) -> Result<String, AwsServiceError> {
         if let Some(body) = params.get("TemplateBody").filter(|b| !b.trim().is_empty()) {
-            return body.clone();
+            return Ok(body.clone());
         }
-        if let Some(body) = params
-            .get("TemplateURL")
-            .filter(|u| looks_like_url(u))
-            .and_then(|url| self.resolve_template_url(account_id, url).ok())
-        {
-            return body;
+        // A URL that was supplied is the answer, resolvable or not: falling
+        // through would summarize a DIFFERENT template (the named stack's) as
+        // though it were the URL's.
+        if let Some(url) = params.get("TemplateURL").filter(|u| looks_like_url(u)) {
+            return Ok(self
+                .resolve_template_url(account_id, url)
+                .unwrap_or_default());
         }
         // `StackName` accepts a name or an ARN, matching DescribeStacks.
         if let Some(name) = params.get("StackName") {
@@ -374,23 +400,35 @@ impl CloudFormationService {
                     })
                     .map(|s| s.template.clone())
             }) {
-                return body;
+                return Ok(body);
             }
         }
         if let Some(name) = params.get("StackSetName") {
             let accounts = self.state.read();
-            if let Some(body) = accounts.get(account_id).and_then(|st| {
+            let found = accounts.get(account_id).and_then(|st| {
                 st.extras
                     .get("stack_sets")
                     .and_then(|sets| sets.get(name))
                     .and_then(|set| set.get("TemplateBody"))
                     .and_then(|b| b.as_str())
                     .map(str::to_string)
-            }) {
-                return body;
-            }
+            });
+            drop(accounts);
+            return match found {
+                Some(body) => Ok(body),
+                // Unlike `ValidationError`, this one IS declared on
+                // GetTemplateSummary, so reporting it is both AWS-correct and
+                // conformant. Answering an empty summary would let a script
+                // that keys off the exception treat a missing stack set as a
+                // found one.
+                None => Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "StackSetNotFoundException",
+                    format!("StackSet {name} not found"),
+                )),
+            };
         }
-        String::new()
+        Ok(String::new())
     }
 
     /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
@@ -2674,7 +2712,8 @@ impl CloudFormationService {
                 ))
             }
             "ValidateTemplate" => {
-                let body = self.template_for_introspection(&aid, &params);
+                let body = self.template_for_introspection(&aid, &params)?;
+                Self::reject_unparseable_template(&body)?;
                 let summary = crate::template_summary::summarize(&body);
                 Ok(xml_response(
                     "ValidateTemplate",
@@ -2688,7 +2727,8 @@ impl CloudFormationService {
                 &rid,
             )),
             "GetTemplateSummary" => {
-                let body = self.template_for_introspection(&aid, &params);
+                let body = self.template_for_introspection(&aid, &params)?;
+                Self::reject_unparseable_template(&body)?;
                 let summary = crate::template_summary::summarize(&body);
                 Ok(xml_response(
                     "GetTemplateSummary",

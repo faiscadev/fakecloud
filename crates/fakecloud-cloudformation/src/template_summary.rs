@@ -93,7 +93,7 @@ fn parameters(value: &Value) -> Vec<SummaryParameter> {
             // A non-string default (a Number parameter's `Default: 3`) is
             // reported in its JSON spelling, which is how it arrives on the
             // wire everywhere else in this crate.
-            default_value: spec.get("Default").map(scalar_to_string),
+            default_value: spec.get("Default").and_then(scalar_to_string),
             parameter_type: spec
                 .get("Type")
                 .and_then(Value::as_str)
@@ -107,7 +107,7 @@ fn parameters(value: &Value) -> Vec<SummaryParameter> {
             allowed_values: spec
                 .get("AllowedValues")
                 .and_then(Value::as_array)
-                .map(|vals| vals.iter().map(scalar_to_string).collect())
+                .map(|vals| vals.iter().filter_map(scalar_to_string).collect())
                 .unwrap_or_default(),
         })
         .collect()
@@ -123,10 +123,14 @@ fn truthy(value: &Value) -> bool {
     }
 }
 
-fn scalar_to_string(value: &Value) -> String {
+/// A scalar in its wire spelling. `Null` is absent rather than the literal
+/// `"null"`: a YAML `Default:` with nothing after it parses to `Null`, and
+/// reporting that as the default invents a value the template never declared.
+fn scalar_to_string(value: &Value) -> Option<String> {
     match value {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
     }
 }
 
@@ -144,16 +148,24 @@ fn resource_types(value: &Value) -> Vec<String> {
     types
 }
 
-/// `Transform` is either a single name or a list of them.
+/// `Transform` takes a single name, a list, or the mapping form that carries
+/// arguments (`{Name: AWS::Include, Parameters: {...}}`) -- including inside a
+/// list. Missing the mapping form meant a template that declares one reported
+/// no transforms and, through `capabilities`, omitted CAPABILITY_AUTO_EXPAND:
+/// `validate-template` would say no capability was needed for a template
+/// `create-stack` then rejects for lacking it.
 fn declared_transforms(value: &Value) -> Vec<String> {
+    fn name_of(value: &Value) -> Option<String> {
+        match value {
+            Value::String(s) => Some(s.clone()),
+            Value::Object(map) => map.get("Name").and_then(Value::as_str).map(str::to_string),
+            _ => None,
+        }
+    }
     match value.get("Transform") {
-        Some(Value::String(s)) => vec![s.clone()],
-        Some(Value::Array(items)) => items
-            .iter()
-            .filter_map(|v| v.as_str())
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
+        Some(Value::Array(items)) => items.iter().filter_map(name_of).collect(),
+        Some(other) => name_of(other).into_iter().collect(),
+        None => Vec::new(),
     }
 }
 
@@ -421,6 +433,39 @@ Resources:
         );
         assert_eq!(s.resource_types, ["AWS::SQS::Queue"]);
         assert_eq!(s.parameters.len(), 1);
+    }
+
+    #[test]
+    fn the_transform_mapping_form_counts() {
+        // `Transform: {Name: ..., Parameters: {...}}` is as real as the string
+        // form. Missing it reported no transforms and, worse, omitted
+        // CAPABILITY_AUTO_EXPAND -- telling the caller no capability was
+        // needed for a template create-stack would then reject.
+        let mapping = "Transform:\n  Name: AWS::Include\n  Parameters:\n    Location: s3://b/k\nResources: {}\n";
+        let s = summarize(mapping);
+        assert_eq!(s.declared_transforms, ["AWS::Include"]);
+        assert_eq!(s.capabilities, ["CAPABILITY_AUTO_EXPAND"]);
+
+        // Also inside a list, mixed with plain names.
+        let mixed =
+            "Transform:\n  - AWS::Serverless-2016-10-31\n  - Name: MyMacro\nResources: {}\n";
+        assert_eq!(
+            summarize(mixed).declared_transforms,
+            ["AWS::Serverless-2016-10-31", "MyMacro"]
+        );
+    }
+
+    #[test]
+    fn a_null_default_is_absent_not_the_string_null() {
+        // `Default:` with nothing after it parses to Null. Reporting "null"
+        // would invent a default the template never declared.
+        let s = summarize("Parameters:\n  P:\n    Type: String\n    Default:\nResources: {}\n");
+        let p = &s.parameters[0];
+        assert_eq!(p.default_value, None, "a null default must be absent");
+
+        // A real default still reports, including a non-string one.
+        let s = summarize("Parameters:\n  N:\n    Type: Number\n    Default: 3\nResources: {}\n");
+        assert_eq!(s.parameters[0].default_value.as_deref(), Some("3"));
     }
 
     #[test]
