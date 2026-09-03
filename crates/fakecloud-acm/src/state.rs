@@ -25,6 +25,94 @@ pub struct AccountState {
     /// Keyed by full certificate ARN.
     pub certificates: BTreeMap<String, StoredCertificate>,
     pub account_config: AccountConfig,
+    /// ACME endpoints keyed by `AcmeEndpointArn`.
+    #[serde(default)]
+    pub acme_endpoints: BTreeMap<String, AcmeEndpoint>,
+    /// External account bindings keyed by `AcmeExternalAccountBindingArn`.
+    #[serde(default)]
+    pub acme_bindings: BTreeMap<String, AcmeBinding>,
+    /// Domain validations keyed by `AcmeDomainValidationArn`.
+    #[serde(default)]
+    pub acme_domain_validations: BTreeMap<String, AcmeDomainValidation>,
+    /// ACME accounts keyed by `(endpoint arn, account url)`.
+    #[serde(default)]
+    pub acme_accounts: BTreeMap<String, AcmeAccount>,
+}
+
+/// An ACME endpoint: the directory a client talks to, plus the CA it issues
+/// from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmeEndpoint {
+    pub arn: String,
+    pub endpoint_url: String,
+    /// `AcmeEndpointStatus` (CREATING | ACTIVE | DELETING | FAILED).
+    pub status: String,
+    pub authorization_behavior: String,
+    pub contact: Option<String>,
+    /// The `CertificateAuthority` union, stored as supplied.
+    pub certificate_authority: serde_json::Value,
+    pub certificate_tags: BTreeMap<String, String>,
+    pub tags: BTreeMap<String, String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    /// Set by the caller's `IdempotencyToken`, so a repeat create returns the
+    /// same endpoint rather than a second one.
+    pub idempotency_token: Option<String>,
+}
+
+/// An external account binding: the HMAC credential an ACME client uses to
+/// bind its account to this AWS account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmeBinding {
+    pub arn: String,
+    pub endpoint_arn: String,
+    pub role_arn: String,
+    /// The HMAC key id and secret returned by
+    /// `GetAcmeExternalAccountBindingCredentials`.
+    pub key_id: String,
+    pub mac_key: String,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub tags: BTreeMap<String, String>,
+    pub idempotency_token: Option<String>,
+}
+
+/// A pre-validated domain: the DNS record an ACME client can rely on instead
+/// of answering a challenge per order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmeDomainValidation {
+    pub arn: String,
+    pub endpoint_arn: String,
+    pub domain_name: String,
+    /// `PrevalidationType` — only DNS_PREVALIDATION exists today.
+    pub prevalidation_type: String,
+    pub domain_scope: Option<String>,
+    pub hosted_zone_id: Option<String>,
+    /// The CNAME an operator publishes to prove control.
+    pub record_name: String,
+    pub record_value: String,
+    /// `AcmeDomainValidationStatus`.
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub tags: BTreeMap<String, String>,
+    pub idempotency_token: Option<String>,
+}
+
+/// An ACME account registered against an endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AcmeAccount {
+    pub endpoint_arn: String,
+    pub account_url: String,
+    pub public_key_thumbprint: String,
+    /// `AcmeAccountStatus` (VALID | DEACTIVATED | REVOKED).
+    pub status: String,
+    pub binding_arn: Option<String>,
+    pub contacts: Vec<String>,
+    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

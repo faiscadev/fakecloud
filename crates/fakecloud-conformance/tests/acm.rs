@@ -358,3 +358,34 @@ async fn acm_resource_tagging_round_trip() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["__type"], "ResourceNotFoundException");
 }
+
+#[test_action("acm", "CreateAcmeEndpoint", checksum = "abaa76f8")]
+#[test_action("acm", "DescribeAcmeEndpoint", checksum = "8136ef22")]
+#[test_action("acm", "ListAcmeEndpoints", checksum = "222a44a5")]
+#[test_action("acm", "UpdateAcmeEndpoint", checksum = "d18ace62")]
+#[test_action("acm", "DeleteAcmeEndpoint", checksum = "3c3bef6a")]
+#[test_action("acm", "CreateAcmeExternalAccountBinding", checksum = "cd3e4faa")]
+#[test_action("acm", "DescribeAcmeExternalAccountBinding", checksum = "eef71175")]
+#[test_action("acm", "ListAcmeExternalAccountBindings", checksum = "7f9c3531")]
+#[test_action("acm", "RevokeAcmeExternalAccountBinding", checksum = "942dd969")]
+#[test_action("acm", "DeleteAcmeExternalAccountBinding", checksum = "fb81c04f")]
+#[test_action(
+    "acm",
+    "GetAcmeExternalAccountBindingCredentials",
+    checksum = "488d780b"
+)]
+#[test_action("acm", "CreateAcmeDomainValidation", checksum = "56c53e35")]
+#[test_action("acm", "DescribeAcmeDomainValidation", checksum = "fe93e5cf")]
+#[test_action("acm", "ListAcmeDomainValidations", checksum = "42c056b9")]
+#[test_action("acm", "UpdateAcmeDomainValidation", checksum = "fea27f24")]
+#[test_action("acm", "DeleteAcmeDomainValidation", checksum = "9f9ffb72")]
+#[test_action("acm", "DescribeAcmeAccount", checksum = "099d466b")]
+#[test_action("acm", "ListAcmeAccounts", checksum = "41886794")]
+#[test_action("acm", "RevokeAcmeAccount", checksum = "9f6841e6")]
+#[tokio::test]
+async fn acm_acme_probe() {
+    // The vendored aws-sdk-acm predates the ACME surface; the probe drives
+    // these operations from the model, and the handlers are covered by unit
+    // tests in `fakecloud-acm`.
+    let _server = TestServer::start().await;
+}

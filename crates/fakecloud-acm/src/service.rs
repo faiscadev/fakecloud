@@ -46,6 +46,16 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "SearchCertificates",
 ];
 
+/// ACME operations live in `crate::acme`; their action list is appended here
+/// so the two families stay independently readable.
+static ALL_ACTIONS: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
+    SUPPORTED_ACTIONS
+        .iter()
+        .copied()
+        .chain(crate::acme::ACME_ACTIONS.iter().copied())
+        .collect()
+});
+
 /// Actions that mutate persisted ACM state and therefore must trigger a
 /// snapshot write. Read-only actions (Describe/List/Get/Export/Search) and
 /// ResendValidationEmail (no state change) are excluded.
@@ -64,7 +74,7 @@ const MUTATING_ACTIONS: &[&str] = &[
 ];
 
 pub struct AcmService {
-    state: SharedAcmState,
+    pub(crate) state: SharedAcmState,
     /// How long the auto-issue tick sleeps before flipping a freshly
     /// requested DNS cert from `PENDING_VALIDATION` to `ISSUED`. Real
     /// ACM takes minutes; the default of 5s keeps SDK-driven integration
@@ -399,11 +409,12 @@ impl AwsService for AcmService {
     }
 
     fn supported_actions(&self) -> &[&str] {
-        SUPPORTED_ACTIONS
+        &ALL_ACTIONS
     }
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
-        let mutates = MUTATING_ACTIONS.contains(&req.action.as_str());
+        let mutates = MUTATING_ACTIONS.contains(&req.action.as_str())
+            || crate::acme::ACME_MUTATING.contains(&req.action.as_str());
         let result = match req.action.as_str() {
             "RequestCertificate" => self.request_certificate(&req),
             "DescribeCertificate" => self.describe_certificate(&req),
@@ -418,6 +429,29 @@ impl AwsService for AcmService {
             "AddTagsToCertificate" => self.add_tags_to_certificate(&req),
             "RemoveTagsFromCertificate" => self.remove_tags_from_certificate(&req),
             "ListTagsForCertificate" => self.list_tags_for_certificate(&req),
+            "CreateAcmeEndpoint" => self.create_acme_endpoint(&req),
+            "DescribeAcmeEndpoint" => self.describe_acme_endpoint(&req),
+            "ListAcmeEndpoints" => self.list_acme_endpoints(&req),
+            "UpdateAcmeEndpoint" => self.update_acme_endpoint(&req),
+            "DeleteAcmeEndpoint" => self.delete_acme_endpoint(&req),
+            "CreateAcmeExternalAccountBinding" => self.create_acme_external_account_binding(&req),
+            "DescribeAcmeExternalAccountBinding" => {
+                self.describe_acme_external_account_binding(&req)
+            }
+            "ListAcmeExternalAccountBindings" => self.list_acme_external_account_bindings(&req),
+            "RevokeAcmeExternalAccountBinding" => self.revoke_acme_external_account_binding(&req),
+            "DeleteAcmeExternalAccountBinding" => self.delete_acme_external_account_binding(&req),
+            "GetAcmeExternalAccountBindingCredentials" => {
+                self.get_acme_external_account_binding_credentials(&req)
+            }
+            "CreateAcmeDomainValidation" => self.create_acme_domain_validation(&req),
+            "DescribeAcmeDomainValidation" => self.describe_acme_domain_validation(&req),
+            "ListAcmeDomainValidations" => self.list_acme_domain_validations(&req),
+            "UpdateAcmeDomainValidation" => self.update_acme_domain_validation(&req),
+            "DeleteAcmeDomainValidation" => self.delete_acme_domain_validation(&req),
+            "DescribeAcmeAccount" => self.describe_acme_account(&req),
+            "ListAcmeAccounts" => self.list_acme_accounts(&req),
+            "RevokeAcmeAccount" => self.revoke_acme_account(&req),
             "TagResource" => self.tag_resource(&req),
             "UntagResource" => self.untag_resource(&req),
             "ListTagsForResource" => self.list_tags_for_resource(&req),
@@ -1443,7 +1477,10 @@ impl AcmService {
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
-fn account_mut<'a>(state: &'a mut AcmAccounts, account_id: &str) -> &'a mut AccountState {
+pub(crate) fn account_mut<'a>(
+    state: &'a mut AcmAccounts,
+    account_id: &str,
+) -> &'a mut AccountState {
     state.accounts.entry(account_id.to_string()).or_default()
 }
 
