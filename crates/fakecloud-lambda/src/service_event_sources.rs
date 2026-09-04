@@ -232,6 +232,17 @@ impl LambdaService {
             .get("FunctionName")
             .map(|f| crate::service::normalize_function_name(f));
         let event_source_filter = req.query_params.get("EventSourceArn").cloned();
+        // `Arn.length 0..10000`: an over-long filter is rejected rather than
+        // quietly matching nothing.
+        if let Some(arn) = &event_source_filter {
+            if arn.chars().count() > 10_000 {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    "EventSourceArn exceeds the 10000-character maximum",
+                ));
+            }
+        }
 
         let accounts = self.state.read();
         let empty = LambdaState::new(account_id, "");

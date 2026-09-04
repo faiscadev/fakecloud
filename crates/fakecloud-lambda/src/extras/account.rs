@@ -2,6 +2,43 @@
 
 use super::*;
 
+/// Operations addressed at one function's sub-resources. Each declares
+/// `ResourceNotFoundException` in the Smithy model, and each 404s on AWS when
+/// the function itself is absent.
+const FUNCTION_SCOPED_ACTIONS: &[&str] = &[
+    "CreateAlias",
+    "CreateFunctionUrlConfig",
+    "DeleteAlias",
+    "DeleteFunctionCodeSigningConfig",
+    "DeleteFunctionConcurrency",
+    "DeleteFunctionEventInvokeConfig",
+    "DeleteFunctionUrlConfig",
+    "DeleteProvisionedConcurrencyConfig",
+    "GetAlias",
+    "GetFunctionCodeSigningConfig",
+    "GetFunctionConcurrency",
+    "GetFunctionEventInvokeConfig",
+    "GetFunctionRecursionConfig",
+    "GetFunctionScalingConfig",
+    "GetFunctionUrlConfig",
+    "GetProvisionedConcurrencyConfig",
+    "GetRuntimeManagementConfig",
+    "ListAliases",
+    "ListFunctionEventInvokeConfigs",
+    "ListFunctionUrlConfigs",
+    "ListProvisionedConcurrencyConfigs",
+    "ListVersionsByFunction",
+    "PutFunctionCodeSigningConfig",
+    "PutFunctionEventInvokeConfig",
+    "PutFunctionRecursionConfig",
+    "PutFunctionScalingConfig",
+    "PutProvisionedConcurrencyConfig",
+    "PutRuntimeManagementConfig",
+    "UpdateAlias",
+    "UpdateFunctionEventInvokeConfig",
+    "UpdateFunctionUrlConfig",
+];
+
 impl LambdaService {
     pub(crate) async fn handle_extra(
         &self,
@@ -11,6 +48,22 @@ impl LambdaService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let aid = req.account_id.as_str();
         let res = resource.unwrap_or("");
+        // Every operation scoped to a function declares
+        // `ResourceNotFoundException`, and AWS raises it before touching the
+        // sub-resource: reading or clearing an alias, a concurrency setting or
+        // a URL config on a function that does not exist is a 404, not a
+        // silent success. Guarding once here keeps the individual handlers
+        // from each having to re-check.
+        if FUNCTION_SCOPED_ACTIONS.contains(&action) {
+            let exists = self
+                .state
+                .read()
+                .get(aid)
+                .is_some_and(|s| s.functions.contains_key(res));
+            if !exists {
+                return Err(not_found("Function", res));
+            }
+        }
         match action {
             // Function lifecycle extras
             "GetFunctionConfiguration" => self.get_function_configuration(res, aid, req),

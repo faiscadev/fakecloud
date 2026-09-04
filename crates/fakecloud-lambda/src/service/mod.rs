@@ -1368,12 +1368,27 @@ impl AwsService for LambdaService {
         prevalidate_lambda(action, &req)?;
         let result = match action {
             "CreateFunction" => self.create_function(&req),
-            "ListFunctions" => self.list_functions(
-                aid,
-                req.query_params.get("FunctionVersion").map(String::as_str),
-                req.query_params.get("Marker").map(String::as_str),
-                marker_page_size(&req),
-            ),
+            "ListFunctions" => {
+                // `MasterRegion.length 1..50`, and the shape's pattern only
+                // admits `ALL` or a region name. An unusable filter is
+                // rejected rather than silently listing everything.
+                if let Some(region) = req.query_params.get("MasterRegion") {
+                    let len = region.chars().count();
+                    if !(1..=50).contains(&len) {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "InvalidParameterValueException",
+                            "MasterRegion must be between 1 and 50 characters",
+                        ));
+                    }
+                }
+                self.list_functions(
+                    aid,
+                    req.query_params.get("FunctionVersion").map(String::as_str),
+                    req.query_params.get("Marker").map(String::as_str),
+                    marker_page_size(&req),
+                )
+            }
             "GetFunction" => self.get_function(
                 &req,
                 resource_name.as_deref().unwrap_or(""),

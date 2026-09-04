@@ -4068,3 +4068,110 @@ async fn statement_level_writes_bump_the_policy_revision() {
     let after: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert_ne!(mid["RevisionId"], after["RevisionId"]);
 }
+
+/// Every operation scoped to a function 404s when that function does not
+/// exist. Before this guard each sub-resource handler answered 200, so a
+/// caller could read or clear a concurrency setting, an alias list or a URL
+/// config on a function that was never created.
+#[tokio::test]
+async fn function_scoped_operations_404_without_the_function() {
+    let svc = LambdaService::new(make_state());
+
+    for (method, path) in [
+        (Method::GET, "/2015-03-31/functions/ghost/aliases"),
+        (Method::GET, "/2019-09-30/functions/ghost/concurrency"),
+        (Method::DELETE, "/2017-10-31/functions/ghost/concurrency"),
+        (Method::GET, "/2021-10-31/functions/ghost/urls"),
+        (Method::DELETE, "/2021-10-31/functions/ghost/url"),
+        (
+            Method::GET,
+            "/2020-06-30/functions/ghost/code-signing-config",
+        ),
+        (
+            Method::DELETE,
+            "/2020-06-30/functions/ghost/code-signing-config",
+        ),
+        (
+            Method::GET,
+            "/2019-09-25/functions/ghost/event-invoke-config",
+        ),
+        (Method::GET, "/2024-08-31/functions/ghost/recursion-config"),
+        (
+            Method::GET,
+            "/2021-07-20/functions/ghost/runtime-management-config",
+        ),
+    ] {
+        let req = make_request(method.clone(), path, "{}");
+        let err = svc
+            .handle(req)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("{method} {path} must not succeed without the function"));
+        assert_eq!(err.code(), "ResourceNotFoundException", "{method} {path}");
+    }
+
+    // With the function present, the same reads succeed.
+    seed_function(&svc, "real").await;
+    let req = make_request(Method::GET, "/2015-03-31/functions/real/aliases", "{}");
+    assert!(svc.handle(req).await.is_ok());
+}
+
+/// `DeleteAlias` declares `ResourceNotFoundException` and AWS raises it: the
+/// delete is not idempotent.
+#[tokio::test]
+async fn delete_alias_reports_an_alias_that_never_existed() {
+    let svc = LambdaService::new(make_state());
+    seed_function(&svc, "fn1").await;
+
+    let req = make_request(
+        Method::DELETE,
+        "/2015-03-31/functions/fn1/aliases/nope",
+        "{}",
+    );
+    let err = svc.handle(req).await.err().expect("must not succeed");
+    assert_eq!(err.code(), "ResourceNotFoundException");
+
+    // A real alias deletes once, then reports gone.
+    let body = json!({ "Name": "live", "FunctionVersion": "$LATEST" });
+    let req = make_request(
+        Method::POST,
+        "/2015-03-31/functions/fn1/aliases",
+        &body.to_string(),
+    );
+    svc.handle(req).await.unwrap();
+    let del = || {
+        make_request(
+            Method::DELETE,
+            "/2015-03-31/functions/fn1/aliases/live",
+            "{}",
+        )
+    };
+    assert!(svc.handle(del()).await.is_ok());
+    assert_eq!(
+        svc.handle(del()).await.err().map(|e| e.code().to_string()),
+        Some("ResourceNotFoundException".to_string())
+    );
+}
+
+/// `MasterRegion` and `EventSourceArn` carry `@length` bounds that were not
+/// being enforced, so an unusable filter silently listed everything.
+#[tokio::test]
+async fn list_filters_enforce_their_length_bounds() {
+    let svc = LambdaService::new(make_state());
+
+    let mut req = make_request(Method::GET, "/2015-03-31/functions", "{}");
+    req.query_params
+        .insert("MasterRegion".to_string(), "x".repeat(51));
+    assert_eq!(
+        svc.handle(req).await.err().map(|e| e.code().to_string()),
+        Some("InvalidParameterValueException".to_string())
+    );
+
+    let mut req = make_request(Method::GET, "/2015-03-31/event-source-mappings", "{}");
+    req.query_params
+        .insert("EventSourceArn".to_string(), "a".repeat(10_001));
+    assert_eq!(
+        svc.handle(req).await.err().map(|e| e.code().to_string()),
+        Some("InvalidParameterValueException".to_string())
+    );
+}
