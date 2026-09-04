@@ -30,6 +30,25 @@ fn str_list(body: &Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Unpack a `SearchFilterValue` / `SearchMapFilterValue`. Both are unions, so
+/// the value arrives as `{"StringValue": ...}` or `{"LongValue": ...}` rather
+/// than a bare string.
+fn filter_value(value: Option<&Value>) -> Option<String> {
+    let value = value?;
+    if let Some(s) = value.get("StringValue").and_then(Value::as_str) {
+        return Some(s.to_string());
+    }
+    if let Some(n) = value.get("LongValue").and_then(Value::as_i64) {
+        return Some(n.to_string());
+    }
+    // A bare scalar is accepted too, so a hand-written request still works.
+    match value {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// Evaluate a `SearchFilterClause`. The shape is a union, so exactly one of
 /// `AndAllFilters`, `OrAnyFilters`, `AttributeFilter`, or `MapFilter` is set,
 /// and clauses nest through the two list arms.
@@ -55,12 +74,12 @@ fn matches_filter_clause(asset: &Value, clause: &Value) -> bool {
             .get("Forms")
             .and_then(|forms| forms.get(attr))
             .and_then(|form| form_field(form, key));
+        // SearchMapFilter models no operator: the key either holds the value
+        // or it does not.
         return compare(
             value.as_deref(),
-            f.get("Operator")
-                .and_then(Value::as_str)
-                .unwrap_or("equals"),
-            f.get("Value").and_then(Value::as_str),
+            "equals",
+            filter_value(f.get("Value")).as_deref(),
         );
     }
     // An empty clause constrains nothing.
@@ -101,7 +120,7 @@ fn matches_attribute_filter(asset: &Value, f: &Value) -> bool {
         f.get("Operator")
             .and_then(Value::as_str)
             .unwrap_or("equals"),
-        f.get("Value").and_then(Value::as_str),
+        filter_value(f.get("Value")).as_deref(),
     )
 }
 
@@ -668,21 +687,38 @@ impl GlueService {
             })
             .collect();
 
-        // Sorting is by asset name; DESCENDING reverses it.
+        // Sort names the result field to order by; DESCENDING reverses it.
         let descending = body
             .get("Sort")
             .and_then(|s| s.get("Order"))
             .and_then(Value::as_str)
             == Some("DESCENDING");
+        let attribute = body
+            .get("Sort")
+            .and_then(|s| s.get("Attribute"))
+            .and_then(Value::as_str)
+            .unwrap_or("AssetName")
+            .to_string();
+        // A result item names the asset's fields with an Asset prefix, so a
+        // sort on `Name` and one on `AssetName` mean the same thing.
+        let result_field = match attribute.as_str() {
+            "Name" => "AssetName",
+            "Description" => "AssetDescription",
+            other => other,
+        }
+        .to_string();
         items.sort_by(|a, b| {
-            let (x, y) = (
-                a["AssetName"].as_str().unwrap_or_default(),
-                b["AssetName"].as_str().unwrap_or_default(),
-            );
+            let key = |item: &Value| {
+                item.get(result_field.as_str())
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            };
+            let (x, y) = (key(a), key(b));
             if descending {
-                y.cmp(x)
+                y.cmp(&x)
             } else {
-                x.cmp(y)
+                x.cmp(&y)
             }
         });
 

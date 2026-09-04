@@ -198,14 +198,18 @@ impl GlueService {
                 "Form type {form_type_id} not found"
             )));
         }
-        // An item-scoped attachment needs that item to exist.
+        // An item-scoped attachment needs that item to exist. Items can be
+        // addressed by ItemName as well as ItemId, so the identifier is
+        // canonicalised to the item's own id: otherwise an attachment written
+        // through the alias would be invisible to a read by id.
+        let mut item = item;
         if let (Some(f), Some(i)) = (form.as_deref(), item.as_deref()) {
-            if !iterable_items(state, &asset_id, f)
+            let items = iterable_items(state, &asset_id, f);
+            let found = items
                 .iter()
-                .any(|it| item_matches(it, i))
-            {
-                return Err(entity_not_found(format!("Item {i} not found in form {f}")));
-            }
+                .find(|it| item_matches(it, i))
+                .ok_or_else(|| entity_not_found(format!("Item {i} not found in form {f}")))?;
+            item = item_id_of(found).map(str::to_string);
         }
 
         let key = attachment_key(&asset_id, form.as_deref(), item.as_deref(), &name);
@@ -246,6 +250,14 @@ impl GlueService {
         let state = accounts.get_or_create(&req.account_id, &req.region);
         if !state.assets.contains_key(&asset_id) {
             return Err(entity_not_found(format!("Asset {asset_id} not found")));
+        }
+        // Resolve an ItemName alias to the item's id, as the write path does.
+        let mut item = item;
+        if let (Some(f), Some(i)) = (form.as_deref(), item.as_deref()) {
+            let items = iterable_items(state, &asset_id, f);
+            if let Some(found) = items.iter().find(|it| item_matches(it, i)) {
+                item = item_id_of(found).map(str::to_string);
+            }
         }
         // The attachment itself may already be gone; only the asset is checked,
         // matching how the other business-catalog deletes behave.
@@ -490,7 +502,7 @@ pub(crate) fn asset_attachments(state: &GlueState, asset_id: &str) -> Option<Val
             )
         })
         .collect();
-    (!map.is_empty()).then(|| Value::Object(map))
+    (!map.is_empty()).then_some(Value::Object(map))
 }
 
 /// The asset's iterable forms as an `IterableFormMap`. A form is iterable when
@@ -509,5 +521,5 @@ pub(crate) fn asset_iterable_forms(asset: &Value) -> Option<Value> {
         })
         .map(|(name, entry)| (name.clone(), json!({ "FormTypeId": entry["FormTypeId"] })))
         .collect();
-    (!map.is_empty()).then(|| Value::Object(map))
+    (!map.is_empty()).then_some(Value::Object(map))
 }

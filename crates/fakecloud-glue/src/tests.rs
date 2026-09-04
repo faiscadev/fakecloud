@@ -2013,15 +2013,200 @@ fn list_and_map_constraints_are_checked_by_cardinality() {
     let one = json!({ "AssetIdentifier": "a", "GlossaryTermIdentifiers": ["t-1"] });
     assert!(validate_constraints("AssociateGlossaryTerms", &one).is_ok());
 
-    let too_many: Vec<String> = (0..1000).map(|i| format!("t-{i}")).collect();
-    let over = json!({ "AssetIdentifier": "a", "GlossaryTermIdentifiers": too_many });
     let bounded = crate::constraints::constraints_for("AssociateGlossaryTerms")
         .iter()
         .any(|c| c.field == "GlossaryTermIdentifiers" && c.len_max.is_some());
-    if bounded {
-        assert!(
-            validate_constraints("AssociateGlossaryTerms", &over).is_err(),
-            "an oversized list must be rejected"
+    assert!(
+        bounded,
+        "GlossaryTermIdentifiers must carry a generated @length bound, or this \
+         test cannot detect the regression it exists for"
+    );
+    let too_many: Vec<String> = (0..1000).map(|i| format!("t-{i}")).collect();
+    let over = json!({ "AssetIdentifier": "a", "GlossaryTermIdentifiers": too_many });
+    assert!(
+        validate_constraints("AssociateGlossaryTerms", &over).is_err(),
+        "an oversized list must be rejected"
+    );
+
+    // Maps are counted by entry too. Glue bounds Tags at 50 per request.
+    let bounded_map = crate::constraints::constraints_for("CreateDatabase")
+        .iter()
+        .any(|c| c.field == "Tags" && c.len_max == Some(50));
+    assert!(
+        bounded_map,
+        "CreateDatabase.Tags must carry its @length bound"
+    );
+    let tags: serde_json::Map<String, Value> =
+        (0..51).map(|i| (format!("k{i}"), json!("v"))).collect();
+    assert!(
+        validate_constraints("CreateDatabase", &json!({ "Tags": tags })).is_err(),
+        "an oversized map must be rejected"
+    );
+    let ok: serde_json::Map<String, Value> =
+        (0..50).map(|i| (format!("k{i}"), json!("v"))).collect();
+    assert!(validate_constraints("CreateDatabase", &json!({ "Tags": ok })).is_ok());
+}
+
+/// Filter values are unions on the wire, so a modeled `{"StringValue": ...}`
+/// has to compare the same as a bare string would.
+#[test]
+fn search_filter_values_unpack_the_modeled_union() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    make_asset(&svc, &type_id, "a-1", "sales", Some("quarterly"));
+    make_asset(&svc, &type_id, "a-2", "hr", None);
+
+    let ids = |clause: Value| -> Vec<String> {
+        let out = body_of(
+            svc.search_assets(&req("SearchAssets", json!({ "FilterClause": clause })))
+                .unwrap(),
         );
-    }
+        out["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["Id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        ids(json!({
+            "AttributeFilter": {
+                "Attribute": "AssetName",
+                "Operator": "equals",
+                "Value": { "StringValue": "sales" },
+            }
+        })),
+        vec!["a-1".to_string()],
+        "a StringValue union must compare, not silently fail every asset"
+    );
+
+    // A MapFilter reads one key inside a named form, and models no operator.
+    svc.put_asset(&req(
+        "PutAsset",
+        json!({
+            "AssetTypeId": type_id,
+            "Identifier": "a-3",
+            "Name": "ops",
+            "Forms": { "meta": { "FormTypeId": "ft-1", "Content": "{\"owner\":\"platform\"}" } },
+        }),
+    ))
+    .unwrap();
+    assert_eq!(
+        ids(json!({
+            "MapFilter": {
+                "Attribute": "meta",
+                "Key": "owner",
+                "Value": { "StringValue": "platform" },
+            }
+        })),
+        vec!["a-3".to_string()]
+    );
+    assert!(ids(json!({
+        "MapFilter": {
+            "Attribute": "meta",
+            "Key": "owner",
+            "Value": { "StringValue": "someone-else" },
+        }
+    }))
+    .is_empty());
+}
+
+#[test]
+fn search_sort_honours_the_requested_attribute() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    // Names and descriptions sort in opposite orders, so a sort that ignored
+    // the attribute would be caught here.
+    make_asset(&svc, &type_id, "a-1", "alpha", Some("zebra"));
+    make_asset(&svc, &type_id, "a-2", "zulu", Some("aardvark"));
+
+    let sorted = |attribute: &str| -> Vec<String> {
+        let out = body_of(
+            svc.search_assets(&req(
+                "SearchAssets",
+                json!({ "Sort": { "Attribute": attribute } }),
+            ))
+            .unwrap(),
+        );
+        out["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["Id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        sorted("AssetName"),
+        vec!["a-1".to_string(), "a-2".to_string()]
+    );
+    assert_eq!(
+        sorted("AssetDescription"),
+        vec!["a-2".to_string(), "a-1".to_string()],
+        "sorting by description must not fall back to the name"
+    );
+}
+
+/// An item can be addressed by `ItemName` as well as `ItemId`, and an
+/// attachment written through either has to be visible to a read by the other.
+#[test]
+fn an_attachment_written_by_item_name_reads_back_by_item_id() {
+    let svc = GlueService::default();
+    let ft = make_form_type(&svc, "note");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "first",
+            "AttachmentName": "readme",
+            "Content": "hello",
+            "FormTypeId": ft,
+        }),
+    ))
+    .unwrap();
+
+    let got = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(
+        got["Items"][0]["Attachments"]["readme"]["Content"], "hello",
+        "an ItemName alias must key the same attachment as its ItemId"
+    );
+
+    // Deleting through the alias removes it too.
+    svc.delete_attachment(&req(
+        "DeleteAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "first",
+            "AttachmentName": "readme",
+        }),
+    ))
+    .unwrap();
+    let got = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert!(got["Items"][0].get("Attachments").is_none());
 }
