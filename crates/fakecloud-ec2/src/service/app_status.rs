@@ -119,6 +119,11 @@ fn validate_probe(req: &AwsRequest) -> Result<(), AwsServiceError> {
     validate_int_range(&req.query_params, "Timeout", 2, 120)?;
     validate_int_range(&req.query_params, "FailureThreshold", 1, 10)?;
     validate_int_range(&req.query_params, "SuccessThreshold", 1, 10)?;
+    // DeviceIndex names a network interface slot, so it cannot be negative.
+    // The model leaves it an unbounded Integer, but no slot below zero exists.
+    if int_param(req, "DeviceIndex").is_some_and(|v| v < 0) {
+        return Err(invalid_parameter_value("DeviceIndex must not be negative"));
+    }
     // -1 disables the grace period, so the modeled floor is below zero.
     validate_int_range(
         &req.query_params,
@@ -331,6 +336,7 @@ pub(crate) fn describe_application_status_checks(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    require_int_params(req, &["MaxResults"])?;
     validate_int_range(&req.query_params, "MaxResults", 5, 100)?;
     let ids = indexed_list(&req.query_params, "ApplicationStatusCheckId");
     // Deleted checks are tombstoned; only `IncludeAll` surfaces them.
@@ -455,10 +461,9 @@ pub(crate) fn delete_application_status_check(
     }
     let mut accounts = svc.state.write();
     let state = accounts.get_or_create(&req.account_id);
+    // get_check already treats a tombstoned check as gone, so reaching here
+    // means the check is live.
     let check = get_check(state, &id)?;
-    if check.deletion_time.is_some() {
-        return Err(not_found("InvalidApplicationStatusCheckId.NotFound", &id));
-    }
     // AWS reports a deletion time on the returned object, so the check is
     // tombstoned rather than dropped; its associations go with it.
     check.deletion_time = Some(now_rfc3339());
@@ -586,6 +591,7 @@ pub(crate) fn describe_application_status_check_associations(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    require_int_params(req, &["MaxResults"])?;
     validate_int_range(&req.query_params, "MaxResults", 5, 1_000)?;
     let ids = indexed_list(&req.query_params, "ApplicationStatusCheckId");
     let accounts = svc.state.read();
@@ -624,6 +630,7 @@ pub(crate) fn describe_application_status(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    require_int_params(req, &["MaxResults"])?;
     validate_int_range(&req.query_params, "MaxResults", 1, 100)?;
     let requested = indexed_list(&req.query_params, "InstanceId");
     let accounts = svc.state.read();
@@ -702,12 +709,20 @@ pub(crate) fn describe_application_status(
             ));
         }
     }
+    let max_results = req
+        .query_params
+        .get("MaxResults")
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<usize>().ok());
+    let next_token = req.query_params.get("NextToken").map(String::as_str);
+    let (page, token) = crate::service_helpers::paginate(&items, next_token, max_results);
     Ok(Ec2Service::respond(
         "DescribeApplicationStatus",
         &req.request_id,
         &format!(
-            "<applicationStatusesResponseType>{}</applicationStatusesResponseType>",
-            ec2_list("instanceSet", &items)
+            "<applicationStatusesResponseType>{}</applicationStatusesResponseType>{}",
+            ec2_list("instanceSet", &page),
+            token.map(|t| ec2_elem("nextToken", &t)).unwrap_or_default(),
         ),
     ))
 }
@@ -1438,6 +1453,80 @@ mod tests {
             &req(
                 "CreateApplicationStatusCheck",
                 &[("Protocol", "http"), ("Port", "not-a-number")],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
+    }
+
+    #[test]
+    fn describe_application_status_paginates() {
+        let svc = Ec2Service::new();
+        for i in 1..=3 {
+            seed_instance(&svc, &format!("i-{i}"), &[]);
+        }
+        let id = make_check(&svc, &[]);
+        for i in 1..=3 {
+            associate_application_status_check(
+                &svc,
+                &req(
+                    "AssociateApplicationStatusCheck",
+                    &[
+                        ("ApplicationStatusCheckId", &id),
+                        ("InstanceId.1", &format!("i-{i}")),
+                    ],
+                ),
+            )
+            .unwrap();
+        }
+
+        let first = body(
+            describe_application_status(
+                &svc,
+                &req("DescribeApplicationStatus", &[("MaxResults", "2")]),
+            )
+            .unwrap(),
+        );
+        assert_eq!(first.matches("<instanceId>").count(), 2, "{first}");
+        let token = first
+            .split("<nextToken>")
+            .nth(1)
+            .and_then(|s| s.split("</nextToken>").next())
+            .expect("a partial page must carry a nextToken")
+            .to_string();
+
+        let second = body(
+            describe_application_status(
+                &svc,
+                &req(
+                    "DescribeApplicationStatus",
+                    &[("MaxResults", "2"), ("NextToken", &token)],
+                ),
+            )
+            .unwrap(),
+        );
+        assert_eq!(second.matches("<instanceId>").count(), 1, "{second}");
+        assert!(
+            !second.contains("<nextToken>"),
+            "the last page ends: {second}"
+        );
+    }
+
+    #[test]
+    fn malformed_or_negative_integers_are_rejected() {
+        let svc = Ec2Service::new();
+        // A non-numeric MaxResults must not slip past the range check.
+        let err = err_of(describe_application_status(
+            &svc,
+            &req("DescribeApplicationStatus", &[("MaxResults", "many")]),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
+
+        // A device index names an interface slot, so it cannot be negative.
+        let err = err_of(create_application_status_check(
+            &svc,
+            &req(
+                "CreateApplicationStatusCheck",
+                &[("Protocol", "http"), ("Port", "80"), ("DeviceIndex", "-1")],
             ),
         ));
         assert_eq!(err.code(), "InvalidParameterValue");
