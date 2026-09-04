@@ -14,6 +14,7 @@ pub(crate) mod instance;
 mod ipam;
 mod ipam_discovery;
 mod ipam_policy;
+mod ipam_registry;
 mod lgw;
 mod meta;
 mod nacl;
@@ -585,6 +586,21 @@ pub const SUPPORTED_ACTIONS: &[&str] = &[
     "DescribeIpamExternalResourceVerificationTokens",
     // IPAM policies + prefix-list resolvers
     "CreateIpamPolicy",
+    "BatchModifyIpamRoutingPolicyRegistrations",
+    "CreateIpamInternetRegistryAssociation",
+    "CreateIpamRoutingPolicyRegistration",
+    "DeleteIpamInternetRegistryAssociation",
+    "DeleteIpamRoutingPolicyRegistration",
+    "DescribeIpamInternetRegistryAssociations",
+    "EnableIpamInternetRegistryAssociation",
+    "GetIpamDiscoveredRoutes",
+    "GetIpamInternetRegistryAssociationAsns",
+    "GetIpamInternetRegistryAssociationCidrs",
+    "GetIpamRouteOriginAuthorizations",
+    "GetIpamRouteProtectionFindings",
+    "GetIpamRoutingPolicyRegistrationDeltas",
+    "GetIpamRoutingPolicyRegistrations",
+    "ModifyIpamRoutingPolicyRegistration",
     "DeleteIpamPolicy",
     "DescribeIpamPolicies",
     "EnableIpamPolicy",
@@ -2195,6 +2211,49 @@ impl AwsService for Ec2Service {
                 ipam_discovery::describe_ipam_external_resource_verification_tokens(self, &request)
             }
             "CreateIpamPolicy" => ipam_policy::create_ipam_policy(self, &request),
+            "BatchModifyIpamRoutingPolicyRegistrations" => {
+                ipam_registry::batch_modify_ipam_routing_policy_registrations(self, &request)
+            }
+            "CreateIpamInternetRegistryAssociation" => {
+                ipam_registry::create_ipam_internet_registry_association(self, &request)
+            }
+            "CreateIpamRoutingPolicyRegistration" => {
+                ipam_registry::create_ipam_routing_policy_registration(self, &request)
+            }
+            "DeleteIpamInternetRegistryAssociation" => {
+                ipam_registry::delete_ipam_internet_registry_association(self, &request)
+            }
+            "DeleteIpamRoutingPolicyRegistration" => {
+                ipam_registry::delete_ipam_routing_policy_registration(self, &request)
+            }
+            "DescribeIpamInternetRegistryAssociations" => {
+                ipam_registry::describe_ipam_internet_registry_associations(self, &request)
+            }
+            "EnableIpamInternetRegistryAssociation" => {
+                ipam_registry::enable_ipam_internet_registry_association(self, &request)
+            }
+            "GetIpamDiscoveredRoutes" => ipam_registry::get_ipam_discovered_routes(self, &request),
+            "GetIpamInternetRegistryAssociationAsns" => {
+                ipam_registry::get_ipam_internet_registry_association_asns(self, &request)
+            }
+            "GetIpamInternetRegistryAssociationCidrs" => {
+                ipam_registry::get_ipam_internet_registry_association_cidrs(self, &request)
+            }
+            "GetIpamRouteOriginAuthorizations" => {
+                ipam_registry::get_ipam_route_origin_authorizations(self, &request)
+            }
+            "GetIpamRouteProtectionFindings" => {
+                ipam_registry::get_ipam_route_protection_findings(self, &request)
+            }
+            "GetIpamRoutingPolicyRegistrationDeltas" => {
+                ipam_registry::get_ipam_routing_policy_registration_deltas(self, &request)
+            }
+            "GetIpamRoutingPolicyRegistrations" => {
+                ipam_registry::get_ipam_routing_policy_registrations(self, &request)
+            }
+            "ModifyIpamRoutingPolicyRegistration" => {
+                ipam_registry::modify_ipam_routing_policy_registration(self, &request)
+            }
             "DeleteIpamPolicy" => ipam_policy::delete_ipam_policy(self, &request),
             "DescribeIpamPolicies" => ipam_policy::describe_ipam_policies(self, &request),
             "EnableIpamPolicy" => ipam_policy::enable_ipam_policy(self, &request),

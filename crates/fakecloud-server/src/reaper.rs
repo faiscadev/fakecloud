@@ -12,8 +12,6 @@
 //! and remove any whose owner is no longer alive. Objects owned by the
 //! currently-running fakecloud process are always skipped.
 
-use std::process::{Command, Stdio};
-
 /// Reap orphaned fakecloud-owned containers whose server PID is no longer alive.
 ///
 /// Uses the same CLI detection policy as the runtimes: honors
@@ -63,13 +61,14 @@ fn reap_orphans(cli: &str, list_args: &[&str], remove_argv: impl Fn(&str) -> Vec
         "{{.ID}} {{.Label \"fakecloud-instance\"}}",
     ]);
 
-    let output = match Command::new(cli).args(&args).stderr(Stdio::null()).output() {
-        Ok(o) if o.status.success() => o,
-        _ => return 0,
+    // Bounded: the liveness probe answering does not promise this call will,
+    // and the reap runs synchronously before the server starts serving, so an
+    // unbounded call here wedges startup rather than just the sweep.
+    let Some(listing) = fakecloud_core::container_net::bounded_output(cli, &args) else {
+        return 0;
     };
 
     let self_pid = std::process::id();
-    let listing = String::from_utf8_lossy(&output.stdout);
     let mut reaped = 0usize;
 
     for line in listing.lines() {
@@ -85,13 +84,7 @@ fn reap_orphans(cli: &str, list_args: &[&str], remove_argv: impl Fn(&str) -> Vec
         if pid == self_pid || pid_alive(pid) {
             continue;
         }
-        let removed = Command::new(cli)
-            .args(remove_argv(id))
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+        let removed = fakecloud_core::container_net::bounded_status(cli, &remove_argv(id));
         if removed {
             reaped += 1;
         }

@@ -471,23 +471,68 @@ fn sweep_instance_containers(cli: &str, pid: u32) {
         return;
     }
     let label = format!("fakecloud-instance=fakecloud-{pid}");
-    let Ok(output) = Command::new(cli)
-        .args(["ps", "-aq", "--filter", &format!("label={label}")])
-        .stderr(Stdio::null())
-        .output()
+    let Some(ids) = bounded_output(cli, &["ps", "-aq", "--filter", &format!("label={label}")])
     else {
         return;
     };
-    if !output.status.success() {
-        return;
-    }
-    let ids = String::from_utf8_lossy(&output.stdout);
     for id in ids.split_whitespace() {
-        let _ = Command::new(cli)
-            .args(["rm", "-f", id])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        bounded_status(cli, &["rm", "-f", id]);
+    }
+}
+
+/// How long any container-CLI call in the harness may take. A healthy daemon
+/// answers immediately; a wedged one (stale `DOCKER_HOST`, Docker Desktop mid
+/// start, a broken socket) blocks on connect forever, and an unbounded call
+/// here hangs the whole test run rather than the one container sweep.
+const CLI_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Run a container-CLI command, returning its stdout, or `None` when it fails
+/// or outruns [`CLI_TIMEOUT`].
+fn bounded_output(cli: &str, args: &[&str]) -> Option<String> {
+    let mut child = Command::new(cli)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    if !wait_bounded(&mut child) {
+        return None;
+    }
+    let output = child.wait_with_output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run a container-CLI command for its effect only, bounded the same way.
+fn bounded_status(cli: &str, args: &[&str]) {
+    if let Ok(mut child) = Command::new(cli)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        wait_bounded(&mut child);
+    }
+}
+
+/// Wait for `child` up to [`CLI_TIMEOUT`], killing it on expiry. Returns
+/// whether it exited on its own.
+fn wait_bounded(child: &mut std::process::Child) -> bool {
+    let deadline = std::time::Instant::now() + CLI_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) => {}
+            Err(_) => return false,
+        }
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -630,20 +675,10 @@ fn probe_cli(cli: &str) -> bool {
     else {
         return false;
     };
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
-            Ok(None) => {}
-            Err(_) => return false,
-        }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(25));
+    if !wait_bounded(&mut child) {
+        return false;
     }
+    child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 /// Prefix that `fakecloud-server` prints before the bound port on stdout.
@@ -1010,5 +1045,41 @@ mod handshake_tests {
     fn prefix_matches_server_contract() {
         // Guards against accidental drift from the server-side constant.
         assert_eq!(PORT_HANDSHAKE_PREFIX, "FAKECLOUD_PORT=");
+    }
+}
+
+#[cfg(test)]
+mod bounded_cli_tests {
+    use super::*;
+
+    /// A container CLI that never returns must not hang the harness. `sleep`
+    /// stands in for a wedged daemon: the bound has to cut it off.
+    #[test]
+    fn a_hanging_cli_call_is_cut_off() {
+        let start = std::time::Instant::now();
+        let mut child = Command::new("sleep")
+            .arg("600")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("sleep is available");
+        assert!(
+            !wait_bounded(&mut child),
+            "a hung call must not report success"
+        );
+        assert!(
+            start.elapsed() < CLI_TIMEOUT + Duration::from_secs(5),
+            "the wait must end at the bound, not run on"
+        );
+    }
+
+    #[test]
+    fn a_prompt_cli_call_returns_its_output() {
+        assert_eq!(
+            bounded_output("echo", &["container-id"])
+                .as_deref()
+                .map(str::trim),
+            Some("container-id")
+        );
     }
 }

@@ -90,21 +90,62 @@ fn probe_cli(cli: &str) -> bool {
     let Ok(mut child) = child else {
         return false;
     };
+    wait_bounded(&mut child) && child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// Wait for `child` up to [`CLI_PROBE_TIMEOUT`], killing it on expiry. Returns
+/// whether it exited on its own. Every container-CLI call goes through this:
+/// a liveness probe answering does not promise the next call will, and an
+/// unbounded one blocks the caller rather than just that command.
+pub fn wait_bounded(child: &mut std::process::Child) -> bool {
     let deadline = std::time::Instant::now() + CLI_PROBE_TIMEOUT;
     loop {
         match child.try_wait() {
-            Ok(Some(status)) => return status.success(),
+            Ok(Some(_)) => return true,
             Ok(None) => {}
             Err(_) => return false,
         }
         if std::time::Instant::now() >= deadline {
-            // Daemon is wedged: kill the blocked probe and report unavailable.
+            // Daemon is wedged: kill the blocked call and report failure.
             let _ = child.kill();
             let _ = child.wait();
             return false;
         }
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+}
+
+/// Run a container-CLI command and return its stdout, or `None` when it fails
+/// or outruns [`CLI_PROBE_TIMEOUT`].
+pub fn bounded_output(cli: &str, args: &[&str]) -> Option<String> {
+    let mut child = std::process::Command::new(cli)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    if !wait_bounded(&mut child) {
+        return None;
+    }
+    let output = child.wait_with_output().ok()?;
+    output
+        .status
+        .success()
+        .then(|| String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Run a container-CLI command for its effect only, bounded the same way.
+/// Returns whether it succeeded.
+pub fn bounded_status(cli: &str, args: &[String]) -> bool {
+    let Ok(mut child) = std::process::Command::new(cli)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    wait_bounded(&mut child) && child.wait().map(|s| s.success()).unwrap_or(false)
 }
 
 /// True when `cli` is podman or a podman-compatible binary. Matches on the
@@ -585,5 +626,41 @@ mod tests {
                 "host.docker.internal:host-gateway".to_string(),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod bounded_cli_tests {
+    use super::*;
+
+    /// A wedged daemon leaves the CLI blocked on connect forever. Every
+    /// container call has to end at the bound instead of hanging its caller,
+    /// which for the reaper means hanging server startup.
+    #[test]
+    fn a_hanging_cli_call_is_cut_off() {
+        let start = std::time::Instant::now();
+        let mut child = std::process::Command::new("sleep")
+            .arg("600")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("sleep is available");
+        assert!(!wait_bounded(&mut child));
+        assert!(
+            start.elapsed() < CLI_PROBE_TIMEOUT + std::time::Duration::from_secs(5),
+            "the wait must end at the bound"
+        );
+    }
+
+    #[test]
+    fn a_prompt_cli_call_returns_its_output() {
+        assert_eq!(
+            bounded_output("echo", &["abc123"])
+                .as_deref()
+                .map(str::trim),
+            Some("abc123")
+        );
+        assert!(bounded_status("true", &[]));
+        assert!(!bounded_status("false", &[]));
     }
 }
