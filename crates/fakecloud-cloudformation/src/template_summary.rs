@@ -164,22 +164,22 @@ pub(crate) fn structural_error(body: &str) -> Option<String> {
         );
     };
 
-    // Expand exactly as the deploy path does, so a ForEach entry is judged as
-    // the resources it produces rather than as the array it is written as. An
-    // expansion failure is NOT reported: it needs parameter values this pass
-    // does not have, and guessing would reject a deployable template.
-    let expanded = crate::template::expand_for_each(&value, &BTreeMap::new(), &BTreeMap::new())
-        .ok()
-        .unwrap_or_else(|| value.clone());
-    let resources = expanded
-        .get("Resources")
-        .and_then(Value::as_object)
-        .or_else(|| resources.as_object());
-    let Some(resources) = resources else {
+    if !resources.is_object() {
+        return Some("Template format error: [/Resources] must be an object.".to_string());
+    }
+    let expanded = expand_like_the_deploy_path(&value);
+    let Some(resources) = expanded.get("Resources").and_then(Value::as_object) else {
         return Some("Template format error: [/Resources] must be an object.".to_string());
     };
 
     for (logical_id, resource) in resources {
+        // A ForEach entry that is still here did not expand -- its item list
+        // is a `Ref` to a parameter whose value this pass does not have. It is
+        // a loop, not a resource, so judging its array shape would reject a
+        // template that deploys once the value is supplied.
+        if logical_id.starts_with(FOR_EACH_PREFIX) {
+            continue;
+        }
         // Shape first. `Resources: {Q: not-an-object}` reported "must contain
         // a Type member", which points the reader at a member they cannot add
         // -- the entry is a scalar, not a resource.
@@ -209,6 +209,22 @@ pub(crate) fn structural_error(body: &str) -> Option<String> {
     None
 }
 
+/// Logical ids of `Fn::ForEach` loops, which are not resources.
+const FOR_EACH_PREFIX: &str = "Fn::ForEach";
+
+/// Expand `Fn::ForEach` the way `template::parse_template` does, so every
+/// resource-derived field sees the resources a template actually produces
+/// rather than the loop that produces them.
+///
+/// Lenient on failure: expansion needs parameter values this pass does not
+/// have (a loop can iterate a `Ref` to a CommaDelimitedList parameter), so a
+/// failure returns the template unchanged and callers skip the unexpanded
+/// entries. Reporting the failure would reject a template that deploys.
+fn expand_like_the_deploy_path(value: &Value) -> Value {
+    crate::template::expand_for_each(value, &BTreeMap::new(), &BTreeMap::new())
+        .unwrap_or_else(|_| value.clone())
+}
+
 /// Build the summary. A body that does not parse, or parses to something that
 /// is not a mapping, yields the empty summary.
 pub(crate) fn summarize(template_body: &str) -> TemplateSummary {
@@ -232,20 +248,26 @@ pub(crate) fn summarize(template_body: &str) -> TemplateSummary {
         .filter(|m| !m.is_null())
         .map(ToString::to_string);
 
+    // Resource-derived fields read the EXPANDED template. Letting
+    // structural_error expand while summarize walked the raw map meant a
+    // ForEach template passed validation and then reported none of the
+    // resource types or capabilities it actually creates.
+    let expanded = expand_like_the_deploy_path(&value);
+
     // Computed once and shared: `capabilities` and `capabilities_reason` both
     // need the IAM types and the transforms, and deriving them separately in
     // three places both re-walked the template and gave the three copies room
     // to drift apart.
     let transforms = declared_transforms(&value);
-    let iam = iam_resource_types(&value);
-    let named_iam = has_named_iam(&value);
+    let iam = iam_resource_types(&expanded);
+    let named_iam = has_named_iam(&expanded);
 
     TemplateSummary {
         description,
         parameters: parameters(&value),
         capabilities: capabilities(&iam, &transforms, named_iam),
         capabilities_reason: capabilities_reason(&iam, &transforms),
-        resource_types: resource_types(&value),
+        resource_types: resource_types(&expanded),
         declared_transforms: transforms,
         version,
         metadata,
@@ -363,11 +385,28 @@ fn iam_resource_types(value: &Value) -> Vec<String> {
     // deriving `--capabilities` from the summary got rejected by real AWS for
     // the missing CAPABILITY_IAM.
     let synthesizes_role = resources.values().any(|r| {
-        r.get("Type").and_then(Value::as_str) == Some("AWS::Serverless::Function")
-            && !r
-                .get("Properties")
+        let ty = r.get("Type").and_then(Value::as_str);
+        let props = r.get("Properties").and_then(Value::as_object);
+        match ty {
+            Some("AWS::Serverless::Function") => !props
                 .and_then(|p| p.get("Role"))
-                .is_some_and(|role| !role.is_null())
+                .is_some_and(|role| !role.is_null()),
+            // A state machine gets an `<Id>EventsRole` when it declares an
+            // event that must start it -- `expand_state_machine_events` sets
+            // `needs_start_role` for exactly these types.
+            Some("AWS::Serverless::StateMachine") => props
+                .and_then(|p| p.get("Events"))
+                .and_then(Value::as_object)
+                .is_some_and(|events| {
+                    events.values().any(|e| {
+                        matches!(
+                            e.get("Type").and_then(Value::as_str),
+                            Some("Schedule" | "ScheduleV2" | "EventBridgeRule" | "CloudWatchEvent")
+                        )
+                    })
+                }),
+            _ => false,
+        }
     });
     if synthesizes_role {
         types.push("AWS::IAM::Role".to_string());
@@ -846,6 +885,65 @@ Resources:
                 "a blank name must not force NAMED_IAM: {body}"
             );
         }
+    }
+
+    #[test]
+    fn a_for_each_template_summarizes_the_resources_it_produces() {
+        let body = r#"
+Transform: AWS::LanguageExtensions
+Resources:
+  'Fn::ForEach::Buckets':
+    - Id
+    - [A, B]
+    - '${Id}Bucket':
+        Type: AWS::S3::Bucket
+"#;
+        // Validating a ForEach template and then reporting none of its
+        // resources is the empty-summary false green light in another form.
+        let s = summarize(body);
+        assert!(
+            s.resource_types.contains(&"AWS::S3::Bucket".to_string()),
+            "{:?}",
+            s.resource_types
+        );
+    }
+
+    #[test]
+    fn an_unexpandable_for_each_loop_is_not_judged_as_a_resource() {
+        // The item list is a Ref to a parameter with no value here, so the
+        // loop cannot expand. It is still a loop, not a malformed resource.
+        let body = r#"
+Transform: AWS::LanguageExtensions
+Parameters:
+  Names:
+    Type: CommaDelimitedList
+Resources:
+  'Fn::ForEach::Topics':
+    - Id
+    - !Ref Names
+    - '${Id}Topic':
+        Type: AWS::SNS::Topic
+"#;
+        assert_eq!(
+            structural_error(body),
+            None,
+            "an unexpanded loop must not be reported as a non-object resource"
+        );
+    }
+
+    #[test]
+    fn a_sam_state_machine_with_a_start_event_needs_iam() {
+        // expand_state_machine_events builds an <Id>EventsRole for exactly
+        // these event types, so reporting AUTO_EXPAND alone under-reports.
+        let scheduled = "Transform: AWS::Serverless-2016-10-31\nResources:\n  M:\n    Type: AWS::Serverless::StateMachine\n    Properties:\n      Events:\n        Tick:\n          Type: Schedule\n";
+        assert_eq!(
+            summarize(scheduled).capabilities,
+            ["CAPABILITY_IAM", "CAPABILITY_AUTO_EXPAND"]
+        );
+
+        // No start event means no synthesized role.
+        let plain = "Transform: AWS::Serverless-2016-10-31\nResources:\n  M:\n    Type: AWS::Serverless::StateMachine\n";
+        assert_eq!(summarize(plain).capabilities, ["CAPABILITY_AUTO_EXPAND"]);
     }
 
     /// The invariant: `structural_error` must never reject a body that

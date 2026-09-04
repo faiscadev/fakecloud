@@ -507,15 +507,18 @@ impl CloudFormationService {
         &self,
         account_id: &str,
         params: &BTreeMap<String, String>,
-    ) -> String {
+    ) -> Result<Option<String>, String> {
         if let Some(body) = params.get("TemplateBody").filter(|b| !b.trim().is_empty()) {
-            return body.clone();
+            return Ok(Some(body.clone()));
         }
-        params
-            .get("TemplateURL")
-            .filter(|u| looks_like_url(u))
-            .and_then(|url| self.resolve_template_url(account_id, url).ok())
-            .unwrap_or_default()
+        // A URL that was SUPPLIED but cannot be fetched is a failure, not
+        // "no template given". Collapsing the two let an update against a
+        // missing object report success and keep serving the previous
+        // template -- stale, and indistinguishable from a real update.
+        match params.get("TemplateURL").filter(|u| looks_like_url(u)) {
+            Some(url) => self.resolve_template_url(account_id, url).map(Some),
+            None => Ok(None),
+        }
     }
 
     /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
@@ -1529,7 +1532,16 @@ impl CloudFormationService {
                 // work exists to remove. A fetch that fails still stores the
                 // empty body rather than erroring: CreateStackSet declares no
                 // error for it, and the probe's `"t"` is not a URL shape.
-                let template_body = self.stack_set_template_body(&aid, &params);
+                let template_body = self
+                    .stack_set_template_body(&aid, &params)
+                    .map_err(|reason| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            reason,
+                        )
+                    })?
+                    .unwrap_or_default();
                 let entry = json!({
                     "StackSetId": id,
                     "StackSetName": name,
@@ -1594,12 +1606,32 @@ impl CloudFormationService {
                 //
                 // `UsePreviousTemplate` (and supplying neither body nor URL)
                 // keeps what is stored, which is what the parameter means.
-                let updated = self.stack_set_template_body(&aid, &params);
-                if !updated.is_empty() {
-                    let name = params.get("StackSetName").cloned().unwrap_or_default();
+                let updated = self
+                    .stack_set_template_body(&aid, &params)
+                    .map_err(|reason| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            reason,
+                        )
+                    })?;
+                if let Some(updated) = updated {
+                    let wanted = params.get("StackSetName").cloned().unwrap_or_default();
                     let mut accounts = self.state.write();
                     let state = accounts.get_or_create(&aid);
-                    if let Some(entry) = store(&mut state.extras, "stack_sets").get_mut(&name) {
+                    let sets = store(&mut state.extras, "stack_sets");
+                    // Records are keyed by NAME, but a stack set is equally
+                    // addressable by its id -- and an update by id that
+                    // matched nothing succeeded while leaving the old template
+                    // in place, which reads as a working update.
+                    let key = sets
+                        .iter()
+                        .find(|(name, entry)| {
+                            **name == wanted
+                                || entry["StackSetId"].as_str() == Some(wanted.as_str())
+                        })
+                        .map(|(name, _)| name.clone());
+                    if let Some(entry) = key.and_then(|k| sets.get_mut(&k)) {
                         entry["TemplateBody"] = json!(updated);
                     }
                 }
@@ -3458,6 +3490,73 @@ mod tests {
         introspect(&svc, "UpdateStackSet", &[("StackSetName", "set1")]);
         let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "set1")]);
         assert!(xml.contains("<member>AWS::SNS::Topic</member>"), "{xml}");
+    }
+
+    #[test]
+    fn a_stack_set_updates_by_id_as_well_as_by_name() {
+        let svc = svc();
+        let created = introspect(
+            &svc,
+            "CreateStackSet",
+            &[("StackSetName", "byid"), ("TemplateBody", GOOD_TEMPLATE)],
+        );
+        let id = created
+            .split("<StackSetId>")
+            .nth(1)
+            .and_then(|t| t.split("</StackSetId>").next())
+            .expect("a stack set id")
+            .to_string();
+
+        // Records are keyed by name; an update addressed by id used to match
+        // nothing and succeed, leaving the old template in place.
+        introspect(
+            &svc,
+            "UpdateStackSet",
+            &[
+                ("StackSetName", id.as_str()),
+                (
+                    "TemplateBody",
+                    "Resources:\n  T:\n    Type: AWS::SNS::Topic\n",
+                ),
+            ],
+        );
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "byid")]);
+        assert!(
+            xml.contains("<member>AWS::SNS::Topic</member>"),
+            "an update by id must land: {xml}"
+        );
+    }
+
+    #[test]
+    fn a_supplied_but_unfetchable_template_url_is_not_silently_ignored() {
+        let svc = svc();
+        introspect(
+            &svc,
+            "CreateStackSet",
+            &[("StackSetName", "s"), ("TemplateBody", GOOD_TEMPLATE)],
+        );
+
+        // Supplying a URL that cannot be fetched is a failure. Treating it as
+        // "no template given" reported success and kept serving the old one.
+        let Err(err) = svc.handle_extra_action(&req(
+            "UpdateStackSet",
+            &[
+                ("StackSetName", "s"),
+                ("TemplateURL", "https://s3.amazonaws.com/b/missing.yaml"),
+            ],
+        )) else {
+            panic!("an unfetchable URL must be reported");
+        };
+        assert!(
+            err.message().contains("Template not found"),
+            "{}",
+            err.message()
+        );
+
+        // Supplying neither keeps what is stored -- UsePreviousTemplate.
+        introspect(&svc, "UpdateStackSet", &[("StackSetName", "s")]);
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "s")]);
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
     }
 
     #[test]
