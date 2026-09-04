@@ -1479,6 +1479,16 @@ mod tests {
             .unwrap();
         }
 
+        // Collect the ids from each page: counting alone would pass even if a
+        // page repeated one instance and dropped another.
+        let ids_of = |xml: &str| -> Vec<String> {
+            xml.split("<instanceId>")
+                .skip(1)
+                .filter_map(|s| s.split("</instanceId>").next())
+                .map(str::to_string)
+                .collect()
+        };
+
         let first = body(
             describe_application_status(
                 &svc,
@@ -1486,7 +1496,8 @@ mod tests {
             )
             .unwrap(),
         );
-        assert_eq!(first.matches("<instanceId>").count(), 2, "{first}");
+        let first_ids = ids_of(&first);
+        assert_eq!(first_ids.len(), 2, "{first}");
         let token = first
             .split("<nextToken>")
             .nth(1)
@@ -1504,10 +1515,21 @@ mod tests {
             )
             .unwrap(),
         );
-        assert_eq!(second.matches("<instanceId>").count(), 1, "{second}");
+        let second_ids = ids_of(&second);
+        assert_eq!(second_ids.len(), 1, "{second}");
         assert!(
             !second.contains("<nextToken>"),
             "the last page ends: {second}"
+        );
+
+        // Every instance appears exactly once across the two pages.
+        let mut seen = first_ids;
+        seen.extend(second_ids);
+        seen.sort();
+        assert_eq!(
+            seen,
+            vec!["i-1".to_string(), "i-2".to_string(), "i-3".to_string()],
+            "pages must partition the instances, with no repeat or omission"
         );
     }
 
