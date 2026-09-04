@@ -1,10 +1,10 @@
 +++
 title = "EC2"
-description = "Amazon EC2 — the full 769-operation control plane. VPCs, subnets, security groups, instances, EBS, AMIs, transit gateways, VPN, IPAM, Verified Access, and the entire networking long tail at 100% Smithy conformance."
+description = "Amazon EC2 — the full 786-operation control plane. VPCs, subnets, security groups, instances, EBS, AMIs, transit gateways, VPN, IPAM, Verified Access, and the entire networking long tail at 100% Smithy conformance."
 weight = 41
 +++
 
-fakecloud implements **769 of 769** AWS EC2 operations at 100% Smithy conformance — the complete control plane for the largest service surface in AWS. Request/response shapes, flattened `ec2Query` XML lists, field names, enum validation, and integer/length bounds are checked against AWS's own Smithy model on every commit.
+fakecloud implements **786 of 786** AWS EC2 operations at 100% Smithy conformance — the complete control plane for the largest service surface in AWS. Request/response shapes, flattened `ec2Query` XML lists, field names, enum validation, and integer/length bounds are checked against AWS's own Smithy model on every commit.
 
 ## Supported features
 

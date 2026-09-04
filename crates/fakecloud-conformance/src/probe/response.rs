@@ -229,6 +229,9 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "InvalidPublicIpv4PoolID.NotFound",
             "InvalidVpcID.NotFound",
             "InvalidSubnetID.NotFound",
+            // Application status checks: the probe addresses a check by a
+            // synthetic id, which AWS answers with this not-found code.
+            "InvalidApplicationStatusCheckId.NotFound",
             "InvalidID",
         ],
         // EKS under-declares two client errors that the real API returns for
