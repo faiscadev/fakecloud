@@ -568,7 +568,16 @@ pub struct Snapshot {
     pub create_volume_permissions: Vec<String>,
 }
 
-/// An AMI (machine image).
+/// One health-check path: a source, and the destinations reachable from it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HealthCheckPath {
+    pub source_subnet_id: Option<String>,
+    pub source_security_group_id: Option<String>,
+    /// `(SubnetId, SecurityGroupId)` per destination.
+    #[serde(default)]
+    pub destinations: Vec<(Option<String>, Option<String>)>,
+}
+
 /// An application status check: an HTTP/HTTPS probe EC2 runs against
 /// instances, associated either by instance id or by tag.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -590,6 +599,9 @@ pub struct ApplicationStatusCheck {
     pub success_threshold: Option<i64>,
     pub status_code_matcher: Option<String>,
     pub initialization_grace_period_seconds: Option<i64>,
+    /// `HealthCheckPaths`: the source/destination pairs the probe traverses.
+    #[serde(default)]
+    pub health_check_paths: Vec<HealthCheckPath>,
     /// Instance ids this check is associated with.
     pub instance_ids: Vec<String>,
     /// Tag key/value pairs this check is associated with.
@@ -610,6 +622,7 @@ pub struct ApplicationStatusSuppression {
     pub resume_at: Option<String>,
 }
 
+/// An AMI (machine image).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Image {
     pub image_id: String,

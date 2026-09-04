@@ -29,13 +29,26 @@ fn dry_run(req: &AwsRequest) -> bool {
         .is_some_and(|v| v.eq_ignore_ascii_case("true"))
 }
 
-/// `TargetTagAssociations.N.Key` / `.Value` pairs.
+/// `TargetTagAssociation.N.Key` / `.Value` pairs. The member is
+/// `TargetTagAssociations`, but its `xmlName` is singular, so that is what
+/// official clients put on the wire; the plural spelling is accepted too.
 fn tag_associations(req: &AwsRequest) -> Vec<(String, String)> {
-    parse_tag_pairs(&req.query_params, "TargetTagAssociations")
+    let mut pairs = parse_tag_pairs(&req.query_params, "TargetTagAssociation");
+    if pairs.is_empty() {
+        pairs = parse_tag_pairs(&req.query_params, "TargetTagAssociations");
+    }
+    pairs
         .into_iter()
         .map(|(k, v)| (k, v.unwrap_or_default()))
         .collect()
 }
+
+/// The `AssociationType` reported on an association result. The result objects
+/// are documented with `EC2TAG` and `INSTANCE_ID`, which is a different
+/// spelling from the `AssociationTypeEnum` (`tag`, `instance-id`) that the
+/// describe-associations response uses.
+const RESULT_TYPE_TAG: &str = "EC2TAG";
+const RESULT_TYPE_INSTANCE: &str = "INSTANCE_ID";
 
 fn check_xml(c: &ApplicationStatusCheck) -> String {
     let mut s = String::new();
@@ -70,6 +83,7 @@ fn check_xml(c: &ApplicationStatusCheck) -> String {
             s.push_str(&ec2_elem(tag, v));
         }
     }
+    s.push_str(&health_check_paths_xml(&c.health_check_paths));
     s.push_str(&ec2_elem("creationTime", &c.creation_time));
     s.push_str(&ec2_elem("modifyTime", &c.modify_time));
     if let Some(d) = &c.deletion_time {
@@ -81,7 +95,7 @@ fn check_xml(c: &ApplicationStatusCheck) -> String {
         .map(|(k, v)| format!("{}{}", ec2_elem("key", k), ec2_elem("value", v)))
         .collect();
     if !pairs.is_empty() {
-        s.push_str(&ec2_list("targetTagAssociations", &pairs));
+        s.push_str(&ec2_list("targetTagAssociationSet", &pairs));
     }
     let tags: Vec<String> = c
         .tags
@@ -105,6 +119,13 @@ fn validate_probe(req: &AwsRequest) -> Result<(), AwsServiceError> {
     validate_int_range(&req.query_params, "Timeout", 2, 120)?;
     validate_int_range(&req.query_params, "FailureThreshold", 1, 10)?;
     validate_int_range(&req.query_params, "SuccessThreshold", 1, 10)?;
+    // -1 disables the grace period, so the modeled floor is below zero.
+    validate_int_range(
+        &req.query_params,
+        "InitializationGracePeriodSeconds",
+        -1,
+        600,
+    )?;
     // A probe that times out no sooner than it repeats can never report a
     // result before the next attempt starts.
     let interval = req
@@ -129,10 +150,100 @@ fn int_param(req: &AwsRequest, key: &str) -> Option<i64> {
     req.query_params.get(key).and_then(|v| v.parse().ok())
 }
 
+/// Reject a present-but-unparseable integer instead of silently treating it as
+/// absent, which would let a malformed Port fall back to the default.
+fn require_int_params(req: &AwsRequest, keys: &[&str]) -> Result<(), AwsServiceError> {
+    for key in keys {
+        if let Some(v) = req.query_params.get(*key).filter(|v| !v.is_empty()) {
+            if v.parse::<i64>().is_err() {
+                return Err(invalid_parameter_value(format!(
+                    "Invalid value '{v}' for {key}"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Parse the `HealthCheckPath.N` request set: each path has one source and an
+/// indexed `Destination.M` set beneath it.
+fn health_check_paths(req: &AwsRequest) -> Vec<crate::state::HealthCheckPath> {
+    let mut paths = Vec::new();
+    for n in 1.. {
+        let prefix = format!("HealthCheckPath.{n}");
+        let get = |suffix: &str| req.query_params.get(&format!("{prefix}.{suffix}")).cloned();
+        let source_subnet_id = get("Source.SubnetId");
+        let source_security_group_id = get("Source.SecurityGroupId");
+        let mut destinations = Vec::new();
+        for m in 1.. {
+            let subnet = get(&format!("Destination.{m}.SubnetId"));
+            let sg = get(&format!("Destination.{m}.SecurityGroupId"));
+            if subnet.is_none() && sg.is_none() {
+                break;
+            }
+            destinations.push((subnet, sg));
+        }
+        if source_subnet_id.is_none()
+            && source_security_group_id.is_none()
+            && destinations.is_empty()
+        {
+            break;
+        }
+        paths.push(crate::state::HealthCheckPath {
+            source_subnet_id,
+            source_security_group_id,
+            destinations,
+        });
+    }
+    paths
+}
+
+fn health_check_paths_xml(paths: &[crate::state::HealthCheckPath]) -> String {
+    let items: Vec<String> = paths
+        .iter()
+        .map(|p| {
+            let mut source = String::new();
+            if let Some(v) = &p.source_subnet_id {
+                source.push_str(&ec2_elem("subnetId", v));
+            }
+            if let Some(v) = &p.source_security_group_id {
+                source.push_str(&ec2_elem("securityGroupId", v));
+            }
+            let destinations: Vec<String> = p
+                .destinations
+                .iter()
+                .map(|(subnet, sg)| {
+                    let mut d = String::new();
+                    if let Some(v) = subnet {
+                        d.push_str(&ec2_elem("subnetId", v));
+                    }
+                    if let Some(v) = sg {
+                        d.push_str(&ec2_elem("securityGroupId", v));
+                    }
+                    d
+                })
+                .collect();
+            let mut out = format!("<source>{source}</source>");
+            if !destinations.is_empty() {
+                out.push_str(&ec2_list("destinationSet", &destinations));
+            }
+            out
+        })
+        .collect();
+    if items.is_empty() {
+        String::new()
+    } else {
+        ec2_list("healthCheckPathSet", &items)
+    }
+}
+
 fn str_param(req: &AwsRequest, key: &str) -> Option<String> {
     req.query_params.get(key).filter(|v| !v.is_empty()).cloned()
 }
 
+/// A check that has been deleted is tombstoned rather than dropped, so that
+/// its deletion time stays describable. Every other operation must treat it as
+/// gone.
 fn get_check<'a>(
     state: &'a mut Ec2State,
     id: &str,
@@ -140,6 +251,7 @@ fn get_check<'a>(
     state
         .application_status_checks
         .get_mut(id)
+        .filter(|c| c.deletion_time.is_none())
         .ok_or_else(|| not_found("InvalidApplicationStatusCheckId.NotFound", id))
 }
 
@@ -150,6 +262,18 @@ pub(crate) fn create_application_status_check(
     let protocol = require(&req.query_params, "Protocol")?;
     require(&req.query_params, "Port")?;
     validate_probe(req)?;
+    require_int_params(
+        req,
+        &[
+            "Port",
+            "DeviceIndex",
+            "Interval",
+            "Timeout",
+            "FailureThreshold",
+            "SuccessThreshold",
+            "InitializationGracePeriodSeconds",
+        ],
+    )?;
     let port = int_param(req, "Port").unwrap_or(80);
 
     if dry_run(req) {
@@ -178,6 +302,7 @@ pub(crate) fn create_application_status_check(
         success_threshold: int_param(req, "SuccessThreshold"),
         status_code_matcher: str_param(req, "StatusCodeMatcher"),
         initialization_grace_period_seconds: int_param(req, "InitializationGracePeriodSeconds"),
+        health_check_paths: health_check_paths(req),
         instance_ids: Vec::new(),
         tag_associations: Vec::new(),
         tags: parse_tag_pairs(&req.query_params, "TagSpecification.1.Tag")
@@ -206,6 +331,7 @@ pub(crate) fn describe_application_status_checks(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    validate_int_range(&req.query_params, "MaxResults", 5, 100)?;
     let ids = indexed_list(&req.query_params, "ApplicationStatusCheckId");
     // Deleted checks are tombstoned; only `IncludeAll` surfaces them.
     let include_all = req
@@ -237,6 +363,19 @@ pub(crate) fn modify_application_status_check(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ApplicationStatusCheckId")?;
     validate_probe(req)?;
+    require_int_params(
+        req,
+        &[
+            "Port",
+            "DeviceIndex",
+            "Interval",
+            "Timeout",
+            "FailureThreshold",
+            "SuccessThreshold",
+            "InitializationGracePeriodSeconds",
+        ],
+    )?;
+    let paths = health_check_paths(req);
     if dry_run(req) {
         return Ok(Ec2Service::respond(
             "ModifyApplicationStatusCheck",
@@ -286,6 +425,9 @@ pub(crate) fn modify_application_status_check(
         {
             *slot = Some(v);
         }
+    }
+    if !paths.is_empty() {
+        check.health_check_paths = paths;
     }
     check.modify_time = now_rfc3339();
     let body = format!(
@@ -349,6 +491,14 @@ fn change_associations(
             "Either InstanceIds or TargetTagAssociations must be specified",
         ));
     }
+    // A check targets instances or tags, never both in one call.
+    if !instance_ids.is_empty() && !tags.is_empty() {
+        return Err(AwsServiceError::aws_error(
+            http::StatusCode::BAD_REQUEST,
+            "InvalidParameterCombination",
+            "InstanceIds and TargetTagAssociations cannot be specified together",
+        ));
+    }
     if dry_run(req) {
         return Ok(Ec2Service::respond(action, &req.request_id, ""));
     }
@@ -361,13 +511,13 @@ fn change_associations(
     let mut successful = Vec::new();
     let mut unsuccessful = Vec::new();
     for instance_id in instance_ids {
-        // Associating a check with an instance that does not exist is
-        // reported per-target rather than failing the whole call.
-        if associate && !known_instances.contains(&instance_id) {
+        // An instance that does not exist is reported per-target rather than
+        // failing the whole call, on both associate and disassociate.
+        if !known_instances.contains(&instance_id) {
             unsuccessful.push(format!(
                 "{}{}{}{}",
                 ec2_elem("applicationStatusCheckId", &id),
-                ec2_elem("associationType", "instance-id"),
+                ec2_elem("associationType", RESULT_TYPE_INSTANCE),
                 ec2_elem("associationValue", &instance_id),
                 ec2_elem("reason", "The instance ID does not exist")
             ));
@@ -383,7 +533,7 @@ fn change_associations(
         successful.push(format!(
             "{}{}{}",
             ec2_elem("applicationStatusCheckId", &id),
-            ec2_elem("associationType", "instance-id"),
+            ec2_elem("associationType", RESULT_TYPE_INSTANCE),
             ec2_elem("associationValue", &instance_id)
         ));
     }
@@ -404,7 +554,7 @@ fn change_associations(
         successful.push(format!(
             "{}{}{}",
             ec2_elem("applicationStatusCheckId", &id),
-            ec2_elem("associationType", "tag"),
+            ec2_elem("associationType", RESULT_TYPE_TAG),
             ec2_elem("associationValue", &format!("{k}={v}"))
         ));
     }
@@ -436,6 +586,7 @@ pub(crate) fn describe_application_status_check_associations(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    validate_int_range(&req.query_params, "MaxResults", 5, 1_000)?;
     let ids = indexed_list(&req.query_params, "ApplicationStatusCheckId");
     let accounts = svc.state.read();
     let mut items = Vec::new();
@@ -473,6 +624,7 @@ pub(crate) fn describe_application_status(
     svc: &Ec2Service,
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
+    validate_int_range(&req.query_params, "MaxResults", 1, 100)?;
     let requested = indexed_list(&req.query_params, "InstanceId");
     let accounts = svc.state.read();
     let mut items = Vec::new();
@@ -513,9 +665,17 @@ pub(crate) fn describe_application_status(
             // With no check associated there is nothing to report on; with
             // one, fakecloud runs no probe, so the status is the honest
             // "insufficient-data" rather than a fabricated "ok".
+            // `Aggregation=excluded` keeps a check off the instance's
+            // aggregate status while still reporting it in the detail set, so
+            // an instance whose only check is excluded has nothing to
+            // aggregate over.
+            let included = checks
+                .iter()
+                .filter(|c| c.aggregation != "excluded")
+                .count();
             let status = if suppressed {
                 "suppressed"
-            } else if checks.is_empty() {
+            } else if included == 0 {
                 "not-applicable"
             } else {
                 "insufficient-data"
@@ -546,7 +706,7 @@ pub(crate) fn describe_application_status(
         "DescribeApplicationStatus",
         &req.request_id,
         &format!(
-            "<applicationStatuses>{}</applicationStatuses>",
+            "<applicationStatusesResponseType>{}</applicationStatusesResponseType>",
             ec2_list("instanceSet", &items)
         ),
     ))
@@ -1011,5 +1171,275 @@ mod tests {
                 .unwrap(),
         );
         assert!(!d.contains("asc-"), "{d}");
+    }
+
+    #[test]
+    fn describe_uses_the_modeled_wrapper_names() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1", &[]);
+        let id = make_check(&svc, &[]);
+        associate_application_status_check(
+            &svc,
+            &req(
+                "AssociateApplicationStatusCheck",
+                &[("ApplicationStatusCheckId", &id), ("InstanceId.1", "i-1")],
+            ),
+        )
+        .unwrap();
+
+        let d = body(
+            describe_application_status(&svc, &req("DescribeApplicationStatus", &[])).unwrap(),
+        );
+        assert!(
+            d.contains("<applicationStatusesResponseType>"),
+            "the modeled wrapper is applicationStatusesResponseType: {d}"
+        );
+
+        // Tag associations use the modeled set name on the check response.
+        disassociate_application_status_check(
+            &svc,
+            &req(
+                "DisassociateApplicationStatusCheck",
+                &[("ApplicationStatusCheckId", &id), ("InstanceId.1", "i-1")],
+            ),
+        )
+        .unwrap();
+        associate_application_status_check(
+            &svc,
+            &req(
+                "AssociateApplicationStatusCheck",
+                &[
+                    ("ApplicationStatusCheckId", &id),
+                    ("TargetTagAssociation.1.Key", "env"),
+                    ("TargetTagAssociation.1.Value", "prod"),
+                ],
+            ),
+        )
+        .unwrap();
+        let d = body(
+            describe_application_status_checks(&svc, &req("DescribeApplicationStatusChecks", &[]))
+                .unwrap(),
+        );
+        assert!(
+            d.contains("<targetTagAssociationSet>"),
+            "the modeled set name is targetTagAssociationSet: {d}"
+        );
+    }
+
+    #[test]
+    fn association_results_use_the_documented_type_spelling() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1", &[]);
+        let id = make_check(&svc, &[]);
+
+        // Result objects are documented with EC2TAG and INSTANCE_ID, which is
+        // a different spelling from the describe response's enum.
+        let d = body(
+            associate_application_status_check(
+                &svc,
+                &req(
+                    "AssociateApplicationStatusCheck",
+                    &[("ApplicationStatusCheckId", &id), ("InstanceId.1", "i-1")],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            d.contains("<associationType>INSTANCE_ID</associationType>"),
+            "{d}"
+        );
+
+        let d = body(
+            associate_application_status_check(
+                &svc,
+                &req(
+                    "AssociateApplicationStatusCheck",
+                    &[
+                        ("ApplicationStatusCheckId", &id),
+                        ("TargetTagAssociation.1.Key", "env"),
+                        ("TargetTagAssociation.1.Value", "prod"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            d.contains("<associationType>EC2TAG</associationType>"),
+            "{d}"
+        );
+
+        // The describe-associations response keeps the enum spelling.
+        let d = body(
+            describe_application_status_check_associations(
+                &svc,
+                &req("DescribeApplicationStatusCheckAssociations", &[]),
+            )
+            .unwrap(),
+        );
+        assert!(d.contains("instance-id") || d.contains("tag"), "{d}");
+    }
+
+    #[test]
+    fn association_requires_exactly_one_target_type() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1", &[]);
+        let id = make_check(&svc, &[]);
+
+        let err = err_of(associate_application_status_check(
+            &svc,
+            &req(
+                "AssociateApplicationStatusCheck",
+                &[
+                    ("ApplicationStatusCheckId", &id),
+                    ("InstanceId.1", "i-1"),
+                    ("TargetTagAssociation.1.Key", "env"),
+                    ("TargetTagAssociation.1.Value", "prod"),
+                ],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidParameterCombination");
+    }
+
+    #[test]
+    fn disassociating_an_unknown_instance_is_reported_unsuccessful() {
+        let svc = Ec2Service::new();
+        let id = make_check(&svc, &[]);
+        let d = body(
+            disassociate_application_status_check(
+                &svc,
+                &req(
+                    "DisassociateApplicationStatusCheck",
+                    &[
+                        ("ApplicationStatusCheckId", &id),
+                        ("InstanceId.1", "i-ghost"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert!(
+            d.contains("<unsuccessfulResultSet>") && d.contains("i-ghost"),
+            "a nonexistent instance must not be reported successful: {d}"
+        );
+        assert!(!d.contains("<successfulResultSet><item>"), "{d}");
+    }
+
+    #[test]
+    fn health_check_paths_round_trip() {
+        let svc = Ec2Service::new();
+        let id = make_check(
+            &svc,
+            &[
+                ("HealthCheckPath.1.Source.SubnetId", "subnet-a"),
+                ("HealthCheckPath.1.Destination.1.SubnetId", "subnet-b"),
+                ("HealthCheckPath.1.Destination.1.SecurityGroupId", "sg-1"),
+            ],
+        );
+        let d = body(
+            describe_application_status_checks(&svc, &req("DescribeApplicationStatusChecks", &[]))
+                .unwrap(),
+        );
+        assert!(d.contains("<healthCheckPathSet>"), "{d}");
+        assert!(
+            d.contains("subnet-a") && d.contains("subnet-b") && d.contains("sg-1"),
+            "{d}"
+        );
+
+        // Modify replaces the set.
+        modify_application_status_check(
+            &svc,
+            &req(
+                "ModifyApplicationStatusCheck",
+                &[
+                    ("ApplicationStatusCheckId", &id),
+                    ("HealthCheckPath.1.Source.SubnetId", "subnet-c"),
+                ],
+            ),
+        )
+        .unwrap();
+        let d = body(
+            describe_application_status_checks(&svc, &req("DescribeApplicationStatusChecks", &[]))
+                .unwrap(),
+        );
+        assert!(d.contains("subnet-c") && !d.contains("subnet-a"), "{d}");
+    }
+
+    #[test]
+    fn an_excluded_check_does_not_drive_the_aggregate_status() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1", &[]);
+        let id = make_check(&svc, &[("Aggregation", "excluded")]);
+        associate_application_status_check(
+            &svc,
+            &req(
+                "AssociateApplicationStatusCheck",
+                &[("ApplicationStatusCheckId", &id), ("InstanceId.1", "i-1")],
+            ),
+        )
+        .unwrap();
+
+        let d = body(
+            describe_application_status(&svc, &req("DescribeApplicationStatus", &[])).unwrap(),
+        );
+        // The check still appears in the detail set, but contributes nothing.
+        assert!(d.contains("<detailSet>"), "{d}");
+        assert!(
+            d.contains("<status>not-applicable</status>"),
+            "an excluded-only instance has nothing to aggregate: {d}"
+        );
+    }
+
+    #[test]
+    fn a_deleted_check_is_gone_for_every_other_operation() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-1", &[]);
+        let id = make_check(&svc, &[]);
+        delete_application_status_check(
+            &svc,
+            &req(
+                "DeleteApplicationStatusCheck",
+                &[("ApplicationStatusCheckId", &id)],
+            ),
+        )
+        .unwrap();
+
+        for err in [
+            err_of(modify_application_status_check(
+                &svc,
+                &req(
+                    "ModifyApplicationStatusCheck",
+                    &[("ApplicationStatusCheckId", &id), ("Port", "9090")],
+                ),
+            )),
+            err_of(associate_application_status_check(
+                &svc,
+                &req(
+                    "AssociateApplicationStatusCheck",
+                    &[("ApplicationStatusCheckId", &id), ("InstanceId.1", "i-1")],
+                ),
+            )),
+            err_of(delete_application_status_check(
+                &svc,
+                &req(
+                    "DeleteApplicationStatusCheck",
+                    &[("ApplicationStatusCheckId", &id)],
+                ),
+            )),
+        ] {
+            assert_eq!(err.code(), "InvalidApplicationStatusCheckId.NotFound");
+        }
+    }
+
+    #[test]
+    fn a_malformed_integer_is_rejected_rather_than_defaulted() {
+        let svc = Ec2Service::new();
+        let err = err_of(create_application_status_check(
+            &svc,
+            &req(
+                "CreateApplicationStatusCheck",
+                &[("Protocol", "http"), ("Port", "not-a-number")],
+            ),
+        ));
+        assert_eq!(err.code(), "InvalidParameterValue");
     }
 }
