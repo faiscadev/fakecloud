@@ -950,6 +950,7 @@ mod tests {
                 write_capacity_units: 0,
             },
             items,
+            key_index: Default::default(),
             gsi: vec![],
             lsi: vec![],
             tags: BTreeMap::new(),

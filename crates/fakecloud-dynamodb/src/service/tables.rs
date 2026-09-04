@@ -224,6 +224,8 @@ impl DynamoDbService {
             attribute_definitions: attribute_definitions.clone(),
             provisioned_throughput: provisioned_throughput.clone(),
             items: Vec::new(),
+            // Built lazily on the table's first write.
+            key_index: Default::default(),
             gsi: gsi.clone(),
             lsi: lsi.clone(),
             tags,
@@ -1140,6 +1142,8 @@ impl DynamoDbService {
             attribute_definitions: backup.attribute_definitions.clone(),
             provisioned_throughput: backup.provisioned_throughput.clone(),
             items: backup.items.clone(),
+            // Left unbuilt here; the `recalculate_stats()` below builds it.
+            key_index: Default::default(),
             gsi: backup.gsi.clone(),
             lsi: backup.lsi.clone(),
             tags: backup.tags.clone(),
@@ -1246,6 +1250,8 @@ impl DynamoDbService {
             attribute_definitions: source.attribute_definitions.clone(),
             provisioned_throughput: source.provisioned_throughput.clone(),
             items: source.items.clone(),
+            // Left unbuilt here; the `recalculate_stats()` below builds it.
+            key_index: Default::default(),
             gsi: source.gsi.clone(),
             lsi: source.lsi.clone(),
             tags: source.tags.clone(),
@@ -1773,6 +1779,8 @@ impl DynamoDbService {
                 write_capacity_units: 0,
             },
             items: imported_items,
+            // Left unbuilt here; the `recalculate_stats()` below builds it.
+            key_index: Default::default(),
             gsi: Vec::new(),
             lsi: Vec::new(),
             tags: BTreeMap::new(),

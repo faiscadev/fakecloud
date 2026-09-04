@@ -422,6 +422,7 @@ mod tests {
                 write_capacity_units: 0,
             },
             items: Vec::new(),
+            key_index: Default::default(),
             gsi: Vec::new(),
             lsi: Vec::new(),
             tags: BTreeMap::new(),
