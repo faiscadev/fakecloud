@@ -435,7 +435,10 @@ async fn acm_acme_probe() {
     let binding = acme
         .call(
             "CreateAcmeExternalAccountBinding",
-            json!({ "AcmeEndpointArn": endpoint }),
+            json!({
+                "AcmeEndpointArn": endpoint,
+                "RoleArn": "arn:aws:iam::123456789012:role/acme",
+            }),
         )
         .await["AcmeExternalAccountBindingArn"]
         .as_str()
