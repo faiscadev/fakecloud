@@ -47,6 +47,12 @@ pub struct AccountState {
     pub delivery_channels: BTreeMap<String, DeliveryChannel>,
     /// Config rules keyed by rule name.
     pub rules: BTreeMap<String, ConfigRule>,
+    /// Third-party cloud connectors keyed by ARN.
+    #[serde(default)]
+    pub connectors: BTreeMap<String, Connector>,
+    /// Service-linked recorders that record through a connector, keyed by name.
+    #[serde(default)]
+    pub third_party_recorders: BTreeMap<String, ThirdPartyRecorder>,
     /// Configuration-item history keyed by `resource_key(type, id)`; each value
     /// is an ordered (oldest-first) list of recorded items.
     pub config_items: BTreeMap<String, Vec<ConfigurationItem>>,
@@ -352,6 +358,32 @@ pub struct ResourceEvaluation {
     pub evaluation_context: Option<serde_json::Value>,
     #[serde(default)]
     pub evaluation_results: Vec<EvaluationResult>,
+}
+
+/// A third-party cloud connector. `PutConnector` mints one per Azure tenant
+/// and client pair; the recorders that read through it name it by ARN.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Connector {
+    pub arn: String,
+    pub name: String,
+    /// Today the model has exactly one provider, `AZURE`.
+    pub provider: String,
+    pub tenant_identifier: String,
+    pub client_identifier: String,
+    /// Epoch seconds, matching how the rest of the Config state stores dates.
+    pub created_time: f64,
+    #[serde(default)]
+    pub tags: Vec<(String, String)>,
+}
+
+/// A service-linked configuration recorder that records through a connector.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThirdPartyRecorder {
+    pub arn: String,
+    pub name: String,
+    pub service_principal: String,
+    pub connector_arn: String,
+    pub scope_configuration: serde_json::Value,
 }
 
 /// On-disk snapshot envelope. Versioned so format changes fail loudly on

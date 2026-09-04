@@ -1455,3 +1455,149 @@ async fn untag_resource() {
     .await;
     assert_eq!(s, 200, "{b}");
 }
+
+// ---- third-party cloud connectors ----
+
+const AZURE: &str = "azure";
+
+async fn make_connector(server: &TestServer, tenant: &str) -> String {
+    let (s, b) = cfg(
+        server,
+        "PutConnector",
+        json!({
+            "ConnectorConfiguration": {
+                AZURE: { "tenantIdentifier": tenant, "clientIdentifier": "client-1" }
+            }
+        }),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    b["Arn"]
+        .as_str()
+        .expect("PutConnector returns an ARN")
+        .to_string()
+}
+
+#[test_action("config", "PutConnector", checksum = "0393c311")]
+#[test_action("config", "GetConnector", checksum = "d94af4b2")]
+#[test_action("config", "DeleteConnector", checksum = "422e3b6c")]
+#[tokio::test]
+async fn config_connector_lifecycle() {
+    let server = TestServer::start().await;
+    let arn = make_connector(&server, "tenant-1").await;
+    assert!(arn.contains(":connector/"), "{arn}");
+
+    let (s, b) = cfg(&server, "GetConnector", json!({ "Arn": arn.clone() })).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["Connector"]["arn"], arn.as_str());
+    assert_eq!(
+        b["Connector"]["connectorConfiguration"]["azure"]["tenantIdentifier"],
+        "tenant-1"
+    );
+    assert!(b["Connector"]["createdTime"].is_number(), "{b}");
+
+    // Put is an upsert on the tenant and client pair, not a second connector.
+    let again = make_connector(&server, "tenant-1").await;
+    assert_eq!(
+        again, arn,
+        "the same cloud account must reuse its connector"
+    );
+
+    let (s, b) = cfg(&server, "DeleteConnector", json!({ "Arn": arn.clone() })).await;
+    assert_eq!(s, 200, "{b}");
+    let (s, b) = cfg(&server, "GetConnector", json!({ "Arn": arn })).await;
+    assert_eq!(s, 400);
+    assert_eq!(b["__type"], "ResourceNotFoundException", "{b}");
+}
+
+#[test_action("config", "ListConnectors", checksum = "b9c924fd")]
+#[tokio::test]
+async fn config_list_connectors_filters_and_pages() {
+    let server = TestServer::start().await;
+    make_connector(&server, "tenant-1").await;
+    make_connector(&server, "tenant-2").await;
+
+    let (s, b) = cfg(&server, "ListConnectors", json!({})).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["ConnectorSummaries"].as_array().map(Vec::len), Some(2));
+    assert_eq!(b["ConnectorSummaries"][0]["provider"], "AZURE");
+
+    // A tenant filter narrows to that cloud account.
+    let (s, b) = cfg(
+        &server,
+        "ListConnectors",
+        json!({ "Filters": [{ "filterName": "TENANT_ID", "filterValues": ["tenant-2"] }] }),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    let list = b["ConnectorSummaries"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["tenantIdentifier"], "tenant-2");
+
+    // Pagination carries a token while more remain.
+    let (s, b) = cfg(&server, "ListConnectors", json!({ "MaxResults": 1 })).await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["ConnectorSummaries"].as_array().map(Vec::len), Some(1));
+    let token = b["NextToken"]
+        .as_str()
+        .expect("a partial page carries a token");
+    let (s, b) = cfg(
+        &server,
+        "ListConnectors",
+        json!({ "MaxResults": 1, "NextToken": token }),
+    )
+    .await;
+    assert_eq!(s, 200, "{b}");
+    assert_eq!(b["ConnectorSummaries"].as_array().map(Vec::len), Some(1));
+
+    // The modeled bounds are enforced.
+    let (s, _) = cfg(&server, "ListConnectors", json!({ "MaxResults": 101 })).await;
+    assert_eq!(s, 400);
+}
+
+#[test_action(
+    "config",
+    "PutThirdPartyServiceLinkedConfigurationRecorder",
+    checksum = "3781a253"
+)]
+#[tokio::test]
+async fn config_third_party_recorder_needs_its_connector() {
+    let server = TestServer::start().await;
+    let arn = make_connector(&server, "tenant-1").await;
+
+    let put = |connector: String| {
+        let server = &server;
+        async move {
+            cfg(
+                server,
+                "PutThirdPartyServiceLinkedConfigurationRecorder",
+                json!({
+                    "ServicePrincipal": "config.amazonaws.com",
+                    "ConnectorArn": connector,
+                    "ScopeConfiguration": { "scopeType": "SUBSCRIPTION", "allRegions": true },
+                }),
+            )
+            .await
+        }
+    };
+
+    let (s, b) = put(arn.clone()).await;
+    assert_eq!(s, 200, "{b}");
+    assert!(b["Name"].as_str().is_some_and(|n| !n.is_empty()), "{b}");
+    assert!(
+        b["Arn"]
+            .as_str()
+            .is_some_and(|a| a.contains(":configuration-recorder/")),
+        "{b}"
+    );
+
+    // The operation declares no not-found, so an unknown connector is a
+    // validation failure on the ARN.
+    let (s, b) = put("arn:aws:config:us-east-1:123456789012:connector/ghost".to_string()).await;
+    assert_eq!(s, 400);
+    assert_eq!(b["__type"], "ValidationException", "{b}");
+
+    // Deleting the connector takes the recorder that read through it.
+    let (s, _) = cfg(&server, "DeleteConnector", json!({ "Arn": arn })).await;
+    assert_eq!(s, 200);
+}
