@@ -62,6 +62,24 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 `DBParameterGroupNotFound`, `DBSubnetGroupNotFoundFault`,
 `GlobalClusterNotFoundFault`, `SubscriptionNotFound`, and the rest.
 
+## Describe filters
+
+`Filters` is honored on the three operations in the table below -- the ones Neptune documents filter names for. Most other Describes model the parameter but AWS documents it as *not currently supported* there, so it is accepted and ignored, matching AWS. The exception is `DescribePendingMaintenanceActions`, which does document `db-cluster-id` and `db-instance-id`: it reports no pending actions at all, so there is nothing for a filter to narrow. `DescribeGlobalClusters` takes no `Filters` member at all. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
+
+| Operation | Supported filter names |
+| --- | --- |
+| `DescribeDBClusters` | `db-cluster-id`, `engine` |
+| `DescribeDBInstances` | `db-cluster-id`, `engine` |
+| `DescribeDBClusterEndpoints` | `db-cluster-endpoint-id`, `db-cluster-endpoint-type`, `db-cluster-endpoint-custom-type`, `db-cluster-endpoint-status` |
+
+`db-cluster-id` accepts identifiers and ARNs. The endpoint enum filters match case-insensitively: AWS returns those values uppercase (`READER`, `CUSTOM`) while documenting the filter values lowercase, so an exact comparison would return nothing for a caller copying the documented command.
+
+`DescribeDBClusterEndpoints` reports each cluster's built-in writer and reader endpoints alongside the custom ones, as AWS does -- without them `db-cluster-endpoint-type=reader` could never match anything. They belong to the cluster rather than the endpoint store, so they carry no identifier, resource id or ARN of their own, and their `Status` is mapped into the endpoint enum.
+
+`CreateDBClusterEndpoint` only ever creates custom endpoints, so the request's `EndpointType` (`READER`, `WRITER`, `ANY`) is reported back as `CustomEndpointType` with `EndpointType` set to `CUSTOM`, matching AWS and the RDS behaviour -- `CustomEndpointType` is an output member, not something a caller sends. `ModifyDBClusterEndpoint` retargets it the same way.
+
+An unrecognized filter name matches no resource rather than raising: Neptune declares no `InvalidParameterValue`-equivalent on these operations, so returning one would put an error shape on the wire that the operation never declares. The name is logged at `warn`.
+
 ## Honest gap: no data plane
 
 fakecloud does not run a real Neptune (Gremlin/SPARQL graph) engine. RDS

@@ -64,6 +64,414 @@ fn body(resp: &AwsResponse) -> String {
     }
 }
 
+/// `Filters` was accepted and ignored, so a caller narrowing a listing
+/// got every resource in the account back.
+#[tokio::test]
+async fn describe_db_clusters_honors_its_filters() {
+    let svc = service();
+    for id in ["clu-a", "clu-b"] {
+        call(
+            &svc,
+            "CreateDBCluster",
+            &[("DBClusterIdentifier", id), ("Engine", "neptune")],
+        )
+        .await;
+    }
+
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-b"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterIdentifier>clu-b</DBClusterIdentifier>"),
+        "{xml}"
+    );
+    assert!(
+        !xml.contains("<DBClusterIdentifier>clu-a</DBClusterIdentifier>"),
+        "the filter kept an unmatched cluster: {xml}"
+    );
+
+    // The ARN form selects the same cluster.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                (
+                    "Filters.Filter.1.Values.Value.1",
+                    "arn:aws:rds:us-east-1:123456789012:cluster:clu-b",
+                ),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterIdentifier>clu-b</DBClusterIdentifier>"),
+        "{xml}"
+    );
+
+    // `engine` selects both; a different engine selects neither.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "engine"),
+                ("Filters.Filter.1.Values.Value.1", "neptune"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(xml.matches("<DBClusterIdentifier>").count(), 2, "{xml}");
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "engine"),
+                ("Filters.Filter.1.Values.Value.1", "aurora"),
+            ],
+        )
+        .await,
+    );
+    assert!(!xml.contains("<DBClusterIdentifier>"), "{xml}");
+
+    // An unrecognized name matches nothing rather than returning the
+    // full list.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusters",
+            &[
+                ("Filters.Filter.1.Name", "not-a-filter"),
+                ("Filters.Filter.1.Values.Value.1", "clu-b"),
+            ],
+        )
+        .await,
+    );
+    assert!(!xml.contains("<DBClusterIdentifier>"), "{xml}");
+}
+
+#[tokio::test]
+async fn describe_db_instances_honors_its_filters() {
+    let svc = service();
+    for cluster in ["clu-a", "clu-b"] {
+        call(
+            &svc,
+            "CreateDBCluster",
+            &[("DBClusterIdentifier", cluster), ("Engine", "neptune")],
+        )
+        .await;
+    }
+    for (instance, cluster) in [("inst-a", "clu-a"), ("inst-b", "clu-b")] {
+        call(
+            &svc,
+            "CreateDBInstance",
+            &[
+                ("DBInstanceIdentifier", instance),
+                ("DBClusterIdentifier", cluster),
+                ("DBInstanceClass", "db.r5.large"),
+                ("Engine", "neptune"),
+            ],
+        )
+        .await;
+    }
+
+    // By the cluster the instance belongs to, as identifier and as ARN.
+    for value in ["clu-a", "arn:aws:rds:us-east-1:123456789012:cluster:clu-a"] {
+        let xml = body(
+            &call(
+                &svc,
+                "DescribeDBInstances",
+                &[
+                    ("Filters.Filter.1.Name", "db-cluster-id"),
+                    ("Filters.Filter.1.Values.Value.1", value),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            xml.contains("<DBInstanceIdentifier>inst-a</DBInstanceIdentifier>"),
+            "db-cluster-id={value} selected nothing: {xml}"
+        );
+        assert!(
+            !xml.contains("<DBInstanceIdentifier>inst-b</DBInstanceIdentifier>"),
+            "db-cluster-id={value} kept the other cluster's instance: {xml}"
+        );
+    }
+
+    // `engine` selects both; a different engine selects neither.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "engine"),
+                ("Filters.Filter.1.Values.Value.1", "neptune"),
+            ],
+        )
+        .await,
+    );
+    assert_eq!(xml.matches("<DBInstanceIdentifier>").count(), 2, "{xml}");
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "engine"),
+                ("Filters.Filter.1.Values.Value.1", "docdb"),
+            ],
+        )
+        .await,
+    );
+    assert!(!xml.contains("<DBInstanceIdentifier>"), "{xml}");
+
+    // An unrecognized name matches nothing rather than returning all.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBInstances",
+            &[
+                ("Filters.Filter.1.Name", "not-a-filter"),
+                ("Filters.Filter.1.Values.Value.1", "inst-a"),
+            ],
+        )
+        .await,
+    );
+    assert!(!xml.contains("<DBInstanceIdentifier>"), "{xml}");
+}
+
+#[tokio::test]
+async fn describe_db_cluster_endpoints_honors_its_filters() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[("DBClusterIdentifier", "clu-1"), ("Engine", "neptune")],
+    )
+    .await;
+    // TWO endpoints, differing in custom type: with only one, every
+    // positive assertion below passes even when the predicate is
+    // ignored entirely.
+    call(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("DBClusterEndpointIdentifier", "ep-1"),
+            ("EndpointType", "READER"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "CreateDBClusterEndpoint",
+        &[
+            ("DBClusterIdentifier", "clu-1"),
+            ("DBClusterEndpointIdentifier", "ep-2"),
+            ("EndpointType", "ANY"),
+        ],
+    )
+    .await;
+
+    // The documented values are lowercase while the API returns them
+    // uppercase, so an exact comparison would select nothing for a
+    // caller copying the documented command. `db-cluster-endpoint-type`
+    // is the case that actually folds: it is stored as sent (READER) and
+    // queried as documented (reader).
+    for (name, value) in [
+        ("db-cluster-endpoint-id", "ep-1"),
+        ("db-cluster-endpoint-status", "available"),
+        // The endpoint reads back as CUSTOM; the READER it was created
+        // with is its custom type. Both spellings of each, since the
+        // documented filter values are lowercase while the API returns
+        // uppercase.
+        ("db-cluster-endpoint-type", "custom"),
+        ("db-cluster-endpoint-type", "CUSTOM"),
+        ("db-cluster-endpoint-custom-type", "reader"),
+        ("db-cluster-endpoint-custom-type", "READER"),
+    ] {
+        let xml = body(
+            &call(
+                &svc,
+                "DescribeDBClusterEndpoints",
+                &[
+                    ("Filters.Filter.1.Name", name),
+                    ("Filters.Filter.1.Values.Value.1", value),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            xml.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+            "{name}={value} selected nothing: {xml}"
+        );
+        // `db-cluster-endpoint-type` and `-status` are shared by both
+        // endpoints; the id and custom-type filters name ep-1 alone, so
+        // ep-2 has to be excluded for those.
+        if name == "db-cluster-endpoint-id" || name == "db-cluster-endpoint-custom-type" {
+            assert!(
+                !xml.contains("<DBClusterEndpointIdentifier>ep-2</DBClusterEndpointIdentifier>"),
+                "{name}={value} also returned ep-2: {xml}"
+            );
+        }
+    }
+
+    // The other endpoint's custom type selects it and not ep-1.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusterEndpoints",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-endpoint-custom-type"),
+                ("Filters.Filter.1.Values.Value.1", "any"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterEndpointIdentifier>ep-2</DBClusterEndpointIdentifier>"),
+        "{xml}"
+    );
+    assert!(
+        !xml.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "the custom-type filter returned both endpoints: {xml}"
+    );
+
+    // The cluster's built-in endpoints are reported too, which is what
+    // makes `db-cluster-endpoint-type=reader` able to match at all --
+    // CreateDBClusterEndpoint only ever makes CUSTOM ones.
+    for value in ["reader", "writer"] {
+        let xml = body(
+            &call(
+                &svc,
+                "DescribeDBClusterEndpoints",
+                &[
+                    ("Filters.Filter.1.Name", "db-cluster-endpoint-type"),
+                    ("Filters.Filter.1.Values.Value.1", value),
+                ],
+            )
+            .await,
+        );
+        assert!(
+            xml.contains(&format!(
+                "<EndpointType>{}</EndpointType>",
+                value.to_uppercase()
+            )),
+            "db-cluster-endpoint-type={value} found no built-in endpoint: {xml}"
+        );
+        // A built-in has no identifier of its own, so NEITHER custom
+        // endpoint should come back under this filter.
+        assert!(
+            !xml.contains("<DBClusterEndpointIdentifier>"),
+            "db-cluster-endpoint-type={value} returned a custom endpoint: {xml}"
+        );
+        // And the built-in renders no empty optional members: an empty
+        // identifier or ARN reads as a resource named "".
+        for tag in [
+            "DBClusterEndpointIdentifier",
+            "DBClusterEndpointResourceIdentifier",
+            "CustomEndpointType",
+            "DBClusterEndpointArn",
+        ] {
+            assert!(
+                !xml.contains(&format!("<{tag}></{tag}>")),
+                "built-in rendered an empty <{tag}>: {xml}"
+            );
+        }
+    }
+
+    // MaxRecords / Marker are modeled here and were never honored.
+    // Rows are identified by their Endpoint address: a built-in carries
+    // no identifier, so that is the only per-row identity, and
+    // comparing whole response bodies would pass on nothing more than a
+    // differing <Marker>.
+    let addresses = |xml: &str| -> Vec<String> {
+        xml.split("<Endpoint>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</Endpoint>").next())
+            .map(str::to_string)
+            .collect()
+    };
+    let unpaged = addresses(&body(&call(&svc, "DescribeDBClusterEndpoints", &[]).await));
+    assert!(
+        unpaged.len() >= 4,
+        "expected two custom endpoints and the cluster's two built-ins: {unpaged:?}"
+    );
+
+    // Walk to exhaustion one row at a time.
+    let mut seen: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let xml = body(&call(&svc, "DescribeDBClusterEndpoints", &params).await);
+        let rows = addresses(&xml);
+        assert_eq!(
+            rows.len(),
+            1,
+            "MaxRecords=1 returned {} rows: {xml}",
+            rows.len()
+        );
+        seen.extend(rows);
+        pages += 1;
+        assert!(pages <= unpaged.len(), "pagination did not terminate");
+        marker = xml
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if marker.is_none() {
+            break;
+        }
+    }
+
+    // Every row, once, in the unpaginated order -- built-ins included.
+    assert_eq!(
+        seen, unpaged,
+        "the paged walk did not reproduce the unpaginated listing"
+    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(
+        unique.len(),
+        seen.len(),
+        "a row was returned twice: {seen:?}"
+    );
+
+    // A status the endpoint is not in selects nothing.
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusterEndpoints",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-endpoint-status"),
+                ("Filters.Filter.1.Values.Value.1", "deleting"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        !xml.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+        "a non-matching status still returned the endpoint: {xml}"
+    );
+}
+
 #[tokio::test]
 async fn envelope_shape_is_correct() {
     let svc = service();
@@ -343,7 +751,13 @@ async fn cluster_endpoint_lifecycle() {
     .await;
     let xml = body(&resp);
     assert!(xml.contains("<DBClusterEndpointIdentifier>custom-ep</DBClusterEndpointIdentifier>"));
-    assert!(xml.contains("<EndpointType>READER</EndpointType>"));
+    // The request's EndpointType is the CUSTOM type; the endpoint reads
+    // back as CUSTOM, matching the model and the RDS behaviour.
+    assert!(xml.contains("<EndpointType>CUSTOM</EndpointType>"), "{xml}");
+    assert!(
+        xml.contains("<CustomEndpointType>READER</CustomEndpointType>"),
+        "{xml}"
+    );
     assert!(xml.contains(".cluster-custom-"));
     assert!(xml.contains("arn:aws:rds:us-east-1:123456789012:cluster-endpoint:custom-ep"));
 
@@ -357,7 +771,13 @@ async fn cluster_endpoint_lifecycle() {
         ],
     )
     .await;
-    assert!(body(&resp).contains("<EndpointType>ANY</EndpointType>"));
+    // Modify retargets the custom endpoint; it stays CUSTOM.
+    let xml = body(&resp);
+    assert!(
+        xml.contains("<CustomEndpointType>ANY</CustomEndpointType>"),
+        "{xml}"
+    );
+    assert!(xml.contains("<EndpointType>CUSTOM</EndpointType>"), "{xml}");
 
     // Describe.
     let resp = call(&svc, "DescribeDBClusterEndpoints", &[]).await;

@@ -151,25 +151,43 @@ pub(crate) fn db_cluster(c: &DbCluster) -> String {
 pub(crate) fn db_cluster_endpoint(e: &DbClusterEndpoint) -> String {
     let static_members = string_list("StaticMembers", "member", &e.static_members);
     let excluded_members = string_list("ExcludedMembers", "member", &e.excluded_members);
+    // The optional members are omitted when empty rather than rendered
+    // blank. A cluster's built-in writer and reader endpoints carry no
+    // identifier, resource id, custom type or ARN, and an empty element
+    // reads as a resource named "" -- an identifier a client might try
+    // to delete, or an ARN it might try to resolve.
+    let optional = |tag: &str, value: &str| -> String {
+        if value.is_empty() {
+            String::new()
+        } else {
+            format!("<{tag}>{}</{tag}>", xml_escape(value))
+        }
+    };
     format!(
-        "<DBClusterEndpointIdentifier>{id}</DBClusterEndpointIdentifier>\
+        "{id}\
          <DBClusterIdentifier>{cluster}</DBClusterIdentifier>\
-         <DBClusterEndpointResourceIdentifier>{rid}</DBClusterEndpointResourceIdentifier>\
+         {rid}\
          <Endpoint>{endpoint}</Endpoint>\
          <Status>{status}</Status>\
          <EndpointType>{etype}</EndpointType>\
-         <CustomEndpointType>{ctype}</CustomEndpointType>\
+         {ctype}\
          {static_members}\
          {excluded_members}\
-         <DBClusterEndpointArn>{arn}</DBClusterEndpointArn>",
-        id = xml_escape(&e.db_cluster_endpoint_identifier),
+         {arn}",
+        id = optional(
+            "DBClusterEndpointIdentifier",
+            &e.db_cluster_endpoint_identifier
+        ),
         cluster = xml_escape(&e.db_cluster_identifier),
-        rid = xml_escape(&e.db_cluster_endpoint_resource_identifier),
+        rid = optional(
+            "DBClusterEndpointResourceIdentifier",
+            &e.db_cluster_endpoint_resource_identifier
+        ),
         endpoint = xml_escape(&e.endpoint),
         status = xml_escape(&e.status),
         etype = xml_escape(&e.endpoint_type),
-        ctype = xml_escape(&e.custom_endpoint_type),
-        arn = xml_escape(&e.db_cluster_endpoint_arn),
+        ctype = optional("CustomEndpointType", &e.custom_endpoint_type),
+        arn = optional("DBClusterEndpointArn", &e.db_cluster_endpoint_arn),
     )
 }
 

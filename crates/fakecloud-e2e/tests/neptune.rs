@@ -91,7 +91,11 @@ async fn neptune_full_control_plane_round_trip() {
         endpoint.db_cluster_endpoint_identifier(),
         Some("neptune-reader-ep")
     );
-    assert_eq!(endpoint.endpoint_type(), Some("READER"));
+    // This operation only creates CUSTOM endpoints: the request's
+    // EndpointType is the custom type, and the endpoint reads back as
+    // CUSTOM. Same mapping as RDS, per the Neptune model.
+    assert_eq!(endpoint.endpoint_type(), Some("CUSTOM"));
+    assert_eq!(endpoint.custom_endpoint_type(), Some("READER"));
     assert!(endpoint
         .endpoint()
         .unwrap()

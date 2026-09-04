@@ -10,6 +10,7 @@ pub mod multi_account;
 pub mod pagination;
 pub mod protocol;
 pub mod query;
+pub mod query_filters;
 pub mod registry;
 pub mod service;
 pub mod tag_index;

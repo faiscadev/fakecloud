@@ -8,13 +8,17 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
+use fakecloud_core::query_filters::{
+    parse_filters, requested_identifier, sibling_rds_arn, warn_unknown_filters, QueryFilter,
+};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
     ClusterMember, DbCluster, DbClusterParameterGroup, DbClusterSnapshot, DbInstance,
-    DbSubnetGroup, DocDbSnapshot, DocDbState, EventSubscription, GlobalCluster, ParameterValue,
-    SharedDocDbState, Subnet, Tag, DOCDB_SNAPSHOT_SCHEMA_VERSION,
+    DbSubnetGroup, DocDbSnapshot, DocDbState, EventSubscription, GlobalCluster,
+    GlobalClusterMember, ParameterValue, SharedDocDbState, Subnet, Tag,
+    DOCDB_SNAPSHOT_SCHEMA_VERSION,
 };
 use crate::xml;
 
@@ -380,6 +384,114 @@ fn is_mutating(action: &str) -> bool {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// The filter names DocumentDB documents per operation. A name outside
+/// the set matches nothing -- DocumentDB, like RDS, declares no
+/// `InvalidParameterValue`-equivalent on these operations, so rejecting
+/// would put an undeclared error shape on the wire.
+const CLUSTER_FILTERS: &[&str] = &["db-cluster-id"];
+const INSTANCE_FILTERS: &[&str] = &["db-cluster-id", "db-instance-id"];
+const GLOBAL_CLUSTER_FILTERS: &[&str] = &["db-cluster-id"];
+
+/// True when a cluster satisfies every filter.
+///
+/// `db-cluster-id` accepts identifiers and ARNs, so both forms are
+/// offered to the match.
+fn cluster_matches_filters(cluster: &DbCluster, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => filter.matches_any([
+            Some(cluster.db_cluster_identifier.as_str()),
+            Some(cluster.db_cluster_arn.as_str()),
+        ]),
+        _ => false,
+    })
+}
+
+/// The identifier a member ARN carries, for matching a caller's bare id
+/// against it.
+fn member_identifier(db_cluster_arn: &str) -> Option<&str> {
+    db_cluster_arn
+        .rsplit(':')
+        .next()
+        .filter(|id| !id.is_empty())
+}
+
+/// True when a member is the one the caller named, by identifier or ARN.
+fn member_is(member: &GlobalClusterMember, wanted: &str) -> bool {
+    member.db_cluster_arn == wanted || member_identifier(&member.db_cluster_arn) == Some(wanted)
+}
+
+/// Keeps a global cluster's writer valid after a member leaves.
+///
+/// Removing the writer used to leave every remaining member at
+/// `IsWriter=false` -- the writerless state the failover path refuses to
+/// create. The oldest remaining member takes over, as a promotion would.
+fn ensure_writer(global: &mut GlobalCluster) {
+    if !global.members.is_empty() && !global.members.iter().any(|m| m.is_writer) {
+        if let Some(first) = global.members.first_mut() {
+            first.is_writer = true;
+        }
+    }
+}
+
+/// True when a global cluster satisfies every filter.
+///
+/// `db-cluster-id` accepts cluster identifiers and ARNs. A global
+/// cluster is named by its own identifier and reached through the member
+/// clusters it spans, so both are offered: filtering by a member's ARN
+/// selects the global cluster containing it, which is the only way a
+/// caller holding a regional cluster ARN can find its global parent.
+fn global_cluster_matches_filters(global: &GlobalCluster, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => {
+            // Members by identifier as well as ARN: AWS documents this
+            // filter as accepting "cluster identifiers and cluster
+            // ARNs", and the bare id is the common form -- matching only
+            // the ARN meant `--filters Name=db-cluster-id,Values=clu-a`
+            // returned nothing. A member carries only its ARN, so the
+            // identifier is its last segment.
+            let matches_member = global.members.iter().any(|member| {
+                filter.matches_any([
+                    Some(member.db_cluster_arn.as_str()),
+                    member_identifier(&member.db_cluster_arn),
+                ])
+            });
+            // MEMBERS only. The filter is `db-cluster-id` and the model
+            // describes it as "the clusters identified by these ARNs" --
+            // DB clusters, not the global cluster wrapping them. Also
+            // accepting the global cluster's own name returned rows AWS
+            // would not.
+            matches_member
+        }
+        _ => false,
+    })
+}
+
+/// True when an instance satisfies every filter. `db-cluster-id` selects
+/// the instances of the named cluster; `db-instance-id` the instance
+/// itself. Both accept identifiers and ARNs -- the cluster ARN is
+/// rebuilt from the instance's own, which shares its partition, region
+/// and account.
+fn instance_matches_filters(instance: &DbInstance, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => {
+            let cluster_arn = sibling_rds_arn(
+                &instance.db_instance_arn,
+                "cluster",
+                &instance.db_cluster_identifier,
+            );
+            filter.matches_any([
+                Some(instance.db_cluster_identifier.as_str()),
+                cluster_arn.as_deref(),
+            ])
+        }
+        "db-instance-id" => filter.matches_any([
+            Some(instance.db_instance_identifier.as_str()),
+            Some(instance.db_instance_arn.as_str()),
+        ]),
+        _ => false,
+    })
+}
+
 impl DocDbService {
     fn create_db_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(req, "DBClusterIdentifier")?;
@@ -455,6 +567,27 @@ impl DocDbService {
             cluster_create_time: Utc::now(),
             tags: parse_tags(req),
         };
+        // `CreateDBCluster --global-cluster-identifier` is how a cluster
+        // normally joins a global cluster; only the CreateGlobalCluster
+        // source path recorded a member, so the common flow (create the
+        // global cluster, then create clusters into it) left
+        // `GlobalClusterMembers` empty. An identifier naming no global
+        // cluster raises the fault the operation declares.
+        if let Some(global_id) =
+            optional_query_param(req, "GlobalClusterIdentifier").filter(|value| !value.is_empty())
+        {
+            let global = st
+                .global_clusters
+                .get_mut(&global_id)
+                .ok_or_else(|| global_cluster_not_found(&global_id))?;
+            // The first cluster in is the writer; later ones are
+            // secondaries, as on AWS.
+            let is_writer = global.members.is_empty();
+            global.members.push(GlobalClusterMember {
+                db_cluster_arn: cluster.db_cluster_arn.clone(),
+                is_writer,
+            });
+        }
         st.clusters.insert(id, cluster.clone());
         Ok(ok_xml(
             "CreateDBCluster",
@@ -464,6 +597,10 @@ impl DocDbService {
     }
 
     fn describe_db_clusters(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // `Filters` was accepted and ignored, so a caller narrowing a
+        // listing got every cluster in the account back.
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, CLUSTER_FILTERS);
         let filter = optional_query_param(req, "DBClusterIdentifier");
         let accounts = self.state.read();
         let empty = DocDbState::new(&req.account_id, &req.region);
@@ -475,6 +612,11 @@ impl DocDbService {
             },
             None => st.clusters.values().collect(),
         };
+        // AND-ed with the identifier parameter, as AWS applies them.
+        let clusters: Vec<&DbCluster> = clusters
+            .into_iter()
+            .filter(|c| cluster_matches_filters(c, &filters))
+            .collect();
         let inner: String = clusters
             .iter()
             .map(|c| format!("<DBCluster>{}</DBCluster>", xml::db_cluster(c)))
@@ -550,8 +692,40 @@ impl DocDbService {
         let renamed = optional_query_param(req, "NewDBClusterIdentifier");
         let mut cluster = cluster.clone();
         if let Some(new_id) = renamed.filter(|n| n != &id) {
+            let old_arn = cluster.db_cluster_arn.clone();
             cluster.db_cluster_identifier = new_id.clone();
             cluster.db_cluster_arn = cluster_arn(&req.region, &req.account_id, &new_id);
+            // A rename moves the ARN, so any global cluster holding the
+            // old one has to follow. Left behind it is the same dangling
+            // member the delete sweep removes: the listing reports an
+            // ARN nothing resolves to, `db-cluster-id` misses the new
+            // name, and the old name still selects the global cluster.
+            for global in st.global_clusters.values_mut() {
+                for member in &mut global.members {
+                    if member.db_cluster_arn == old_arn {
+                        member.db_cluster_arn = cluster.db_cluster_arn.clone();
+                    }
+                }
+            }
+            // The cluster's instances point at it by identifier, so a
+            // rename has to carry them along too -- otherwise
+            // `DescribeDBInstances --filters Name=db-cluster-id` misses
+            // them under the new name and finds them under the old one,
+            // the same dangling reference the member sweep above fixes.
+            for instance in st.instances.values_mut() {
+                if instance.db_cluster_identifier == id {
+                    instance.db_cluster_identifier = new_id.clone();
+                }
+            }
+            // Snapshots name their source cluster the same way, and
+            // DescribeDBClusterSnapshots matches on it: left behind, the
+            // new name returned no snapshots while the old one -- a
+            // cluster that no longer exists -- still did.
+            for snapshot in st.cluster_snapshots.values_mut() {
+                if snapshot.db_cluster_identifier == id {
+                    snapshot.db_cluster_identifier = new_id.clone();
+                }
+            }
             st.clusters.remove(&id);
             st.clusters.insert(new_id, cluster.clone());
         } else {
@@ -588,6 +762,16 @@ impl DocDbService {
             .collect();
         for mid in member_ids {
             st.instances.remove(&mid);
+        }
+        // Drop it from any global cluster it belonged to. Left behind,
+        // the dangling ARN kept being reported under
+        // `GlobalClusterMembers` and kept selecting the global cluster
+        // through the `db-cluster-id` filter.
+        for global in st.global_clusters.values_mut() {
+            global
+                .members
+                .retain(|m| m.db_cluster_arn != cluster.db_cluster_arn);
+            ensure_writer(global);
         }
         Ok(ok_xml(
             "DeleteDBCluster",
@@ -709,6 +893,8 @@ impl DocDbService {
     }
 
     fn describe_db_instances(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, INSTANCE_FILTERS);
         let filter = optional_query_param(req, "DBInstanceIdentifier");
         let accounts = self.state.read();
         let empty = DocDbState::new(&req.account_id, &req.region);
@@ -720,6 +906,10 @@ impl DocDbService {
             },
             None => st.instances.values().collect(),
         };
+        let instances: Vec<&DbInstance> = instances
+            .into_iter()
+            .filter(|i| instance_matches_filters(i, &filters))
+            .collect();
         let inner: String = instances
             .iter()
             .map(|i| format!("<DBInstance>{}</DBInstance>", xml::db_instance(i)))
@@ -1452,10 +1642,49 @@ impl DocDbService {
             return Err(global_cluster_already_exists(&id));
         }
         // Optionally seed from an existing source cluster.
-        let source = optional_query_param(req, "SourceDBClusterIdentifier");
-        let (engine, engine_version) = match &source {
-            Some(arn) => {
-                let src_id = arn.rsplit(':').next().unwrap_or(arn);
+        // An explicitly empty value is absent, as it is for
+        // GlobalClusterIdentifier on the create path. Without the
+        // filter, `SourceDBClusterIdentifier=` resolves to a cluster
+        // named "" and the new not-found check rejects a request that
+        // named no source at all.
+        let source = optional_query_param(req, "SourceDBClusterIdentifier")
+            .filter(|value| !value.is_empty());
+        // The source cluster becomes the global cluster's first member,
+        // as it does on AWS. It was resolved for its engine and then
+        // discarded, so every global cluster reported an empty
+        // `GlobalClusterMembers` -- and `db-cluster-id` had nothing to
+        // match a member against.
+        let source_member = match &source {
+            Some(raw) => {
+                // Reduced the fail-closed way, not by `rsplit(':')`:
+                // splitting on the last colon turns ANY colon-bearing
+                // value into a local identifier, so another account's
+                // cluster ARN would resolve against this account's
+                // same-named cluster. An ARN this operation cannot
+                // resolve stays whole, matches nothing, and reaches the
+                // declared fault below.
+                let reduced = requested_identifier(Some(raw.clone()), "cluster", &req.account_id)
+                    .unwrap_or_else(|| raw.clone());
+                let src_id = reduced.as_str();
+                // AWS raises DBClusterNotFoundFault here. Resolving to
+                // None instead created the global cluster with no member
+                // and a default engine that may not be the source's.
+                let cluster = st
+                    .clusters
+                    .get(src_id)
+                    .ok_or_else(|| db_cluster_not_found(src_id))?;
+                Some(GlobalClusterMember {
+                    db_cluster_arn: cluster.db_cluster_arn.clone(),
+                    is_writer: true,
+                })
+            }
+            None => None,
+        };
+        let (engine, engine_version) = match &source_member {
+            // Resolved once above; the engine comes from the same
+            // cluster the membership does.
+            Some(member) => {
+                let src_id = member_identifier(&member.db_cluster_arn).unwrap_or_default();
                 st.clusters
                     .get(src_id)
                     .map(|c| (c.engine.clone(), c.engine_version.clone()))
@@ -1486,7 +1715,7 @@ impl DocDbService {
             deletion_protection: optional_query_param(req, "DeletionProtection")
                 .map(|v| v == "true")
                 .unwrap_or(false),
-            members: Vec::new(),
+            members: source_member.into_iter().collect(),
             tags: parse_tags(req),
         };
         st.global_clusters.insert(id, global.clone());
@@ -1540,6 +1769,21 @@ impl DocDbService {
         let id = required_query_param(req, "GlobalClusterIdentifier")?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
+        // AWS refuses while member clusters remain, and the fault is
+        // declared here. Deleting anyway pulled the global cluster out
+        // from under the clusters that still pointed at it -- reachable
+        // only now that membership is recorded at all.
+        if st
+            .global_clusters
+            .get(&id)
+            .is_some_and(|global| !global.members.is_empty())
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidGlobalClusterStateFault",
+                format!("Global cluster {id} still has member clusters."),
+            ));
+        }
         let global = st
             .global_clusters
             .remove(&id)
@@ -1559,6 +1803,8 @@ impl DocDbService {
         // (the member's modelled length minimum is 1): AWS resolves it to no
         // cluster and returns GlobalClusterNotFoundFault, so honour the raw
         // presence rather than collapsing empty to "no filter".
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, GLOBAL_CLUSTER_FILTERS);
         let filter = req.query_params.get("GlobalClusterIdentifier").cloned();
         let accounts = self.state.read();
         let empty = DocDbState::new(&req.account_id, &req.region);
@@ -1570,6 +1816,10 @@ impl DocDbService {
             },
             None => st.global_clusters.values().collect(),
         };
+        let globals: Vec<&GlobalCluster> = globals
+            .into_iter()
+            .filter(|g| global_cluster_matches_filters(g, &filters))
+            .collect();
         let inner: String = globals
             .iter()
             .map(|g| format!("<GlobalCluster>{}</GlobalCluster>", xml::global_cluster(g)))
@@ -1590,7 +1840,15 @@ impl DocDbService {
             .global_clusters
             .get_mut(&id)
             .ok_or_else(|| global_cluster_not_found(&id))?;
-        global.members.retain(|m| m.db_cluster_arn != db_cluster);
+        // Identifier or ARN, matching the CLI's documented form -- an
+        // exact ARN comparison made `--db-cluster-identifier clu-a` a
+        // silent no-op that answered 200 while the member stayed. A
+        // target naming no member is the declared fault.
+        if !global.members.iter().any(|m| member_is(m, &db_cluster)) {
+            return Err(db_cluster_not_found(&db_cluster));
+        }
+        global.members.retain(|m| !member_is(m, &db_cluster));
+        ensure_writer(global);
         let global = global.clone();
         Ok(ok_xml(
             "RemoveFromGlobalCluster",
@@ -1611,8 +1869,16 @@ impl DocDbService {
             .global_clusters
             .get_mut(&id)
             .ok_or_else(|| global_cluster_not_found(&id))?;
+        // A target that names no member is the declared fault, not a
+        // silent success: assigning `is_writer` unconditionally cleared
+        // it on EVERY member when nothing matched, leaving the global
+        // cluster with no writer at all. `TargetDbClusterIdentifier`
+        // takes an identifier or an ARN.
+        if !global.members.iter().any(|m| member_is(m, &target)) {
+            return Err(db_cluster_not_found(&target));
+        }
         for m in &mut global.members {
-            m.is_writer = m.db_cluster_arn == target;
+            m.is_writer = member_is(m, &target);
         }
         let global = global.clone();
         Ok(ok_xml(
@@ -1634,8 +1900,12 @@ impl DocDbService {
             .global_clusters
             .get_mut(&id)
             .ok_or_else(|| global_cluster_not_found(&id))?;
+        // Same as the failover path above.
+        if !global.members.iter().any(|m| member_is(m, &target)) {
+            return Err(db_cluster_not_found(&target));
+        }
         for m in &mut global.members {
-            m.is_writer = m.db_cluster_arn == target;
+            m.is_writer = member_is(m, &target);
         }
         let global = global.clone();
         Ok(ok_xml(

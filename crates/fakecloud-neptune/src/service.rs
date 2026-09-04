@@ -8,6 +8,9 @@ use http::StatusCode;
 use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
+use fakecloud_core::query_filters::{
+    parse_filters, sibling_rds_arn, warn_unknown_filters, QueryFilter,
+};
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
@@ -425,6 +428,116 @@ fn is_mutating(action: &str) -> bool {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// The filter names Neptune documents per operation. A name outside the
+/// set matches nothing -- Neptune, like RDS, declares no
+/// `InvalidParameterValue`-equivalent on these operations, so rejecting
+/// would put an undeclared error shape on the wire.
+const CLUSTER_FILTERS: &[&str] = &["db-cluster-id", "engine"];
+const INSTANCE_FILTERS: &[&str] = &["db-cluster-id", "engine"];
+const CLUSTER_ENDPOINT_FILTERS: &[&str] = &[
+    "db-cluster-endpoint-id",
+    "db-cluster-endpoint-type",
+    "db-cluster-endpoint-custom-type",
+    "db-cluster-endpoint-status",
+];
+
+/// True when a cluster satisfies every filter. `db-cluster-id` accepts
+/// identifiers and ARNs.
+fn cluster_matches_filters(cluster: &DbCluster, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => filter.matches_any([
+            Some(cluster.db_cluster_identifier.as_str()),
+            Some(cluster.db_cluster_arn.as_str()),
+        ]),
+        "engine" => filter.matches(Some(cluster.engine.as_str())),
+        _ => false,
+    })
+}
+
+/// True when an instance satisfies every filter. The cluster ARN is
+/// rebuilt from the instance's own, which shares its partition, region
+/// and account.
+fn instance_matches_filters(instance: &DbInstance, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-id" => {
+            let cluster_arn = sibling_rds_arn(
+                &instance.db_instance_arn,
+                "cluster",
+                &instance.db_cluster_identifier,
+            );
+            filter.matches_any([
+                Some(instance.db_cluster_identifier.as_str()),
+                cluster_arn.as_deref(),
+            ])
+        }
+        "engine" => filter.matches(Some(instance.engine.as_str())),
+        _ => false,
+    })
+}
+
+/// A cluster's built-in writer and reader endpoints.
+///
+/// AWS reports these alongside the custom ones, and without them
+/// `db-cluster-endpoint-type=reader` (a documented value) can never
+/// match: `CreateDBClusterEndpoint` only makes CUSTOM endpoints. They
+/// belong to the cluster rather than the endpoint store -- no API
+/// creates or deletes them -- and carry no identifier, resource id or
+/// ARN of their own, so none is reported.
+fn built_in_cluster_endpoints(cluster: &DbCluster) -> Vec<DbClusterEndpoint> {
+    [
+        ("WRITER", &cluster.endpoint),
+        ("READER", &cluster.reader_endpoint),
+    ]
+    .into_iter()
+    .filter(|(_, address)| !address.is_empty())
+    .map(|(kind, address)| DbClusterEndpoint {
+        db_cluster_endpoint_identifier: String::new(),
+        db_cluster_identifier: cluster.db_cluster_identifier.clone(),
+        db_cluster_endpoint_resource_identifier: String::new(),
+        endpoint: address.clone(),
+        // DBClusterEndpoint.Status is its own enum (creating /
+        // available / deleting / inactive / modifying); a cluster's
+        // status has values outside it.
+        status: match cluster.status.as_str() {
+            state @ ("creating" | "available" | "deleting" | "inactive" | "modifying") => state,
+            "stopped" => "inactive",
+            _ => "modifying",
+        }
+        .to_string(),
+        endpoint_type: kind.to_string(),
+        custom_endpoint_type: String::new(),
+        static_members: Vec::new(),
+        excluded_members: Vec::new(),
+        db_cluster_endpoint_arn: String::new(),
+        tags: Vec::new(),
+    })
+    .collect()
+}
+
+/// True when a cluster endpoint satisfies every filter.
+///
+/// The enum-valued names match case-insensitively: AWS returns these
+/// uppercase (`READER`, `CUSTOM`) while documenting the filter values
+/// lowercase, so an exact comparison returns nothing for a caller
+/// copying the documented command.
+fn cluster_endpoint_matches_filters(endpoint: &DbClusterEndpoint, filters: &[QueryFilter]) -> bool {
+    filters.iter().all(|filter| match filter.name.as_str() {
+        "db-cluster-endpoint-id" => {
+            filter.matches(Some(endpoint.db_cluster_endpoint_identifier.as_str()))
+        }
+        "db-cluster-endpoint-type" => {
+            filter.matches_ignore_case(Some(endpoint.endpoint_type.as_str()))
+        }
+        // An endpoint with no custom type -- every non-CUSTOM one --
+        // matches no value of this filter rather than matching "".
+        "db-cluster-endpoint-custom-type" => filter.matches_ignore_case(
+            Some(endpoint.custom_endpoint_type.as_str()).filter(|v| !v.is_empty()),
+        ),
+        "db-cluster-endpoint-status" => filter.matches_ignore_case(Some(endpoint.status.as_str())),
+        _ => false,
+    })
+}
+
 impl NeptuneService {
     fn create_db_cluster(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let id = required_query_param(req, "DBClusterIdentifier")?;
@@ -516,6 +629,10 @@ impl NeptuneService {
     }
 
     fn describe_db_clusters(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        // `Filters` was accepted and ignored, so a caller narrowing a
+        // listing got every cluster in the account back.
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, CLUSTER_FILTERS);
         let filter = optional_query_param(req, "DBClusterIdentifier");
         let accounts = self.state.read();
         let empty = NeptuneState::new(&req.account_id, &req.region);
@@ -527,6 +644,11 @@ impl NeptuneService {
             },
             None => st.clusters.values().collect(),
         };
+        // AND-ed with the identifier parameter, as AWS applies them.
+        let clusters: Vec<&DbCluster> = clusters
+            .into_iter()
+            .filter(|c| cluster_matches_filters(c, &filters))
+            .collect();
         let inner: String = clusters
             .iter()
             .map(|c| format!("<DBCluster>{}</DBCluster>", xml::db_cluster(c)))
@@ -819,9 +941,14 @@ impl NeptuneService {
                 req.region
             ),
             status: "available".to_string(),
-            endpoint_type,
-            custom_endpoint_type: optional_query_param(req, "CustomEndpointType")
-                .unwrap_or_else(|| "ANY".to_string()),
+            // This operation only ever creates CUSTOM endpoints: the
+            // request's EndpointType (READER / WRITER / ANY) IS the
+            // custom type, and the endpoint reads back as CUSTOM. Same
+            // mapping as RDS -- CustomEndpointType is not an input
+            // member in either model, so reading one off the request
+            // could never fire for an SDK or CLI caller.
+            endpoint_type: "CUSTOM".to_string(),
+            custom_endpoint_type: endpoint_type,
             static_members: collect_list(req, "StaticMembers", &["member"]),
             excluded_members: collect_list(req, "ExcludedMembers", &["member"]),
             db_cluster_endpoint_arn: format!(
@@ -848,11 +975,13 @@ impl NeptuneService {
             .cluster_endpoints
             .get_mut(&endpoint_id)
             .ok_or_else(|| cluster_endpoint_not_found(&endpoint_id))?;
+        // The request's EndpointType retargets the custom endpoint; the
+        // endpoint itself stays CUSTOM. Reading an unmodeled
+        // CustomEndpointType off the request could produce a combination
+        // create cannot: a READER endpoint carrying a custom type.
         if let Some(v) = optional_query_param(req, "EndpointType") {
-            endpoint.endpoint_type = v;
-        }
-        if let Some(v) = optional_query_param(req, "CustomEndpointType") {
             endpoint.custom_endpoint_type = v;
+            endpoint.endpoint_type = "CUSTOM".to_string();
         }
         if !static_members.is_empty() {
             endpoint.static_members = static_members;
@@ -888,6 +1017,8 @@ impl NeptuneService {
         &self,
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, CLUSTER_ENDPOINT_FILTERS);
         let endpoint_filter = optional_query_param(req, "DBClusterEndpointIdentifier");
         let cluster_filter = optional_query_param(req, "DBClusterIdentifier");
         let accounts = self.state.read();
@@ -896,9 +1027,17 @@ impl NeptuneService {
         // `DescribeDBClusterEndpoints` declares only `DBClusterNotFoundFault`;
         // an unknown `DBClusterEndpointIdentifier` filter resolves to an empty
         // list rather than an error (matching the real API).
+        // The cluster's own writer and reader endpoints are reported
+        // next to the custom ones, as on AWS.
+        let built_ins: Vec<DbClusterEndpoint> = st
+            .clusters
+            .values()
+            .flat_map(built_in_cluster_endpoints)
+            .collect();
         let endpoints: Vec<&DbClusterEndpoint> = st
             .cluster_endpoints
             .values()
+            .chain(built_ins.iter())
             .filter(|e| {
                 endpoint_filter
                     .as_ref()
@@ -906,9 +1045,27 @@ impl NeptuneService {
                     && cluster_filter
                         .as_ref()
                         .is_none_or(|c| &e.db_cluster_identifier == c)
+                    && cluster_endpoint_matches_filters(e, &filters)
             })
             .collect();
-        let inner: String = endpoints
+        // MaxRecords / Marker are modeled on this operation and were
+        // never honored, so a client asking for a page got the whole
+        // list -- more visible now that each cluster contributes its two
+        // built-in endpoints. Clamped and lenient rather than
+        // rejecting: this operation declares no
+        // InvalidParameterValue-equivalent, so an error here would be an
+        // undeclared shape.
+        let max_records: usize =
+            match optional_query_param(req, "MaxRecords").map(|raw| raw.parse::<i32>()) {
+                Some(Ok(parsed)) => parsed.clamp(1, 100) as usize,
+                Some(Err(_)) | None => 100,
+            };
+        let (page, next_marker) = fakecloud_core::pagination::paginate(
+            &endpoints,
+            optional_query_param(req, "Marker").as_deref(),
+            max_records,
+        );
+        let inner: String = page
             .iter()
             .map(|e| {
                 format!(
@@ -917,9 +1074,12 @@ impl NeptuneService {
                 )
             })
             .collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", fakecloud_aws::xml::xml_escape(&m)))
+            .unwrap_or_default();
         Ok(ok_xml(
             "DescribeDBClusterEndpoints",
-            format!("<DBClusterEndpoints>{inner}</DBClusterEndpoints>"),
+            format!("<DBClusterEndpoints>{inner}</DBClusterEndpoints>{marker_xml}"),
             &req.request_id,
         ))
     }
@@ -1002,6 +1162,8 @@ impl NeptuneService {
     }
 
     fn describe_db_instances(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
+        let filters = parse_filters(req);
+        warn_unknown_filters(&filters, INSTANCE_FILTERS);
         let filter = optional_query_param(req, "DBInstanceIdentifier");
         let accounts = self.state.read();
         let empty = NeptuneState::new(&req.account_id, &req.region);
@@ -1013,6 +1175,10 @@ impl NeptuneService {
             },
             None => st.instances.values().collect(),
         };
+        let instances: Vec<&DbInstance> = instances
+            .into_iter()
+            .filter(|i| instance_matches_filters(i, &filters))
+            .collect();
         let inner: String = instances
             .iter()
             .map(|i| format!("<DBInstance>{}</DBInstance>", xml::db_instance(i)))

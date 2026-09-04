@@ -54,6 +54,22 @@ status — `DBClusterNotFoundFault`, `DBInstanceNotFound`,
 `DBParameterGroupNotFound`, `DBSubnetGroupNotFoundFault`,
 `GlobalClusterNotFoundFault`, `SubscriptionNotFound`, and the rest.
 
+## Describe filters
+
+`Filters` is honored on the three operations in the table below -- the ones DocumentDB documents filter names for. Most other Describes model the parameter but AWS documents it as *not currently supported* there, so it is accepted and ignored, matching AWS. The exception is `DescribePendingMaintenanceActions`, which does document `db-cluster-id` and `db-instance-id`: it reports no pending actions at all, so there is nothing for a filter to narrow. Filters are AND-ed with each other and with the operation's own identifier parameter; the values inside one filter are OR-ed.
+
+| Operation | Supported filter names |
+| --- | --- |
+| `DescribeDBClusters` | `db-cluster-id` |
+| `DescribeDBInstances` | `db-cluster-id`, `db-instance-id` |
+| `DescribeGlobalClusters` | `db-cluster-id` |
+
+Each accepts identifiers and ARNs, as AWS documents. On `DescribeGlobalClusters`, `db-cluster-id` names a *member* DB cluster, not the global cluster wrapping it: filtering by a member's identifier or ARN selects the global cluster containing it, which is how a caller holding a regional cluster finds its global parent. A global cluster's own identifier matches nothing, as on AWS.
+
+A cluster joins a global cluster through `CreateDBCluster --global-cluster-identifier` (or by being the `SourceDBClusterIdentifier` of `CreateGlobalCluster`) and leaves it on delete, rename or `RemoveFromGlobalCluster`, so `GlobalClusterMembers` tracks the clusters that actually exist.
+
+An unrecognized filter name matches no resource rather than raising: DocumentDB declares no `InvalidParameterValue`-equivalent on these operations, so returning one would put an error shape on the wire that the operation never declares. The name is logged at `warn`, since nothing on the wire explains the empty result.
+
 ## Honest gap: no data plane
 
 fakecloud does not run a real DocumentDB (MongoDB-compatible) engine. RDS
