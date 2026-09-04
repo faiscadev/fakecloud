@@ -6,6 +6,8 @@ pub(crate) mod state;
 
 pub(crate) mod assets;
 pub(crate) mod blueprints;
+pub(crate) mod business_catalog;
+pub(crate) mod business_forms;
 pub(crate) mod catalog;
 pub(crate) mod common;
 pub(crate) mod connections;

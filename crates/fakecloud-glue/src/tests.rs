@@ -1049,3 +1049,1164 @@ fn blueprint_run_settles_to_terminal_on_read() {
     );
     assert_eq!(got["BlueprintRun"]["State"], "SUCCEEDED");
 }
+
+// ---------------------------------------------------------------------
+// Business catalog: glossaries, terms, asset types and assets
+// ---------------------------------------------------------------------
+
+fn err_code(
+    r: Result<fakecloud_core::service::AwsResponse, fakecloud_core::service::AwsServiceError>,
+) -> String {
+    match r {
+        Ok(_) => panic!("expected an error"),
+        Err(e) => e.code().to_string(),
+    }
+}
+
+fn make_glossary(svc: &GlueService, name: &str) -> String {
+    body_of(
+        svc.create_glossary(&req("CreateGlossary", json!({ "Name": name })))
+            .unwrap(),
+    )["Id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn make_term(svc: &GlueService, glossary_id: &str, name: &str) -> String {
+    body_of(
+        svc.create_glossary_term(&req(
+            "CreateGlossaryTerm",
+            json!({ "GlossaryIdentifier": glossary_id, "Name": name }),
+        ))
+        .unwrap(),
+    )["Id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn make_asset_type(svc: &GlueService, name: &str) -> String {
+    body_of(
+        svc.put_asset_type(&req(
+            "PutAssetType",
+            json!({ "Name": name, "Forms": { "f1": { "FormTypeIdentifier": "ft-1" } } }),
+        ))
+        .unwrap(),
+    )["Id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+fn make_asset(svc: &GlueService, type_id: &str, id: &str, name: &str, description: Option<&str>) {
+    let mut b = json!({
+        "AssetTypeId": type_id,
+        "Identifier": id,
+        "Name": name,
+        "Forms": { "f1": { "FormTypeId": "ft-1", "Content": "{}" } },
+    });
+    if let Some(d) = description {
+        b["Description"] = json!(d);
+    }
+    svc.put_asset(&req("PutAsset", b)).unwrap();
+}
+
+#[test]
+fn glossary_and_terms_round_trip() {
+    let svc = GlueService::default();
+    let gid = make_glossary(&svc, "finance");
+    let tid = make_term(&svc, &gid, "revenue");
+
+    let g = body_of(
+        svc.get_glossary(&req("GetGlossary", json!({ "Identifier": gid })))
+            .unwrap(),
+    );
+    assert_eq!(g["Name"], "finance");
+
+    let t = body_of(
+        svc.get_glossary_term(&req("GetGlossaryTerm", json!({ "Identifier": tid })))
+            .unwrap(),
+    );
+    assert_eq!(t["Name"], "revenue");
+    assert_eq!(t["GlossaryId"], gid.as_str());
+
+    // Terms list by their glossary, not account-wide.
+    let other = make_glossary(&svc, "hr");
+    make_term(&svc, &other, "headcount");
+    let listed = body_of(
+        svc.list_glossary_terms(&req(
+            "ListGlossaryTerms",
+            json!({ "GlossaryIdentifier": gid }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(listed["Items"].as_array().unwrap().len(), 1);
+    assert_eq!(listed["Items"][0]["Name"], "revenue");
+
+    // Update touches only what was sent.
+    svc.update_glossary(&req(
+        "UpdateGlossary",
+        json!({ "Identifier": gid, "Description": "money words" }),
+    ))
+    .unwrap();
+    let g = body_of(
+        svc.get_glossary(&req("GetGlossary", json!({ "Identifier": gid })))
+            .unwrap(),
+    );
+    assert_eq!(g["Name"], "finance");
+    assert_eq!(g["Description"], "money words");
+
+    // A duplicate glossary name conflicts.
+    assert_eq!(
+        err_code(svc.create_glossary(&req("CreateGlossary", json!({ "Name": "finance" })))),
+        "AlreadyExistsException"
+    );
+    // A term needs a glossary that exists.
+    assert_eq!(
+        err_code(svc.create_glossary_term(&req(
+            "CreateGlossaryTerm",
+            json!({ "GlossaryIdentifier": "no-such", "Name": "x" })
+        ))),
+        "EntityNotFoundException"
+    );
+}
+
+#[test]
+fn deleting_a_glossary_takes_its_terms_and_associations() {
+    let svc = GlueService::default();
+    let gid = make_glossary(&svc, "finance");
+    let tid = make_term(&svc, &gid, "revenue");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset(&svc, &type_id, "asset-1", "sales", None);
+
+    svc.associate_glossary_terms(&req(
+        "AssociateGlossaryTerms",
+        json!({ "AssetIdentifier": "asset-1", "GlossaryTermIdentifiers": [tid] }),
+    ))
+    .unwrap();
+    let a = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "asset-1" })))
+            .unwrap(),
+    );
+    assert_eq!(a["GlossaryTerms"][0], tid.as_str());
+
+    // Deleting the glossary removes its terms and drops them off the asset.
+    svc.delete_glossary(&req("DeleteGlossary", json!({ "Identifier": gid })))
+        .unwrap();
+    assert_eq!(
+        err_code(svc.get_glossary_term(&req("GetGlossaryTerm", json!({ "Identifier": tid })))),
+        "EntityNotFoundException"
+    );
+    let a = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "asset-1" })))
+            .unwrap(),
+    );
+    assert!(a.get("GlossaryTerms").is_none(), "{a}");
+}
+
+#[test]
+fn glossary_term_association_is_validated_and_reversible() {
+    let svc = GlueService::default();
+    let gid = make_glossary(&svc, "g");
+    let tid = make_term(&svc, &gid, "t");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset(&svc, &type_id, "asset-1", "sales", None);
+
+    // Both the asset and every term must exist.
+    assert_eq!(
+        err_code(svc.associate_glossary_terms(&req(
+            "AssociateGlossaryTerms",
+            json!({ "AssetIdentifier": "ghost", "GlossaryTermIdentifiers": [tid] })
+        ))),
+        "EntityNotFoundException"
+    );
+    assert_eq!(
+        err_code(svc.associate_glossary_terms(&req(
+            "AssociateGlossaryTerms",
+            json!({ "AssetIdentifier": "asset-1", "GlossaryTermIdentifiers": ["ghost"] })
+        ))),
+        "EntityNotFoundException"
+    );
+    assert_eq!(
+        err_code(svc.associate_glossary_terms(&req(
+            "AssociateGlossaryTerms",
+            json!({ "AssetIdentifier": "asset-1", "GlossaryTermIdentifiers": [] })
+        ))),
+        "InvalidInputException"
+    );
+
+    // Associating twice does not duplicate.
+    for _ in 0..2 {
+        svc.associate_glossary_terms(&req(
+            "AssociateGlossaryTerms",
+            json!({ "AssetIdentifier": "asset-1", "GlossaryTermIdentifiers": [tid] }),
+        ))
+        .unwrap();
+    }
+    let a = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "asset-1" })))
+            .unwrap(),
+    );
+    assert_eq!(a["GlossaryTerms"].as_array().unwrap().len(), 1);
+
+    let out = body_of(
+        svc.disassociate_glossary_terms(&req(
+            "DisassociateGlossaryTerms",
+            json!({ "AssetIdentifier": "asset-1", "GlossaryTermIdentifiers": [tid] }),
+        ))
+        .unwrap(),
+    );
+    assert!(out["GlossaryTerms"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn assets_require_a_type_and_put_upserts() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+
+    // An asset cannot name a type that does not exist.
+    assert_eq!(
+        err_code(svc.put_asset(&req(
+            "PutAsset",
+            json!({
+                "AssetTypeId": "no-such",
+                "Identifier": "a1",
+                "Name": "n",
+                "Forms": {},
+            })
+        ))),
+        "EntityNotFoundException"
+    );
+
+    make_asset(&svc, &type_id, "a1", "sales", Some("first"));
+    let first = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "a1" })))
+            .unwrap(),
+    );
+    let created = first["CreatedAt"].as_f64().unwrap();
+
+    // Put is an upsert: the second write keeps the original creation time.
+    make_asset(&svc, &type_id, "a1", "sales-v2", Some("second"));
+    let second = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "a1" })))
+            .unwrap(),
+    );
+    assert_eq!(second["Name"], "sales-v2");
+    assert_eq!(second["CreatedAt"].as_f64().unwrap(), created);
+
+    // An asset type still in use cannot be deleted.
+    assert_eq!(
+        err_code(svc.delete_asset_type(&req("DeleteAssetType", json!({ "Identifier": type_id })))),
+        "InvalidInputException"
+    );
+    svc.delete_asset(&req("DeleteAsset", json!({ "Identifier": "a1" })))
+        .unwrap();
+    svc.delete_asset_type(&req("DeleteAssetType", json!({ "Identifier": type_id })))
+        .unwrap();
+}
+
+#[test]
+fn put_asset_type_is_upsert_by_name() {
+    let svc = GlueService::default();
+    let first = make_asset_type(&svc, "table");
+    let second = make_asset_type(&svc, "table");
+    assert_eq!(first, second, "a repeat Put reuses the type's id");
+    let listed = body_of(
+        svc.list_asset_types(&req("ListAssetTypes", json!({})))
+            .unwrap(),
+    );
+    assert_eq!(listed["Items"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn search_assets_matches_name_and_description_and_sorts() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    make_asset(&svc, &type_id, "a1", "sales_daily", Some("revenue by day"));
+    make_asset(&svc, &type_id, "a2", "inventory", Some("stock levels"));
+    make_asset(&svc, &type_id, "a3", "sales_monthly", None);
+
+    let hits = |text: &str| -> Vec<String> {
+        let b = body_of(
+            svc.search_assets(&req("SearchAssets", json!({ "SearchText": text })))
+                .unwrap(),
+        );
+        b["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["AssetName"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Name substring, case-insensitive.
+    assert_eq!(hits("SALES"), vec!["sales_daily", "sales_monthly"]);
+    // Description substring too.
+    assert_eq!(hits("stock"), vec!["inventory"]);
+    // An empty search matches everything.
+    assert_eq!(hits("").len(), 3);
+    assert!(hits("nothing-matches").is_empty());
+
+    // DESCENDING reverses the name ordering.
+    let b = body_of(
+        svc.search_assets(&req(
+            "SearchAssets",
+            json!({ "Sort": { "Attribute": "Name", "Order": "DESCENDING" } }),
+        ))
+        .unwrap(),
+    );
+    let names: Vec<&str> = b["Items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["AssetName"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["sales_monthly", "sales_daily", "inventory"]);
+
+    assert_eq!(
+        err_code(svc.search_assets(&req(
+            "SearchAssets",
+            json!({ "Sort": { "Attribute": "Name", "Order": "SIDEWAYS" } })
+        ))),
+        "InvalidInputException"
+    );
+}
+
+/// The business-catalog deletes declare no EntityNotFoundException in the
+/// Smithy model, so deleting something absent succeeds instead of erroring.
+/// The `Get` counterparts do declare it, and keep erroring.
+#[test]
+fn business_catalog_deletes_are_idempotent() {
+    let svc = GlueService::default();
+
+    for (action, call) in [
+        ("DeleteGlossary", 0),
+        ("DeleteGlossaryTerm", 1),
+        ("DeleteAsset", 2),
+        ("DeleteAssetType", 3),
+    ] {
+        let r = req(action, json!({ "Identifier": "never-existed" }));
+        let res = match call {
+            0 => svc.delete_glossary(&r),
+            1 => svc.delete_glossary_term(&r),
+            2 => svc.delete_asset(&r),
+            _ => svc.delete_asset_type(&r),
+        };
+        assert!(res.is_ok(), "{action} on an absent entity must not error");
+    }
+
+    // Deleting a real glossary twice is equally quiet, and still cascades.
+    let gid = make_glossary(&svc, "finance");
+    let tid = make_term(&svc, &gid, "revenue");
+    let del = req("DeleteGlossary", json!({ "Identifier": gid.clone() }));
+    assert!(svc.delete_glossary(&del).is_ok());
+    assert!(svc.delete_glossary(&del).is_ok());
+    assert_eq!(
+        err_code(svc.get_glossary_term(&req("GetGlossaryTerm", json!({ "Identifier": tid })))),
+        "EntityNotFoundException",
+        "the glossary's terms go with it"
+    );
+}
+
+/// ListGlossaryTerms has no not-found error in its model either, so terms of
+/// an unknown glossary come back as an empty page.
+#[test]
+fn list_glossary_terms_of_unknown_glossary_is_empty() {
+    let svc = GlueService::default();
+    let out = body_of(
+        svc.list_glossary_terms(&req(
+            "ListGlossaryTerms",
+            json!({ "GlossaryIdentifier": "never-existed" }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(out["Items"].as_array().map(Vec::len), Some(0));
+    assert!(out.get("NextToken").is_none());
+}
+
+/// Constraint validation is model-driven: the generated table covers the
+/// business-catalog ops, so out-of-range inputs are rejected before any handler.
+#[test]
+fn business_catalog_inputs_are_constraint_checked() {
+    use crate::common::validate_constraints;
+
+    // Name has a @length minimum of 1.
+    assert!(validate_constraints("CreateGlossary", &json!({ "Name": "" })).is_err());
+    assert!(validate_constraints("CreateGlossary", &json!({ "Name": "finance" })).is_ok());
+
+    // MaxResults carries a @range on the list and search ops.
+    for action in ["ListGlossaries", "ListAssetTypes", "SearchAssets"] {
+        assert!(
+            validate_constraints(action, &json!({ "MaxResults": 0 })).is_err(),
+            "{action} must reject MaxResults below its range minimum"
+        );
+        assert!(validate_constraints(action, &json!({ "MaxResults": 25 })).is_ok());
+    }
+}
+
+/// An asset carrying an iterable form: the form's content is a JSON array, one
+/// element per item, which is where iterable-form items come from.
+fn make_asset_with_items(svc: &GlueService, type_id: &str, id: &str) {
+    let content = json!([
+        { "ItemId": "i-1", "ItemName": "first", "Description": "the first item" },
+        { "ItemId": "i-2", "ItemName": "second" },
+    ])
+    .to_string();
+    svc.put_asset(&req(
+        "PutAsset",
+        json!({
+            "AssetTypeId": type_id,
+            "Identifier": id,
+            "Name": id,
+            "Forms": { "rows": { "FormTypeId": "ft-1", "Content": content } },
+        }),
+    ))
+    .unwrap();
+}
+
+fn make_form_type(svc: &GlueService, name: &str) -> String {
+    body_of(
+        svc.put_form_type(&req(
+            "PutFormType",
+            json!({ "Name": name, "Schema": "{\"type\":\"object\"}" }),
+        ))
+        .unwrap(),
+    )["Id"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn form_type_put_is_an_upsert_keyed_by_name() {
+    let svc = GlueService::default();
+    let id = make_form_type(&svc, "row_schema");
+    let again = make_form_type(&svc, "row_schema");
+    assert_eq!(id, again, "re-putting a name must keep its id");
+
+    let got = body_of(
+        svc.get_form_type(&req("GetFormType", json!({ "Identifier": id.clone() })))
+            .unwrap(),
+    );
+    assert_eq!(got["Name"], "row_schema");
+
+    let listed = body_of(
+        svc.list_form_types(&req("ListFormTypes", json!({})))
+            .unwrap(),
+    );
+    assert_eq!(listed["Items"].as_array().map(Vec::len), Some(1));
+
+    // Delete declares no EntityNotFoundException, so it is idempotent.
+    let del = req("DeleteFormType", json!({ "Identifier": id.clone() }));
+    assert!(svc.delete_form_type(&del).is_ok());
+    assert!(svc.delete_form_type(&del).is_ok());
+    assert_eq!(
+        err_code(svc.get_form_type(&req("GetFormType", json!({ "Identifier": id })))),
+        "EntityNotFoundException"
+    );
+}
+
+#[test]
+fn form_type_in_use_cannot_be_deleted() {
+    let svc = GlueService::default();
+    let ft = make_form_type(&svc, "row_schema");
+    let type_id = make_asset_type(&svc, "table");
+    svc.put_asset(&req(
+        "PutAsset",
+        json!({
+            "AssetTypeId": type_id,
+            "Identifier": "a-1",
+            "Name": "sales",
+            "Forms": { "f1": { "FormTypeId": ft.clone(), "Content": "{}" } },
+        }),
+    ))
+    .unwrap();
+
+    assert_eq!(
+        err_code(svc.delete_form_type(&req("DeleteFormType", json!({ "Identifier": ft.clone() })))),
+        "ConflictException"
+    );
+
+    svc.delete_asset(&req("DeleteAsset", json!({ "Identifier": "a-1" })))
+        .unwrap();
+
+    // An asset type referencing it holds it too. Asset-type forms name the
+    // reference `FormTypeIdentifier`, one level inside the Forms map.
+    svc.put_asset_type(&req(
+        "PutAssetType",
+        json!({ "Name": "typed", "Forms": { "f1": { "FormTypeIdentifier": ft.clone() } } }),
+    ))
+    .unwrap();
+    assert_eq!(
+        err_code(svc.delete_form_type(&req("DeleteFormType", json!({ "Identifier": ft.clone() })))),
+        "ConflictException",
+        "an asset type's form reference must block the delete"
+    );
+    let typed_id = body_of(
+        svc.put_asset_type(&req(
+            "PutAssetType",
+            json!({ "Name": "typed", "Forms": { "f1": { "FormTypeIdentifier": "other" } } }),
+        ))
+        .unwrap(),
+    )["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.delete_asset_type(&req("DeleteAssetType", json!({ "Identifier": typed_id })))
+        .unwrap();
+
+    // An attachment referencing it holds it as well.
+    let plain_type = make_asset_type(&svc, "plain");
+    make_asset_with_items(&svc, &plain_type, "a-2");
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-2",
+            "AttachmentName": "readme",
+            "Content": "hello",
+            "FormTypeId": ft.clone(),
+        }),
+    ))
+    .unwrap();
+    assert_eq!(
+        err_code(svc.delete_form_type(&req("DeleteFormType", json!({ "Identifier": ft.clone() })))),
+        "ConflictException",
+        "an attachment's form reference must block the delete"
+    );
+
+    // Once nothing references it, it goes.
+    svc.delete_asset(&req("DeleteAsset", json!({ "Identifier": "a-2" })))
+        .unwrap();
+    assert!(svc
+        .delete_form_type(&req("DeleteFormType", json!({ "Identifier": ft })))
+        .is_ok());
+}
+
+#[test]
+fn iterable_forms_list_and_batch_get_their_items() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    let listed = body_of(
+        svc.list_iterable_forms(&req(
+            "ListIterableForms",
+            json!({ "AssetIdentifier": "a-1", "IterableFormName": "rows" }),
+        ))
+        .unwrap(),
+    );
+    let items = listed["Items"].as_array().unwrap();
+    assert_eq!(items.len(), 2);
+    assert_eq!(items[0]["ItemId"], "i-1");
+    assert_eq!(items[0]["Description"], "the first item");
+
+    // A batch read reports misses per item instead of failing the call.
+    let got = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1", "ghost"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["Items"].as_array().map(Vec::len), Some(1));
+    assert_eq!(got["Items"][0]["ItemId"], "i-1");
+    assert_eq!(got["Errors"][0]["ItemIdentifier"], "ghost");
+    assert_eq!(got["Errors"][0]["Code"], "EntityNotFoundException");
+
+    // A form that is not on the asset simply has no items.
+    let none = body_of(
+        svc.list_iterable_forms(&req(
+            "ListIterableForms",
+            json!({ "AssetIdentifier": "a-1", "IterableFormName": "absent" }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(none["Items"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn glossary_terms_scope_to_an_iterable_form_item() {
+    let svc = GlueService::default();
+    let gid = make_glossary(&svc, "finance");
+    let tid = make_term(&svc, &gid, "revenue");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    let scoped = json!({
+        "AssetIdentifier": "a-1",
+        "IterableFormName": "rows",
+        "ItemIdentifier": "i-1",
+        "GlossaryTermIdentifiers": [tid.clone()],
+    });
+    svc.associate_glossary_terms(&req("AssociateGlossaryTerms", scoped.clone()))
+        .unwrap();
+
+    // The term shows on that item, and only that item.
+    let listed = body_of(
+        svc.list_iterable_forms(&req(
+            "ListIterableForms",
+            json!({ "AssetIdentifier": "a-1", "IterableFormName": "rows" }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(listed["Items"][0]["GlossaryTerms"], json!([tid.clone()]));
+    assert!(listed["Items"][1].get("GlossaryTerms").is_none());
+
+    // An item-scoped association is not an asset-level one.
+    let asset = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "a-1" })))
+            .unwrap(),
+    );
+    assert!(asset.get("GlossaryTerms").is_none());
+
+    // An unknown item is rejected rather than silently creating a scope.
+    assert_eq!(
+        err_code(svc.associate_glossary_terms(&req(
+            "AssociateGlossaryTerms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifier": "ghost",
+                "GlossaryTermIdentifiers": [tid.clone()],
+            })
+        ))),
+        "EntityNotFoundException"
+    );
+
+    svc.disassociate_glossary_terms(&req("DisassociateGlossaryTerms", scoped))
+        .unwrap();
+    let after = body_of(
+        svc.list_iterable_forms(&req(
+            "ListIterableForms",
+            json!({ "AssetIdentifier": "a-1", "IterableFormName": "rows" }),
+        ))
+        .unwrap(),
+    );
+    assert!(after["Items"][0].get("GlossaryTerms").is_none());
+}
+
+#[test]
+fn attachments_hang_off_assets_and_items() {
+    let svc = GlueService::default();
+    let ft = make_form_type(&svc, "note");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    let put = json!({
+        "AssetIdentifier": "a-1",
+        "IterableFormName": "rows",
+        "ItemIdentifier": "i-1",
+        "AttachmentName": "readme",
+        "Content": "hello",
+        "FormTypeId": ft.clone(),
+    });
+    let out = body_of(
+        svc.put_attachment(&req("PutAttachment", put.clone()))
+            .unwrap(),
+    );
+    assert_eq!(out["AttachmentName"], "readme");
+    assert_eq!(out["ItemIdentifier"], "i-1");
+
+    // It surfaces on the item it was attached to.
+    let got = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["Items"][0]["Attachments"]["readme"]["Content"], "hello");
+
+    // Both the asset and the form type must exist.
+    let mut ghost_asset = put.clone();
+    ghost_asset["AssetIdentifier"] = json!("nope");
+    assert_eq!(
+        err_code(svc.put_attachment(&req("PutAttachment", ghost_asset))),
+        "EntityNotFoundException"
+    );
+    let mut ghost_type = put.clone();
+    ghost_type["FormTypeId"] = json!("nope");
+    assert_eq!(
+        err_code(svc.put_attachment(&req("PutAttachment", ghost_type))),
+        "EntityNotFoundException"
+    );
+    let mut ghost_item = put.clone();
+    ghost_item["ItemIdentifier"] = json!("nope");
+    assert_eq!(
+        err_code(svc.put_attachment(&req("PutAttachment", ghost_item))),
+        "EntityNotFoundException"
+    );
+
+    svc.delete_attachment(&req(
+        "DeleteAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "i-1",
+            "AttachmentName": "readme",
+        }),
+    ))
+    .unwrap();
+    let after = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert!(after["Items"][0].get("Attachments").is_none());
+}
+
+#[test]
+fn deleting_an_asset_takes_its_item_scoped_state() {
+    let svc = GlueService::default();
+    let ft = make_form_type(&svc, "note");
+    let gid = make_glossary(&svc, "g");
+    let tid = make_term(&svc, &gid, "t");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    svc.associate_glossary_terms(&req(
+        "AssociateGlossaryTerms",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "i-1",
+            "GlossaryTermIdentifiers": [tid],
+        }),
+    ))
+    .unwrap();
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "i-1",
+            "AttachmentName": "readme",
+            "Content": "hello",
+            "FormTypeId": ft.clone(),
+        }),
+    ))
+    .unwrap();
+
+    svc.delete_asset(&req("DeleteAsset", json!({ "Identifier": "a-1" })))
+        .unwrap();
+
+    // Nothing item-scoped may outlive the asset, or re-creating the asset would
+    // inherit a previous asset's terms and attachments.
+    make_asset_with_items(&svc, &type_id, "a-1");
+    let got = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert!(got["Items"][0].get("Attachments").is_none());
+    assert!(got["Items"][0].get("GlossaryTerms").is_none());
+}
+
+#[test]
+fn data_catalog_export_configuration_round_trips() {
+    let svc = GlueService::default();
+    // Nothing is configured until it is put.
+    assert_eq!(
+        err_code(svc.get_data_catalog_export_configuration(&req(
+            "GetDataCatalogExportConfiguration",
+            json!({})
+        ))),
+        "EntityNotFoundException"
+    );
+
+    let out = body_of(
+        svc.put_data_catalog_export_configuration(&req(
+            "PutDataCatalogExportConfiguration",
+            json!({
+                "ExportSetting": "ENABLED",
+                "EncryptionConfiguration": { "SseAlgorithm": "AES256" },
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(out["ExportSetting"], "ENABLED");
+
+    let got = body_of(
+        svc.get_data_catalog_export_configuration(&req(
+            "GetDataCatalogExportConfiguration",
+            json!({}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["Status"], "ENABLED");
+    assert_eq!(got["EncryptionConfiguration"]["SseAlgorithm"], "AES256");
+    let created = got["CreatedAt"].as_f64().unwrap();
+
+    // Disabling keeps the original creation time.
+    svc.put_data_catalog_export_configuration(&req(
+        "PutDataCatalogExportConfiguration",
+        json!({ "ExportSetting": "DISABLED" }),
+    ))
+    .unwrap();
+    let after = body_of(
+        svc.get_data_catalog_export_configuration(&req(
+            "GetDataCatalogExportConfiguration",
+            json!({}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(after["Status"], "DISABLED");
+    assert_eq!(after["CreatedAt"].as_f64(), Some(created));
+
+    assert_eq!(
+        err_code(svc.put_data_catalog_export_configuration(&req(
+            "PutDataCatalogExportConfiguration",
+            json!({ "ExportSetting": "MAYBE" })
+        ))),
+        "InvalidInputException"
+    );
+}
+
+#[test]
+fn get_asset_reports_attachments_and_iterable_forms() {
+    let svc = GlueService::default();
+    let ft = make_form_type(&svc, "note");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    // A form whose content is a JSON array is the iterable one.
+    let asset = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "a-1" })))
+            .unwrap(),
+    );
+    assert_eq!(asset["IterableForms"]["rows"]["FormTypeId"], "ft-1");
+    assert!(asset.get("Attachments").is_none());
+
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "AttachmentName": "readme",
+            "Content": "hello",
+            "FormTypeId": ft.clone(),
+        }),
+    ))
+    .unwrap();
+    // An item-scoped attachment belongs to its item, not to the asset.
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "i-1",
+            "AttachmentName": "scoped",
+            "Content": "inner",
+            "FormTypeId": ft,
+        }),
+    ))
+    .unwrap();
+
+    let asset = body_of(
+        svc.get_asset(&req("GetAsset", json!({ "Identifier": "a-1" })))
+            .unwrap(),
+    );
+    assert_eq!(asset["Attachments"]["readme"]["Content"], "hello");
+    assert!(
+        asset["Attachments"].get("scoped").is_none(),
+        "an item-scoped attachment must not surface as an asset attachment"
+    );
+}
+
+#[test]
+fn search_assets_evaluates_the_filter_clause() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    make_asset(&svc, &type_id, "a-1", "sales", Some("quarterly revenue"));
+    make_asset(&svc, &type_id, "a-2", "hr", Some("headcount"));
+
+    let search = |clause: Value| -> Vec<String> {
+        let out = body_of(
+            svc.search_assets(&req("SearchAssets", json!({ "FilterClause": clause })))
+                .unwrap(),
+        );
+        out["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["Id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        search(json!({
+            "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "sales" }
+        })),
+        vec!["a-1".to_string()]
+    );
+
+    // The two list arms nest.
+    assert_eq!(
+        search(json!({
+            "OrAnyFilters": [
+                { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "sales" } },
+                { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "hr" } },
+            ]
+        }))
+        .len(),
+        2
+    );
+    assert!(search(json!({
+        "AndAllFilters": [
+            { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "sales" } },
+            { "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "hr" } },
+        ]
+    }))
+    .is_empty());
+
+    // notExists matches the assets that lack the attribute entirely.
+    make_asset(&svc, &type_id, "a-3", "ops", None);
+    assert_eq!(
+        search(json!({
+            "AttributeFilter": { "Attribute": "AssetDescription", "Operator": "notExists" }
+        })),
+        vec!["a-3".to_string()]
+    );
+
+    // SearchText and the filter both have to hold.
+    let out = body_of(
+        svc.search_assets(&req(
+            "SearchAssets",
+            json!({
+                "SearchText": "sales",
+                "FilterClause": {
+                    "AttributeFilter": { "Attribute": "AssetName", "Operator": "equals", "Value": "hr" }
+                },
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(out["Items"].as_array().map(Vec::len), Some(0));
+}
+
+#[test]
+fn list_and_map_constraints_are_checked_by_cardinality() {
+    use crate::common::validate_constraints;
+
+    // GlossaryTermIdentifiers is a list with a @length maximum; a string-length
+    // check would never fire on it.
+    let one = json!({ "AssetIdentifier": "a", "GlossaryTermIdentifiers": ["t-1"] });
+    assert!(validate_constraints("AssociateGlossaryTerms", &one).is_ok());
+
+    let bounded = crate::constraints::constraints_for("AssociateGlossaryTerms")
+        .iter()
+        .any(|c| c.field == "GlossaryTermIdentifiers" && c.len_max.is_some());
+    assert!(
+        bounded,
+        "GlossaryTermIdentifiers must carry a generated @length bound, or this \
+         test cannot detect the regression it exists for"
+    );
+    let too_many: Vec<String> = (0..1000).map(|i| format!("t-{i}")).collect();
+    let over = json!({ "AssetIdentifier": "a", "GlossaryTermIdentifiers": too_many });
+    assert!(
+        validate_constraints("AssociateGlossaryTerms", &over).is_err(),
+        "an oversized list must be rejected"
+    );
+
+    // Maps are counted by entry too. Glue bounds Tags at 50 per request.
+    let bounded_map = crate::constraints::constraints_for("CreateDatabase")
+        .iter()
+        .any(|c| c.field == "Tags" && c.len_max == Some(50));
+    assert!(
+        bounded_map,
+        "CreateDatabase.Tags must carry its @length bound"
+    );
+    let tags: serde_json::Map<String, Value> =
+        (0..51).map(|i| (format!("k{i}"), json!("v"))).collect();
+    assert!(
+        validate_constraints("CreateDatabase", &json!({ "Tags": tags })).is_err(),
+        "an oversized map must be rejected"
+    );
+    let ok: serde_json::Map<String, Value> =
+        (0..50).map(|i| (format!("k{i}"), json!("v"))).collect();
+    assert!(validate_constraints("CreateDatabase", &json!({ "Tags": ok })).is_ok());
+}
+
+/// Filter values are unions on the wire, so a modeled `{"StringValue": ...}`
+/// has to compare the same as a bare string would.
+#[test]
+fn search_filter_values_unpack_the_modeled_union() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    make_asset(&svc, &type_id, "a-1", "sales", Some("quarterly"));
+    make_asset(&svc, &type_id, "a-2", "hr", None);
+
+    let ids = |clause: Value| -> Vec<String> {
+        let out = body_of(
+            svc.search_assets(&req("SearchAssets", json!({ "FilterClause": clause })))
+                .unwrap(),
+        );
+        out["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["Id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        ids(json!({
+            "AttributeFilter": {
+                "Attribute": "AssetName",
+                "Operator": "equals",
+                "Value": { "StringValue": "sales" },
+            }
+        })),
+        vec!["a-1".to_string()],
+        "a StringValue union must compare, not silently fail every asset"
+    );
+
+    // A MapFilter reads one key inside a named form, and models no operator.
+    svc.put_asset(&req(
+        "PutAsset",
+        json!({
+            "AssetTypeId": type_id,
+            "Identifier": "a-3",
+            "Name": "ops",
+            "Forms": { "meta": { "FormTypeId": "ft-1", "Content": "{\"owner\":\"platform\"}" } },
+        }),
+    ))
+    .unwrap();
+    assert_eq!(
+        ids(json!({
+            "MapFilter": {
+                "Attribute": "meta",
+                "Key": "owner",
+                "Value": { "StringValue": "platform" },
+            }
+        })),
+        vec!["a-3".to_string()]
+    );
+    assert!(ids(json!({
+        "MapFilter": {
+            "Attribute": "meta",
+            "Key": "owner",
+            "Value": { "StringValue": "someone-else" },
+        }
+    }))
+    .is_empty());
+}
+
+#[test]
+fn search_sort_honours_the_requested_attribute() {
+    let svc = GlueService::default();
+    let type_id = make_asset_type(&svc, "table");
+    // Names and descriptions sort in opposite orders, so a sort that ignored
+    // the attribute would be caught here.
+    make_asset(&svc, &type_id, "a-1", "alpha", Some("zebra"));
+    make_asset(&svc, &type_id, "a-2", "zulu", Some("aardvark"));
+
+    let sorted = |attribute: &str| -> Vec<String> {
+        let out = body_of(
+            svc.search_assets(&req(
+                "SearchAssets",
+                json!({ "Sort": { "Attribute": attribute } }),
+            ))
+            .unwrap(),
+        );
+        out["Items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["Id"].as_str().unwrap().to_string())
+            .collect()
+    };
+
+    assert_eq!(
+        sorted("AssetName"),
+        vec!["a-1".to_string(), "a-2".to_string()]
+    );
+    assert_eq!(
+        sorted("AssetDescription"),
+        vec!["a-2".to_string(), "a-1".to_string()],
+        "sorting by description must not fall back to the name"
+    );
+}
+
+/// An item can be addressed by `ItemName` as well as `ItemId`, and an
+/// attachment written through either has to be visible to a read by the other.
+#[test]
+fn an_attachment_written_by_item_name_reads_back_by_item_id() {
+    let svc = GlueService::default();
+    let ft = make_form_type(&svc, "note");
+    let type_id = make_asset_type(&svc, "table");
+    make_asset_with_items(&svc, &type_id, "a-1");
+
+    svc.put_attachment(&req(
+        "PutAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "first",
+            "AttachmentName": "readme",
+            "Content": "hello",
+            "FormTypeId": ft,
+        }),
+    ))
+    .unwrap();
+
+    let got = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(
+        got["Items"][0]["Attachments"]["readme"]["Content"], "hello",
+        "an ItemName alias must key the same attachment as its ItemId"
+    );
+
+    // Deleting through the alias removes it too.
+    svc.delete_attachment(&req(
+        "DeleteAttachment",
+        json!({
+            "AssetIdentifier": "a-1",
+            "IterableFormName": "rows",
+            "ItemIdentifier": "first",
+            "AttachmentName": "readme",
+        }),
+    ))
+    .unwrap();
+    let got = body_of(
+        svc.batch_get_iterable_forms(&req(
+            "BatchGetIterableForms",
+            json!({
+                "AssetIdentifier": "a-1",
+                "IterableFormName": "rows",
+                "ItemIdentifiers": ["i-1"],
+            }),
+        ))
+        .unwrap(),
+    );
+    assert!(got["Items"][0].get("Attachments").is_none());
+}

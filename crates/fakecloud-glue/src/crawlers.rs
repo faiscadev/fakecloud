@@ -125,7 +125,7 @@ impl GlueService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id, &req.region);
         let crawlers: Vec<Value> = state.crawlers.values().cloned().collect();
-        let (page, token) = crate::common::paginate_body(&body, crawlers)?;
+        let (page, token) = crate::common::paginate_body(&req.action, &body, crawlers)?;
         let mut resp = json!({ "Crawlers": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);

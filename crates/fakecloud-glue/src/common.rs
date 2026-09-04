@@ -151,6 +151,7 @@ pub(crate) fn resource_arn(account: &str, region: &str, kind: &str, name: &str) 
 /// single page with no continuation token — matching how AWS returns an
 /// unbounded page when the caller omits a page size.
 pub(crate) fn paginate_body(
+    action: &str,
     body: &Value,
     items: Vec<Value>,
 ) -> Result<(Vec<Value>, Option<String>), AwsServiceError> {
@@ -161,9 +162,17 @@ pub(crate) fn paginate_body(
         .map(|n| n as usize)
         .unwrap_or(usize::MAX);
     // A malformed NextToken is rejected with InvalidInputException rather than
-    // silently restarting at page 0 (which can loop a client forever).
-    fakecloud_core::pagination::paginate_checked(&items, token, max)
-        .map_err(|_| invalid_input("Invalid value for NextToken."))
+    // silently restarting at page 0 (which can loop a client forever). Seven
+    // paginated Glue operations (GetCrawlers and friends) do not declare that
+    // error in the model, so they cannot report one: those end the pagination
+    // with an empty final page, which is terminal and cannot loop either.
+    fakecloud_core::pagination::paginate_checked(&items, token, max).or_else(|_| {
+        if crate::constraints::declares_invalid_input(action) {
+            Err(invalid_input("Invalid value for NextToken."))
+        } else {
+            Ok((Vec::new(), None))
+        }
+    })
 }
 
 /// A small UUID-ish identifier (32 hex chars). Glue uses these for run ids,
@@ -227,6 +236,32 @@ pub(crate) fn validate_constraints(action: &str, body: &Value) -> Result<(), Aws
             if let Some(max) = c.range_max {
                 if n > max {
                     return Err(invalid_input(format!("{} exceeds maximum {max}", c.field)));
+                }
+            }
+        } else {
+            // `@length` on a list or map constrains its cardinality, not a
+            // string length, so those shapes are checked by element count.
+            let count = match v {
+                Value::Array(a) => Some(a.len() as u64),
+                Value::Object(o) => Some(o.len() as u64),
+                _ => None,
+            };
+            if let Some(count) = count {
+                if let Some(min) = c.len_min {
+                    if count < min {
+                        return Err(invalid_input(format!(
+                            "{} must have at least {min} entries",
+                            c.field
+                        )));
+                    }
+                }
+                if let Some(max) = c.len_max {
+                    if count > max {
+                        return Err(invalid_input(format!(
+                            "{} must have at most {max} entries",
+                            c.field
+                        )));
+                    }
                 }
             }
         }

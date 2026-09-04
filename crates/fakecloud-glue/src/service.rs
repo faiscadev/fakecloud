@@ -270,6 +270,26 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "TagResource",
     "TestConnection",
     "UntagResource",
+    "CreateGlossary",
+    "GetGlossary",
+    "UpdateGlossary",
+    "DeleteGlossary",
+    "ListGlossaries",
+    "CreateGlossaryTerm",
+    "GetGlossaryTerm",
+    "UpdateGlossaryTerm",
+    "DeleteGlossaryTerm",
+    "ListGlossaryTerms",
+    "AssociateGlossaryTerms",
+    "DisassociateGlossaryTerms",
+    "PutAsset",
+    "GetAsset",
+    "DeleteAsset",
+    "SearchAssets",
+    "PutAssetType",
+    "GetAssetType",
+    "DeleteAssetType",
+    "ListAssetTypes",
     "UpdateAsset",
     "UpdateBlueprint",
     "UpdateCatalog",
@@ -299,6 +319,16 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "UpdateUsageProfile",
     "UpdateUserDefinedFunction",
     "UpdateWorkflow",
+    "PutFormType",
+    "GetFormType",
+    "DeleteFormType",
+    "ListFormTypes",
+    "PutAttachment",
+    "DeleteAttachment",
+    "BatchGetIterableForms",
+    "ListIterableForms",
+    "GetDataCatalogExportConfiguration",
+    "PutDataCatalogExportConfiguration",
 ];
 
 pub struct GlueService {
@@ -409,6 +439,16 @@ impl AwsService for GlueService {
         crate::common::validate_constraints(&req.action, &req.json_body())?;
         let mutates = is_mutating_action(&req.action);
         let result = match req.action.as_str() {
+            "PutFormType" => self.put_form_type(&req),
+            "GetFormType" => self.get_form_type(&req),
+            "DeleteFormType" => self.delete_form_type(&req),
+            "ListFormTypes" => self.list_form_types(&req),
+            "PutAttachment" => self.put_attachment(&req),
+            "DeleteAttachment" => self.delete_attachment(&req),
+            "BatchGetIterableForms" => self.batch_get_iterable_forms(&req),
+            "ListIterableForms" => self.list_iterable_forms(&req),
+            "GetDataCatalogExportConfiguration" => self.get_data_catalog_export_configuration(&req),
+            "PutDataCatalogExportConfiguration" => self.put_data_catalog_export_configuration(&req),
             "BatchCreatePartition" => self.batch_create_partition(&req),
             "BatchDeleteConnection" => self.batch_delete_connection(&req),
             "BatchDeletePartition" => self.batch_delete_partition(&req),
@@ -697,6 +737,26 @@ impl AwsService for GlueService {
             "TagResource" => self.tag_resource(&req),
             "TestConnection" => self.test_connection(&req),
             "UntagResource" => self.untag_resource(&req),
+            "CreateGlossary" => self.create_glossary(&req),
+            "GetGlossary" => self.get_glossary(&req),
+            "UpdateGlossary" => self.update_glossary(&req),
+            "DeleteGlossary" => self.delete_glossary(&req),
+            "ListGlossaries" => self.list_glossaries(&req),
+            "CreateGlossaryTerm" => self.create_glossary_term(&req),
+            "GetGlossaryTerm" => self.get_glossary_term(&req),
+            "UpdateGlossaryTerm" => self.update_glossary_term(&req),
+            "DeleteGlossaryTerm" => self.delete_glossary_term(&req),
+            "ListGlossaryTerms" => self.list_glossary_terms(&req),
+            "AssociateGlossaryTerms" => self.associate_glossary_terms(&req),
+            "DisassociateGlossaryTerms" => self.disassociate_glossary_terms(&req),
+            "PutAsset" => self.put_asset(&req),
+            "GetAsset" => self.get_asset(&req),
+            "DeleteAsset" => self.delete_asset(&req),
+            "SearchAssets" => self.search_assets(&req),
+            "PutAssetType" => self.put_asset_type(&req),
+            "GetAssetType" => self.get_asset_type(&req),
+            "DeleteAssetType" => self.delete_asset_type(&req),
+            "ListAssetTypes" => self.list_asset_types(&req),
             "UpdateAsset" => self.update_asset(&req),
             "UpdateBlueprint" => self.update_blueprint(&req),
             "UpdateCatalog" => self.update_catalog(&req),
@@ -1078,7 +1138,7 @@ impl GlueService {
             .and_then(|s| s.dbs_in(&req.region))
             .map(|map| map.values().map(database_json).collect())
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, dbs)?;
+        let (page, token) = crate::common::paginate_body(&req.action, &body, dbs)?;
         let mut resp = json!({ "DatabaseList": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
@@ -1225,7 +1285,7 @@ impl GlueService {
                 }
             }
         }
-        let (page, token) = crate::common::paginate_body(&body, tables)?;
+        let (page, token) = crate::common::paginate_body(&req.action, &body, tables)?;
         let mut resp = json!({ "TableList": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
@@ -1436,7 +1496,7 @@ impl GlueService {
                     .collect()
             })
             .unwrap_or_default();
-        let (page, token) = crate::common::paginate_body(&body, parts)?;
+        let (page, token) = crate::common::paginate_body(&req.action, &body, parts)?;
         let mut resp = json!({ "Partitions": page });
         if let Some(t) = token {
             resp["NextToken"] = json!(t);
