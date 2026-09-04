@@ -549,6 +549,77 @@ async fn renaming_a_cluster_carries_its_references() {
     );
 }
 
+/// A source this account cannot resolve names no cluster.
+///
+/// Reducing `SourceDBClusterIdentifier` by its last colon turned any
+/// colon-bearing value into a local identifier, so another account's
+/// cluster ARN resolved against this account's same-named cluster.
+#[tokio::test]
+async fn create_global_cluster_does_not_alias_a_foreign_source() {
+    let svc = service();
+    call(
+        &svc,
+        "CreateDBCluster",
+        &[("DBClusterIdentifier", "clu-a"), ("Engine", "docdb")],
+    )
+    .await;
+
+    for source in [
+        // Another account's ARN for a cluster THIS account also has.
+        "arn:aws:rds:us-east-1:999999999999:cluster:clu-a",
+        // An ARN of the wrong resource type.
+        "arn:aws:rds:us-east-1:123456789012:db:clu-a",
+        // A cluster that simply doesn't exist.
+        "ghost",
+    ] {
+        let err = call_err(
+            &svc,
+            "CreateGlobalCluster",
+            &[
+                ("GlobalClusterIdentifier", "glob-x"),
+                ("Engine", "docdb"),
+                ("SourceDBClusterIdentifier", source),
+            ],
+        )
+        .await;
+        assert_eq!(
+            err.code(),
+            "DBClusterNotFoundFault",
+            "source {source} resolved to a local cluster"
+        );
+    }
+
+    // This account's own ARN still resolves, and seeds the member.
+    call(
+        &svc,
+        "CreateGlobalCluster",
+        &[
+            ("GlobalClusterIdentifier", "glob-1"),
+            ("Engine", "docdb"),
+            (
+                "SourceDBClusterIdentifier",
+                "arn:aws:rds:us-east-1:123456789012:cluster:clu-a",
+            ),
+        ],
+    )
+    .await;
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeGlobalClusters",
+            &[
+                ("Filters.Filter.1.Name", "db-cluster-id"),
+                ("Filters.Filter.1.Values.Value.1", "clu-a"),
+            ],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<GlobalClusterIdentifier>glob-1</GlobalClusterIdentifier>"),
+        "the source was not recorded as a member: {xml}"
+    );
+}
+
 #[tokio::test]
 async fn envelope_shape_is_correct() {
     let svc = service();

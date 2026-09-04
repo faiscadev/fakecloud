@@ -9,7 +9,7 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_core::query::{optional_query_param, query_response_xml, required_query_param};
 use fakecloud_core::query_filters::{
-    parse_filters, sibling_rds_arn, warn_unknown_filters, QueryFilter,
+    parse_filters, requested_identifier, sibling_rds_arn, warn_unknown_filters, QueryFilter,
 };
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
@@ -1655,8 +1655,17 @@ impl DocDbService {
         // `GlobalClusterMembers` -- and `db-cluster-id` had nothing to
         // match a member against.
         let source_member = match &source {
-            Some(arn) => {
-                let src_id = arn.rsplit(':').next().unwrap_or(arn);
+            Some(raw) => {
+                // Reduced the fail-closed way, not by `rsplit(':')`:
+                // splitting on the last colon turns ANY colon-bearing
+                // value into a local identifier, so another account's
+                // cluster ARN would resolve against this account's
+                // same-named cluster. An ARN this operation cannot
+                // resolve stays whole, matches nothing, and reaches the
+                // declared fault below.
+                let reduced = requested_identifier(Some(raw.clone()), "cluster", &req.account_id)
+                    .unwrap_or_else(|| raw.clone());
+                let src_id = reduced.as_str();
                 // AWS raises DBClusterNotFoundFault here. Resolving to
                 // None instead created the global cluster with no member
                 // and a default engine that may not be the source's.
@@ -1671,9 +1680,11 @@ impl DocDbService {
             }
             None => None,
         };
-        let (engine, engine_version) = match &source {
-            Some(arn) => {
-                let src_id = arn.rsplit(':').next().unwrap_or(arn);
+        let (engine, engine_version) = match &source_member {
+            // Resolved once above; the engine comes from the same
+            // cluster the membership does.
+            Some(member) => {
+                let src_id = member_identifier(&member.db_cluster_arn).unwrap_or_default();
                 st.clusters
                     .get(src_id)
                     .map(|c| (c.engine.clone(), c.engine_version.clone()))
