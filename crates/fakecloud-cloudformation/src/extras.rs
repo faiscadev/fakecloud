@@ -1615,8 +1615,8 @@ impl CloudFormationService {
                             reason,
                         )
                     })?;
-                if let Some(updated) = updated {
-                    let wanted = params.get("StackSetName").cloned().unwrap_or_default();
+                let wanted = params.get("StackSetName").cloned().unwrap_or_default();
+                {
                     let mut accounts = self.state.write();
                     let state = accounts.get_or_create(&aid);
                     let sets = store(&mut state.extras, "stack_sets");
@@ -1631,7 +1631,20 @@ impl CloudFormationService {
                                 || entry["StackSetId"].as_str() == Some(wanted.as_str())
                         })
                         .map(|(name, _)| name.clone());
-                    if let Some(entry) = key.and_then(|k| sets.get_mut(&k)) {
+                    // Updating a stack set that does not exist is not a
+                    // success. Answering with an OperationId for a name that
+                    // matches nothing is the same false green light as a
+                    // summary of a template we never stored.
+                    // `StackSetNotFoundException` IS declared on
+                    // UpdateStackSet, so reporting it stays conformant.
+                    let Some(key) = key else {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "StackSetNotFoundException",
+                            format!("StackSet {wanted} not found"),
+                        ));
+                    };
+                    if let (Some(updated), Some(entry)) = (updated, sets.get_mut(&key)) {
                         entry["TemplateBody"] = json!(updated);
                     }
                 }
@@ -3528,6 +3541,20 @@ mod tests {
     }
 
     #[test]
+    fn updating_a_stack_set_that_does_not_exist_is_reported() {
+        let svc = svc();
+        // Answering with an OperationId for a name that matches nothing is
+        // the same false green light as summarizing a template never stored.
+        let Err(err) = svc.handle_extra_action(&req(
+            "UpdateStackSet",
+            &[("StackSetName", "nope"), ("TemplateBody", GOOD_TEMPLATE)],
+        )) else {
+            panic!("an unknown stack set must be reported");
+        };
+        assert_eq!(err.code(), "StackSetNotFoundException");
+    }
+
+    #[test]
     fn a_supplied_but_unfetchable_template_url_is_not_silently_ignored() {
         let svc = svc();
         introspect(
@@ -3688,8 +3715,15 @@ mod tests {
     }
 
     fn ok(action: &str, params: &[(&str, &str)]) {
-        let r = svc().handle_extra_action(&req(action, params));
-        match r {
+        ok_on(&svc(), action, params);
+    }
+
+    /// `ok` against a service the caller keeps, for sequences where a later
+    /// call depends on state an earlier one created. `ok` builds a fresh
+    /// service per call, so anything that must EXIST by the time it is used
+    /// belongs here instead.
+    fn ok_on(svc: &CloudFormationService, action: &str, params: &[(&str, &str)]) {
+        match svc.handle_extra_action(&req(action, params)) {
             Ok(resp) => assert!(resp.status.is_success(), "{action} status: {}", resp.status),
             Err(e) => panic!("{action} failed: {e:?}"),
         }
@@ -4025,10 +4059,14 @@ mod tests {
 
     #[test]
     fn stack_sets_instances_refactors() {
-        ok("CreateStackSet", &[("StackSetName", "ss")]);
-        ok("DescribeStackSet", &[("StackSetName", "ss")]);
-        ok("ListStackSets", &[]);
-        ok("UpdateStackSet", &[("StackSetName", "ss")]);
+        // One service for the whole sequence: UpdateStackSet and
+        // DeleteStackSet act on the stack set CreateStackSet made, and a
+        // fresh service per call would not have it.
+        let svc = svc();
+        ok_on(&svc, "CreateStackSet", &[("StackSetName", "ss")]);
+        ok_on(&svc, "DescribeStackSet", &[("StackSetName", "ss")]);
+        ok_on(&svc, "ListStackSets", &[]);
+        ok_on(&svc, "UpdateStackSet", &[("StackSetName", "ss")]);
         ok(
             "DescribeStackSetOperation",
             &[("StackSetName", "ss"), ("OperationId", "op")],
@@ -4047,7 +4085,7 @@ mod tests {
             &[("StackSetName", "ss"), ("OperationId", "op")],
         );
         ok("ImportStacksToStackSet", &[("StackSetName", "ss")]);
-        ok("DeleteStackSet", &[("StackSetName", "ss")]);
+        ok_on(&svc, "DeleteStackSet", &[("StackSetName", "ss")]);
         ok(
             "CreateStackInstances",
             &[("StackSetName", "ss"), ("Regions.member.1", "us-east-1")],
