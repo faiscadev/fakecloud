@@ -515,6 +515,38 @@ async fn renaming_a_cluster_carries_its_references() {
         xml.contains("<DBInstanceIdentifier>inst-1</DBInstanceIdentifier>"),
         "the instance kept the old cluster name: {xml}"
     );
+
+    // And its snapshots.
+    call(
+        &svc,
+        "CreateDBClusterSnapshot",
+        &[
+            ("DBClusterSnapshotIdentifier", "snap-1"),
+            ("DBClusterIdentifier", "clu-new"),
+        ],
+    )
+    .await;
+    call(
+        &svc,
+        "ModifyDBCluster",
+        &[
+            ("DBClusterIdentifier", "clu-new"),
+            ("NewDBClusterIdentifier", "clu-final"),
+        ],
+    )
+    .await;
+    let xml = body(
+        &call(
+            &svc,
+            "DescribeDBClusterSnapshots",
+            &[("DBClusterIdentifier", "clu-final")],
+        )
+        .await,
+    );
+    assert!(
+        xml.contains("<DBClusterSnapshotIdentifier>snap-1</DBClusterSnapshotIdentifier>"),
+        "the snapshot kept the old cluster name: {xml}"
+    );
 }
 
 #[tokio::test]

@@ -909,7 +909,7 @@ impl NeptuneService {
             // member in either model, so reading one off the request
             // could never fire for an SDK or CLI caller.
             endpoint_type: "CUSTOM".to_string(),
-            custom_endpoint_type: endpoint_type.clone(),
+            custom_endpoint_type: endpoint_type,
             static_members: collect_list(req, "StaticMembers", &["member"]),
             excluded_members: collect_list(req, "ExcludedMembers", &["member"]),
             db_cluster_endpoint_arn: format!(

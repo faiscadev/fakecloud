@@ -717,6 +717,15 @@ impl DocDbService {
                     instance.db_cluster_identifier = new_id.clone();
                 }
             }
+            // Snapshots name their source cluster the same way, and
+            // DescribeDBClusterSnapshots matches on it: left behind, the
+            // new name returned no snapshots while the old one -- a
+            // cluster that no longer exists -- still did.
+            for snapshot in st.cluster_snapshots.values_mut() {
+                if snapshot.db_cluster_identifier == id {
+                    snapshot.db_cluster_identifier = new_id.clone();
+                }
+            }
             st.clusters.remove(&id);
             st.clusters.insert(new_id, cluster.clone());
         } else {
@@ -1633,7 +1642,13 @@ impl DocDbService {
             return Err(global_cluster_already_exists(&id));
         }
         // Optionally seed from an existing source cluster.
-        let source = optional_query_param(req, "SourceDBClusterIdentifier");
+        // An explicitly empty value is absent, as it is for
+        // GlobalClusterIdentifier on the create path. Without the
+        // filter, `SourceDBClusterIdentifier=` resolves to a cluster
+        // named "" and the new not-found check rejects a request that
+        // named no source at all.
+        let source = optional_query_param(req, "SourceDBClusterIdentifier")
+            .filter(|value| !value.is_empty());
         // The source cluster becomes the global cluster's first member,
         // as it does on AWS. It was resolved for its engine and then
         // discarded, so every global cluster reported an empty
