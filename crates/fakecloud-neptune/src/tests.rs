@@ -368,13 +368,57 @@ async fn describe_db_cluster_endpoints_honors_its_filters() {
             )),
             "db-cluster-endpoint-type={value} found no built-in endpoint: {xml}"
         );
-        // A built-in has no identifier of its own, so no custom
+        // A built-in has no identifier of its own, so NEITHER custom
         // endpoint should come back under this filter.
         assert!(
-            !xml.contains("<DBClusterEndpointIdentifier>ep-1</DBClusterEndpointIdentifier>"),
+            !xml.contains("<DBClusterEndpointIdentifier>"),
             "db-cluster-endpoint-type={value} returned a custom endpoint: {xml}"
         );
+        // And the built-in renders no empty optional members: an empty
+        // identifier or ARN reads as a resource named "".
+        for tag in [
+            "DBClusterEndpointIdentifier",
+            "DBClusterEndpointResourceIdentifier",
+            "CustomEndpointType",
+            "DBClusterEndpointArn",
+        ] {
+            assert!(
+                !xml.contains(&format!("<{tag}></{tag}>")),
+                "built-in rendered an empty <{tag}>: {xml}"
+            );
+        }
     }
+
+    // MaxRecords / Marker are modeled here and were never honored.
+    let first = body(&call(&svc, "DescribeDBClusterEndpoints", &[("MaxRecords", "1")]).await);
+    assert_eq!(
+        first.matches("<DBClusterEndpointList>").count(),
+        1,
+        "MaxRecords=1 returned more than one row: {first}"
+    );
+    let marker = first
+        .split("<Marker>")
+        .nth(1)
+        .and_then(|rest| rest.split("</Marker>").next())
+        .expect("a marker while rows remain")
+        .to_string();
+    let second = body(
+        &call(
+            &svc,
+            "DescribeDBClusterEndpoints",
+            &[("MaxRecords", "1"), ("Marker", &marker)],
+        )
+        .await,
+    );
+    assert_eq!(
+        second.matches("<DBClusterEndpointList>").count(),
+        1,
+        "{second}"
+    );
+    assert_ne!(
+        first, second,
+        "the second page repeated the first: {second}"
+    );
 
     // A status the endpoint is not in selects nothing.
     let xml = body(

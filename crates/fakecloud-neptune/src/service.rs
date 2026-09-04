@@ -1048,7 +1048,24 @@ impl NeptuneService {
                     && cluster_endpoint_matches_filters(e, &filters)
             })
             .collect();
-        let inner: String = endpoints
+        // MaxRecords / Marker are modeled on this operation and were
+        // never honored, so a client asking for a page got the whole
+        // list -- more visible now that each cluster contributes its two
+        // built-in endpoints. Clamped and lenient rather than
+        // rejecting: this operation declares no
+        // InvalidParameterValue-equivalent, so an error here would be an
+        // undeclared shape.
+        let max_records: usize =
+            match optional_query_param(req, "MaxRecords").map(|raw| raw.parse::<i32>()) {
+                Some(Ok(parsed)) => parsed.clamp(1, 100) as usize,
+                Some(Err(_)) | None => 100,
+            };
+        let (page, next_marker) = fakecloud_core::pagination::paginate(
+            &endpoints,
+            optional_query_param(req, "Marker").as_deref(),
+            max_records,
+        );
+        let inner: String = page
             .iter()
             .map(|e| {
                 format!(
@@ -1057,9 +1074,12 @@ impl NeptuneService {
                 )
             })
             .collect();
+        let marker_xml = next_marker
+            .map(|m| format!("<Marker>{}</Marker>", fakecloud_aws::xml::xml_escape(&m)))
+            .unwrap_or_default();
         Ok(ok_xml(
             "DescribeDBClusterEndpoints",
-            format!("<DBClusterEndpoints>{inner}</DBClusterEndpoints>"),
+            format!("<DBClusterEndpoints>{inner}</DBClusterEndpoints>{marker_xml}"),
             &req.request_id,
         ))
     }
