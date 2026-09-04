@@ -440,7 +440,7 @@ async fn acm_acme_probe() {
                 "RoleArn": "arn:aws:iam::123456789012:role/acme",
             }),
         )
-        .await["AcmeExternalAccountBindingArn"]
+        .await["ExternalAccountBinding"]["AcmeExternalAccountBindingArn"]
         .as_str()
         .expect("CreateAcmeExternalAccountBinding returns an ARN")
         .to_string();
@@ -452,7 +452,7 @@ async fn acm_acme_probe() {
         )
         .await;
     assert_eq!(
-        described["AcmeExternalAccountBinding"]["AcmeEndpointArn"],
+        described["ExternalAccountBinding"]["AcmeEndpointArn"],
         endpoint.as_str()
     );
 
@@ -463,9 +463,7 @@ async fn acm_acme_probe() {
         )
         .await;
     assert_eq!(
-        listed["AcmeExternalAccountBindings"]
-            .as_array()
-            .map(Vec::len),
+        listed["ExternalAccountBindings"].as_array().map(Vec::len),
         Some(1)
     );
 
@@ -475,7 +473,10 @@ async fn acm_acme_probe() {
             json!({ "AcmeExternalAccountBindingArn": binding }),
         )
         .await;
-    assert!(creds["HmacKey"].is_string() || creds["KeyId"].is_string());
+    assert!(
+        creds["KeyId"].is_string() && creds["MacKey"].is_string(),
+        "{creds}"
+    );
 
     acme.call(
         "RevokeAcmeExternalAccountBinding",
@@ -488,9 +489,9 @@ async fn acm_acme_probe() {
             json!({ "AcmeExternalAccountBindingArn": binding }),
         )
         .await;
-    assert_eq!(
-        described["AcmeExternalAccountBinding"]["Status"], "REVOKED",
-        "revoking must be observable"
+    assert!(
+        described["ExternalAccountBinding"]["RevokedAt"].is_number(),
+        "revoking must be observable: {described}"
     );
 
     acme.call(
