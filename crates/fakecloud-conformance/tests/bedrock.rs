@@ -1818,9 +1818,9 @@ async fn bedrock_evaluation_job_lifecycle() {
 #[test_action(
     "bedrock",
     "CreateAdvancedPromptOptimizationJob",
-    checksum = "888adcdb"
+    checksum = "731fc393"
 )]
-#[test_action("bedrock", "GetAdvancedPromptOptimizationJob", checksum = "9b661c72")]
+#[test_action("bedrock", "GetAdvancedPromptOptimizationJob", checksum = "71b6009b")]
 #[test_action("bedrock", "ListAdvancedPromptOptimizationJobs", checksum = "20f8a055")]
 #[test_action("bedrock", "StopAdvancedPromptOptimizationJob", checksum = "24036f24")]
 #[test_action(

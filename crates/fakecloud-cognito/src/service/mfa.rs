@@ -571,3 +571,47 @@ impl CognitoService {
         Ok(AwsResponse::ok_json(resp))
     }
 }
+
+impl CognitoService {
+    /// `AdminDeleteSoftwareToken` — remove a user's registered TOTP factor.
+    ///
+    /// Deleting the factor clears both the stored secret and the
+    /// software-token MFA preference: a user with no secret cannot be
+    /// challenged for one, so leaving the preference set would advertise a
+    /// factor that can no longer be satisfied.
+    pub(super) fn admin_delete_software_token(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let pool_id = require_str(&body, "UserPoolId")?;
+        let username = require_str(&body, "Username")?;
+
+        let mut accounts = self.state.write();
+        let state = accounts.get_or_create(&req.account_id);
+        ensure_user_pool_exists(state, pool_id)?;
+
+        let resolved = crate::service::resolve_alias_username(state, pool_id, username);
+        let username = resolved.as_str();
+        let user = state
+            .users
+            .get_mut(pool_id)
+            .and_then(|users| users.get_mut(username))
+            .ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "UserNotFoundException",
+                    "User does not exist.",
+                )
+            })?;
+
+        user.totp_secret = None;
+        if let Some(prefs) = user.mfa_preferences.as_mut() {
+            prefs.software_token_enabled = false;
+            prefs.software_token_preferred = false;
+        }
+        user.user_last_modified_date = Utc::now();
+
+        Ok(AwsResponse::ok_json(json!({})))
+    }
+}

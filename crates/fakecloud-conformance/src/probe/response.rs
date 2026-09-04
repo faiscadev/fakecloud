@@ -275,7 +275,16 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
         "monitoring" => &["ValidationError", "InvalidParameterValue"],
         "iam" => &["ValidationError", "NoSuchEntity"],
         "cloudformation" => &["ValidationError"],
-        "rds" => &["InvalidParameterValue"],
+        // RDS also publishes InvalidParameterCombination (parameters that
+        // conflict) and MissingParameter (an omitted required one) in the
+        // same "Common Errors" reference, and neither appears anywhere in
+        // the RDS Smithy file. Source: RDS API Reference, "Common Errors"
+        // (https://docs.aws.amazon.com/AmazonRDS/latest/APIReference/CommonErrors.html).
+        "rds" => &[
+            "InvalidParameterValue",
+            "InvalidParameterCombination",
+            "MissingParameter",
+        ],
         "elasticache" => &["InvalidParameterValue"],
         "kms" => &["ValidationException"],
         "ssm" => &["InvalidNextToken", "ValidationException"],

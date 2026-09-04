@@ -97,6 +97,22 @@ pub struct LocalSecondaryIndex {
     pub projection: Projection,
 }
 
+/// A vector index: a similarity-search index over one list-valued attribute.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VectorIndex {
+    pub index_name: String,
+    pub index_arn: String,
+    /// The attribute holding each item's vector.
+    pub vector_attribute: String,
+    pub dimensions: i64,
+    /// `VectorDistanceFunction` (COSINE | DOT_PRODUCT | EUCLIDEAN).
+    pub distance_function: String,
+    /// `SearchSchema` entries as `(AttributeName, SearchSchemaElementType)`.
+    pub search_schema: Vec<(String, String)>,
+    pub projection: Projection,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Projection {
     pub projection_type: String, // ALL, KEYS_ONLY, INCLUDE
@@ -243,6 +259,9 @@ pub struct DynamoTable {
     /// CreateTable and changed via UpdateTable.
     #[serde(default = "default_table_class")]
     pub table_class: String,
+    /// Vector indexes for similarity search, keyed by index name.
+    #[serde(default)]
+    pub vector_indexes: Vec<VectorIndex>,
 }
 
 pub(crate) fn default_table_class() -> String {
@@ -957,6 +976,7 @@ mod tests {
             deletion_protection_enabled: false,
             on_demand_throughput: None,
             table_class: default_table_class(),
+            vector_indexes: Vec::new(),
         }
     }
 

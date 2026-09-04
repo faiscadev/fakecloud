@@ -210,5 +210,44 @@ pub(crate) fn build_table_description(table: &DynamoTable) -> Value {
     // falls back to STANDARD when absent.
     desc["TableClassSummary"] = json!({ "TableClass": table.table_class });
 
+    // Vector indexes are only present once the table declares one, matching
+    // the way AWS omits an empty index list rather than returning `[]`.
+    if !table.vector_indexes.is_empty() {
+        desc["VectorIndexes"] = Value::Array(
+            table
+                .vector_indexes
+                .iter()
+                .map(build_vector_index_description)
+                .collect(),
+        );
+    }
+
     desc
+}
+
+/// Project a stored [`VectorIndex`] into a `VectorIndexDescription`.
+pub(crate) fn build_vector_index_description(idx: &VectorIndex) -> Value {
+    json!({
+        "IndexName": idx.index_name,
+        "IndexArn": idx.index_arn,
+        "IndexStatus": idx.status,
+        "Backfilling": false,
+        "ItemCount": 0,
+        "IndexSizeBytes": 0,
+        "Dimensions": idx.dimensions,
+        "DistanceFunction": idx.distance_function,
+        "VectorAttribute": { "AttributeName": idx.vector_attribute },
+        "SearchSchema": idx
+            .search_schema
+            .iter()
+            .map(|(name, kind)| json!({
+                "AttributeName": name,
+                "SearchSchemaElementType": kind,
+            }))
+            .collect::<Vec<Value>>(),
+        "Projection": {
+            "ProjectionType": idx.projection.projection_type,
+            "NonKeyAttributes": idx.projection.non_key_attributes,
+        },
+    })
 }

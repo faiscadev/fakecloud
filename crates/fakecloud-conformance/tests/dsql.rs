@@ -95,7 +95,7 @@ async fn dsql_list_clusters() {
     assert!(resp.clusters().iter().any(|c| c.identifier() == id));
 }
 
-#[test_action("dsql", "GetVpcEndpointServiceName", checksum = "4636592d")]
+#[test_action("dsql", "GetVpcEndpointServiceName", checksum = "093c086f")]
 #[tokio::test]
 async fn dsql_get_vpc_endpoint_service_name() {
     let server = TestServer::start().await;
@@ -203,7 +203,7 @@ async fn make_stream(client: &aws_sdk_dsql::Client, cluster_id: &str) -> String 
         .clone()
 }
 
-#[test_action("dsql", "CreateStream", checksum = "ffb28976")]
+#[test_action("dsql", "CreateStream", checksum = "e0378da2")]
 #[tokio::test]
 async fn dsql_create_stream() {
     let server = TestServer::start().await;
@@ -223,7 +223,7 @@ async fn dsql_create_stream() {
     assert_eq!(resp.status().as_str(), "CREATING");
 }
 
-#[test_action("dsql", "GetStream", checksum = "d985156f")]
+#[test_action("dsql", "GetStream", checksum = "f4ac4c6a")]
 #[tokio::test]
 async fn dsql_get_stream() {
     let server = TestServer::start().await;

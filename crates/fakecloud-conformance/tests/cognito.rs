@@ -7,6 +7,9 @@ use helpers::TestServer;
 // User Pool lifecycle
 // ---------------------------------------------------------------------------
 
+#[test_action("cognito-idp", "AdminDeleteSoftwareToken", checksum = "25009e40")]
+#[test_action("cognito-idp", "DescribeTermsByClient", checksum = "a780f839")]
+#[test_action("cognito-idp", "GetClientToken", checksum = "6e91e741")]
 #[test_action("cognito-idp", "CreateUserPool", checksum = "685b8c93")]
 #[tokio::test]
 async fn cognito_create_user_pool() {

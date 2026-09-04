@@ -852,6 +852,7 @@ mod tests {
                     deletion_protection_enabled: false,
                     on_demand_throughput: None,
                     table_class: "STANDARD".into(),
+                    vector_indexes: Vec::new(),
                 },
             );
         }

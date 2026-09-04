@@ -304,29 +304,26 @@ where
         Some(Err(_)) | None => 100,
     };
 
-    // Decode marker to get starting identifier. A marker we don't
-    // recognise (un-decodable base64, invalid UTF-8) is treated as
-    // pointing past the end of the list — same as a marker we
-    // recognise that no longer matches a known item. Returning an
-    // error here would surface as a wire code Smithy doesn't declare
-    // for any Describe* op.
-    let start_id = match marker {
+    // A marker we don't recognise — un-decodable base64, invalid UTF-8,
+    // or a key that no longer matches a known item — points past the end
+    // of the list. Returning an error instead would surface as a wire
+    // code Smithy doesn't declare for any Describe* op.
+    //
+    // "Absent" and "present but unreadable" are NOT the same: decoding
+    // used to collapse both to `None`, which restarted an unreadable
+    // marker at the FIRST page. A client that mangles a marker then gets
+    // page one again and, if it keeps paging, walks the list forever
+    // instead of ending — the failure this comment already claimed was
+    // handled.
+    let start_index = match marker {
+        None => 0,
         Some(encoded_marker) => BASE64
             .decode(encoded_marker.as_bytes())
             .ok()
-            .and_then(|decoded| String::from_utf8(decoded).ok()),
-        None => None,
-    };
-
-    // Find starting position
-    let start_index = if let Some(ref start_id) = start_id {
-        items
-            .iter()
-            .position(|item| get_id(item) == start_id)
+            .and_then(|decoded| String::from_utf8(decoded).ok())
+            .and_then(|start_id| items.iter().position(|item| get_id(item) == start_id))
             .map(|pos| pos + 1) // Start after the marker
-            .unwrap_or(items.len()) // If not found, return empty result
-    } else {
-        0
+            .unwrap_or(items.len()), // Unreadable or unknown: past the end
     };
 
     // Take items from start_index
@@ -512,11 +509,19 @@ fn is_valid_instance_size(size: &str) -> bool {
 
 pub(crate) fn validate_db_instance_class(db_instance_class: &str) -> Result<(), AwsServiceError> {
     if !is_valid_db_instance_class(db_instance_class) {
-        return Err(AwsServiceError::aws_error(
-            StatusCode::BAD_REQUEST,
-            "InvalidParameterValue",
-            format!("Invalid DB Instance class: {db_instance_class}"),
-        ));
+        // AWS returns InvalidParameterValue for a MALFORMED class, and
+        // InsufficientDBInstanceCapacity only for a well-formed one that
+        // is momentarily unavailable -- a transient condition whose
+        // documented remedy is to retry. Reporting a typo as a capacity
+        // problem would name no parameter and tell the caller to retry
+        // something that can never succeed. InvalidParameterValue is one
+        // of RDS's published Common Errors; it appears nowhere in the
+        // Smithy file, which is why the conformance classifier carries an
+        // `rds` common-error entry rather than this being bent to a
+        // declared-but-wrong shape.
+        return Err(invalid_param(&format!(
+            "Invalid DB Instance class: {db_instance_class}"
+        )));
     }
     Ok(())
 }
@@ -2517,6 +2522,10 @@ mod instance_class_tests {
                 !is_valid_db_instance_class(class),
                 "expected {class:?} to be rejected"
             );
+            // AWS's own answer for a malformed class, and one of RDS's
+            // published Common Errors -- see the note on the conformance
+            // classifier's `rds` entry for why that is in-contract
+            // despite appearing nowhere in the Smithy file.
             let err = validate_db_instance_class(class).unwrap_err();
             assert_eq!(err.code(), "InvalidParameterValue", "for {class:?}");
         }

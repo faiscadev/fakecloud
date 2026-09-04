@@ -1219,6 +1219,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `AdminAddUserToGroup`
 - `AdminConfirmSignUp`
 - `AdminCreateUser`
+- `AdminDeleteSoftwareToken`
 - `AdminDeleteUser`
 - `AdminDeleteUserAttributes`
 - `AdminDisableProviderForUser`
@@ -1278,6 +1279,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `DescribeResourceServer`
 - `DescribeRiskConfiguration`
 - `DescribeTerms`
+- `DescribeTermsByClient`
 - `DescribeUserImportJob`
 - `DescribeUserPool`
 - `DescribeUserPoolClient`
@@ -1285,6 +1287,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ForgetDevice`
 - `ForgotPassword`
 - `GetCSVHeader`
+- `GetClientToken`
 - `GetDevice`
 - `GetGroup`
 - `GetIdentityProviderByIdentifier`
@@ -7877,6 +7880,7 @@ This is a surface listing, not an implementation manifest. For fakecloud's per-s
 - `ReleaseIpamPoolAllocation`
 - `ReplaceIamInstanceProfileAssociation`
 - `ReplaceImageCriteriaInAllowedImagesSettings`
+- `ReplaceImageInstanceTypeSpecification`
 - `ReplaceNetworkAclAssociation`
 - `ReplaceNetworkAclEntry`
 - `ReplaceRoute`

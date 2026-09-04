@@ -10034,3 +10034,201 @@ fn oauth2_userinfo_rejects_expired_token() {
         .expect("fresh token returns claims");
     assert_eq!(claims["username"], "uiuser");
 }
+
+// ---------------------------------------------------------------------
+// New operations from the 2026-08-31 model refresh
+// ---------------------------------------------------------------------
+
+/// Create an M2M app client with a secret and the client_credentials flow.
+fn create_m2m_client(svc: &CognitoService, pool_id: &str, scopes: &[&str]) -> (String, String) {
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientName": "m2m-client",
+        "GenerateSecret": true,
+        "AllowedOAuthFlows": ["client_credentials"],
+        "AllowedOAuthScopes": scopes,
+        "AllowedOAuthFlowsUserPoolClient": true,
+    });
+    let req = make_req("CreateUserPoolClient", &body.to_string());
+    let b = resp_json(&svc.create_user_pool_client(&req).unwrap());
+    (
+        b["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+        b["UserPoolClient"]["ClientSecret"]
+            .as_str()
+            .unwrap()
+            .to_string(),
+    )
+}
+
+#[test]
+fn get_client_token_issues_an_m2m_access_token() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, secret) = create_m2m_client(&svc, &pool_id, &["api/read", "api/write"]);
+
+    let body = json!({ "ClientId": client_id, "Secret": secret, "Scopes": ["api/read"] });
+    let resp =
+        block_on(svc.get_client_token(&make_req("GetClientToken", &body.to_string()))).unwrap();
+    let b = resp_json(&resp);
+    let result = &b["ClientAuthenticationResult"];
+    assert_eq!(result["TokenType"], "Bearer");
+    assert!(result["ExpiresIn"].as_i64().unwrap() > 0);
+    let token = result["AccessToken"].as_str().unwrap();
+    // A real JWT: three dot-separated segments.
+    assert_eq!(token.split('.').count(), 3, "{token}");
+
+    // The token is registered, so the pool can resolve its owner later.
+    {
+        let state = _state_of(&svc);
+        let accounts = state.read();
+        let acct = accounts.get("123456789012").unwrap();
+        let data = acct.access_tokens.get(token).expect("token registered");
+        assert_eq!(data.client_id, client_id);
+        assert_eq!(data.user_pool_id, pool_id);
+    }
+}
+
+fn _state_of(svc: &CognitoService) -> crate::state::SharedCognitoState {
+    svc.state.clone()
+}
+
+#[test]
+fn get_client_token_enforces_secret_flow_and_scopes() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let (client_id, secret) = create_m2m_client(&svc, &pool_id, &["api/read"]);
+
+    // A wrong secret is not authorized.
+    let body = json!({ "ClientId": client_id, "Secret": "wrong" });
+    let err = expect_err(block_on(
+        svc.get_client_token(&make_req("GetClientToken", &body.to_string())),
+    ));
+    assert_eq!(err.code(), "NotAuthorizedException");
+
+    // A scope the client is not registered for is rejected rather than
+    // silently narrowed.
+    let body = json!({ "ClientId": client_id, "Secret": secret, "Scopes": ["api/admin"] });
+    let err = expect_err(block_on(
+        svc.get_client_token(&make_req("GetClientToken", &body.to_string())),
+    ));
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    // An unknown client does not exist.
+    let body = json!({ "ClientId": "no-such-client", "Secret": "x" });
+    let err = expect_err(block_on(
+        svc.get_client_token(&make_req("GetClientToken", &body.to_string())),
+    ));
+    assert_eq!(err.code(), "ResourceNotFoundException");
+
+    // A public client (no secret, no client_credentials flow) cannot use it.
+    let plain_client = create_client(&svc, &pool_id);
+    let body = json!({ "ClientId": plain_client, "Secret": "anything" });
+    let err = expect_err(block_on(
+        svc.get_client_token(&make_req("GetClientToken", &body.to_string())),
+    ));
+    assert_eq!(err.code(), "NotAuthorizedException");
+}
+
+#[test]
+fn admin_delete_software_token_clears_secret_and_preference() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    admin_create_user_helper(&svc, &pool_id, "totp-user");
+
+    // Register a TOTP factor and prefer it.
+    {
+        let state = _state_of(&svc);
+        let mut accounts = state.write();
+        let acct = accounts.get_or_create("123456789012");
+        let user = acct
+            .users
+            .get_mut(&pool_id)
+            .unwrap()
+            .get_mut("totp-user")
+            .unwrap();
+        user.totp_secret = Some("JBSWY3DPEHPK3PXP".to_string());
+        user.mfa_preferences = Some(crate::state::MfaPreferences {
+            sms_enabled: false,
+            sms_preferred: false,
+            software_token_enabled: true,
+            software_token_preferred: true,
+        });
+    }
+
+    let body = json!({ "UserPoolId": pool_id, "Username": "totp-user" });
+    svc.admin_delete_software_token(&make_req("AdminDeleteSoftwareToken", &body.to_string()))
+        .unwrap();
+
+    let state = _state_of(&svc);
+    let accounts = state.read();
+    let user = accounts
+        .get("123456789012")
+        .unwrap()
+        .users
+        .get(&pool_id)
+        .unwrap()
+        .get("totp-user")
+        .unwrap();
+    assert!(user.totp_secret.is_none(), "secret cleared");
+    let prefs = user.mfa_preferences.as_ref().unwrap();
+    // A factor that no longer exists must not still be advertised.
+    assert!(!prefs.software_token_enabled);
+    assert!(!prefs.software_token_preferred);
+}
+
+#[test]
+fn admin_delete_software_token_reports_missing_pool_and_user() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+
+    let body = json!({ "UserPoolId": pool_id, "Username": "ghost" });
+    let err = expect_err(
+        svc.admin_delete_software_token(&make_req("AdminDeleteSoftwareToken", &body.to_string())),
+    );
+    assert_eq!(err.code(), "UserNotFoundException");
+
+    let body = json!({ "UserPoolId": "us-east-1_missing", "Username": "x" });
+    let err = expect_err(
+        svc.admin_delete_software_token(&make_req("AdminDeleteSoftwareToken", &body.to_string())),
+    );
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[test]
+fn describe_terms_by_client_resolves_by_client_and_name() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+
+    let body = json!({
+        "UserPoolId": pool_id,
+        "ClientId": client_id,
+        "TermsName": "tos",
+        "TermsSource": "LINK",
+        "Enforcement": "NONE",
+    });
+    svc.create_terms(&make_req("CreateTerms", &body.to_string()))
+        .unwrap();
+
+    let body = json!({ "UserPoolId": pool_id, "ClientId": client_id, "TermsName": "tos" });
+    let b = resp_json(
+        &svc.describe_terms_by_client(&make_req("DescribeTermsByClient", &body.to_string()))
+            .unwrap(),
+    );
+    assert_eq!(b["Terms"]["TermsName"], "tos");
+    assert_eq!(b["Terms"]["ClientId"], client_id.as_str());
+
+    // A different name, or a different client, does not match.
+    for body in [
+        json!({ "UserPoolId": pool_id, "ClientId": client_id, "TermsName": "other" }),
+        json!({ "UserPoolId": pool_id, "ClientId": "other-client", "TermsName": "tos" }),
+    ] {
+        let err = expect_err(
+            svc.describe_terms_by_client(&make_req("DescribeTermsByClient", &body.to_string())),
+        );
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+}

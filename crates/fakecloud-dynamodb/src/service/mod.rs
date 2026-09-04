@@ -6,6 +6,7 @@ mod items;
 mod queries;
 mod streams;
 mod tables;
+mod vectors;
 
 use std::collections::HashMap;
 use std::io;
@@ -465,6 +466,7 @@ impl AwsService for DynamoDbService {
             "DeleteItem" => self.delete_item(&req),
             "UpdateItem" => self.update_item(&req),
             "Query" => self.query(&req),
+            "SearchVectors" => self.search_vectors(&req),
             "Scan" => self.scan(&req),
             "BatchGetItem" => self.batch_get_item(&req),
             "BatchWriteItem" => self.batch_write_item(&req),
@@ -548,6 +550,7 @@ impl AwsService for DynamoDbService {
             "UpdateItem",
             "Query",
             "Scan",
+            "SearchVectors",
             "BatchGetItem",
             "BatchWriteItem",
             "TagResource",
