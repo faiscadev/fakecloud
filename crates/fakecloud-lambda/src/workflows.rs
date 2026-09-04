@@ -7,7 +7,6 @@
 use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
-use uuid::Uuid;
 
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
@@ -251,16 +250,6 @@ pub(crate) fn list_function_versions_by_capacity_provider(
 
 // ─── Durable executions ───────────────────────────────────────────────────
 
-fn execution_arn(region: &str, account: &str, id: &str) -> String {
-    Arn::new(
-        "lambda",
-        region,
-        account,
-        &format!("durable-execution/{id}"),
-    )
-    .to_string()
-}
-
 fn execution_json(e: &DurableExecution) -> Value {
     json!({
         "DurableExecutionArn": e.arn,
@@ -283,6 +272,21 @@ pub(crate) fn list_durable_executions_by_function(
     function_name: &str,
 ) -> Result<AwsResponse, AwsServiceError> {
     check_len("FunctionName", function_name, 1, 170)?;
+    {
+        // Listing executions of a function that does not exist is a 404, as it
+        // is for every other operation scoped to one function.
+        let accts = state.read();
+        let exists = accts
+            .get(&req.account_id)
+            .is_some_and(|s| s.functions.contains_key(function_name));
+        if !exists {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Function not found: {function_name}"),
+            ));
+        }
+    }
     if let Some(n) = req.query_params.get("DurableExecutionName") {
         check_len("DurableExecutionName", n, 1, 64)?;
     }
@@ -440,16 +444,20 @@ fn record_callback(
     check_len("CallbackId", callback_id, 1, 1024)?;
     let mut accts = state.write();
     let s = accts.get_or_create(&req.account_id);
-    let existing_execution = s
+    // A callback token is minted by the service when a task suspends, so an
+    // id nobody handed out cannot be recorded against: the operation declares
+    // ResourceNotFoundException for exactly this.
+    let execution_arn = s
         .durable_execution_callbacks
         .get(callback_id)
-        .map(|cb| cb.execution_arn.clone());
-    let execution_arn = existing_execution.unwrap_or_else(|| {
-        // Synthesize a parent execution arn when the callback id is
-        // unknown — callbacks created externally (out-of-band) still
-        // need to be recordable so the workflow can resume.
-        execution_arn(&req.region, &req.account_id, &Uuid::new_v4().to_string())
-    });
+        .map(|cb| cb.execution_arn.clone())
+        .ok_or_else(|| {
+            AwsServiceError::aws_error(
+                StatusCode::NOT_FOUND,
+                "ResourceNotFoundException",
+                format!("Callback not found: {callback_id}"),
+            )
+        })?;
     s.durable_execution_callbacks.insert(
         callback_id.to_string(),
         DurableExecutionCallback {
@@ -603,6 +611,15 @@ mod tests {
     fn seed_execution(s: &SharedLambdaState, arn: &str, function_name: &str, status: &str) {
         let mut accts = s.write();
         let st = accts.get_or_create("123456789012");
+        // An execution belongs to a function, and listing by function name
+        // 404s when that function does not exist, so seed it too.
+        if !st.functions.contains_key(function_name) {
+            let f = crate::state::LambdaFunction {
+                function_name: function_name.to_string(),
+                ..Default::default()
+            };
+            st.functions.insert(function_name.to_string(), f);
+        }
         st.durable_executions.insert(
             arn.to_string(),
             DurableExecution {
@@ -692,9 +709,28 @@ mod tests {
         assert_eq!(v["DurableExecutions"].as_array().unwrap().len(), 1);
     }
 
+    /// Seed a callback token as the service would when a task suspends.
+    fn seed_callback(s: &SharedLambdaState, callback_id: &str) {
+        let mut accts = s.write();
+        let st = accts.get_or_create("123456789012");
+        st.durable_execution_callbacks.insert(
+            callback_id.to_string(),
+            DurableExecutionCallback {
+                callback_id: callback_id.to_string(),
+                execution_arn: "arn:aws:lambda:us-east-1:123456789012:durable-execution/e1"
+                    .to_string(),
+                outcome: "Pending".to_string(),
+                recorded_at: Utc::now(),
+            },
+        );
+    }
+
     #[test]
-    fn send_callback_records_outcome_and_creates_callback_if_unknown() {
+    fn send_callback_records_the_outcome_on_a_known_token() {
         let s = shared();
+        for id in ["cb1", "cb2", "cb3"] {
+            seed_callback(&s, id);
+        }
         send_callback_success(&s, &req(), "cb1").unwrap();
         send_callback_failure(&s, &req(), "cb2").unwrap();
         send_callback_heartbeat(&s, &req(), "cb3").unwrap();
@@ -703,5 +739,36 @@ mod tests {
         assert_eq!(cbs["cb1"].outcome, "Succeeded");
         assert_eq!(cbs["cb2"].outcome, "Failed");
         assert_eq!(cbs["cb3"].outcome, "Heartbeat");
+    }
+
+    /// A callback token is minted by the service when a task suspends, so an
+    /// id nobody handed out is not recordable.
+    #[test]
+    fn send_callback_rejects_an_unknown_token() {
+        let s = shared();
+        for outcome in [
+            send_callback_success(&s, &req(), "never-issued"),
+            send_callback_failure(&s, &req(), "never-issued"),
+            send_callback_heartbeat(&s, &req(), "never-issued"),
+        ] {
+            assert_eq!(
+                outcome.err().map(|e| e.code().to_string()).as_deref(),
+                Some("ResourceNotFoundException")
+            );
+        }
+        assert!(s
+            .read()
+            .default_ref()
+            .durable_execution_callbacks
+            .is_empty());
+    }
+
+    #[test]
+    fn listing_executions_of_an_unknown_function_is_not_found() {
+        let s = shared();
+        let err = list_durable_executions_by_function(&s, &req(), "never-created")
+            .err()
+            .expect("an unknown function must not list");
+        assert_eq!(err.code(), "ResourceNotFoundException");
     }
 }
