@@ -9,6 +9,7 @@ use aws_sdk_acm::types::{
 };
 use fakecloud_conformance_macros::test_action;
 use helpers::TestServer;
+use serde_json::{json, Value};
 
 const FAKE_CERT_PEM: &str = "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n";
 const FAKE_KEY_PEM: &str = "-----BEGIN RSA PRIVATE KEY-----\nfake\n-----END RSA PRIVATE KEY-----\n";
@@ -357,4 +358,343 @@ async fn acm_resource_tagging_round_trip() {
     assert_eq!(resp.status().as_u16(), 400);
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["__type"], "ResourceNotFoundException");
+}
+
+#[test_action("acm", "CreateAcmeEndpoint", checksum = "abaa76f8")]
+#[test_action("acm", "DescribeAcmeEndpoint", checksum = "8136ef22")]
+#[test_action("acm", "ListAcmeEndpoints", checksum = "222a44a5")]
+#[test_action("acm", "UpdateAcmeEndpoint", checksum = "d18ace62")]
+#[test_action("acm", "DeleteAcmeEndpoint", checksum = "3c3bef6a")]
+#[test_action("acm", "CreateAcmeExternalAccountBinding", checksum = "cd3e4faa")]
+#[test_action("acm", "DescribeAcmeExternalAccountBinding", checksum = "eef71175")]
+#[test_action("acm", "ListAcmeExternalAccountBindings", checksum = "7f9c3531")]
+#[test_action("acm", "RevokeAcmeExternalAccountBinding", checksum = "942dd969")]
+#[test_action("acm", "DeleteAcmeExternalAccountBinding", checksum = "fb81c04f")]
+#[test_action(
+    "acm",
+    "GetAcmeExternalAccountBindingCredentials",
+    checksum = "488d780b"
+)]
+#[test_action("acm", "CreateAcmeDomainValidation", checksum = "56c53e35")]
+#[test_action("acm", "DescribeAcmeDomainValidation", checksum = "fe93e5cf")]
+#[test_action("acm", "ListAcmeDomainValidations", checksum = "42c056b9")]
+#[test_action("acm", "UpdateAcmeDomainValidation", checksum = "fea27f24")]
+#[test_action("acm", "DeleteAcmeDomainValidation", checksum = "9f9ffb72")]
+#[test_action("acm", "DescribeAcmeAccount", checksum = "099d466b")]
+#[test_action("acm", "ListAcmeAccounts", checksum = "41886794")]
+#[test_action("acm", "RevokeAcmeAccount", checksum = "9f6841e6")]
+#[tokio::test]
+async fn acm_acme_probe() {
+    // The vendored aws-sdk-acm predates the ACME surface, so these operations
+    // are driven over the wire directly rather than through the SDK. Every
+    // annotated action above is exercised here, in dependency order.
+    let server = TestServer::start().await;
+    let acme = AcmeClient::new(&server);
+
+    // --- endpoints ---
+    let endpoint = acme
+        .call(
+            "CreateAcmeEndpoint",
+            json!({
+                "AuthorizationBehavior": "PRE_APPROVED",
+                "CertificateAuthority": {
+                    "PublicCertificateAuthority": { "AllowedKeyAlgorithms": ["RSA_2048"] }
+                },
+            }),
+        )
+        .await["AcmeEndpointArn"]
+        .as_str()
+        .expect("CreateAcmeEndpoint returns an ARN")
+        .to_string();
+
+    let described = acme
+        .call(
+            "DescribeAcmeEndpoint",
+            json!({ "AcmeEndpointArn": endpoint }),
+        )
+        .await;
+    assert_eq!(described["AcmeEndpoint"]["Status"], "ACTIVE");
+
+    let listed = acme.call("ListAcmeEndpoints", json!({})).await;
+    assert_eq!(listed["AcmeEndpoints"].as_array().map(Vec::len), Some(1));
+
+    acme.call(
+        "UpdateAcmeEndpoint",
+        json!({ "AcmeEndpointArn": endpoint, "Contact": "NOT_REQUIRED" }),
+    )
+    .await;
+    let described = acme
+        .call(
+            "DescribeAcmeEndpoint",
+            json!({ "AcmeEndpointArn": endpoint }),
+        )
+        .await;
+    assert_eq!(described["AcmeEndpoint"]["Contact"], "NOT_REQUIRED");
+
+    // --- external account bindings ---
+    let binding = acme
+        .call(
+            "CreateAcmeExternalAccountBinding",
+            json!({
+                "AcmeEndpointArn": endpoint,
+                "RoleArn": "arn:aws:iam::123456789012:role/acme",
+            }),
+        )
+        .await["ExternalAccountBinding"]["AcmeExternalAccountBindingArn"]
+        .as_str()
+        .expect("CreateAcmeExternalAccountBinding returns an ARN")
+        .to_string();
+
+    let described = acme
+        .call(
+            "DescribeAcmeExternalAccountBinding",
+            json!({ "AcmeExternalAccountBindingArn": binding }),
+        )
+        .await;
+    assert_eq!(
+        described["ExternalAccountBinding"]["AcmeEndpointArn"],
+        endpoint.as_str()
+    );
+
+    let listed = acme
+        .call(
+            "ListAcmeExternalAccountBindings",
+            json!({ "AcmeEndpointArn": endpoint }),
+        )
+        .await;
+    assert_eq!(
+        listed["ExternalAccountBindings"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    let creds = acme
+        .call(
+            "GetAcmeExternalAccountBindingCredentials",
+            json!({ "AcmeExternalAccountBindingArn": binding }),
+        )
+        .await;
+    assert!(
+        creds["KeyId"].is_string() && creds["MacKey"].is_string(),
+        "{creds}"
+    );
+
+    acme.call(
+        "RevokeAcmeExternalAccountBinding",
+        json!({ "AcmeExternalAccountBindingArn": binding }),
+    )
+    .await;
+    let described = acme
+        .call(
+            "DescribeAcmeExternalAccountBinding",
+            json!({ "AcmeExternalAccountBindingArn": binding }),
+        )
+        .await;
+    assert!(
+        described["ExternalAccountBinding"]["RevokedAt"].is_number(),
+        "revoking must be observable: {described}"
+    );
+
+    acme.call(
+        "DeleteAcmeExternalAccountBinding",
+        json!({ "AcmeExternalAccountBindingArn": binding }),
+    )
+    .await;
+
+    // --- domain validations ---
+    let validation = acme
+        .call(
+            "CreateAcmeDomainValidation",
+            json!({
+                "AcmeEndpointArn": endpoint,
+                "DomainName": "conf.example.com",
+                "RoleArn": "arn:aws:iam::123456789012:role/acme",
+                "PrevalidationOptions": {
+                    "DnsPrevalidation": {
+                        "DomainScope": { "ExactDomain": "ENABLED" }
+                    }
+                },
+            }),
+        )
+        .await["AcmeDomainValidationArn"]
+        .as_str()
+        .expect("CreateAcmeDomainValidation returns an ARN")
+        .to_string();
+
+    let described = acme
+        .call(
+            "DescribeAcmeDomainValidation",
+            json!({ "AcmeDomainValidationArn": validation }),
+        )
+        .await;
+    assert_eq!(
+        described["AcmeDomainValidation"]["DomainName"],
+        "conf.example.com"
+    );
+
+    let listed = acme
+        .call(
+            "ListAcmeDomainValidations",
+            json!({ "AcmeEndpointArn": endpoint }),
+        )
+        .await;
+    assert_eq!(
+        listed["AcmeDomainValidations"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    acme.call(
+        "UpdateAcmeDomainValidation",
+        json!({
+            "AcmeDomainValidationArn": validation,
+            "PrevalidationOptions": {
+                "DnsPrevalidation": { "DomainScope": { "Subdomains": "ENABLED" } }
+            },
+        }),
+    )
+    .await;
+    let described = acme
+        .call(
+            "DescribeAcmeDomainValidation",
+            json!({ "AcmeDomainValidationArn": validation }),
+        )
+        .await;
+    assert_eq!(
+        described["AcmeDomainValidation"]["PrevalidationDetails"]["DnsPrevalidation"]
+            ["DomainScope"]["Subdomains"],
+        "ENABLED"
+    );
+
+    acme.call(
+        "DeleteAcmeDomainValidation",
+        json!({ "AcmeDomainValidationArn": validation }),
+    )
+    .await;
+
+    // --- accounts ---
+    // Accounts appear when an ACME client registers against the endpoint; the
+    // list and describe paths are driven against that empty set, and revoke
+    // reports the account as gone rather than inventing one.
+    let listed = acme
+        .call("ListAcmeAccounts", json!({ "AcmeEndpointArn": endpoint }))
+        .await;
+    assert!(listed["AcmeAccounts"].is_array());
+
+    let missing = acme
+        .call_expecting_error(
+            "DescribeAcmeAccount",
+            json!({
+                "AcmeEndpointArn": endpoint,
+                "AccountUrl": "https://acme.example/acct/absent",
+            }),
+        )
+        .await;
+    assert_eq!(missing, "ResourceNotFoundException");
+
+    let missing = acme
+        .call_expecting_error(
+            "RevokeAcmeAccount",
+            json!({
+                "AcmeEndpointArn": endpoint,
+                "AccountUrl": "https://acme.example/acct/absent",
+            }),
+        )
+        .await;
+    assert_eq!(missing, "ResourceNotFoundException");
+
+    // Deleting the endpoint is last: it takes its children with it.
+    acme.call("DeleteAcmeEndpoint", json!({ "AcmeEndpointArn": endpoint }))
+        .await;
+    let listed = acme.call("ListAcmeEndpoints", json!({})).await;
+    assert_eq!(listed["AcmeEndpoints"].as_array().map(Vec::len), Some(0));
+}
+
+/// Drives ACM's awsJson surface directly, for operations the vendored SDK does
+/// not know about.
+struct AcmeClient {
+    endpoint: String,
+    http: reqwest::Client,
+}
+
+impl AcmeClient {
+    fn new(server: &TestServer) -> Self {
+        Self {
+            endpoint: server.endpoint().to_string(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn send(&self, action: &str, body: Value) -> (u16, Value) {
+        let resp = self
+            .http
+            .post(&self.endpoint)
+            .header("x-amz-target", format!("CertificateManager.{action}"))
+            .header("content-type", "application/x-amz-json-1.1")
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/acm/aws4_request, \
+                 SignedHeaders=host, Signature=test",
+            )
+            .body(body.to_string())
+            .send()
+            .await
+            .expect("ACME request failed");
+        let status = resp.status().as_u16();
+        let text = resp.text().await.unwrap_or_default();
+        let json = serde_json::from_str(&text).unwrap_or(Value::Null);
+        (status, json)
+    }
+
+    async fn call(&self, action: &str, body: Value) -> Value {
+        let (status, json) = self.send(action, body).await;
+        assert_eq!(status, 200, "{action} failed: {json}");
+        json
+    }
+
+    /// The error code from a call that is expected to fail.
+    async fn call_expecting_error(&self, action: &str, body: Value) -> String {
+        let (status, json) = self.send(action, body).await;
+        assert_ne!(status, 200, "{action} unexpectedly succeeded: {json}");
+        json["__type"]
+            .as_str()
+            .or_else(|| json["code"].as_str())
+            .unwrap_or_default()
+            .rsplit('#')
+            .next()
+            .unwrap_or_default()
+            .to_string()
+    }
+}
+
+#[test_action("acm", "ListCertificateDomainValidations", checksum = "0c030016")]
+#[tokio::test]
+async fn acm_list_certificate_domain_validations() {
+    let server = TestServer::start().await;
+    let arn = make_cert(&server, "validations.example.com").await;
+    let acme = AcmeClient::new(&server);
+
+    let out = acme
+        .call(
+            "ListCertificateDomainValidations",
+            json!({ "CertificateArn": arn }),
+        )
+        .await;
+    let list = out["DomainValidationSummaryList"].as_array().unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0]["DomainName"], "validations.example.com");
+    // A DNS-validated certificate carries its resource record on the challenge.
+    let active = &list[0]["ActiveValidationConfiguration"];
+    assert_eq!(active["ValidationMethod"], "DNS");
+    assert!(
+        active["ValidationChallenge"]["DnsValidationChallenge"]["ResourceRecord"]["Name"]
+            .is_string()
+    );
+
+    // An unknown certificate is a not-found, which the operation declares.
+    let err = acme
+        .call_expecting_error(
+            "ListCertificateDomainValidations",
+            json!({ "CertificateArn": "arn:aws:acm:us-east-1:123456789012:certificate/ghost" }),
+        )
+        .await;
+    assert_eq!(err, "ResourceNotFoundException");
 }

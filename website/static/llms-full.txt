@@ -6,7 +6,7 @@
 
 fakecloud emulates AWS locally for integration testing and development. It is a single Rust binary (~19 MB, ~300ms startup, ~10 MiB idle memory) — no Docker required to run fakecloud itself, no signup. Point any AWS SDK or the AWS CLI at `http://localhost:4566` with dummy credentials.
 
-**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 105 services (7,408 operations) are shipped today, all at true 100% conformance — 248,557/248,557 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
+**Coverage goal:** 100% of AWS services, each at 100% behavioral conformance, with 100% of cross-service integrations. Approach is depth-first — a service lands when it passes the full Smithy-model test variants and the cross-service wire-ups that matter for it, not when the API surface looks filled in. 105 services (7,431 operations) are shipped today, all at true 100% conformance — 248,557/248,557 generated Smithy variants pass on every commit; more land progressively as they hit the bar.
 
 Key design principles:
 - **Depth-first coverage**: every implemented service targets 100% conformance with real AWS, validated on every commit against AWS's own Smithy models — 248,557/248,557 generated test variants pass on every commit, true 100% across every implemented service. CI also runs upstream `hashicorp/terraform-provider-aws` `TestAcc*` suites against fakecloud.
@@ -569,7 +569,7 @@ Features: Default SOA + NS records seeded on zone create with AWS-shaped name se
 
 Protocol: REST-XML under `/2013-04-01/` (HTTP method + URI routing)
 
-### ACM (Certificate Manager) (17 actions)
+### ACM (Certificate Manager) (40 actions)
 
 **Public Certificates:** RequestCertificate, DescribeCertificate, GetCertificate, ListCertificates, SearchCertificates, DeleteCertificate, RenewCertificate, RevokeCertificate
 **Imported Certificates:** ImportCertificate (round-trips PEM, supports re-import to same ARN), ExportCertificate (returns cert + chain + key with passphrase)

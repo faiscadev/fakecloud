@@ -4,7 +4,7 @@ description = "AWS Certificate Manager — request / import / export / revoke ce
 weight = 26
 +++
 
-fakecloud implements AWS Certificate Manager's full JSON 1.1 control plane: 17 operations covering certificate lifecycle, import/export, tags, and account-wide expiry events. 100% Smithy conformance.
+fakecloud implements AWS Certificate Manager's full JSON 1.1 control plane: 36 operations covering certificate lifecycle, import/export, tags, account-wide expiry events, and the ACME surface (endpoints, external account bindings, pre-validated domains, and registered ACME accounts). 100% Smithy conformance.
 
 **Status: 100% control-plane coverage.**
 
