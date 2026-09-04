@@ -80,6 +80,18 @@ pub struct AcmeBinding {
     pub idempotency_token: Option<String>,
 }
 
+/// The three independent scope options of a DNS prevalidation, each
+/// `ENABLED` or `DISABLED`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct DomainScope {
+    #[serde(default)]
+    pub exact_domain: Option<String>,
+    #[serde(default)]
+    pub subdomains: Option<String>,
+    #[serde(default)]
+    pub wildcards: Option<String>,
+}
+
 /// A pre-validated domain: the DNS record an ACME client can rely on instead
 /// of answering a challenge per order.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +101,10 @@ pub struct AcmeDomainValidation {
     pub domain_name: String,
     /// `PrevalidationType` — only DNS_PREVALIDATION exists today.
     pub prevalidation_type: String,
-    pub domain_scope: Option<String>,
+    /// `DomainScope`: which names the prevalidation covers. Modeled as a
+    /// structure of three `ENABLED`/`DISABLED` options, not a single enum.
+    #[serde(default)]
+    pub domain_scope: Option<DomainScope>,
     pub hosted_zone_id: Option<String>,
     /// The CNAME an operator publishes to prove control.
     pub record_name: String,
@@ -224,4 +239,7 @@ pub struct AcmSnapshot {
     pub accounts: Option<AcmAccounts>,
 }
 
-pub const ACM_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+/// Bumped to 2 when the ACME resources landed. An older binary reading a
+/// snapshot that carries them would drop the unknown maps silently, so the
+/// version guard has to reject the downgrade rather than lose state.
+pub const ACM_SNAPSHOT_SCHEMA_VERSION: u32 = 2;

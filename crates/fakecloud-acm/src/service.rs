@@ -27,6 +27,7 @@ const SUPPORTED_ACTIONS: &[&str] = &[
     "RequestCertificate",
     "DescribeCertificate",
     "ListCertificates",
+    "ListCertificateDomainValidations",
     "DeleteCertificate",
     "ImportCertificate",
     "ExportCertificate",
@@ -419,6 +420,7 @@ impl AwsService for AcmService {
             "RequestCertificate" => self.request_certificate(&req),
             "DescribeCertificate" => self.describe_certificate(&req),
             "ListCertificates" => self.list_certificates(&req),
+            "ListCertificateDomainValidations" => self.list_certificate_domain_validations(&req),
             "DeleteCertificate" => self.delete_certificate(&req),
             "ImportCertificate" => self.import_certificate(&req),
             "ExportCertificate" => self.export_certificate(&req),
@@ -658,6 +660,91 @@ impl AcmService {
         Ok(AwsResponse::ok_json(json!({
             "Certificate": certificate_detail_json(&cert),
         })))
+    }
+
+    /// The per-domain validation state of one certificate. Each summary
+    /// reports the configuration actually in force and the one that was
+    /// requested; they differ while a validation method change is pending.
+    fn list_certificate_domain_validations(
+        &self,
+        req: &AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
+        let body = req.json_body();
+        let arn = body
+            .get("CertificateArn")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| validation_error("CertificateArn is required"))?
+            .to_string();
+        let max_items: usize = body
+            .get("MaxItems")
+            .and_then(Value::as_u64)
+            .map(|n| n as usize)
+            .unwrap_or(100);
+        if !(1..=1000).contains(&max_items) {
+            return Err(validation_error("MaxItems must be between 1 and 1000"));
+        }
+        let next_token = body.get("NextToken").and_then(Value::as_str);
+
+        let state = self.state.read();
+        let cert = state
+            .accounts
+            .get(&req.account_id)
+            .and_then(|a| a.certificates.get(&arn))
+            .ok_or_else(|| no_such_certificate(&arn))?;
+
+        let items: Vec<Value> = cert
+            .domain_validation
+            .iter()
+            .map(|d| {
+                let mut challenge = json!({});
+                match d.validation_method.as_str() {
+                    "DNS" => {
+                        if let (Some(name), Some(ty), Some(value)) = (
+                            d.resource_record_name.as_ref(),
+                            d.resource_record_type.as_ref(),
+                            d.resource_record_value.as_ref(),
+                        ) {
+                            challenge["DnsValidationChallenge"] = json!({
+                                "ResourceRecord": {
+                                    "Name": name,
+                                    "Type": ty,
+                                    "Value": value,
+                                }
+                            });
+                        }
+                    }
+                    "EMAIL" => {
+                        challenge["EmailValidationChallenge"] = json!({
+                            "ValidationDomain": d.domain_name,
+                            "ValidationEmails": validation_emails(&d.domain_name),
+                        });
+                    }
+                    _ => {}
+                }
+                let mut configuration = json!({
+                    "ValidationMethod": d.validation_method,
+                    "ValidationStatus": d.validation_status,
+                });
+                if !challenge.as_object().is_some_and(|o| o.is_empty()) {
+                    configuration["ValidationChallenge"] = challenge;
+                }
+                json!({
+                    "DomainName": d.domain_name,
+                    "ActiveValidationConfiguration": configuration,
+                    "RequestedValidationConfiguration": configuration,
+                })
+            })
+            .collect();
+
+        let (page, token) =
+            fakecloud_core::pagination::paginate_checked(&items, next_token, max_items)
+                .map_err(|_| validation_error("Invalid NextToken"))?;
+        let mut out = json!({ "DomainValidationSummaryList": page });
+        if let Some(t) = token {
+            out["NextToken"] = json!(t);
+        }
+        Ok(AwsResponse::ok_json(out))
     }
 
     fn list_certificates(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
@@ -1681,6 +1768,21 @@ fn invalid_param(msg: impl Into<String>) -> AwsServiceError {
 
 fn validation_error(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationException", msg)
+}
+
+/// The five addresses ACM emails for EMAIL validation of a domain: the three
+/// WHOIS contacts plus `admin@` and `administrator@` on the domain itself.
+fn validation_emails(domain: &str) -> Vec<String> {
+    [
+        "admin",
+        "administrator",
+        "hostmaster",
+        "postmaster",
+        "webmaster",
+    ]
+    .iter()
+    .map(|user| format!("{user}@{domain}"))
+    .collect()
 }
 
 fn no_such_certificate(arn: &str) -> AwsServiceError {

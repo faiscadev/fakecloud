@@ -14,11 +14,12 @@ use http::StatusCode;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
+use fakecloud_aws::arn::partition_for;
 use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::service::AcmService;
-use crate::state::{AcmeBinding, AcmeDomainValidation, AcmeEndpoint};
+use crate::state::{AcmeBinding, AcmeDomainValidation, AcmeEndpoint, DomainScope};
 
 pub(crate) const ACME_ACTIONS: &[&str] = &[
     "CreateAcmeEndpoint",
@@ -54,6 +55,11 @@ pub(crate) const ACME_MUTATING: &[&str] = &[
     "UpdateAcmeDomainValidation",
     "DeleteAcmeDomainValidation",
     "RevokeAcmeAccount",
+    // Both of these advance state on a read path: describing a validating
+    // domain settles it to VALID, and fetching credentials stamps LastUsedAt.
+    // Without them the change would be lost across a restart.
+    "DescribeAcmeDomainValidation",
+    "GetAcmeExternalAccountBindingCredentials",
 ];
 
 fn validation(msg: impl Into<String>) -> AwsServiceError {
@@ -69,11 +75,20 @@ fn conflict(msg: impl Into<String>) -> AwsServiceError {
 }
 
 fn require(body: &Value, field: &str) -> Result<String, AwsServiceError> {
-    body.get(field)
+    let value = body
+        .get(field)
         .and_then(Value::as_str)
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .ok_or_else(|| validation(format!("{field} is required")))
+        .ok_or_else(|| validation(format!("{field} is required")))?;
+    // Every ACME ARN member is modeled @length(min: 1, max: 200). The check
+    // belongs here because the deletes are otherwise idempotent, and an
+    // over-length ARN has to be rejected rather than quietly accepted.
+    if field.ends_with("Arn") && value.chars().count() > 200 {
+        return Err(validation(format!(
+            "{field} must be 200 characters or fewer"
+        )));
+    }
+    Ok(value.to_string())
 }
 
 fn tags_of(body: &Value, field: &str) -> BTreeMap<String, String> {
@@ -107,8 +122,9 @@ fn page(items: Vec<Value>, body: &Value, list_key: &str) -> Result<AwsResponse, 
         .and_then(Value::as_u64)
         .map(|n| n as usize)
         .unwrap_or(100);
-    if !(1..=1000).contains(&max_results) {
-        return Err(validation("MaxResults must be between 1 and 1000"));
+    // Every ACME list operation models MaxResults with @range(min: 1, max: 100).
+    if !(1..=100).contains(&max_results) {
+        return Err(validation("MaxResults must be between 1 and 100"));
     }
     let next_token = body.get("NextToken").and_then(Value::as_str);
     let (items, token) = paginate_checked(&items, next_token, max_results)
@@ -159,10 +175,50 @@ fn binding_json(b: &AcmeBinding) -> Value {
     out
 }
 
+/// Parse and validate a modeled `DomainScope`: three independent options, each
+/// `ENABLED` or `DISABLED`. Anything else, including the bare string some
+/// callers might expect, is a validation error.
+fn parse_domain_scope(value: &Value) -> Result<DomainScope, AwsServiceError> {
+    let Some(obj) = value.as_object() else {
+        return Err(validation("DomainScope must be a structure"));
+    };
+    let mut scope = DomainScope::default();
+    for (field, slot) in [
+        ("ExactDomain", &mut scope.exact_domain),
+        ("Subdomains", &mut scope.subdomains),
+        ("Wildcards", &mut scope.wildcards),
+    ] {
+        let Some(v) = obj.get(field).filter(|v| !v.is_null()) else {
+            continue;
+        };
+        let Some(v) = v.as_str().filter(|v| matches!(*v, "ENABLED" | "DISABLED")) else {
+            return Err(validation(format!(
+                "DomainScope.{field} has an invalid value"
+            )));
+        };
+        *slot = Some(v.to_string());
+    }
+    Ok(scope)
+}
+
+fn domain_scope_json(scope: &DomainScope) -> Value {
+    let mut out = json!({});
+    for (field, value) in [
+        ("ExactDomain", &scope.exact_domain),
+        ("Subdomains", &scope.subdomains),
+        ("Wildcards", &scope.wildcards),
+    ] {
+        if let Some(v) = value {
+            out[field] = json!(v);
+        }
+    }
+    out
+}
+
 fn domain_validation_json(d: &AcmeDomainValidation) -> Value {
     let mut details = json!({});
-    if let Some(s) = &d.domain_scope {
-        details["DomainScope"] = json!(s);
+    if let Some(scope) = &d.domain_scope {
+        details["DomainScope"] = domain_scope_json(scope);
     }
     if let Some(z) = &d.hosted_zone_id {
         details["HostedZoneId"] = json!(z);
@@ -237,7 +293,10 @@ impl AcmService {
         }
 
         let id = Uuid::new_v4().simple().to_string();
-        let arn = format!("arn:aws:acm:{region}:{account_id}:acme-endpoint/{id}");
+        let arn = format!(
+            "arn:{}:acm:{region}:{account_id}:acme-endpoint/{id}",
+            partition_for(&region)
+        );
         let now = Utc::now();
         let endpoint = AcmeEndpoint {
             arn: arn.clone(),
@@ -245,10 +304,14 @@ impl AcmService {
             // Creation is synchronous here, so the endpoint is usable at once.
             status: "ACTIVE".to_string(),
             authorization_behavior: behavior,
-            contact: body
-                .get("Contact")
-                .and_then(Value::as_str)
-                .map(str::to_string),
+            // Contact is modeled with @default REQUIRED, so an omitted value
+            // is that default rather than absent.
+            contact: Some(
+                body.get("Contact")
+                    .and_then(Value::as_str)
+                    .unwrap_or("REQUIRED")
+                    .to_string(),
+            ),
             certificate_authority: ca,
             certificate_tags: tags_of(&body, "CertificateTags"),
             tags: tags_of(&body, "Tags"),
@@ -304,28 +367,40 @@ impl AcmService {
             .get_mut(&arn)
             .ok_or_else(|| not_found(format!("ACME endpoint not found: {arn}")))?;
 
-        if let Some(behavior) = body.get("AuthorizationBehavior").and_then(Value::as_str) {
+        // Every field is validated before any is applied: a request whose
+        // later field is invalid must leave the endpoint untouched.
+        let behavior = body.get("AuthorizationBehavior").and_then(Value::as_str);
+        if let Some(behavior) = behavior {
             if behavior != "PRE_APPROVED" {
                 return Err(validation(format!(
                     "AuthorizationBehavior has an invalid value '{behavior}'"
                 )));
             }
-            e.authorization_behavior = behavior.to_string();
         }
-        if let Some(contact) = body.get("Contact").and_then(Value::as_str) {
+        let contact = body.get("Contact").and_then(Value::as_str);
+        if let Some(contact) = contact {
             if !matches!(contact, "REQUIRED" | "NOT_REQUIRED") {
                 return Err(validation(format!(
                     "Contact has an invalid value '{contact}'"
                 )));
             }
-            e.contact = Some(contact.to_string());
         }
-        if let Some(ca) = body.get("CertificateAuthority") {
+        let ca = body.get("CertificateAuthority");
+        if let Some(ca) = ca {
             if ca.get("PublicCertificateAuthority").is_none() {
                 return Err(validation(
                     "CertificateAuthority.PublicCertificateAuthority is required",
                 ));
             }
+        }
+
+        if let Some(behavior) = behavior {
+            e.authorization_behavior = behavior.to_string();
+        }
+        if let Some(contact) = contact {
+            e.contact = Some(contact.to_string());
+        }
+        if let Some(ca) = ca {
             e.certificate_authority = ca.clone();
         }
         e.updated_at = Utc::now();
@@ -340,9 +415,9 @@ impl AcmService {
         let arn = require(&body, "AcmeEndpointArn")?;
         let mut state = self.state.write();
         let acct = crate::service::account_mut(&mut state, &req.account_id);
-        if acct.acme_endpoints.remove(&arn).is_none() {
-            return Err(not_found(format!("ACME endpoint not found: {arn}")));
-        }
+        // The ACME deletes declare no ResourceNotFoundException in the model,
+        // so removing something already gone succeeds.
+        acct.acme_endpoints.remove(&arn);
         // Bindings, domain validations and accounts belong to the endpoint;
         // leaving them behind would strand children pointing at a gone parent.
         acct.acme_bindings.retain(|_, b| b.endpoint_arn != arn);
@@ -414,7 +489,12 @@ impl AcmService {
             if let Some(existing) = acct
                 .acme_bindings
                 .values()
-                .find(|b| b.idempotency_token.as_deref() == Some(t.as_str()))
+                // Scoped to the endpoint: the same token against a different
+                // endpoint is a different request, not a repeat of this one.
+                .find(|b| {
+                    b.endpoint_arn == endpoint_arn
+                        && b.idempotency_token.as_deref() == Some(t.as_str())
+                })
             {
                 return Ok(AwsResponse::ok_json(
                     json!({ "ExternalAccountBinding": binding_json(existing) }),
@@ -423,7 +503,10 @@ impl AcmService {
         }
 
         let id = Uuid::new_v4().simple().to_string();
-        let arn = format!("arn:aws:acm:{region}:{account_id}:acme-external-account-binding/{id}");
+        let arn = format!(
+            "arn:{}:acm:{region}:{account_id}:acme-external-account-binding/{id}",
+            partition_for(&region)
+        );
         let now = Utc::now();
         let binding = AcmeBinding {
             arn: arn.clone(),
@@ -516,11 +599,9 @@ impl AcmService {
         let arn = require(&body, "AcmeExternalAccountBindingArn")?;
         let mut state = self.state.write();
         let acct = crate::service::account_mut(&mut state, &req.account_id);
-        if acct.acme_bindings.remove(&arn).is_none() {
-            return Err(not_found(format!(
-                "External account binding not found: {arn}"
-            )));
-        }
+        // The ACME deletes declare no ResourceNotFoundException in the model,
+        // so removing something already gone succeeds.
+        acct.acme_bindings.remove(&arn);
         // Accounts registered through the binding lose their link to it.
         for account in acct.acme_accounts.values_mut() {
             if account.binding_arn.as_deref() == Some(arn.as_str()) {
@@ -573,18 +654,9 @@ impl AcmService {
             .ok_or_else(|| validation("PrevalidationOptions.DnsPrevalidation is required"))?;
         let domain_scope = options
             .get("DomainScope")
-            .and_then(Value::as_str)
-            .map(str::to_string);
-        if let Some(s) = &domain_scope {
-            if !matches!(
-                s.as_str(),
-                "DOMAIN" | "SUBDOMAINS" | "DOMAIN_AND_SUBDOMAINS"
-            ) {
-                return Err(validation(format!(
-                    "DomainScope has an invalid value '{s}'"
-                )));
-            }
-        }
+            .filter(|v| !v.is_null())
+            .map(parse_domain_scope)
+            .transpose()?;
         let token = body
             .get("IdempotencyToken")
             .and_then(Value::as_str)
@@ -600,7 +672,11 @@ impl AcmService {
             if let Some(existing) = acct
                 .acme_domain_validations
                 .values()
-                .find(|d| d.idempotency_token.as_deref() == Some(t.as_str()))
+                // Scoped to the endpoint, as for bindings.
+                .find(|d| {
+                    d.endpoint_arn == endpoint_arn
+                        && d.idempotency_token.as_deref() == Some(t.as_str())
+                })
             {
                 return Ok(AwsResponse::ok_json(
                     json!({ "AcmeDomainValidationArn": existing.arn }),
@@ -619,7 +695,10 @@ impl AcmService {
         }
 
         let id = Uuid::new_v4().simple().to_string();
-        let arn = format!("arn:aws:acm:{region}:{account_id}:acme-domain-validation/{id}");
+        let arn = format!(
+            "arn:{}:acm:{region}:{account_id}:acme-domain-validation/{id}",
+            partition_for(&region)
+        );
         let now = Utc::now();
         let validation_record = AcmeDomainValidation {
             arn: arn.clone(),
@@ -705,13 +784,15 @@ impl AcmService {
             .get("PrevalidationOptions")
             .and_then(|o| o.get("DnsPrevalidation"))
         {
-            if let Some(s) = options.get("DomainScope").and_then(Value::as_str) {
-                if !matches!(s, "DOMAIN" | "SUBDOMAINS" | "DOMAIN_AND_SUBDOMAINS") {
-                    return Err(validation(format!(
-                        "DomainScope has an invalid value '{s}'"
-                    )));
-                }
-                d.domain_scope = Some(s.to_string());
+            // Every field is validated before any is applied, so a bad value
+            // late in the request cannot leave a half-updated validation.
+            let scope = options
+                .get("DomainScope")
+                .filter(|v| !v.is_null())
+                .map(parse_domain_scope)
+                .transpose()?;
+            if let Some(scope) = scope {
+                d.domain_scope = Some(scope);
             }
             if let Some(z) = options.get("HostedZoneId").and_then(Value::as_str) {
                 d.hosted_zone_id = Some(z.to_string());
@@ -729,9 +810,9 @@ impl AcmService {
         let arn = require(&body, "AcmeDomainValidationArn")?;
         let mut state = self.state.write();
         let acct = crate::service::account_mut(&mut state, &req.account_id);
-        acct.acme_domain_validations
-            .remove(&arn)
-            .ok_or_else(|| not_found(format!("Domain validation not found: {arn}")))?;
+        // The ACME deletes declare no ResourceNotFoundException in the model,
+        // so removing something already gone succeeds.
+        acct.acme_domain_validations.remove(&arn);
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -1053,7 +1134,11 @@ mod tests {
         let body = json!({
             "AcmeEndpointArn": endpoint,
             "DomainName": "example.com",
-            "PrevalidationOptions": { "DnsPrevalidation": { "DomainScope": "DOMAIN" } },
+            "PrevalidationOptions": {
+                "DnsPrevalidation": {
+                    "DomainScope": { "ExactDomain": "ENABLED", "Subdomains": "DISABLED" }
+                }
+            },
         });
         let arn = json_of(
             s.create_acme_domain_validation(&req("CreateAcmeDomainValidation", body.clone()))
@@ -1265,7 +1350,9 @@ mod tests {
                 json!({
                     "AcmeEndpointArn": endpoint,
                     "DomainName": "x.example.com",
-                    "PrevalidationOptions": { "DnsPrevalidation": { "DomainScope": "PLANET" } },
+                    "PrevalidationOptions": {
+                        "DnsPrevalidation": { "DomainScope": { "ExactDomain": "PLANET" } }
+                    },
                 }),
             ))
             .err()
@@ -1286,5 +1373,165 @@ mod tests {
         }
         let _: SharedAcmState =
             std::sync::Arc::new(parking_lot::RwLock::new(AcmAccounts::default()));
+    }
+
+    /// `DomainScope` is a structure of three ENABLED/DISABLED options, not a
+    /// single enum string, and it round-trips through describe.
+    #[test]
+    fn domain_scope_is_the_modeled_structure() {
+        let s = AcmService::default();
+        let endpoint = make_endpoint(&s);
+        let arn = json_of(
+            s.create_acme_domain_validation(&req(
+                "CreateAcmeDomainValidation",
+                json!({
+                    "AcmeEndpointArn": endpoint,
+                    "DomainName": "example.com",
+                    "RoleArn": "arn:aws:iam::123456789012:role/acme",
+                    "PrevalidationOptions": {
+                        "DnsPrevalidation": {
+                            "DomainScope": {
+                                "ExactDomain": "ENABLED",
+                                "Subdomains": "DISABLED",
+                                "Wildcards": "ENABLED",
+                            }
+                        }
+                    },
+                }),
+            ))
+            .unwrap(),
+        )["AcmeDomainValidationArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let d = json_of(
+            s.describe_acme_domain_validation(&req(
+                "DescribeAcmeDomainValidation",
+                json!({ "AcmeDomainValidationArn": arn.clone() }),
+            ))
+            .unwrap(),
+        );
+        let scope =
+            &d["AcmeDomainValidation"]["PrevalidationDetails"]["DnsPrevalidation"]["DomainScope"];
+        assert_eq!(scope["ExactDomain"], "ENABLED");
+        assert_eq!(scope["Subdomains"], "DISABLED");
+        assert_eq!(scope["Wildcards"], "ENABLED");
+
+        // A bare string is not the modeled shape.
+        let err = s.create_acme_domain_validation(&req(
+            "CreateAcmeDomainValidation",
+            json!({
+                "AcmeEndpointArn": endpoint,
+                "DomainName": "other.example",
+                "RoleArn": "arn:aws:iam::123456789012:role/acme",
+                "PrevalidationOptions": { "DnsPrevalidation": { "DomainScope": "DOMAIN" } },
+            }),
+        ));
+        assert_eq!(err.err().unwrap().code(), "ValidationException");
+    }
+
+    #[test]
+    fn contact_defaults_to_required() {
+        let s = AcmService::default();
+        let arn = make_endpoint(&s);
+        let e = json_of(
+            s.describe_acme_endpoint(&req(
+                "DescribeAcmeEndpoint",
+                json!({ "AcmeEndpointArn": arn }),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            e["AcmeEndpoint"]["Contact"], "REQUIRED",
+            "Contact carries @default REQUIRED"
+        );
+    }
+
+    #[test]
+    fn an_invalid_update_field_leaves_the_endpoint_untouched() {
+        let s = AcmService::default();
+        let arn = make_endpoint(&s);
+        let err = s.update_acme_endpoint(&req(
+            "UpdateAcmeEndpoint",
+            json!({
+                "AcmeEndpointArn": arn.clone(),
+                "Contact": "NOT_REQUIRED",
+                "CertificateAuthority": { "Nonsense": {} },
+            }),
+        ));
+        assert_eq!(err.err().unwrap().code(), "ValidationException");
+
+        let e = json_of(
+            s.describe_acme_endpoint(&req(
+                "DescribeAcmeEndpoint",
+                json!({ "AcmeEndpointArn": arn }),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(
+            e["AcmeEndpoint"]["Contact"], "REQUIRED",
+            "the valid Contact must not persist when a later field is invalid"
+        );
+    }
+
+    #[test]
+    fn max_results_uses_the_modeled_range() {
+        let s = AcmService::default();
+        make_endpoint(&s);
+        assert!(s
+            .list_acme_endpoints(&req("ListAcmeEndpoints", json!({ "MaxResults": 100 })))
+            .is_ok());
+        let err = s.list_acme_endpoints(&req("ListAcmeEndpoints", json!({ "MaxResults": 101 })));
+        assert_eq!(err.err().unwrap().code(), "ValidationException");
+    }
+
+    #[test]
+    fn arns_follow_the_region_partition() {
+        let s = AcmService::default();
+        let mut r = req(
+            "CreateAcmeEndpoint",
+            json!({ "AuthorizationBehavior": "PRE_APPROVED", "CertificateAuthority": ca() }),
+        );
+        r.region = "cn-north-1".to_string();
+        let arn = json_of(s.create_acme_endpoint(&r).unwrap())["AcmeEndpointArn"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(arn.starts_with("arn:aws-cn:acm:cn-north-1:"), "{arn}");
+    }
+
+    #[test]
+    fn idempotency_is_scoped_to_the_endpoint() {
+        let s = AcmService::default();
+        let first = make_endpoint(&s);
+        let second = make_endpoint(&s);
+
+        let make = |endpoint: &str| {
+            json_of(
+                s.create_acme_domain_validation(&req(
+                    "CreateAcmeDomainValidation",
+                    json!({
+                        "AcmeEndpointArn": endpoint,
+                        "DomainName": format!("{endpoint}.example"),
+                        "RoleArn": "arn:aws:iam::123456789012:role/acme",
+                        "PrevalidationOptions": { "DnsPrevalidation": {} },
+                        "IdempotencyToken": "tok-shared",
+                    }),
+                ))
+                .unwrap(),
+            )["AcmeDomainValidationArn"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        };
+        let a = make(&first);
+        let b = make(&second);
+        assert_ne!(
+            a, b,
+            "the same token against a different endpoint is a different request"
+        );
+        // Repeating against the same endpoint still returns the first one.
+        assert_eq!(make(&first), a);
     }
 }
