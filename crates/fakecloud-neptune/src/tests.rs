@@ -390,34 +390,68 @@ async fn describe_db_cluster_endpoints_honors_its_filters() {
     }
 
     // MaxRecords / Marker are modeled here and were never honored.
-    let first = body(&call(&svc, "DescribeDBClusterEndpoints", &[("MaxRecords", "1")]).await);
+    // Rows are identified by their Endpoint address: a built-in carries
+    // no identifier, so that is the only per-row identity, and
+    // comparing whole response bodies would pass on nothing more than a
+    // differing <Marker>.
+    let addresses = |xml: &str| -> Vec<String> {
+        xml.split("<Endpoint>")
+            .skip(1)
+            .filter_map(|rest| rest.split("</Endpoint>").next())
+            .map(str::to_string)
+            .collect()
+    };
+    let unpaged = addresses(&body(&call(&svc, "DescribeDBClusterEndpoints", &[]).await));
+    assert!(
+        unpaged.len() >= 4,
+        "expected two custom endpoints and the cluster's two built-ins: {unpaged:?}"
+    );
+
+    // Walk to exhaustion one row at a time.
+    let mut seen: Vec<String> = Vec::new();
+    let mut marker: Option<String> = None;
+    let mut pages = 0;
+    loop {
+        let mut params: Vec<(&str, &str)> = vec![("MaxRecords", "1")];
+        let held;
+        if let Some(value) = marker.as_deref() {
+            held = value.to_string();
+            params.push(("Marker", &held));
+        }
+        let xml = body(&call(&svc, "DescribeDBClusterEndpoints", &params).await);
+        let rows = addresses(&xml);
+        assert_eq!(
+            rows.len(),
+            1,
+            "MaxRecords=1 returned {} rows: {xml}",
+            rows.len()
+        );
+        seen.extend(rows);
+        pages += 1;
+        assert!(pages <= unpaged.len(), "pagination did not terminate");
+        marker = xml
+            .split("<Marker>")
+            .nth(1)
+            .and_then(|rest| rest.split("</Marker>").next())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+        if marker.is_none() {
+            break;
+        }
+    }
+
+    // Every row, once, in the unpaginated order -- built-ins included.
     assert_eq!(
-        first.matches("<DBClusterEndpointList>").count(),
-        1,
-        "MaxRecords=1 returned more than one row: {first}"
+        seen, unpaged,
+        "the paged walk did not reproduce the unpaginated listing"
     );
-    let marker = first
-        .split("<Marker>")
-        .nth(1)
-        .and_then(|rest| rest.split("</Marker>").next())
-        .expect("a marker while rows remain")
-        .to_string();
-    let second = body(
-        &call(
-            &svc,
-            "DescribeDBClusterEndpoints",
-            &[("MaxRecords", "1"), ("Marker", &marker)],
-        )
-        .await,
-    );
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
     assert_eq!(
-        second.matches("<DBClusterEndpointList>").count(),
-        1,
-        "{second}"
-    );
-    assert_ne!(
-        first, second,
-        "the second page repeated the first: {second}"
+        unique.len(),
+        seen.len(),
+        "a row was returned twice: {seen:?}"
     );
 
     // A status the endpoint is not in selects nothing.
