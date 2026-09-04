@@ -12936,3 +12936,488 @@ async fn ec2_detach_image_watermark() {
     let body = resp.text().await.unwrap();
     assert!(body.contains("<return>true</return>"), "unexpected: {body}");
 }
+
+// ---- IPAM internet-registry associations and routing policy registrations ----
+
+/// Percent-encode a Query parameter, using the unreserved set.
+fn urlencode(v: &str) -> String {
+    let mut out = String::with_capacity(v.len());
+    for b in v.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Drives EC2's Query protocol directly. The vendored aws-sdk-ec2 predates the
+/// internet-registry surface, so these operations are exercised over the wire.
+struct Ec2Query {
+    endpoint: String,
+    http: reqwest::Client,
+}
+
+impl Ec2Query {
+    fn new(server: &TestServer) -> Self {
+        Self {
+            endpoint: server.endpoint().to_string(),
+            http: reqwest::Client::new(),
+        }
+    }
+
+    async fn send(&self, action: &str, params: &[(&str, &str)]) -> (u16, String) {
+        // Query protocol: everything is form-encoded in the body.
+        let mut form = vec![
+            format!("Action={}", urlencode(action)),
+            "Version=2016-11-15".to_string(),
+        ];
+        form.extend(
+            params
+                .iter()
+                .map(|(k, v)| format!("{}={}", urlencode(k), urlencode(v))),
+        );
+        let resp = self
+            .http
+            .post(&self.endpoint)
+            .header(
+                "authorization",
+                "AWS4-HMAC-SHA256 Credential=test/20240101/us-east-1/ec2/aws4_request, \
+                 SignedHeaders=host, Signature=test",
+            )
+            .header("content-type", "application/x-www-form-urlencoded")
+            .body(form.join("&"))
+            .send()
+            .await
+            .expect("EC2 query request failed");
+        let status = resp.status().as_u16();
+        (status, resp.text().await.unwrap_or_default())
+    }
+
+    async fn call(&self, action: &str, params: &[(&str, &str)]) -> String {
+        let (status, body) = self.send(action, params).await;
+        assert_eq!(status, 200, "{action} failed: {body}");
+        body
+    }
+}
+
+/// Pull the first `<tag>value</tag>` out of an EC2 Query response.
+fn xml_value(body: &str, tag: &str) -> String {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = body
+        .find(&open)
+        .unwrap_or_else(|| panic!("no <{tag}> in {body}"))
+        + open.len();
+    let end = body[start..]
+        .find(&close)
+        .unwrap_or_else(|| panic!("unclosed <{tag}> in {body}"))
+        + start;
+    body[start..end].to_string()
+}
+
+/// An IPAM, an internet-registry association on it, and one registration.
+async fn make_ir_association(c: &aws_sdk_ec2::Client, q: &Ec2Query) -> String {
+    let ipam = make_ipam(c).await;
+    let body = q
+        .call(
+            "CreateIpamInternetRegistryAssociation",
+            &[
+                ("IpamId", &ipam),
+                ("Rir", "arin"),
+                ("OrganizationHandle", "EXAMPLE-ORG"),
+            ],
+        )
+        .await;
+    xml_value(&body, "ipamInternetRegistryAssociationId")
+}
+
+#[test_action("ec2", "CreateIpamInternetRegistryAssociation", checksum = "5f34bb6b")]
+#[test_action(
+    "ec2",
+    "DescribeIpamInternetRegistryAssociations",
+    checksum = "3e5b69be"
+)]
+#[test_action("ec2", "EnableIpamInternetRegistryAssociation", checksum = "5b7cab96")]
+#[test_action("ec2", "DeleteIpamInternetRegistryAssociation", checksum = "aa2e586a")]
+#[tokio::test]
+async fn ec2_ipam_internet_registry_association_lifecycle() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let q = Ec2Query::new(&s);
+
+    let id = make_ir_association(&c, &q).await;
+    assert!(id.starts_with("ipam-ir-assoc-"), "{id}");
+
+    let body = q
+        .call("DescribeIpamInternetRegistryAssociations", &[])
+        .await;
+    assert!(body.contains(&id), "{body}");
+    assert!(body.contains("<rir>arin</rir>"), "{body}");
+    // A new association cannot publish until it is enabled.
+    assert!(body.contains("<state>pending-enable</state>"), "{body}");
+
+    let body = q
+        .call(
+            "EnableIpamInternetRegistryAssociation",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("RpkiVersion", "1"),
+                ("ServiceUri", "https://rpki.example/up-down"),
+                ("ChildHandle", "child"),
+                ("ParentHandle", "parent"),
+                ("ParentBpkiTa", "TA=="),
+            ],
+        )
+        .await;
+    assert!(body.contains("<state>enable-complete</state>"), "{body}");
+    // The child request is a document carried inside XML, so it arrives
+    // entity-escaped.
+    assert!(body.contains("child_handle=&quot;child&quot;"), "{body}");
+
+    let body = q
+        .call(
+            "DeleteIpamInternetRegistryAssociation",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(body.contains("<state>delete-complete</state>"), "{body}");
+    let body = q
+        .call("DescribeIpamInternetRegistryAssociations", &[])
+        .await;
+    assert!(!body.contains(&id), "the association must be gone: {body}");
+}
+
+#[test_action("ec2", "CreateIpamRoutingPolicyRegistration", checksum = "c0fe61b5")]
+#[test_action("ec2", "ModifyIpamRoutingPolicyRegistration", checksum = "82482c84")]
+#[test_action("ec2", "DeleteIpamRoutingPolicyRegistration", checksum = "bd003f39")]
+#[test_action("ec2", "GetIpamRoutingPolicyRegistrations", checksum = "f832dfa9")]
+#[test_action("ec2", "GetIpamRoutingPolicyRegistrationDeltas", checksum = "1dd1c788")]
+#[tokio::test]
+async fn ec2_ipam_routing_policy_registration_lifecycle() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let q = Ec2Query::new(&s);
+    let id = make_ir_association(&c, &q).await;
+
+    let body = q
+        .call(
+            "CreateIpamRoutingPolicyRegistration",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("Cidr", "10.0.0.0/16"),
+                ("Asn.1", "64512"),
+                ("MaxLength", "24"),
+            ],
+        )
+        .await;
+    let first_delta = xml_value(&body, "deltaId");
+    assert!(body.contains("<state>published</state>"), "{body}");
+
+    let body = q
+        .call(
+            "GetIpamRoutingPolicyRegistrations",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(body.contains("<cidr>10.0.0.0/16</cidr>"), "{body}");
+    assert!(body.contains("<item>64512</item>"), "{body}");
+    assert!(body.contains("<maxLength>24</maxLength>"), "{body}");
+    assert!(body.contains("<state>create-complete</state>"), "{body}");
+
+    // Creating the same CIDR twice is a conflict, not a silent overwrite.
+    let (status, _) = q
+        .send(
+            "CreateIpamRoutingPolicyRegistration",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("Cidr", "10.0.0.0/16"),
+                ("Asn.1", "64512"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 400);
+
+    let body = q
+        .call(
+            "ModifyIpamRoutingPolicyRegistration",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("Cidr", "10.0.0.0/16"),
+                ("Asn.1", "64513"),
+            ],
+        )
+        .await;
+    let second_delta = xml_value(&body, "deltaId");
+    assert_ne!(first_delta, second_delta, "each change is its own delta");
+
+    let body = q
+        .call(
+            "GetIpamRoutingPolicyRegistrations",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(body.contains("<item>64513</item>"), "{body}");
+    assert!(body.contains("<state>update-complete</state>"), "{body}");
+
+    // Deltas are the audit trail, and survive the registration they describe.
+    let body = q
+        .call(
+            "GetIpamRoutingPolicyRegistrationDeltas",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(
+        body.contains(&first_delta) && body.contains(&second_delta),
+        "{body}"
+    );
+
+    let forward = q
+        .call(
+            "GetIpamRoutingPolicyRegistrationDeltas",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("ChronologicalOrder", "forward"),
+            ],
+        )
+        .await;
+    let reverse = q
+        .call(
+            "GetIpamRoutingPolicyRegistrationDeltas",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("ChronologicalOrder", "reverse"),
+            ],
+        )
+        .await;
+    assert!(
+        forward.find(&first_delta) < forward.find(&second_delta),
+        "forward is oldest first"
+    );
+    assert!(
+        reverse.find(&second_delta) < reverse.find(&first_delta),
+        "reverse is newest first"
+    );
+
+    // A single delta can be fetched by id.
+    let one = q
+        .call(
+            "GetIpamRoutingPolicyRegistrationDeltas",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("DeltaId", &first_delta),
+            ],
+        )
+        .await;
+    assert!(
+        one.contains(&first_delta) && !one.contains(&second_delta),
+        "{one}"
+    );
+
+    q.call(
+        "DeleteIpamRoutingPolicyRegistration",
+        &[
+            ("IpamInternetRegistryAssociationId", &id),
+            ("Cidr", "10.0.0.0/16"),
+        ],
+    )
+    .await;
+    let body = q
+        .call(
+            "GetIpamRoutingPolicyRegistrations",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(!body.contains("10.0.0.0/16"), "{body}");
+}
+
+#[test_action(
+    "ec2",
+    "BatchModifyIpamRoutingPolicyRegistrations",
+    checksum = "e50d439a"
+)]
+#[tokio::test]
+async fn ec2_batch_modify_ipam_routing_policy_registrations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let q = Ec2Query::new(&s);
+    let id = make_ir_association(&c, &q).await;
+
+    let delta = r#"{"add":[{"cidr":"192.0.2.0/24","asns":["64512"],"maxLength":25},
+                            {"cidr":"198.51.100.0/24","asns":["64513"]}]}"#;
+    let body = q
+        .call(
+            "BatchModifyIpamRoutingPolicyRegistrations",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("DeltaJson", delta),
+            ],
+        )
+        .await;
+    assert!(body.contains("<state>published</state>"), "{body}");
+
+    let body = q
+        .call(
+            "GetIpamRoutingPolicyRegistrations",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(
+        body.contains("192.0.2.0/24") && body.contains("198.51.100.0/24"),
+        "{body}"
+    );
+
+    // The same document can remove them again.
+    q.call(
+        "BatchModifyIpamRoutingPolicyRegistrations",
+        &[
+            ("IpamInternetRegistryAssociationId", &id),
+            ("DeltaJson", r#"{"remove":["192.0.2.0/24"]}"#),
+        ],
+    )
+    .await;
+    let body = q
+        .call(
+            "GetIpamRoutingPolicyRegistrations",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(!body.contains("192.0.2.0/24"), "{body}");
+    assert!(body.contains("198.51.100.0/24"), "{body}");
+
+    // Malformed JSON is rejected rather than recorded as a delta.
+    let (status, _) = q
+        .send(
+            "BatchModifyIpamRoutingPolicyRegistrations",
+            &[
+                ("IpamInternetRegistryAssociationId", &id),
+                ("DeltaJson", "not json"),
+            ],
+        )
+        .await;
+    assert_eq!(status, 400);
+}
+
+#[test_action("ec2", "GetIpamRouteOriginAuthorizations", checksum = "b9bc9048")]
+#[test_action("ec2", "GetIpamInternetRegistryAssociationAsns", checksum = "4ccf1619")]
+#[test_action(
+    "ec2",
+    "GetIpamInternetRegistryAssociationCidrs",
+    checksum = "4835f267"
+)]
+#[tokio::test]
+async fn ec2_ipam_registry_views_derive_from_registrations() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let q = Ec2Query::new(&s);
+    let id = make_ir_association(&c, &q).await;
+
+    q.call(
+        "CreateIpamRoutingPolicyRegistration",
+        &[
+            ("IpamInternetRegistryAssociationId", &id),
+            ("Cidr", "203.0.113.0/24"),
+            ("Asn.1", "64512"),
+            ("Asn.2", "64513"),
+            ("MaxLength", "26"),
+        ],
+    )
+    .await;
+
+    // One authorization per CIDR and ASN pair.
+    let body = q
+        .call(
+            "GetIpamRouteOriginAuthorizations",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert_eq!(
+        body.matches("<cidr>203.0.113.0/24</cidr>").count(),
+        2,
+        "{body}"
+    );
+    assert!(
+        body.contains("<asn>64512</asn>") && body.contains("<asn>64513</asn>"),
+        "{body}"
+    );
+
+    let body = q
+        .call(
+            "GetIpamInternetRegistryAssociationAsns",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(
+        body.contains("<asn>64512</asn>") && body.contains("<asn>64513</asn>"),
+        "{body}"
+    );
+
+    let body = q
+        .call(
+            "GetIpamInternetRegistryAssociationCidrs",
+            &[("IpamInternetRegistryAssociationId", &id)],
+        )
+        .await;
+    assert!(body.contains("<cidr>203.0.113.0/24</cidr>"), "{body}");
+}
+
+#[test_action("ec2", "GetIpamDiscoveredRoutes", checksum = "222ea81a")]
+#[test_action("ec2", "GetIpamRouteProtectionFindings", checksum = "501db0c9")]
+#[tokio::test]
+async fn ec2_ipam_route_discovery_and_protection_findings() {
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let q = Ec2Query::new(&s);
+
+    let ipam = make_ipam(&c).await;
+    let body = q
+        .call(
+            "CreateIpamInternetRegistryAssociation",
+            &[
+                ("IpamId", &ipam),
+                ("Rir", "ripe"),
+                ("OrganizationHandle", "EXAMPLE-ORG"),
+            ],
+        )
+        .await;
+    let id = xml_value(&body, "ipamInternetRegistryAssociationId");
+    q.call(
+        "CreateIpamRoutingPolicyRegistration",
+        &[
+            ("IpamInternetRegistryAssociationId", &id),
+            ("Cidr", "192.0.2.0/24"),
+            ("Asn.1", "64512"),
+        ],
+    )
+    .await;
+
+    let rd = make_rd(&c).await;
+    let body = q
+        .call(
+            "GetIpamDiscoveredRoutes",
+            &[
+                ("IpamResourceDiscoveryId", &rd),
+                ("ResourceRegion", "us-east-1"),
+            ],
+        )
+        .await;
+    assert!(body.contains("<cidr>192.0.2.0/24</cidr>"), "{body}");
+
+    // A registration carrying an ASN is a valid, signed announcement.
+    let body = q
+        .call("GetIpamRouteProtectionFindings", &[("IpamId", &ipam)])
+        .await;
+    assert!(body.contains("<rpkiStatus>valid</rpkiStatus>"), "{body}");
+    assert!(body.contains("<roaSet>"), "{body}");
+
+    // An unknown IPAM is a not-found rather than an empty result.
+    let (status, _) = q
+        .send(
+            "GetIpamRouteProtectionFindings",
+            &[("IpamId", "ipam-ghost")],
+        )
+        .await;
+    assert_eq!(status, 400);
+}

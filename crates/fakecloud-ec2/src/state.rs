@@ -1097,6 +1097,56 @@ pub struct IpamResourceDiscovery {
     pub description: String,
 }
 
+/// An IPAM association with a Regional Internet Registry, and the routing
+/// policy registrations (ROAs) published through it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpamInternetRegistryAssociation {
+    pub id: String,
+    pub ipam_id: String,
+    pub region: String,
+    /// `Rir`: ripe | apnic | arin | lacnic.
+    pub rir: String,
+    pub organization_handle: String,
+    pub description: Option<String>,
+    /// `IpamInternetRegistryAssociationState`.
+    pub state: String,
+    /// Set once the association is enabled against the RIR's RPKI service.
+    #[serde(default)]
+    pub child_request_xml: Option<String>,
+    /// Routing policy registrations, keyed by CIDR.
+    #[serde(default)]
+    pub registrations: BTreeMap<String, IpamRoutingPolicyRegistration>,
+    /// Every delta ever applied, oldest first. Deltas are the audit trail of
+    /// registration changes, so they outlive the registrations themselves.
+    #[serde(default)]
+    pub deltas: Vec<IpamRoutingPolicyRegistrationDelta>,
+}
+
+/// One CIDR's route origin authorization within an association.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpamRoutingPolicyRegistration {
+    pub cidr: String,
+    pub asns: Vec<String>,
+    pub permit_more_specific_announcements: Option<bool>,
+    pub max_length: Option<i64>,
+    pub description: Option<String>,
+    pub latest_delta_id: String,
+    /// `IpamRoutingPolicyRegistrationState`.
+    pub state: String,
+}
+
+/// A single change to an association's registrations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IpamRoutingPolicyRegistrationDelta {
+    pub delta_id: String,
+    pub delta_json: String,
+    /// `IpamRoutingPolicyRegistrationDeltaState`.
+    pub state: String,
+    pub state_message: Option<String>,
+    /// RFC 3339, for the time-window filters on the delta query.
+    pub created_at: String,
+}
+
 /// An IPAM policy.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct IpamPolicy {
@@ -1794,6 +1844,9 @@ pub struct Ec2State {
     /// external-token-id -> ipam-id.
     #[serde(default)]
     pub ipam_ext_tokens: BTreeMap<String, String>,
+    /// association-id -> the IPAM's internet-registry (RIR) association.
+    #[serde(default)]
+    pub ipam_ir_associations: BTreeMap<String, IpamInternetRegistryAssociation>,
     #[serde(default)]
     pub ipam_policies: BTreeMap<String, IpamPolicy>,
     #[serde(default)]

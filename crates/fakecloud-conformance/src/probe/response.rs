@@ -229,6 +229,12 @@ pub(super) fn service_common_errors(service_name: &str) -> &'static [&'static st
             "InvalidPublicIpv4PoolID.NotFound",
             "InvalidVpcID.NotFound",
             "InvalidSubnetID.NotFound",
+            // IPAM: the probes address IPAMs, resource discoveries, registry
+            // associations and registrations by synthetic ids.
+            "InvalidIpamId.NotFound",
+            "InvalidIpamResourceDiscoveryId.NotFound",
+            "InvalidIpamInternetRegistryAssociationId.NotFound",
+            "InvalidIpamRoutingPolicyRegistration.NotFound",
             "InvalidID",
         ],
         // EKS under-declares two client errors that the real API returns for
