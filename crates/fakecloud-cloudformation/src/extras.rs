@@ -339,6 +339,188 @@ pub(crate) fn parse_s3_url(url: &str) -> Option<(String, String)> {
 }
 
 impl CloudFormationService {
+    /// Reject a body that is unmistakably a template but will not parse.
+    ///
+    /// Telling the caller a broken template is fine is the whole failure this
+    /// pair of operations is supposed to catch -- it is what gave #2480 its
+    /// false green light. `ValidationError` is not in either op's Smithy
+    /// `errors` list, so the gate is `is_template_document`: the probe's
+    /// placeholder scalars (`test`, `t`) are not template documents and turn
+    /// into the empty summary instead.
+    ///
+    /// That gate is not airtight, and the difference matters. A
+    /// proptest-generated all-digit body such as `"42"` YAML-parses to a
+    /// number, so `is_template_document` accepts it and this function does
+    /// report. It stays conformant only because `service_common_errors` lists
+    /// `ValidationError` for cloudformation
+    /// (`fakecloud-conformance/src/probe/response.rs`) -- that allowlist entry
+    /// is load-bearing here, not incidental. CreateStack ships the same
+    /// reasoning.
+    fn reject_unparseable_template(body: &str) -> Result<(), AwsServiceError> {
+        if body.trim().is_empty() {
+            return Ok(());
+        }
+        if !fakecloud_core::cfn_template::is_template_document(body) {
+            return Ok(());
+        }
+        // Structural validity, which is what AWS checks here: the dialect
+        // parses, there is a `Resources` mapping, every resource has a `Type`.
+        // NOT CreateStack's full parse -- that resolves parameter *values*, so
+        // a template using `!FindInMap [Config, !Ref Env, Size]` with no
+        // default for `Env` would be reported invalid even though real
+        // validate-template accepts it and the stack deploys fine. CDK and
+        // `sam deploy` call GetTemplateSummary during deploy, so that would
+        // break the deploy before it started.
+        if let Some(err) = crate::template_summary::structural_error(body) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "ValidationError",
+                err,
+            ));
+        }
+        Ok(())
+    }
+
+    /// The template body `ValidateTemplate` / `GetTemplateSummary` should
+    /// describe.
+    ///
+    /// Both accept the body inline, by `TemplateURL`, or -- for
+    /// `GetTemplateSummary` -- by naming an existing stack or stack set, whose
+    /// stored template is then summarized. Anything unresolvable yields an
+    /// empty string, which summarizes to the empty report: these are read-only
+    /// introspection calls and neither declares `ValidationError`, so a
+    /// synthetic or missing input must not become an undeclared error.
+    fn template_for_introspection(
+        &self,
+        account_id: &str,
+        params: &BTreeMap<String, String>,
+        allow_stack_sources: bool,
+    ) -> Result<String, AwsServiceError> {
+        // A supplied body wins even when blank: falling through would
+        // summarize a DIFFERENT template (the named stack's) as though it were
+        // the caller's. A blank body simply summarizes to nothing.
+        if let Some(body) = params.get("TemplateBody") {
+            return Ok(body.clone());
+        }
+        // Likewise a supplied URL, and an unusable one is reported rather than
+        // answered with a clean empty summary -- `create-stack` with the same
+        // URL reports it, so validating it as fine would be the same false
+        // green light. `looks_like_url` keeps the probe's `"t"` off this path.
+        if let Some(url) = params.get("TemplateURL").filter(|u| looks_like_url(u)) {
+            return self.resolve_template_url(account_id, url).map_err(|err| {
+                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "ValidationError", err)
+            });
+        }
+        // Only GetTemplateSummary takes a stack or stack set. They are not
+        // members of `ValidateTemplateInput`, and ValidateTemplate declares no
+        // errors at all -- answering `StackSetNotFoundException` from it would
+        // be an undeclared error on an operation that models none.
+        if !allow_stack_sources {
+            return Ok(String::new());
+        }
+        // `StackName` accepts a name or an ARN, matching DescribeStacks.
+        //
+        // An unknown stack stays lenient here, unlike the stack-set branch
+        // below, and the asymmetry is deliberate: AWS answers `ValidationError`
+        // for a missing stack, but that error is NOT in GetTemplateSummary's
+        // Smithy `errors` list, while `StackSetNotFoundException` is. The
+        // conformance probe emits an `optional_StackName` variant carrying
+        // `"t"` and expects success, so returning an undeclared error here
+        // would drop the service off its baseline.
+        if let Some(name) = params.get("StackName") {
+            let accounts = self.state.read();
+            // A deleted stack is still summarizable BY ITS UNIQUE ID, which
+            // is how a caller inspects what a since-deleted stack contained.
+            // By NAME, though, a deleted stack is gone: the name is free for
+            // reuse, so answering with the dead stack's template would
+            // describe something the caller is not asking about.
+            //
+            // AWS drops deleted stacks from this lookup after 90 days. We do
+            // not: a deleted record stays addressable by id for as long as the
+            // state lives. Emulator state is created and thrown away far
+            // inside that window, so an age cutoff would only ever be dead
+            // code here -- and it would cost a deletion timestamp on every
+            // stack record to express. Deliberate divergence, not an
+            // oversight.
+            if let Some(body) = accounts.get(account_id).and_then(|st| {
+                st.stacks
+                    .values()
+                    .find(|s| {
+                        &s.stack_id == name || (&s.name == name && s.status != "DELETE_COMPLETE")
+                    })
+                    .map(|s| s.template.clone())
+            }) {
+                return Ok(body);
+            }
+        }
+        if let Some(name) = params.get("StackSetName") {
+            let accounts = self.state.read();
+            // Existence and body are separate questions: a stack set whose
+            // record carries no `TemplateBody` still EXISTS, and conflating
+            // the two reported it as missing. AWS accepts the stack set's id
+            // (`{name}:{suffix}`) as well as its name.
+            let entry = accounts.get(account_id).and_then(|st| {
+                st.extras.get("stack_sets").and_then(|sets| {
+                    sets.get(name).or_else(|| {
+                        sets.iter()
+                            .find(|(_, set)| {
+                                set.get("StackSetId").and_then(|v| v.as_str())
+                                    == Some(name.as_str())
+                            })
+                            .map(|(_, set)| set)
+                    })
+                })
+            });
+            let found = entry.map(|set| {
+                set.get("TemplateBody")
+                    .and_then(|b| b.as_str())
+                    .unwrap_or_default()
+                    .to_string()
+            });
+            drop(accounts);
+            return match found {
+                Some(body) => Ok(body),
+                // Unlike `ValidationError`, this one IS declared on
+                // GetTemplateSummary, so reporting it is both AWS-correct and
+                // conformant. Answering an empty summary would let a script
+                // that keys off the exception treat a missing stack set as a
+                // found one.
+                None => Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "StackSetNotFoundException",
+                    format!("StackSet {name} not found"),
+                )),
+            };
+        }
+        Ok(String::new())
+    }
+
+    /// The template body a stack-set operation carries: inline if given,
+    /// otherwise fetched from `TemplateURL`.
+    ///
+    /// Returns an empty string when there is neither, or when the URL cannot
+    /// be fetched. Neither `CreateStackSet` nor `UpdateStackSet` declares an
+    /// error for an unusable URL, and the conformance probe sends
+    /// `TemplateURL="t"` -- which `looks_like_url` rejects before any fetch is
+    /// attempted -- so this stays lenient by design.
+    fn stack_set_template_body(
+        &self,
+        account_id: &str,
+        params: &BTreeMap<String, String>,
+    ) -> Result<Option<String>, String> {
+        if let Some(body) = params.get("TemplateBody").filter(|b| !b.trim().is_empty()) {
+            return Ok(Some(body.clone()));
+        }
+        // A URL that was SUPPLIED but cannot be fetched is a failure, not
+        // "no template given". Collapsing the two let an update against a
+        // missing object report success and keep serving the previous
+        // template -- stale, and indistinguishable from a real update.
+        match params.get("TemplateURL").filter(|u| looks_like_url(u)) {
+            Some(url) => self.resolve_template_url(account_id, url).map(Some),
+            None => Ok(None),
+        }
+    }
+
     /// Resolve a `TemplateURL` to a template body, distinguishing the two ways
     /// it can fail. AWS reports an unusable URL shape and a missing object
     /// differently, and collapsing them into one message sends the caller
@@ -1343,11 +1525,28 @@ impl CloudFormationService {
                     .ok_or_else(|| missing("StackSetName"))?
                     .clone();
                 let id = format!("{name}:{}", rand_id());
+                // Resolve a TemplateURL too. Storing only the inline body left
+                // every URL-created stack set with an empty template, so
+                // `get-template-summary --stack-set-name` reported a
+                // confidently empty summary -- the false green light this
+                // work exists to remove. A fetch that fails still stores the
+                // empty body rather than erroring: CreateStackSet declares no
+                // error for it, and the probe's `"t"` is not a URL shape.
+                let template_body = self
+                    .stack_set_template_body(&aid, &params)
+                    .map_err(|reason| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            reason,
+                        )
+                    })?
+                    .unwrap_or_default();
                 let entry = json!({
                     "StackSetId": id,
                     "StackSetName": name,
                     "Status": "ACTIVE",
-                    "TemplateBody": params.get("TemplateBody").cloned().unwrap_or_default(),
+                    "TemplateBody": template_body,
                 });
                 let mut accounts = self.state.write();
                 let state = accounts.get_or_create(&aid);
@@ -1400,6 +1599,55 @@ impl CloudFormationService {
             }
             "UpdateStackSet" => {
                 require_scalar(&params, "StackSetName")?;
+                // Persist the new template. Answering with an OperationId and
+                // storing nothing meant a stack set updated to a new template
+                // kept summarizing the ORIGINAL one forever -- stale is worse
+                // than empty, because it looks right.
+                //
+                // `UsePreviousTemplate` (and supplying neither body nor URL)
+                // keeps what is stored, which is what the parameter means.
+                let updated = self
+                    .stack_set_template_body(&aid, &params)
+                    .map_err(|reason| {
+                        AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "ValidationError",
+                            reason,
+                        )
+                    })?;
+                let wanted = params.get("StackSetName").cloned().unwrap_or_default();
+                {
+                    let mut accounts = self.state.write();
+                    let state = accounts.get_or_create(&aid);
+                    let sets = store(&mut state.extras, "stack_sets");
+                    // Records are keyed by NAME, but a stack set is equally
+                    // addressable by its id -- and an update by id that
+                    // matched nothing succeeded while leaving the old template
+                    // in place, which reads as a working update.
+                    let key = sets
+                        .iter()
+                        .find(|(name, entry)| {
+                            **name == wanted
+                                || entry["StackSetId"].as_str() == Some(wanted.as_str())
+                        })
+                        .map(|(name, _)| name.clone());
+                    // Updating a stack set that does not exist is not a
+                    // success. Answering with an OperationId for a name that
+                    // matches nothing is the same false green light as a
+                    // summary of a template we never stored.
+                    // `StackSetNotFoundException` IS declared on
+                    // UpdateStackSet, so reporting it stays conformant.
+                    let Some(key) = key else {
+                        return Err(AwsServiceError::aws_error(
+                            StatusCode::BAD_REQUEST,
+                            "StackSetNotFoundException",
+                            format!("StackSet {wanted} not found"),
+                        ));
+                    };
+                    if let (Some(updated), Some(entry)) = (updated, sets.get_mut(&key)) {
+                        entry["TemplateBody"] = json!(updated);
+                    }
+                }
                 let op_id = rand_id();
                 Ok(xml_response(
                     "UpdateStackSet",
@@ -2619,22 +2867,31 @@ impl CloudFormationService {
                     &rid,
                 ))
             }
-            "ValidateTemplate" => Ok(xml_response(
-                "ValidateTemplate",
-                "    <Description>Validated</Description>\n    <Capabilities/>\n    <Parameters/>"
-                    .to_string(),
-                &rid,
-            )),
+            "ValidateTemplate" => {
+                let body = self.template_for_introspection(&aid, &params, false)?;
+                Self::reject_unparseable_template(&body)?;
+                let summary = crate::template_summary::summarize(&body);
+                Ok(xml_response(
+                    "ValidateTemplate",
+                    crate::template_summary::validate_template_xml(&summary),
+                    &rid,
+                ))
+            }
             "EstimateTemplateCost" => Ok(xml_response(
                 "EstimateTemplateCost",
                 "    <Url>https://calculator.aws/#/estimate</Url>".to_string(),
                 &rid,
             )),
-            "GetTemplateSummary" => Ok(xml_response(
-                "GetTemplateSummary",
-                "    <Parameters/>\n    <ResourceTypes/>\n    <Capabilities/>".to_string(),
-                &rid,
-            )),
+            "GetTemplateSummary" => {
+                let body = self.template_for_introspection(&aid, &params, true)?;
+                Self::reject_unparseable_template(&body)?;
+                let summary = crate::template_summary::summarize(&body);
+                Ok(xml_response(
+                    "GetTemplateSummary",
+                    crate::template_summary::get_template_summary_xml(&summary),
+                    &rid,
+                ))
+            }
             "CancelUpdateStack" => {
                 params
                     .get("StackName")
@@ -3089,6 +3346,348 @@ mod tests {
         CloudFormationService::new(state, deps())
     }
 
+    /// Body of the XML response, for asserting on the rendered summary.
+    fn introspect(svc: &CloudFormationService, action: &str, params: &[(&str, &str)]) -> String {
+        let resp = match svc.handle_extra_action(&req(action, params)) {
+            Ok(resp) => resp,
+            Err(e) => panic!("{action} should succeed: {}", e.message()),
+        };
+        match resp.body {
+            fakecloud_core::service::ResponseBody::Bytes(b) => {
+                String::from_utf8(b.to_vec()).expect("utf8 body")
+            }
+            _ => panic!("expected an in-memory body"),
+        }
+    }
+
+    const GOOD_TEMPLATE: &str = "Resources:\n  Q:\n    Type: AWS::SQS::Queue\n";
+
+    #[test]
+    fn introspection_ops_report_the_supplied_body() {
+        let svc = svc();
+        let xml = introspect(&svc, "ValidateTemplate", &[("TemplateBody", GOOD_TEMPLATE)]);
+        assert!(xml.contains("<Capabilities/>"), "{xml}");
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[("TemplateBody", GOOD_TEMPLATE)],
+        );
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
+    }
+
+    #[test]
+    fn introspection_ops_reject_a_template_that_is_not_valid() {
+        let svc = svc();
+        // Not just a dialect error: this is well-formed YAML whose resource
+        // has no `Type`, which CreateStack rejects. Validating it clean is the
+        // false green light these operations exist to remove.
+        let no_type = "Resources:\n  Q:\n    Properties: {}\n";
+        for action in ["ValidateTemplate", "GetTemplateSummary"] {
+            let Err(err) = svc.handle_extra_action(&req(action, &[("TemplateBody", no_type)]))
+            else {
+                panic!("{action}: a resource with no Type must not validate");
+            };
+            assert!(err.message().contains("Type"), "{}", err.message());
+        }
+        // A dialect error is rejected too.
+        let tabs = "Resources:\n\tQ:\n\t\tType: AWS::SQS::Queue\n";
+        assert!(svc
+            .handle_extra_action(&req("ValidateTemplate", &[("TemplateBody", tabs)]))
+            .is_err());
+    }
+
+    #[test]
+    fn introspection_ops_stay_lenient_for_probe_inputs() {
+        // Neither op declares ValidationError; the probe's synthetic values
+        // must keep returning the empty report.
+        let svc = svc();
+        for body in ["test", "t", ""] {
+            let xml = introspect(&svc, "ValidateTemplate", &[("TemplateBody", body)]);
+            assert!(xml.contains("<Parameters/>"), "{body:?} -> {xml}");
+        }
+        // A non-URL TemplateURL is synthetic too, and an unknown StackName
+        // stays lenient because ValidationError is undeclared here.
+        let xml = introspect(&svc, "GetTemplateSummary", &[("TemplateURL", "t")]);
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[("StackName", "never-existed")],
+        );
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+    }
+
+    #[test]
+    fn a_supplied_body_never_falls_through_to_a_stack() {
+        let svc = svc();
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .stacks
+            .insert(
+                "decoy".to_string(),
+                crate::state::Stack {
+                    name: "decoy".to_string(),
+                    stack_id: "arn:aws:cloudformation:us-east-1:000000000000:stack/decoy/1"
+                        .to_string(),
+                    template: GOOD_TEMPLATE.to_string(),
+                    status: "CREATE_COMPLETE".to_string(),
+                    status_reason: None,
+                    resources: vec![],
+                    parameters: BTreeMap::new(),
+                    tags: BTreeMap::new(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    description: None,
+                    notification_arns: vec![],
+                    outputs: vec![],
+                    enable_termination_protection: false,
+                },
+            );
+
+        // A blank body is still the caller's answer: summarizing the stack's
+        // template instead would report a template they never sent.
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[("TemplateBody", "   "), ("StackName", "decoy")],
+        );
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+
+        // Naming the stack alone DOES summarize it, by name and by ARN.
+        for key in [
+            "decoy",
+            "arn:aws:cloudformation:us-east-1:000000000000:stack/decoy/1",
+        ] {
+            let xml = introspect(&svc, "GetTemplateSummary", &[("StackName", key)]);
+            assert!(
+                xml.contains("<member>AWS::SQS::Queue</member>"),
+                "{key}: {xml}"
+            );
+        }
+    }
+
+    #[test]
+    fn updating_a_stack_set_updates_what_it_summarizes() {
+        let svc = svc();
+        let created = introspect(
+            &svc,
+            "CreateStackSet",
+            &[("StackSetName", "set1"), ("TemplateBody", GOOD_TEMPLATE)],
+        );
+        assert!(created.contains("<StackSetId>"), "{created}");
+
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "set1")]);
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
+
+        // Update it to a different template.
+        let updated_template = "Resources:\n  T:\n    Type: AWS::SNS::Topic\n";
+        introspect(
+            &svc,
+            "UpdateStackSet",
+            &[("StackSetName", "set1"), ("TemplateBody", updated_template)],
+        );
+
+        // Stale is worse than empty: it looks right.
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "set1")]);
+        assert!(
+            xml.contains("<member>AWS::SNS::Topic</member>"),
+            "the summary must follow the update: {xml}"
+        );
+        assert!(
+            !xml.contains("AWS::SQS::Queue"),
+            "the original template must not survive the update: {xml}"
+        );
+
+        // Supplying no template keeps what is stored -- UsePreviousTemplate.
+        introspect(&svc, "UpdateStackSet", &[("StackSetName", "set1")]);
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "set1")]);
+        assert!(xml.contains("<member>AWS::SNS::Topic</member>"), "{xml}");
+    }
+
+    #[test]
+    fn a_stack_set_updates_by_id_as_well_as_by_name() {
+        let svc = svc();
+        let created = introspect(
+            &svc,
+            "CreateStackSet",
+            &[("StackSetName", "byid"), ("TemplateBody", GOOD_TEMPLATE)],
+        );
+        let id = created
+            .split("<StackSetId>")
+            .nth(1)
+            .and_then(|t| t.split("</StackSetId>").next())
+            .expect("a stack set id")
+            .to_string();
+
+        // Records are keyed by name; an update addressed by id used to match
+        // nothing and succeed, leaving the old template in place.
+        introspect(
+            &svc,
+            "UpdateStackSet",
+            &[
+                ("StackSetName", id.as_str()),
+                (
+                    "TemplateBody",
+                    "Resources:\n  T:\n    Type: AWS::SNS::Topic\n",
+                ),
+            ],
+        );
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "byid")]);
+        assert!(
+            xml.contains("<member>AWS::SNS::Topic</member>"),
+            "an update by id must land: {xml}"
+        );
+    }
+
+    #[test]
+    fn updating_a_stack_set_that_does_not_exist_is_reported() {
+        let svc = svc();
+        // Answering with an OperationId for a name that matches nothing is
+        // the same false green light as summarizing a template never stored.
+        let Err(err) = svc.handle_extra_action(&req(
+            "UpdateStackSet",
+            &[("StackSetName", "nope"), ("TemplateBody", GOOD_TEMPLATE)],
+        )) else {
+            panic!("an unknown stack set must be reported");
+        };
+        assert_eq!(err.code(), "StackSetNotFoundException");
+    }
+
+    #[test]
+    fn a_supplied_but_unfetchable_template_url_is_not_silently_ignored() {
+        let svc = svc();
+        introspect(
+            &svc,
+            "CreateStackSet",
+            &[("StackSetName", "s"), ("TemplateBody", GOOD_TEMPLATE)],
+        );
+
+        // Supplying a URL that cannot be fetched is a failure. Treating it as
+        // "no template given" reported success and kept serving the old one.
+        let Err(err) = svc.handle_extra_action(&req(
+            "UpdateStackSet",
+            &[
+                ("StackSetName", "s"),
+                ("TemplateURL", "https://s3.amazonaws.com/b/missing.yaml"),
+            ],
+        )) else {
+            panic!("an unfetchable URL must be reported");
+        };
+        assert!(
+            err.message().contains("Template not found"),
+            "{}",
+            err.message()
+        );
+
+        // Supplying neither keeps what is stored -- UsePreviousTemplate.
+        introspect(&svc, "UpdateStackSet", &[("StackSetName", "s")]);
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "s")]);
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
+    }
+
+    #[test]
+    fn a_deleted_stack_is_summarizable_by_id_but_not_by_name() {
+        let svc = svc();
+        svc.state
+            .write()
+            .get_or_create("000000000000")
+            .stacks
+            .insert(
+                "gone".to_string(),
+                crate::state::Stack {
+                    name: "gone".to_string(),
+                    stack_id: "arn:aws:cloudformation:us-east-1:000000000000:stack/gone/9"
+                        .to_string(),
+                    template: GOOD_TEMPLATE.to_string(),
+                    status: "DELETE_COMPLETE".to_string(),
+                    status_reason: None,
+                    resources: vec![],
+                    parameters: BTreeMap::new(),
+                    tags: BTreeMap::new(),
+                    created_at: chrono::Utc::now(),
+                    updated_at: None,
+                    description: None,
+                    notification_arns: vec![],
+                    outputs: vec![],
+                    enable_termination_protection: false,
+                },
+            );
+
+        // By unique id: AWS keeps deleted stacks addressable this way.
+        let xml = introspect(
+            &svc,
+            "GetTemplateSummary",
+            &[(
+                "StackName",
+                "arn:aws:cloudformation:us-east-1:000000000000:stack/gone/9",
+            )],
+        );
+        assert!(xml.contains("<member>AWS::SQS::Queue</member>"), "{xml}");
+
+        // By name: the name is free for reuse, so the dead stack must not
+        // answer for it.
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackName", "gone")]);
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+    }
+
+    #[test]
+    fn an_unusable_template_url_is_reported_not_validated() {
+        let svc = svc();
+        let Err(err) = svc.handle_extra_action(&req(
+            "ValidateTemplate",
+            &[("TemplateURL", "https://s3.amazonaws.com/b/missing.yaml")],
+        )) else {
+            panic!("a URL that resolves to nothing must not validate clean");
+        };
+        assert!(
+            err.message().contains("Template not found"),
+            "{}",
+            err.message()
+        );
+    }
+
+    #[test]
+    fn stack_sets_resolve_by_name_or_id_and_report_absence() {
+        let svc = svc();
+        {
+            let mut accounts = svc.state.write();
+            let st = accounts.get_or_create("000000000000");
+            let sets = st.extras.entry("stack_sets".to_string()).or_default();
+            sets.insert(
+                "myset".to_string(),
+                json!({"StackSetId": "myset:abc123", "TemplateBody": GOOD_TEMPLATE}),
+            );
+            // A record with no TemplateBody still EXISTS.
+            sets.insert(
+                "bodyless".to_string(),
+                json!({"StackSetId": "bodyless:def"}),
+            );
+        }
+
+        for key in ["myset", "myset:abc123"] {
+            let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", key)]);
+            assert!(
+                xml.contains("<member>AWS::SQS::Queue</member>"),
+                "{key}: {xml}"
+            );
+        }
+
+        // Present but bodyless: an empty summary, NOT "does not exist".
+        let xml = introspect(&svc, "GetTemplateSummary", &[("StackSetName", "bodyless")]);
+        assert!(xml.contains("<ResourceTypes/>"), "{xml}");
+
+        // Genuinely absent: the declared error.
+        let Err(err) =
+            svc.handle_extra_action(&req("GetTemplateSummary", &[("StackSetName", "nope")]))
+        else {
+            panic!("an unknown stack set must report the modeled error");
+        };
+        assert!(err.message().contains("not found"), "{}", err.message());
+    }
+
+    use std::collections::BTreeMap;
+
     fn req(action: &str, params: &[(&str, &str)]) -> AwsRequest {
         let mut q = HashMap::new();
         q.insert("Action".to_string(), action.to_string());
@@ -3116,8 +3715,15 @@ mod tests {
     }
 
     fn ok(action: &str, params: &[(&str, &str)]) {
-        let r = svc().handle_extra_action(&req(action, params));
-        match r {
+        ok_on(&svc(), action, params);
+    }
+
+    /// `ok` against a service the caller keeps, for sequences where a later
+    /// call depends on state an earlier one created. `ok` builds a fresh
+    /// service per call, so anything that must EXIST by the time it is used
+    /// belongs here instead.
+    fn ok_on(svc: &CloudFormationService, action: &str, params: &[(&str, &str)]) {
+        match svc.handle_extra_action(&req(action, params)) {
             Ok(resp) => assert!(resp.status.is_success(), "{action} status: {}", resp.status),
             Err(e) => panic!("{action} failed: {e:?}"),
         }
@@ -3453,10 +4059,14 @@ mod tests {
 
     #[test]
     fn stack_sets_instances_refactors() {
-        ok("CreateStackSet", &[("StackSetName", "ss")]);
-        ok("DescribeStackSet", &[("StackSetName", "ss")]);
-        ok("ListStackSets", &[]);
-        ok("UpdateStackSet", &[("StackSetName", "ss")]);
+        // One service for the whole sequence: UpdateStackSet and
+        // DeleteStackSet act on the stack set CreateStackSet made, and a
+        // fresh service per call would not have it.
+        let svc = svc();
+        ok_on(&svc, "CreateStackSet", &[("StackSetName", "ss")]);
+        ok_on(&svc, "DescribeStackSet", &[("StackSetName", "ss")]);
+        ok_on(&svc, "ListStackSets", &[]);
+        ok_on(&svc, "UpdateStackSet", &[("StackSetName", "ss")]);
         ok(
             "DescribeStackSetOperation",
             &[("StackSetName", "ss"), ("OperationId", "op")],
@@ -3475,7 +4085,7 @@ mod tests {
             &[("StackSetName", "ss"), ("OperationId", "op")],
         );
         ok("ImportStacksToStackSet", &[("StackSetName", "ss")]);
-        ok("DeleteStackSet", &[("StackSetName", "ss")]);
+        ok_on(&svc, "DeleteStackSet", &[("StackSetName", "ss")]);
         ok(
             "CreateStackInstances",
             &[("StackSetName", "ss"), ("Regions.member.1", "us-east-1")],

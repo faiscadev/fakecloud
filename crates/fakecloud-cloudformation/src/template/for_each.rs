@@ -21,7 +21,7 @@ use super::*;
 /// bodies via `bindings`, so `${OuterVar}` resolves inside an inner
 /// loop's body. Each call resolves its own loop variable's iterations
 /// before recursing into the emitted entries.
-pub(super) fn expand_for_each(
+pub(crate) fn expand_for_each(
     value: &Value,
     bindings: &BTreeMap<String, String>,
     parameters: &BTreeMap<String, String>,
