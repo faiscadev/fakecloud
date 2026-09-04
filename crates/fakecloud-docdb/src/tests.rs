@@ -121,6 +121,11 @@ async fn describe_db_clusters_honors_the_db_cluster_id_filter() {
         xml.contains("<DBClusterIdentifier>clu-b</DBClusterIdentifier>"),
         "{xml}"
     );
+    assert_eq!(
+        xml.matches("<DBClusterIdentifier>").count(),
+        1,
+        "the ARN form returned more than the cluster it names: {xml}"
+    );
 
     // An unrecognized name matches nothing rather than returning the
     // full list: DocumentDB declares no InvalidParameterValue-equivalent

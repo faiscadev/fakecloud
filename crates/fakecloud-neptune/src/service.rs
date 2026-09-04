@@ -475,6 +475,45 @@ fn instance_matches_filters(instance: &DbInstance, filters: &[QueryFilter]) -> b
     })
 }
 
+/// A cluster's built-in writer and reader endpoints.
+///
+/// AWS reports these alongside the custom ones, and without them
+/// `db-cluster-endpoint-type=reader` (a documented value) can never
+/// match: `CreateDBClusterEndpoint` only makes CUSTOM endpoints. They
+/// belong to the cluster rather than the endpoint store -- no API
+/// creates or deletes them -- and carry no identifier, resource id or
+/// ARN of their own, so none is reported.
+fn built_in_cluster_endpoints(cluster: &DbCluster) -> Vec<DbClusterEndpoint> {
+    [
+        ("WRITER", &cluster.endpoint),
+        ("READER", &cluster.reader_endpoint),
+    ]
+    .into_iter()
+    .filter(|(_, address)| !address.is_empty())
+    .map(|(kind, address)| DbClusterEndpoint {
+        db_cluster_endpoint_identifier: String::new(),
+        db_cluster_identifier: cluster.db_cluster_identifier.clone(),
+        db_cluster_endpoint_resource_identifier: String::new(),
+        endpoint: address.clone(),
+        // DBClusterEndpoint.Status is its own enum (creating /
+        // available / deleting / inactive / modifying); a cluster's
+        // status has values outside it.
+        status: match cluster.status.as_str() {
+            state @ ("creating" | "available" | "deleting" | "inactive" | "modifying") => state,
+            "stopped" => "inactive",
+            _ => "modifying",
+        }
+        .to_string(),
+        endpoint_type: kind.to_string(),
+        custom_endpoint_type: String::new(),
+        static_members: Vec::new(),
+        excluded_members: Vec::new(),
+        db_cluster_endpoint_arn: String::new(),
+        tags: Vec::new(),
+    })
+    .collect()
+}
+
 /// True when a cluster endpoint satisfies every filter.
 ///
 /// The enum-valued names match case-insensitively: AWS returns these
@@ -988,9 +1027,17 @@ impl NeptuneService {
         // `DescribeDBClusterEndpoints` declares only `DBClusterNotFoundFault`;
         // an unknown `DBClusterEndpointIdentifier` filter resolves to an empty
         // list rather than an error (matching the real API).
+        // The cluster's own writer and reader endpoints are reported
+        // next to the custom ones, as on AWS.
+        let built_ins: Vec<DbClusterEndpoint> = st
+            .clusters
+            .values()
+            .flat_map(built_in_cluster_endpoints)
+            .collect();
         let endpoints: Vec<&DbClusterEndpoint> = st
             .cluster_endpoints
             .values()
+            .chain(built_ins.iter())
             .filter(|e| {
                 endpoint_filter
                     .as_ref()
