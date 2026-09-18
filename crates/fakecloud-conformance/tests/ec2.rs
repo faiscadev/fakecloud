@@ -10676,8 +10676,15 @@ async fn ec2_associate_enclave_certificate_iam_role() {
 async fn ec2_associate_iam_instance_profile() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    // The instance must exist (InvalidInstanceID.NotFound otherwise).
+    let id = run_one(&c).await;
     c.associate_iam_instance_profile()
-        .instance_id("x")
+        .instance_id(id)
+        .iam_instance_profile(
+            aws_sdk_ec2::types::IamInstanceProfileSpecification::builder()
+                .name("web-profile")
+                .build(),
+        )
         .send()
         .await
         .unwrap();
@@ -11898,13 +11905,33 @@ async fn ec2_disassociate_enclave_certificate_iam_role() {
         .unwrap();
 }
 
+async fn make_iam_profile_association(c: &aws_sdk_ec2::Client) -> String {
+    let id = run_one(c).await;
+    c.associate_iam_instance_profile()
+        .instance_id(id)
+        .iam_instance_profile(
+            aws_sdk_ec2::types::IamInstanceProfileSpecification::builder()
+                .name("web-profile")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap()
+        .iam_instance_profile_association()
+        .and_then(|a| a.association_id())
+        .unwrap()
+        .to_string()
+}
+
 #[test_action("ec2", "DisassociateIamInstanceProfile", checksum = "865568f3")]
 #[tokio::test]
 async fn ec2_disassociate_iam_instance_profile() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    // The association must exist (InvalidAssociationID.NotFound otherwise).
+    let assoc_id = make_iam_profile_association(&c).await;
     c.disassociate_iam_instance_profile()
-        .association_id("x")
+        .association_id(assoc_id)
         .send()
         .await
         .unwrap();
@@ -12610,8 +12637,15 @@ async fn ec2_purchase_scheduled_instances() {
 async fn ec2_replace_iam_instance_profile_association() {
     let s = TestServer::start().await;
     let c = s.ec2_client().await;
+    // The association must exist (InvalidAssociationID.NotFound otherwise).
+    let assoc_id = make_iam_profile_association(&c).await;
     c.replace_iam_instance_profile_association()
-        .association_id("x")
+        .association_id(assoc_id)
+        .iam_instance_profile(
+            aws_sdk_ec2::types::IamInstanceProfileSpecification::builder()
+                .name("admin-profile")
+                .build(),
+        )
         .send()
         .await
         .unwrap();

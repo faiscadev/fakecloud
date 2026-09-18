@@ -12,7 +12,7 @@ use crate::service_helpers::{
     gen_id, indexed_list, instance_limit_exceeded, invalid_parameter_value, missing_parameter,
     parse_filters, require, require_struct, validate_enum, Filter,
 };
-use crate::state::{Ec2State, Instance, Tag};
+use crate::state::{Ec2State, IamInstanceProfileAssociation, Instance, Tag};
 
 const LAUNCH_TIME: &str = "2024-01-01T00:00:00.000Z";
 
@@ -78,6 +78,11 @@ fn platform_for(state: &Ec2State, image_id: &str) -> String {
     super::image::platform_details_label(raw)
 }
 
+/// Render one `<item>` of `instancesSet`. `iam_assoc` is the instance's
+/// IAM instance-profile association, looked up by the caller from
+/// `state.iam_instance_profile_associations` (the instance record itself does
+/// not carry the profile, mirroring how `sg_names` and block-device mappings
+/// are resolved at describe time).
 fn instance_xml(
     i: &Instance,
     tags: &[Tag],
@@ -85,7 +90,14 @@ fn instance_xml(
     sg_names: &HashMap<String, String>,
     architecture: &str,
     platform_details: &str,
+    iam_assoc: Option<&IamInstanceProfileAssociation>,
 ) -> String {
+    // Rendered whenever an association exists, regardless of its `state`, so
+    // records persisted by older versions (which never left `associating`)
+    // still reflect on the instance.
+    let iam_profile = iam_assoc
+        .map(super::rest::iam_instance_profile_xml)
+        .unwrap_or_default();
     let groups: Vec<String> = i
         .security_group_ids
         .iter()
@@ -168,7 +180,7 @@ fn instance_xml(
         .map(|a| ec2_elem("affinity", a))
         .unwrap_or_default();
     format!(
-        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+        "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
         ec2_elem("instanceId", &i.instance_id),
         ec2_elem("imageId", &i.image_id),
         state_xml("instanceState", i.state_code, &i.state_name),
@@ -219,6 +231,7 @@ fn instance_xml(
             ec2_list("groupSet", &groups),
             ec2_elem("ownerId", owner)
         ),
+        iam_profile,
         metadata_options,
         cpu_options,
         super::tags::tag_set_xml(tags),
@@ -352,17 +365,7 @@ pub(crate) async fn run_instances(
         .map(|v| v == "true")
         .unwrap_or(false);
     let metadata_options = parse_metadata_options(&req.query_params);
-    // `IamInstanceProfile.Arn` / `.Name` (either half is accepted; synthesize
-    // the ARN from the name when only the name is given).
-    let iam_profile_arn = req
-        .query_params
-        .get("IamInstanceProfile.Arn")
-        .cloned()
-        .or_else(|| {
-            req.query_params
-                .get("IamInstanceProfile.Name")
-                .map(|n| format!("arn:aws:iam::{}:instance-profile/{n}", req.account_id))
-        });
+    let iam_profile_arn = super::rest::iam_profile_arn(req);
     let az = format!(
         "{}a",
         if req.region.is_empty() {
@@ -552,6 +555,14 @@ pub(crate) async fn run_instances(
             let tags = state.tags_for(id).to_vec();
             let architecture = arch_for(state, &inst.image_id);
             let platform_details = platform_for(state, &inst.image_id);
+            // Build the IAM instance-profile association (when the request
+            // supplies `IamInstanceProfile`) before rendering, so the launch
+            // response carries <iamInstanceProfile> as on AWS. The record
+            // matches a direct AssociateIamInstanceProfile so
+            // DescribeIamInstanceProfileAssociations reflects it too.
+            let iam_assoc = iam_profile_arn.clone().map(|profile_arn| {
+                super::rest::new_iam_profile_association(id.clone(), profile_arn)
+            });
             rendered.push(instance_xml(
                 &inst,
                 &tags,
@@ -559,21 +570,10 @@ pub(crate) async fn run_instances(
                 &sg_names,
                 &architecture,
                 &platform_details,
+                iam_assoc.as_ref(),
             ));
             state.instances.insert(id.clone(), inst);
-
-            // Record an IAM instance-profile association when the request
-            // supplies `IamInstanceProfile`, matching a direct
-            // AssociateIamInstanceProfile so
-            // DescribeIamInstanceProfileAssociations reflects it.
-            if let Some(profile_arn) = iam_profile_arn.clone() {
-                let assoc = crate::state::IamInstanceProfileAssociation {
-                    association_id: gen_id("iip-assoc"),
-                    instance_id: id.clone(),
-                    iam_instance_profile_arn: profile_arn,
-                    iam_instance_profile_id: gen_id("AIPA"),
-                    state: "associated".to_string(),
-                };
+            if let Some(assoc) = iam_assoc {
                 state
                     .iam_instance_profile_associations
                     .insert(assoc.association_id.clone(), assoc);
@@ -927,13 +927,7 @@ pub(crate) fn cfn_create_instance(
                 let name = spec.iam_instance_profile_name.clone().unwrap_or_default();
                 format!("arn:aws:iam::{account_id}:instance-profile/{name}")
             });
-            let assoc = crate::state::IamInstanceProfileAssociation {
-                association_id: gen_id("iip-assoc"),
-                instance_id: id.clone(),
-                iam_instance_profile_arn: arn,
-                iam_instance_profile_id: gen_id("AIPA"),
-                state: "associated".to_string(),
-            };
+            let assoc = super::rest::new_iam_profile_association(id.clone(), arn);
             state
                 .iam_instance_profile_associations
                 .insert(assoc.association_id.clone(), assoc);
@@ -1438,6 +1432,16 @@ pub(crate) fn describe_instances(
         }
     }
     let no_bdm: Vec<&crate::state::VolumeAttachment> = Vec::new();
+    // Same idea for the IAM instance profile: it lives in the association map,
+    // not on the instance, so resolve it once per request for the render.
+    // Associate rejects a second profile per instance, so at most one record
+    // matches; a snapshot from before that check could hold two, in which case
+    // the last in map order wins.
+    let profile_by_instance: HashMap<&str, &IamInstanceProfileAssociation> = state
+        .iam_instance_profile_associations
+        .values()
+        .map(|a| (a.instance_id.as_str(), a))
+        .collect();
 
     // Flatten matching instances into a stable order (by reservation, then id),
     // then paginate over the flat instance list — AWS counts instances, not
@@ -1481,6 +1485,7 @@ pub(crate) fn describe_instances(
                 &sg_names,
                 &arch_for(state, &i.image_id),
                 &platform_for(state, &i.image_id),
+                profile_by_instance.get(i.instance_id.as_str()).copied(),
             ));
     }
     let reservations: Vec<String> = order
@@ -2468,6 +2473,7 @@ mod tests {
 #[cfg(test)]
 mod modify_tests {
     use super::*;
+    use crate::test_support::{assoc_id_of, seed_instance};
 
     fn req(action: &str, query: &[(&str, &str)]) -> AwsRequest {
         AwsRequest {
@@ -2577,47 +2583,6 @@ mod modify_tests {
         assert!(!xml.contains("b <c>"), "raw < must not appear: {xml}");
     }
 
-    fn seed_instance(svc: &Ec2Service, id: &str) {
-        let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
-        let inst = Instance {
-            instance_id: id.into(),
-            image_id: "ami-1".into(),
-            instance_type: "t3.micro".into(),
-            state_code: 16,
-            state_name: "running".into(),
-            private_ip: "10.0.0.5".into(),
-            public_ip: None,
-            subnet_id: Some("subnet-1".into()),
-            vpc_id: Some("vpc-1".into()),
-            key_name: None,
-            security_group_ids: vec![],
-            reservation_id: "r-1".into(),
-            ami_launch_index: 0,
-            monitoring: false,
-            az: "us-east-1a".into(),
-            launch_time: "2024-01-01T00:00:00.000Z".into(),
-            container_id: None,
-            disable_api_termination: false,
-            disable_api_stop: false,
-            source_dest_check: true,
-            ebs_optimized: false,
-            instance_initiated_shutdown_behavior: "stop".into(),
-            user_data: None,
-            metadata_options: Default::default(),
-            cpu_options: None,
-            bandwidth_weighting: None,
-            maintenance_options: Default::default(),
-            placement_tenancy: None,
-            placement_affinity: None,
-            placement_group_name: None,
-            private_dns_hostname_type: None,
-            enable_resource_name_dns_a_record: false,
-            enable_resource_name_dns_aaaa_record: false,
-        };
-        state.instances.insert(id.to_string(), inst);
-    }
-
     // Docker-free coverage of the metadata threading the StartInstances
     // stopped-then-restart fallback relies on: after a restart the runtime
     // registry has no handle for a `stopped` instance, so the boot task must
@@ -2713,6 +2678,15 @@ mod modify_tests {
             ..Default::default()
         };
         let attrs = cfn_create_instance(&svc, "000000000000", "us-east-1", &spec);
+
+        // ...and DescribeInstances renders the profile on the instance.
+        let desc = body(describe_instances(&svc, &req("DescribeInstances", &[])).unwrap());
+        assert!(
+            desc.contains(
+                "<iamInstanceProfile><arn>arn:aws:iam::000000000000:instance-profile/my-profile</arn><id>AIPA"
+            ),
+            "got: {desc}"
+        );
 
         let accounts = svc.state.read();
         let state = accounts.get("000000000000").unwrap();
@@ -2887,6 +2861,140 @@ mod modify_tests {
                 .unwrap(),
         );
         assert!(out.contains("<instanceId>i-1</instanceId>"), "got: {out}");
+    }
+
+    #[test]
+    fn describe_instances_renders_iam_instance_profile_regardless_of_association_state() {
+        // Snapshots written before Associate advanced the state hold records
+        // stuck at `associating`; they must still show on the instance.
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-old");
+        {
+            let mut accounts = svc.state.write();
+            let state = accounts.get_or_create("000000000000");
+            let mut assoc = super::super::rest::new_iam_profile_association(
+                "i-old".into(),
+                "arn:aws:iam::000000000000:instance-profile/legacy".into(),
+            );
+            assoc.state = "associating".into();
+            state
+                .iam_instance_profile_associations
+                .insert(assoc.association_id.clone(), assoc);
+        }
+        let out = body(describe_instances(&svc, &req("DescribeInstances", &[])).unwrap());
+        assert!(
+            out.contains("<arn>arn:aws:iam::000000000000:instance-profile/legacy</arn>"),
+            "got: {out}"
+        );
+    }
+
+    #[test]
+    fn describe_instances_reports_iam_instance_profile_after_associate() {
+        // AssociateIamInstanceProfile recorded an association but the instance
+        // render never emitted <iamInstanceProfile>, so `describe-instances
+        // --query ...IamInstanceProfile.Arn` stayed null forever.
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-prof");
+        let assoc = body(
+            super::super::rest::associate_iam_instance_profile(
+                &svc,
+                &req(
+                    "AssociateIamInstanceProfile",
+                    &[
+                        ("InstanceId", "i-prof"),
+                        ("IamInstanceProfile.Name", "web-profile"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let out = body(describe_instances(&svc, &req("DescribeInstances", &[])).unwrap());
+        assert!(
+            out.contains(
+                "<iamInstanceProfile><arn>arn:aws:iam::000000000000:instance-profile/web-profile</arn><id>AIPA"
+            ),
+            "got: {out}"
+        );
+
+        // Disassociating drops the element again.
+        let assoc_id = assoc_id_of(&assoc);
+        super::super::rest::disassociate_iam_instance_profile(
+            &svc,
+            &req(
+                "DisassociateIamInstanceProfile",
+                &[("AssociationId", &assoc_id)],
+            ),
+        )
+        .unwrap();
+        let out = body(describe_instances(&svc, &req("DescribeInstances", &[])).unwrap());
+        assert!(!out.contains("<iamInstanceProfile>"), "got: {out}");
+    }
+
+    #[test]
+    fn describe_instances_reports_replaced_iam_instance_profile() {
+        let svc = Ec2Service::new();
+        seed_instance(&svc, "i-prof");
+        let assoc = body(
+            super::super::rest::associate_iam_instance_profile(
+                &svc,
+                &req(
+                    "AssociateIamInstanceProfile",
+                    &[
+                        ("InstanceId", "i-prof"),
+                        ("IamInstanceProfile.Name", "web-profile"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        let assoc_id = assoc_id_of(&assoc);
+        super::super::rest::replace_iam_instance_profile_association(
+            &svc,
+            &req(
+                "ReplaceIamInstanceProfileAssociation",
+                &[
+                    ("AssociationId", &assoc_id),
+                    ("IamInstanceProfile.Name", "admin-profile"),
+                ],
+            ),
+        )
+        .unwrap();
+        let out = body(describe_instances(&svc, &req("DescribeInstances", &[])).unwrap());
+        assert!(
+            out.contains("<arn>arn:aws:iam::000000000000:instance-profile/admin-profile</arn>"),
+            "got: {out}"
+        );
+        assert!(!out.contains("instance-profile/web-profile"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_instances_reports_iam_instance_profile_in_response() {
+        // The launch response rendered the instance before the association was
+        // recorded, so `run-instances --iam-instance-profile` never echoed the
+        // profile even though DescribeInstances (now) does.
+        let svc = Ec2Service::new();
+        let out = body(
+            run_instances(
+                &svc,
+                &req(
+                    "RunInstances",
+                    &[
+                        ("ImageId", "ami-12345678"),
+                        ("MinCount", "1"),
+                        ("MaxCount", "1"),
+                        ("IamInstanceProfile.Name", "web-profile"),
+                    ],
+                ),
+            )
+            .await
+            .unwrap(),
+        );
+        assert!(
+            out.contains(
+                "<iamInstanceProfile><arn>arn:aws:iam::000000000000:instance-profile/web-profile</arn><id>AIPA"
+            ),
+            "got: {out}"
+        );
     }
 
     #[test]

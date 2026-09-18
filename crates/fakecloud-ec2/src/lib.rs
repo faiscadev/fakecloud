@@ -32,6 +32,58 @@ pub(crate) mod test_support {
         }
     }
 
+    /// Insert a minimal running instance into the default test account so
+    /// handlers that look the instance up have something to find.
+    pub(crate) fn seed_instance(svc: &crate::service::Ec2Service, id: &str) {
+        let mut accounts = svc.state.write();
+        let state = accounts.get_or_create("000000000000");
+        let inst = crate::state::Instance {
+            instance_id: id.into(),
+            image_id: "ami-1".into(),
+            instance_type: "t3.micro".into(),
+            state_code: 16,
+            state_name: "running".into(),
+            private_ip: "10.0.0.5".into(),
+            public_ip: None,
+            subnet_id: Some("subnet-1".into()),
+            vpc_id: Some("vpc-1".into()),
+            key_name: None,
+            security_group_ids: vec![],
+            reservation_id: "r-1".into(),
+            ami_launch_index: 0,
+            monitoring: false,
+            az: "us-east-1a".into(),
+            launch_time: "2024-01-01T00:00:00.000Z".into(),
+            container_id: None,
+            disable_api_termination: false,
+            disable_api_stop: false,
+            source_dest_check: true,
+            ebs_optimized: false,
+            instance_initiated_shutdown_behavior: "stop".into(),
+            user_data: None,
+            metadata_options: Default::default(),
+            cpu_options: None,
+            bandwidth_weighting: None,
+            maintenance_options: Default::default(),
+            placement_tenancy: None,
+            placement_affinity: None,
+            placement_group_name: None,
+            private_dns_hostname_type: None,
+            enable_resource_name_dns_a_record: false,
+            enable_resource_name_dns_aaaa_record: false,
+        };
+        state.instances.insert(id.to_string(), inst);
+    }
+
+    /// The `<associationId>` of an IAM instance-profile association response.
+    pub(crate) fn assoc_id_of(xml: &str) -> String {
+        xml.split("<associationId>")
+            .nth(1)
+            .and_then(|s| s.split("</associationId>").next())
+            .expect("associationId in response")
+            .to_string()
+    }
+
     /// Build a minimal query-protocol [`AwsRequest`] for handler unit tests.
     pub(crate) fn ec2_request(action: &str, query: &[(&str, &str)]) -> AwsRequest {
         AwsRequest {

@@ -706,3 +706,66 @@ async fn describe_instances_reports_ami_architecture() {
         .flat_map(|r| r.instances())
         .any(|i| i.instance_id() == Some(id.as_str())));
 }
+
+#[tokio::test]
+async fn describe_instances_reports_iam_instance_profile_round_trip() {
+    // Attach a profile, read it back on the instance, detach, read again.
+    // Covers the SDK-visible shape: DescribeInstances rendered no
+    // <iamInstanceProfile> at all, so `IamInstanceProfile.Arn` stayed null.
+    let s = TestServer::start().await;
+    let c = s.ec2_client().await;
+    let id = run(&c, 1, 1).await.remove(0);
+
+    let assoc = c
+        .associate_iam_instance_profile()
+        .instance_id(&id)
+        .iam_instance_profile(
+            aws_sdk_ec2::types::IamInstanceProfileSpecification::builder()
+                .name("web-profile")
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let assoc_id = assoc
+        .iam_instance_profile_association()
+        .and_then(|a| a.association_id())
+        .expect("association id")
+        .to_string();
+
+    let desc = c
+        .describe_instances()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    let inst = &desc.reservations()[0].instances()[0];
+    let profile = inst.iam_instance_profile().expect("profile on instance");
+    assert_eq!(
+        profile.arn(),
+        Some("arn:aws:iam::123456789012:instance-profile/web-profile"),
+        "{profile:?}"
+    );
+    assert!(
+        profile.id().is_some_and(|i| i.starts_with("AIPA")),
+        "{profile:?}"
+    );
+
+    c.disassociate_iam_instance_profile()
+        .association_id(&assoc_id)
+        .send()
+        .await
+        .unwrap();
+    let desc = c
+        .describe_instances()
+        .instance_ids(&id)
+        .send()
+        .await
+        .unwrap();
+    assert!(
+        desc.reservations()[0].instances()[0]
+            .iam_instance_profile()
+            .is_none(),
+        "profile must be gone after disassociate"
+    );
+}

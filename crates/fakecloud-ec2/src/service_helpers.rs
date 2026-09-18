@@ -84,6 +84,22 @@ pub fn incorrect_instance_state(id: &str, current: &str) -> AwsServiceError {
     )
 }
 
+/// `IncorrectState` (HTTP 400) — the resource is in the wrong state for the
+/// request (e.g. associating a second IAM instance profile with an instance).
+pub fn incorrect_state(message: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "IncorrectState", message.into())
+}
+
+/// `InvalidAssociationID.NotFound` (HTTP 400) — the requested association id
+/// does not exist.
+pub fn association_not_found(id: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidAssociationID.NotFound",
+        format!("The association ID '{id}' does not exist"),
+    )
+}
+
 /// Match an EC2 filter value against a candidate, honoring the `*` (any run)
 /// and `?` (any single char) wildcards AWS supports in filter values. A value
 /// with no wildcard is an exact match.
