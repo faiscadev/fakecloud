@@ -481,13 +481,6 @@ pub(crate) fn iam_action_resource(
     }
 }
 
-/// Extract the caller's access key from the request's Authorization header.
-pub(crate) fn extract_access_key(req: &AwsRequest) -> Option<String> {
-    let auth = req.headers.get("authorization")?.to_str().ok()?;
-    let info = fakecloud_aws::sigv4::parse_sigv4(auth)?;
-    Some(info.access_key)
-}
-
 /// Convert a hyphenated service name to title case, handling known abbreviations.
 pub(crate) fn title_case_service(s: &str) -> String {
     s.split('-')
