@@ -3639,6 +3639,34 @@ fn create_bucket_configuration_tags_ignores_foreign_bodies() {
 }
 
 #[test]
+fn create_bucket_idempotent_recreate_does_not_reapply_create_time_tags() {
+    // The us-east-1 idempotent re-create is a no-op on the existing bucket. It
+    // re-applies no create-time setting, tags included — PutBucketTagging is
+    // what changes an existing bucket's tags.
+    let svc = make_service();
+    let plain = make_request(Method::PUT, "/idem-tags", &[], b"");
+    svc.create_bucket("123456789012", &plain, "idem-tags")
+        .unwrap();
+
+    let tagged = make_request(
+        Method::PUT,
+        "/idem-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    let resp = svc
+        .create_bucket("123456789012", &tagged, "idem-tags")
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let get = make_request(Method::GET, "/idem-tags", &[("tagging", "")], b"");
+    assert_aws_err(
+        svc.get_bucket_tagging("123456789012", &get, "idem-tags"),
+        "NoSuchTagSet",
+    );
+}
+
+#[test]
 fn create_bucket_already_owned_other_region() {
     let svc = make_service();
     let mut req = make_request(
