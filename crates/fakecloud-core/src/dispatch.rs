@@ -1133,7 +1133,15 @@ fn streaming_route(
         let virtual_hosted_s3 = protocol::parse_routing_host_from_headers(headers)
             .filter(|h| h.service == "s3" && h.bucket.is_some())
             .is_some();
-        if after.is_empty() || (!virtual_hosted_s3 && !after.contains('/')) {
+        // Path-style needs a non-empty key after the bucket: `PUT /<bucket>`
+        // and `PUT /<bucket>/` are both CreateBucket, and the trailing-slash
+        // form is what the AWS SDKs actually send. Treating it as an object
+        // upload left the body unbuffered, so everything that runs before the
+        // handler -- IAM enforcement above all -- saw an empty body and could
+        // not read `CreateBucketConfiguration` (no `aws:RequestTag` from a
+        // create-time tag set, for one).
+        let path_style_key = after.split_once('/').map(|(_, key)| key).unwrap_or("");
+        if after.is_empty() || (!virtual_hosted_s3 && path_style_key.is_empty()) {
             return None;
         }
         let header_s3 = headers
@@ -1993,6 +2001,19 @@ mod tests {
         let headers = s3_sigv4_headers();
         assert_eq!(
             streaming_route(&http::Method::PUT, "/my-bucket", &headers, &HashMap::new(),),
+            None,
+        );
+    }
+
+    #[test]
+    fn streaming_route_path_style_create_bucket_with_trailing_slash_skipped() {
+        // The AWS SDKs send CreateBucket as `PUT /<bucket>/`. The trailing
+        // slash must not make it look like an object upload: the body carries
+        // `CreateBucketConfiguration` (location constraint, tag set) and has
+        // to be buffered before IAM enforcement reads it.
+        let headers = s3_sigv4_headers();
+        assert_eq!(
+            streaming_route(&http::Method::PUT, "/my-bucket/", &headers, &HashMap::new(),),
             None,
         );
     }

@@ -411,6 +411,146 @@ async fn sns_publish_allowed_on_specific_topic() {
 // S3 tests
 // ======================================================================
 
+/// Real S3 requires `s3:TagResource` on top of `s3:CreateBucket` to create a
+/// bucket carrying `CreateBucketConfiguration.Tags` (issue #2553). A grant of
+/// `s3:CreateBucket` alone still creates untagged buckets, but a tagged create
+/// is denied.
+#[tokio::test]
+async fn s3_create_bucket_with_tags_needs_tag_resource() {
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "s3taguser").await;
+    attach_inline_policy(
+        &server,
+        "s3taguser",
+        "create-only",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":"s3:CreateBucket","Resource":"*"}
+        ]}"#,
+    )
+    .await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let s3 = aws_sdk_s3::Client::new(&cfg);
+
+    // Untagged create is allowed by s3:CreateBucket alone.
+    s3.create_bucket()
+        .bucket("tagperm-untagged")
+        .send()
+        .await
+        .unwrap();
+
+    // The same grant must not authorize a tagged create.
+    let err = s3
+        .create_bucket()
+        .bucket("tagperm-denied")
+        .create_bucket_configuration(
+            aws_sdk_s3::types::CreateBucketConfiguration::builder()
+                .tags(
+                    aws_sdk_s3::types::Tag::builder()
+                        .key("team")
+                        .value("a")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("AccessDenied"),
+        "expected AccessDenied for tagged create, got {msg}"
+    );
+
+    // Adding s3:TagResource unblocks it, and the bucket comes out tagged.
+    attach_inline_policy(
+        &server,
+        "s3taguser",
+        "create-and-tag",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:CreateBucket","s3:TagResource","s3:GetBucketTagging"],"Resource":"*"}
+        ]}"#,
+    )
+    .await;
+    s3.create_bucket()
+        .bucket("tagperm-allowed")
+        .create_bucket_configuration(
+            aws_sdk_s3::types::CreateBucketConfiguration::builder()
+                .tags(
+                    aws_sdk_s3::types::Tag::builder()
+                        .key("team")
+                        .value("a")
+                        .build()
+                        .unwrap(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let tags = s3
+        .get_bucket_tagging()
+        .bucket("tagperm-allowed")
+        .send()
+        .await
+        .unwrap();
+    assert!(tags
+        .tag_set()
+        .iter()
+        .any(|t| t.key() == "team" && t.value() == "a"));
+}
+
+/// The create-time tag set feeds `aws:RequestTag/*`, so a policy conditioned
+/// on the tag value actually decides the create.
+#[tokio::test]
+async fn s3_create_bucket_tags_drive_request_tag_condition() {
+    let server = start_strict().await;
+    let (akid, secret) = bootstrap_user(&server, "s3reqtaguser").await;
+    attach_inline_policy(
+        &server,
+        "s3reqtaguser",
+        "team-a-only",
+        r#"{"Version":"2012-10-17","Statement":[
+            {"Effect":"Allow","Action":["s3:CreateBucket","s3:TagResource"],"Resource":"*",
+             "Condition":{"StringEquals":{"aws:RequestTag/team":"a"}}}
+        ]}"#,
+    )
+    .await;
+
+    let cfg = sdk_config_with(&server, &akid, &secret).await;
+    let s3 = aws_sdk_s3::Client::new(&cfg);
+    let create_with_team = |bucket: &'static str, team: &'static str| {
+        let s3 = s3.clone();
+        async move {
+            s3.create_bucket()
+                .bucket(bucket)
+                .create_bucket_configuration(
+                    aws_sdk_s3::types::CreateBucketConfiguration::builder()
+                        .tags(
+                            aws_sdk_s3::types::Tag::builder()
+                                .key("team")
+                                .value(team)
+                                .build()
+                                .unwrap(),
+                        )
+                        .build(),
+                )
+                .send()
+                .await
+        }
+    };
+
+    create_with_team("reqtag-allowed", "a").await.unwrap();
+
+    let err = create_with_team("reqtag-denied", "b").await.unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("AccessDenied"),
+        "expected AccessDenied for the non-matching tag value, got {msg}"
+    );
+}
+
 #[tokio::test]
 async fn s3_get_object_resource_scoped() {
     let server = start_strict().await;

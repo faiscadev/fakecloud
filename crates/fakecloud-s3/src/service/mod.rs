@@ -1453,6 +1453,31 @@ impl AwsService for S3Service {
         })
     }
 
+    /// Tagging a bucket at create time needs `s3:TagResource` as well as
+    /// `s3:CreateBucket` — the S3 model says so on
+    /// `CreateBucketConfiguration$Tags` ("You must have the
+    /// `s3:TagResource` permission to create a general purpose bucket with
+    /// tags"). Dispatch requires every returned action to be allowed, so a
+    /// principal granted only `s3:CreateBucket` can still create an untagged
+    /// bucket but not a tagged one, as on AWS.
+    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
+        let Some(action) = self.iam_action_for(request) else {
+            return Vec::new();
+        };
+        if action.service == "s3" && action.action == "CreateBucket" {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            if !create_bucket_configuration_tags(body).is_empty() {
+                let tag_resource = fakecloud_core::auth::IamAction {
+                    service: "s3",
+                    action: "TagResource",
+                    resource: action.resource.clone(),
+                };
+                return vec![action, tag_resource];
+            }
+        }
+        vec![action]
+    }
+
     fn iam_condition_keys_for(
         &self,
         request: &AwsRequest,
@@ -1570,6 +1595,15 @@ fn s3_request_tags(
             // Tags come in XML body
             let body = std::str::from_utf8(&request.body).unwrap_or("");
             let tags = parse_tagging_xml(body);
+            Some(tags.into_iter().collect())
+        }
+        // CreateBucket carries its tag set inside CreateBucketConfiguration,
+        // and the `s3:TagResource` authorization it requires alongside
+        // `s3:CreateBucket` is evaluated against the same tags — so both see
+        // `aws:RequestTag/*` and `aws:TagKeys`.
+        "CreateBucket" | "TagResource" => {
+            let body = std::str::from_utf8(&request.body).unwrap_or("");
+            let tags = create_bucket_configuration_tags(body);
             Some(tags.into_iter().collect())
         }
         _ => Some(std::collections::BTreeMap::new()),
@@ -2938,6 +2972,22 @@ pub(crate) fn parse_delete_objects_quiet(xml: &str) -> bool {
     extract_xml_value(xml, "Quiet")
         .map(|v| v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Extract the `<Tags>` tag set from a `CreateBucketConfiguration` body.
+///
+/// The tag set was added to `CreateBucketConfiguration` in the 2025 S3 API;
+/// it is serialized as `<Tags><Tag><Key/><Value/></Tag></Tags>`, the same
+/// `Tag` shape `PutBucketTagging` uses. Returns an empty vec for a body that
+/// is not a `CreateBucketConfiguration` or carries no tags — no `<Tags>`
+/// element means no `<Tag>` elements to find, so the scan is its own gate
+/// and an element written with a namespace or attribute
+/// (`<Tags xmlns="...">`) is not silently skipped.
+pub(crate) fn create_bucket_configuration_tags(body: &str) -> Vec<(String, String)> {
+    if body.is_empty() || !body.contains("CreateBucketConfiguration") {
+        return Vec::new();
+    }
+    parse_tagging_xml(body)
 }
 
 /// Minimal XML parser for `<Tagging><TagSet><Tag><Key>k</Key><Value>v</Value></Tag>...`.

@@ -3559,6 +3559,86 @@ fn create_bucket_tags_decode_xml_entities() {
 }
 
 #[test]
+fn create_bucket_with_tags_also_requires_tag_resource() {
+    use fakecloud_core::service::AwsService as _;
+
+    let svc = make_service();
+    let tagged = make_request(
+        Method::PUT,
+        "/tagged-perm",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    let actions = svc.iam_actions_for(&tagged);
+    let names: Vec<&str> = actions.iter().map(|a| a.action).collect();
+    assert_eq!(names, vec!["CreateBucket", "TagResource"]);
+    // Both are authorized against the same bucket ARN.
+    assert_eq!(actions[0].resource, actions[1].resource);
+    assert_eq!(actions[1].service, "s3");
+
+    // An untagged create still needs only s3:CreateBucket.
+    let plain = make_request(Method::PUT, "/plain-perm", &[], b"");
+    let names: Vec<&str> = svc
+        .iam_actions_for(&plain)
+        .iter()
+        .map(|a| a.action)
+        .collect();
+    assert_eq!(names, vec!["CreateBucket"]);
+
+    // ...as does a CreateBucketConfiguration that carries no tag set.
+    let loc_only = make_request(
+        Method::PUT,
+        "/loc-perm",
+        &[],
+        b"<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>",
+    );
+    let names: Vec<&str> = svc
+        .iam_actions_for(&loc_only)
+        .iter()
+        .map(|a| a.action)
+        .collect();
+    assert_eq!(names, vec!["CreateBucket"]);
+}
+
+#[test]
+fn create_bucket_request_tags_feed_condition_keys() {
+    let req = make_request(
+        Method::PUT,
+        "/req-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    for action in ["CreateBucket", "TagResource"] {
+        let tags = s3_request_tags(&req, action).expect("tags extracted");
+        assert_eq!(tags.get("team").map(String::as_str), Some("a"), "{action}");
+    }
+
+    // A body with no tag set yields an empty map, not a miss.
+    let plain = make_request(Method::PUT, "/req-plain", &[], b"");
+    assert!(s3_request_tags(&plain, "CreateBucket")
+        .expect("tags extracted")
+        .is_empty());
+}
+
+#[test]
+fn create_bucket_configuration_tags_ignores_foreign_bodies() {
+    // A PutBucketTagging body must not be mistaken for a create-time tag set:
+    // the helper is gated on the CreateBucketConfiguration root element.
+    let tagging =
+        r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
+    assert!(create_bucket_configuration_tags(tagging).is_empty());
+    assert!(create_bucket_configuration_tags("").is_empty());
+
+    // A namespaced or attributed <Tags> element is still parsed — the scan
+    // matches the <Tag> children, not the container.
+    let ns = r#"<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tags xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>"#;
+    assert_eq!(
+        create_bucket_configuration_tags(ns),
+        vec![("team".to_string(), "a".to_string())]
+    );
+}
+
+#[test]
 fn create_bucket_already_owned_other_region() {
     let svc = make_service();
     let mut req = make_request(

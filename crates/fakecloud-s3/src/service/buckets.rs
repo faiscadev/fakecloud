@@ -11,8 +11,8 @@ use crate::persistence::bucket_meta_snapshot;
 use crate::state::S3Bucket;
 
 use super::{
-    canned_acl_grants, extract_xml_value, is_valid_bucket_name, is_valid_region, no_such_bucket,
-    parse_tagging_xml, s3_xml, validate_tags, xml_escape, S3Service,
+    canned_acl_grants, create_bucket_configuration_tags, extract_xml_value, is_valid_bucket_name,
+    is_valid_region, no_such_bucket, s3_xml, validate_tags, xml_escape, S3Service,
 };
 
 impl S3Service {
@@ -219,11 +219,7 @@ impl S3Service {
         // the S3 API in 2025). The AWS Terraform provider tags a bucket this way
         // on create and then skips PutBucketTagging, so dropping these leaves the
         // bucket untagged (issue #2553).
-        let create_tags = if has_config_body && body_str.contains("<Tags>") {
-            parse_tagging_xml(body_str)
-        } else {
-            Vec::new()
-        };
+        let create_tags = create_bucket_configuration_tags(body_str);
         validate_tags(&create_tags)?;
 
         // Parse ACL from header
