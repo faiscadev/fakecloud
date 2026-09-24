@@ -3474,6 +3474,91 @@ fn create_bucket_idempotent_same_region_us_east_1() {
 }
 
 #[test]
+fn create_bucket_stores_tags_from_create_bucket_configuration() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/tagged",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag>\
+          <Tag><Key>env</Key><Value>prod</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    svc.create_bucket("123456789012", &req, "tagged").unwrap();
+
+    let get = make_request(Method::GET, "/tagged", &[("tagging", "")], b"");
+    let resp = svc
+        .get_bucket_tagging("123456789012", &get, "tagged")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<Tag><Key>env</Key><Value>prod</Value></Tag>"),
+        "tag set missing env: {body}"
+    );
+    assert!(
+        body.contains("<Tag><Key>team</Key><Value>a</Value></Tag>"),
+        "tag set missing team: {body}"
+    );
+}
+
+#[test]
+fn create_bucket_without_tags_has_no_tag_set() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/untagged",
+        &[],
+        b"<CreateBucketConfiguration></CreateBucketConfiguration>",
+    );
+    svc.create_bucket("123456789012", &req, "untagged").unwrap();
+
+    let get = make_request(Method::GET, "/untagged", &[("tagging", "")], b"");
+    assert_aws_err(
+        svc.get_bucket_tagging("123456789012", &get, "untagged"),
+        "NoSuchTagSet",
+    );
+}
+
+#[test]
+fn create_bucket_rejects_duplicate_tag_keys() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/dup-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag>\
+          <Tag><Key>team</Key><Value>b</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    assert_aws_err(
+        svc.create_bucket("123456789012", &req, "dup-tags"),
+        "InvalidTag",
+    );
+    // The rejected request must not have left a bucket behind.
+    assert_aws_err(svc.head_bucket("123456789012", "dup-tags"), "NotFound");
+}
+
+#[test]
+fn create_bucket_tags_decode_xml_entities() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/amp-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>a&amp;b</Key><Value>c&amp;d</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    svc.create_bucket("123456789012", &req, "amp-tags").unwrap();
+
+    let get = make_request(Method::GET, "/amp-tags", &[("tagging", "")], b"");
+    let resp = svc
+        .get_bucket_tagging("123456789012", &get, "amp-tags")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<Tag><Key>a&amp;b</Key><Value>c&amp;d</Value></Tag>"),
+        "entity round-trip wrong: {body}"
+    );
+}
+
+#[test]
 fn create_bucket_already_owned_other_region() {
     let svc = make_service();
     let mut req = make_request(

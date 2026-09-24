@@ -5,9 +5,10 @@ use std::time::Duration;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{
     BucketVersioningStatus, CompletedMultipartUpload, CompletedPart, CorsConfiguration, CorsRule,
-    ObjectLockConfiguration, ObjectLockEnabled, ObjectLockLegalHold, ObjectLockLegalHoldStatus,
-    ServerSideEncryption, ServerSideEncryptionByDefault, ServerSideEncryptionConfiguration,
-    ServerSideEncryptionRule, StorageClass, Tag, Tagging, VersioningConfiguration,
+    CreateBucketConfiguration, ObjectLockConfiguration, ObjectLockEnabled, ObjectLockLegalHold,
+    ObjectLockLegalHoldStatus, ServerSideEncryption, ServerSideEncryptionByDefault,
+    ServerSideEncryptionConfiguration, ServerSideEncryptionRule, StorageClass, Tag, Tagging,
+    VersioningConfiguration,
 };
 use helpers::{run_until_exit, TestServer};
 use sha2::{Digest, Sha256};
@@ -1262,4 +1263,40 @@ async fn persistence_body_cache_small_and_large_objects() {
         let got = get.body.collect().await.unwrap().into_bytes();
         assert_eq!(sha256(&got), sha256(expected), "body mismatch for {}", key);
     }
+}
+
+#[tokio::test]
+async fn persistence_create_bucket_tags_survive_restart() {
+    // Tags supplied through CreateBucketConfiguration go to the same Tags
+    // subresource PutBucketTagging writes, so they must reload after a restart.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let client = server.s3_client().await;
+
+    client
+        .create_bucket()
+        .bucket("create-tag-bucket")
+        .create_bucket_configuration(
+            CreateBucketConfiguration::builder()
+                .tags(Tag::builder().key("team").value("a").build().unwrap())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    server.restart().await;
+    let client = server.s3_client().await;
+
+    let tags = client
+        .get_bucket_tagging()
+        .bucket("create-tag-bucket")
+        .send()
+        .await
+        .unwrap();
+    let ts = tags.tag_set();
+    assert!(
+        ts.iter().any(|t| t.key() == "team" && t.value() == "a"),
+        "create-time tags lost across restart: {ts:?}"
+    );
 }

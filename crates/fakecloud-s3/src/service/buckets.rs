@@ -5,13 +5,14 @@ use http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
+use fakecloud_persistence::{BucketSubresource, TagsSnapshot};
 
 use crate::persistence::bucket_meta_snapshot;
 use crate::state::S3Bucket;
 
 use super::{
     canned_acl_grants, extract_xml_value, is_valid_bucket_name, is_valid_region, no_such_bucket,
-    s3_xml, xml_escape, S3Service,
+    parse_tagging_xml, s3_xml, validate_tags, xml_escape, S3Service,
 };
 
 impl S3Service {
@@ -214,6 +215,17 @@ impl S3Service {
             _ => req.region.clone(),
         };
 
+        // CreateBucketConfiguration carries an optional <Tags> tag set (added to
+        // the S3 API in 2025). The AWS Terraform provider tags a bucket this way
+        // on create and then skips PutBucketTagging, so dropping these leaves the
+        // bucket untagged (issue #2553).
+        let create_tags = if has_config_body && body_str.contains("<Tags>") {
+            parse_tagging_xml(body_str)
+        } else {
+            Vec::new()
+        };
+        validate_tags(&create_tags)?;
+
         // Parse ACL from header
         let acl = req
             .headers
@@ -290,11 +302,28 @@ impl S3Service {
             ));
         }
 
+        let tags_snapshot = if create_tags.is_empty() {
+            None
+        } else {
+            b.tags = create_tags.into_iter().collect();
+            Some(TagsSnapshot {
+                tags: b.tags.clone(),
+            })
+        };
+
         let meta = bucket_meta_snapshot(&b);
         state.buckets.insert(bucket.to_string(), b);
         self.store
             .put_bucket_meta(bucket, &meta)
             .map_err(super::persistence_error)?;
+        // Bucket tags live in their own subresource, not in the bucket meta, so
+        // they need an explicit write to survive a restart.
+        if let Some(snap) = tags_snapshot {
+            let payload = toml::to_string(&snap).unwrap_or_default();
+            self.store
+                .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
+                .map_err(super::persistence_error)?;
+        }
 
         let mut headers = HeaderMap::new();
         headers.insert("location", format!("/{bucket}").parse().unwrap());
