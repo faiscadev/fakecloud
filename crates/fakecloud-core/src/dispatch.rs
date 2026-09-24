@@ -486,19 +486,10 @@ pub async fn dispatch(
     // ran against the wire path, so this rewrite is signature-safe.
     let wire_path = parts.uri.path();
     let path = if detected.service == "s3" {
-        if let Some(bucket) = host_info.as_ref().and_then(|h| h.bucket.as_deref()) {
-            let prefix_with_slash = format!("/{bucket}/");
-            let is_bucket_root = wire_path.trim_end_matches('/') == format!("/{bucket}");
-            if wire_path.starts_with(&prefix_with_slash) || is_bucket_root {
-                wire_path.to_string()
-            } else if wire_path == "/" || wire_path.is_empty() {
-                format!("/{bucket}")
-            } else {
-                format!("/{bucket}{wire_path}")
-            }
-        } else {
-            wire_path.to_string()
-        }
+        s3_routing_path(
+            wire_path,
+            host_info.as_ref().and_then(|h| h.bucket.as_deref()),
+        )
     } else {
         wire_path.to_string()
     };
@@ -1086,6 +1077,31 @@ impl DispatchConfig {
     }
 }
 
+/// The path an S3 request is routed on: for virtual-hosted-style the bucket
+/// comes from the Host header and is prepended, unless the client already put
+/// it in the path (`PUT /<bucket>` / `PUT /<bucket>/key` against a
+/// virtual-hosted host). Path-style requests pass through unchanged.
+///
+/// Shared with [`streaming_route`] on purpose. The streaming gate has to agree
+/// with routing about where the bucket ends and the key begins; when the two
+/// derived it separately they drifted, and a request the router read as a
+/// bucket-level operation was dispatched unbuffered, so the handler and IAM
+/// enforcement saw an empty body.
+fn s3_routing_path(wire_path: &str, host_bucket: Option<&str>) -> String {
+    let Some(bucket) = host_bucket else {
+        return wire_path.to_string();
+    };
+    let prefix_with_slash = format!("/{bucket}/");
+    let is_bucket_root = wire_path.trim_end_matches('/') == format!("/{bucket}");
+    if wire_path.starts_with(&prefix_with_slash) || is_bucket_root {
+        wire_path.to_string()
+    } else if wire_path == "/" || wire_path.is_empty() {
+        format!("/{bucket}")
+    } else {
+        format!("/{bucket}{wire_path}")
+    }
+}
+
 /// Extract the 12-digit account ID segment from an AWS ARN.
 ///
 /// ARNs follow `arn:<partition>:<service>:<region>:<account>:<resource>`.
@@ -1124,34 +1140,23 @@ fn streaming_route(
     // presigned URL (X-Amz-Credential .../s3/...) OR a SigV2 presigned
     // URL (AWSAccessKeyId + Signature + Expires query parameters).
     if method == http::Method::PUT {
-        let after = path.trim_start_matches('/');
-        // Path-style PutObject is `PUT /<bucket>/<key>` (path contains a
-        // slash); virtual-hosted-style is `PUT /<key>` with the bucket
-        // in the Host header. For virtual-hosted, accept any non-empty
-        // path so the key flows through the streaming dispatch — the
-        // Host parser already routed this request to S3.
-        let virtual_hosted_s3 = protocol::parse_routing_host_from_headers(headers)
-            .filter(|h| h.service == "s3" && h.bucket.is_some())
-            .is_some();
-        // Path-style needs a non-empty key after the bucket: `PUT /<bucket>`
-        // and `PUT /<bucket>/` are both CreateBucket, and the trailing-slash
-        // form is what the AWS SDKs actually send. Treating it as an object
-        // upload left the body unbuffered, so everything that runs before the
-        // handler -- IAM enforcement above all -- saw an empty body and could
-        // not read `CreateBucketConfiguration` (no `aws:RequestTag` from a
-        // create-time tag set, for one).
-        //
-        // The key is derived exactly the way the request builder derives
-        // `path_segments` -- split on '/', drop empty segments -- so the two
-        // cannot disagree. A naive `split_once` would call the key of
-        // `PUT /<bucket>//` "/" and stream it, while routing collapses that
-        // path to a bucket-level operation and would again see an empty body.
-        let path_style_key = after
-            .split('/')
-            .skip(1)
-            .find(|seg| !seg.is_empty())
-            .unwrap_or("");
-        if after.is_empty() || (!virtual_hosted_s3 && path_style_key.is_empty()) {
+        // An object upload needs a bucket AND a key. Resolve the request the
+        // way routing will (bucket from the Host header for virtual-hosted,
+        // straight from the path otherwise), then split it the way the request
+        // builder builds `path_segments` -- on '/', dropping empty segments.
+        // Anything that leaves no key is a bucket-level operation:
+        // `PUT /<bucket>`, `PUT /<bucket>/` (the form the AWS SDKs actually
+        // send for CreateBucket), `PUT /<bucket>//`, and the virtual-hosted
+        // equivalents. Streaming those left the body unbuffered, so everything
+        // that runs before the handler -- IAM enforcement above all -- saw an
+        // empty body and could not read `CreateBucketConfiguration` (no
+        // `aws:RequestTag` from a create-time tag set, for one).
+        let host_bucket = protocol::parse_routing_host_from_headers(headers)
+            .filter(|h| h.service == "s3")
+            .and_then(|h| h.bucket);
+        let routed = s3_routing_path(path, host_bucket.as_deref());
+        let has_key = routed.split('/').filter(|seg| !seg.is_empty()).count() >= 2;
+        if !has_key {
             return None;
         }
         let header_s3 = headers
@@ -2077,6 +2082,36 @@ mod tests {
         // flows through the streaming dispatch.
         assert_eq!(
             streaming_route(&http::Method::PUT, "/hello.txt", &headers, &HashMap::new(),),
+            Some(("s3", "")),
+        );
+    }
+
+    #[test]
+    fn streaming_route_virtual_hosted_bucket_in_path_skipped() {
+        // `Host: my-bucket.s3...` with the bucket ALSO in the path is the
+        // router's bucket-root shape (dispatch collapses it to CreateBucket),
+        // so it must not stream -- with or without the trailing slash.
+        let mut headers = s3_sigv4_headers();
+        headers.insert(
+            "host",
+            "my-bucket.s3.us-east-1.amazonaws.com".parse().unwrap(),
+        );
+        assert_eq!(
+            streaming_route(&http::Method::PUT, "/my-bucket", &headers, &HashMap::new()),
+            None,
+        );
+        assert_eq!(
+            streaming_route(&http::Method::PUT, "/my-bucket/", &headers, &HashMap::new()),
+            None,
+        );
+        // ...but a real key under that same host still streams.
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/my-bucket/key.txt",
+                &headers,
+                &HashMap::new(),
+            ),
             Some(("s3", "")),
         );
     }
