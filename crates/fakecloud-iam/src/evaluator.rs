@@ -384,8 +384,12 @@ fn classify_aws_principal(s: &str) -> PrincipalRef {
     if s == "*" {
         return PrincipalRef::AnyAws;
     }
-    // `arn:aws:iam::<account>:root` → account root
-    if let Some(rest) = s.strip_prefix("arn:aws:iam::") {
+    // `arn:<partition>:iam::<account>:root` → account root
+    if let Some(rest) = s
+        .strip_prefix("arn:")
+        .and_then(|r| r.split_once(':'))
+        .and_then(|(_partition, r)| r.strip_prefix("iam::"))
+    {
         if let Some((account, tail)) = rest.split_once(':') {
             if tail == "root" && !account.is_empty() {
                 return PrincipalRef::AwsAccountRoot(account.to_string());

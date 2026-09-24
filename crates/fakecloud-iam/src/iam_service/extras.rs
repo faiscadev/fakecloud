@@ -15,8 +15,8 @@ use crate::state::{
 };
 
 use super::{
-    empty_response, parse_tags, required_param_with_code, resolve_calling_user, tags_xml,
-    validate_string_length_with_code, IamService,
+    empty_response, existing_arn_partition, parse_tags, required_param_with_code,
+    resolve_calling_user, tags_xml, validate_string_length_with_code, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -1291,8 +1291,9 @@ impl IamService {
         let user_name = req.principal.as_ref().and_then(|p| {
             let arn = &p.arn;
             arn.strip_prefix("arn:")
-                .and_then(|rest| rest.split_once(":iam::"))
-                .and_then(|(_, rest)| rest.split_once(":user/"))
+                .and_then(|rest| rest.split_once(':'))
+                .and_then(|(_partition, rest)| rest.strip_prefix("iam::"))
+                .and_then(|rest| rest.split_once(":user/"))
                 .map(|(_, name)| name.to_string())
         });
         let Some(user_name) = user_name else {
@@ -1510,7 +1511,7 @@ impl IamService {
         // Rebuild ARN with the new path/name so metadata responses reflect the rename.
         updated.arn = format!(
             "arn:{partition}:iam::{account}:server-certificate{path}{name}",
-            partition = fakecloud_aws::arn::partition_for(&req.region),
+            partition = existing_arn_partition(&updated.arn, &req.region),
             account = req.account_id,
             path = if updated.path.starts_with('/') {
                 updated.path.clone()

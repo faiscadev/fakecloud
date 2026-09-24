@@ -6,7 +6,10 @@ use fakecloud_core::validation::*;
 
 use crate::state::IamGroup;
 
-use super::{empty_response, generate_id, url_encode, validate_list_pagination, IamService};
+use super::{
+    empty_response, existing_arn_partition, generate_id, url_encode, validate_list_pagination,
+    IamService,
+};
 use fakecloud_core::query::required_param;
 
 use fakecloud_aws::xml::xml_escape;
@@ -359,7 +362,7 @@ impl IamService {
         group.group_name = actual_new_name.clone();
         group.arn = format!(
             "arn:{}:iam::{}:group{}{}",
-            fakecloud_aws::arn::partition_for(&req.region),
+            existing_arn_partition(&group.arn, &req.region),
             state.account_id,
             if group.path == "/" { "/" } else { &group.path },
             actual_new_name

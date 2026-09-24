@@ -35,12 +35,12 @@ impl IamRoleTrustValidator {
     }
 }
 
-/// Parse `arn:aws:iam::<account>:role[/<path>]/<name>` into role name.
-/// Returns `None` if the ARN is not an IAM role ARN.
+/// Parse `arn:<partition>:iam::<account>:role[/<path>]/<name>` into role
+/// name, in any partition. Returns `None` if the ARN is not an IAM role ARN.
 fn role_name_from_arn(role_arn: &str) -> Option<&str> {
-    // Format: arn:aws:iam::<account>:role/<optional-path>/<name>
     // Extract the substring after the last "/".
-    let role_part = role_arn.strip_prefix("arn:aws:iam::")?;
+    let (_partition, rest) = role_arn.strip_prefix("arn:")?.split_once(':')?;
+    let role_part = rest.strip_prefix("iam::")?;
     let (_account, rest) = role_part.split_once(':')?;
     let role_path = rest.strip_prefix("role/")?;
     role_path.rsplit('/').next()
@@ -181,6 +181,18 @@ mod tests {
         assert_eq!(
             role_name_from_arn("arn:aws:iam::000000000000:role/service-role/MyRole"),
             Some("MyRole")
+        );
+        assert_eq!(
+            role_name_from_arn("arn:aws-cn:iam::000000000000:role/MyRole"),
+            Some("MyRole")
+        );
+        assert_eq!(
+            role_name_from_arn("arn:aws-us-gov:iam::000000000000:role/svc/MyRole"),
+            Some("MyRole")
+        );
+        assert_eq!(
+            role_name_from_arn("arn:aws-cn:sts::000000000000:role/MyRole"),
+            None
         );
         assert_eq!(role_name_from_arn("not-an-arn"), None);
     }

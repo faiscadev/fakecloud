@@ -1460,6 +1460,21 @@ fn classify_aws_principal_recognizes_root_arn() {
 }
 
 #[test]
+fn classify_aws_principal_recognizes_root_arn_in_any_partition() {
+    for partition in ["aws-cn", "aws-us-gov", "aws-iso"] {
+        assert_eq!(
+            classify_aws_principal(&format!("arn:{partition}:iam::111111111111:root")),
+            PrincipalRef::AwsAccountRoot("111111111111".to_string())
+        );
+    }
+    // A non-IAM ARN ending in `:root` is not an account root.
+    assert_eq!(
+        classify_aws_principal("arn:aws-cn:sts::111111111111:root"),
+        PrincipalRef::AwsArn("arn:aws-cn:sts::111111111111:root".to_string())
+    );
+}
+
+#[test]
 fn classify_aws_principal_keeps_user_arn_as_arn() {
     assert_eq!(
         classify_aws_principal("arn:aws:iam::111111111111:user/alice"),

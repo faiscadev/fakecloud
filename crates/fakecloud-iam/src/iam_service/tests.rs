@@ -5522,3 +5522,78 @@ fn change_password_resolves_non_aws_partition_principal() {
     right.principal = Some(principal);
     svc.change_password(&right).unwrap();
 }
+
+/// IAM is global, so a rename can arrive from any region. Renaming a group
+/// or server certificate from a commercial region must keep the `aws-cn`
+/// partition it was created with, the same way UpdateUser does.
+#[test]
+fn rename_from_other_region_keeps_partition() {
+    let svc = make_service();
+    let in_region = |action: &str, params: Vec<(&str, &str)>, region: &str| {
+        let mut req = make_request(action, params);
+        req.region = region.to_string();
+        req
+    };
+    let arn_of = |resp: AwsResponse| {
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        extract_xml_tag(&body, "Arn").to_string()
+    };
+
+    svc.create_group(&in_region(
+        "CreateGroup",
+        vec![("GroupName", "ops")],
+        "cn-north-1",
+    ))
+    .unwrap();
+    svc.update_group(&in_region(
+        "UpdateGroup",
+        vec![("GroupName", "ops"), ("NewGroupName", "ops2")],
+        "us-east-1",
+    ))
+    .unwrap();
+    let group = svc
+        .get_group(&in_region(
+            "GetGroup",
+            vec![("GroupName", "ops2")],
+            "us-east-1",
+        ))
+        .unwrap();
+    assert_eq!(arn_of(group), "arn:aws-cn:iam::123456789012:group/ops2");
+
+    svc.upload_server_certificate(&in_region(
+        "UploadServerCertificate",
+        vec![
+            ("ServerCertificateName", "web"),
+            (
+                "CertificateBody",
+                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+            ),
+            (
+                "PrivateKey",
+                "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+            ),
+        ],
+        "cn-north-1",
+    ))
+    .unwrap();
+    svc.update_server_certificate(&in_region(
+        "UpdateServerCertificate",
+        vec![
+            ("ServerCertificateName", "web"),
+            ("NewServerCertificateName", "web2"),
+        ],
+        "us-east-1",
+    ))
+    .unwrap();
+    let cert = svc
+        .get_server_certificate(&in_region(
+            "GetServerCertificate",
+            vec![("ServerCertificateName", "web2")],
+            "us-east-1",
+        ))
+        .unwrap();
+    assert_eq!(
+        arn_of(cert),
+        "arn:aws-cn:iam::123456789012:server-certificate/web2"
+    );
+}

@@ -7,6 +7,18 @@ pub(crate) fn partition_for_region(region: &str) -> &str {
     fakecloud_aws::arn::partition_for(region)
 }
 
+/// Partition of an entity's existing ARN, falling back to the request
+/// region's. A rename rebuilds the ARN, and IAM being global means the
+/// renaming request can come from any region; taking the partition from the
+/// stored ARN keeps a cn-/us-gov-/iso- entity in its partition.
+pub(crate) fn existing_arn_partition(arn: &str, region: &str) -> String {
+    arn.split(':')
+        .nth(1)
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| partition_for_region(region))
+        .to_string()
+}
+
 /// Actions on the IAM service that mutate state. Kept in sync with the
 /// dispatch table in `handle`.
 pub(crate) fn is_mutating_action(action: &str) -> bool {
