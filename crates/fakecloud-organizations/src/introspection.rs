@@ -60,6 +60,16 @@ fn transfer_to_row(org_id: &str, t: &ResponsibilityTransfer) -> ResponsibilityTr
 pub fn list_all_responsibility_transfers(
     state: &SharedOrganizationsState,
 ) -> Vec<ResponsibilityTransferRow> {
+    // Expire past-due handshakes first, exactly as the Organizations API
+    // does on every call. Without this the route answered `REQUESTED`
+    // with a live `activeHandshakeId` for a transfer that
+    // `DescribeResponsibilityTransfer` already reported as `EXPIRED` --
+    // one object, two contradictory answers, for as long as no API call
+    // happened to arrive.
+    let now = Utc::now();
+    if state.read().has_stale_handshakes(now) {
+        state.write().expire_stale_handshakes(now);
+    }
     let guard = state.read();
     let mut rows: Vec<ResponsibilityTransferRow> = guard
         .iter()
