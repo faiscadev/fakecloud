@@ -1087,6 +1087,14 @@ impl DispatchConfig {
 /// derived it separately they drifted, and a request the router read as a
 /// bucket-level operation was dispatched unbuffered, so the handler and IAM
 /// enforcement saw an empty body.
+///
+/// Known limitation: under virtual-hosted addressing the whole path is the
+/// key on real S3, so an object key that begins with `<bucket>/` (or a key
+/// that IS the bucket name) is not representable here — the passthrough reads
+/// it as a client that put the bucket in the path, and the prefix is dropped.
+/// Nothing in a single request distinguishes the two, so this resolves the
+/// ambiguity in favor of the mixed-addressing client. Keys shaped like their
+/// own bucket name are the cost.
 fn s3_routing_path(wire_path: &str, host_bucket: Option<&str>) -> String {
     let Some(bucket) = host_bucket else {
         return wire_path.to_string();
@@ -2104,7 +2112,10 @@ mod tests {
             streaming_route(&http::Method::PUT, "/my-bucket/", &headers, &HashMap::new()),
             None,
         );
-        // ...but a real key under that same host still streams.
+        // ...but a path the router reads as a key under that bucket still
+        // streams. (Per the `s3_routing_path` limitation, a virtual-hosted key
+        // that genuinely begins with `my-bucket/` is indistinguishable from
+        // this and is routed the same way.)
         assert_eq!(
             streaming_route(
                 &http::Method::PUT,
