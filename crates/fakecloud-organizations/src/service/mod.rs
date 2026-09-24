@@ -475,6 +475,19 @@ impl AwsService for OrganizationsService {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mutates = is_mutating_action(&req.action);
+        // Expire past-due handshakes before answering anything. AWS
+        // expires a handshake 15 days after it is extended whether or not
+        // anyone is looking, so the sweep cannot hang off the mutating
+        // paths alone: a `DescribeHandshake` has to report `EXPIRED` too,
+        // and an `AcceptHandshake` must be refused rather than reviving
+        // an offer that lapsed. The read-locked check keeps the write
+        // lock for the requests that actually have something to expire.
+        let now = Utc::now();
+        let expired = if self.state.read().has_stale_handshakes(now) {
+            self.state.write().expire_stale_handshakes(now)
+        } else {
+            0
+        };
         let result = match req.action.as_str() {
             "CreateOrganization" => self.create_organization(&req),
             "DescribeOrganization" => self.describe_organization(&req),
@@ -556,6 +569,12 @@ impl AwsService for OrganizationsService {
                 &req.action,
             )),
         };
+        // A sweep is a mutation like any other, even when it happened on
+        // the way into a read: without this the expiry is lost on
+        // restart and the handshake comes back OPEN.
+        if expired > 0 {
+            self.save_snapshot().await;
+        }
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
             self.save_snapshot().await;
             // Any successful mutation can have moved an account between OUs,

@@ -3913,3 +3913,263 @@ async fn deregistering_an_unregistered_administrator_names_the_account() {
         "the error must not name the service principal, got: {err}"
     );
 }
+
+/// AWS gives a handshake 15 days and expires it on its own. Nothing
+/// here ever did, so an overdue invitation stayed OPEN and acceptable
+/// forever and the `ExpirationTimestamp` fakecloud reported was
+/// decoration.
+#[tokio::test]
+async fn an_overdue_handshake_expires_and_cannot_be_accepted() {
+    let (svc, state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "InviteAccountToOrganization",
+            json!({ "Target": {"Id": "222222222222", "Type": "ACCOUNT"} }),
+        ))
+        .await
+        .unwrap();
+    let id = body_json(&resp)["Handshake"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Backdate it past its deadline, the way 15 days of wall clock would.
+    state
+        .write()
+        .sole_mut()
+        .unwrap()
+        .handshakes
+        .get_mut(&id)
+        .unwrap()
+        .expiration_timestamp = Utc::now() - chrono::Duration::days(1);
+
+    let described = svc
+        .handle(req_with(
+            "222222222222",
+            "DescribeHandshake",
+            json!({ "HandshakeId": id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(&described)["Handshake"]["State"], "EXPIRED");
+
+    // And the offer is gone: accepting it is a terminal-transition error,
+    // not a join.
+    let err = expect_err(
+        svc.handle(req_with(
+            "222222222222",
+            "AcceptHandshake",
+            json!({ "HandshakeId": id }),
+        ))
+        .await,
+    );
+    assert_eq!(err.code(), "InvalidHandshakeTransitionException");
+    assert!(
+        !state
+            .read()
+            .sole()
+            .unwrap()
+            .accounts
+            .contains_key("222222222222"),
+        "an expired invitation must not enroll its target"
+    );
+}
+
+/// A responsibility transfer rides a handshake, so it ends when that
+/// handshake lapses -- leaving it REQUESTED with a live
+/// `ActiveHandshakeId` pointing at an EXPIRED handshake made the two
+/// records disagree, the same way an unhandled accept once did.
+#[tokio::test]
+async fn an_expired_handshake_ends_the_transfer_riding_it() {
+    let (svc, state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "InviteOrganizationToTransferResponsibility",
+            json!({
+                "Type": "BILLING",
+                "SourceName": "handover",
+                "StartTimestamp": 1893456000.0,
+                "Target": {"Id": "222222222222", "Type": "ACCOUNT"},
+            }),
+        ))
+        .await
+        .unwrap();
+    let handshake_id = body_json(&resp)["Handshake"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let transfer_id = body_json(&resp)["Handshake"]["Resources"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["Type"] == "RESPONSIBILITY_TRANSFER")
+        .unwrap()["Value"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let deadline = Utc::now() - chrono::Duration::days(5);
+    state
+        .write()
+        .sole_mut()
+        .unwrap()
+        .handshakes
+        .get_mut(&handshake_id)
+        .unwrap()
+        .expiration_timestamp = deadline;
+
+    let described = svc
+        .handle(req_with(
+            "111111111111",
+            "DescribeResponsibilityTransfer",
+            json!({ "Id": transfer_id }),
+        ))
+        .await
+        .unwrap();
+    let transfer = body_json(&described)["ResponsibilityTransfer"].clone();
+    assert_eq!(transfer["Status"], "EXPIRED");
+    assert!(
+        transfer.get("ActiveHandshakeId").is_none(),
+        "an expired transfer holds no live handshake, got: {transfer}"
+    );
+    // The transfer ended when its handshake lapsed, not when the sweep
+    // happened to notice -- an idle process would otherwise report an
+    // EndTimestamp days after the ExpirationTimestamp on the same record.
+    assert_eq!(
+        transfer["EndTimestamp"].as_f64().unwrap() as i64,
+        deadline.timestamp()
+    );
+
+    // The introspection route reads the same object and must not
+    // contradict the API: it answered REQUESTED with a live
+    // activeHandshakeId until it swept too.
+    let rows = crate::introspection::list_all_responsibility_transfers(&state);
+    let row = rows.iter().find(|r| r.id == transfer_id).unwrap();
+    assert_eq!(row.status, "EXPIRED");
+    assert!(row.active_handshake_id.is_none());
+
+    // The target is free again: the expired offer no longer collides.
+    svc.handle(req_with(
+        "111111111111",
+        "InviteOrganizationToTransferResponsibility",
+        json!({
+            "Type": "BILLING",
+            "SourceName": "handover",
+            "StartTimestamp": 1893456000.0,
+            "Target": {"Id": "222222222222", "Type": "ACCOUNT"},
+        }),
+    ))
+    .await
+    .expect("an expired offer must not block a fresh one");
+}
+
+/// A handshake still inside its 15 days is untouched by the sweep.
+///
+/// This guards against OVER-expiry only -- it passes without the sweep
+/// too. Its job is to fail if the deadline comparison is ever inverted
+/// or the `OPEN | REQUESTED` filter dropped.
+#[tokio::test]
+async fn a_live_handshake_is_left_alone() {
+    let (svc, _state) = OrganizationsService::shared();
+    create_org_with_root(&svc).await;
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "InviteAccountToOrganization",
+            json!({ "Target": {"Id": "222222222222", "Type": "ACCOUNT"} }),
+        ))
+        .await
+        .unwrap();
+    let id = body_json(&resp)["Handshake"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let described = svc
+        .handle(req_with(
+            "222222222222",
+            "DescribeHandshake",
+            json!({ "HandshakeId": id }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(body_json(&described)["Handshake"]["State"], "OPEN");
+}
+
+/// Recording store: keeps the last bytes written so a test can assert
+/// what was actually persisted.
+#[derive(Default)]
+struct RecordingStore(parking_lot::Mutex<Option<Vec<u8>>>);
+
+impl fakecloud_persistence::SnapshotStore for RecordingStore {
+    fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+        Ok(self.0.lock().clone())
+    }
+
+    fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+        *self.0.lock() = Some(bytes.to_vec());
+        Ok(())
+    }
+}
+
+/// A sweep is a mutation even when it happens on the way into a READ,
+/// so it has to be persisted there too. Without that, an expiry noticed
+/// by a `DescribeHandshake` is lost on restart and the handshake comes
+/// back OPEN -- past its deadline, and acceptable again.
+#[tokio::test]
+async fn an_expiry_noticed_by_a_read_is_persisted() {
+    let state: SharedOrganizationsState =
+        Arc::new(parking_lot::RwLock::new(OrganizationsRegistry::default()));
+    let store = Arc::new(RecordingStore::default());
+    let svc = Arc::new(OrganizationsService::new(state.clone()).with_snapshot_store(store.clone()));
+    svc.handle(req_with("111111111111", "CreateOrganization", json!({})))
+        .await
+        .unwrap();
+    let resp = svc
+        .handle(req_with(
+            "111111111111",
+            "InviteAccountToOrganization",
+            json!({ "Target": {"Id": "222222222222", "Type": "ACCOUNT"} }),
+        ))
+        .await
+        .unwrap();
+    let id = body_json(&resp)["Handshake"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    state
+        .write()
+        .sole_mut()
+        .unwrap()
+        .handshakes
+        .get_mut(&id)
+        .unwrap()
+        .expiration_timestamp = Utc::now() - chrono::Duration::days(1);
+
+    // A pure read triggers the sweep.
+    svc.handle(req_with(
+        "222222222222",
+        "DescribeHandshake",
+        json!({ "HandshakeId": id }),
+    ))
+    .await
+    .unwrap();
+
+    // What landed on disk must carry the expiry, not the OPEN state the
+    // last mutating call wrote.
+    let bytes = store
+        .0
+        .lock()
+        .clone()
+        .expect("the read persisted a snapshot");
+    let snapshot: OrganizationsSnapshot = serde_json::from_slice(&bytes).unwrap();
+    let restored = snapshot.into_registry();
+    assert_eq!(
+        restored.sole().unwrap().handshakes.get(&id).unwrap().state,
+        "EXPIRED"
+    );
+}

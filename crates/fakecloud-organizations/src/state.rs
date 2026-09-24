@@ -67,6 +67,28 @@ impl OrganizationsRegistry {
         self.orgs.is_empty()
     }
 
+    /// Does any organization hold a handshake that is past due?
+    ///
+    /// Cheap enough to run under the read lock on every request, so the
+    /// write lock the sweep needs is only ever taken when there is
+    /// something to expire.
+    pub fn has_stale_handshakes(&self, now: DateTime<Utc>) -> bool {
+        self.orgs.values().any(|org| {
+            org.handshakes.values().any(|h| {
+                matches!(h.state.as_str(), "OPEN" | "REQUESTED") && h.expiration_timestamp <= now
+            })
+        })
+    }
+
+    /// Expire every past-due handshake in every organization, and
+    /// return how many moved.
+    pub fn expire_stale_handshakes(&mut self, now: DateTime<Utc>) -> usize {
+        self.orgs
+            .values_mut()
+            .map(|org| org.expire_stale_handshakes(now))
+            .sum()
+    }
+
     pub fn len(&self) -> usize {
         self.orgs.len()
     }
@@ -1082,6 +1104,49 @@ impl OrganizationState {
             }
         }
         Ok(snapshot)
+    }
+
+    /// Flip every handshake past its `ExpirationTimestamp` to
+    /// `EXPIRED`, and return how many moved.
+    ///
+    /// AWS gives a handshake 15 days and expires it on its own; nothing
+    /// here ever did, so an overdue invitation stayed `OPEN` and
+    /// acceptable forever, and the `ExpirationTimestamp` fakecloud
+    /// reported was decoration. Expiry runs through `resolve_handshake`
+    /// like every other terminal transition, so a responsibility
+    /// transfer riding an expired handshake ends with it.
+    pub fn expire_stale_handshakes(&mut self, now: DateTime<Utc>) -> usize {
+        let stale: Vec<(String, DateTime<Utc>)> = self
+            .handshakes
+            .values()
+            .filter(|h| {
+                matches!(h.state.as_str(), "OPEN" | "REQUESTED") && h.expiration_timestamp <= now
+            })
+            .map(|h| (h.id.clone(), h.expiration_timestamp))
+            .collect();
+        for (id, deadline) in &stale {
+            // Bind the transfer BEFORE resolving: `resolve_handshake`
+            // clears the `active_handshake_id` that identifies it.
+            let riding = self
+                .responsibility_transfers
+                .values()
+                .find(|t| t.active_handshake_id.as_deref() == Some(id.as_str()))
+                .map(|t| t.id.clone());
+            // The state check above is exactly the one `resolve_handshake`
+            // re-applies, so this cannot fail.
+            let _ = self.resolve_handshake(id, "EXPIRED", None, None);
+            // A transfer ends when its handshake lapsed, not when the
+            // sweep noticed. `resolve_handshake` stamps "now", which is
+            // right for a decline or a cancel -- somebody acted at that
+            // instant -- but an idle process would otherwise report an
+            // `EndTimestamp` days after the `ExpirationTimestamp` on the
+            // same record.
+            if let Some(transfer) = riding.and_then(|id| self.responsibility_transfers.get_mut(&id))
+            {
+                transfer.end_timestamp = Some(*deadline);
+            }
+        }
+        stale.len()
     }
 
     /// Every handshake this organization holds.
