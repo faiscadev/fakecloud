@@ -1300,3 +1300,50 @@ async fn persistence_create_bucket_tags_survive_restart() {
         "create-time tags lost across restart: {ts:?}"
     );
 }
+
+#[tokio::test]
+async fn persistence_untagged_create_clears_an_orphan_tag_file() {
+    // A create that fails after writing its tag set (or dies between the tag
+    // write and meta.toml) leaves a tags.toml in a directory with no meta.toml.
+    // The loader skips such a directory, but a later untagged CreateBucket of
+    // the same name must not adopt that never-committed tag set on the next
+    // restart.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let client = server.s3_client().await;
+
+    // Simulate the half-written create: a bucket directory holding only tags.
+    let orphan_dir = tmp.path().join("s3").join("buckets").join("orphan-tags");
+    std::fs::create_dir_all(&orphan_dir).unwrap();
+    std::fs::write(orphan_dir.join("tags.toml"), "[tags]\nteam = \"ghost\"\n").unwrap();
+
+    server.restart().await;
+    let client2 = server.s3_client().await;
+    // No meta.toml, so the loader skipped it and no bucket exists.
+    client2
+        .head_bucket()
+        .bucket("orphan-tags")
+        .send()
+        .await
+        .expect_err("orphan directory must not resurrect the bucket");
+    drop(client);
+
+    client2
+        .create_bucket()
+        .bucket("orphan-tags")
+        .send()
+        .await
+        .unwrap();
+
+    server.restart().await;
+    let client3 = server.s3_client().await;
+
+    let err = client3
+        .get_bucket_tagging()
+        .bucket("orphan-tags")
+        .send()
+        .await
+        .expect_err("untagged create must not inherit the orphan tag set");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("NoSuchTagSet"), "unexpected error: {msg}");
+}

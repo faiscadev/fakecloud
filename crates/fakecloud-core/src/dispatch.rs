@@ -1140,7 +1140,17 @@ fn streaming_route(
         // handler -- IAM enforcement above all -- saw an empty body and could
         // not read `CreateBucketConfiguration` (no `aws:RequestTag` from a
         // create-time tag set, for one).
-        let path_style_key = after.split_once('/').map(|(_, key)| key).unwrap_or("");
+        //
+        // The key is derived exactly the way the request builder derives
+        // `path_segments` -- split on '/', drop empty segments -- so the two
+        // cannot disagree. A naive `split_once` would call the key of
+        // `PUT /<bucket>//` "/" and stream it, while routing collapses that
+        // path to a bucket-level operation and would again see an empty body.
+        let path_style_key = after
+            .split('/')
+            .skip(1)
+            .find(|seg| !seg.is_empty())
+            .unwrap_or("");
         if after.is_empty() || (!virtual_hosted_s3 && path_style_key.is_empty()) {
             return None;
         }
@@ -2015,6 +2025,40 @@ mod tests {
         assert_eq!(
             streaming_route(&http::Method::PUT, "/my-bucket/", &headers, &HashMap::new(),),
             None,
+        );
+    }
+
+    #[test]
+    fn streaming_route_path_style_doubled_slash_skipped() {
+        // Routing filters empty path segments, so `PUT /<bucket>//` is a
+        // bucket-level operation, not an object upload with a "/" key. The
+        // streaming gate has to agree, or the body goes unbuffered for a
+        // request the handler reads as CreateBucket / PutBucketTagging.
+        let headers = s3_sigv4_headers();
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/my-bucket//",
+                &headers,
+                &HashMap::new()
+            ),
+            None,
+        );
+    }
+
+    #[test]
+    fn streaming_route_path_style_key_with_trailing_slash_streams() {
+        // A real object key that ends in '/' (a directory marker) still
+        // streams -- the gate rejects an absent key, not a trailing slash.
+        let headers = s3_sigv4_headers();
+        assert_eq!(
+            streaming_route(
+                &http::Method::PUT,
+                "/my-bucket/folder/",
+                &headers,
+                &HashMap::new(),
+            ),
+            Some(("s3", "")),
         );
     }
 

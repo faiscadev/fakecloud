@@ -323,11 +323,24 @@ impl S3Service {
         // `meta.toml`, and the in-memory insert is last, so a store error at
         // either step surfaces as an error with no half-created bucket — the
         // same guarantee the `InvalidTag` path gives.
-        if let Some(snap) = tags_snapshot {
-            let payload = toml::to_string(&snap).unwrap_or_default();
-            self.store
-                .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
-                .map_err(super::persistence_error)?;
+        match tags_snapshot {
+            Some(snap) => {
+                let payload = toml::to_string(&snap).unwrap_or_default();
+                self.store
+                    .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
+                    .map_err(super::persistence_error)?;
+            }
+            // An untagged create clears the file rather than leaving it alone:
+            // a create that failed after its tag write (or died between the two
+            // writes) leaves a `tags.toml` in a directory with no `meta.toml`,
+            // which the loader skips — but a later untagged create of the same
+            // name would adopt that never-committed tag set on the next restart.
+            // Deleting is a no-op when the file is absent, which is the normal
+            // case.
+            None => self
+                .store
+                .delete_bucket_subresource(bucket, BucketSubresource::Tags)
+                .map_err(super::persistence_error)?,
         }
         self.store
             .put_bucket_meta(bucket, &meta)
