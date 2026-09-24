@@ -932,7 +932,8 @@ impl IamService {
 
         // Root account row (after users)
         csv.push_str(&format!(
-            "<root_account>,arn:aws:iam::{}:root,{},not_supported,not_supported,not_supported,not_supported,false,false,N/A,N/A,N/A,N/A,false,N/A,N/A,N/A,N/A,false,N/A,false,N/A\n",
+            "<root_account>,arn:{}:iam::{}:root,{},not_supported,not_supported,not_supported,not_supported,false,false,N/A,N/A,N/A,N/A,false,N/A,N/A,N/A,N/A,false,N/A,false,N/A\n",
+            fakecloud_aws::arn::partition_for(&req.region),
             state.account_id,
             Utc::now().format("%Y-%m-%dT%H:%M:%S+00:00")
         ));

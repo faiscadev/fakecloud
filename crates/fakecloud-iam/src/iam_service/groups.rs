@@ -37,7 +37,8 @@ impl IamService {
         let group = IamGroup {
             group_id: format!("AGPA{}", generate_id()),
             arn: format!(
-                "arn:aws:iam::{}:group{}{}",
+                "arn:{}:iam::{}:group{}{}",
+                fakecloud_aws::arn::partition_for(&req.region),
                 state.account_id,
                 if path == "/" { "/" } else { &path },
                 group_name
@@ -357,7 +358,8 @@ impl IamService {
         let actual_new_name = new_group_name.unwrap_or_else(|| group_name.clone());
         group.group_name = actual_new_name.clone();
         group.arn = format!(
-            "arn:aws:iam::{}:group{}{}",
+            "arn:{}:iam::{}:group{}{}",
+            fakecloud_aws::arn::partition_for(&req.region),
             state.account_id,
             if group.path == "/" { "/" } else { &group.path },
             actual_new_name

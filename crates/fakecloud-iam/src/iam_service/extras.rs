@@ -1093,9 +1093,11 @@ impl IamService {
             .map(|(_, doc)| doc.clone())
             .collect();
 
-        let principal_arn_str = caller_arn
-            .clone()
-            .unwrap_or_else(|| Arn::global("iam", &req.account_id, "root").to_string());
+        let principal_arn_str = caller_arn.clone().unwrap_or_else(|| {
+            Arn::global("iam", &req.account_id, "root")
+                .with_partition(fakecloud_aws::arn::partition_for(&req.region))
+                .to_string()
+        });
         let principal = Principal {
             arn: principal_arn_str.clone(),
             user_id: principal_arn_str.clone(),
@@ -1288,8 +1290,9 @@ impl IamService {
         // payload (OldPassword != NewPassword) above.
         let user_name = req.principal.as_ref().and_then(|p| {
             let arn = &p.arn;
-            arn.strip_prefix("arn:aws:iam::")
-                .and_then(|rest| rest.split_once(":user/"))
+            arn.strip_prefix("arn:")
+                .and_then(|rest| rest.split_once(":iam::"))
+                .and_then(|(_, rest)| rest.split_once(":user/"))
                 .map(|(_, name)| name.to_string())
         });
         let Some(user_name) = user_name else {
@@ -1506,7 +1509,8 @@ impl IamService {
         updated.server_certificate_name = final_name.clone();
         // Rebuild ARN with the new path/name so metadata responses reflect the rename.
         updated.arn = format!(
-            "arn:aws:iam::{account}:server-certificate{path}{name}",
+            "arn:{partition}:iam::{account}:server-certificate{path}{name}",
+            partition = fakecloud_aws::arn::partition_for(&req.region),
             account = req.account_id,
             path = if updated.path.starts_with('/') {
                 updated.path.clone()

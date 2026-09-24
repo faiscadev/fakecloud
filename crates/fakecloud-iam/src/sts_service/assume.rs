@@ -489,7 +489,13 @@ impl StsService {
             .as_ref()
             .map(|(_iss, p)| p.arn.clone())
             .or(provider_id_param.clone())
-            .unwrap_or_else(|| format!("arn:aws:iam::{}:oidc-provider/web-identity", account_id));
+            .unwrap_or_else(|| {
+                format!(
+                    "arn:{}:iam::{}:oidc-provider/web-identity",
+                    partition_for_region(&req.region),
+                    account_id
+                )
+            });
 
         // Trust-policy gate: same shape as AssumeRole, but the caller
         // principal is the federated provider and the action is
