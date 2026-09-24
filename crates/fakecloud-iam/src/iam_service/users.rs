@@ -9,7 +9,7 @@ use crate::state::{IamAccessKey, IamState, IamUser, SigningCertificate, SshPubli
 use crate::xml_responses;
 
 use super::{
-    empty_response, extract_access_key, generate_id, generate_long_id, parse_tag_keys, parse_tags,
+    empty_response, generate_id, generate_long_id, parse_tag_keys, parse_tags,
     partition_for_region, required_param_with_code, resolve_calling_user, tags_xml, url_encode,
     validate_optional_string_length_with_code, validate_string_length_with_code, validate_tags,
     validate_untag_keys, IamService,
@@ -185,20 +185,6 @@ fn rename_user_references(state: &mut IamState, old_name: &str, new_name: &str) 
 // ========= User operations =========
 
 impl IamService {
-    /// Determine the effective account ID for this request.
-    /// If the caller has assumed a role into a different account, use that account ID.
-    /// MUST be called before acquiring a write lock on self.state.
-    pub(super) fn effective_account_id(&self, req: &AwsRequest) -> String {
-        if let Some(access_key) = extract_access_key(req) {
-            let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
-            if let Some(identity) = state.credential_identities.get(&access_key) {
-                return identity.account_id.clone();
-            }
-        }
-        self.state.read().default_account_id().to_string()
-    }
-
     pub(super) fn create_user(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let user_name = required_param(&req.query_params, "UserName")?;
         validate_string_length("userName", &user_name, 1, 64)?;
@@ -212,7 +198,6 @@ impl IamService {
         let permissions_boundary = req.query_params.get("PermissionsBoundary").cloned();
 
         let partition = partition_for_region(&req.region);
-        let effective_account = self.effective_account_id(req);
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
@@ -229,7 +214,7 @@ impl IamService {
             arn: format!(
                 "arn:{}:iam::{}:user{}{}",
                 partition,
-                effective_account,
+                state.account_id,
                 if path == "/" { "/" } else { &path },
                 user_name
             ),

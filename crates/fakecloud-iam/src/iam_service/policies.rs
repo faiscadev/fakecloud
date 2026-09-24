@@ -42,14 +42,13 @@ impl IamService {
         let input = CreatePolicyInput::from_query(&req.query_params)?;
 
         let partition = partition_for_region(&req.region);
-        let effective_account = self.effective_account_id(req);
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
         let arn = format!(
             "arn:{}:iam::{}:policy{}{}",
-            partition, effective_account, input.path, input.policy_name
+            partition, state.account_id, input.path, input.policy_name
         );
 
         if state.policies.contains_key(&arn) {

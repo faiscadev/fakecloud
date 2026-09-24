@@ -103,6 +103,139 @@ async fn sts_assume_role_routes_to_target_account() {
 }
 
 // ======================================================================
+// IAM: every entity ARN carries the account it was created in
+// ======================================================================
+
+const LIST_BUCKET_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:ListBucket","Resource":"*"}]}"#;
+
+/// Creates a user, a customer-managed policy, a role, and a group through
+/// `iam` and asserts each ARN names `account`, and that the policy and user
+/// resolve by those ARNs.
+async fn assert_iam_entities_in_account(iam: &aws_sdk_iam::Client, account: &str) {
+    let user = iam.create_user().user_name("alice").send().await.unwrap();
+    let user_arn = user.user().unwrap().arn();
+    assert_eq!(user_arn, format!("arn:aws:iam::{account}:user/alice"));
+
+    let policy = iam
+        .create_policy()
+        .policy_name("list")
+        .policy_document(LIST_BUCKET_POLICY)
+        .send()
+        .await
+        .unwrap();
+    let policy_arn = policy.policy().unwrap().arn().unwrap().to_string();
+    assert_eq!(policy_arn, format!("arn:aws:iam::{account}:policy/list"));
+
+    let role = iam
+        .create_role()
+        .role_name("svc")
+        .assume_role_policy_document(r#"{"Version":"2012-10-17","Statement":[]}"#)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        role.role().unwrap().arn(),
+        format!("arn:aws:iam::{account}:role/svc")
+    );
+
+    let group = iam.create_group().group_name("ops").send().await.unwrap();
+    assert_eq!(
+        group.group().unwrap().arn(),
+        format!("arn:aws:iam::{account}:group/ops")
+    );
+
+    // The policy resolves by the ARN CreatePolicy returned, and attaching it
+    // by that ARN reaches the user.
+    let fetched = iam
+        .get_policy()
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(fetched.policy().unwrap().arn(), Some(policy_arn.as_str()));
+    iam.attach_user_policy()
+        .user_name("alice")
+        .policy_arn(&policy_arn)
+        .send()
+        .await
+        .unwrap();
+    let attached = iam
+        .list_attached_user_policies()
+        .user_name("alice")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        attached.attached_policies()[0].policy_arn(),
+        Some(policy_arn.as_str())
+    );
+
+    let fetched_user = iam.get_user().user_name("alice").send().await.unwrap();
+    assert_eq!(fetched_user.user().unwrap().arn(), user_arn);
+}
+
+#[tokio::test]
+async fn iam_entity_arns_use_non_default_account() {
+    let server = start().await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+    let b_cfg = config_with(&server, &b_akid, &b_secret).await;
+    let iam_b = aws_sdk_iam::Client::new(&b_cfg);
+
+    assert_iam_entities_in_account(&iam_b, ACCOUNT_B).await;
+}
+
+#[tokio::test]
+async fn iam_entity_arns_use_assumed_role_account() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let (b_akid, b_secret) = server.create_admin(ACCOUNT_B, "admin-b").await;
+
+    // An admin role in account B that account A may assume.
+    let b_cfg = config_with(&server, &b_akid, &b_secret).await;
+    let iam_b = aws_sdk_iam::Client::new(&b_cfg);
+    iam_b
+        .create_role()
+        .role_name("admin-role")
+        .assume_role_policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":"*","Action":"sts:AssumeRole"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    iam_b
+        .attach_role_policy()
+        .role_name("admin-role")
+        .policy_arn("arn:aws:iam::aws:policy/AdministratorAccess")
+        .send()
+        .await
+        .unwrap();
+
+    let a_cfg = config_with(&server, &a_akid, &a_secret).await;
+    let assumed = StsClient::new(&a_cfg)
+        .assume_role()
+        .role_arn(format!("arn:aws:iam::{ACCOUNT_B}:role/admin-role"))
+        .role_session_name("cross")
+        .send()
+        .await
+        .unwrap();
+    let creds = assumed.credentials().unwrap();
+    let session_cfg = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(Credentials::new(
+            creds.access_key_id(),
+            creds.secret_access_key(),
+            Some(creds.session_token().to_string()),
+            None,
+            "multi-acct-session",
+        ))
+        .load()
+        .await;
+
+    assert_iam_entities_in_account(&aws_sdk_iam::Client::new(&session_cfg), ACCOUNT_B).await;
+}
+
+// ======================================================================
 // SQS: queues isolated per account
 // ======================================================================
 
