@@ -40,47 +40,10 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        // Check for ACL header
-        let acl_header = req
-            .headers
-            .get("x-amz-acl")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        // Check for grant headers alongside canned ACL
-        let has_grant_headers = super::super::has_grant_headers(&req.headers);
-
-        // Validated here, before `take_body_stream` spools the payload to disk:
+        // Resolved here, before `take_body_stream` spools the payload to disk:
         // returning after the spool leaks the file, since nothing unlinks it on
         // the error paths.
-        if let Some(acl) = acl_header.as_deref() {
-            super::super::validate_object_canned_acl(acl)?;
-        }
-        if has_grant_headers {
-            resolved_grant_headers(&req.headers)?;
-        }
-        if acl_header.is_some() && has_grant_headers {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "InvalidRequest",
-                "Specifying both Canned ACLs and Header Grants is not allowed",
-            ));
-        }
-
-        // BucketOwnerEnforced disables object ACLs at write-time too:
-        // any x-amz-acl or x-amz-grant-* header rejects with
-        // AccessControlListNotSupported. Plain PutObject without ACL
-        // headers continues to work — only attempts to set a grant
-        // are rejected.
-        if (acl_header.is_some() || has_grant_headers)
-            && self.bucket_owner_enforced(account_id, bucket)
-        {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "AccessControlListNotSupported",
-                "The bucket does not allow ACLs",
-            ));
-        }
+        let write_acl = self.resolve_write_acl_headers(account_id, bucket, &req.headers)?;
 
         // Parse tags from header
         let tags = if let Some(tagging) = &tagging_header {
@@ -306,12 +269,8 @@ impl S3Service {
         });
 
         // Build ACL grants for object
-        let acl_grants = if has_grant_headers {
-            // Already validated before the body was spooled; this cannot fail
-            // here, but resolving again keeps one source for the grants.
-            resolved_grant_headers(&req.headers)?
-        } else if let Some(ref acl) = acl_header {
-            canned_acl_grants_for_object(acl, &acl_owner_id)
+        let acl_grants = if let Some(grants) = write_acl.grants_for(&acl_owner_id) {
+            grants
         } else {
             // Default: owner full control
             vec![AclGrant {
@@ -859,6 +818,15 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_uppercase());
 
+        // CopyObject accepts the same ACL headers as PutObject: a canned
+        // `x-amz-acl` or the `x-amz-grant-*` pair, never both. Ignoring them --
+        // which is what this path used to do -- answered 200 for
+        // `copy-object --acl public-read` and produced a private object, so the
+        // caller believed it had published the copy.
+        // Resolved before the write lock, since the check reads bucket state of
+        // its own, and before the copy does any work.
+        let copy_acl = self.resolve_write_acl_headers(account_id, dest_bucket, &req.headers)?;
+
         let mut accts = self.state.write();
         let state = accts.get_or_create(account_id);
 
@@ -1152,14 +1120,18 @@ impl S3Service {
             None
         };
 
-        // Default ACL for destination (not copied from source)
-        let dest_acl_grants = vec![AclGrant {
-            grantee_type: "CanonicalUser".to_string(),
-            grantee_id: Some(db.acl_owner_id.clone()),
-            grantee_display_name: Some(db.acl_owner_id.clone()),
-            grantee_uri: None,
-            permission: "FULL_CONTROL".to_string(),
-        }];
+        // The destination's ACL comes from this request, never from the source:
+        // S3 treats a copy as a new object, so an unspecified ACL is the default
+        // private one rather than whatever the source carried.
+        let dest_acl_grants = copy_acl.grants_for(&db.acl_owner_id).unwrap_or_else(|| {
+            vec![AclGrant {
+                grantee_type: "CanonicalUser".to_string(),
+                grantee_id: Some(db.acl_owner_id.clone()),
+                grantee_display_name: Some(db.acl_owner_id.clone()),
+                grantee_uri: None,
+                permission: "FULL_CONTROL".to_string(),
+            }]
+        });
 
         let dest_obj = S3Object {
             key: dest_key.to_string(),
