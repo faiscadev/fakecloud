@@ -112,6 +112,24 @@ pub fn upload_part_meta_snapshot(p: &UploadPart) -> UploadPartMeta {
     }
 }
 
+/// Whether a stored grant names someone it could ever match.
+///
+/// An older build read an email grantee's absent `<ID>` as an empty string, so
+/// a legacy `acl.toml` can hold a grant that matches nobody. Dropping those at
+/// load keeps memory, disk and `GetBucketAcl` telling the same story -- hiding
+/// them only when rendering would make the response disagree with the ACL the
+/// bucket actually has, and a read-modify-write would then persist the omission.
+fn acl_grant_names_a_grantee(g: &AclGrantSnapshot) -> bool {
+    // Trimmed, like the request-side checks: a stored grantee of whitespace
+    // names nobody just as surely as an empty one.
+    let named = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+    match g.grantee_type.as_str() {
+        "Group" => named(&g.grantee_uri),
+        "AmazonCustomerByEmail" => named(&g.grantee_display_name),
+        _ => named(&g.grantee_id),
+    }
+}
+
 fn acl_grant_from_snapshot(g: &AclGrantSnapshot) -> AclGrant {
     AclGrant {
         grantee_type: g.grantee_type.clone(),
@@ -247,7 +265,13 @@ pub fn s3_bucket_from_snapshot(
         grantee_uri: None,
         permission: "FULL_CONTROL".to_string(),
     };
-    let has_acl_sidecar = subresources.contains_key("acl.toml");
+    // An `acl.toml` written by an older build could be empty (its writer used
+    // `unwrap_or_default()` on serialization failure). Treat that as no sidecar
+    // at all, so the bucket keeps the default owner grant instead of loading
+    // with no grants and silently stripping the owner's FULL_CONTROL.
+    let has_acl_sidecar = subresources
+        .get("acl.toml")
+        .is_some_and(|text| !text.trim().is_empty());
     let mut b = S3Bucket {
         name: name.to_string(),
         creation_date: meta.creation_date,
@@ -330,7 +354,30 @@ pub fn s3_bucket_from_snapshot(
                 if !snap.owner_id.is_empty() {
                     b.acl_owner_id = snap.owner_id;
                 }
-                b.acl_grants = snap.grants.iter().map(acl_grant_from_snapshot).collect();
+                // Drop grants that name nobody, so the loaded ACL is one the
+                // server would also accept back from a client.
+                let usable: Vec<AclGrant> = snap
+                    .grants
+                    .iter()
+                    .filter(|g| acl_grant_names_a_grantee(g))
+                    .map(acl_grant_from_snapshot)
+                    .collect();
+                // ...but never leave the bucket with no grants at all. A
+                // sidecar whose every grant is unusable is indistinguishable
+                // from one that was never written, so fall back to the same
+                // default owner grant a bucket with no `acl.toml` gets, rather
+                // than loading a bucket whose owner has lost FULL_CONTROL.
+                b.acl_grants = if usable.is_empty() {
+                    vec![AclGrant {
+                        grantee_type: "CanonicalUser".to_string(),
+                        grantee_id: Some(b.acl_owner_id.clone()),
+                        grantee_display_name: Some(b.acl_owner_id.clone()),
+                        grantee_uri: None,
+                        permission: "FULL_CONTROL".to_string(),
+                    }]
+                } else {
+                    usable
+                };
             }
             "inventory.toml" => {
                 if text.trim().is_empty() {
@@ -345,19 +392,58 @@ pub fn s3_bucket_from_snapshot(
                 if text.trim().is_empty() {
                     continue;
                 }
-                b.analytics_configs = toml::from_str(&text).unwrap_or_default();
+                // Neither `unwrap_or_default` nor `?`. Defaulting would load the
+                // bucket with no configurations and no word, and the next Put
+                // would overwrite the file and make the loss permanent; failing
+                // would hide every object in the bucket behind an unparseable
+                // reporting config. Skip the sidecar, keep the bucket, and say so,
+                // so the file is still there to look at.
+                match toml::from_str(&text) {
+                    Ok(parsed) => b.analytics_configs = parsed,
+                    Err(e) => tracing::warn!(
+                        bucket = %name,
+                        error = %e,
+                        "ignoring unreadable analytics.toml; its configurations are not loaded",
+                    ),
+                }
             }
             "intelligent_tiering.toml" => {
                 if text.trim().is_empty() {
                     continue;
                 }
-                b.intelligent_tiering_configs = toml::from_str(&text).unwrap_or_default();
+                // Neither `unwrap_or_default` nor `?`. Defaulting would load the
+                // bucket with no configurations and no word, and the next Put
+                // would overwrite the file and make the loss permanent; failing
+                // would hide every object in the bucket behind an unparseable
+                // reporting config. Skip the sidecar, keep the bucket, and say so,
+                // so the file is still there to look at.
+                match toml::from_str(&text) {
+                    Ok(parsed) => b.intelligent_tiering_configs = parsed,
+                    Err(e) => tracing::warn!(
+                        bucket = %name,
+                        error = %e,
+                        "ignoring unreadable intelligent_tiering.toml; its configurations are not loaded",
+                    ),
+                }
             }
             "metrics.toml" => {
                 if text.trim().is_empty() {
                     continue;
                 }
-                b.metrics_configs = toml::from_str(&text).unwrap_or_default();
+                // Neither `unwrap_or_default` nor `?`. Defaulting would load the
+                // bucket with no configurations and no word, and the next Put
+                // would overwrite the file and make the loss permanent; failing
+                // would hide every object in the bucket behind an unparseable
+                // reporting config. Skip the sidecar, keep the bucket, and say so,
+                // so the file is still there to look at.
+                match toml::from_str(&text) {
+                    Ok(parsed) => b.metrics_configs = parsed,
+                    Err(e) => tracing::warn!(
+                        bucket = %name,
+                        error = %e,
+                        "ignoring unreadable metrics.toml; its configurations are not loaded",
+                    ),
+                }
             }
             "request_payment.toml" => {
                 b.request_payment = Some(text);
@@ -382,10 +468,40 @@ pub fn hydrate_s3_state(
     account_id: &str,
     region: &str,
 ) -> Result<S3State, String> {
+    hydrate_s3_state_reporting(snapshot, account_id, region, &mut |_, _| {})
+}
+
+/// Hydrate a loaded snapshot, reporting each bucket that cannot be used instead
+/// of failing the whole load.
+///
+/// The store already isolates a bucket whose objects it cannot read: it warns,
+/// records the refusal and carries on, so one bad file costs one bucket rather
+/// than the server. Sidecars are parsed here, a layer later, and a single
+/// malformed `acl.toml` or `tags.toml` used to abort startup -- every other
+/// bucket inaccessible because of one file. Such a bucket is skipped and handed
+/// to `refused` so it is reported exactly like a store-level refusal: absent
+/// from memory, its name refused by CreateBucket, and clearable by DeleteBucket.
+pub fn hydrate_s3_state_reporting(
+    snapshot: S3StateSnapshot,
+    account_id: &str,
+    region: &str,
+    refused: &mut dyn FnMut(&str, &str),
+) -> Result<S3State, String> {
     let mut state = S3State::new(account_id, region);
     for (name, snap) in snapshot.buckets {
-        let bucket = s3_bucket_from_snapshot(&name, snap, region)?;
-        state.buckets.insert(name, bucket);
+        match s3_bucket_from_snapshot(&name, snap, region) {
+            Ok(bucket) => {
+                state.buckets.insert(name, bucket);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    bucket = %name,
+                    error = %e,
+                    "skipping S3 bucket whose stored configuration could not be read",
+                );
+                refused(&name, &e);
+            }
+        }
     }
     Ok(state)
 }

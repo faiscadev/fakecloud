@@ -62,7 +62,7 @@ impl S3Service {
         let snap = TagsSnapshot {
             tags: b.tags.clone(),
         };
-        let payload = toml::to_string(&snap).unwrap_or_default();
+        let payload = crate::service::toml_or_internal_error(&snap)?;
         self.store
             .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
             .map_err(crate::service::persistence_error)?;

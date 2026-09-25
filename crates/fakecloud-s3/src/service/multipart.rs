@@ -13,8 +13,8 @@ use md5::{Digest, Md5};
 
 use super::{
     canned_acl_grants, compute_md5, extract_user_metadata, no_such_bucket, no_such_key,
-    no_such_upload, parse_complete_multipart_xml, parse_grant_headers, parse_url_encoded_tags,
-    precondition_failed, resolve_object, s3_xml, xml_escape, S3Service,
+    no_such_upload, parse_complete_multipart_xml, parse_url_encoded_tags, precondition_failed,
+    resolve_object, resolved_grant_headers, s3_xml, xml_escape, S3Service,
 };
 
 /// Build the `CompleteMultipartUploadResult` XML response for an object that
@@ -100,10 +100,19 @@ impl S3Service {
             .get("x-amz-acl")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
-        let has_grant_headers = req
-            .headers
-            .keys()
-            .any(|k| k.as_str().starts_with("x-amz-grant-"));
+        let has_grant_headers = super::has_grant_headers(&req.headers);
+        // Every sibling ACL-setting path rejects an ACL on a bucket whose
+        // ownership disables them; this one used to accept it and carry the
+        // grants into the completed object, which now persists them.
+        if (acl_header.is_some() || has_grant_headers)
+            && self.bucket_owner_enforced(account_id, bucket)
+        {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "AccessControlListNotSupported",
+                "The bucket does not allow ACLs",
+            ));
+        }
 
         if acl_header.is_some() && has_grant_headers {
             return Err(AwsServiceError::aws_error(
@@ -128,9 +137,10 @@ impl S3Service {
             .ok_or_else(|| no_such_bucket(bucket))?;
 
         let acl_grants = if has_grant_headers {
-            parse_grant_headers(&req.headers)
+            resolved_grant_headers(&req.headers)?
         } else {
             let acl = acl_header.as_deref().unwrap_or("private");
+            super::validate_object_canned_acl(acl)?;
             canned_acl_grants(acl, &b.acl_owner_id)
         };
 

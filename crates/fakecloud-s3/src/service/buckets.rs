@@ -5,17 +5,35 @@ use http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
-use fakecloud_persistence::{BucketSubresource, TagsSnapshot};
+use fakecloud_persistence::{AclGrantSnapshot, AclSnapshot, BucketSubresource, TagsSnapshot};
 
 use crate::persistence::bucket_meta_snapshot;
 use crate::state::S3Bucket;
 
 use super::{
-    canned_acl_grants, create_bucket_configuration_tags, extract_xml_value, is_valid_bucket_name,
-    is_valid_region, no_such_bucket, s3_xml, validate_tags, xml_escape, S3Service,
+    canned_acl_grants, create_bucket_configuration_tags, extract_xml_value, has_grant_headers,
+    is_valid_bucket_name, is_valid_region, no_such_bucket, resolved_grant_headers, s3_xml,
+    validate_tags, xml_escape, S3Service, BUCKET_CANNED_ACLS, OBJECT_OWNERSHIP_VALUES,
 };
 
 impl S3Service {
+    /// Write a bucket subresource when the create set one. Anything the store
+    /// held for the name was already discarded before this point, so there is
+    /// nothing stale left for these writes to sit on top of.
+    fn put_bucket_subresource_if_set(
+        &self,
+        bucket: &str,
+        kind: BucketSubresource,
+        payload: Option<&str>,
+    ) -> Result<(), AwsServiceError> {
+        let Some(text) = payload else {
+            return Ok(());
+        };
+        self.store
+            .put_bucket_subresource(bucket, kind, text)
+            .map_err(super::persistence_error)
+    }
+
     pub(super) fn list_buckets(
         &self,
         account_id: &str,
@@ -222,12 +240,93 @@ impl S3Service {
         let create_tags = create_bucket_configuration_tags(body_str);
         validate_tags(&create_tags)?;
 
-        // Parse ACL from header
-        let acl = req
+        // Parse the ACL the create asks for. Either a canned `x-amz-acl` or the
+        // `x-amz-grant-*` headers, never both -- S3 rejects the combination
+        // rather than picking a winner. Whichever is used, the result is an ACL
+        // the caller chose, so it needs an `acl.toml`; the default private
+        // grant is what the loader reconstructs on its own and needs no
+        // sidecar.
+        let acl_header = req.headers.get("x-amz-acl").and_then(|v| v.to_str().ok());
+        let grant_headers_present = has_grant_headers(&req.headers);
+        if acl_header.is_some() && grant_headers_present {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidRequest",
+                "Specifying both Canned ACLs and Header Grants is not allowed",
+            ));
+        }
+        if let Some(acl) = acl_header {
+            if !BUCKET_CANNED_ACLS.contains(&acl) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    format!("Invalid x-amz-acl value: {acl}"),
+                ));
+            }
+        }
+        let header_grants = if grant_headers_present {
+            resolved_grant_headers(&req.headers)?
+        } else {
+            Vec::new()
+        };
+
+        // BucketOwnerEnforced turns ACLs off for the bucket, so S3 refuses a
+        // create that also asks for one. Without this the bucket would come out
+        // publicly readable via a canned `public-read` while `PutBucketAcl` can
+        // no longer edit that ACL -- and this create now persists it, so the
+        // state would survive restarts instead of evaporating.
+        //
+        // A canned ACL is judged by the grants it resolves to (`private` grants
+        // nothing beyond the owner, so S3 accepts it), while ANY `x-amz-grant-*`
+        // header conflicts on presence alone, as on S3 -- the caller is asking
+        // for an ACL on a bucket that has none.
+        let ownership_header = req
             .headers
-            .get("x-amz-acl")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("private");
+            .get("x-amz-object-ownership")
+            .and_then(|v| v.to_str().ok());
+        if let Some(ownership) = ownership_header {
+            if !OBJECT_OWNERSHIP_VALUES.contains(&ownership) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    format!("Invalid x-amz-object-ownership value: {ownership}"),
+                ));
+            }
+        }
+        // Compared exactly, not case-insensitively: `bucket_owner_enforced()`
+        // matches the stored XML case-sensitively, so accepting a differently
+        // cased value here would refuse an ACL at create that the very next
+        // PutBucketAcl would then happily set.
+        let ownership_enforced = ownership_header == Some("BucketOwnerEnforced");
+        let owner_only = |grants: &[crate::state::AclGrant]| {
+            grants.iter().all(|g| {
+                g.permission == "FULL_CONTROL"
+                    && g.grantee_type == "CanonicalUser"
+                    && g.grantee_id.as_deref() == Some(req.account_id.as_str())
+            })
+        };
+        let acl_requests_grants = grant_headers_present
+            || acl_header.is_some_and(|a| {
+                // `aws-exec-read` grants READ to the EC2 service's canonical
+                // user. That grantee is not modeled, so the resolved grants
+                // look owner-only -- but the request still asks for an ACL
+                // reaching outside the owner, which is what conflicts.
+                a == "aws-exec-read" || !owner_only(&canned_acl_grants(a, &req.account_id))
+            });
+        if ownership_enforced && acl_requests_grants {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::BAD_REQUEST,
+                "InvalidBucketAclWithObjectOwnership",
+                "Bucket cannot have ACLs set with ObjectOwnership's BucketOwnerEnforced setting",
+            ));
+        }
+        // `aws-exec-read` resolves to owner-only here (its READ grant to the EC2
+        // service's canonical user is not modeled), which is exactly what the
+        // loader reconstructs without a sidecar -- so it gets no `acl.toml`
+        // rather than a stored record claiming an explicit ACL it does not have.
+        let acl_header_present =
+            grant_headers_present || acl_header.is_some_and(|a| a != "aws-exec-read");
+        let acl = acl_header.unwrap_or("private");
 
         let mut accts = self.state.write();
         // Check global uniqueness across all accounts before creating
@@ -248,7 +347,7 @@ impl S3Service {
         if let Some(existing) = state.buckets.get(bucket) {
             // In us-east-1, re-creating same bucket in same region is idempotent
             // (returns 200). The re-create is a no-op on the existing bucket: it
-            // re-applies none of the create-time settings — not the canned ACL,
+            // re-applies none of the create-time settings -- not the canned ACL,
             // not object lock, not object ownership, and not the
             // `CreateBucketConfiguration` tag set. Applying only the tags here
             // would make them the one create-time setting that mutates a bucket
@@ -279,7 +378,11 @@ impl S3Service {
             .unwrap_or(false);
 
         let mut b = S3Bucket::new(bucket, &requested_region, &req.account_id);
-        b.acl_grants = canned_acl_grants(acl, &req.account_id);
+        b.acl_grants = if grant_headers_present {
+            header_grants
+        } else {
+            canned_acl_grants(acl, &req.account_id)
+        };
         if object_lock_enabled {
             b.versioning = Some("Enabled".to_string());
             b.object_lock_config = Some(
@@ -292,11 +395,7 @@ impl S3Service {
         }
 
         // Handle x-amz-object-ownership header
-        if let Some(ownership) = req
-            .headers
-            .get("x-amz-object-ownership")
-            .and_then(|v| v.to_str().ok())
-        {
+        if let Some(ownership) = ownership_header {
             b.ownership_controls = Some(format!(
                 "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
                  <OwnershipControls xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
@@ -315,36 +414,92 @@ impl S3Service {
         };
 
         let meta = bucket_meta_snapshot(&b);
-        // Persist before committing the bucket to memory, tags first: bucket
-        // tags live in their own subresource rather than in the bucket meta, so
-        // they need an explicit write to survive a restart, and writing them
-        // ahead of `meta.toml` keeps a failed create from leaving anything
-        // usable behind. The loader skips a bucket directory with no
-        // `meta.toml`, and the in-memory insert is last, so a store error at
-        // either step surfaces as an error with no half-created bucket — the
-        // same guarantee the `InvalidTag` path gives.
-        match tags_snapshot {
-            Some(snap) => {
-                let payload = toml::to_string(&snap).unwrap_or_default();
-                self.store
-                    .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
-                    .map_err(super::persistence_error)?;
-            }
-            // An untagged create clears the file rather than leaving it alone:
-            // a create that failed after its tag write (or died between the two
-            // writes) leaves a `tags.toml` in a directory with no `meta.toml`,
-            // which the loader skips — but a later untagged create of the same
-            // name would adopt that never-committed tag set on the next restart.
-            // Deleting is a no-op when the file is absent, which is the normal
-            // case.
-            None => self
-                .store
-                .delete_bucket_subresource(bucket, BucketSubresource::Tags)
-                .map_err(super::persistence_error)?,
-        }
+        // Persist the create-time subresources before `meta.toml` and before the
+        // in-memory insert. None of these three live in `BucketMeta`, and the
+        // loader restores `object_lock_config` / `ownership_controls` as `None`
+        // and falls back to the default owner grant when `acl.toml` is absent --
+        // so without an explicit write, a bucket created with `x-amz-acl`,
+        // object lock, or an ownership rule came back after a restart with none
+        // of them (object-lock retention silently stopped being enforced).
+        //
+        // Each one is written only when the create set it; the clear above is
+        // what guarantees nothing stale is left for the ones it did not.
+        let acl_payload = if acl_header_present {
+            let snap = AclSnapshot {
+                owner_id: b.acl_owner_id.clone(),
+                grants: b.acl_grants.iter().map(AclGrantSnapshot::from).collect(),
+            };
+            // Never fall back to an empty document here: the loader takes the
+            // mere presence of `acl.toml` to mean "this bucket has an explicit
+            // ACL" and skips the default owner grant, so an empty file would
+            // restore the bucket with no grants at all.
+            Some(toml::to_string(&snap).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    format!("failed to serialize bucket ACL: {e}"),
+                )
+            })?)
+        } else {
+            None
+        };
+        let tags_payload = match tags_snapshot {
+            // Never fall back to an empty document: a blank `tags.toml` is not
+            // what "no tags" means on disk, and the sweep below is what clears
+            // a stale one.
+            Some(snap) => Some(toml::to_string(&snap).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "InternalError",
+                    format!("failed to serialize bucket tags: {e}"),
+                )
+            })?),
+            None => None,
+        };
+        // The meta goes first, and nothing is destroyed until it lands: a
+        // create that fails here has changed nothing on disk, where clearing
+        // the old sidecars first would have thrown away the configuration of
+        // whatever bucket this name belonged to for a create that never
+        // happened.
         self.store
             .put_bucket_meta(bucket, &meta)
             .map_err(super::persistence_error)?;
+        // Clear every stored subresource for this name before writing this
+        // bucket's own, now that the create is committed. A create or delete that stopped partway -- or a
+        // `/_fakecloud/reset`, which clears memory and leaves the store alone --
+        // can leave sidecars behind, and a later create would otherwise be
+        // restored carrying the old bucket's `policy.toml`, `acl.toml` and the
+        // rest. Each delete tolerates a missing file, which is the normal case.
+        //
+        // Scoped to the sidecars on purpose. `objects/` is NOT touched: the
+        // loader skips a bucket whose objects it cannot read, so that bucket is
+        // absent from memory while its data sits intact on disk, and clearing
+        // the directory here would make re-creating the name the thing that
+        // destroys it. Whether a create should adopt or discard a stale object
+        // tree is a separate question from this one, and this is not the change
+        // that answers it.
+        for kind in fakecloud_persistence::ALL_SUBRESOURCES {
+            self.store
+                .delete_bucket_subresource(bucket, *kind)
+                .map_err(super::persistence_error)?;
+        }
+
+        self.put_bucket_subresource_if_set(
+            bucket,
+            BucketSubresource::Tags,
+            tags_payload.as_deref(),
+        )?;
+        self.put_bucket_subresource_if_set(bucket, BucketSubresource::Acl, acl_payload.as_deref())?;
+        self.put_bucket_subresource_if_set(
+            bucket,
+            BucketSubresource::ObjectLock,
+            b.object_lock_config.as_deref(),
+        )?;
+        self.put_bucket_subresource_if_set(
+            bucket,
+            BucketSubresource::Ownership,
+            b.ownership_controls.as_deref(),
+        )?;
         state.buckets.insert(bucket.to_string(), b);
 
         let mut headers = HeaderMap::new();

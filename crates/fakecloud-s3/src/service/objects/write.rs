@@ -48,11 +48,17 @@ impl S3Service {
             .map(|s| s.to_string());
 
         // Check for grant headers alongside canned ACL
-        let has_grant_headers = req.headers.keys().any(|k| {
-            let name = k.as_str();
-            name.starts_with("x-amz-grant-")
-        });
+        let has_grant_headers = super::super::has_grant_headers(&req.headers);
 
+        // Validated here, before `take_body_stream` spools the payload to disk:
+        // returning after the spool leaks the file, since nothing unlinks it on
+        // the error paths.
+        if let Some(acl) = acl_header.as_deref() {
+            super::super::validate_object_canned_acl(acl)?;
+        }
+        if has_grant_headers {
+            resolved_grant_headers(&req.headers)?;
+        }
         if acl_header.is_some() && has_grant_headers {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -301,7 +307,9 @@ impl S3Service {
 
         // Build ACL grants for object
         let acl_grants = if has_grant_headers {
-            parse_grant_headers(&req.headers)
+            // Already validated before the body was spooled; this cannot fail
+            // here, but resolving again keeps one source for the grants.
+            resolved_grant_headers(&req.headers)?
         } else if let Some(ref acl) = acl_header {
             canned_acl_grants_for_object(acl, &acl_owner_id)
         } else {

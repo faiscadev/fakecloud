@@ -982,11 +982,29 @@ impl S3Store for DiskS3Store {
 
     fn delete_object(&self, bucket: &str, key: &str, version: Option<&str>) -> StoreResult<()> {
         let (dir, bin_path, toml_path) = self.object_paths(bucket, key, version);
-        for p in [&bin_path, &toml_path] {
-            match std::fs::remove_file(p) {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e.into()),
+        // Sidecar first, body second. `load` iterates `*.toml` and treats a
+        // sidecar whose `.bin` is gone as a hard error that costs the whole
+        // bucket, while an orphan `.bin` is never looked at. So if this is
+        // interrupted -- a signal, or the second `remove_file` failing -- the
+        // residue left behind has to be the body, not the sidecar.
+        // The sidecar is the durable record, so its removal is the one that has
+        // to succeed. Once it is gone the object is deleted as far as every
+        // reader is concerned, and failing the call over a body that could not
+        // be unlinked would report a delete that did happen as an error --
+        // while still leaving the caller no way to reclaim the bytes.
+        match std::fs::remove_file(&toml_path) {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+        if let Err(e) = std::fs::remove_file(&bin_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %bin_path.display(),
+                    error = %e,
+                    "deleted object's body could not be removed; it is orphaned until the \
+                     bucket is deleted",
+                );
             }
         }
         Self::cleanup_empty(&dir);
@@ -1502,6 +1520,56 @@ mod disk_tests {
         let loaded = store.load().unwrap();
         let obj = loaded.buckets.get("b").unwrap().objects.get("k").unwrap();
         assert_eq!(obj.meta.tags.get("x").map(String::as_str), Some("y"));
+    }
+
+    #[test]
+    fn delete_object_removes_the_sidecar_before_the_body() {
+        // `load` iterates `*.toml` and treats a sidecar whose `.bin` is gone as
+        // a hard error for the whole bucket, while an orphan `.bin` is never
+        // read. So the sidecar has to be the file the delete attempts first.
+        //
+        // Forces the SIDECAR removal to fail, by making that path a non-empty
+        // directory `remove_file` cannot take. Only a sidecar-first delete
+        // reports the failure with the body still on disk; a body-first one
+        // would have removed the body before reaching it.
+        let tmp = TempDir::new().unwrap();
+        let store = new_store(&tmp);
+        store
+            .put_bucket_meta(
+                "b",
+                &BucketMeta {
+                    name: "b".to_string(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        store
+            .put_object(
+                "b",
+                "k.txt",
+                None,
+                BodySource::Bytes(Bytes::from_static(b"v")),
+                &ObjectMeta {
+                    key: "k.txt".to_string(),
+                    size: 1,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let (_dir, bin, toml) = store.object_paths("b", "k.txt", None);
+        std::fs::remove_file(&toml).unwrap();
+        std::fs::create_dir(&toml).unwrap();
+        std::fs::write(toml.join("blocker"), b"x").unwrap();
+
+        assert!(
+            store.delete_object("b", "k.txt", None).is_err(),
+            "a sidecar that cannot be removed must fail the delete: it is the durable record"
+        );
+        assert!(
+            bin.exists(),
+            "the body must still be there, which is only true if the sidecar was attempted first"
+        );
     }
 
     #[test]

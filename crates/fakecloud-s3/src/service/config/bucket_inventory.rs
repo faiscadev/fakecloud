@@ -25,7 +25,7 @@ impl S3Service {
             let snap = InventorySnapshot {
                 configs: b.inventory_configs.clone(),
             };
-            toml::to_string(&snap).unwrap_or_default()
+            crate::service::toml_or_internal_error(&snap)?
         };
         self.store
             .put_bucket_subresource(bucket, BucketSubresource::Inventory, &payload)
@@ -114,7 +114,7 @@ impl S3Service {
             let snap = InventorySnapshot {
                 configs: b.inventory_configs.clone(),
             };
-            let payload = toml::to_string(&snap).unwrap_or_default();
+            let payload = crate::service::toml_or_internal_error(&snap)?;
             self.store
                 .put_bucket_subresource(bucket, BucketSubresource::Inventory, &payload)
                 .map_err(crate::service::persistence_error)?;
