@@ -1651,6 +1651,11 @@ impl ResourceProvisioner {
             // `update_iam_group`.
             "AWS::IAM::User" => Some(self.update_iam_user(existing, new_def)?),
             "AWS::IAM::Group" => Some(self.update_iam_group(existing, new_def)?),
+            // In-place update: the reprovision fallback deletes then recreates,
+            // which under UpdateReplacePolicy Retain collides with the retained
+            // provider. Only a new Url / Name replaces.
+            "AWS::IAM::OIDCProvider" => Some(self.update_iam_oidc_provider(existing, new_def)?),
+            "AWS::IAM::SAMLProvider" => Some(self.update_iam_saml_provider(existing, new_def)?),
             "AWS::ApiGateway::RestApi" => Some(self.update_apigw_rest_api(existing, new_def)?),
             "AWS::ApiGateway::Resource" => Some(self.update_apigw_resource(existing, new_def)?),
             "AWS::ApiGateway::Method" => Some(self.update_apigw_method(existing, new_def)?),
@@ -6931,6 +6936,237 @@ mod tests {
         );
         let sr = prov.create_resource(&res).unwrap();
         assert!(prov.delete_resource(&sr).is_ok());
+    }
+
+    #[test]
+    fn iam_entities_provisioned_in_china_region_use_aws_cn_partition() {
+        let mut prov = make_provisioner();
+        prov.region = "cn-north-1".to_string();
+        let metadata = format!("<EntityDescriptor>{}</EntityDescriptor>", "x".repeat(1000));
+
+        let saml = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::SAMLProvider",
+                "Idp",
+                serde_json::json!({"Name": "idp", "SamlMetadataDocument": metadata}),
+            ))
+            .unwrap();
+        assert_eq!(
+            saml.physical_id,
+            "arn:aws-cn:iam::123456789012:saml-provider/idp"
+        );
+
+        let slr = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::ServiceLinkedRole",
+                "Slr",
+                serde_json::json!({"AWSServiceName": "elasticbeanstalk.amazonaws.com"}),
+            ))
+            .unwrap();
+        assert!(
+            slr.attributes.get("Arn").is_some_and(
+                |a| a.starts_with("arn:aws-cn:iam::123456789012:role/aws-service-role/")
+            ),
+            "service-linked role ARN: {:?}",
+            slr.attributes
+        );
+
+        let mfa = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::VirtualMFADevice",
+                "Mfa",
+                serde_json::json!({"VirtualMfaDeviceName": "dev"}),
+            ))
+            .unwrap();
+        assert_eq!(mfa.physical_id, "arn:aws-cn:iam::123456789012:mfa/dev");
+
+        // A second SAML provider with the same name fails like CreateSAMLProvider.
+        let err = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::SAMLProvider",
+                "Idp2",
+                serde_json::json!({"Name": "idp", "SamlMetadataDocument": metadata}),
+            ))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+    }
+
+    /// Changing an OIDC provider's thumbprints or client ids, or a SAML
+    /// provider's metadata, updates the provider in place, even with
+    /// UpdateReplacePolicy Retain, where a replacement would collide with the
+    /// retained provider. A new Url / Name still replaces.
+    #[test]
+    fn iam_oidc_and_saml_providers_update_in_place() {
+        let prov = make_provisioner();
+        let oidc_def = |thumbprint: &str, url: &str| {
+            let mut def = make_resource(
+                "AWS::IAM::OIDCProvider",
+                "Gh",
+                serde_json::json!({
+                    "Url": url,
+                    "ClientIdList": ["sts.amazonaws.com"],
+                    "ThumbprintList": [thumbprint],
+                    "Tags": [{"Key": "team", "Value": "ci"}],
+                }),
+            );
+            def.update_replace_policy = Some("Retain".to_string());
+            def
+        };
+        let gh = "https://token.actions.githubusercontent.com";
+        let mut existing = prov
+            .create_resource(&oidc_def("1111111111111111111111111111111111111111", gh))
+            .unwrap();
+        existing.update_replace_policy = Some("Retain".to_string());
+        let updated = prov
+            .update_resource(
+                &existing,
+                &oidc_def("2222222222222222222222222222222222222222", gh),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.physical_id, existing.physical_id);
+        {
+            let accounts = prov.iam_state.read();
+            let state = accounts.get("123456789012").unwrap();
+            assert_eq!(state.oidc_providers.len(), 1);
+            let p = &state.oidc_providers[&existing.physical_id];
+            assert_eq!(
+                p.thumbprint_list,
+                vec!["2222222222222222222222222222222222222222".to_string()]
+            );
+            assert_eq!(p.tags.len(), 1);
+        }
+        // A new Url is a different provider: replaced, and the retained one stays.
+        let replaced = prov
+            .update_resource(
+                &existing,
+                &oidc_def(
+                    "2222222222222222222222222222222222222222",
+                    "https://other.example.com",
+                ),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            replaced.physical_id,
+            "arn:aws:iam::123456789012:oidc-provider/other.example.com"
+        );
+
+        let metadata = |c: char| {
+            format!(
+                "<EntityDescriptor>{}</EntityDescriptor>",
+                c.to_string().repeat(1000)
+            )
+        };
+        let saml_def = |name: &str, c: char| {
+            let mut def = make_resource(
+                "AWS::IAM::SAMLProvider",
+                "Idp",
+                serde_json::json!({"Name": name, "SamlMetadataDocument": metadata(c)}),
+            );
+            def.update_replace_policy = Some("Retain".to_string());
+            def
+        };
+        let mut saml = prov.create_resource(&saml_def("corp-idp", 'a')).unwrap();
+        saml.update_replace_policy = Some("Retain".to_string());
+        let updated = prov
+            .update_resource(&saml, &saml_def("corp-idp", 'b'))
+            .unwrap()
+            .unwrap();
+        assert_eq!(updated.physical_id, saml.physical_id);
+        let accounts = prov.iam_state.read();
+        let state = accounts.get("123456789012").unwrap();
+        assert_eq!(state.saml_providers.len(), 1);
+        assert_eq!(
+            state.saml_providers[&saml.physical_id].saml_metadata_document,
+            metadata('b')
+        );
+        drop(accounts);
+
+        // Dropping Name from a named provider is a rename: replaced with a
+        // generated name.
+        let mut unnamed = make_resource(
+            "AWS::IAM::SAMLProvider",
+            "Idp",
+            serde_json::json!({"SamlMetadataDocument": metadata('c')}),
+        );
+        unnamed.update_replace_policy = Some("Retain".to_string());
+        let renamed = prov.update_resource(&saml, &unnamed).unwrap().unwrap();
+        assert_ne!(renamed.physical_id, saml.physical_id);
+
+        // An unnamed provider keeps its generated name across an update.
+        let generated = StackResource {
+            physical_id: renamed.physical_id.clone(),
+            ..saml.clone()
+        };
+        let mut unnamed_again = unnamed.clone();
+        unnamed_again.properties = serde_json::json!({"SamlMetadataDocument": metadata('d')});
+        let kept = prov
+            .update_resource(&generated, &unnamed_again)
+            .unwrap()
+            .unwrap();
+        assert_eq!(kept.physical_id, renamed.physical_id);
+
+        // A query string change on an OIDC URL updates the stored URL in place.
+        let with_query = prov
+            .update_resource(
+                &replaced,
+                &oidc_def(
+                    "2222222222222222222222222222222222222222",
+                    "https://other.example.com?aud=x",
+                ),
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(with_query.physical_id, replaced.physical_id);
+        let accounts = prov.iam_state.read();
+        assert_eq!(
+            accounts.get("123456789012").unwrap().oidc_providers[&replaced.physical_id].url,
+            "other.example.com?aud=x"
+        );
+    }
+
+    #[test]
+    fn iam_oidc_provider_matches_api_shape_and_is_unique_per_url() {
+        let prov = make_provisioner();
+        let oidc = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::OIDCProvider",
+                "Gh",
+                serde_json::json!({
+                    "Url": "https://token.actions.githubusercontent.com",
+                    "ClientIdList": ["sts.amazonaws.com"],
+                    "ThumbprintList": ["abcdef1234567890abcdef1234567890abcdef12"],
+                }),
+            ))
+            .unwrap();
+        assert_eq!(
+            oidc.physical_id,
+            "arn:aws:iam::123456789012:oidc-provider/token.actions.githubusercontent.com"
+        );
+        {
+            let accounts = prov.iam_state.read();
+            let stored = &accounts.get("123456789012").unwrap().oidc_providers[&oidc.physical_id];
+            assert_eq!(stored.url, "token.actions.githubusercontent.com");
+        }
+
+        // Another stack declaring the same URL fails instead of taking over
+        // the existing provider.
+        let err = prov
+            .create_resource(&make_resource(
+                "AWS::IAM::OIDCProvider",
+                "Gh2",
+                serde_json::json!({
+                    "Url": "https://token.actions.githubusercontent.com",
+                    "ClientIdList": ["other"],
+                    "ThumbprintList": ["0000000000000000000000000000000000000000"],
+                }),
+            ))
+            .unwrap_err();
+        assert!(err.contains("already exists"), "{err}");
+        let accounts = prov.iam_state.read();
+        let stored = &accounts.get("123456789012").unwrap().oidc_providers[&oidc.physical_id];
+        assert_eq!(stored.client_id_list, vec!["sts.amazonaws.com".to_string()]);
     }
 
     #[test]

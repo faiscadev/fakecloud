@@ -104,7 +104,8 @@ async fn cfn_provisions_iam_extras() {
         .send()
         .await
         .expect("get_open_id_connect_provider");
-    assert_eq!(oidc.url(), Some("https://accounts.example.com"));
+    // Stored like CreateOpenIDConnectProvider stores it: without the scheme.
+    assert_eq!(oidc.url(), Some("accounts.example.com"));
     assert!(oidc.client_id_list().contains(&"my-app".to_string()));
 
     // Verify service-linked role via SDK.
