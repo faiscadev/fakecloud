@@ -9,10 +9,10 @@ use crate::state::{IamAccessKey, IamState, IamUser, SigningCertificate, SshPubli
 use crate::xml_responses;
 
 use super::{
-    empty_response, generate_id, generate_long_id, parse_tag_keys, parse_tags,
-    partition_for_region, required_param_with_code, resolve_calling_user, tags_xml, url_encode,
-    validate_optional_string_length_with_code, validate_string_length_with_code, validate_tags,
-    validate_untag_keys, IamService,
+    empty_response, existing_arn_partition, generate_id, generate_long_id, parse_tag_keys,
+    parse_tags, partition_for_region, required_param_with_code, resolve_calling_user, tags_xml,
+    url_encode, validate_optional_string_length_with_code, validate_string_length_with_code,
+    validate_tags, validate_untag_keys, IamService,
 };
 use fakecloud_core::query::required_param;
 
@@ -437,17 +437,7 @@ impl IamService {
 
         let actual_new_name = new_user_name.unwrap_or_else(|| user_name.clone());
         user.user_name = actual_new_name.clone();
-        // Preserve the existing ARN's partition (aws / aws-cn / aws-us-gov
-        // / aws-iso*) rather than hardcoding `arn:aws:`, which would flip
-        // the partition on a rename in cn-/us-gov-/iso- regions. Derive it
-        // from the user's current ARN, falling back to the region.
-        let partition = user
-            .arn
-            .split(':')
-            .nth(1)
-            .filter(|p| !p.is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| partition_for_region(&req.region).to_string());
+        let partition = existing_arn_partition(&user.arn, &req.region);
         user.arn = format!(
             "arn:{}:iam::{}:user{}{}",
             partition,

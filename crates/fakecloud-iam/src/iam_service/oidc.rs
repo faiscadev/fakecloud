@@ -139,8 +139,9 @@ impl IamService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        let arn =
-            Arn::global("iam", &state.account_id, &format!("saml-provider/{name}")).to_string();
+        let arn = Arn::global("iam", &state.account_id, &format!("saml-provider/{name}"))
+            .with_partition(fakecloud_aws::arn::partition_for(&req.region))
+            .to_string();
 
         let provider = SamlProvider {
             arn: arn.clone(),
@@ -357,8 +358,10 @@ impl IamService {
             .next()
             .unwrap_or(&url_without_scheme);
         let arn = format!(
-            "arn:aws:iam::{}:oidc-provider/{}",
-            state.account_id, url_for_arn
+            "arn:{}:iam::{}:oidc-provider/{}",
+            fakecloud_aws::arn::partition_for(&req.region),
+            state.account_id,
+            url_for_arn
         );
 
         if state.oidc_providers.contains_key(&arn) {
@@ -693,7 +696,8 @@ impl IamService {
         let cert = ServerCertificate {
             server_certificate_id: format!("ASCA{}", generate_id()),
             arn: format!(
-                "arn:aws:iam::{}:server-certificate{}{}",
+                "arn:{}:iam::{}:server-certificate{}{}",
+                fakecloud_aws::arn::partition_for(&req.region),
                 state.account_id,
                 if path == "/" { "/" } else { &path },
                 name

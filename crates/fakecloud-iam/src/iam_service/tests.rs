@@ -5370,3 +5370,230 @@ fn list_instance_profiles_paginates() {
     assert!(!body.contains("ip-a"));
     assert!(!body.contains("ip-b"));
 }
+
+/// Every IAM entity ARN minted in a China region carries the `aws-cn`
+/// partition, the same way users, roles and policies already do.
+#[test]
+fn entity_arns_carry_region_partition() {
+    let svc = make_service();
+    let cn = |action: &str, params: Vec<(&str, &str)>| {
+        let mut req = make_request(action, params);
+        req.region = "cn-north-1".to_string();
+        req
+    };
+    let arn_of = |resp: AwsResponse, tag: &str| {
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        extract_xml_tag(&body, tag).to_string()
+    };
+
+    let group = svc
+        .create_group(&cn("CreateGroup", vec![("GroupName", "ops")]))
+        .unwrap();
+    assert_eq!(
+        arn_of(group, "Arn"),
+        "arn:aws-cn:iam::123456789012:group/ops"
+    );
+    svc.update_group(&cn(
+        "UpdateGroup",
+        vec![("GroupName", "ops"), ("NewGroupName", "ops2")],
+    ))
+    .unwrap();
+    let group = svc
+        .get_group(&cn("GetGroup", vec![("GroupName", "ops2")]))
+        .unwrap();
+    assert_eq!(
+        arn_of(group, "Arn"),
+        "arn:aws-cn:iam::123456789012:group/ops2"
+    );
+
+    let oidc = svc
+        .create_oidc_provider(&cn(
+            "CreateOpenIDConnectProvider",
+            vec![
+                ("Url", "https://oidc.example.com"),
+                (
+                    "ThumbprintList.member.1",
+                    "abcdef1234567890abcdef1234567890abcdef12",
+                ),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(
+        arn_of(oidc, "OpenIDConnectProviderArn"),
+        "arn:aws-cn:iam::123456789012:oidc-provider/oidc.example.com"
+    );
+
+    let metadata = format!("<EntityDescriptor>{}</EntityDescriptor>", "x".repeat(1000));
+    let saml = svc
+        .create_saml_provider(&cn(
+            "CreateSAMLProvider",
+            vec![("Name", "idp"), ("SAMLMetadataDocument", &metadata)],
+        ))
+        .unwrap();
+    assert_eq!(
+        arn_of(saml, "SAMLProviderArn"),
+        "arn:aws-cn:iam::123456789012:saml-provider/idp"
+    );
+
+    let cert = svc
+        .upload_server_certificate(&cn(
+            "UploadServerCertificate",
+            vec![
+                ("ServerCertificateName", "web"),
+                (
+                    "CertificateBody",
+                    "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+                ),
+                (
+                    "PrivateKey",
+                    "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+                ),
+            ],
+        ))
+        .unwrap();
+    assert_eq!(
+        arn_of(cert, "Arn"),
+        "arn:aws-cn:iam::123456789012:server-certificate/web"
+    );
+    svc.update_server_certificate(&cn(
+        "UpdateServerCertificate",
+        vec![
+            ("ServerCertificateName", "web"),
+            ("NewServerCertificateName", "web2"),
+        ],
+    ))
+    .unwrap();
+    let cert = svc
+        .get_server_certificate(&cn(
+            "GetServerCertificate",
+            vec![("ServerCertificateName", "web2")],
+        ))
+        .unwrap();
+    assert_eq!(
+        arn_of(cert, "Arn"),
+        "arn:aws-cn:iam::123456789012:server-certificate/web2"
+    );
+
+    svc.generate_credential_report(&cn("GenerateCredentialReport", vec![]))
+        .unwrap();
+    let report = svc
+        .get_credential_report(&cn("GetCredentialReport", vec![]))
+        .unwrap();
+    let encoded = arn_of(report, "Content");
+    let csv = String::from_utf8(
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, encoded).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        csv.contains("<root_account>,arn:aws-cn:iam::123456789012:root,"),
+        "root row must carry the region partition: {csv}"
+    );
+}
+
+/// ChangePassword resolves the caller from an `aws-cn` principal ARN rather
+/// than silently no-oping because the ARN is not `arn:aws:`.
+#[test]
+fn change_password_resolves_non_aws_partition_principal() {
+    let svc = make_service();
+    svc.create_user(&make_request("CreateUser", vec![("UserName", "u1")]))
+        .unwrap();
+    svc.create_login_profile(&make_request(
+        "CreateLoginProfile",
+        vec![("UserName", "u1"), ("Password", "old")],
+    ))
+    .unwrap();
+    let mut principal = change_password_principal("u1");
+    principal.arn = "arn:aws-cn:iam::123456789012:user/u1".to_string();
+
+    let mut wrong = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "not-old"), ("NewPassword", "fresh")],
+    );
+    wrong.principal = Some(principal.clone());
+    assert!(
+        svc.change_password(&wrong).is_err(),
+        "a wrong old password must be rejected, not accepted as an anonymous no-op"
+    );
+
+    let mut right = make_request(
+        "ChangePassword",
+        vec![("OldPassword", "old"), ("NewPassword", "fresh")],
+    );
+    right.principal = Some(principal);
+    svc.change_password(&right).unwrap();
+}
+
+/// IAM is global, so a rename can arrive from any region. Renaming a group
+/// or server certificate from a commercial region must keep the `aws-cn`
+/// partition it was created with, the same way UpdateUser does.
+#[test]
+fn rename_from_other_region_keeps_partition() {
+    let svc = make_service();
+    let in_region = |action: &str, params: Vec<(&str, &str)>, region: &str| {
+        let mut req = make_request(action, params);
+        req.region = region.to_string();
+        req
+    };
+    let arn_of = |resp: AwsResponse| {
+        let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+        extract_xml_tag(&body, "Arn").to_string()
+    };
+
+    svc.create_group(&in_region(
+        "CreateGroup",
+        vec![("GroupName", "ops")],
+        "cn-north-1",
+    ))
+    .unwrap();
+    svc.update_group(&in_region(
+        "UpdateGroup",
+        vec![("GroupName", "ops"), ("NewGroupName", "ops2")],
+        "us-east-1",
+    ))
+    .unwrap();
+    let group = svc
+        .get_group(&in_region(
+            "GetGroup",
+            vec![("GroupName", "ops2")],
+            "us-east-1",
+        ))
+        .unwrap();
+    assert_eq!(arn_of(group), "arn:aws-cn:iam::123456789012:group/ops2");
+
+    svc.upload_server_certificate(&in_region(
+        "UploadServerCertificate",
+        vec![
+            ("ServerCertificateName", "web"),
+            (
+                "CertificateBody",
+                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----",
+            ),
+            (
+                "PrivateKey",
+                "-----BEGIN RSA PRIVATE KEY-----\ntest\n-----END RSA PRIVATE KEY-----",
+            ),
+        ],
+        "cn-north-1",
+    ))
+    .unwrap();
+    svc.update_server_certificate(&in_region(
+        "UpdateServerCertificate",
+        vec![
+            ("ServerCertificateName", "web"),
+            ("NewServerCertificateName", "web2"),
+        ],
+        "us-east-1",
+    ))
+    .unwrap();
+    let cert = svc
+        .get_server_certificate(&in_region(
+            "GetServerCertificate",
+            vec![("ServerCertificateName", "web2")],
+            "us-east-1",
+        ))
+        .unwrap();
+    assert_eq!(
+        arn_of(cert),
+        "arn:aws-cn:iam::123456789012:server-certificate/web2"
+    );
+}
