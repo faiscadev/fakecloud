@@ -268,3 +268,94 @@ async fn cfn_provisions_cloudfront_distribution() {
     let after = cf.get_distribution().id(&dist_id).send().await;
     assert!(after.is_err(), "distribution should be gone");
 }
+
+/// A SPA distribution as CDK synthesizes one: `CustomErrorResponses` mapping
+/// 403/404 to `/index.html` with a 200. CloudFormation types `ResponseCode` as
+/// an Integer while the CloudFront API carries it as a string, so translating
+/// the CFN block through the wire struct dropped every rule and the
+/// distribution came out with none — deep links 404'd instead of serving the
+/// app shell.
+const SPA_ERROR_TEMPLATE: &str = r#"{
+  "Resources": {
+    "Dist": {
+      "Type": "AWS::CloudFront::Distribution",
+      "Properties": {
+        "DistributionConfig": {
+          "Comment": "spa error rules",
+          "Enabled": true,
+          "DefaultRootObject": "index.html",
+          "Origins": [
+            {"Id": "origin-1", "DomainName": "origin.example.com",
+             "CustomOriginConfig": {"OriginProtocolPolicy": "http-only", "HTTPPort": 80, "HTTPSPort": 443}}
+          ],
+          "DefaultCacheBehavior": {
+            "TargetOriginId": "origin-1",
+            "ViewerProtocolPolicy": "allow-all"
+          },
+          "CustomErrorResponses": [
+            {"ErrorCode": 403, "ResponseCode": 200, "ResponsePagePath": "/index.html", "ErrorCachingMinTTL": 300},
+            {"ErrorCode": 404, "ResponseCode": 200, "ResponsePagePath": "/index.html", "ErrorCachingMinTTL": 300}
+          ]
+        }
+      }
+    }
+  },
+  "Outputs": {
+    "DistId": {"Value": {"Ref": "Dist"}}
+  }
+}"#;
+
+#[tokio::test]
+async fn cfn_provisions_spa_custom_error_responses() {
+    let server = TestServer::start().await;
+    let cfn = server.cloudformation_client().await;
+    let cf = aws_sdk_cloudfront::Client::new(&server.aws_config().await);
+
+    cfn.create_stack()
+        .stack_name("cf-spa-errors")
+        .template_body(SPA_ERROR_TEMPLATE)
+        .send()
+        .await
+        .expect("create_stack");
+
+    let described = cfn
+        .describe_stacks()
+        .stack_name("cf-spa-errors")
+        .send()
+        .await
+        .expect("describe_stacks");
+    let stack = described.stacks().first().unwrap();
+    assert_eq!(stack.stack_status().unwrap().as_str(), "CREATE_COMPLETE");
+
+    let dist_id = stack
+        .outputs()
+        .iter()
+        .find(|o| o.output_key() == Some("DistId"))
+        .and_then(|o| o.output_value())
+        .map(|s| s.to_string())
+        .expect("DistId");
+
+    let got = cf
+        .get_distribution()
+        .id(&dist_id)
+        .send()
+        .await
+        .expect("get_distribution");
+    let dcfg = got
+        .distribution()
+        .and_then(|d| d.distribution_config())
+        .expect("config");
+
+    let rules = dcfg
+        .custom_error_responses()
+        .expect("CustomErrorResponses provisioned");
+    assert_eq!(rules.quantity(), 2, "both rules must survive translation");
+    let mut codes: Vec<i32> = rules.items().iter().map(|r| r.error_code()).collect();
+    codes.sort_unstable();
+    assert_eq!(codes, vec![403, 404]);
+    for rule in rules.items() {
+        assert_eq!(rule.response_code(), Some("200"));
+        assert_eq!(rule.response_page_path(), Some("/index.html"));
+        assert_eq!(rule.error_caching_min_ttl(), Some(300));
+    }
+}

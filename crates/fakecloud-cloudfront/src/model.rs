@@ -555,7 +555,15 @@ pub struct CustomErrorResponse {
     pub response_page_path: Option<String>,
     #[serde(default, skip_serializing_if = "skip_if_none")]
     pub response_code: Option<String>,
-    #[serde(default, skip_serializing_if = "skip_if_none")]
+    // AWS spells this `ErrorCachingMinTTL` (upper-case TTL). The default
+    // PascalCase rule would emit `ErrorCachingMinTtl`, which drops the field on
+    // parse from real SDK requests and mis-names it on the wire. Pin the exact
+    // name, as `WebACLId` above does.
+    #[serde(
+        default,
+        rename = "ErrorCachingMinTTL",
+        skip_serializing_if = "skip_if_none"
+    )]
     pub error_caching_min_ttl: Option<i64>,
 }
 
