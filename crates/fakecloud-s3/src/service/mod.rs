@@ -1531,14 +1531,65 @@ impl AwsService for S3Service {
             return Vec::new();
         };
         if action.service == "s3" && action.action == "CreateBucket" {
+            // A create that also configures the bucket needs the permission for
+            // each thing it configures, as on AWS: dispatch requires every
+            // returned action to be allowed, so a principal holding only
+            // `s3:CreateBucket` can still create a plain bucket. This matters
+            // more now that these settings PERSIST -- a bucket created
+            // `public-read` by a caller with no `s3:PutBucketAcl` used to lose
+            // the grant on restart, and now keeps it.
+            let mut extra = Vec::new();
             let body = std::str::from_utf8(&request.body).unwrap_or("");
             if !create_bucket_configuration_tags(body).is_empty() {
-                let tag_resource = fakecloud_core::auth::IamAction {
-                    service: "s3",
-                    action: "TagResource",
-                    resource: action.resource.clone(),
-                };
-                return vec![action, tag_resource];
+                extra.push("TagResource");
+            }
+            // Per the CreateBucket permissions in the vendored model: an ACL set
+            // to public-read, public-read-write, authenticated-read "or any
+            // other custom ACLs" needs s3:PutBucketAcl, while "if you set the
+            // ACL to private, or if you don't specify any ACLs, only the
+            // s3:CreateBucket permission is required". Judged by the grants the
+            // request resolves to, so the two spellings of an owner-only ACL
+            // agree -- and so a least-privilege caller that always sends
+            // `--acl private` is not refused.
+            let acl_reaches_past_owner = request
+                .headers
+                .get("x-amz-acl")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|acl| {
+                    canned_acl_grants(acl, &request.account_id).iter().any(|g| {
+                        g.permission != "FULL_CONTROL"
+                            || g.grantee_type != "CanonicalUser"
+                            || g.grantee_id.as_deref() != Some(request.account_id.as_str())
+                    })
+                });
+            if acl_reaches_past_owner || has_grant_headers(&request.headers) {
+                extra.push("PutBucketAcl");
+            }
+            if request.headers.contains_key("x-amz-object-ownership") {
+                extra.push("PutBucketOwnershipControls");
+            }
+            if request
+                .headers
+                .get("x-amz-bucket-object-lock-enabled")
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("true"))
+            {
+                // Object lock forces versioning on, so AWS wants both.
+                extra.push("PutBucketObjectLockConfiguration");
+                extra.push("PutBucketVersioning");
+            }
+            if !extra.is_empty() {
+                let mut actions = Vec::with_capacity(extra.len() + 1);
+                let resource = action.resource.clone();
+                actions.push(action);
+                for name in extra {
+                    actions.push(fakecloud_core::auth::IamAction {
+                        service: "s3",
+                        action: name,
+                        resource: resource.clone(),
+                    });
+                }
+                return actions;
             }
         }
         vec![action]
@@ -1549,7 +1600,7 @@ impl AwsService for S3Service {
         request: &AwsRequest,
         action: &fakecloud_core::auth::IamAction,
     ) -> std::collections::BTreeMap<String, Vec<String>> {
-        s3_condition_keys(action.action, &request.query_params)
+        s3_condition_keys(action.action, &request.query_params, &request.headers)
     }
 
     fn resource_tags_for(
@@ -1579,8 +1630,34 @@ impl AwsService for S3Service {
 fn s3_condition_keys(
     action: &str,
     query: &std::collections::HashMap<String, String>,
+    headers: &HeaderMap,
 ) -> std::collections::BTreeMap<String, Vec<String>> {
     let mut out = std::collections::BTreeMap::new();
+    // `s3:x-amz-acl` and the `s3:x-amz-grant-*` family are how a policy pins
+    // down which ACL a write may ask for -- a guardrail like
+    // `Deny s3:CreateBucket when s3:x-amz-acl != private` is useless while they
+    // are never populated. AWS exposes them on every ACL-accepting write, so
+    // they are emitted whenever the request carries them rather than being
+    // gated on an action list that would drift.
+    if let Some(acl) = headers.get("x-amz-acl").and_then(|v| v.to_str().ok()) {
+        out.insert("s3:x-amz-acl".to_string(), vec![acl.to_string()]);
+    }
+    for (header, _) in &GRANT_HEADER_PERMISSIONS {
+        // Blank values are skipped for the same reason `has_grant_headers`
+        // treats them as absent: a present-but-empty header asks for no grant,
+        // and emitting the key would make a `Null`-based guardrail read it as
+        // present and deny the request.
+        let values: Vec<String> = headers
+            .get_all(*header)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| v.to_string())
+            .collect();
+        if !values.is_empty() {
+            out.insert(format!("s3:{header}"), values);
+        }
+    }
     if matches!(action, "ListObjects" | "ListObjectsV2") {
         // Both list variants share the same query param shape.
         if let Some(prefix) = query.get("prefix") {
