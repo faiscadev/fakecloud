@@ -384,6 +384,20 @@ fn is_s3_website(domain: &str) -> bool {
     domain.contains(".s3-website") && domain.ends_with(".amazonaws.com")
 }
 
+/// An S3 REST endpoint in virtual-hosted style — `<bucket>.s3.<region>.amazonaws.com`
+/// (what `S3OriginConfig` origins carry; CDK's `S3BucketOrigin` emits the bucket's
+/// `RegionalDomainName`), plus the legacy `<bucket>.s3.amazonaws.com` and
+/// dash-separated `<bucket>.s3-<region>.amazonaws.com` forms.
+///
+/// Delegates to the shared `Host` parser so bucket names containing dots and the
+/// LocalStack hostname convention are handled the same way the S3 front door
+/// handles them. Requires a bucket, so a path-style `s3.<region>.amazonaws.com`
+/// (no bucket to serve) is not treated as an origin of this kind.
+fn is_s3_rest(domain: &str) -> bool {
+    fakecloud_core::protocol::parse_routing_host(domain)
+        .is_some_and(|h| h.service == "s3" && h.bucket.is_some())
+}
+
 /// Resolve an [`crate::model::Origin`] to the upstream to connect to.
 ///
 /// - S3-website origins are served by this same fakecloud process, so connect to
@@ -392,7 +406,9 @@ fn is_s3_website(domain: &str) -> bool {
 ///   is fetched over HTTPS (else HTTP), and the configured `HTTPPort`/`HTTPSPort`
 ///   is appended UNLESS the `domain_name` already carries an explicit `:port`
 ///   (as local test origins do) or the port is the scheme default.
-/// - Bare origins (no config) are reached over HTTP at their domain verbatim.
+/// - Bare S3 REST origins (`<bucket>.s3.<region>.amazonaws.com`) are likewise
+///   served by this process, with the bucket domain preserved in `Host`.
+/// - Other bare origins (no config) are reached over HTTP at their domain verbatim.
 fn upstream_for(origin: &crate::model::Origin, s3_endpoint: &str) -> UpstreamTarget {
     let domain = &origin.domain_name;
     if is_s3_website(domain) {
@@ -423,6 +439,16 @@ fn upstream_for(origin: &crate::model::Origin, s3_endpoint: &str) -> UpstreamTar
         };
         return UpstreamTarget {
             url_base: format!("{scheme}://{authority}"),
+            host_header: domain.clone(),
+        };
+    }
+    // A bare S3 REST origin is served by this same process, like an S3-website
+    // origin: connect to our own port with the bucket domain kept in `Host` so
+    // the S3 front door resolves it virtual-hosted style. Without this the
+    // domain resolves in real DNS and the fetch goes to real AWS S3.
+    if is_s3_rest(domain) {
+        return UpstreamTarget {
+            url_base: format!("http://{s3_endpoint}"),
             host_header: domain.clone(),
         };
     }
@@ -606,6 +632,44 @@ mod tests {
         );
         assert_eq!(up.url_base, "http://127.0.0.1:4566");
         assert_eq!(up.host_header, "b.s3-website-us-east-1.amazonaws.com");
+    }
+
+    #[test]
+    fn s3_rest_origin_routes_to_local_port() {
+        // What an `S3OriginConfig` origin carries (CDK's `S3BucketOrigin` emits the
+        // bucket's `RegionalDomainName`). These resolve in real DNS, so without
+        // rerouting they are proxied to real AWS S3, which answers `NoSuchBucket`.
+        for domain in [
+            "b.s3.us-east-1.amazonaws.com",
+            "b.s3.amazonaws.com",
+            "b.s3-us-east-1.amazonaws.com",
+            "my.dotted.bucket.s3.eu-west-2.amazonaws.com",
+        ] {
+            let up = upstream_for(&origin(domain, None), "127.0.0.1:4566");
+            assert_eq!(up.url_base, "http://127.0.0.1:4566", "{domain}");
+            assert_eq!(up.host_header, domain, "{domain}");
+        }
+    }
+
+    #[test]
+    fn s3_lookalike_origin_is_not_rerouted() {
+        // Not an AWS hostname: a real custom origin that must keep its own domain.
+        let up = upstream_for(&origin("s3.example.com", None), "127.0.0.1:4566");
+        assert_eq!(up.url_base, "http://s3.example.com");
+    }
+
+    #[test]
+    fn custom_origin_config_wins_over_s3_rest_domain() {
+        // An S3 REST domain declared as an explicit custom origin keeps the
+        // configured scheme/port rather than being rerouted to the local port.
+        let up = upstream_for(
+            &origin(
+                "b.s3.us-east-1.amazonaws.com",
+                Some(custom("https-only", 80, 8443)),
+            ),
+            "127.0.0.1:4566",
+        );
+        assert_eq!(up.url_base, "https://b.s3.us-east-1.amazonaws.com:8443");
     }
 
     #[test]

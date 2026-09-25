@@ -483,6 +483,37 @@ async fn serves_static_from_s3_website_origin_and_routes_api() {
     assert_eq!(r.text().await.unwrap(), "ECHO /api/orders");
 }
 
+/// Regression: an `S3OriginConfig` origin carries the bucket's REST domain
+/// (`<bucket>.s3.<region>.amazonaws.com` — what CDK's `S3BucketOrigin` emits),
+/// which resolves in real DNS. Before the fix the data plane proxied it to real
+/// AWS S3 instead of this process, so the distribution never served the bucket.
+#[tokio::test]
+async fn serves_static_from_s3_rest_origin() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("restsite")
+        .send()
+        .await
+        .expect("create_bucket");
+    put_object(
+        &s3,
+        "restsite",
+        "assets/app.js",
+        "application/javascript",
+        b"APPJS",
+    )
+    .await;
+
+    let cf = server.cloudfront_client().await;
+    let dist = make_spa_distribution(&cf, "restsite.s3.us-east-1.amazonaws.com", None).await;
+    assert!(wait_for_served(&server, dist.id(), Duration::from_secs(10)).await);
+
+    let r = viewer_get(&server, dist.domain_name(), "/assets/app.js").await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "APPJS");
+}
+
 #[tokio::test]
 async fn stays_served_after_restart_persistent() {
     let tmp = tempfile::tempdir().unwrap();
