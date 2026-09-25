@@ -143,6 +143,16 @@ impl IamService {
             .with_partition(fakecloud_aws::arn::partition_for(&req.region))
             .to_string();
 
+        // Names are unique per account; a second create must not replace the
+        // existing provider's metadata, tags and creation date.
+        if state.saml_providers.values().any(|p| p.name == name) {
+            return Err(AwsServiceError::aws_error(
+                StatusCode::CONFLICT,
+                "EntityAlreadyExists",
+                format!("SAMLProvider {name} already exists."),
+            ));
+        }
+
         let provider = SamlProvider {
             arn: arn.clone(),
             name,
@@ -345,18 +355,9 @@ impl IamService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        // Store URL without scheme for responses (AWS behavior)
-        let url_without_scheme = url
-            .strip_prefix("https://")
-            .or_else(|| url.strip_prefix("http://"))
-            .unwrap_or(&url)
-            .to_string();
-
-        // ARN uses URL path without query string
-        let url_for_arn = url_without_scheme
-            .split('?')
-            .next()
-            .unwrap_or(&url_without_scheme);
+        // Stored without the scheme (AWS behavior); the ARN also drops the
+        // query string.
+        let (url_without_scheme, url_for_arn) = crate::state::oidc_url_parts(&url);
         let arn = format!(
             "arn:{}:iam::{}:oidc-provider/{}",
             fakecloud_aws::arn::partition_for(&req.region),
@@ -364,7 +365,7 @@ impl IamService {
             url_for_arn
         );
 
-        if state.oidc_providers.contains_key(&arn) {
+        if state.has_oidc_provider_for(&url_for_arn) {
             return Err(AwsServiceError::aws_error(
                 StatusCode::CONFLICT,
                 "EntityAlreadyExists",
