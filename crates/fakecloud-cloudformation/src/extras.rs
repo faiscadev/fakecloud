@@ -199,6 +199,17 @@ fn record_hook_results(
     }
 }
 
+/// `ChangeSetNotFoundException` — declared on `DescribeChangeSet`,
+/// `DescribeChangeSetHooks` and `ExecuteChangeSet`, awsQueryError code
+/// `ChangeSetNotFound`, HTTP 404 (aws-models/cloudformation.json).
+fn change_set_not_found(cs: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::NOT_FOUND,
+        "ChangeSetNotFound",
+        format!("ChangeSet [{cs}] does not exist"),
+    )
+}
+
 fn missing(name: &str) -> AwsServiceError {
     AwsServiceError::aws_error(
         StatusCode::BAD_REQUEST,
@@ -635,6 +646,32 @@ impl CloudFormationService {
         Some(exists)
     }
 
+    /// Look a change set up by name or ARN, optionally constrained to a stack.
+    ///
+    /// Every caller previously inlined this and then fabricated a
+    /// `CREATE_COMPLETE` stub on a miss. That made `cdk deploy`/`cdk bootstrap`
+    /// hang against an existing stack: the CLI deletes its change set and polls
+    /// `DescribeChangeSet` until it 404s (`waitForGone`), so a stubbed success
+    /// never terminates. Callers now map `None` to `change_set_not_found`.
+    fn find_change_set(&self, account_id: &str, cs: &str, stack: Option<&str>) -> Option<Value> {
+        let accounts = self.state.read();
+        accounts
+            .get(account_id)
+            .and_then(|s| s.extras.get("change_sets"))
+            .and_then(|m| {
+                m.values()
+                    .find(|v| {
+                        let id_match =
+                            v["Id"].as_str() == Some(cs) || v["ChangeSetName"].as_str() == Some(cs);
+                        let stack_match = stack.is_none_or(|sf| {
+                            v["StackName"].as_str() == Some(sf) || v["StackId"].as_str() == Some(sf)
+                        });
+                        id_match && stack_match
+                    })
+                    .cloned()
+            })
+    }
+
     pub(crate) fn handle_extra_action(
         &self,
         req: &AwsRequest,
@@ -1016,20 +1053,9 @@ impl CloudFormationService {
                     .ok_or_else(|| missing("ChangeSetName"))?
                     .clone();
                 let stack_filter = params.get("StackName").cloned();
-                let accounts = self.state.read();
-                let entry = accounts.get(&aid)
-                    .and_then(|s| s.extras.get("change_sets"))
-                    .and_then(|m| m.values().find(|v| {
-                        let id_match = v["Id"].as_str() == Some(&cs)
-                            || v["ChangeSetName"].as_str() == Some(&cs);
-                        let stack_match = stack_filter.as_deref().is_none_or(|sf| {
-                            v["StackName"].as_str() == Some(sf)
-                                || v["StackId"].as_str() == Some(sf)
-                        });
-                        id_match && stack_match
-                    }))
-                    .cloned()
-                    .unwrap_or_else(|| json!({"ChangeSetName": cs.clone(), "Status": "CREATE_COMPLETE", "ExecutionStatus": "AVAILABLE"}));
+                let entry = self
+                    .find_change_set(&aid, &cs, stack_filter.as_deref())
+                    .ok_or_else(|| change_set_not_found(&cs))?;
                 let changes_xml = entry["Changes"]
                     .as_array()
                     .map(|arr| {
@@ -1094,41 +1120,16 @@ impl CloudFormationService {
                 // Read the hooks snapshotted onto the change set at
                 // CreateChangeSet time instead of always returning empty
                 // (bug-audit 2026-06-13, 1.8).
-                let entry = {
-                    let accounts = self.state.read();
-                    accounts
-                        .get(&aid)
-                        .and_then(|s| s.extras.get("change_sets"))
-                        .and_then(|m| {
-                            m.values()
-                                .find(|v| {
-                                    let id_match = v["Id"].as_str() == Some(&cs)
-                                        || v["ChangeSetName"].as_str() == Some(&cs);
-                                    let stack_match = stack_filter.as_deref().is_none_or(|sf| {
-                                        v["StackName"].as_str() == Some(sf)
-                                            || v["StackId"].as_str() == Some(sf)
-                                    });
-                                    id_match && stack_match
-                                })
-                                .cloned()
-                        })
-                };
-                let (cs_id, cs_name, stack_id, stack_name, hooks) = match &entry {
-                    Some(e) => (
-                        e["Id"].as_str().unwrap_or("").to_string(),
-                        e["ChangeSetName"].as_str().unwrap_or("").to_string(),
-                        e["StackId"].as_str().unwrap_or("").to_string(),
-                        e["StackName"].as_str().unwrap_or("").to_string(),
-                        e["Hooks"].as_array().cloned().unwrap_or_default(),
-                    ),
-                    None => (
-                        cs.clone(),
-                        cs.clone(),
-                        String::new(),
-                        String::new(),
-                        Vec::new(),
-                    ),
-                };
+                let entry = self
+                    .find_change_set(&aid, &cs, stack_filter.as_deref())
+                    .ok_or_else(|| change_set_not_found(&cs))?;
+                let (cs_id, cs_name, stack_id, stack_name, hooks) = (
+                    entry["Id"].as_str().unwrap_or("").to_string(),
+                    entry["ChangeSetName"].as_str().unwrap_or("").to_string(),
+                    entry["StackId"].as_str().unwrap_or("").to_string(),
+                    entry["StackName"].as_str().unwrap_or("").to_string(),
+                    entry["Hooks"].as_array().cloned().unwrap_or_default(),
+                );
                 let logical_filter = params.get("LogicalResourceId").cloned();
                 let hooks_xml = if hooks.is_empty() {
                     "    <Hooks/>".to_string()
@@ -1181,31 +1182,9 @@ impl CloudFormationService {
                     .ok_or_else(|| missing("ChangeSetName"))?;
                 let stack_filter = params.get("StackName").cloned();
 
-                let entry = {
-                    let accounts = self.state.read();
-                    accounts
-                        .get(&aid)
-                        .and_then(|s| s.extras.get("change_sets"))
-                        .and_then(|m| {
-                            m.values()
-                                .find(|v| {
-                                    let id_match = v["Id"].as_str() == Some(&cs)
-                                        || v["ChangeSetName"].as_str() == Some(&cs);
-                                    let stack_match = stack_filter.as_deref().is_none_or(|sf| {
-                                        v["StackName"].as_str() == Some(sf)
-                                            || v["StackId"].as_str() == Some(sf)
-                                    });
-                                    id_match && stack_match
-                                })
-                                .cloned()
-                        })
-                };
-                let Some(entry) = entry else {
-                    // Unknown change set: pass-through success rather than
-                    // hard-fail to preserve route-coverage semantics for
-                    // callers that don't first call CreateChangeSet.
-                    return Ok(xml_response("ExecuteChangeSet", String::new(), &rid));
-                };
+                let entry = self
+                    .find_change_set(&aid, &cs, stack_filter.as_deref())
+                    .ok_or_else(|| change_set_not_found(&cs))?;
 
                 if entry["ExecutionStatus"].as_str() != Some("AVAILABLE") {
                     return Err(AwsServiceError::aws_error(
@@ -2628,6 +2607,7 @@ pub(crate) mod tests {
     use fakecloud_core::multi_account::MultiAccountState;
     use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
     use http::Method;
+    use http::StatusCode;
     use parking_lot::RwLock;
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -3436,15 +3416,47 @@ pub(crate) mod tests {
 
     #[test]
     fn change_sets() {
-        ok(
+        // One service for the whole lifecycle: the reads only succeed because
+        // the change set really is there, not because a miss is stubbed out.
+        let svc = svc();
+        ok_on(
+            &svc,
             "CreateChangeSet",
             &[("StackName", "s"), ("ChangeSetName", "cs")],
         );
-        ok("DescribeChangeSet", &[("ChangeSetName", "cs")]);
-        ok("DescribeChangeSetHooks", &[("ChangeSetName", "cs")]);
-        ok("ListChangeSets", &[("StackName", "s")]);
-        ok("ExecuteChangeSet", &[("ChangeSetName", "cs")]);
-        ok("DeleteChangeSet", &[("ChangeSetName", "cs")]);
+        ok_on(&svc, "DescribeChangeSet", &[("ChangeSetName", "cs")]);
+        ok_on(&svc, "DescribeChangeSetHooks", &[("ChangeSetName", "cs")]);
+        ok_on(&svc, "ListChangeSets", &[("StackName", "s")]);
+        ok_on(&svc, "ExecuteChangeSet", &[("ChangeSetName", "cs")]);
+        // DeleteChangeSet declares no not-found error: AWS succeeds either way.
+        ok_on(&svc, "DeleteChangeSet", &[("ChangeSetName", "cs")]);
+        ok_on(
+            &svc,
+            "DeleteChangeSet",
+            &[("ChangeSetName", "never-existed")],
+        );
+    }
+
+    /// The reads must 404 once the change set is gone. CDK's `waitForGone`
+    /// polls `DescribeChangeSet` until it does, so a stubbed success hangs
+    /// `cdk deploy` and `cdk bootstrap` against an existing stack forever.
+    #[test]
+    fn change_set_reads_report_not_found() {
+        let svc = svc();
+        for action in [
+            "DescribeChangeSet",
+            "DescribeChangeSetHooks",
+            "ExecuteChangeSet",
+        ] {
+            let Err(err) = svc.handle_extra_action(&req(action, &[("ChangeSetName", "cs")])) else {
+                panic!("{action} on an unknown change set must fail");
+            };
+            let AwsServiceError::AwsError { status, code, .. } = &err else {
+                panic!("{action}: unexpected error {err:?}");
+            };
+            assert_eq!(*status, StatusCode::NOT_FOUND, "{action}");
+            assert_eq!(code, "ChangeSetNotFound", "{action}");
+        }
     }
 
     fn body_str(resp: &fakecloud_core::service::AwsResponse) -> String {

@@ -605,3 +605,86 @@ async fn create_type_change_set_rejected_for_existing_stack() {
         "CREATE change set against an existing stack must be rejected, got {err:?}"
     );
 }
+
+/// An unknown change set must report `ChangeSetNotFound`, not a fabricated
+/// `CREATE_COMPLETE`. The CDK CLI deletes its change set and then polls
+/// `DescribeChangeSet` until the call 404s (`waitForGone`), so a stubbed
+/// success makes `cdk deploy`/`cdk bootstrap` against an existing stack hang
+/// forever.
+#[tokio::test]
+async fn describe_change_set_reports_unknown_change_set_as_not_found() {
+    let server = TestServer::start().await;
+    let cf = server.cloudformation_client().await;
+
+    let template = r#"{
+        "Resources": {
+            "QueueGone": {
+                "Type": "AWS::SQS::Queue",
+                "Properties": {"QueueName": "cs-gone-queue"}
+            }
+        }
+    }"#;
+
+    cf.create_stack()
+        .stack_name("cs-gone-stack")
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+
+    // Never created.
+    let err = cf
+        .describe_change_set()
+        .stack_name("cs-gone-stack")
+        .change_set_name("never-created")
+        .send()
+        .await
+        .expect_err("DescribeChangeSet on an unknown change set must fail");
+    assert!(err.into_service_error().is_change_set_not_found_exception());
+
+    // Created, then deleted: this is the exact sequence the CDK CLI runs.
+    cf.create_change_set()
+        .stack_name("cs-gone-stack")
+        .change_set_name("cs-transient")
+        .change_set_type(ChangeSetType::Update)
+        .template_body(template)
+        .send()
+        .await
+        .unwrap();
+
+    // DeleteChangeSet declares no not-found error: AWS succeeds either way.
+    cf.delete_change_set()
+        .stack_name("cs-gone-stack")
+        .change_set_name("cs-transient")
+        .send()
+        .await
+        .unwrap();
+
+    let err = cf
+        .describe_change_set()
+        .stack_name("cs-gone-stack")
+        .change_set_name("cs-transient")
+        .send()
+        .await
+        .expect_err("DescribeChangeSet after DeleteChangeSet must fail");
+    assert!(err.into_service_error().is_change_set_not_found_exception());
+
+    // Same for the hooks view and for execution.
+    let err = cf
+        .describe_change_set_hooks()
+        .stack_name("cs-gone-stack")
+        .change_set_name("cs-transient")
+        .send()
+        .await
+        .expect_err("DescribeChangeSetHooks on an unknown change set must fail");
+    assert!(err.into_service_error().is_change_set_not_found_exception());
+
+    let err = cf
+        .execute_change_set()
+        .stack_name("cs-gone-stack")
+        .change_set_name("cs-transient")
+        .send()
+        .await
+        .expect_err("ExecuteChangeSet on an unknown change set must fail");
+    assert!(err.into_service_error().is_change_set_not_found_exception());
+}
