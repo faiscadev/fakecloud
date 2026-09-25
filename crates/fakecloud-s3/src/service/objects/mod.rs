@@ -15,8 +15,8 @@ use super::{
     check_object_lock_for_overwrite, compute_checksum, deliver_notifications, etag_matches,
     extract_user_metadata, extract_xml_value, is_frozen, is_valid_storage_class,
     make_delete_marker, no_such_bucket, no_such_key, parse_delete_objects_quiet,
-    parse_delete_objects_xml, parse_grant_headers, parse_range_header, parse_url_encoded_tags,
-    precondition_failed, replicate_through_store, resolve_object, s3_xml, url_encode_s3_key,
+    parse_delete_objects_xml, parse_range_header, parse_url_encoded_tags, precondition_failed,
+    replicate_through_store, resolve_object, resolved_grant_headers, s3_xml, url_encode_s3_key,
     xml_escape, RangeResult, S3Service,
 };
 

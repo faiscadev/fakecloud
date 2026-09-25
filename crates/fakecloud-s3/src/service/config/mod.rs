@@ -10,9 +10,10 @@ use crate::inventory;
 use crate::persistence::{bucket_meta_snapshot, object_meta_snapshot};
 
 use super::{
-    build_acl_xml, canned_acl_grants, empty_response, extract_xml_value, no_such_bucket,
-    normalize_notification_ids, normalize_replication_xml, parse_acl_xml, parse_tagging_xml,
-    s3_xml, validate_lifecycle_xml, validate_tags, xml_escape, S3Service,
+    build_acl_xml, canned_acl_grants, empty_response, extract_xml_value, has_grant_headers,
+    no_such_bucket, normalize_notification_ids, normalize_replication_xml, parse_acl_xml,
+    parse_tagging_xml, reject_conflicting_acl_sources, resolved_grant_headers, s3_xml,
+    validate_lifecycle_xml, validate_tags, xml_escape, S3Service, BUCKET_CANNED_ACLS,
 };
 
 /// Decoded `PublicAccessBlockConfiguration` flags read by the request
@@ -240,12 +241,28 @@ impl S3Service {
         req: &AwsRequest,
         bucket: &str,
     ) -> Result<AwsResponse, AwsServiceError> {
-        // Check for canned ACL header
+        // An unrecognized canned value used to fall through `canned_acl_grants`'
+        // catch-all to owner-only, silently stripping every public grant -- and
+        // that wipe is now written to `acl.toml`, so it outlives the process.
+        //
+        // Checked before the bucket is resolved, matching PutObjectAcl and S3
+        // itself: a bad header is an InvalidArgument whether or not the target
+        // exists.
         let canned = req
             .headers
             .get("x-amz-acl")
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
+        if let Some(acl) = canned.as_deref() {
+            if !BUCKET_CANNED_ACLS.contains(&acl) {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidArgument",
+                    format!("Invalid x-amz-acl value: {acl}"),
+                ));
+            }
+        }
+        reject_conflicting_acl_sources(canned.as_deref(), &req.headers, &req.body)?;
 
         // BucketOwnerEnforced disables ACLs on this bucket entirely;
         // any ACL-mutating call rejects with
@@ -267,12 +284,41 @@ impl S3Service {
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
 
+        // Canned header, else the `x-amz-grant-*` headers, else the XML body --
+        // the precedence PutObjectAcl uses. Without the grant-header arm a
+        // `put-bucket-acl --grant-read uri=...` request fell through to an
+        // empty body and wiped the bucket's ACL to nothing.
         let proposed_grants = if let Some(acl) = &canned {
             canned_acl_grants(acl, &b.acl_owner_id.clone())
+        } else if has_grant_headers(&req.headers) {
+            resolved_grant_headers(&req.headers)?
         } else {
             let body_str = std::str::from_utf8(&req.body).unwrap_or("");
             parse_acl_xml(body_str)?
         };
+        // A request that names no ACL at all is malformed rather than "remove
+        // every grant". An explicit `<AccessControlList/>` IS the documented
+        // way to drop all grants, so zero grants on its own is not an error --
+        // but a body that is not an AccessControlPolicy at all (whitespace,
+        // JSON, a misspelled root) parses to zero grants too, and taking that
+        // as "drop everything" wipes the bucket's ACL durably.
+        if canned.is_none() && !has_grant_headers(&req.headers) {
+            let body_str = std::str::from_utf8(&req.body).unwrap_or("");
+            if body_str.trim().is_empty() {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MalformedACLError",
+                    "The XML you provided was not well-formed or did not validate against our published schema",
+                ));
+            }
+            if !body_str.contains("<AccessControlPolicy") {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema",
+                ));
+            }
+        }
 
         // PublicAccessBlock.BlockPublicAcls rejects any new grant that
         // would expose the bucket to AllUsers / AuthenticatedUsers,
@@ -287,16 +333,30 @@ impl S3Service {
                 ));
             }
         }
-        b.acl_grants = proposed_grants;
-
+        // Serialize AND persist before touching memory, so a failure at either
+        // step returns an error having changed nothing. Assigning first would
+        // leave the in-memory ACL ahead of the one on disk, and a restart would
+        // then silently revert what the caller was told had failed.
+        //
+        // Never fall back to an empty document either: the loader takes the
+        // presence of `acl.toml` to mean the bucket has an explicit ACL and
+        // skips the default owner grant, so an empty file would restore the
+        // bucket with no grants at all -- worse than no file.
         let snap = AclSnapshot {
             owner_id: b.acl_owner_id.clone(),
-            grants: b.acl_grants.iter().map(AclGrantSnapshot::from).collect(),
+            grants: proposed_grants.iter().map(AclGrantSnapshot::from).collect(),
         };
-        let payload = toml::to_string(&snap).unwrap_or_default();
+        let payload = toml::to_string(&snap).map_err(|e| {
+            AwsServiceError::aws_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "InternalError",
+                format!("failed to serialize bucket ACL: {e}"),
+            )
+        })?;
         self.store
             .put_bucket_subresource(bucket, BucketSubresource::Acl, &payload)
             .map_err(crate::service::persistence_error)?;
+        b.acl_grants = proposed_grants;
         Ok(AwsResponse {
             status: StatusCode::OK,
             content_type: "application/xml".to_string(),
@@ -1147,7 +1207,7 @@ fn store_named_config(
             .get_mut(bucket)
             .ok_or_else(|| no_such_bucket(bucket))?;
         config_map(b, kind).insert(id, body_str);
-        toml::to_string(config_map(b, kind)).unwrap_or_default()
+        crate::service::toml_or_internal_error(config_map(b, kind))?
     };
     svc.store
         .put_bucket_subresource(bucket, kind.subresource(), &payload)
@@ -1210,7 +1270,9 @@ fn delete_named_config(
         config_map(b, kind).remove(&id);
         let map = config_map(b, kind);
         let is_empty = map.is_empty();
-        (is_empty, toml::to_string(map).unwrap_or_default())
+        // Not `unwrap_or_default`: writing an empty document in the non-empty
+        // branch would drop the configurations that remain.
+        (is_empty, crate::service::toml_or_internal_error(map)?)
     };
     if empty {
         svc.store

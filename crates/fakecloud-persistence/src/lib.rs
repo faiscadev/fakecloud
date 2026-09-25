@@ -11,6 +11,6 @@ pub use s3::{
     AclGrantSnapshot, AclSnapshot, AnnotationSnapshot, BodyRef, BodySource, BucketMeta,
     BucketSnapshot, BucketSubresource, InventorySnapshot, LoadedMpu, LoadedObject, LoadedPart,
     MemoryS3Store, MpuInit, ObjectMeta, S3State as S3StateSnapshot, S3Store, StoreError,
-    StoreResult, TagsSnapshot, UploadPartMeta,
+    StoreResult, TagsSnapshot, UploadPartMeta, ALL_SUBRESOURCES,
 };
 pub use snapshot::{DiskSnapshotStore, MemorySnapshotStore, SnapshotHook, SnapshotStore};

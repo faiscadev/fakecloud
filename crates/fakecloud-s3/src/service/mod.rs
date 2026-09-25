@@ -142,6 +142,72 @@ pub struct S3Service {
     pub(crate) credential_resolver: Option<Arc<dyn fakecloud_core::auth::CredentialResolver>>,
 }
 
+/// Serialize a persistence snapshot, turning a failure into a 500 rather than an
+/// empty document.
+///
+/// An empty file is worse than no file: the loader either skips it (losing the
+/// configuration with no word, which the next Put then makes permanent) or, for
+/// `acl.toml`, takes its presence to mean an explicit ACL and drops the default
+/// owner grant.
+pub(crate) fn toml_or_internal_error<T: serde::Serialize>(
+    value: &T,
+) -> Result<String, AwsServiceError> {
+    toml::to_string(value).map_err(|e| {
+        AwsServiceError::aws_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "InternalError",
+            format!("failed to serialize persisted state: {e}"),
+        )
+    })
+}
+
+/// Reject a request that names an ACL more than one way.
+///
+/// A canned header, the `x-amz-grant-*` headers and an `AccessControlPolicy`
+/// body are mutually exclusive on S3, and letting one win silently discards what
+/// the others asked for -- durably, since the result is persisted. Shared so the
+/// bucket and object paths cannot drift on which pairs they reject.
+pub(crate) fn reject_conflicting_acl_sources(
+    canned: Option<&str>,
+    headers: &HeaderMap,
+    body: &[u8],
+) -> Result<(), AwsServiceError> {
+    let grants = has_grant_headers(headers);
+    let has_body = !body_is_blank(body);
+    let conflict = match (canned.is_some(), grants, has_body) {
+        (true, true, _) => Some("Specifying both Canned ACLs and Header Grants is not allowed"),
+        (true, _, true) => {
+            Some("Specifying both a Canned ACL and an AccessControlPolicy body is not allowed")
+        }
+        (_, true, true) => {
+            Some("Specifying both Header Grants and an AccessControlPolicy body is not allowed")
+        }
+        _ => None,
+    };
+    match conflict {
+        Some(message) => Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidRequest",
+            message,
+        )),
+        None => Ok(()),
+    }
+}
+
+/// Whether a request body carries nothing an ACL could be read from.
+///
+/// The mutual-exclusion checks and the "names no ACL at all" check have to agree
+/// on this: testing raw emptiness in one and trimmed emptiness in the other made
+/// a canned ACL plus a stray newline -- one ACL, named once -- fail as though it
+/// named two.
+pub(crate) fn body_is_blank(body: &[u8]) -> bool {
+    // A body that does not decode is one no ACL can be read from, which is
+    // exactly how the parse sites treat it (`from_utf8(..).unwrap_or("")`).
+    // Calling it present would reject a canned ACL for conflicting with a body
+    // the next line discards.
+    std::str::from_utf8(body).map_or(true, |s| s.trim().is_empty())
+}
+
 /// Map a [`StoreError`] from the persistence layer to a 500 InternalError
 /// response. Invoked at every mutation site when the write-through persistence
 /// call fails: the in-memory mutation has already happened, but we surface the
@@ -2262,6 +2328,13 @@ pub(crate) fn build_acl_xml(owner_id: &str, grants: &[AclGrant], _account_id: &s
                  <URI>{}</URI></Grantee>",
                 xml_escape(uri),
             )
+        } else if g.grantee_type == "AmazonCustomerByEmail" {
+            let email = g.grantee_display_name.as_deref().unwrap_or("");
+            format!(
+                "<Grantee xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"AmazonCustomerByEmail\">\
+                 <EmailAddress>{}</EmailAddress></Grantee>",
+                xml_escape(email),
+            )
         } else {
             let id = g.grantee_id.as_deref().unwrap_or("");
             format!(
@@ -2285,6 +2358,71 @@ pub(crate) fn build_acl_xml(owner_id: &str, grants: &[AclGrant], _account_id: &s
         owner_id = xml_escape(owner_id),
     )
 }
+
+/// The canned ACLs an object accepts, per `com.amazonaws.s3#ObjectCannedACL`.
+/// `log-delivery-write` is bucket-only and is not among them.
+pub(crate) const OBJECT_CANNED_ACLS: [&str; 7] = [
+    "private",
+    "public-read",
+    "public-read-write",
+    "authenticated-read",
+    "aws-exec-read",
+    "bucket-owner-read",
+    "bucket-owner-full-control",
+];
+
+/// Reject a canned ACL an object does not accept. An unrecognized value used to
+/// fall through `canned_acl_grants`' catch-all to owner-only, silently wiping
+/// the object's grants with a 200.
+pub(crate) fn validate_object_canned_acl(acl: &str) -> Result<(), AwsServiceError> {
+    if OBJECT_CANNED_ACLS.contains(&acl) {
+        return Ok(());
+    }
+    Err(AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidArgument",
+        format!("Invalid x-amz-acl value: {acl}"),
+    ))
+}
+
+/// The values `x-amz-object-ownership` accepts, per
+/// `com.amazonaws.s3#ObjectOwnership`. Matched case-sensitively, as S3 does.
+pub(crate) const OBJECT_OWNERSHIP_VALUES: [&str; 3] = [
+    "BucketOwnerPreferred",
+    "ObjectWriter",
+    "BucketOwnerEnforced",
+];
+
+/// The canned ACLs a bucket accepts. `com.amazonaws.s3#BucketCannedACL` lists
+/// only the first four; `log-delivery-write` is bucket-scoped in the S3
+/// canned-ACL table (it is how a server-access-logging target is set up), so
+/// the header takes it even though the modeled enum omits it.
+///
+/// `aws-exec-read` is bucket-scoped too (CloudFormation's
+/// `AWS::S3::Bucket` `AccessControl: AwsExecRead` maps to it), and AWS answers
+/// 200, so refusing it would turn a working call into a hard failure. Its grant
+/// is a READ to the EC2 service's canonical user, which this build cannot
+/// reproduce, so it resolves to owner-only -- `create_bucket` special-cases it
+/// when checking the BucketOwnerEnforced conflict, since the request does ask
+/// for an ACL reaching past the owner.
+///
+/// `bucket-owner-read` and `bucket-owner-full-control` are object-scoped, and
+/// the canned-ACL table says S3 IGNORES them when they are given on a bucket
+/// rather than refusing the call -- so they are accepted here and resolve to
+/// the owner's FULL_CONTROL, which is what ignoring them produces. Rejecting
+/// them would have turned a working call into a hard failure on a claim about
+/// live S3 this build cannot check. A value S3 does not define at all is still
+/// refused, since that is a typo silently wiping the bucket's grants.
+pub(crate) const BUCKET_CANNED_ACLS: [&str; 8] = [
+    "private",
+    "public-read",
+    "public-read-write",
+    "authenticated-read",
+    "aws-exec-read",
+    "log-delivery-write",
+    "bucket-owner-read",
+    "bucket-owner-full-control",
+];
 
 pub(crate) fn canned_acl_grants(acl: &str, owner_id: &str) -> Vec<AclGrant> {
     let owner_grant = AclGrant {
@@ -2335,6 +2473,27 @@ pub(crate) fn canned_acl_grants(acl: &str, owner_id: &str) -> Vec<AclGrant> {
                 permission: "READ".to_string(),
             },
         ],
+        // Grants the log-delivery group what it needs to write access logs into
+        // the bucket, which is the entire point of this canned ACL.
+        "log-delivery-write" => vec![
+            owner_grant,
+            AclGrant {
+                grantee_type: "Group".to_string(),
+                grantee_id: None,
+                grantee_display_name: None,
+                grantee_uri: Some("http://acs.amazonaws.com/groups/s3/LogDelivery".to_string()),
+                permission: "WRITE".to_string(),
+            },
+            AclGrant {
+                grantee_type: "Group".to_string(),
+                grantee_id: None,
+                grantee_display_name: None,
+                grantee_uri: Some("http://acs.amazonaws.com/groups/s3/LogDelivery".to_string()),
+                permission: "READ_ACP".to_string(),
+            },
+        ],
+        // `bucket-owner-read` / `bucket-owner-full-control` on an object owned
+        // by the caller come out as the owner's FULL_CONTROL.
         "bucket-owner-full-control" => vec![owner_grant],
         _ => vec![owner_grant],
     }
@@ -2345,29 +2504,143 @@ pub(crate) fn canned_acl_grants_for_object(acl: &str, owner_id: &str) -> Vec<Acl
     canned_acl_grants(acl, owner_id)
 }
 
+/// The `x-amz-grant-*` headers and the ACL permission each one grants.
+pub(crate) const GRANT_HEADER_PERMISSIONS: [(&str, &str); 5] = [
+    ("x-amz-grant-read", "READ"),
+    ("x-amz-grant-write", "WRITE"),
+    ("x-amz-grant-read-acp", "READ_ACP"),
+    ("x-amz-grant-write-acp", "WRITE_ACP"),
+    ("x-amz-grant-full-control", "FULL_CONTROL"),
+];
+
+/// How many grantee clauses the `x-amz-grant-*` headers carry, counting every
+/// comma-separated entry whether or not [`parse_grant_headers`] can turn it
+/// into a grant.
+///
+/// That function skips a clause it cannot make a usable grantee of -- an `id=`
+/// or `uri=` with nothing after it, or a key it does not recognize at all -- so
+/// a caller about to STORE the parsed grants as the authoritative ACL compares
+/// the two counts: fewer grants than clauses means the request asked for
+/// something the stored ACL would not express.
+pub(crate) fn grant_header_clause_count(headers: &HeaderMap) -> usize {
+    let mut clauses = 0;
+    for (header, _) in &GRANT_HEADER_PERMISSIONS {
+        // `get_all`, not `get`: a repeated header carries more than one value,
+        // and counting only the first would let the extras be dropped silently
+        // -- the very thing the count exists to catch.
+        for value in headers.get_all(*header) {
+            match value.to_str() {
+                Ok(value) => {
+                    clauses += value
+                        .split(',')
+                        .filter(|part| !part.trim().is_empty())
+                        .count();
+                }
+                // Header values are opaque bytes. `parse_grant_headers` cannot
+                // read this one either, so counting it as zero would let the
+                // counts agree and the grant disappear -- count it as a clause
+                // that did not resolve.
+                Err(_) => clauses += 1,
+            }
+        }
+    }
+    clauses
+}
+
+/// Whether the request carries any of the recognized `x-amz-grant-*` headers.
+/// Matched by exact name, not by prefix, so an unknown `x-amz-grant-…` header
+/// is ignored rather than turning a valid create into an error.
+pub(crate) fn has_grant_headers(headers: &HeaderMap) -> bool {
+    // A present-but-blank value is what a client sends for an unset config
+    // field, and S3 treats it as absent. Testing presence alone turned that
+    // into a hard rejection on every ACL-setting operation.
+    GRANT_HEADER_PERMISSIONS.iter().any(|(header, _)| {
+        headers
+            .get_all(*header)
+            .iter()
+            .any(|v| v.to_str().map(|s| !s.trim().is_empty()).unwrap_or(true))
+    })
+}
+
+/// Resolve the `x-amz-grant-*` headers into grants, refusing the request when
+/// any grantee clause does not resolve into one.
+///
+/// [`parse_grant_headers`] skips a clause it cannot make a grantee of -- a key
+/// with an empty value, or one it does not recognize -- so a caller that STORES
+/// the result as the authoritative ACL would persist a permission set nobody
+/// asked for, and a request where nothing resolves would store an ACL with not
+/// even an owner entry. Every ACL-setting path goes through here so they all
+/// agree. (`emailAddress=` IS resolved, into an AmazonCustomerByEmail grantee.)
+pub(crate) fn resolved_grant_headers(
+    headers: &HeaderMap,
+) -> Result<Vec<AclGrant>, AwsServiceError> {
+    let grants = parse_grant_headers(headers);
+    if grants.is_empty() || grants.len() != grant_header_clause_count(headers) {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidArgument",
+            "Argument format not recognized: grantees must be specified as id=<canonical-id> or uri=<group-uri>",
+        ));
+    }
+    Ok(grants)
+}
+
 pub(crate) fn parse_grant_headers(headers: &HeaderMap) -> Vec<AclGrant> {
     let mut grants = Vec::new();
-    let header_permission_map = [
-        ("x-amz-grant-read", "READ"),
-        ("x-amz-grant-write", "WRITE"),
-        ("x-amz-grant-read-acp", "READ_ACP"),
-        ("x-amz-grant-write-acp", "WRITE_ACP"),
-        ("x-amz-grant-full-control", "FULL_CONTROL"),
-    ];
+    let header_permission_map = GRANT_HEADER_PERMISSIONS;
 
     for (header, permission) in &header_permission_map {
-        if let Some(value) = headers.get(*header).and_then(|v| v.to_str().ok()) {
+        for value in headers.get_all(*header) {
+            let Ok(value) = value.to_str() else { continue };
             // Parse "id=xxx" or "uri=xxx" or "emailAddress=xxx"
             for part in value.split(',') {
                 let part = part.trim();
                 if let Some((key, val)) = part.split_once('=') {
-                    let val = val.trim().trim_matches('"');
+                    // Quotes first, then trim: trimming first leaves `"  "` as
+                    // two spaces, which the emptiness checks below would accept
+                    // as a grantee naming somebody.
+                    let val = val.trim().trim_matches('"').trim();
                     let key = key.trim().to_lowercase();
+                    // `id=` / `uri=` with nothing after it names no grantee.
+                    // Emitting a grant with an empty id would store an ACL
+                    // entry that can never match anyone; leaving it out lets
+                    // the caller's clause count catch the request instead.
+                    if val.is_empty() {
+                        continue;
+                    }
                     match key.as_str() {
                         "id" => {
                             grants.push(AclGrant {
                                 grantee_type: "CanonicalUser".to_string(),
                                 grantee_id: Some(val.to_string()),
+                                grantee_display_name: Some(val.to_string()),
+                                grantee_uri: None,
+                                permission: permission.to_string(),
+                            });
+                        }
+                        // S3 resolves an email to the account's canonical id.
+                        // There is no directory to resolve against here, so the
+                        // grant keeps the address as an AmazonCustomerByEmail
+                        // grantee -- a real ACL grantee type -- rather than
+                        // being dropped (which would silently lose a grant) or
+                        // refused (which would fail a call AWS accepts).
+                        //
+                        // It is recorded, not enforced: every authorization path
+                        // matches a Group URI or a canonical id, so this grant
+                        // gives the named address no access. Say so rather than
+                        // letting it look like working authorization.
+                        "emailaddress" => {
+                            tracing::warn!(
+                                target: "fakecloud::s3",
+                                email = %val,
+                                permission = %permission,
+                                "storing an email-addressed ACL grant that is not enforced: \
+                                 email grantees are not resolved to a canonical user here, so \
+                                 this grant conveys no access",
+                            );
+                            grants.push(AclGrant {
+                                grantee_type: "AmazonCustomerByEmail".to_string(),
+                                grantee_id: None,
                                 grantee_display_name: Some(val.to_string()),
                                 grantee_uri: None,
                                 permission: permission.to_string(),
@@ -2422,7 +2695,21 @@ pub(crate) fn parse_acl_xml(xml: &str) -> Result<Vec<AclGrant>, AwsServiceError>
 
             // Determine grantee type
             if grant_body.contains("xsi:type=\"Group\"") || grant_body.contains("<URI>") {
-                let uri = extract_xml_value(grant_body, "URI").unwrap_or_default();
+                // Trimmed: `<URI>\n  http://...\n</URI>` is what a formatted
+                // policy carries, and the padding would otherwise be stored as
+                // part of the group URI and never match.
+                let uri = extract_xml_value(grant_body, "URI")
+                    .map(|u| u.trim().to_string())
+                    .unwrap_or_default();
+                // Same rule as an empty <ID>: a grant naming no group can never
+                // match anyone, and it would be stored as the bucket's ACL.
+                if uri.is_empty() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MalformedACLError",
+                        "The XML you provided was not well-formed or did not validate against our published schema",
+                    ));
+                }
                 grants.push(AclGrant {
                     grantee_type: "Group".to_string(),
                     grantee_id: None,
@@ -2430,10 +2717,60 @@ pub(crate) fn parse_acl_xml(xml: &str) -> Result<Vec<AclGrant>, AwsServiceError>
                     grantee_uri: Some(uri),
                     permission,
                 });
+            } else if grant_body.contains("AmazonCustomerByEmail")
+                || grant_body.contains("<EmailAddress>")
+            {
+                // S3 allows exactly one grantee identifier. A Grantee carrying
+                // both an ID and an EmailAddress used to silently drop the
+                // canonical id in favor of the (unenforced) email grant, and the
+                // wrong one was the persisted one.
+                if grant_body.contains("<ID>") {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MalformedACLError",
+                        "The XML you provided was not well-formed or did not validate against our published schema",
+                    ));
+                }
+                // An email grantee carries <EmailAddress>, never <ID>. Reading it
+                // as a CanonicalUser would store a grant with an empty id --
+                // an entry that can never match anyone, which is exactly what
+                // the header path refuses. This is reachable by feeding
+                // GetBucketAcl output straight back into PutBucketAcl.
+                let email = extract_xml_value(grant_body, "EmailAddress")
+                    .map(|e| e.trim().to_string())
+                    .unwrap_or_default();
+                if email.is_empty() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MalformedACLError",
+                        "The XML you provided was not well-formed or did not validate against our published schema",
+                    ));
+                }
+                grants.push(AclGrant {
+                    grantee_type: "AmazonCustomerByEmail".to_string(),
+                    grantee_id: None,
+                    grantee_display_name: Some(email),
+                    grantee_uri: None,
+                    permission,
+                });
             } else {
-                let id = extract_xml_value(grant_body, "ID").unwrap_or_default();
-                let display =
-                    extract_xml_value(grant_body, "DisplayName").unwrap_or_else(|| id.clone());
+                // Trimmed for the same reason: a pretty-printed canonical id
+                // would otherwise be stored with its padding and never match
+                // the owner in any authorization comparison.
+                let id = extract_xml_value(grant_body, "ID")
+                    .map(|i| i.trim().to_string())
+                    .unwrap_or_default();
+                if id.is_empty() {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "MalformedACLError",
+                        "The XML you provided was not well-formed or did not validate against our published schema",
+                    ));
+                }
+                let display = extract_xml_value(grant_body, "DisplayName")
+                    .map(|d| d.trim().to_string())
+                    .filter(|d| !d.is_empty())
+                    .unwrap_or_else(|| id.clone());
                 grants.push(AclGrant {
                     grantee_type: "CanonicalUser".to_string(),
                     grantee_id: Some(id),
