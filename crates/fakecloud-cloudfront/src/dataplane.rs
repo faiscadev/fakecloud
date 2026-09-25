@@ -162,12 +162,20 @@ impl CloudFrontDataPlane {
             ));
         };
 
-        let path_and_query = parts
-            .uri
-            .path_and_query()
-            .map(|p| p.as_str())
-            .unwrap_or("/")
-            .to_string();
+        // A root request is fetched as the distribution's DefaultRootObject; the
+        // query string is preserved, as CloudFront does.
+        let path_and_query = match &route.root_object {
+            Some(object) => match parts.uri.query() {
+                Some(q) => format!("{object}?{q}"),
+                None => object.clone(),
+            },
+            None => parts
+                .uri
+                .path_and_query()
+                .map(|p| p.as_str())
+                .unwrap_or("/")
+                .to_string(),
+        };
         let url = format!("{}{path_and_query}", route.upstream.url_base);
         trace!(%host, path = %parts.uri.path(), origin = %route.upstream.host_header, "CloudFront data plane: proxying");
         let resp = self
@@ -293,6 +301,9 @@ struct RouteResolution {
     default_upstream: UpstreamTarget,
     /// CustomErrorResponses that have a response page path.
     error_rules: Vec<ErrorRule>,
+    /// `DefaultRootObject` as an origin path (`/index.html`), set only when this
+    /// request is for the distribution root and the distribution configures one.
+    root_object: Option<String>,
 }
 
 /// A resolved origin address: the scheme+authority to connect to and the `Host`
@@ -350,10 +361,21 @@ fn resolve_route(
                 .collect()
         })
         .unwrap_or_default();
+    // DefaultRootObject: a request for the distribution ROOT is served the named
+    // object from the origin. AWS applies this to the root only -- a request for a
+    // subdirectory is never rewritten to `<dir>/<object>` -- so the rewrite is
+    // decided here, from the original viewer path, and the cache behavior is still
+    // selected on that original path.
+    let root_object = matches!(path, "" | "/")
+        .then(|| cfg.default_root_object.as_deref().map(str::trim))
+        .flatten()
+        .filter(|o| !o.is_empty())
+        .map(|o| format!("/{}", o.trim_start_matches('/')));
     Some(RouteResolution {
         upstream,
         default_upstream,
         error_rules,
+        root_object,
     })
 }
 
@@ -497,7 +519,9 @@ fn is_hop_by_hop(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{AliasItems, Aliases, CustomOriginConfig, Origin};
+    use crate::model::{
+        AliasItems, Aliases, CustomOriginConfig, DefaultCacheBehavior, Origin, OriginItems, Origins,
+    };
     use crate::state::StoredDistribution;
     use chrono::Utc;
 
@@ -606,6 +630,61 @@ mod tests {
         );
         assert_eq!(up.url_base, "http://127.0.0.1:4566");
         assert_eq!(up.host_header, "b.s3-website-us-east-1.amazonaws.com");
+    }
+
+    fn cfg_with_root(root: Option<&str>) -> DistributionConfig {
+        DistributionConfig {
+            default_root_object: root.map(Into::into),
+            origins: Origins {
+                quantity: 1,
+                items: Some(OriginItems {
+                    origin: vec![origin("b.s3.us-east-1.amazonaws.com", None)],
+                }),
+            },
+            default_cache_behavior: DefaultCacheBehavior {
+                target_origin_id: "o".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    fn root_object_for(cfg: &DistributionConfig, path: &str) -> Option<String> {
+        resolve_route(cfg, path, "127.0.0.1:4566")
+            .expect("route resolves")
+            .root_object
+    }
+
+    #[test]
+    fn default_root_object_applies_to_the_distribution_root() {
+        let cfg = cfg_with_root(Some("index.html"));
+        assert_eq!(root_object_for(&cfg, "/").as_deref(), Some("/index.html"));
+        assert_eq!(root_object_for(&cfg, "").as_deref(), Some("/index.html"));
+    }
+
+    #[test]
+    fn default_root_object_does_not_apply_below_the_root() {
+        // AWS serves the default root object for the distribution root ONLY; a
+        // subdirectory request is never rewritten to `<dir>/<object>`.
+        let cfg = cfg_with_root(Some("index.html"));
+        assert_eq!(root_object_for(&cfg, "/about/"), None);
+        assert_eq!(root_object_for(&cfg, "/about"), None);
+        assert_eq!(root_object_for(&cfg, "/index.html"), None);
+    }
+
+    #[test]
+    fn default_root_object_unset_or_blank_leaves_the_root_alone() {
+        for root in [None, Some(""), Some("   ")] {
+            assert_eq!(root_object_for(&cfg_with_root(root), "/"), None, "{root:?}");
+        }
+    }
+
+    #[test]
+    fn default_root_object_is_normalized_to_a_single_leading_slash() {
+        // AWS rejects a leading slash in the config, but accept one defensively
+        // rather than proxying a `//index.html` path to the origin.
+        let cfg = cfg_with_root(Some("/index.html"));
+        assert_eq!(root_object_for(&cfg, "/").as_deref(), Some("/index.html"));
     }
 
     #[test]

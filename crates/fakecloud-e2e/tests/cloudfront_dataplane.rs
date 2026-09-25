@@ -69,6 +69,33 @@ pub async fn make_spa_distribution(
         .clone()
 }
 
+/// Create a SPA distribution that also sets `DefaultRootObject`.
+pub async fn make_spa_distribution_with_root_object(
+    cf: &aws_sdk_cloudfront::Client,
+    default_origin_domain: &str,
+    root_object: &str,
+) -> aws_sdk_cloudfront::types::Distribution {
+    let mut config = spa_config(
+        default_origin_domain,
+        None,
+        &format!("spa-{}", uuid_like()),
+        true,
+        true,
+        &[],
+    );
+    config.default_root_object = Some(root_object.to_string());
+    let create = cf
+        .create_distribution()
+        .distribution_config(config)
+        .send()
+        .await
+        .expect("create_distribution");
+    create
+        .distribution()
+        .expect("distribution returned")
+        .clone()
+}
+
 /// Build the SPA distribution config. Shared by create (enabled=true) and the
 /// disable-via-update path (enabled=false) so both use an identical shape; the
 /// `caller_reference` must be preserved across an UpdateDistribution.
@@ -643,4 +670,42 @@ async fn api_traffic_is_not_intercepted() {
         .send()
         .await
         .expect("s3 list_buckets must pass through the viewer middleware");
+}
+
+/// Regression: `DefaultRootObject` was stored on the model but never applied, so a
+/// viewer request for the distribution root reached the bucket root and returned
+/// S3's `ListBucketResult` XML instead of the SPA shell.
+#[tokio::test]
+async fn serves_default_root_object_at_the_distribution_root() {
+    let server = TestServer::start().await;
+    let s3 = server.s3_client().await;
+    s3.create_bucket()
+        .bucket("rootsite")
+        .send()
+        .await
+        .expect("create_bucket");
+    put_object(&s3, "rootsite", "index.html", "text/html", b"SHELL").await;
+    put_object(&s3, "rootsite", "nested/index.html", "text/html", b"NESTED").await;
+
+    let cf = server.cloudfront_client().await;
+    let dist = make_spa_distribution_with_root_object(
+        &cf,
+        "rootsite.s3-website-us-east-1.amazonaws.com",
+        "index.html",
+    )
+    .await;
+    assert!(wait_for_served(&server, dist.id(), Duration::from_secs(10)).await);
+    let host = dist.domain_name();
+
+    // The root serves the default root object, not a bucket listing.
+    let r = viewer_get(&server, host, "/").await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "SHELL");
+
+    // A subdirectory is NOT rewritten to `nested/index.html`: AWS applies the
+    // default root object to the distribution root only. Here the miss falls
+    // through to the SPA CustomErrorResponse rule instead.
+    let r = viewer_get(&server, host, "/nested/").await;
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.text().await.unwrap(), "SHELL");
 }
