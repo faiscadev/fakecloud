@@ -510,6 +510,16 @@ impl IamState {
         }
     }
 
+    /// Whether this account already has an OIDC provider for `url_for_arn`
+    /// (see [`oidc_url_parts`]). An account has one provider per URL, whichever
+    /// partition the ARN it was created under names.
+    pub fn has_oidc_provider_for(&self, url_for_arn: &str) -> bool {
+        self.oidc_providers.keys().any(|arn| {
+            arn.split_once(":oidc-provider/")
+                .is_some_and(|(_, url)| url == url_for_arn)
+        })
+    }
+
     pub fn reset(&mut self) {
         let account_id = self.account_id.clone();
         *self = Self::new(&account_id);
@@ -671,6 +681,18 @@ pub struct IamSnapshot {
 }
 
 pub const IAM_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+
+/// An OIDC provider URL split the way `CreateOpenIDConnectProvider` stores it:
+/// the URL without its scheme, and the part of that the ARN is built from (no
+/// query string).
+pub fn oidc_url_parts(url: &str) -> (String, String) {
+    let without_scheme = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url);
+    let for_arn = without_scheme.split('?').next().unwrap_or(without_scheme);
+    (without_scheme.to_string(), for_arn.to_string())
+}
 
 #[cfg(test)]
 mod tests {

@@ -5597,3 +5597,69 @@ fn rename_from_other_region_keeps_partition() {
         "arn:aws-cn:iam::123456789012:server-certificate/web2"
     );
 }
+
+/// An account has one OIDC provider per URL, whichever partition's region
+/// the second create comes from.
+#[test]
+fn oidc_provider_url_is_unique_across_partitions() {
+    let svc = make_service();
+    let create = |region: &str| {
+        let mut req = make_request(
+            "CreateOpenIDConnectProvider",
+            vec![
+                ("Url", "https://oidc.example.com"),
+                (
+                    "ThumbprintList.member.1",
+                    "abcdef1234567890abcdef1234567890abcdef12",
+                ),
+            ],
+        );
+        req.region = region.to_string();
+        req
+    };
+    svc.create_oidc_provider(&create("us-east-1")).unwrap();
+    let err = match svc.create_oidc_provider(&create("cn-north-1")) {
+        Err(e) => e,
+        Ok(_) => panic!("a second provider for the same URL must be rejected"),
+    };
+    assert_eq!(err.status(), http::StatusCode::CONFLICT);
+    assert!(format!("{err:?}").contains("EntityAlreadyExists"));
+}
+
+/// CreateSAMLProvider with a name already in use fails instead of replacing
+/// the existing provider's metadata.
+#[test]
+fn saml_provider_name_is_unique() {
+    let svc = make_service();
+    let first = format!("<EntityDescriptor>{}</EntityDescriptor>", "a".repeat(1000));
+    let second = format!("<EntityDescriptor>{}</EntityDescriptor>", "b".repeat(1000));
+    let resp = svc
+        .create_saml_provider(&make_request(
+            "CreateSAMLProvider",
+            vec![("Name", "idp"), ("SAMLMetadataDocument", &first)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes()).to_string();
+    let arn = extract_xml_tag(&body, "SAMLProviderArn").to_string();
+
+    let mut again = make_request(
+        "CreateSAMLProvider",
+        vec![("Name", "idp"), ("SAMLMetadataDocument", &second)],
+    );
+    again.region = "cn-north-1".to_string();
+    let err = match svc.create_saml_provider(&again) {
+        Err(e) => e,
+        Ok(_) => panic!("a duplicate SAML provider name must be rejected"),
+    };
+    assert_eq!(err.status(), http::StatusCode::CONFLICT);
+    assert!(format!("{err:?}").contains("EntityAlreadyExists"));
+
+    let resp = svc
+        .get_saml_provider(&make_request(
+            "GetSAMLProvider",
+            vec![("SAMLProviderArn", &arn)],
+        ))
+        .unwrap();
+    let body = String::from_utf8_lossy(resp.body.expect_bytes());
+    assert!(body.contains(&"a".repeat(1000)), "original metadata kept");
+}

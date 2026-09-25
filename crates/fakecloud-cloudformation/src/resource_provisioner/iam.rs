@@ -1003,47 +1003,74 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .ok_or("Url is required")?
             .to_string();
-        let client_id_list: Vec<String> = props
-            .get("ClientIdList")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let thumbprint_list: Vec<String> = props
-            .get("ThumbprintList")
-            .and_then(|v| v.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|v| v.as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
-        // Real AWS strips the scheme to form the resource path component.
-        let url_path = url
-            .trim_start_matches("https://")
-            .trim_start_matches("http://")
-            .to_string();
+        let client_id_list = string_list(props, "ClientIdList");
+        let thumbprint_list = string_list(props, "ThumbprintList");
+        let (url_without_scheme, url_for_arn) = fakecloud_iam::oidc_url_parts(&url);
         let arn = format!(
             "arn:{}:iam::{}:oidc-provider/{}",
             fakecloud_aws::arn::partition_for(&self.region),
             self.account_id,
-            url_path
+            url_for_arn
         );
         let provider = OidcProvider {
             arn: arn.clone(),
-            url,
+            url: url_without_scheme,
             client_id_list,
             thumbprint_list,
             created_at: Utc::now(),
-            tags: Vec::new(),
+            tags: parse_iam_tags(props.get("Tags")),
         };
         let mut accounts = self.iam_state.write();
         let state = accounts.get_or_create(&self.account_id);
+        // One provider per URL: a second stack declaring the same URL must not
+        // take over the provider another owner created.
+        if state.has_oidc_provider_for(&url_for_arn) {
+            return Err(format!("OIDC provider for {url_for_arn} already exists."));
+        }
         state.oidc_providers.insert(arn.clone(), provider);
         Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
+    }
+
+    /// `ClientIdList`, `ThumbprintList` and `Tags` update in place; a new `Url`
+    /// is a different provider, so it is replaced.
+    pub(super) fn update_iam_oidc_provider(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let url = props
+            .get("Url")
+            .and_then(|v| v.as_str())
+            .ok_or("Url is required")?;
+        let (url_without_scheme, url_for_arn) = fakecloud_iam::oidc_url_parts(url);
+        let in_place = {
+            let mut accounts = self.iam_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            match state.oidc_providers.get_mut(&existing.physical_id) {
+                Some(provider)
+                    if provider
+                        .arn
+                        .split_once(":oidc-provider/")
+                        .is_some_and(|(_, u)| u == url_for_arn) =>
+                {
+                    // The query string is not part of the ARN, so it can change
+                    // in place.
+                    provider.url = url_without_scheme;
+                    provider.client_id_list = string_list(props, "ClientIdList");
+                    provider.thumbprint_list = string_list(props, "ThumbprintList");
+                    provider.tags = parse_iam_tags(props.get("Tags"));
+                    Some(provider.arn.clone())
+                }
+                _ => None,
+            }
+        };
+        match in_place {
+            Some(arn) => Ok(ProvisionResult::new(arn.clone()).with("Arn", arn)),
+            None => self.reprovision_resource(existing, resource).map(|opt| {
+                opt.unwrap_or_else(|| ProvisionResult::new(existing.physical_id.clone()))
+            }),
+        }
     }
 
     pub(super) fn delete_iam_oidc_provider(&self, physical_id: &str) -> Result<(), String> {
@@ -1068,8 +1095,9 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .ok_or("SamlMetadataDocument is required")?
             .to_string();
-        let arn =
-            Arn::global("iam", &self.account_id, &format!("saml-provider/{name}")).to_string();
+        let arn = Arn::global("iam", &self.account_id, &format!("saml-provider/{name}"))
+            .with_partition(fakecloud_aws::arn::partition_for(&self.region))
+            .to_string();
         let now = Utc::now();
         let valid_until = now + chrono::Duration::days(365 * 10);
         let provider = SamlProvider {
@@ -1078,12 +1106,59 @@ impl ResourceProvisioner {
             saml_metadata_document,
             created_at: now,
             valid_until,
-            tags: Vec::new(),
+            tags: parse_iam_tags(props.get("Tags")),
         };
         let mut accounts = self.iam_state.write();
         let state = accounts.get_or_create(&self.account_id);
+        if state
+            .saml_providers
+            .values()
+            .any(|p| p.name == provider.name)
+        {
+            return Err(format!("SAMLProvider {} already exists.", provider.name));
+        }
         state.saml_providers.insert(arn.clone(), provider);
         Ok(ProvisionResult::new(arn.clone()).with("Arn", arn))
+    }
+
+    /// `SamlMetadataDocument` and `Tags` update in place; a new `Name` is a
+    /// different provider, so it is replaced.
+    pub(super) fn update_iam_saml_provider(
+        &self,
+        existing: &StackResource,
+        resource: &ResourceDefinition,
+    ) -> Result<ProvisionResult, String> {
+        let props = &resource.properties;
+        let saml_metadata_document = props
+            .get("SamlMetadataDocument")
+            .and_then(|v| v.as_str())
+            .ok_or("SamlMetadataDocument is required")?
+            .to_string();
+        // The name the template asks for: its `Name`, or with none, the one the
+        // stack generated. Dropping `Name` from a named provider is a rename.
+        let wanted_name = props
+            .get("Name")
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .or_else(|| self.existing_name(existing));
+        let in_place = {
+            let mut accounts = self.iam_state.write();
+            let state = accounts.get_or_create(&self.account_id);
+            match state.saml_providers.get_mut(&existing.physical_id) {
+                Some(provider) if wanted_name.as_deref() == Some(provider.name.as_str()) => {
+                    provider.saml_metadata_document = saml_metadata_document;
+                    provider.tags = parse_iam_tags(props.get("Tags"));
+                    Some(provider.arn.clone())
+                }
+                _ => None,
+            }
+        };
+        match in_place {
+            Some(arn) => Ok(ProvisionResult::new(arn.clone()).with("Arn", arn)),
+            None => self.reprovision_resource(existing, resource).map(|opt| {
+                opt.unwrap_or_else(|| ProvisionResult::new(existing.physical_id.clone()))
+            }),
+        }
     }
 
     pub(super) fn delete_iam_saml_provider(&self, physical_id: &str) -> Result<(), String> {
@@ -1119,8 +1194,9 @@ impl ResourceProvisioner {
             None => format!("AWSServiceRoleFor{service_short}"),
         };
         let path = format!("/aws-service-role/{aws_service_name}/");
-        let arn =
-            Arn::global("iam", &self.account_id, &format!("role{path}{role_name}")).to_string();
+        let arn = Arn::global("iam", &self.account_id, &format!("role{path}{role_name}"))
+            .with_partition(fakecloud_aws::arn::partition_for(&self.region))
+            .to_string();
         // Service-linked roles get a trust policy specific to the service.
         let assume_role_policy_document = serde_json::json!({
             "Version": "2012-10-17",
@@ -1174,8 +1250,9 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .unwrap_or("/")
             .to_string();
-        let serial_number =
-            Arn::global("iam", &self.account_id, &format!("mfa{path}{name}")).to_string();
+        let serial_number = Arn::global("iam", &self.account_id, &format!("mfa{path}{name}"))
+            .with_partition(fakecloud_aws::arn::partition_for(&self.region))
+            .to_string();
         // Real AWS returns a base32 seed + a PNG QR code; we synthesize
         // deterministic placeholders so callers can read them back.
         let seed = format!("BASE32SEED{}", Uuid::new_v4().simple());
@@ -1207,4 +1284,17 @@ impl ResourceProvisioner {
         state.virtual_mfa_devices.remove(physical_id);
         Ok(())
     }
+}
+
+/// A template property holding a list of strings; non-strings are skipped.
+fn string_list(props: &serde_json::Value, key: &str) -> Vec<String> {
+    props
+        .get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }

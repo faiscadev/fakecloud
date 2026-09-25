@@ -15,7 +15,7 @@ pub mod sts_service;
 pub mod xml_responses;
 
 pub use state::{
-    CredentialIdentity, IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy, IamRole,
-    IamSnapshot, IamState, IamUser, OidcProvider, PolicyVersion, SamlProvider, SharedIamState,
-    StsTempCredential, Tag, VirtualMfaDevice, IAM_SNAPSHOT_SCHEMA_VERSION,
+    oidc_url_parts, CredentialIdentity, IamAccessKey, IamGroup, IamInstanceProfile, IamPolicy,
+    IamRole, IamSnapshot, IamState, IamUser, OidcProvider, PolicyVersion, SamlProvider,
+    SharedIamState, StsTempCredential, Tag, VirtualMfaDevice, IAM_SNAPSHOT_SCHEMA_VERSION,
 };
