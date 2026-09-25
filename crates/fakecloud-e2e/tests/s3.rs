@@ -2851,6 +2851,89 @@ async fn s3_bucket_tagging() {
         .unwrap();
 }
 
+#[tokio::test]
+async fn s3_create_bucket_with_tags_in_configuration() {
+    // CreateBucketConfiguration.Tags — the AWS Terraform provider tags a bucket
+    // this way on create and then skips PutBucketTagging, so dropping the tag
+    // set leaves `aws_s3_bucket` reading back `tags = {}` (issue #2553).
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    use aws_sdk_s3::types::{CreateBucketConfiguration, Tag};
+    client
+        .create_bucket()
+        .bucket("btag-on-create")
+        .create_bucket_configuration(
+            CreateBucketConfiguration::builder()
+                .tags(Tag::builder().key("team").value("a").build().unwrap())
+                .tags(Tag::builder().key("env").value("prod").build().unwrap())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap();
+
+    let resp = client
+        .get_bucket_tagging()
+        .bucket("btag-on-create")
+        .send()
+        .await
+        .unwrap();
+    let ts = resp.tag_set();
+    assert_eq!(ts.len(), 2, "tag set: {ts:?}");
+    assert!(ts.iter().any(|t| t.key() == "team" && t.value() == "a"));
+    assert!(ts.iter().any(|t| t.key() == "env" && t.value() == "prod"));
+
+    // PutBucketTagging still replaces the create-time set wholesale.
+    use aws_sdk_s3::types::Tagging;
+    client
+        .put_bucket_tagging()
+        .bucket("btag-on-create")
+        .tagging(
+            Tagging::builder()
+                .tag_set(Tag::builder().key("team").value("b").build().unwrap())
+                .build()
+                .unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    let resp = client
+        .get_bucket_tagging()
+        .bucket("btag-on-create")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resp.tag_set().len(), 1);
+    assert_eq!(resp.tag_set()[0].value(), "b");
+}
+
+#[tokio::test]
+async fn s3_create_bucket_with_duplicate_tag_keys_is_rejected() {
+    let server = TestServer::start().await;
+    let client = server.s3_client().await;
+
+    use aws_sdk_s3::types::{CreateBucketConfiguration, Tag};
+    let err = client
+        .create_bucket()
+        .bucket("btag-dup-keys")
+        .create_bucket_configuration(
+            CreateBucketConfiguration::builder()
+                .tags(Tag::builder().key("team").value("a").build().unwrap())
+                .tags(Tag::builder().key("team").value("b").build().unwrap())
+                .build(),
+        )
+        .send()
+        .await
+        .expect_err("duplicate tag keys must be rejected");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("InvalidTag"), "unexpected error: {msg}");
+
+    // The rejected create must not have left a bucket behind.
+    let head = client.head_bucket().bucket("btag-dup-keys").send().await;
+    assert!(head.is_err(), "bucket created despite InvalidTag");
+}
+
 // ---- S3 ACL Tests ----
 
 #[tokio::test]

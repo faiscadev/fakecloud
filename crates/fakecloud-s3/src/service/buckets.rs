@@ -5,13 +5,14 @@ use http::{HeaderMap, StatusCode};
 use bytes::Bytes;
 use fakecloud_aws::arn::Arn;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
+use fakecloud_persistence::{BucketSubresource, TagsSnapshot};
 
 use crate::persistence::bucket_meta_snapshot;
 use crate::state::S3Bucket;
 
 use super::{
-    canned_acl_grants, extract_xml_value, is_valid_bucket_name, is_valid_region, no_such_bucket,
-    s3_xml, xml_escape, S3Service,
+    canned_acl_grants, create_bucket_configuration_tags, extract_xml_value, is_valid_bucket_name,
+    is_valid_region, no_such_bucket, s3_xml, validate_tags, xml_escape, S3Service,
 };
 
 impl S3Service {
@@ -214,6 +215,13 @@ impl S3Service {
             _ => req.region.clone(),
         };
 
+        // CreateBucketConfiguration carries an optional <Tags> tag set (added to
+        // the S3 API in 2025). The AWS Terraform provider tags a bucket this way
+        // on create and then skips PutBucketTagging, so dropping these leaves the
+        // bucket untagged (issue #2553).
+        let create_tags = create_bucket_configuration_tags(body_str);
+        validate_tags(&create_tags)?;
+
         // Parse ACL from header
         let acl = req
             .headers
@@ -238,7 +246,14 @@ impl S3Service {
         }
         let state = accts.get_or_create(account_id);
         if let Some(existing) = state.buckets.get(bucket) {
-            // In us-east-1, re-creating same bucket in same region is idempotent (returns 200)
+            // In us-east-1, re-creating same bucket in same region is idempotent
+            // (returns 200). The re-create is a no-op on the existing bucket: it
+            // re-applies none of the create-time settings — not the canned ACL,
+            // not object lock, not object ownership, and not the
+            // `CreateBucketConfiguration` tag set. Applying only the tags here
+            // would make them the one create-time setting that mutates a bucket
+            // that already exists; `PutBucketTagging` is the operation that
+            // changes the tags of an existing bucket.
             if existing.region == requested_region && requested_region == "us-east-1" {
                 let mut headers = HeaderMap::new();
                 headers.insert("location", format!("/{bucket}").parse().unwrap());
@@ -290,11 +305,47 @@ impl S3Service {
             ));
         }
 
+        let tags_snapshot = if create_tags.is_empty() {
+            None
+        } else {
+            b.tags = create_tags.into_iter().collect();
+            Some(TagsSnapshot {
+                tags: b.tags.clone(),
+            })
+        };
+
         let meta = bucket_meta_snapshot(&b);
-        state.buckets.insert(bucket.to_string(), b);
+        // Persist before committing the bucket to memory, tags first: bucket
+        // tags live in their own subresource rather than in the bucket meta, so
+        // they need an explicit write to survive a restart, and writing them
+        // ahead of `meta.toml` keeps a failed create from leaving anything
+        // usable behind. The loader skips a bucket directory with no
+        // `meta.toml`, and the in-memory insert is last, so a store error at
+        // either step surfaces as an error with no half-created bucket — the
+        // same guarantee the `InvalidTag` path gives.
+        match tags_snapshot {
+            Some(snap) => {
+                let payload = toml::to_string(&snap).unwrap_or_default();
+                self.store
+                    .put_bucket_subresource(bucket, BucketSubresource::Tags, &payload)
+                    .map_err(super::persistence_error)?;
+            }
+            // An untagged create clears the file rather than leaving it alone:
+            // a create that failed after its tag write (or died between the two
+            // writes) leaves a `tags.toml` in a directory with no `meta.toml`,
+            // which the loader skips — but a later untagged create of the same
+            // name would adopt that never-committed tag set on the next restart.
+            // Deleting is a no-op when the file is absent, which is the normal
+            // case.
+            None => self
+                .store
+                .delete_bucket_subresource(bucket, BucketSubresource::Tags)
+                .map_err(super::persistence_error)?,
+        }
         self.store
             .put_bucket_meta(bucket, &meta)
             .map_err(super::persistence_error)?;
+        state.buckets.insert(bucket.to_string(), b);
 
         let mut headers = HeaderMap::new();
         headers.insert("location", format!("/{bucket}").parse().unwrap());

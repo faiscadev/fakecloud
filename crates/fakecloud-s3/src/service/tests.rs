@@ -3474,6 +3474,199 @@ fn create_bucket_idempotent_same_region_us_east_1() {
 }
 
 #[test]
+fn create_bucket_stores_tags_from_create_bucket_configuration() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/tagged",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag>\
+          <Tag><Key>env</Key><Value>prod</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    svc.create_bucket("123456789012", &req, "tagged").unwrap();
+
+    let get = make_request(Method::GET, "/tagged", &[("tagging", "")], b"");
+    let resp = svc
+        .get_bucket_tagging("123456789012", &get, "tagged")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<Tag><Key>env</Key><Value>prod</Value></Tag>"),
+        "tag set missing env: {body}"
+    );
+    assert!(
+        body.contains("<Tag><Key>team</Key><Value>a</Value></Tag>"),
+        "tag set missing team: {body}"
+    );
+}
+
+#[test]
+fn create_bucket_without_tags_has_no_tag_set() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/untagged",
+        &[],
+        b"<CreateBucketConfiguration></CreateBucketConfiguration>",
+    );
+    svc.create_bucket("123456789012", &req, "untagged").unwrap();
+
+    let get = make_request(Method::GET, "/untagged", &[("tagging", "")], b"");
+    assert_aws_err(
+        svc.get_bucket_tagging("123456789012", &get, "untagged"),
+        "NoSuchTagSet",
+    );
+}
+
+#[test]
+fn create_bucket_rejects_duplicate_tag_keys() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/dup-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag>\
+          <Tag><Key>team</Key><Value>b</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    assert_aws_err(
+        svc.create_bucket("123456789012", &req, "dup-tags"),
+        "InvalidTag",
+    );
+    // The rejected request must not have left a bucket behind.
+    assert_aws_err(svc.head_bucket("123456789012", "dup-tags"), "NotFound");
+}
+
+#[test]
+fn create_bucket_tags_decode_xml_entities() {
+    let svc = make_service();
+    let req = make_request(
+        Method::PUT,
+        "/amp-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>a&amp;b</Key><Value>c&amp;d</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    svc.create_bucket("123456789012", &req, "amp-tags").unwrap();
+
+    let get = make_request(Method::GET, "/amp-tags", &[("tagging", "")], b"");
+    let resp = svc
+        .get_bucket_tagging("123456789012", &get, "amp-tags")
+        .unwrap();
+    let body = std::str::from_utf8(resp.body.expect_bytes()).unwrap();
+    assert!(
+        body.contains("<Tag><Key>a&amp;b</Key><Value>c&amp;d</Value></Tag>"),
+        "entity round-trip wrong: {body}"
+    );
+}
+
+#[test]
+fn create_bucket_with_tags_also_requires_tag_resource() {
+    use fakecloud_core::service::AwsService as _;
+
+    let svc = make_service();
+    let tagged = make_request(
+        Method::PUT,
+        "/tagged-perm",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    let actions = svc.iam_actions_for(&tagged);
+    let names: Vec<&str> = actions.iter().map(|a| a.action).collect();
+    assert_eq!(names, vec!["CreateBucket", "TagResource"]);
+    // Both are authorized against the same bucket ARN.
+    assert_eq!(actions[0].resource, actions[1].resource);
+    assert_eq!(actions[1].service, "s3");
+
+    // An untagged create still needs only s3:CreateBucket.
+    let plain = make_request(Method::PUT, "/plain-perm", &[], b"");
+    let names: Vec<&str> = svc
+        .iam_actions_for(&plain)
+        .iter()
+        .map(|a| a.action)
+        .collect();
+    assert_eq!(names, vec!["CreateBucket"]);
+
+    // ...as does a CreateBucketConfiguration that carries no tag set.
+    let loc_only = make_request(
+        Method::PUT,
+        "/loc-perm",
+        &[],
+        b"<CreateBucketConfiguration><LocationConstraint>eu-west-1</LocationConstraint></CreateBucketConfiguration>",
+    );
+    let names: Vec<&str> = svc
+        .iam_actions_for(&loc_only)
+        .iter()
+        .map(|a| a.action)
+        .collect();
+    assert_eq!(names, vec!["CreateBucket"]);
+}
+
+#[test]
+fn create_bucket_request_tags_feed_condition_keys() {
+    let req = make_request(
+        Method::PUT,
+        "/req-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    for action in ["CreateBucket", "TagResource"] {
+        let tags = s3_request_tags(&req, action).expect("tags extracted");
+        assert_eq!(tags.get("team").map(String::as_str), Some("a"), "{action}");
+    }
+
+    // A body with no tag set yields an empty map, not a miss.
+    let plain = make_request(Method::PUT, "/req-plain", &[], b"");
+    assert!(s3_request_tags(&plain, "CreateBucket")
+        .expect("tags extracted")
+        .is_empty());
+}
+
+#[test]
+fn create_bucket_configuration_tags_ignores_foreign_bodies() {
+    // A PutBucketTagging body must not be mistaken for a create-time tag set:
+    // the helper is gated on the CreateBucketConfiguration root element.
+    let tagging =
+        r#"<Tagging><TagSet><Tag><Key>env</Key><Value>prod</Value></Tag></TagSet></Tagging>"#;
+    assert!(create_bucket_configuration_tags(tagging).is_empty());
+    assert!(create_bucket_configuration_tags("").is_empty());
+
+    // A namespaced or attributed <Tags> element is still parsed — the scan
+    // matches the <Tag> children, not the container.
+    let ns = r#"<CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tags xmlns="http://s3.amazonaws.com/doc/2006-03-01/"><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>"#;
+    assert_eq!(
+        create_bucket_configuration_tags(ns),
+        vec![("team".to_string(), "a".to_string())]
+    );
+}
+
+#[test]
+fn create_bucket_idempotent_recreate_does_not_reapply_create_time_tags() {
+    // The us-east-1 idempotent re-create is a no-op on the existing bucket. It
+    // re-applies no create-time setting, tags included — PutBucketTagging is
+    // what changes an existing bucket's tags.
+    let svc = make_service();
+    let plain = make_request(Method::PUT, "/idem-tags", &[], b"");
+    svc.create_bucket("123456789012", &plain, "idem-tags")
+        .unwrap();
+
+    let tagged = make_request(
+        Method::PUT,
+        "/idem-tags",
+        &[],
+        b"<CreateBucketConfiguration><Tags><Tag><Key>team</Key><Value>a</Value></Tag></Tags></CreateBucketConfiguration>",
+    );
+    let resp = svc
+        .create_bucket("123456789012", &tagged, "idem-tags")
+        .unwrap();
+    assert_eq!(resp.status, StatusCode::OK);
+
+    let get = make_request(Method::GET, "/idem-tags", &[("tagging", "")], b"");
+    assert_aws_err(
+        svc.get_bucket_tagging("123456789012", &get, "idem-tags"),
+        "NoSuchTagSet",
+    );
+}
+
+#[test]
 fn create_bucket_already_owned_other_region() {
     let svc = make_service();
     let mut req = make_request(

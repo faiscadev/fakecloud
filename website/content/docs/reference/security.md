@@ -213,7 +213,7 @@ Tag-based access control via four condition key families:
 | Condition key | Description | Enforced services |
 |---|---|---|
 | `aws:ResourceTag/<key>` | Tags on the target resource | S3, SQS, SNS, IAM, KMS, DynamoDB (a table's tags, also for its indexes and streams) |
-| `aws:RequestTag/<key>` | Tags sent in the request (e.g. on CreateQueue, PutObject) | S3, SQS, SNS, IAM, KMS, DynamoDB (`CreateTable`, `TagResource`) |
+| `aws:RequestTag/<key>` | Tags sent in the request (e.g. on CreateQueue, PutObject, CreateBucket) | S3 (including a `CreateBucket` tag set, which also requires `s3:TagResource`), SQS, SNS, IAM, KMS, DynamoDB (`CreateTable`, `TagResource`) |
 | `aws:TagKeys` | List of tag keys in the request (for `ForAllValues`/`ForAnyValue`) | S3, SQS, SNS, IAM, KMS, DynamoDB (`CreateTable`, `TagResource`, `UntagResource`) |
 | `aws:PrincipalTag/<key>` | Tags on the calling IAM user or assumed role | All enforced services |
 
