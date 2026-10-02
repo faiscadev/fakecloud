@@ -37,6 +37,16 @@ async fn wait_for_execution_full(
 async fn sfn_sync_athena_start_query_execution_returns_full_result() {
     let server = TestServer::start().await;
     let sfn = server.sfn_client().await;
+    // Athena writes the result CSV to the OutputLocation bucket; a missing
+    // bucket fails the query, as on AWS.
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("example-bucket")
+        .send()
+        .await
+        .unwrap();
 
     let definition = json!({
         "StartAt": "RunQuery",

@@ -313,6 +313,12 @@ pub struct QueryInfo {
     pub end_time: i64,
     pub status: String,
     pub create_time: i64,
+    /// The `GetQueryResults` payload, computed once on the first poll. A
+    /// query's results are a point-in-time snapshot on AWS, so later polls
+    /// return the same rows without rescanning (and re-cloning) every event.
+    /// Not persisted: after a restart the first poll recomputes it.
+    #[serde(skip)]
+    pub results: Option<std::sync::Arc<serde_json::Value>>,
 }
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]

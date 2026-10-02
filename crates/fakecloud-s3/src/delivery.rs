@@ -3,7 +3,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use chrono::Utc;
 use fakecloud_core::delivery::S3Delivery;
-use fakecloud_persistence::{BodySource, S3Store};
+use fakecloud_persistence::S3Store;
 use md5::{Digest, Md5};
 use parking_lot::RwLock;
 
@@ -40,6 +40,78 @@ impl S3DeliveryImpl {
     }
 }
 
+/// Write `body` as `bucket/key` in `account_id`, persisting through `store`
+/// when one is configured (disk mode). The payload is hashed and staged next
+/// to the store with no S3 lock held; the global S3 write lock is taken only
+/// for the rename-into-place and the in-memory insert. Shared by
+/// [`S3DeliveryImpl`] and services that write result objects (Athena query
+/// results).
+pub fn put_object_via_store(
+    state: &SharedS3State,
+    store: Option<&dyn S3Store>,
+    account_id: &str,
+    bucket: &str,
+    key: &str,
+    body: Vec<u8>,
+    content_type: Option<&str>,
+) -> Result<(), String> {
+    let missing = || format!("bucket {bucket} not found in account {account_id}");
+
+    // Cheap existence check under a read guard, so a delivery to a missing
+    // bucket never touches the disk.
+    {
+        let accounts = state.read();
+        let exists = accounts
+            .get(account_id)
+            .is_some_and(|s| s.buckets.contains_key(bucket));
+        if !exists {
+            return Err(missing());
+        }
+    }
+
+    // Hash and stage the payload with no S3 lock held: the global S3 lock
+    // is shared by every bucket in every account, so a large export or
+    // log delivery written to disk under it would stall all of S3.
+    let bytes = Bytes::from(body);
+    let size = bytes.len() as u64;
+    let etag = format!("{:x}", Md5::digest(&bytes));
+    let mut spooled = crate::service::run_blocking_io(|| {
+        crate::body_io::SpooledBody::spool(store, bytes.clone())
+    })
+    .map_err(|e| format!("failed to stage object {key} for bucket {bucket}: {e}"))?;
+
+    let mut obj = S3Object {
+        key: key.to_string(),
+        body: memory_body(bytes),
+        content_type: content_type
+            .unwrap_or("application/octet-stream")
+            .to_string(),
+        etag,
+        size,
+        last_modified: Utc::now(),
+        ..Default::default()
+    };
+
+    let mut accounts = state.write();
+    let acct = accounts.get_or_create(account_id);
+    let bucket_ref = acct.buckets.get_mut(bucket).ok_or_else(missing)?;
+    // Write through to the durable store so the delivered object survives a
+    // restart (S3 has no state snapshot; it is rebuilt from the store on
+    // boot). The payload is already staged next to the store, so this is
+    // a rename under the lock, not a body copy. Committing under the same
+    // guard as the in-memory insert keeps the on-disk body and the
+    // in-memory metadata of concurrent writers to one key in step.
+    if let Some(store) = store {
+        let meta = crate::persistence::object_meta_snapshot(&obj);
+        let returned = store
+            .put_object(bucket, key, None, spooled.source(), &meta)
+            .map_err(|e| format!("failed to persist object {key} to bucket {bucket}: {e}"))?;
+        obj.body = returned;
+    }
+    bucket_ref.objects.insert(key.to_string(), obj);
+    Ok(())
+}
+
 impl S3Delivery for S3DeliveryImpl {
     fn put_object(
         &self,
@@ -52,57 +124,37 @@ impl S3Delivery for S3DeliveryImpl {
         // Snapshot the durable store handle before taking the S3 state lock so
         // the two locks are never held nested.
         let store = self.store.read().clone();
-        let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        let bucket_ref = state
-            .buckets
-            .get_mut(bucket)
-            .ok_or_else(|| format!("bucket {bucket} not found in account {account_id}"))?;
-
-        let bytes = Bytes::from(body);
-        let size = bytes.len() as u64;
-        let etag = format!("{:x}", Md5::digest(&bytes));
-        let mut obj = S3Object {
-            key: key.to_string(),
-            body: memory_body(bytes.clone()),
-            content_type: content_type
-                .unwrap_or("application/octet-stream")
-                .to_string(),
-            etag,
-            size,
-            last_modified: Utc::now(),
-            ..Default::default()
-        };
-        // Write through to the durable store so the delivered object survives a
-        // restart (S3 has no state snapshot; it is rebuilt from the store on
-        // boot). Mirror the S3 replication path: persist via the store, then
-        // swap the in-memory body for the canonical ref it returns.
-        if let Some(store) = &store {
-            let meta = crate::persistence::object_meta_snapshot(&obj);
-            let returned = store
-                .put_object(bucket, key, None, BodySource::Bytes(bytes), &meta)
-                .map_err(|e| format!("failed to persist object {key} to bucket {bucket}: {e}"))?;
-            obj.body = returned;
-        }
-        bucket_ref.objects.insert(key.to_string(), obj);
-        Ok(())
+        put_object_via_store(
+            &self.state,
+            store.as_deref(),
+            account_id,
+            bucket,
+            key,
+            body,
+            content_type,
+        )
     }
 
     fn get_object(&self, account_id: &str, bucket: &str, key: &str) -> Result<Vec<u8>, String> {
-        let accounts = self.state.read();
-        let state = accounts
-            .get(account_id)
-            .ok_or_else(|| format!("account {account_id} has no S3 state"))?;
-        let bucket_ref = state
-            .buckets
-            .get(bucket)
-            .ok_or_else(|| format!("bucket {bucket} not found in account {account_id}"))?;
-        let object = bucket_ref
-            .objects
-            .get(key)
-            .ok_or_else(|| format!("key {key} not found in bucket {bucket}"))?;
-        let body = state
-            .read_body(&object.body)
+        // Resolve and open the body under the guard, read it after the guard
+        // is dropped (the open fd pins the inode against a concurrent PUT).
+        let handle = {
+            let accounts = self.state.read();
+            let state = accounts
+                .get(account_id)
+                .ok_or_else(|| format!("account {account_id} has no S3 state"))?;
+            let bucket_ref = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| format!("bucket {bucket} not found in account {account_id}"))?;
+            let object = bucket_ref
+                .objects
+                .get(key)
+                .ok_or_else(|| format!("key {key} not found in bucket {bucket}"))?;
+            crate::body_io::ObjectBodyHandle::open(&object.body)
+                .map_err(|e| format!("failed to read body: {e}"))?
+        };
+        let body = crate::service::run_blocking_io(|| handle.read_all())
             .map_err(|e| format!("failed to read body: {e}"))?;
         Ok(body.to_vec())
     }

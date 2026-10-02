@@ -1,4 +1,6 @@
+pub mod body_io;
 pub mod cfn;
+pub mod compression;
 pub mod delivery;
 pub mod eventstream;
 pub mod inventory;

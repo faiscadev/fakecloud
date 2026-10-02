@@ -107,6 +107,7 @@ impl LogsService {
                 end_time,
                 status: "Complete".to_string(),
                 create_time: now,
+                results: None,
             },
         );
 
@@ -131,93 +132,130 @@ impl LogsService {
 
         validate_string_length("queryId", query_id, 1, 256)?;
 
-        let accounts = self.state.read();
-        let empty = crate::state::LogsState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let query_info = state.queries.get(query_id).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                "The specified query does not exist.",
-            )
-        })?;
-
-        // Parse the query string. StartQuery already rejected malformed
-        // queries; treat any residual parse failure as an empty pipeline so a
-        // stored-then-corrupted query can never panic or return an undeclared
-        // error here (GetQueryResults does not declare MalformedQueryException).
-        let parsed = query::parse_query(&query_info.query_string).unwrap_or_default();
-
-        // Collect events by stream from every group/identifier the query
-        // referenced, not just the legacy single `log_group_name`. ARNs are
-        // resolved to bare group names so multi-group StartQuery requests
-        // actually scan every requested group. Each event keeps its original
-        // index in the stream's full event list so the `@ptr` it produces
-        // round-trips through GetLogRecord.
-        let mut streams: Vec<query::QueryStream> = Vec::new();
-        let mut seen_groups: std::collections::HashSet<String> = Default::default();
-        let identifiers: Vec<String> = if query_info.log_group_identifiers.is_empty() {
-            vec![query_info.log_group_name.clone()]
-        } else {
-            query_info.log_group_identifiers.clone()
-        };
-        for identifier in identifiers {
-            let group_name = if identifier.starts_with("arn:") {
-                match super::extract_log_group_from_arn(&identifier) {
-                    Some(n) => n,
-                    None => continue,
-                }
-            } else {
-                identifier
-            };
-            if !seen_groups.insert(group_name.clone()) {
-                continue;
+        // Gather the inputs under a short read guard: a cached result is
+        // returned as-is; otherwise only the events inside the query's time
+        // window are copied, and the query itself runs after the guard drops.
+        let (status, start_time, end_time, parsed, streams) = {
+            let accounts = self.state.read();
+            let empty = crate::state::LogsState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            let query_info = state.queries.get(query_id).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ResourceNotFoundException",
+                    "The specified query does not exist.",
+                )
+            })?;
+            if let Some(cached) = &query_info.results {
+                let mut out = (**cached).clone();
+                out["status"] = json!(query_info.status);
+                return Ok(AwsResponse::json(
+                    StatusCode::OK,
+                    serde_json::to_string(&out).unwrap(),
+                ));
             }
-            if let Some(group) = state.log_groups.get(&group_name) {
-                let retention_cutoff = group
-                    .retention_in_days
-                    .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
-                for stream in group.log_streams.values() {
-                    let events: Vec<(usize, LogEvent)> = stream
-                        .events
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, e)| {
-                            retention_cutoff.is_none_or(|cutoff| e.timestamp >= cutoff)
-                        })
-                        .map(|(i, e)| (i, e.clone()))
-                        .collect();
-                    streams.push(query::QueryStream {
-                        group_name: group_name.clone(),
-                        stream_name: stream.name.clone(),
-                        events,
-                    });
+
+            // Parse the query string. StartQuery already rejected malformed
+            // queries; treat any residual parse failure as an empty pipeline
+            // so a stored-then-corrupted query can never panic or return an
+            // undeclared error here (GetQueryResults does not declare
+            // MalformedQueryException).
+            let parsed = query::parse_query(&query_info.query_string).unwrap_or_default();
+            let (start_time, end_time) = (query_info.start_time, query_info.end_time);
+
+            // Collect events by stream from every group/identifier the query
+            // referenced, not just the legacy single `log_group_name`. ARNs
+            // are resolved to bare group names so multi-group StartQuery
+            // requests actually scan every requested group. Each event keeps
+            // its original index in the stream's full event list so the
+            // `@ptr` it produces round-trips through GetLogRecord.
+            let mut streams: Vec<query::QueryStream> = Vec::new();
+            let mut seen_groups: std::collections::HashSet<String> = Default::default();
+            let identifiers: Vec<String> = if query_info.log_group_identifiers.is_empty() {
+                vec![query_info.log_group_name.clone()]
+            } else {
+                query_info.log_group_identifiers.clone()
+            };
+            for identifier in identifiers {
+                let group_name = if identifier.starts_with("arn:") {
+                    match super::extract_log_group_from_arn(&identifier) {
+                        Some(n) => n,
+                        None => continue,
+                    }
+                } else {
+                    identifier
+                };
+                if !seen_groups.insert(group_name.clone()) {
+                    continue;
                 }
+                if let Some(group) = state.log_groups.get(&group_name) {
+                    let retention_cutoff = group
+                        .retention_in_days
+                        .map(|d| Utc::now().timestamp_millis() - (d as i64) * 86_400_000);
+                    for stream in group.log_streams.values() {
+                        let events: Vec<(usize, LogEvent)> = stream
+                            .events
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, e)| {
+                                retention_cutoff.is_none_or(|cutoff| e.timestamp >= cutoff)
+                                    && query::in_query_window(e.timestamp, start_time, end_time)
+                            })
+                            .map(|(i, e)| (i, e.clone()))
+                            .collect();
+                        if events.is_empty() {
+                            continue;
+                        }
+                        streams.push(query::QueryStream {
+                            group_name: group_name.clone(),
+                            stream_name: stream.name.clone(),
+                            events,
+                        });
+                    }
+                }
+            }
+            (
+                query_info.status.clone(),
+                start_time,
+                end_time,
+                parsed,
+                streams,
+            )
+        };
+
+        let results = query::execute_query(&parsed, &streams, start_time, end_time);
+        let records_matched = results.len() as f64;
+        let total_scanned: usize = streams.iter().map(|s| s.events.len()).sum();
+        let bytes_scanned: usize = streams
+            .iter()
+            .flat_map(|s| s.events.iter())
+            .map(|(_, e)| e.message.len())
+            .sum();
+        let out = json!({
+            "status": status,
+            "results": results,
+            "statistics": {
+                "recordsMatched": records_matched,
+                "recordsScanned": total_scanned as f64,
+                "bytesScanned": bytes_scanned as f64,
+            },
+        });
+
+        // Freeze the result of a finished query so later polls are served
+        // from the snapshot.
+        if status == "Complete" {
+            let mut accounts = self.state.write();
+            if let Some(q) = accounts
+                .get_mut(&req.account_id)
+                .and_then(|st| st.queries.get_mut(query_id))
+            {
+                q.results = Some(std::sync::Arc::new(out.clone()));
             }
         }
 
-        let results = query::execute_query(
-            &parsed,
-            &streams,
-            query_info.start_time,
-            query_info.end_time,
-        );
-
-        let records_matched = results.len() as f64;
-        let total_scanned: usize = streams.iter().map(|s| s.events.len()).sum();
-
         Ok(AwsResponse::json(
             StatusCode::OK,
-            serde_json::to_string(&json!({
-                "status": query_info.status,
-                "results": results,
-                "statistics": {
-                    "recordsMatched": records_matched,
-                    "recordsScanned": total_scanned as f64,
-                    "bytesScanned": 0.0,
-                },
-            }))
-            .unwrap(),
+            serde_json::to_string(&out).unwrap(),
         ))
     }
 
@@ -753,6 +791,7 @@ mod tests {
                     end_time: 0,
                     status: "Complete".to_string(),
                     create_time: 0,
+                    results: None,
                 },
             );
         }
@@ -949,5 +988,55 @@ mod tests {
         let svc = make_service();
         let req = make_request("ListLogGroupsForQuery", json!({}));
         assert!(svc.list_log_groups_for_query(&req).is_err());
+    }
+
+    #[test]
+    fn get_query_results_window_is_inclusive_and_results_are_frozen() {
+        let svc = make_service();
+        create_group(&svc, "app");
+        create_stream(&svc, "app", "s");
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let now_s = now_ms / 1000;
+        let put = |ts: i64, msg: &str| {
+            let req = make_request(
+                "PutLogEvents",
+                json!({
+                    "logGroupName": "app",
+                    "logStreamName": "s",
+                    "logEvents": [{ "timestamp": ts, "message": msg }],
+                }),
+            );
+            svc.put_log_events(&req).unwrap();
+        };
+        put((now_s - 10) * 1000, "before");
+        put(now_s * 1000, "at-end");
+        // The window ends at `now_s`, inclusive; the event 10s earlier is
+        // outside a window starting at `now_s - 5`.
+        let req = make_request(
+            "StartQuery",
+            json!({
+                "logGroupName": "app",
+                "startTime": now_s - 5,
+                "endTime": now_s,
+                "queryString": "fields @message"
+            }),
+        );
+        let resp = svc.start_query(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        let qid = body["queryId"].as_str().unwrap().to_string();
+        let get = || {
+            let req = make_request("GetQueryResults", json!({ "queryId": qid }));
+            let resp = svc.get_query_results(&req).unwrap();
+            serde_json::from_slice::<Value>(resp.body.expect_bytes()).unwrap()
+        };
+        let first = get();
+        assert_eq!(first["results"].as_array().unwrap().len(), 1);
+        assert_eq!(first["statistics"]["recordsScanned"], 1.0);
+        assert_eq!(first["results"][0][0]["value"], "at-end");
+
+        // Results are a snapshot: an event ingested after the first poll
+        // does not change what later polls return.
+        put(now_s * 1000, "late");
+        assert_eq!(get()["results"], first["results"]);
     }
 }

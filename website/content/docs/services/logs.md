@@ -16,10 +16,10 @@ fakecloud implements **115 of 115** CloudWatch Logs operations at 100% Smithy co
 - **GetLogGroupFields** — real field discovery from indexed events
 - **ListLogGroupsForQuery** — real list filtered by query string
 - **Subscription filters** — delivery to Lambda, Kinesis, SQS
-- **Query language** — StartQuery, GetQueryResults with full Insights query syntax
+- **Query language**: StartQuery, GetQueryResults with full Insights query syntax; the `startTime`/`endTime` window is inclusive, and a finished query's results are computed once and served as a snapshot on later polls
 - **Metric filters** — CRUD, extraction patterns
 - **Resource policies** — CRUD
-- **Export tasks** — S3 exports (recorded)
+- **Export tasks**: `CreateExportTask` returns the task id at once and runs the export as a job (`PENDING -> RUNNING -> COMPLETED` in `DescribeExportTasks`): matching events land in the destination bucket as gzip JSONL at `<prefix>/<taskId>/<hash>/000000.gz`. `CancelExportTask` cancels a pending or running task (`InvalidOperationException` once it finished), and tasks interrupted by a restart resume
 - **Destinations** — cross-account destinations
 - **Anomaly detectors** — CRUD, training state, configuration; `ListAnomalies` / `UpdateAnomaly` operate on anomalies seeded via the admin endpoint below
 - **Log deliveries** — CRUD plus delivery configuration and standard delivery templates

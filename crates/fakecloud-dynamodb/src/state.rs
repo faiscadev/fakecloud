@@ -740,13 +740,17 @@ pub struct ReplicaDescription {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportDescription {
     pub export_arn: String,
+    /// `IN_PROGRESS` while the background export runs, then `COMPLETED` or
+    /// `FAILED`.
     pub export_status: String,
     pub table_arn: String,
     pub s3_bucket: String,
     pub s3_prefix: Option<String>,
     pub export_format: String,
     pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
+    /// Set once the export has finished (successfully or not).
+    #[serde(default)]
+    pub end_time: Option<DateTime<Utc>>,
     pub export_time: DateTime<Utc>,
     pub item_count: i64,
     pub billed_size_bytes: i64,
@@ -755,28 +759,64 @@ pub struct ExportDescription {
     pub failure_code: Option<String>,
     #[serde(default)]
     pub failure_message: Option<String>,
+    /// S3 key of the export's `manifest-summary.json`, once written.
+    #[serde(default)]
+    pub export_manifest: Option<String>,
+    #[serde(default)]
+    pub table_id: Option<String>,
+    #[serde(default)]
+    pub s3_bucket_owner: Option<String>,
+    #[serde(default)]
+    pub s3_sse_algorithm: Option<String>,
+    #[serde(default)]
+    pub s3_sse_kms_key_id: Option<String>,
+    #[serde(default)]
+    pub client_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ImportDescription {
     pub import_arn: String,
+    /// `IN_PROGRESS` while the background import runs, then `COMPLETED` or
+    /// `FAILED`.
     pub import_status: String,
     pub table_arn: String,
     pub table_name: String,
     pub s3_bucket_source: String,
     pub input_format: String,
     pub start_time: DateTime<Utc>,
-    pub end_time: DateTime<Utc>,
+    /// Set once the import has finished (successfully or not).
+    #[serde(default)]
+    pub end_time: Option<DateTime<Utc>>,
     pub processed_item_count: i64,
     pub processed_size_bytes: i64,
     /// Rows written to the table: processed rows less the invalid ones, with
     /// rows sharing a primary key counted once.
     #[serde(default)]
     pub imported_item_count: i64,
-    /// Rows skipped because they lack a key attribute or carry one of the
-    /// wrong type.
+    /// Rows skipped because they could not form a valid item.
     #[serde(default)]
     pub error_count: i64,
+    #[serde(default)]
+    pub table_id: Option<String>,
+    #[serde(default)]
+    pub s3_key_prefix: Option<String>,
+    #[serde(default)]
+    pub s3_bucket_owner: Option<String>,
+    #[serde(default)]
+    pub input_compression_type: Option<String>,
+    /// `InputFormatOptions` exactly as requested (CSV delimiter / header).
+    #[serde(default)]
+    pub input_format_options: Option<serde_json::Value>,
+    /// `TableCreationParameters` exactly as requested.
+    #[serde(default)]
+    pub table_creation_parameters: Option<serde_json::Value>,
+    #[serde(default)]
+    pub client_token: Option<String>,
+    #[serde(default)]
+    pub failure_code: Option<String>,
+    #[serde(default)]
+    pub failure_message: Option<String>,
 }
 
 impl DynamoTable {

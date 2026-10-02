@@ -24,8 +24,10 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+md-5 = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+zstd = { workspace = true }
 tempfile = { workspace = true }
 fakecloud-kms = { workspace = true, features = ["test-util"] }

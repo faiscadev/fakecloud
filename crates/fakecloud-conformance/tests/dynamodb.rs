@@ -1474,20 +1474,28 @@ async fn dynamodb_export_lifecycle() {
         .unwrap()
         .to_string();
 
-    let resp = client
-        .describe_export()
-        .export_arn(&export_arn)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.export_description()
+    // The export is a background job: poll until it leaves IN_PROGRESS.
+    let mut status = String::new();
+    for _ in 0..200 {
+        let resp = client
+            .describe_export()
+            .export_arn(&export_arn)
+            .send()
+            .await
+            .unwrap();
+        status = resp
+            .export_description()
             .unwrap()
             .export_status()
             .unwrap()
-            .as_str(),
-        "COMPLETED"
-    );
+            .as_str()
+            .to_string();
+        if status != "IN_PROGRESS" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, "COMPLETED");
 
     let resp = client.list_exports().send().await.unwrap();
     assert!(!resp.export_summaries().is_empty());
@@ -1548,20 +1556,28 @@ async fn dynamodb_import_lifecycle() {
         .unwrap()
         .to_string();
 
-    let resp = client
-        .describe_import()
-        .import_arn(&import_arn)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(
-        resp.import_table_description()
+    // The import is a background job: poll until it leaves IN_PROGRESS.
+    let mut status = String::new();
+    for _ in 0..200 {
+        let resp = client
+            .describe_import()
+            .import_arn(&import_arn)
+            .send()
+            .await
+            .unwrap();
+        status = resp
+            .import_table_description()
             .unwrap()
             .import_status()
             .unwrap()
-            .as_str(),
-        "COMPLETED"
-    );
+            .as_str()
+            .to_string();
+        if status != "IN_PROGRESS" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert_eq!(status, "COMPLETED");
 
     let resp = client.list_imports().send().await.unwrap();
     assert!(!resp.import_summary_list().is_empty());

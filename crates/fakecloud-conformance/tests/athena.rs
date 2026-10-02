@@ -83,17 +83,27 @@ async fn make_prepared_statement(server: &TestServer, name: &str) {
         .unwrap();
 }
 
+/// Start a query that writes its result to an existing bucket and wait for
+/// it to finish: StartQueryExecution only accepts the query, and a missing
+/// output bucket fails it, as on Athena.
 async fn make_query_execution(server: &TestServer) -> String {
     server
-        .athena_client()
+        .s3_client()
         .await
+        .create_bucket()
+        .bucket("athena-conformance-results")
+        .send()
+        .await
+        .unwrap();
+    let athena = server.athena_client().await;
+    let qid = athena
         .start_query_execution()
         .query_string("SELECT 1")
         .work_group("primary")
         .query_execution_context(QueryExecutionContext::builder().database("default").build())
         .result_configuration(
             ResultConfiguration::builder()
-                .output_location("s3://b/out/")
+                .output_location("s3://athena-conformance-results/out/")
                 .build(),
         )
         .send()
@@ -101,7 +111,25 @@ async fn make_query_execution(server: &TestServer) -> String {
         .unwrap()
         .query_execution_id()
         .unwrap()
-        .to_owned()
+        .to_owned();
+    for _ in 0..200 {
+        let state = athena
+            .get_query_execution()
+            .query_execution_id(&qid)
+            .send()
+            .await
+            .unwrap()
+            .query_execution()
+            .and_then(|q| q.status())
+            .and_then(|s| s.state())
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if state != "QUEUED" && state != "RUNNING" {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    qid
 }
 
 async fn make_notebook(server: &TestServer, name: &str) -> String {

@@ -1426,6 +1426,25 @@ async fn logs_subscription_filter_delivers_to_sqs() {
 
 // make_zip is defined at the top of this file
 
+/// Poll an AWS CLI describe call until the job status at `status_pointer`
+/// leaves IN_PROGRESS, returning the final JSON.
+async fn wait_for_cli_job(
+    server: &TestServer,
+    args: &[&str],
+    status_pointer: &str,
+) -> serde_json::Value {
+    for _ in 0..200 {
+        let out = server.aws_cli(args).await;
+        assert!(out.success(), "{args:?} failed: {}", out.stderr_text());
+        let json = out.stdout_json();
+        if json.pointer(status_pointer).and_then(|v| v.as_str()) != Some("IN_PROGRESS") {
+            return json;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("{args:?} never left IN_PROGRESS");
+}
+
 /// DynamoDB export to S3 and import from S3 roundtrip test.
 #[tokio::test]
 async fn dynamodb_export_import_roundtrip() {
@@ -1514,15 +1533,14 @@ async fn dynamodb_export_import_roundtrip() {
         .as_str()
         .unwrap()
         .to_string();
-    let describe_output = server
-        .aws_cli(&["dynamodb", "describe-export", "--export-arn", &export_arn])
-        .await;
-    assert!(
-        describe_output.success(),
-        "describe-export failed: {}",
-        describe_output.stderr_text()
-    );
-    let describe_json = describe_output.stdout_json();
+    // The export runs in the background; poll DescribeExport as real clients
+    // do until it settles.
+    let describe_json = wait_for_cli_job(
+        &server,
+        &["dynamodb", "describe-export", "--export-arn", &export_arn],
+        "/ExportDescription/ExportStatus",
+    )
+    .await;
     assert_eq!(
         describe_json["ExportDescription"]["ExportStatus"],
         "COMPLETED"
@@ -1532,32 +1550,58 @@ async fn dynamodb_export_import_roundtrip() {
         .unwrap_or(0);
     assert_eq!(item_count, 3, "Expected 3 items exported");
 
-    // Verify that data was written to S3
-    let s3_obj = s3
-        .get_object()
-        .bucket("export-bucket")
-        .key("exports/source/data/manifest-files.json")
-        .send()
-        .await
+    // The export lands in the AWS layout:
+    // <prefix>/AWSDynamoDB/<export-id>/{manifest-summary.json,manifest-files.json,data/*.json.gz}
+    let export_id = export_arn.rsplit('/').next().unwrap();
+    let base = format!("exports/source/AWSDynamoDB/{export_id}");
+    assert_eq!(
+        describe_json["ExportDescription"]["ExportManifest"],
+        format!("{base}/manifest-summary.json")
+    );
+    let get_text = |key: String| {
+        let s3 = s3.clone();
+        async move {
+            let obj = s3
+                .get_object()
+                .bucket("export-bucket")
+                .key(&key)
+                .send()
+                .await
+                .unwrap_or_else(|e| panic!("get {key}: {e:?}"));
+            obj.body.collect().await.unwrap().into_bytes().to_vec()
+        }
+    };
+    let summary: serde_json::Value =
+        serde_json::from_slice(&get_text(format!("{base}/manifest-summary.json")).await).unwrap();
+    assert_eq!(summary["itemCount"], 3);
+    assert_eq!(summary["outputFormat"], "DYNAMODB_JSON");
+    let files = get_text(format!("{base}/manifest-files.json")).await;
+    let entry: serde_json::Value =
+        serde_json::from_str(std::str::from_utf8(&files).unwrap().lines().next().unwrap()).unwrap();
+    let data_key = entry["dataFileS3Key"].as_str().unwrap().to_string();
+    assert!(data_key.starts_with(&format!("{base}/data/")) && data_key.ends_with(".json.gz"));
+    let gz = get_text(data_key).await;
+    let mut s3_text = String::new();
+    std::io::Read::read_to_string(&mut flate2::read::GzDecoder::new(&gz[..]), &mut s3_text)
         .unwrap();
-    let s3_body = s3_obj.body.collect().await.unwrap().into_bytes();
-    let s3_text = std::str::from_utf8(&s3_body).unwrap();
-    assert!(!s3_text.is_empty(), "Export data should be non-empty in S3");
     // Should have 3 lines (one per item)
     let lines: Vec<&str> = s3_text.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 3, "Expected 3 JSON Lines in export");
 
-    // Now import into a new table
+    // Now import the export's data files (gzip DynamoDB JSON) into a new table
+    let source = format!(r#"{{"S3Bucket":"export-bucket","S3KeyPrefix":"{base}/data/"}}"#);
     let import_output = server
         .aws_cli(&[
             "dynamodb",
             "import-table",
             "--input-format",
             "DYNAMODB_JSON",
+            "--input-compression-type",
+            "GZIP",
             "--s3-bucket-source",
-            r#"{"S3Bucket":"export-bucket","S3KeyPrefix":"exports/source/"}"#,
+            &source,
             "--table-creation-parameters",
-            r#"{"TableName":"ImportDest","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}]}"#,
+            r#"{"TableName":"ImportDest","KeySchema":[{"AttributeName":"pk","KeyType":"HASH"}],"AttributeDefinitions":[{"AttributeName":"pk","AttributeType":"S"}],"BillingMode":"PAY_PER_REQUEST"}"#,
         ])
         .await;
     assert!(
@@ -1574,18 +1618,30 @@ async fn dynamodb_export_import_roundtrip() {
         .as_str()
         .unwrap()
         .to_string();
-    let describe_output = server
-        .aws_cli(&["dynamodb", "describe-import", "--import-arn", &import_arn])
-        .await;
-    assert!(
-        describe_output.success(),
-        "describe-import failed: {}",
-        describe_output.stderr_text()
+    let describe_json = wait_for_cli_job(
+        &server,
+        &["dynamodb", "describe-import", "--import-arn", &import_arn],
+        "/ImportTableDescription/ImportStatus",
+    )
+    .await;
+    assert_eq!(
+        describe_json["ImportTableDescription"]["ImportStatus"], "COMPLETED",
+        "{describe_json}"
     );
-    let processed = describe_output.stdout_json()["ImportTableDescription"]["ProcessedItemCount"]
+    let processed = describe_json["ImportTableDescription"]["ProcessedItemCount"]
         .as_i64()
         .unwrap_or(0);
     assert_eq!(processed, 3, "Expected 3 items imported");
+    let table = ddb
+        .describe_table()
+        .table_name("ImportDest")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        table.table().unwrap().table_status().unwrap().as_str(),
+        "ACTIVE"
+    );
 
     // Verify items in the imported table
     let scan = ddb.scan().table_name("ImportDest").send().await.unwrap();
@@ -1852,6 +1908,168 @@ async fn eventbridge_sns_filter_policy_drops_non_matching() {
     assert_eq!(inner["source"], "payments");
 }
 
+/// Poll DescribeImport until the background import job settles.
+async fn wait_for_import(
+    ddb: &aws_sdk_dynamodb::Client,
+    import_arn: &str,
+) -> aws_sdk_dynamodb::types::ImportTableDescription {
+    for _ in 0..200 {
+        let desc = ddb
+            .describe_import()
+            .import_arn(import_arn)
+            .send()
+            .await
+            .unwrap()
+            .import_table_description()
+            .unwrap()
+            .clone();
+        if desc.import_status().map(|s| s.as_str()) != Some("IN_PROGRESS") {
+            return desc;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("import {import_arn} never settled");
+}
+
+/// ImportTable is a job: the call returns IN_PROGRESS at once and the
+/// gzip-compressed CSV is read, decompressed and parsed afterwards. CSV key
+/// columns take their AttributeDefinitions type; other columns are strings.
+/// A missing source bucket fails the job (not the call) and leaves no table.
+#[tokio::test]
+async fn dynamodb_import_table_gzip_csv_job() {
+    let server = helpers::TestServer::start().await;
+    let s3 = server.s3_client().await;
+    let ddb = server.dynamodb_client().await;
+
+    s3.create_bucket()
+        .bucket("csv-import")
+        .send()
+        .await
+        .unwrap();
+    let csv = "id,name,score\n1,alice,10\n2,\"bob, jr\",\n";
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(csv.as_bytes()).unwrap();
+    s3.put_object()
+        .bucket("csv-import")
+        .key("in/part-0.csv.gz")
+        .body(enc.finish().unwrap().into())
+        .send()
+        .await
+        .unwrap();
+
+    let params = |table: &str| {
+        aws_sdk_dynamodb::types::TableCreationParameters::builder()
+            .table_name(table)
+            .key_schema(
+                KeySchemaElement::builder()
+                    .attribute_name("id")
+                    .key_type(KeyType::Hash)
+                    .build()
+                    .unwrap(),
+            )
+            .attribute_definitions(
+                AttributeDefinition::builder()
+                    .attribute_name("id")
+                    .attribute_type(ScalarAttributeType::N)
+                    .build()
+                    .unwrap(),
+            )
+            .billing_mode(BillingMode::PayPerRequest)
+            .build()
+            .unwrap()
+    };
+    let resp = ddb
+        .import_table()
+        .input_format(aws_sdk_dynamodb::types::InputFormat::Csv)
+        .input_compression_type(aws_sdk_dynamodb::types::InputCompressionType::Gzip)
+        .s3_bucket_source(
+            aws_sdk_dynamodb::types::S3BucketSource::builder()
+                .s3_bucket("csv-import")
+                .s3_key_prefix("in/")
+                .build()
+                .unwrap(),
+        )
+        .table_creation_parameters(params("CsvImported"))
+        .send()
+        .await
+        .unwrap();
+    let started = resp.import_table_description().unwrap();
+    assert_eq!(started.import_status().unwrap().as_str(), "IN_PROGRESS");
+    // The table exists from the moment the import is accepted.
+    ddb.describe_table()
+        .table_name("CsvImported")
+        .send()
+        .await
+        .unwrap();
+
+    let desc = wait_for_import(&ddb, started.import_arn().unwrap()).await;
+    assert_eq!(desc.import_status().unwrap().as_str(), "COMPLETED");
+    assert_eq!(desc.imported_item_count(), 2);
+    assert_eq!(desc.input_compression_type().unwrap().as_str(), "GZIP");
+    let table = ddb
+        .describe_table()
+        .table_name("CsvImported")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        table.table().unwrap().table_status().unwrap().as_str(),
+        "ACTIVE"
+    );
+    let bob = ddb
+        .get_item()
+        .table_name("CsvImported")
+        .key("id", AttributeValue::N("2".into()))
+        .send()
+        .await
+        .unwrap();
+    let bob = bob.item().unwrap();
+    assert_eq!(bob["name"].as_s().unwrap(), "bob, jr");
+    assert!(!bob.contains_key("score"), "empty CSV column is omitted");
+    let alice = ddb
+        .get_item()
+        .table_name("CsvImported")
+        .key("id", AttributeValue::N("1".into()))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(alice.item().unwrap()["score"].as_s().unwrap(), "10");
+
+    let resp = ddb
+        .import_table()
+        .input_format(aws_sdk_dynamodb::types::InputFormat::Csv)
+        .s3_bucket_source(
+            aws_sdk_dynamodb::types::S3BucketSource::builder()
+                .s3_bucket("no-such-import-bucket")
+                .build()
+                .unwrap(),
+        )
+        .table_creation_parameters(params("NeverCreated"))
+        .send()
+        .await
+        .unwrap();
+    let desc = wait_for_import(
+        &ddb,
+        resp.import_table_description()
+            .unwrap()
+            .import_arn()
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(desc.import_status().unwrap().as_str(), "FAILED");
+    assert_eq!(desc.failure_code(), Some("S3NoSuchBucket"));
+    let err = ddb
+        .describe_table()
+        .table_name("NeverCreated")
+        .send()
+        .await
+        .unwrap_err();
+    assert!(
+        format!("{err:?}").contains("ResourceNotFoundException"),
+        "{err:?}"
+    );
+}
+
 /// ImportTable writes each row the way PutItem would: a row without a valid
 /// primary key (missing, wrong-typed or empty) or with a malformed attribute
 /// value is an import error, counted and skipped, and a row repeating an
@@ -1925,16 +2143,13 @@ async fn dynamodb_import_table_skips_invalid_keys_and_dedupes() {
         .import_arn()
         .unwrap()
         .to_string();
-    let described = ddb
-        .describe_import()
-        .import_arn(import_arn)
-        .send()
-        .await
-        .unwrap();
-    let desc = described.import_table_description().unwrap();
+    let desc = wait_for_import(&ddb, &import_arn).await;
     assert_eq!(desc.processed_item_count(), 7);
     assert_eq!(desc.imported_item_count(), 2);
     assert_eq!(desc.error_count(), 4);
+    // Item validation errors fail the import (the valid rows stay imported).
+    assert_eq!(desc.import_status().unwrap().as_str(), "FAILED");
+    assert_eq!(desc.failure_code(), Some("ItemValidationError"));
 
     let scan = ddb
         .scan()

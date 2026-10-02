@@ -103,85 +103,125 @@ impl AthenaService {
         let id = synth_uuid();
         let now = Utc::now();
 
-        // Try real SQL execution. Only SELECT is implemented today; anything
-        // else lands in QueryExecution with a structured failure reason
-        // (state=FAILED, state_change_reason=<error>) so callers see the real
-        // outcome instead of a fabricated SUCCEEDED.
-        let executed = sql::execute(
-            &query,
-            default_database.as_deref(),
-            output_location.as_deref(),
-            &req.account_id,
-            &req.region,
-            self.glue.as_ref(),
-            self.s3.as_ref(),
-        );
-
-        let (state_str, state_reason, columns, rows, scanned, output) = match executed {
-            Ok(ExecutedQuery {
-                columns,
-                rows,
-                data_scanned_bytes,
-                output_location,
-            }) => (
-                "SUCCEEDED".to_string(),
-                None,
-                columns,
-                rows,
-                data_scanned_bytes,
-                output_location,
-            ),
-            Err(err) => {
-                tracing::debug!(query = %query, error = %err, "athena: query failed");
-                (
-                    "FAILED".to_string(),
-                    Some(err.to_string()),
-                    Vec::new(),
-                    Vec::new(),
-                    0i64,
-                    None,
-                )
-            }
-        };
-
         // Echo the resolved OutputLocation back in ResultConfiguration so
-        // GetQueryExecution reports where results go (real Athena always does,
-        // whether or not a file was materialized). Prefer the executor's exact
-        // s3:// key; otherwise fall back to the effective location resolved from
-        // the request / workgroup config above.
+        // GetQueryExecution reports where results go from the moment the query
+        // is accepted (real Athena always does). Once the query finishes it
+        // points at the exact `<OutputLocation>/<QueryExecutionId>.csv` key.
         let mut effective_result_config = result_configuration.clone();
-        if let Some(out) = output.clone().or_else(|| output_location.clone()) {
-            let cfg = effective_result_config
+        if let Some(out) = output_location.clone() {
+            if let Some(obj) = effective_result_config
                 .get_or_insert_with(|| json!({}))
-                .as_object_mut();
-            if let Some(obj) = cfg {
+                .as_object_mut()
+            {
                 obj.insert("OutputLocation".to_string(), Value::String(out));
             }
         }
 
-        let mut state = self.state.write();
-        let account = account_mut(&mut state, &req.account_id);
-        let qe = QueryExecution {
+        // Record the query as QUEUED and answer with its id straight away, as
+        // Athena does. The SQL runs as a job (S3 scan, result write) that
+        // GetQueryExecution reports moving QUEUED -> RUNNING -> SUCCEEDED or
+        // FAILED; clients poll for it.
+        {
+            let mut state = self.state.write();
+            let account = account_mut(&mut state, &req.account_id);
+            account.query_executions.insert(
+                id.clone(),
+                QueryExecution {
+                    query_execution_id: id.clone(),
+                    query: query.clone(),
+                    statement_type: classify_statement(&query),
+                    work_group,
+                    state: "QUEUED".to_string(),
+                    state_change_reason: None,
+                    submission_time: now,
+                    completion_time: None,
+                    query_execution_context: context,
+                    result_configuration: effective_result_config,
+                    engine_version: Some(engine_version),
+                    data_scanned_bytes: 0,
+                    engine_execution_time_ms: 0,
+                    query_planning_time_ms: 0,
+                    total_execution_time_ms: 0,
+                    result_rows: Vec::new(),
+                    result_columns: Vec::new(),
+                    region: Some(req.region.clone()),
+                },
+            );
+        }
+        self.spawn_query(QueryJob {
+            account_id: req.account_id.clone(),
+            region: req.region.clone(),
             query_execution_id: id.clone(),
-            query: query.clone(),
-            statement_type: classify_statement(&query),
-            work_group,
-            state: state_str,
-            state_change_reason: state_reason,
-            submission_time: now,
-            completion_time: Some(now),
-            query_execution_context: context,
-            result_configuration: effective_result_config,
-            engine_version: Some(engine_version),
-            data_scanned_bytes: scanned,
-            engine_execution_time_ms: 1,
-            query_planning_time_ms: 1,
-            total_execution_time_ms: 2,
-            result_rows: rows,
-            result_columns: columns,
-        };
-        account.query_executions.insert(id.clone(), qe);
+            query,
+            default_database,
+            output_location,
+        });
         Ok(AwsResponse::ok_json(json!({ "QueryExecutionId": id })))
+    }
+
+    /// Run a query job off the request path: on the blocking pool when a Tokio
+    /// runtime is available (then persist the outcome), inline otherwise.
+    fn spawn_query(&self, job: QueryJob) {
+        let env = QueryJobEnv {
+            state: self.state.clone(),
+            glue: self.glue.clone(),
+            s3: self.s3.clone(),
+            s3_store: self.s3_store.clone(),
+        };
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            run_query_job(&env, &job);
+            return;
+        };
+        let state = self.state.clone();
+        let store = self.snapshot_store.clone();
+        let lock = self.snapshot_lock.clone();
+        handle.spawn(async move {
+            if let Err(err) = tokio::task::spawn_blocking(move || run_query_job(&env, &job)).await {
+                tracing::error!(%err, "athena query job panicked");
+            }
+            save_athena_snapshot(&state, store, &lock).await;
+        });
+    }
+
+    /// Re-run queries a previous process accepted but never finished, so they
+    /// do not report QUEUED/RUNNING forever after a restart.
+    pub fn resume_interrupted_queries(&self) {
+        let jobs: Vec<QueryJob> = {
+            let mut state = self.state.write();
+            let mut jobs = Vec::new();
+            for (account_id, account) in state.accounts.iter_mut() {
+                for q in account.query_executions.values_mut() {
+                    if q.state != "QUEUED" && q.state != "RUNNING" {
+                        continue;
+                    }
+                    q.state = "QUEUED".to_string();
+                    let ctx_db = q
+                        .query_execution_context
+                        .as_ref()
+                        .and_then(|c| c.get("Database"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    let out = q
+                        .result_configuration
+                        .as_ref()
+                        .and_then(|c| c.get("OutputLocation"))
+                        .and_then(Value::as_str)
+                        .map(str::to_owned);
+                    jobs.push(QueryJob {
+                        account_id: account_id.clone(),
+                        region: q.region.clone().unwrap_or_else(|| "us-east-1".to_string()),
+                        query_execution_id: q.query_execution_id.clone(),
+                        query: q.query.clone(),
+                        default_database: ctx_db,
+                        output_location: out,
+                    });
+                }
+            }
+            jobs
+        };
+        for job in jobs {
+            self.spawn_query(job);
+        }
     }
 
     pub(super) fn stop_query_execution(
@@ -196,8 +236,13 @@ impl AthenaService {
             .query_executions
             .get_mut(&id)
             .ok_or_else(|| invalid_request(format!("QueryExecution {id} not found")))?;
-        q.state = "CANCELLED".to_string();
-        q.state_change_reason = Some("Cancelled by user".to_string());
+        // Stopping a query that already finished is a no-op on Athena; an
+        // in-flight one is cancelled and its job discards its outcome.
+        if q.state == "QUEUED" || q.state == "RUNNING" {
+            q.state = "CANCELLED".to_string();
+            q.state_change_reason = Some("Query cancelled by user".to_string());
+            q.completion_time = Some(Utc::now());
+        }
         Ok(AwsResponse::ok_json(json!({})))
     }
 
@@ -309,10 +354,16 @@ impl AthenaService {
             .get(&id)
             .ok_or_else(|| invalid_request(format!("QueryExecution {id} not found")))?;
         if q.state != "SUCCEEDED" {
-            return Err(invalid_request(format!(
-                "Query is in state {} — results unavailable",
-                q.state
-            )));
+            let msg = match q.state.as_str() {
+                "QUEUED" | "RUNNING" => {
+                    format!("Query has not yet finished. Current state: {}", q.state)
+                }
+                _ => format!(
+                    "Query did not finish successfully. Final query state: {}",
+                    q.state
+                ),
+            };
+            return Err(invalid_request(msg));
         }
         let column_info: Vec<Value> = q
             .result_columns
@@ -464,5 +515,107 @@ fn effective_engine_version(selected: &str) -> String {
         "Athena engine version 3".to_string()
     } else {
         selected.to_string()
+    }
+}
+
+/// Everything a query job needs to run without the request.
+pub(super) struct QueryJob {
+    pub account_id: String,
+    pub region: String,
+    pub query_execution_id: String,
+    pub query: String,
+    pub default_database: Option<String>,
+    pub output_location: Option<String>,
+}
+
+pub(super) struct QueryJobEnv {
+    pub state: SharedAthenaState,
+    pub glue: Option<SharedGlueState>,
+    pub s3: Option<SharedS3State>,
+    pub s3_store: Option<Arc<dyn fakecloud_persistence::S3Store>>,
+}
+
+/// Move `id` from `from` to RUNNING; false when the query is gone or no
+/// longer in `from` (e.g. StopQueryExecution cancelled it).
+fn begin_query(state: &SharedAthenaState, account_id: &str, id: &str) -> bool {
+    let mut st = state.write();
+    let Some(q) = st
+        .accounts
+        .get_mut(account_id)
+        .and_then(|a| a.query_executions.get_mut(id))
+    else {
+        return false;
+    };
+    if q.state != "QUEUED" {
+        return false;
+    }
+    q.state = "RUNNING".to_string();
+    true
+}
+
+/// Execute a query job: QUEUED -> RUNNING, run the SQL (S3 reads and the
+/// result write happen with no Athena or S3 lock held), then record the
+/// outcome unless the query was cancelled meanwhile.
+pub(super) fn run_query_job(env: &QueryJobEnv, job: &QueryJob) {
+    if !begin_query(&env.state, &job.account_id, &job.query_execution_id) {
+        return;
+    }
+    let started = std::time::Instant::now();
+    let executed = sql::execute(
+        &job.query,
+        job.default_database.as_deref(),
+        job.output_location.as_deref(),
+        &sql::ExecEnv {
+            account_id: &job.account_id,
+            region: &job.region,
+            glue: env.glue.as_ref(),
+            s3: env.s3.as_ref(),
+            s3_store: env.s3_store.as_deref(),
+            query_execution_id: &job.query_execution_id,
+        },
+    );
+    let elapsed_ms = started.elapsed().as_millis() as i64;
+
+    let mut st = env.state.write();
+    let Some(q) = st
+        .accounts
+        .get_mut(&job.account_id)
+        .and_then(|a| a.query_executions.get_mut(&job.query_execution_id))
+    else {
+        return;
+    };
+    if q.state != "RUNNING" {
+        // Cancelled while running: keep CANCELLED and drop the outcome.
+        return;
+    }
+    q.completion_time = Some(Utc::now());
+    q.engine_execution_time_ms = elapsed_ms;
+    q.total_execution_time_ms = elapsed_ms;
+    match executed {
+        Ok(ExecutedQuery {
+            columns,
+            rows,
+            data_scanned_bytes,
+            output_location,
+        }) => {
+            q.state = "SUCCEEDED".to_string();
+            q.result_columns = columns;
+            q.result_rows = rows;
+            q.data_scanned_bytes = data_scanned_bytes;
+            if let Some(out) = output_location {
+                if let Some(obj) = q
+                    .result_configuration
+                    .get_or_insert_with(|| json!({}))
+                    .as_object_mut()
+                {
+                    obj.insert("OutputLocation".to_string(), Value::String(out));
+                }
+            }
+        }
+        Err(err) => {
+            tracing::debug!(query = %job.query, error = %err, "athena: query failed");
+            q.state = "FAILED".to_string();
+            q.state_change_reason = Some(err.to_string());
+        }
     }
 }

@@ -5,6 +5,8 @@ mod expression_corpus_tests;
 mod global_tables;
 pub(crate) mod iam;
 mod iam_conditions;
+mod import_export;
+mod import_formats;
 mod items;
 mod partiql;
 mod queries;
@@ -193,8 +195,12 @@ impl DynamoDbService {
         self
     }
 
+    /// Attach the snapshot store. Called at startup once the persisted state
+    /// has been loaded, so import/export jobs a restart interrupted are
+    /// resumed here (with the S3 wiring already in place).
     pub fn with_snapshot_store(mut self, store: Arc<dyn SnapshotStore>) -> Self {
         self.snapshot_store = Some(store);
+        self.resume_interrupted_jobs();
         self
     }
 

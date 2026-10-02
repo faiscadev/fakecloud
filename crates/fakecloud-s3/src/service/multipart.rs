@@ -372,9 +372,14 @@ impl S3Service {
             .and_then(|v| v.to_str().ok())
             .and_then(super::parse_http_date);
 
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
-        let src_body_ref = {
+        // Phase 1 (read guard): resolve the source, check preconditions and
+        // that the upload exists, and open the source body. Nothing is read
+        // yet: the source can be 5 GB, and the global S3 lock must not be held
+        // across that IO.
+        let src_handle = {
+            let accts = self.state.read();
+            let empty_state = crate::state::S3State::new(account_id, "us-east-1");
+            let state = accts.get(account_id).unwrap_or(&empty_state);
             let sb = state
                 .buckets
                 .get(src_bucket)
@@ -415,10 +420,22 @@ impl S3Service {
                     return Err(precondition_412());
                 }
             }
-            src_obj.body.clone()
+            let b = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            match b.multipart_uploads.get(upload_id) {
+                Some(upload) if upload.key == key => {}
+                _ => return Err(no_such_upload(upload_id)),
+            }
+            crate::body_io::ObjectBodyHandle::open(&src_obj.body).map_err(super::io_to_aws)?
         };
-        let src_bytes = state.read_body(&src_body_ref).map_err(super::io_to_aws)?;
-        let src_data = if let Some(range_str) = copy_range {
+
+        // Phase 2 (no lock): resolve x-amz-copy-source-range against the
+        // source size and read only that range, then stage the part next to
+        // the store.
+        let src_size = src_handle.size();
+        let (offset, len) = if let Some(range_str) = copy_range {
             let range_part = range_str.strip_prefix("bytes=").unwrap_or(range_str);
             let invalid_range = || {
                 AwsServiceError::aws_error(
@@ -426,18 +443,17 @@ impl S3Service {
                     "InvalidArgument",
                     format!(
                         "The x-amz-copy-source-range value \"{range_str}\" is not valid for \
-                         the source object of size {}.",
-                        src_bytes.len()
+                         the source object of size {src_size}."
                     ),
                 )
             };
             if let Some((start_str, end_str)) = range_part.split_once('-') {
                 // A copy-source-range over an empty object has no valid offsets, and a
-                // malformed/out-of-bounds range must be rejected rather than slicing past
-                // the buffer (which would panic the request thread).
-                let last = src_bytes.len().checked_sub(1).ok_or_else(invalid_range)?;
-                let start: usize = start_str.trim().parse().map_err(|_| invalid_range())?;
-                let end: usize = if end_str.trim().is_empty() {
+                // malformed/out-of-bounds range must be rejected rather than reading past
+                // the end of the source.
+                let last = src_size.checked_sub(1).ok_or_else(invalid_range)?;
+                let start: u64 = start_str.trim().parse().map_err(|_| invalid_range())?;
+                let end: u64 = if end_str.trim().is_empty() {
                     last
                 } else {
                     end_str.trim().parse().map_err(|_| invalid_range())?
@@ -445,16 +461,27 @@ impl S3Service {
                 if start > end || end > last {
                     return Err(invalid_range());
                 }
-                src_bytes.slice(start..end + 1)
+                (start, end - start + 1)
             } else {
-                src_bytes.clone()
+                (0, src_size)
             }
         } else {
-            src_bytes.clone()
+            (0, src_size)
         };
+        let src_data = super::run_blocking_io(|| src_handle.read_range(offset, len))
+            .map_err(super::io_to_aws)?;
 
         let data_len = src_data.len() as u64;
         let etag = compute_md5(&src_data);
+        let mut staged = super::run_blocking_io(|| {
+            crate::body_io::SpooledBody::spool(Some(&*self.store), src_data)
+        })
+        .map_err(super::io_to_aws)?;
+
+        // Phase 3 (write guard): commit the part. The upload may have been
+        // aborted or completed meanwhile; the staged file is then discarded.
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
         let b = state
             .buckets
             .get_mut(bucket)
@@ -467,19 +494,22 @@ impl S3Service {
             return Err(no_such_upload(upload_id));
         }
 
-        // Store-first: durably write before the in-memory part is visible.
-        self.store
+        // Store-first: durably write before the in-memory part is visible,
+        // and keep the BodyRef the store returns (a disk file in persistent
+        // mode) instead of pinning the copied bytes in RAM.
+        let body_ref = self
+            .store
             .mpu_put_part(
                 bucket,
                 upload_id,
                 part_number as u32,
-                BodySource::Bytes(src_data.clone()),
+                staged.source(),
                 &etag,
             )
             .map_err(super::persistence_error)?;
         let part = UploadPart {
             part_number: part_number as u32,
-            body: crate::state::memory_body(src_data),
+            body: body_ref,
             etag: etag.clone(),
             size: data_len,
             last_modified: Utc::now(),

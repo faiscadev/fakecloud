@@ -964,28 +964,72 @@ impl S3Service {
             ));
         }
 
-        let accts = self.state.read();
-        let empty = crate::state::S3State::new(account_id, "us-east-1");
-        let state = accts.get(account_id).unwrap_or(&empty);
-        let b = state
-            .buckets
-            .get(bucket)
-            .ok_or_else(|| no_such_bucket(bucket))?;
-        let obj = b.objects.get(key).ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::NOT_FOUND,
-                "NoSuchKey",
-                format!("Key {key} does not exist."),
-            )
-        })?;
+        let codec = match request.InputSerialization.compression_type.as_deref() {
+            None => crate::compression::Codec::None,
+            Some(name) => match crate::compression::Codec::from_name(name) {
+                Some(
+                    c @ (crate::compression::Codec::None
+                    | crate::compression::Codec::Gzip
+                    | crate::compression::Codec::Bzip2),
+                ) => c,
+                _ => {
+                    return Err(AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidCompressionFormat",
+                        format!("The file is not in a supported compression format: {name}"),
+                    ))
+                }
+            },
+        };
 
-        let object_bytes = state.read_body(&obj.body).map_err(|e| {
+        // Resolve the object and open its body under the read guard, then
+        // drop the guard before reading: the whole object is scanned, and
+        // holding the global S3 lock for that would block every writer.
+        let handle = {
+            let accts = self.state.read();
+            let empty = crate::state::S3State::new(account_id, "us-east-1");
+            let state = accts.get(account_id).unwrap_or(&empty);
+            let b = state
+                .buckets
+                .get(bucket)
+                .ok_or_else(|| no_such_bucket(bucket))?;
+            let obj = b.objects.get(key).ok_or_else(|| {
+                AwsServiceError::aws_error(
+                    StatusCode::NOT_FOUND,
+                    "NoSuchKey",
+                    format!("Key {key} does not exist."),
+                )
+            })?;
+            crate::body_io::ObjectBodyHandle::open(&obj.body).map_err(|e| {
+                AwsServiceError::aws_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "ServiceException",
+                    format!("Failed to read object body: {e}"),
+                )
+            })?
+        };
+        let raw_bytes = crate::service::run_blocking_io(|| handle.read_all()).map_err(|e| {
             AwsServiceError::aws_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "ServiceException",
                 format!("Failed to read object body: {e}"),
             )
         })?;
+        // BytesScanned counts the stored (compressed) bytes, as on AWS.
+        let bytes_scanned = raw_bytes.len() as u64;
+        let object_bytes = if codec == crate::compression::Codec::None {
+            raw_bytes
+        } else {
+            bytes::Bytes::from(
+                crate::compression::decompress(codec, &raw_bytes).map_err(|_| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "InvalidCompressionFormat",
+                        "The file is not in a supported compression format.",
+                    )
+                })?,
+            )
+        };
 
         let query = crate::select::parse_sql(&request.Expression).map_err(|e| {
             AwsServiceError::aws_error(
@@ -1049,8 +1093,7 @@ impl S3Service {
         // Build eventstream response
         let mut body = Vec::new();
         body.extend(crate::eventstream::records_event_frame(&output_bytes));
-        let bytes_scanned = object_bytes.len() as u64;
-        let bytes_processed = output_bytes.len() as u64;
+        let bytes_processed = object_bytes.len() as u64;
         let bytes_returned = output_bytes.len() as u64;
         body.extend(crate::eventstream::stats_event_frame(
             bytes_scanned,

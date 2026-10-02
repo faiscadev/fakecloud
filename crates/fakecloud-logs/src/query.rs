@@ -522,6 +522,14 @@ pub struct QueryStream {
 /// Execute a parsed query against a set of streams, returning results in the
 /// CloudWatch Logs Insights format: an array of rows, each an array of
 /// `{field, value}` objects.
+/// Whether an event (millisecond timestamp) falls in a StartQuery window
+/// given in epoch seconds. Both ends are inclusive, as AWS documents for
+/// `startTime` and `endTime`.
+pub fn in_query_window(timestamp_ms: i64, start_time_secs: i64, end_time_secs: i64) -> bool {
+    let secs = timestamp_ms.div_euclid(1000);
+    secs >= start_time_secs && secs <= end_time_secs
+}
+
 pub fn execute_query(
     query: &ParsedQuery,
     streams: &[QueryStream],
@@ -532,8 +540,7 @@ pub fn execute_query(
     let mut records: Vec<Record> = Vec::new();
     for stream in streams {
         for (index, event) in &stream.events {
-            let event_time_secs = event.timestamp / 1000;
-            if event_time_secs >= start_time_secs && event_time_secs < end_time_secs {
+            if in_query_window(event.timestamp, start_time_secs, end_time_secs) {
                 records.push(build_record(
                     event,
                     &stream.group_name,

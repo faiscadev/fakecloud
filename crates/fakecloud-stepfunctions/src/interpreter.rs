@@ -1665,8 +1665,8 @@ async fn call_sdk_action_raw_bytes(
 /// Cap on `.sync` polling so a stuck downstream task can't hang an
 /// execution forever. Mirrors the `TimeoutSeconds` knob on the Task state
 /// when one is set; otherwise defaults to 5 minutes which is enough for
-/// the in-process services that ship today (Athena returns synchronously,
-/// ECS tasks finish within seconds even when docker-less).
+/// the in-process services that ship today (Athena queries finish within
+/// milliseconds, ECS tasks within seconds even when docker-less).
 const SYNC_DEFAULT_TIMEOUT_SECS: u64 = 300;
 const SYNC_POLL_INTERVAL_MS: u64 = 200;
 

@@ -30,8 +30,12 @@ persistent mode. The wire protocol is awsJson1.1 (x-amz-target
   degraded / control-plane-only path (no container runtime, or a SQL app),
   `StartApplication` moves `READY` -> `STARTING` -> `RUNNING` (settling on the
   next describe) and `StopApplication` moves `RUNNING` -> `STOPPING` -> `READY`.
-  `Force` is supported; `RollbackApplication` restores the previous version's
-  configuration into a new version.
+  `Force` is supported. A stop or delete issued while a Flink app is still
+  `STARTING` wins: the in-flight start is cancelled and its cluster torn down.
+  `RollbackApplication` restores the previous version's configuration,
+  runtime and role into a new version; a running app passes through
+  `ROLLING_BACK` (redeploying the previous job) and returns to `RUNNING`, while
+  an app that was not running stays `READY`.
 - **Versioning** (`DescribeApplicationVersion`, `ListApplicationVersions`).
   Every configuration-changing operation increments `ApplicationVersionId` and
   records the full version history. `CurrentApplicationVersionId` and
@@ -82,9 +86,16 @@ RDS, ElastiCache, and Lambda meet:
   live job status.
 - `CreateApplicationPresignedUrl` returns the cluster's reachable dashboard/REST
   URL, so you can drive the live JobManager directly.
+- `UpdateApplication` on a running app moves it to `UPDATING`, cancels the old
+  job, submits the new configuration's job on the same cluster, and returns it
+  to `RUNNING`.
 - `StopApplication` cancels the real job (`PATCH /jobs/{id}?mode=cancel`) and
-  tears the container down; `DeleteApplication` reaps it. Persisted RUNNING apps
-  re-attach their container on restart (no `RUNNING`-with-dead-container).
+  tears the container down; `DeleteApplication` reaps it, so a same-name
+  re-create starts from a clean cluster. On restart, persisted `RUNNING` apps
+  re-attach their container (one that is gone or cannot be re-attached is
+  removed and the app settles `READY`); apps caught mid-`STARTING`,
+  `UPDATING` or `ROLLING_BACK` are redeployed, and apps caught `STOPPING` or
+  `FORCE_STOPPING` finish stopping and settle `READY`.
 
 The backing runtime is used automatically when a container CLI (Docker/Podman)
 is available. It is skipped (and the pure control-plane state machine used

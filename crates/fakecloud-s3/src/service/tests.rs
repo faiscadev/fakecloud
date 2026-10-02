@@ -7863,3 +7863,187 @@ async fn object_lock_default_retention_is_range_checked_and_never_overflows() {
         .await
         .unwrap();
 }
+
+// ── SelectObjectContent compression ──────────────────────────────
+
+fn select_request_xml(compression: &str) -> String {
+    format!(
+        "<SelectObjectContentRequest><Expression>SELECT * FROM S3Object</Expression>\
+         <ExpressionType>SQL</ExpressionType><InputSerialization>\
+         <CompressionType>{compression}</CompressionType><CSV><FileHeaderInfo>USE</FileHeaderInfo></CSV>\
+         </InputSerialization><OutputSerialization><CSV/></OutputSerialization>\
+         </SelectObjectContentRequest>"
+    )
+}
+
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+#[test]
+fn select_object_content_decompresses_gzip_and_bzip2_input() {
+    use std::io::Write;
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    let csv = b"id,name\n1,alice\n2,bob\n";
+    let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    gz.write_all(csv).unwrap();
+    seed_object(&svc, "b", "data.csv.gz", &gz.finish().unwrap());
+    let mut bz = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+    bz.write_all(csv).unwrap();
+    seed_object(&svc, "b", "data.csv.bz2", &bz.finish().unwrap());
+
+    for (key, codec) in [("data.csv.gz", "GZIP"), ("data.csv.bz2", "BZIP2")] {
+        let xml = select_request_xml(codec);
+        let req = make_request(Method::POST, &format!("/b/{key}"), &[], xml.as_bytes());
+        let resp = svc
+            .select_object_content("123456789012", &req, "b", key)
+            .unwrap();
+        let body = resp.body.expect_bytes();
+        assert!(contains(body, b"1,alice"), "{codec}: decoded rows missing");
+        assert!(contains(body, b"2,bob"), "{codec}: decoded rows missing");
+    }
+}
+
+#[test]
+fn select_object_content_rejects_unsupported_or_mismatched_compression() {
+    let svc = make_service();
+    seed_bucket(&svc, "b");
+    seed_object(&svc, "b", "plain.csv", b"id\n1\n");
+    let xml = select_request_xml("LZO");
+    let req = make_request(Method::POST, "/b/plain.csv", &[], xml.as_bytes());
+    assert_aws_err(
+        svc.select_object_content("123456789012", &req, "b", "plain.csv"),
+        "InvalidCompressionFormat",
+    );
+    // Declaring GZIP on an uncompressed object fails instead of returning
+    // garbage rows.
+    let xml = select_request_xml("GZIP");
+    let req = make_request(Method::POST, "/b/plain.csv", &[], xml.as_bytes());
+    assert_aws_err(
+        svc.select_object_content("123456789012", &req, "b", "plain.csv"),
+        "InvalidCompressionFormat",
+    );
+}
+
+// ── CopyObject / UploadPartCopy through a disk store ────────────
+
+fn make_disk_service(dir: &std::path::Path) -> S3Service {
+    let state: SharedS3State = Arc::new(RwLock::new(
+        fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
+    ));
+    let store = Arc::new(fakecloud_persistence::s3::DiskS3Store::new(
+        dir.to_path_buf(),
+        Arc::new(fakecloud_persistence::cache::BodyCache::new(0)),
+    ));
+    S3Service::with_store(state, Arc::new(DeliveryBus::new()), store)
+}
+
+fn disk_body_of(svc: &S3Service, bucket: &str, key: &str) -> Vec<u8> {
+    let mas = svc.state.read();
+    let obj = &mas.default_ref().buckets[bucket].objects[key];
+    match &obj.body {
+        fakecloud_persistence::BodyRef::Disk { path, .. } => std::fs::read(path).unwrap(),
+        other => panic!("expected a disk-backed body, got {other:?}"),
+    }
+}
+
+fn spool_is_empty(dir: &std::path::Path) -> bool {
+    match std::fs::read_dir(dir.join(".spool")) {
+        Ok(entries) => entries.count() == 0,
+        Err(_) => true,
+    }
+}
+
+#[tokio::test]
+async fn copy_object_writes_destination_through_disk_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = make_disk_service(dir.path());
+    seed_bucket(&svc, "src");
+    seed_bucket(&svc, "dst");
+    let req = make_request(Method::PUT, "/src/a", &[], b"copy me please");
+    svc.put_object("123456789012", &req, "src", "a")
+        .await
+        .unwrap();
+
+    let mut req = make_request(Method::PUT, "/dst/b", &[], b"");
+    req.headers
+        .insert("x-amz-copy-source", "src/a".parse().unwrap());
+    svc.copy_object("123456789012", &req, "dst", "b").unwrap();
+
+    assert_eq!(disk_body_of(&svc, "dst", "b"), b"copy me please");
+    assert!(spool_is_empty(dir.path()), "staged copy body left behind");
+
+    // A copy into a missing bucket fails without leaving a staged file.
+    let mut req = make_request(Method::PUT, "/nope/b", &[], b"");
+    req.headers
+        .insert("x-amz-copy-source", "src/a".parse().unwrap());
+    assert_aws_err(
+        svc.copy_object("123456789012", &req, "nope", "b"),
+        "NoSuchBucket",
+    );
+    assert!(spool_is_empty(dir.path()));
+}
+
+#[tokio::test]
+async fn upload_part_copy_reads_only_the_range_and_persists_the_part() {
+    let dir = tempfile::tempdir().unwrap();
+    let svc = make_disk_service(dir.path());
+    seed_bucket(&svc, "b");
+    let req = make_request(Method::PUT, "/b/src", &[], b"0123456789");
+    svc.put_object("123456789012", &req, "b", "src")
+        .await
+        .unwrap();
+
+    let req = make_request(Method::POST, "/b/dst", &[("uploads", "")], b"");
+    let resp = svc
+        .create_multipart_upload("123456789012", &req, "b", "dst")
+        .unwrap();
+    let xml = String::from_utf8(resp.body.expect_bytes().to_vec()).unwrap();
+    let upload_id = xml
+        .split("<UploadId>")
+        .nth(1)
+        .and_then(|s| s.split("</UploadId>").next())
+        .unwrap()
+        .to_string();
+
+    let mut req = make_request(Method::PUT, "/b/dst", &[], b"");
+    req.headers
+        .insert("x-amz-copy-source", "b/src".parse().unwrap());
+    req.headers
+        .insert("x-amz-copy-source-range", "bytes=2-5".parse().unwrap());
+    svc.upload_part_copy("123456789012", &req, "b", "dst", &upload_id, 1)
+        .unwrap();
+
+    {
+        let mas = svc.state.read();
+        let part = &mas.default_ref().buckets["b"].multipart_uploads[&upload_id].parts[&1];
+        assert_eq!(part.size, 4);
+        match &part.body {
+            fakecloud_persistence::BodyRef::Disk { path, .. } => {
+                assert_eq!(std::fs::read(path).unwrap(), b"2345")
+            }
+            other => panic!("part must be disk-backed in persistent mode, got {other:?}"),
+        }
+    }
+    assert!(spool_is_empty(dir.path()));
+
+    // Out-of-range copy ranges are still rejected against the source size.
+    let mut req = make_request(Method::PUT, "/b/dst", &[], b"");
+    req.headers
+        .insert("x-amz-copy-source", "b/src".parse().unwrap());
+    req.headers
+        .insert("x-amz-copy-source-range", "bytes=5-10".parse().unwrap());
+    assert_aws_err(
+        svc.upload_part_copy("123456789012", &req, "b", "dst", &upload_id, 2),
+        "InvalidArgument",
+    );
+    // An unknown upload fails before any source IO.
+    let mut req = make_request(Method::PUT, "/b/dst", &[], b"");
+    req.headers
+        .insert("x-amz-copy-source", "b/src".parse().unwrap());
+    assert_aws_err(
+        svc.upload_part_copy("123456789012", &req, "b", "dst", "no-such-upload", 1),
+        "NoSuchUpload",
+    );
+}

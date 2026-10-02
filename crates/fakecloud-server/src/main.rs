@@ -2297,7 +2297,8 @@ async fn main() {
     if let Some(h) = logs_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("logs", h);
     }
-    registry.register(Arc::new(logs_service));
+    let logs_service = Arc::new(logs_service);
+    registry.register(logs_service.clone());
     let kms_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {
             let data_path = persistence_config
@@ -2618,6 +2619,9 @@ async fn main() {
     // RDS S3 exports go through this Arc): route its writes through the durable
     // store so delivered objects survive a restart.
     s3_delivery_for_logs.set_s3_store(s3_store.clone());
+    // Export tasks a previous process left PENDING/RUNNING can run now that
+    // their S3 destination is durable.
+    logs_service.resume_interrupted_export_tasks();
     let s3_store_for_inbound = s3_store.clone();
     if let Some(ref cache) = shared_body_cache {
         // Share the cache between the S3Store and S3State so read_body honors
@@ -4931,13 +4935,16 @@ async fn main() {
         };
     let mut athena_service = fakecloud_athena::AthenaService::new(athena_state.clone())
         .with_glue(glue_state.clone())
-        .with_s3(s3_state.clone());
+        .with_s3(s3_state.clone())
+        .with_s3_store(s3_store.clone());
     if let Some(store) = athena_snapshot_store.clone() {
         athena_service = athena_service.with_snapshot_store(store);
     }
     if let Some(h) = athena_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("athena", h);
     }
+    // Queries a previous process accepted but never finished run again now.
+    athena_service.resume_interrupted_queries();
     registry.register(Arc::new(athena_service));
     let redshift_snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>> =
         if persistence_config.mode == fakecloud_persistence::StorageMode::Persistent {

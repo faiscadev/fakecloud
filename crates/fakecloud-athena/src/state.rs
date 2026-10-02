@@ -179,6 +179,10 @@ pub struct QueryExecution {
     pub total_execution_time_ms: i64,
     pub result_rows: Vec<Vec<String>>,
     pub result_columns: Vec<(String, String)>,
+    /// Region the query was started in; its Glue catalog lookups resolve
+    /// there. Kept so a query interrupted by a restart can be re-run.
+    #[serde(default)]
+    pub region: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

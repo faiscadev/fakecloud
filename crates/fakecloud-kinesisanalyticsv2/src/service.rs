@@ -9,7 +9,8 @@
 //! application version and records an async operation. The real Flink-job
 //! data plane (a running Docker container) is a separate later batch.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +26,10 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
-use crate::runtime::{flink_state_to_app_status, is_terminal_flink_state, FlinkRuntime};
+use crate::runtime::{
+    flink_state_to_app_status, is_terminal_flink_state, FlinkBackend, FlinkRuntime, RunningFlink,
+    READY_ATTEMPTS, READY_POLL_INTERVAL,
+};
 use crate::state::{
     Application, FlinkBinding, OperationRecord, SharedKa2State, Snapshot, TagMap, VersionRecord,
 };
@@ -102,7 +106,10 @@ pub struct Ka2Service {
     /// path (no container CLI, or the backend explicitly disabled): Flink apps
     /// then behave as the pure state machine (`STARTING` settles to `RUNNING`
     /// on the next describe).
-    runtime: Option<Arc<FlinkRuntime>>,
+    runtime: Option<Arc<dyn FlinkBackend>>,
+    /// Per-application epoch + container-operation lock for the real data
+    /// plane (see [`Lifecycles`]).
+    lifecycles: Lifecycles,
     /// In-process S3 reader used to fetch an application's code JAR from a
     /// fakecloud S3 bucket for submission to the Flink cluster.
     s3: Option<Arc<dyn S3Delivery>>,
@@ -119,6 +126,7 @@ impl Ka2Service {
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
             runtime: None,
+            lifecycles: Lifecycles::default(),
             s3: None,
             ec2_state: None,
         }
@@ -141,6 +149,13 @@ impl Ka2Service {
     /// S3 runs as a genuine Flink job in Docker.
     pub fn with_runtime(mut self, runtime: Arc<FlinkRuntime>) -> Self {
         self.runtime = Some(runtime);
+        self
+    }
+
+    /// Attach any [`FlinkBackend`] implementation (the real runtime, or a
+    /// deterministic test double).
+    pub fn with_backend(mut self, backend: Arc<dyn FlinkBackend>) -> Self {
+        self.runtime = Some(backend);
         self
     }
 
@@ -483,7 +498,7 @@ fn settle_status(status: &str) -> &'static str {
         "STARTING" => "RUNNING",
         "STOPPING" | "FORCE_STOPPING" => "READY",
         "UPDATING" | "AUTOSCALING" => "RUNNING",
-        "ROLLING_BACK" => "READY",
+        "ROLLING_BACK" => "RUNNING",
         "DELETING" => "DELETING",
         "MAINTENANCE" => "READY",
         other => match other {
@@ -1242,16 +1257,19 @@ impl Ka2Service {
         // background so a later describe reflects a job that finished/failed on
         // its own (the "a read fires a transition" pattern).
         let reconcile = if real && app.status == "RUNNING" {
-            app.flink_binding
-                .as_ref()
-                .and_then(|b| b.job_id.as_ref().map(|j| (b.clone(), j.clone())))
+            app.flink_binding.as_ref().and_then(|b| {
+                b.job_id.as_ref().and_then(|j| {
+                    let epoch = self.lifecycles.current(&app.arn);
+                    self.task_ctx(&req.account_id, &name, &app.arn, epoch)
+                        .map(|ctx| (ctx, b.clone(), j.clone()))
+                })
+            })
         } else {
             None
         };
-        let account = req.account_id.clone();
         drop(accounts);
-        if let Some((binding, job_id)) = reconcile {
-            self.spawn_flink_reconcile(account, name, binding, job_id);
+        if let Some((ctx, binding, job_id)) = reconcile {
+            self.spawn_flink_reconcile(ctx, binding, job_id);
         }
         ok(json!({ "ApplicationDetail": detail }))
     }
@@ -1331,12 +1349,34 @@ impl Ka2Service {
             }
         }
         let from = app.version_id;
-        if app.status == "RUNNING" {
+        // A real Flink app that is running (or on its way there) redeploys its
+        // job with the new configuration -- UPDATING until Flink reports the new
+        // job RUNNING. Superseding the epoch cancels any in-flight bring-up or
+        // earlier redeploy so it can't settle the app on the stale config.
+        let redeploy = self.runtime.is_some()
+            && is_real_flink(app)
+            && ACTIVE_STATUSES.contains(&app.status.as_str());
+        if app.status == "RUNNING" || (redeploy && app.status != "STARTING") {
             app.status = "UPDATING".to_string();
         }
         bump_version(app);
         let op_id = record_operation(app, "UpdateApplication", Some(from), Some(app.version_id));
         let detail = build_application_detail(app);
+        let deploy = if redeploy {
+            let epoch = self.lifecycles.bump(&app.arn);
+            DeploySpec::of(app).and_then(|spec| {
+                Some((
+                    self.task_ctx(&req.account_id, &name, &app.arn, epoch)?,
+                    spec,
+                ))
+            })
+        } else {
+            None
+        };
+        drop(accounts);
+        if let Some((ctx, spec)) = deploy {
+            self.spawn_flink_deploy(ctx, spec);
+        }
         ok(json!({ "ApplicationDetail": detail, "OperationId": op_id }))
     }
 
@@ -1354,14 +1394,19 @@ impl Ka2Service {
             .remove(&name)
             .ok_or_else(|| not_found(&name))?;
         st.tags.remove(&app.arn);
-        let binding = app.flink_binding.clone();
+        // Supersede any in-flight bring-up (so it can't resurrect state or keep
+        // its container) and tear down every container of the app, dropping the
+        // runtime's tracking entry so a same-name re-create starts clean.
+        let teardown =
+            if self.runtime.is_some() && (is_real_flink(&app) || app.flink_binding.is_some()) {
+                let epoch = self.lifecycles.bump(&app.arn);
+                self.task_ctx(&req.account_id, &name, &app.arn, epoch)
+            } else {
+                None
+            };
         drop(accounts);
-        // Tear down the backing Flink cluster container on delete so it is not
-        // leaked (fire-and-forget; the request must not block on the daemon).
-        if let (Some(runtime), Some(bind)) = (self.runtime.clone(), binding) {
-            tokio::spawn(async move {
-                runtime.remove_by_id(&bind.container_id).await;
-            });
+        if let Some(ctx) = teardown {
+            self.spawn_flink_teardown(ctx, app.flink_binding.clone(), false);
         }
         ok_empty()
     }
@@ -1433,21 +1478,20 @@ impl Ka2Service {
         // issues #1539/#1730). The app settles to RUNNING only once Flink reports
         // the job RUNNING. Otherwise the pure state machine settles on describe.
         let real = self.runtime.is_some() && is_real_flink(app);
-        let code = if real { flink_code_location(app) } else { None };
-        let parallelism = if real { flink_parallelism(app) } else { None };
-        let program_args = if real { flink_program_args(app) } else { None };
-        let arn = app.arn.clone();
+        let deploy = if real {
+            let epoch = self.lifecycles.bump(&app.arn);
+            DeploySpec::of(app).and_then(|spec| {
+                Some((
+                    self.task_ctx(&req.account_id, &name, &app.arn, epoch)?,
+                    spec,
+                ))
+            })
+        } else {
+            None
+        };
         drop(accounts);
-        if let Some((bucket, key)) = code {
-            self.spawn_flink_start(
-                req.account_id.clone(),
-                name,
-                arn,
-                bucket,
-                key,
-                parallelism,
-                program_args,
-            );
+        if let Some((ctx, spec)) = deploy {
+            self.spawn_flink_deploy(ctx, spec);
         }
         ok(json!({ "OperationId": op_id }))
     }
@@ -1470,14 +1514,16 @@ impl Ka2Service {
         }
         let real = self.runtime.is_some() && is_real_flink(app);
         let binding = app.flink_binding.clone();
-        let running_job = binding
-            .as_ref()
-            .and_then(|b| b.job_id.clone())
-            .filter(|_| real);
-        if real && running_job.is_none() {
-            // A real-flink app with no live job must settle straight to READY:
-            // describe skips the in-memory settle for real apps, so a STOPPING
-            // with no background canceller would strand forever.
+        // Anything to tear down: a bound cluster, or a lifecycle task in flight
+        // (a bring-up/redeploy may be creating a container right now).
+        let needs_teardown = real
+            && (binding.is_some()
+                || ACTIVE_STATUSES.contains(&app.status.as_str())
+                || matches!(app.status.as_str(), "STOPPING" | "FORCE_STOPPING"));
+        if real && !needs_teardown {
+            // Nothing running: settle straight to READY (describe skips the
+            // in-memory settle for real apps, so a STOPPING with no background
+            // canceller would strand forever).
             app.status = "READY".to_string();
         } else {
             app.status = if force {
@@ -1487,10 +1533,21 @@ impl Ka2Service {
             };
         }
         let op_id = record_operation(app, "StopApplication", None, None);
-        let arn = app.arn.clone();
+        // Supersede any in-flight start/redeploy so it can't flip the app back
+        // to RUNNING after this stop.
+        let teardown = if real {
+            let epoch = self.lifecycles.bump(&app.arn);
+            if needs_teardown {
+                self.task_ctx(&req.account_id, &name, &app.arn, epoch)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
         drop(accounts);
-        if let (Some(bind), Some(_job)) = (binding, running_job) {
-            self.spawn_flink_stop(req.account_id.clone(), name, arn, bind);
+        if let Some(ctx) = teardown {
+            self.spawn_flink_teardown(ctx, binding, true);
         }
         ok(json!({ "OperationId": op_id }))
     }
@@ -1517,16 +1574,51 @@ impl Ka2Service {
             ));
         }
         let target = app.version_id.saturating_sub(1).max(1);
-        // Restore the target version's configuration into a new version.
+        // Restore the target version's configuration (code, Flink config, run
+        // configuration, ...), runtime and execution role into a new version.
         if let Some(prev) = app.versions.get(&target).cloned() {
-            if let Some(cfg) = prev
+            if let Some(mut cfg) = prev
                 .detail
                 .get("ApplicationConfigurationDescription")
                 .cloned()
             {
+                // The run configuration belongs to the current run, not to the
+                // version: a rolled-back app keeps running with it.
+                let run_cfg = app
+                    .config_description
+                    .get("RunConfigurationDescription")
+                    .cloned();
+                match (run_cfg, cfg.as_object_mut()) {
+                    (Some(rc), Some(obj)) => {
+                        obj.insert("RunConfigurationDescription".into(), rc);
+                    }
+                    (None, Some(obj)) => {
+                        obj.remove("RunConfigurationDescription");
+                    }
+                    _ => {}
+                }
                 app.config_description = cfg;
             }
+            if let Some(rt) = prev
+                .detail
+                .get("RuntimeEnvironment")
+                .and_then(Value::as_str)
+            {
+                app.runtime_environment = rt.to_string();
+            }
+            if let Some(role) = prev
+                .detail
+                .get("ServiceExecutionRole")
+                .and_then(Value::as_str)
+            {
+                app.service_execution_role = Some(role.to_string());
+            }
         }
+        // AWS rolls a running (or stuck-updating) application back to the
+        // previous version and keeps it RUNNING on that configuration:
+        // ROLLING_BACK while the previous job is redeployed, then RUNNING. An
+        // application that was not running just takes the previous config.
+        let was_active = ACTIVE_STATUSES.contains(&app.status.as_str());
         let from = app.version_id;
         app.version_id += 1;
         app.conditional_token = new_token();
@@ -1534,10 +1626,26 @@ impl Ka2Service {
         app.version_rolled_back_from = Some(from);
         app.version_rolled_back_to = Some(target);
         app.version_updated_from = Some(from);
-        app.status = "READY".to_string();
+        app.status = if was_active { "ROLLING_BACK" } else { "READY" }.to_string();
         record_version(app);
         let op_id = record_operation(app, "RollbackApplication", Some(from), Some(app.version_id));
         let detail = build_application_detail(app);
+        let real = self.runtime.is_some() && is_real_flink(app);
+        let deploy = if real && was_active {
+            let epoch = self.lifecycles.bump(&app.arn);
+            DeploySpec::of(app).and_then(|spec| {
+                Some((
+                    self.task_ctx(&req.account_id, &name, &app.arn, epoch)?,
+                    spec,
+                ))
+            })
+        } else {
+            None
+        };
+        drop(accounts);
+        if let Some((ctx, spec)) = deploy {
+            self.spawn_flink_deploy(ctx, spec);
+        }
         ok(json!({ "ApplicationDetail": detail, "OperationId": op_id }))
     }
 
@@ -2319,6 +2427,374 @@ impl Ka2Service {
 const JOB_POLL_ATTEMPTS: u32 = 120;
 /// Bounded poll for a canceled job to reach a terminal state: ~30s.
 const CANCEL_POLL_ATTEMPTS: u32 = 60;
+const JOB_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Statuses in which an application is (or is about to be) running a job: an
+/// update or rollback in one of these redeploys the real job.
+const ACTIVE_STATUSES: &[&str] = &[
+    "STARTING",
+    "RUNNING",
+    "UPDATING",
+    "ROLLING_BACK",
+    "AUTOSCALING",
+];
+
+/// Per-application lifecycle coordination for the real Flink data plane.
+///
+/// * `epoch` is bumped (under the ka2 state write lock) by every lifecycle
+///   operation -- Start, Stop, Update/Rollback that redeploys, Delete, restart
+///   recovery. A background task captures the epoch it was spawned for and only
+///   applies a status/binding write while that epoch is still current, so a
+///   superseded bring-up can never overwrite a newer Stop/Delete (or resurrect a
+///   deleted application).
+/// * `lock` serializes every container operation for an application ARN, so a
+///   teardown always runs after a superseded bring-up has reached a checkpoint
+///   and a same-name re-create queues behind the old application's teardown.
+#[derive(Default)]
+struct LifecycleSlot {
+    epoch: AtomicU64,
+    lock: AsyncMutex<()>,
+}
+
+#[derive(Clone, Default)]
+struct Lifecycles(Arc<parking_lot::Mutex<HashMap<String, Arc<LifecycleSlot>>>>);
+
+impl Lifecycles {
+    fn slot(&self, arn: &str) -> Arc<LifecycleSlot> {
+        self.0.lock().entry(arn.to_string()).or_default().clone()
+    }
+
+    /// Supersede every in-flight task for `arn`; returns the new epoch.
+    fn bump(&self, arn: &str) -> u64 {
+        self.slot(arn).epoch.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    fn current(&self, arn: &str) -> u64 {
+        self.slot(arn).epoch.load(Ordering::SeqCst)
+    }
+}
+
+/// What to submit for a real Flink application: the code JAR location plus the
+/// job parameters, captured from the configuration the deploy is for.
+#[derive(Debug, Clone)]
+struct DeploySpec {
+    bucket: String,
+    key: String,
+    parallelism: Option<i64>,
+    program_args: Option<String>,
+}
+
+impl DeploySpec {
+    fn of(app: &Application) -> Option<Self> {
+        let (bucket, key) = flink_code_location(app)?;
+        Some(Self {
+            bucket,
+            key,
+            parallelism: flink_parallelism(app),
+            program_args: flink_program_args(app),
+        })
+    }
+}
+
+/// Everything a background lifecycle task needs, bound to the application and
+/// the epoch it was spawned for.
+#[derive(Clone)]
+struct TaskCtx {
+    state: SharedKa2State,
+    store: Option<Arc<dyn SnapshotStore>>,
+    snapshot_lock: Arc<AsyncMutex<()>>,
+    backend: Arc<dyn FlinkBackend>,
+    s3: Option<Arc<dyn S3Delivery>>,
+    lifecycles: Lifecycles,
+    account: String,
+    name: String,
+    arn: String,
+    epoch: u64,
+}
+
+fn running_of(b: &FlinkBinding) -> RunningFlink {
+    RunningFlink {
+        container_id: b.container_id.clone(),
+        host: b.host.clone(),
+        rest_port: b.rest_port,
+    }
+}
+
+enum Ready {
+    Yes,
+    Superseded,
+    TimedOut(String),
+}
+
+impl TaskCtx {
+    fn is_current(&self) -> bool {
+        self.lifecycles.current(&self.arn) == self.epoch
+    }
+
+    /// Apply `f` to the application only while this task's epoch is current
+    /// (checked under the state write lock, the same lock the handlers bump the
+    /// epoch under) and the application with this ARN still exists.
+    fn mutate_if_current<F: FnOnce(&mut Application)>(&self, f: F) -> bool {
+        let mut accounts = self.state.write();
+        if !self.is_current() {
+            return false;
+        }
+        let st = accounts.get_or_create(&self.account);
+        match st.applications.get_mut(&self.name) {
+            Some(app) if app.arn == self.arn => {
+                f(app);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// The application's current binding (regardless of epoch).
+    fn binding(&self) -> Option<FlinkBinding> {
+        self.state
+            .read()
+            .get(&self.account)
+            .and_then(|st| st.applications.get(&self.name))
+            .filter(|app| app.arn == self.arn)
+            .and_then(|app| app.flink_binding.clone())
+    }
+
+    async fn save(&self) {
+        save_snapshot(&self.state, self.store.clone(), &self.snapshot_lock).await;
+    }
+
+    /// Settle to `status`, replacing the binding when `binding` is `Some`.
+    async fn settle(&self, status: &str, binding: Option<Option<FlinkBinding>>) -> bool {
+        let applied = self.mutate_if_current(|app| {
+            app.status = status.to_string();
+            if let Some(b) = binding {
+                app.flink_binding = b;
+            }
+        });
+        if applied {
+            self.save().await;
+        }
+        applied
+    }
+
+    /// A bring-up/redeploy failed: tear the cluster down and settle READY. When
+    /// the task has been superseded the successor owns the cluster, so leave it.
+    async fn fail(&self, container_id: Option<&str>) {
+        if !self.is_current() {
+            return;
+        }
+        self.backend.remove_cluster(&self.arn, container_id).await;
+        self.settle("READY", Some(None)).await;
+    }
+
+    /// Poll the cluster until it can take a job, abandoning the wait as soon as
+    /// the task is superseded (stop/delete during STARTING).
+    async fn wait_ready(&self, running: &RunningFlink) -> Ready {
+        let started = std::time::Instant::now();
+        for _ in 0..READY_ATTEMPTS {
+            if !self.is_current() {
+                return Ready::Superseded;
+            }
+            if self.backend.cluster_ready(running).await {
+                return Ready::Yes;
+            }
+            tokio::time::sleep(READY_POLL_INTERVAL).await;
+        }
+        Ready::TimedOut(
+            self.backend
+                .readiness_failure(&running.container_id, started)
+                .await,
+        )
+    }
+
+    /// Cancel a job and wait (bounded) for it to reach a terminal state.
+    async fn cancel_and_wait(&self, running: &RunningFlink, job_id: &str) {
+        if let Err(error) = self.backend.cancel_job(running, job_id).await {
+            tracing::warn!(%error, app_arn = %self.arn, job_id, "cancel_job failed");
+        }
+        for _ in 0..CANCEL_POLL_ATTEMPTS {
+            match self.backend.job_state(running, job_id).await {
+                Ok(s) if is_terminal_flink_state(&s) => break,
+                Err(_) => break,
+                _ => tokio::time::sleep(JOB_POLL_INTERVAL).await,
+            }
+        }
+    }
+
+    /// Bring the application's job up with `spec`: reuse the tracked cluster or
+    /// create one, cancel any previous job (update/rollback redeploy), submit
+    /// the JAR, and settle RUNNING once Flink reports the job RUNNING. The caller
+    /// holds the application's lifecycle lock. Every step re-checks the epoch: a
+    /// superseded task stops touching state and leaves the tracked cluster to
+    /// its successor (a job it already submitted is canceled first so the
+    /// successor never inherits an untracked job).
+    async fn deploy_locked(&self, spec: DeploySpec) {
+        if !self.is_current() {
+            return;
+        }
+        // 1. Reuse the tracked cluster or bring up a new one.
+        let running = match self.backend.tracked(&self.arn) {
+            Some(r) => r,
+            None => match self.backend.create_cluster(&self.arn).await {
+                Ok(r) => r,
+                Err(error) => {
+                    tracing::error!(%error, app_arn = %self.arn, "failed to bring up Flink cluster; app back to READY");
+                    self.fail(None).await;
+                    return;
+                }
+            },
+        };
+        // The previous job only matters when it lives on this same cluster.
+        let previous = self
+            .binding()
+            .filter(|b| b.container_id == running.container_id);
+        let prev_job = previous.as_ref().and_then(|b| b.job_id.clone());
+        // Persist the container binding immediately so a restart can re-attach
+        // or clean it up (no RUNNING-with-dead-container, #1338).
+        let bound = self.mutate_if_current(|app| {
+            app.flink_binding = Some(FlinkBinding {
+                container_id: running.container_id.clone(),
+                host: running.host.clone(),
+                rest_port: running.rest_port,
+                jar_id: previous.as_ref().and_then(|b| b.jar_id.clone()),
+                job_id: prev_job.clone(),
+            });
+        });
+        if !bound {
+            return;
+        }
+        self.save().await;
+
+        // 2. Wait for a free task slot (cancellable).
+        match self.wait_ready(&running).await {
+            Ready::Yes => {}
+            Ready::Superseded => return,
+            Ready::TimedOut(reason) => {
+                tracing::error!(app_arn = %self.arn, %reason, "Flink cluster never became ready; app back to READY");
+                self.fail(Some(&running.container_id)).await;
+                return;
+            }
+        }
+
+        // 3. A redeploy replaces the running job.
+        if let Some(job) = &prev_job {
+            self.cancel_and_wait(&running, job).await;
+            if !self.mutate_if_current(|app| {
+                if let Some(b) = app.flink_binding.as_mut() {
+                    b.job_id = None;
+                }
+            }) {
+                return;
+            }
+        }
+
+        // 4. Fetch the code JAR from fakecloud S3.
+        let Some(s3) = self.s3.clone() else {
+            tracing::error!(app_arn = %self.arn, "no S3 reader attached; cannot submit Flink job");
+            self.fail(Some(&running.container_id)).await;
+            return;
+        };
+        let jar_bytes = match s3.get_object(&self.account, &spec.bucket, &spec.key) {
+            Ok(b) => b,
+            Err(error) => {
+                tracing::error!(%error, app_arn = %self.arn, bucket = %spec.bucket, key = %spec.key, "failed to read Flink code JAR from S3; app back to READY");
+                self.fail(Some(&running.container_id)).await;
+                return;
+            }
+        };
+        if !self.is_current() {
+            return;
+        }
+        let file_name = spec.key.rsplit('/').next().unwrap_or("application.jar");
+
+        // 5. Upload + run the job.
+        let jar_id = match self
+            .backend
+            .upload_jar(&running, jar_bytes, file_name)
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::error!(%error, app_arn = %self.arn, "Flink jar upload failed; app back to READY");
+                self.fail(Some(&running.container_id)).await;
+                return;
+            }
+        };
+        if !self.is_current() {
+            return;
+        }
+        let job_id = match self
+            .backend
+            .run_job(
+                &running,
+                &jar_id,
+                spec.parallelism,
+                spec.program_args.as_deref(),
+                None,
+            )
+            .await
+        {
+            Ok(id) => id,
+            Err(error) => {
+                tracing::error!(%error, app_arn = %self.arn, "Flink job submission failed; app back to READY");
+                self.fail(Some(&running.container_id)).await;
+                return;
+            }
+        };
+        let recorded = self.mutate_if_current(|app| {
+            app.flink_binding = Some(FlinkBinding {
+                container_id: running.container_id.clone(),
+                host: running.host.clone(),
+                rest_port: running.rest_port,
+                jar_id: Some(jar_id.clone()),
+                job_id: Some(job_id.clone()),
+            });
+        });
+        if !recorded {
+            // Superseded between submit and record: nobody else knows this job.
+            let _ = self.backend.cancel_job(&running, &job_id).await;
+            return;
+        }
+        self.save().await;
+
+        // 6. Poll until the real Flink job is RUNNING (or terminal).
+        for _ in 0..JOB_POLL_ATTEMPTS {
+            if !self.is_current() {
+                return;
+            }
+            match self.backend.job_state(&running, &job_id).await {
+                Ok(s) if flink_state_to_app_status(&s) == "RUNNING" => {
+                    if self.settle("RUNNING", None).await {
+                        tracing::info!(app_arn = %self.arn, job_id = %job_id, "Flink job is RUNNING");
+                    }
+                    return;
+                }
+                Ok(s) if is_terminal_flink_state(&s) => {
+                    tracing::error!(app_arn = %self.arn, job_id = %job_id, flink_state = %s, "Flink job reached a terminal state before RUNNING; app back to READY");
+                    self.fail(Some(&running.container_id)).await;
+                    return;
+                }
+                _ => tokio::time::sleep(JOB_POLL_INTERVAL).await,
+            }
+        }
+        tracing::error!(app_arn = %self.arn, job_id = %job_id, "Flink job did not reach RUNNING within the deadline; app back to READY");
+        self.fail(Some(&running.container_id)).await;
+    }
+
+    /// Cancel the job (if any) and remove every container of the application.
+    /// The caller holds the lifecycle lock. Teardown always completes, even when
+    /// superseded: a successor deploy simply brings up a fresh cluster.
+    async fn teardown_locked(&self, binding: Option<FlinkBinding>) {
+        if let Some(b) = &binding {
+            if let Some(job_id) = &b.job_id {
+                self.cancel_and_wait(&running_of(b), job_id).await;
+            }
+        }
+        self.backend
+            .remove_cluster(&self.arn, binding.as_ref().map(|b| b.container_id.as_str()))
+            .await;
+    }
+}
 
 impl Ka2Service {
     /// Whether a real container runtime is attached.
@@ -2326,207 +2802,62 @@ impl Ka2Service {
         self.runtime.is_some()
     }
 
-    /// Bring up the backing Flink cluster, fetch the app's code JAR from S3,
-    /// submit it, and settle the application to RUNNING once Flink reports the
-    /// job RUNNING. Any failure settles the app back to READY (and tears the
-    /// container down) with a logged reason. Fire-and-forget: never blocks the
-    /// StartApplication handler.
-    #[allow(clippy::too_many_arguments)]
-    fn spawn_flink_start(
-        &self,
-        account: String,
-        name: String,
-        arn: String,
-        bucket: String,
-        key: String,
-        parallelism: Option<i64>,
-        program_args: Option<String>,
-    ) {
-        let Some(runtime) = self.runtime.clone() else {
-            return;
-        };
-        let s3 = self.s3.clone();
-        let state = self.state.clone();
-        let store = self.snapshot_store.clone();
-        let lock = self.snapshot_lock.clone();
+    fn task_ctx(&self, account: &str, name: &str, arn: &str, epoch: u64) -> Option<TaskCtx> {
+        Some(TaskCtx {
+            state: self.state.clone(),
+            store: self.snapshot_store.clone(),
+            snapshot_lock: self.snapshot_lock.clone(),
+            backend: self.runtime.clone()?,
+            s3: self.s3.clone(),
+            lifecycles: self.lifecycles.clone(),
+            account: account.to_string(),
+            name: name.to_string(),
+            arn: arn.to_string(),
+            epoch,
+        })
+    }
+
+    /// Start / update / rollback: (re)deploy the application's job in the
+    /// background. Fire-and-forget: never blocks the handler on a container
+    /// pull/start/submit (issues #1539/#1730).
+    fn spawn_flink_deploy(&self, ctx: TaskCtx, spec: DeploySpec) {
         tokio::spawn(async move {
-            // 1. Spawn (or reuse) the backing Flink session cluster.
-            let running = match runtime.ensure_cluster(&arn).await {
-                Ok(r) => r,
-                Err(error) => {
-                    tracing::error!(%error, app_arn = %arn, "failed to bring up Flink cluster; app back to READY");
-                    set_app_status(&state, &account, &name, "READY", None);
-                    save_snapshot(&state, store.clone(), &lock).await;
-                    return;
-                }
-            };
-            // Persist the container binding immediately so a restart can
-            // re-attach it (no RUNNING-with-dead-container, #1338).
-            set_app_binding(
-                &state,
-                &account,
-                &name,
-                Some(FlinkBinding {
-                    container_id: running.container_id.clone(),
-                    host: running.host.clone(),
-                    rest_port: running.rest_port,
-                    jar_id: None,
-                    job_id: None,
-                }),
-            );
-            save_snapshot(&state, store.clone(), &lock).await;
-
-            // 2. Fetch the code JAR from fakecloud S3.
-            let Some(s3) = s3 else {
-                tracing::error!(app_arn = %arn, "no S3 reader attached; cannot submit Flink job");
-                runtime.stop_cluster(&arn).await;
-                set_app_status(&state, &account, &name, "READY", Some(None));
-                save_snapshot(&state, store.clone(), &lock).await;
-                return;
-            };
-            let jar_bytes = match s3.get_object(&account, &bucket, &key) {
-                Ok(b) => b,
-                Err(error) => {
-                    tracing::error!(%error, app_arn = %arn, bucket = %bucket, key = %key, "failed to read Flink code JAR from S3; app back to READY");
-                    runtime.stop_cluster(&arn).await;
-                    set_app_status(&state, &account, &name, "READY", Some(None));
-                    save_snapshot(&state, store.clone(), &lock).await;
-                    return;
-                }
-            };
-            let file_name = key.rsplit('/').next().unwrap_or("application.jar");
-
-            // 3. Upload + run the job.
-            let jar_id = match runtime.upload_jar(&running, jar_bytes, file_name).await {
-                Ok(id) => id,
-                Err(error) => {
-                    tracing::error!(%error, app_arn = %arn, "Flink jar upload failed; app back to READY");
-                    runtime.stop_cluster(&arn).await;
-                    set_app_status(&state, &account, &name, "READY", Some(None));
-                    save_snapshot(&state, store.clone(), &lock).await;
-                    return;
-                }
-            };
-            let job_id = match runtime
-                .run_job(
-                    &running,
-                    &jar_id,
-                    parallelism,
-                    program_args.as_deref(),
-                    None,
-                )
-                .await
-            {
-                Ok(id) => id,
-                Err(error) => {
-                    tracing::error!(%error, app_arn = %arn, "Flink job submission failed; app back to READY");
-                    runtime.stop_cluster(&arn).await;
-                    set_app_status(&state, &account, &name, "READY", Some(None));
-                    save_snapshot(&state, store.clone(), &lock).await;
-                    return;
-                }
-            };
-            set_app_binding(
-                &state,
-                &account,
-                &name,
-                Some(FlinkBinding {
-                    container_id: running.container_id.clone(),
-                    host: running.host.clone(),
-                    rest_port: running.rest_port,
-                    jar_id: Some(jar_id),
-                    job_id: Some(job_id.clone()),
-                }),
-            );
-            save_snapshot(&state, store.clone(), &lock).await;
-
-            // 4. Poll until the real Flink job is RUNNING (or terminal).
-            for _ in 0..JOB_POLL_ATTEMPTS {
-                match runtime.job_state(&running, &job_id).await {
-                    Ok(state_str) if flink_state_to_app_status(&state_str) == "RUNNING" => {
-                        set_app_status(&state, &account, &name, "RUNNING", None);
-                        save_snapshot(&state, store.clone(), &lock).await;
-                        tracing::info!(app_arn = %arn, job_id = %job_id, "Flink job is RUNNING");
-                        return;
-                    }
-                    Ok(state_str) if is_terminal_flink_state(&state_str) => {
-                        tracing::error!(app_arn = %arn, job_id = %job_id, flink_state = %state_str, "Flink job reached a terminal state before RUNNING; app back to READY");
-                        runtime.stop_cluster(&arn).await;
-                        set_app_status(&state, &account, &name, "READY", Some(None));
-                        save_snapshot(&state, store.clone(), &lock).await;
-                        return;
-                    }
-                    _ => tokio::time::sleep(Duration::from_millis(500)).await,
-                }
-            }
-            tracing::error!(app_arn = %arn, job_id = %job_id, "Flink job did not reach RUNNING within the deadline; app back to READY");
-            runtime.stop_cluster(&arn).await;
-            set_app_status(&state, &account, &name, "READY", Some(None));
-            save_snapshot(&state, store, &lock).await;
+            let slot = ctx.lifecycles.slot(&ctx.arn);
+            let _guard = slot.lock.lock().await;
+            ctx.deploy_locked(spec).await;
         });
     }
 
-    /// Cancel the real Flink job, wait for it to reach a terminal state, tear
-    /// the cluster down, and settle the application to READY. Fire-and-forget.
-    fn spawn_flink_stop(&self, account: String, name: String, arn: String, binding: FlinkBinding) {
-        let Some(runtime) = self.runtime.clone() else {
-            return;
-        };
-        let state = self.state.clone();
-        let store = self.snapshot_store.clone();
-        let lock = self.snapshot_lock.clone();
+    /// Stop / delete: cancel the job, tear the cluster down, and (for a stop)
+    /// settle the application to READY. Queues behind any in-flight bring-up,
+    /// which abandons its work at its next checkpoint once superseded.
+    fn spawn_flink_teardown(
+        &self,
+        ctx: TaskCtx,
+        binding: Option<FlinkBinding>,
+        settle_ready: bool,
+    ) {
         tokio::spawn(async move {
-            let running = crate::runtime::RunningFlink {
-                container_id: binding.container_id.clone(),
-                host: binding.host.clone(),
-                rest_port: binding.rest_port,
-            };
-            if let Some(job_id) = &binding.job_id {
-                if let Err(error) = runtime.cancel_job(&running, job_id).await {
-                    tracing::warn!(%error, app_arn = %arn, "cancel_job failed; tearing the cluster down anyway");
-                }
-                // Wait for the cancel to settle (best-effort).
-                for _ in 0..CANCEL_POLL_ATTEMPTS {
-                    match runtime.job_state(&running, job_id).await {
-                        Ok(s) if is_terminal_flink_state(&s) => break,
-                        Err(_) => break,
-                        _ => tokio::time::sleep(Duration::from_millis(500)).await,
-                    }
-                }
+            let slot = ctx.lifecycles.slot(&ctx.arn);
+            let _guard = slot.lock.lock().await;
+            // A bring-up that ran before us may have bound a newer container.
+            let binding = ctx.binding().or(binding);
+            ctx.teardown_locked(binding).await;
+            if settle_ready && ctx.settle("READY", Some(None)).await {
+                tracing::info!(app_arn = %ctx.arn, "Flink app stopped and cluster torn down");
             }
-            runtime.stop_cluster(&arn).await;
-            set_app_status(&state, &account, &name, "READY", Some(None));
-            save_snapshot(&state, store, &lock).await;
-            tracing::info!(app_arn = %arn, "Flink app stopped and cluster torn down");
         });
     }
 
     /// Poll a RUNNING app's real job once; if it is no longer running, settle
-    /// the app to READY. Guards against clobbering a concurrent start/stop by
-    /// only acting when the app is still RUNNING with the same job id.
-    fn spawn_flink_reconcile(
-        &self,
-        account: String,
-        name: String,
-        binding: FlinkBinding,
-        job_id: String,
-    ) {
-        let Some(runtime) = self.runtime.clone() else {
-            return;
-        };
+    /// the app to READY. Only acts while the describe's epoch is current and the
+    /// app is still RUNNING with the same job id.
+    fn spawn_flink_reconcile(&self, ctx: TaskCtx, binding: FlinkBinding, job_id: String) {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
-        let state = self.state.clone();
-        let store = self.snapshot_store.clone();
-        let lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
-            let running = crate::runtime::RunningFlink {
-                container_id: binding.container_id.clone(),
-                host: binding.host.clone(),
-                rest_port: binding.rest_port,
-            };
-            let terminal = match runtime.job_state(&running, &job_id).await {
+            let terminal = match ctx.backend.job_state(&running_of(&binding), &job_id).await {
                 Ok(s) => flink_state_to_app_status(&s) != "RUNNING",
                 // Job vanished from the cluster -> no longer running.
                 Err(crate::runtime::JobError::NotFound(_)) => true,
@@ -2536,89 +2867,149 @@ impl Ka2Service {
             if !terminal {
                 return;
             }
-            let changed = mutate_app(&state, &account, &name, |app| {
+            let mut changed = false;
+            ctx.mutate_if_current(|app| {
                 let same_job = app.flink_binding.as_ref().and_then(|b| b.job_id.as_deref())
                     == Some(job_id.as_str());
                 if app.status == "RUNNING" && same_job {
                     app.status = "READY".to_string();
-                    true
-                } else {
-                    false
+                    changed = true;
                 }
             });
             if changed {
-                save_snapshot(&state, store, &lock).await;
-                tracing::info!(app = %name, "real Flink job is no longer RUNNING; app settled to READY");
+                ctx.save().await;
+                tracing::info!(app = %ctx.name, "real Flink job is no longer RUNNING; app settled to READY");
             }
         });
     }
 
-    /// Re-attach backing Flink containers for apps a restored snapshot claims
-    /// are RUNNING/STARTING, mirroring the restart-recovery contract of MSK / MQ
-    /// / RDS (no RUNNING-with-dead-container, #1338/#914). When the persisted
-    /// container is gone or its job is no longer running, the app is settled to
-    /// READY. Fire-and-forget per app so a slow re-attach doesn't block startup.
+    /// Restart recovery for real Flink applications, mirroring the contract of
+    /// MSK / MQ / RDS (no RUNNING-with-dead-container, #1338/#914). Every
+    /// transitional state is resolved instead of being stranded:
+    ///
+    /// * `RUNNING` with a binding: re-attach the persisted container; if it (or
+    ///   its job) is gone, or re-attach fails, remove the container BY ID (it is
+    ///   not tracked yet) and settle READY.
+    /// * `STARTING` / `UPDATING` / `ROLLING_BACK` / `AUTOSCALING`: the operation
+    ///   was interrupted, so discard any half-built container and resume it with
+    ///   a fresh deploy that settles RUNNING (or READY on failure).
+    /// * `STOPPING` / `FORCE_STOPPING`: finish the stop -- remove the container
+    ///   and settle READY.
+    ///
+    /// Fire-and-forget per app so a slow re-attach doesn't block startup.
     pub async fn recover_persisted_containers(&self) {
-        let Some(runtime) = self.runtime.clone() else {
+        if self.runtime.is_none() {
             return;
-        };
-        // Collect (account, name, binding) for apps that should have a live job.
-        let targets: Vec<(String, String, FlinkBinding)> = {
-            let accounts = self.state.read();
-            let mut out = Vec::new();
+        }
+        enum Plan {
+            Reattach(FlinkBinding),
+            Resume(Option<FlinkBinding>, DeploySpec),
+            FinishStop(Option<FlinkBinding>),
+        }
+        let mut plans: Vec<(TaskCtx, Plan)> = Vec::new();
+        {
+            let accounts = self.state.write();
             for (account, st) in accounts.iter() {
                 for (name, app) in &st.applications {
-                    if matches!(app.status.as_str(), "RUNNING" | "STARTING") {
-                        if let Some(b) = &app.flink_binding {
-                            out.push((account.to_string(), name.clone(), b.clone()));
+                    let binding = app.flink_binding.clone();
+                    let plan = match app.status.as_str() {
+                        "RUNNING" => binding.map(Plan::Reattach),
+                        "STARTING" | "UPDATING" | "ROLLING_BACK" | "AUTOSCALING"
+                            if is_real_flink(app) =>
+                        {
+                            DeploySpec::of(app).map(|spec| Plan::Resume(binding, spec))
+                        }
+                        "STOPPING" | "FORCE_STOPPING"
+                            if is_real_flink(app) || binding.is_some() =>
+                        {
+                            Some(Plan::FinishStop(binding))
+                        }
+                        _ => None,
+                    };
+                    if let Some(plan) = plan {
+                        let epoch = self.lifecycles.bump(&app.arn);
+                        if let Some(ctx) = self.task_ctx(account, name, &app.arn, epoch) {
+                            plans.push((ctx, plan));
                         }
                     }
                 }
             }
-            out
-        };
-        for (account, name, binding) in targets {
-            let runtime = runtime.clone();
-            let state = self.state.clone();
-            let store = self.snapshot_store.clone();
-            let lock = self.snapshot_lock.clone();
-            let arn = binding_arn(&state, &account, &name);
+        }
+        for (ctx, plan) in plans {
             tokio::spawn(async move {
-                let recovered = match runtime.reattach_cluster(&arn, &binding.container_id).await {
-                    Ok(Some(running)) => match &binding.job_id {
-                        Some(job_id) => match runtime.job_state(&running, job_id).await {
-                            Ok(s) if flink_state_to_app_status(&s) == "RUNNING" => Some(running),
-                            _ => None,
-                        },
-                        None => None,
-                    },
-                    _ => None,
-                };
-                match recovered {
-                    Some(running) => {
-                        // Refresh host/port in case the published port moved.
-                        set_app_binding(
-                            &state,
-                            &account,
-                            &name,
-                            Some(FlinkBinding {
-                                container_id: running.container_id,
-                                host: running.host,
-                                rest_port: running.rest_port,
-                                jar_id: binding.jar_id.clone(),
-                                job_id: binding.job_id.clone(),
-                            }),
-                        );
-                        set_app_status(&state, &account, &name, "RUNNING", None);
-                        tracing::info!(app = %name, "recovered RUNNING Flink app after restart");
+                let slot = ctx.lifecycles.slot(&ctx.arn);
+                let _guard = slot.lock.lock().await;
+                match plan {
+                    Plan::Reattach(binding) => {
+                        let reattached = ctx
+                            .backend
+                            .reattach_cluster(&ctx.arn, &binding.container_id)
+                            .await;
+                        let recovered = match reattached {
+                            Ok(Some(running)) => match &binding.job_id {
+                                Some(job_id) => match ctx.backend.job_state(&running, job_id).await
+                                {
+                                    Ok(s) if flink_state_to_app_status(&s) == "RUNNING" => {
+                                        Some(running)
+                                    }
+                                    _ => None,
+                                },
+                                None => None,
+                            },
+                            Ok(None) => None,
+                            Err(error) => {
+                                tracing::warn!(%error, app = %ctx.name, "re-attaching the Flink container failed");
+                                None
+                            }
+                        };
+                        match recovered {
+                            Some(running) => {
+                                // Refresh host/port in case the published port moved.
+                                ctx.settle(
+                                    "RUNNING",
+                                    Some(Some(FlinkBinding {
+                                        container_id: running.container_id,
+                                        host: running.host,
+                                        rest_port: running.rest_port,
+                                        jar_id: binding.jar_id.clone(),
+                                        job_id: binding.job_id.clone(),
+                                    })),
+                                )
+                                .await;
+                                tracing::info!(app = %ctx.name, "recovered RUNNING Flink app after restart");
+                            }
+                            None => {
+                                // The container may be untracked (reattach never
+                                // completed): remove it by id, not by map entry.
+                                ctx.backend
+                                    .remove_cluster(&ctx.arn, Some(&binding.container_id))
+                                    .await;
+                                ctx.settle("READY", Some(None)).await;
+                                tracing::warn!(app = %ctx.name, "could not recover Flink job after restart; app settled to READY");
+                            }
+                        }
                     }
-                    None => {
-                        runtime.stop_cluster(&arn).await;
-                        set_app_status(&state, &account, &name, "READY", Some(None));
-                        tracing::warn!(app = %name, "could not recover Flink job after restart; app settled to READY");
+                    Plan::Resume(binding, spec) => {
+                        if let Some(b) = &binding {
+                            ctx.backend
+                                .remove_cluster(&ctx.arn, Some(&b.container_id))
+                                .await;
+                        }
+                        if ctx.mutate_if_current(|app| app.flink_binding = None) {
+                            tracing::info!(app = %ctx.name, "resuming interrupted Flink deploy after restart");
+                            ctx.deploy_locked(spec).await;
+                        }
+                    }
+                    Plan::FinishStop(binding) => {
+                        if let Some(b) = &binding {
+                            ctx.backend
+                                .remove_cluster(&ctx.arn, Some(&b.container_id))
+                                .await;
+                        }
+                        ctx.settle("READY", Some(None)).await;
+                        tracing::info!(app = %ctx.name, "finished interrupted Flink stop after restart");
                     }
                 }
-                save_snapshot(&state, store, &lock).await;
             });
         }
     }
@@ -2683,64 +3074,6 @@ fn flink_program_args(app: &Application) -> Option<String> {
         }
     }
     None
-}
-
-/// Look up an application's ARN from state (used by the recovery task, which
-/// only carries the account+name).
-fn binding_arn(state: &SharedKa2State, account: &str, name: &str) -> String {
-    state
-        .read()
-        .get(account)
-        .and_then(|st| st.applications.get(name))
-        .map(|a| a.arn.clone())
-        .unwrap_or_default()
-}
-
-/// Apply a mutation to an application in state, returning whether it was found.
-fn mutate_app<F: FnOnce(&mut Application) -> bool>(
-    state: &SharedKa2State,
-    account: &str,
-    name: &str,
-    f: F,
-) -> bool {
-    let mut accounts = state.write();
-    let st = accounts.get_or_create(account);
-    match st.applications.get_mut(name) {
-        Some(app) => f(app),
-        None => false,
-    }
-}
-
-/// Set an application's status. `binding` is `Some(new_binding)` to also replace
-/// the Flink binding (e.g. `Some(None)` to clear it on stop), or `None` to leave
-/// the binding untouched.
-fn set_app_status(
-    state: &SharedKa2State,
-    account: &str,
-    name: &str,
-    status: &str,
-    binding: Option<Option<FlinkBinding>>,
-) {
-    mutate_app(state, account, name, |app| {
-        app.status = status.to_string();
-        if let Some(b) = binding {
-            app.flink_binding = b;
-        }
-        true
-    });
-}
-
-/// Replace an application's Flink binding.
-fn set_app_binding(
-    state: &SharedKa2State,
-    account: &str,
-    name: &str,
-    binding: Option<FlinkBinding>,
-) {
-    mutate_app(state, account, name, |app| {
-        app.flink_binding = binding;
-        true
-    });
 }
 
 // ===== config-description manipulation helpers =====
@@ -3664,5 +3997,609 @@ mod tests {
             .unwrap(),
         );
         assert_eq!(tags["Tags"][0]["Value"], "cn");
+    }
+
+    // ===== real data-plane lifecycle races (deterministic test backend) =====
+
+    mod lifecycle {
+        use super::*;
+        use crate::runtime::{JobError, RuntimeError};
+        use std::sync::atomic::AtomicU64;
+
+        /// Deterministic in-memory `FlinkBackend`: containers and jobs are map
+        /// entries, `create_cluster` can be held at a gate so a test can land a
+        /// Stop/Delete/Update while a bring-up is in flight.
+        #[derive(Default)]
+        pub(super) struct FakeBackend {
+            next: AtomicU64,
+            /// app arn -> tracked cluster (mirrors FlinkRuntime.containers).
+            tracked: parking_lot::Mutex<HashMap<String, RunningFlink>>,
+            /// live container id -> owning app arn (the label).
+            live: parking_lot::Mutex<HashMap<String, String>>,
+            pub removed: parking_lot::Mutex<Vec<String>>,
+            /// job id -> Flink state.
+            pub jobs: parking_lot::Mutex<HashMap<String, String>>,
+            /// (container id, parallelism) per submitted job.
+            pub runs: parking_lot::Mutex<Vec<(String, Option<i64>)>>,
+            gate: parking_lot::Mutex<Option<Arc<tokio::sync::Semaphore>>>,
+            pub entered_create: tokio::sync::Notify,
+            /// Reattach outcome: None => Ok(None), Some(true) => Ok(Some),
+            /// Some(false) => Err (transient daemon failure).
+            pub reattach: parking_lot::Mutex<Option<bool>>,
+        }
+
+        impl FakeBackend {
+            pub fn gated() -> (Arc<Self>, Arc<tokio::sync::Semaphore>) {
+                let b = Arc::new(Self::default());
+                let sem = Arc::new(tokio::sync::Semaphore::new(0));
+                *b.gate.lock() = Some(sem.clone());
+                (b, sem)
+            }
+            pub fn live_count(&self) -> usize {
+                self.live.lock().len()
+            }
+            pub fn is_live(&self, id: &str) -> bool {
+                self.live.lock().contains_key(id)
+            }
+            pub fn tracked_count(&self) -> usize {
+                self.tracked.lock().len()
+            }
+            pub fn running_jobs(&self) -> usize {
+                self.jobs
+                    .lock()
+                    .values()
+                    .filter(|s| *s == "RUNNING")
+                    .count()
+            }
+            fn kill(&self, id: &str) {
+                if self.live.lock().remove(id).is_some() {
+                    self.removed.lock().push(id.to_string());
+                }
+            }
+        }
+
+        #[async_trait::async_trait]
+        impl FlinkBackend for FakeBackend {
+            fn tracked(&self, app_arn: &str) -> Option<RunningFlink> {
+                self.tracked.lock().get(app_arn).cloned()
+            }
+            async fn create_cluster(&self, app_arn: &str) -> Result<RunningFlink, RuntimeError> {
+                self.entered_create.notify_one();
+                let gate = self.gate.lock().clone();
+                if let Some(g) = gate {
+                    g.acquire().await.unwrap().forget();
+                }
+                let id = format!("c{}", self.next.fetch_add(1, Ordering::SeqCst));
+                let r = RunningFlink {
+                    container_id: id.clone(),
+                    host: "127.0.0.1".into(),
+                    rest_port: 1,
+                };
+                self.live.lock().insert(id, app_arn.to_string());
+                self.tracked.lock().insert(app_arn.to_string(), r.clone());
+                Ok(r)
+            }
+            async fn cluster_ready(&self, _running: &RunningFlink) -> bool {
+                true
+            }
+            async fn readiness_failure(
+                &self,
+                _container_id: &str,
+                _started: std::time::Instant,
+            ) -> String {
+                "timeout".into()
+            }
+            async fn reattach_cluster(
+                &self,
+                app_arn: &str,
+                container_id: &str,
+            ) -> Result<Option<RunningFlink>, RuntimeError> {
+                match *self.reattach.lock() {
+                    None => Ok(None),
+                    Some(false) => Err(RuntimeError::ContainerStartFailed("daemon".into())),
+                    Some(true) => {
+                        let r = RunningFlink {
+                            container_id: container_id.to_string(),
+                            host: "127.0.0.1".into(),
+                            rest_port: 2,
+                        };
+                        self.live
+                            .lock()
+                            .insert(container_id.to_string(), app_arn.to_string());
+                        self.tracked.lock().insert(app_arn.to_string(), r.clone());
+                        Ok(Some(r))
+                    }
+                }
+            }
+            async fn remove_cluster(&self, app_arn: &str, container_id: Option<&str>) {
+                if let Some(t) = self.tracked.lock().remove(app_arn) {
+                    self.kill(&t.container_id);
+                }
+                if let Some(id) = container_id {
+                    self.kill(id);
+                    // A persisted id is removed even when never tracked/live.
+                    if !self.removed.lock().iter().any(|r| r == id) {
+                        self.removed.lock().push(id.to_string());
+                    }
+                }
+                let labeled: Vec<String> = self
+                    .live
+                    .lock()
+                    .iter()
+                    .filter(|(_, a)| *a == app_arn)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in labeled {
+                    self.kill(&id);
+                }
+            }
+            async fn upload_jar(
+                &self,
+                _running: &RunningFlink,
+                _jar: Vec<u8>,
+                _file_name: &str,
+            ) -> Result<String, JobError> {
+                Ok("jar".into())
+            }
+            async fn run_job(
+                &self,
+                running: &RunningFlink,
+                _jar_id: &str,
+                parallelism: Option<i64>,
+                _program_args: Option<&str>,
+                _entry_class: Option<&str>,
+            ) -> Result<String, JobError> {
+                let id = format!("j{}", self.next.fetch_add(1, Ordering::SeqCst));
+                self.jobs.lock().insert(id.clone(), "RUNNING".into());
+                self.runs
+                    .lock()
+                    .push((running.container_id.clone(), parallelism));
+                Ok(id)
+            }
+            async fn job_state(
+                &self,
+                _running: &RunningFlink,
+                job_id: &str,
+            ) -> Result<String, JobError> {
+                self.jobs
+                    .lock()
+                    .get(job_id)
+                    .cloned()
+                    .ok_or_else(|| JobError::NotFound(job_id.to_string()))
+            }
+            async fn cancel_job(
+                &self,
+                _running: &RunningFlink,
+                job_id: &str,
+            ) -> Result<(), JobError> {
+                if let Some(s) = self.jobs.lock().get_mut(job_id) {
+                    *s = "CANCELED".into();
+                }
+                Ok(())
+            }
+        }
+
+        struct FakeS3;
+        impl S3Delivery for FakeS3 {
+            fn put_object(
+                &self,
+                _a: &str,
+                _b: &str,
+                _k: &str,
+                _body: Vec<u8>,
+                _ct: Option<&str>,
+            ) -> Result<(), String> {
+                Ok(())
+            }
+            fn get_object(&self, _a: &str, _b: &str, _k: &str) -> Result<Vec<u8>, String> {
+                Ok(b"PK-jar".to_vec())
+            }
+        }
+
+        fn real_svc(backend: Arc<FakeBackend>) -> Ka2Service {
+            svc().with_backend(backend).with_s3(Arc::new(FakeS3))
+        }
+
+        fn create(s: &Ka2Service, name: &str) {
+            s.create_application(&req(
+                "CreateApplication",
+                json!({
+                    "ApplicationName": name,
+                    "RuntimeEnvironment": "FLINK-1_19",
+                    "ServiceExecutionRole": "arn:aws:iam::000000000000:role/r",
+                    "ApplicationConfiguration": {
+                        "FlinkApplicationConfiguration": {
+                            "ParallelismConfiguration": {
+                                "ConfigurationType": "CUSTOM", "Parallelism": 3 }
+                        },
+                        "ApplicationCodeConfiguration": {
+                            "CodeContentType": "ZIPFILE",
+                            "CodeContent": { "S3ContentLocation": {
+                                "BucketARN": "arn:aws:s3:::b", "FileKey": "app.jar" } }
+                        }
+                    }
+                }),
+            ))
+            .unwrap();
+        }
+
+        fn app(s: &Ka2Service, name: &str) -> Option<Application> {
+            s.state
+                .read()
+                .get("000000000000")
+                .and_then(|st| st.applications.get(name).cloned())
+        }
+
+        fn status(s: &Ka2Service, name: &str) -> String {
+            app(s, name).map(|a| a.status).unwrap_or_default()
+        }
+
+        async fn until(mut cond: impl FnMut() -> bool, what: &str) {
+            for _ in 0..500 {
+                if cond() {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("timed out waiting for: {what}");
+        }
+
+        /// Let any stray background task run to completion.
+        async fn quiesce() {
+            for _ in 0..20 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        fn start(s: &Ka2Service, name: &str) {
+            s.start_application(&req("StartApplication", json!({"ApplicationName": name})))
+                .unwrap();
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn start_settles_running_once_the_job_runs() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            start(&s, "a");
+            until(|| status(&s, "a") == "RUNNING", "RUNNING").await;
+            let bind = app(&s, "a").unwrap().flink_binding.unwrap();
+            assert!(b.is_live(&bind.container_id));
+            assert_eq!(b.running_jobs(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn stop_during_starting_is_not_undone_by_the_start_task() {
+            let (b, gate) = FakeBackend::gated();
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            start(&s, "a");
+            b.entered_create.notified().await;
+            s.stop_application(&req("StopApplication", json!({"ApplicationName": "a"})))
+                .unwrap();
+            assert_eq!(status(&s, "a"), "STOPPING");
+            // The bring-up now completes its container creation.
+            gate.add_permits(1);
+            until(|| status(&s, "a") == "READY", "READY after stop").await;
+            quiesce().await;
+            let a = app(&s, "a").unwrap();
+            assert_eq!(
+                a.status, "READY",
+                "start task must not flip a stopped app to RUNNING"
+            );
+            assert!(a.flink_binding.is_none());
+            assert_eq!(
+                b.live_count(),
+                0,
+                "the superseded bring-up's cluster is torn down"
+            );
+            assert_eq!(b.tracked_count(), 0);
+            assert_eq!(
+                b.running_jobs(),
+                0,
+                "no job was submitted for a stopped app"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn force_stop_during_starting_settles_ready() {
+            let (b, gate) = FakeBackend::gated();
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            start(&s, "a");
+            b.entered_create.notified().await;
+            s.stop_application(&req(
+                "StopApplication",
+                json!({"ApplicationName": "a", "Force": true}),
+            ))
+            .unwrap();
+            assert_eq!(status(&s, "a"), "FORCE_STOPPING");
+            gate.add_permits(1);
+            until(|| status(&s, "a") == "READY", "READY after force stop").await;
+            quiesce().await;
+            assert_eq!(status(&s, "a"), "READY");
+            assert_eq!(b.live_count(), 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn delete_during_starting_leaks_nothing_and_recreate_starts_clean() {
+            let (b, gate) = FakeBackend::gated();
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            let created = app(&s, "a").unwrap().create_timestamp;
+            start(&s, "a");
+            b.entered_create.notified().await;
+            s.delete_application(&req(
+                "DeleteApplication",
+                json!({"ApplicationName": "a", "CreateTimestamp": created.timestamp()}),
+            ))
+            .unwrap();
+            gate.add_permits(1);
+            until(|| b.live_count() == 0 && b.tracked_count() == 0, "teardown").await;
+            quiesce().await;
+            assert!(app(&s, "a").is_none(), "a deleted app is never resurrected");
+            assert_eq!(b.live_count(), 0, "no leaked container");
+            assert_eq!(b.tracked_count(), 0, "no stale tracking entry");
+
+            // Same-name re-create + start gets a fresh, live cluster.
+            create(&s, "a");
+            gate.add_permits(1);
+            start(&s, "a");
+            until(|| status(&s, "a") == "RUNNING", "recreated RUNNING").await;
+            let bind = app(&s, "a").unwrap().flink_binding.unwrap();
+            assert!(
+                b.is_live(&bind.container_id),
+                "recreated app runs on a live cluster"
+            );
+            assert_eq!(b.live_count(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn delete_running_app_removes_cluster_and_tracking() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            start(&s, "a");
+            until(|| status(&s, "a") == "RUNNING", "RUNNING").await;
+            let created = app(&s, "a").unwrap().create_timestamp;
+            s.delete_application(&req(
+                "DeleteApplication",
+                json!({"ApplicationName": "a", "CreateTimestamp": created.timestamp()}),
+            ))
+            .unwrap();
+            until(|| b.live_count() == 0 && b.tracked_count() == 0, "teardown").await;
+            assert_eq!(b.running_jobs(), 0, "job canceled on delete");
+        }
+
+        fn update_parallelism(s: &Ka2Service, name: &str, p: i64) -> Value {
+            let v = app(s, name).unwrap().version_id;
+            body_of(
+                s.update_application(&req(
+                    "UpdateApplication",
+                    json!({
+                        "ApplicationName": name,
+                        "CurrentApplicationVersionId": v,
+                        "ApplicationConfigurationUpdate": {
+                            "FlinkApplicationConfigurationUpdate": {
+                                "ParallelismConfigurationUpdate": {
+                                    "ConfigurationTypeUpdate": "CUSTOM",
+                                    "ParallelismUpdate": p
+                                }
+                            }
+                        }
+                    }),
+                ))
+                .unwrap(),
+            )
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn update_running_app_redeploys_the_job_then_runs() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            start(&s, "a");
+            until(|| status(&s, "a") == "RUNNING", "RUNNING").await;
+            let first = app(&s, "a").unwrap().flink_binding.unwrap();
+            let v = update_parallelism(&s, "a", 5);
+            assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "UPDATING");
+            assert_eq!(v["ApplicationDetail"]["ApplicationVersionId"], 2);
+            until(|| status(&s, "a") == "RUNNING", "RUNNING after update").await;
+            let second = app(&s, "a").unwrap().flink_binding.unwrap();
+            assert_eq!(second.container_id, first.container_id, "cluster reused");
+            assert_ne!(second.job_id, first.job_id, "job redeployed");
+            assert_eq!(
+                b.jobs.lock().get(first.job_id.as_ref().unwrap()).unwrap(),
+                "CANCELED"
+            );
+            assert_eq!(
+                b.runs.lock().last().unwrap().1,
+                Some(5),
+                "new config applied"
+            );
+            assert_eq!(b.running_jobs(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn rollback_running_app_redeploys_previous_config_and_stays_running() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            start(&s, "a");
+            until(|| status(&s, "a") == "RUNNING", "RUNNING").await;
+            update_parallelism(&s, "a", 5);
+            until(|| status(&s, "a") == "RUNNING", "RUNNING after update").await;
+            let v = body_of(
+                s.rollback_application(&req(
+                    "RollbackApplication",
+                    json!({"ApplicationName": "a", "CurrentApplicationVersionId": 2}),
+                ))
+                .unwrap(),
+            );
+            assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "ROLLING_BACK");
+            assert_eq!(v["ApplicationDetail"]["ApplicationVersionRolledBackTo"], 1);
+            until(|| status(&s, "a") == "RUNNING", "RUNNING after rollback").await;
+            assert_eq!(
+                b.runs.lock().last().unwrap().1,
+                Some(3),
+                "previous config redeployed"
+            );
+            assert_eq!(b.running_jobs(), 1, "exactly one job runs after rollback");
+            assert_eq!(flink_parallelism(&app(&s, "a").unwrap()), Some(3));
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn stop_during_update_wins_over_the_redeploy() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            create(&s, "a");
+            start(&s, "a");
+            until(|| status(&s, "a") == "RUNNING", "RUNNING").await;
+            update_parallelism(&s, "a", 5);
+            s.stop_application(&req("StopApplication", json!({"ApplicationName": "a"})))
+                .unwrap();
+            until(|| status(&s, "a") == "READY", "READY").await;
+            quiesce().await;
+            assert_eq!(status(&s, "a"), "READY");
+            assert_eq!(b.live_count(), 0);
+            assert_eq!(b.running_jobs(), 0);
+        }
+
+        fn seed(s: &Ka2Service, name: &str, status: &str, binding: Option<FlinkBinding>) {
+            let mut a = super::flink_app_with_jar();
+            a.name = name.into();
+            a.arn = arn("us-east-1", "000000000000", name);
+            a.status = status.into();
+            a.flink_binding = binding;
+            s.state
+                .write()
+                .get_or_create("000000000000")
+                .applications
+                .insert(name.into(), a);
+        }
+
+        fn bound(id: &str, job: Option<&str>) -> Option<FlinkBinding> {
+            Some(FlinkBinding {
+                container_id: id.into(),
+                host: "127.0.0.1".into(),
+                rest_port: 9,
+                jar_id: Some("jar".into()),
+                job_id: job.map(str::to_string),
+            })
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn recovery_resumes_starting_without_binding() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            seed(&s, "a", "STARTING", None);
+            s.recover_persisted_containers().await;
+            until(|| status(&s, "a") == "RUNNING", "resumed RUNNING").await;
+            assert!(app(&s, "a").unwrap().flink_binding.is_some());
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn recovery_resumes_interrupted_update_on_a_fresh_cluster() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            seed(&s, "a", "UPDATING", bound("old", Some("jold")));
+            s.recover_persisted_containers().await;
+            until(|| status(&s, "a") == "RUNNING", "resumed RUNNING").await;
+            assert!(b.removed.lock().contains(&"old".to_string()));
+            assert_ne!(
+                app(&s, "a").unwrap().flink_binding.unwrap().container_id,
+                "old"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn recovery_finishes_stopping_and_force_stopping() {
+            let b = Arc::new(FakeBackend::default());
+            let s = real_svc(b.clone());
+            seed(&s, "a", "STOPPING", bound("c-a", Some("j")));
+            seed(&s, "f", "FORCE_STOPPING", None);
+            s.recover_persisted_containers().await;
+            until(
+                || status(&s, "a") == "READY" && status(&s, "f") == "READY",
+                "stops settled",
+            )
+            .await;
+            assert!(b.removed.lock().contains(&"c-a".to_string()));
+            assert!(app(&s, "a").unwrap().flink_binding.is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn recovery_reattach_error_removes_the_container_by_id() {
+            let b = Arc::new(FakeBackend::default());
+            *b.reattach.lock() = Some(false);
+            let s = real_svc(b.clone());
+            seed(&s, "a", "RUNNING", bound("persisted", Some("j")));
+            s.recover_persisted_containers().await;
+            until(|| status(&s, "a") == "READY", "READY").await;
+            assert!(
+                b.removed.lock().contains(&"persisted".to_string()),
+                "untracked persisted container removed by id"
+            );
+            assert!(app(&s, "a").unwrap().flink_binding.is_none());
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn recovery_reattaches_running_job() {
+            let b = Arc::new(FakeBackend::default());
+            *b.reattach.lock() = Some(true);
+            b.jobs.lock().insert("j".into(), "RUNNING".into());
+            let s = real_svc(b.clone());
+            seed(&s, "a", "RUNNING", bound("persisted", Some("j")));
+            s.recover_persisted_containers().await;
+            until(
+                || app(&s, "a").unwrap().flink_binding.map(|b| b.rest_port) == Some(2),
+                "binding refreshed",
+            )
+            .await;
+            assert_eq!(status(&s, "a"), "RUNNING");
+            assert!(b.is_live("persisted"));
+        }
+
+        #[test]
+        fn control_plane_rollback_of_running_app_settles_running() {
+            let s = svc();
+            create(&s, "a");
+            start(&s, "a");
+            let v = body_of(
+                s.describe_application(&req("DescribeApplication", json!({"ApplicationName":"a"})))
+                    .unwrap(),
+            );
+            assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "RUNNING");
+            update_parallelism(&s, "a", 5);
+            let v = body_of(
+                s.rollback_application(&req(
+                    "RollbackApplication",
+                    json!({"ApplicationName": "a", "CurrentApplicationVersionId": 2}),
+                ))
+                .unwrap(),
+            );
+            assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "ROLLING_BACK");
+            let v = body_of(
+                s.describe_application(&req("DescribeApplication", json!({"ApplicationName":"a"})))
+                    .unwrap(),
+            );
+            assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "RUNNING");
+            assert_eq!(flink_parallelism(&app(&s, "a").unwrap()), Some(3));
+        }
+
+        #[test]
+        fn rollback_of_ready_app_stays_ready() {
+            let s = svc();
+            create(&s, "a");
+            update_parallelism(&s, "a", 5);
+            let v = body_of(
+                s.rollback_application(&req(
+                    "RollbackApplication",
+                    json!({"ApplicationName": "a", "CurrentApplicationVersionId": 2}),
+                ))
+                .unwrap(),
+            );
+            assert_eq!(v["ApplicationDetail"]["ApplicationStatus"], "READY");
+        }
     }
 }

@@ -139,6 +139,7 @@ pub struct AthenaService {
     state: SharedAthenaState,
     glue: Option<SharedGlueState>,
     s3: Option<SharedS3State>,
+    s3_store: Option<Arc<dyn fakecloud_persistence::S3Store>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
@@ -160,6 +161,7 @@ impl AthenaService {
             state,
             glue: None,
             s3: None,
+            s3_store: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
         }
@@ -172,6 +174,13 @@ impl AthenaService {
 
     pub fn with_s3(mut self, s3: SharedS3State) -> Self {
         self.s3 = Some(s3);
+        self
+    }
+
+    /// Durable S3 store query results are written through, so a result file
+    /// survives a restart like any other object (disk mode).
+    pub fn with_s3_store(mut self, store: Arc<dyn fakecloud_persistence::S3Store>) -> Self {
+        self.s3_store = Some(store);
         self
     }
 
@@ -833,7 +842,6 @@ fn query_execution_json(q: &QueryExecution) -> Value {
         "Status": {
             "State": q.state,
             "SubmissionDateTime": q.submission_time.timestamp() as f64,
-            "CompletionDateTime": q.completion_time.map(|t| t.timestamp() as f64),
         },
         "Statistics": {
             "DataScannedInBytes": q.data_scanned_bytes,
@@ -856,6 +864,9 @@ fn query_execution_json(q: &QueryExecution) -> Value {
         obj.as_object_mut()
             .unwrap()
             .insert("EngineVersion".to_string(), v.clone());
+    }
+    if let Some(t) = q.completion_time {
+        obj["Status"]["CompletionDateTime"] = json!(t.timestamp() as f64);
     }
     if let Some(reason) = &q.state_change_reason {
         obj["Status"].as_object_mut().unwrap().insert(
@@ -1244,6 +1255,7 @@ mod tests {
                     total_execution_time_ms: 2,
                     result_rows: (0..5).map(|n| vec![n.to_string()]).collect(),
                     result_columns: vec![("n".to_string(), "integer".to_string())],
+                    region: None,
                 },
             );
         }
@@ -2021,6 +2033,146 @@ mod tests {
         list.region = "cn-north-1".to_string();
         let tags = parse_json(&svc.list_tags_for_resource(&list).unwrap());
         assert_eq!(tags["Tags"], json!([{ "Key": "team", "Value": "data" }]));
+    }
+
+    fn qe_state(svc: &AthenaService, id: &str) -> serde_json::Value {
+        let resp = svc
+            .get_query_execution(&req("GetQueryExecution", json!({ "QueryExecutionId": id })))
+            .unwrap();
+        parse_json(&resp)["QueryExecution"]["Status"].clone()
+    }
+
+    fn stage_queued(svc: &AthenaService, id: &str) {
+        let mut state = svc.state.write();
+        let account = super::account_mut(&mut state, "123456789012");
+        account.query_executions.insert(
+            id.to_string(),
+            crate::state::QueryExecution {
+                query_execution_id: id.to_string(),
+                query: "SELECT 1".to_string(),
+                statement_type: "DML".to_string(),
+                work_group: "primary".to_string(),
+                state: "QUEUED".to_string(),
+                state_change_reason: None,
+                submission_time: Utc::now(),
+                completion_time: None,
+                query_execution_context: None,
+                result_configuration: None,
+                engine_version: None,
+                data_scanned_bytes: 0,
+                engine_execution_time_ms: 0,
+                query_planning_time_ms: 0,
+                total_execution_time_ms: 0,
+                result_rows: vec![],
+                result_columns: vec![],
+                region: Some("us-east-1".to_string()),
+            },
+        );
+    }
+
+    fn job_for(
+        svc: &AthenaService,
+        id: &str,
+    ) -> (super::queries::QueryJobEnv, super::queries::QueryJob) {
+        (
+            super::queries::QueryJobEnv {
+                state: svc.state.clone(),
+                glue: svc.glue.clone(),
+                s3: svc.s3.clone(),
+                s3_store: None,
+            },
+            super::queries::QueryJob {
+                account_id: "123456789012".to_string(),
+                region: "us-east-1".to_string(),
+                query_execution_id: id.to_string(),
+                query: "SELECT 1".to_string(),
+                default_database: None,
+                output_location: None,
+            },
+        )
+    }
+
+    #[test]
+    fn queued_query_has_no_results_and_no_completion_time() {
+        let (svc, _) = test_service();
+        stage_queued(&svc, "q1");
+        let status = qe_state(&svc, "q1");
+        assert_eq!(status["State"], "QUEUED");
+        assert!(status.get("CompletionDateTime").is_none());
+        let Err(err) =
+            svc.get_query_results(&req("GetQueryResults", json!({ "QueryExecutionId": "q1" })))
+        else {
+            panic!("results of an unfinished query must be refused");
+        };
+        assert!(format!("{err:?}").contains("Query has not yet finished"));
+    }
+
+    #[test]
+    fn query_job_runs_queued_to_succeeded() {
+        let (svc, _) = test_service();
+        stage_queued(&svc, "q2");
+        let (env, job) = job_for(&svc, "q2");
+        super::queries::run_query_job(&env, &job);
+        let status = qe_state(&svc, "q2");
+        assert_eq!(status["State"], "SUCCEEDED");
+        assert!(status["CompletionDateTime"].is_number());
+    }
+
+    #[test]
+    fn stopped_query_is_not_overwritten_by_its_job() {
+        let (svc, _) = test_service();
+        stage_queued(&svc, "q3");
+        svc.stop_query_execution(&req(
+            "StopQueryExecution",
+            json!({ "QueryExecutionId": "q3" }),
+        ))
+        .unwrap();
+        let (env, job) = job_for(&svc, "q3");
+        super::queries::run_query_job(&env, &job);
+        assert_eq!(qe_state(&svc, "q3")["State"], "CANCELLED");
+
+        // Stopping a finished query leaves its terminal state alone.
+        stage_queued(&svc, "q4");
+        let (env, job) = job_for(&svc, "q4");
+        super::queries::run_query_job(&env, &job);
+        svc.stop_query_execution(&req(
+            "StopQueryExecution",
+            json!({ "QueryExecutionId": "q4" }),
+        ))
+        .unwrap();
+        assert_eq!(qe_state(&svc, "q4")["State"], "SUCCEEDED");
+    }
+
+    #[test]
+    fn interrupted_queries_are_resumed() {
+        let (svc, _) = test_service();
+        stage_queued(&svc, "q5");
+        svc.resume_interrupted_queries();
+        assert_eq!(qe_state(&svc, "q5")["State"], "SUCCEEDED");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_query_execution_returns_before_the_query_runs() {
+        let (svc, _) = test_service();
+        let resp = svc
+            .start_query_execution(&req(
+                "StartQueryExecution",
+                json!({ "QueryString": "SELECT 1", "WorkGroup": "primary" }),
+            ))
+            .unwrap();
+        let id = parse_json(&resp)["QueryExecutionId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let mut state = String::new();
+        for _ in 0..200 {
+            state = qe_state(&svc, &id)["State"].as_str().unwrap().to_string();
+            if state != "QUEUED" && state != "RUNNING" {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(state, "SUCCEEDED");
     }
 }
 

@@ -74,6 +74,12 @@ pub enum JobError {
 /// The Flink REST port inside the container.
 const FLINK_REST_PORT: u16 = 8081;
 
+/// Readiness probe budget: 240 * 500ms = ~120s (plus per-probe time), generous
+/// for a cold Flink cluster boot + TaskManager registration on a constrained CI
+/// runner.
+pub const READY_ATTEMPTS: u32 = 240;
+pub const READY_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
 /// Docker/Podman-backed single-container Flink session-cluster runtime.
 #[derive(Debug, Clone)]
 pub struct FlinkRuntime {
@@ -126,17 +132,9 @@ impl FlinkRuntime {
             .unwrap_or_else(|| "flink:1.19".to_string())
     }
 
-    /// Spawn (or return the already-tracked) backing Flink session cluster for
-    /// an application and block until its REST API reports a free task slot.
-    pub async fn ensure_cluster(&self, app_arn: &str) -> Result<RunningFlink, RuntimeError> {
-        if let Some(existing) = self.containers.read().get(app_arn).cloned() {
-            return Ok(existing);
-        }
-        let running = self.spawn_container(app_arn).await?;
-        self.containers
-            .write()
-            .insert(app_arn.to_string(), running.clone());
-        Ok(running)
+    /// The cluster currently tracked for an application, if any.
+    pub fn tracked(&self, app_arn: &str) -> Option<RunningFlink> {
+        self.containers.read().get(app_arn).cloned()
     }
 
     /// Re-attach to an application's PERSISTED Flink cluster container after a
@@ -189,18 +187,27 @@ impl FlinkRuntime {
         Ok(Some(running))
     }
 
-    /// Stop + remove an application's backing container and drop its tracking
-    /// entry. Called on the application's last stop and on delete.
-    pub async fn stop_cluster(&self, app_arn: &str) {
-        let running = self.containers.write().remove(app_arn);
-        if let Some(running) = running {
-            self.remove_container(&running.container_id).await;
+    /// Tear down every container belonging to an application: the tracked
+    /// cluster (whose map entry is dropped, so a later same-name application
+    /// never inherits a dead cluster), the explicitly named `container_id`
+    /// (a persisted binding that may not be tracked, e.g. after a restart or a
+    /// failed reattach), and any container still labeled for this app on this
+    /// fakecloud instance (a bring-up that was superseded mid-flight).
+    pub async fn remove_cluster(&self, app_arn: &str, container_id: Option<&str>) {
+        let tracked = self.containers.write().remove(app_arn);
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(t) = tracked {
+            ids.push(t.container_id);
         }
-    }
-
-    /// Remove a container by id without a tracking entry (delete-while-tracked).
-    pub async fn remove_by_id(&self, container_id: &str) {
-        self.remove_container(container_id).await;
+        if let Some(id) = container_id.filter(|id| !id.is_empty()) {
+            if !ids.iter().any(|i| i == id) {
+                ids.push(id.to_string());
+            }
+        }
+        for id in ids {
+            self.remove_container(&id).await;
+        }
+        self.reap_stale_containers(app_arn).await;
     }
 
     /// Stop every tracked cluster container (graceful shutdown / reset).
@@ -214,7 +221,12 @@ impl FlinkRuntime {
         }
     }
 
-    async fn spawn_container(&self, app_arn: &str) -> Result<RunningFlink, RuntimeError> {
+    /// Create + start a fresh backing Flink session cluster for an application
+    /// and track it immediately (before it is ready), so a superseding
+    /// lifecycle task can find and reuse or tear it down. Readiness is probed
+    /// separately via [`Self::cluster_ready`] so the caller can abandon the
+    /// wait when the application is stopped or deleted mid-bring-up.
+    pub async fn create_cluster(&self, app_arn: &str) -> Result<RunningFlink, RuntimeError> {
         // Reap a leaked container left by a PRIOR failed bring-up of THIS app,
         // scoped to this app AND this fakecloud instance.
         self.reap_stale_containers(app_arn).await;
@@ -250,6 +262,14 @@ impl FlinkRuntime {
             ));
         }
         let container_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let running = RunningFlink {
+            container_id: container_id.clone(),
+            host: self.net.sibling_host.clone(),
+            rest_port,
+        };
+        self.containers
+            .write()
+            .insert(app_arn.to_string(), running.clone());
 
         let start = tokio::process::Command::new(&self.cli)
             .args(["start", &container_id])
@@ -258,18 +278,12 @@ impl FlinkRuntime {
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
         if !start.status.success() {
             let diag = self.capture_container_diagnostics(&container_id).await;
+            self.remove_cluster(app_arn, Some(&container_id)).await;
             return Err(RuntimeError::ContainerStartFailed(format!(
                 "container start failed: {}; {diag}",
                 String::from_utf8_lossy(&start.stderr).trim()
             )));
         }
-
-        let running = RunningFlink {
-            container_id: container_id.clone(),
-            host: self.net.sibling_host.clone(),
-            rest_port,
-        };
-        self.wait_for_ready(&running, &container_id).await?;
 
         tracing::info!(
             app_arn = %app_arn,
@@ -279,6 +293,33 @@ impl FlinkRuntime {
             "Flink session-cluster container started",
         );
         Ok(running)
+    }
+
+    /// One readiness probe: the REST API answers AND a task slot is available
+    /// (the JobManager REST endpoint binds before the TaskManager registers, so
+    /// `/overview` answering alone is not enough to submit a job).
+    pub async fn cluster_ready(&self, running: &RunningFlink) -> bool {
+        let url = format!("{}/overview", running.dashboard_url());
+        let Ok(resp) = self.http.get(&url).send().await else {
+            return false;
+        };
+        let Ok(v) = resp.json::<serde_json::Value>().await else {
+            return false;
+        };
+        v.get("slots-available")
+            .and_then(serde_json::Value::as_i64)
+            .unwrap_or(0)
+            >= 1
+    }
+
+    /// Diagnostic reason for a cluster that never became ready (recent logs +
+    /// terminal container state), so a CI failure is diagnosable.
+    pub async fn readiness_failure(
+        &self,
+        container_id: &str,
+        started: std::time::Instant,
+    ) -> String {
+        self.readiness_timeout_reason(container_id, started).await
     }
 
     /// Read the host port the container's REST port (8081) is published on.
@@ -321,24 +362,12 @@ impl FlinkRuntime {
         running: &RunningFlink,
         container_id: &str,
     ) -> Result<(), RuntimeError> {
-        // 240 * 500ms = ~120s (plus per-probe time): generous for a cold Flink
-        // cluster boot + TaskManager registration on a constrained CI runner.
-        const ATTEMPTS: u32 = 240;
         let start = std::time::Instant::now();
-        let url = format!("{}/overview", running.dashboard_url());
-        for _ in 0..ATTEMPTS {
-            if let Ok(resp) = self.http.get(&url).send().await {
-                if let Ok(v) = resp.json::<serde_json::Value>().await {
-                    let slots = v
-                        .get("slots-available")
-                        .and_then(serde_json::Value::as_i64)
-                        .unwrap_or(0);
-                    if slots >= 1 {
-                        return Ok(());
-                    }
-                }
+        for _ in 0..READY_ATTEMPTS {
+            if self.cluster_ready(running).await {
+                return Ok(());
             }
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            tokio::time::sleep(READY_POLL_INTERVAL).await;
         }
         Err(RuntimeError::ContainerStartFailed(
             self.readiness_timeout_reason(container_id, start).await,
@@ -570,6 +599,104 @@ impl FlinkRuntime {
                 s.trim().to_string()
             })
             .unwrap_or_else(|e| format!("<container logs failed: {e}>"))
+    }
+}
+
+/// The container + Flink-REST operations the service's lifecycle tasks drive.
+/// [`FlinkRuntime`] is the real Docker/Podman implementation; the trait seam
+/// lets the lifecycle races (stop/delete/update/rollback while a bring-up is in
+/// flight, restart recovery) be exercised deterministically in unit tests.
+#[async_trait::async_trait]
+pub trait FlinkBackend: Send + Sync + 'static {
+    /// The cluster currently tracked for an application, if any.
+    fn tracked(&self, app_arn: &str) -> Option<RunningFlink>;
+    /// Create + start a new cluster and track it (not yet ready).
+    async fn create_cluster(&self, app_arn: &str) -> Result<RunningFlink, RuntimeError>;
+    /// One readiness probe.
+    async fn cluster_ready(&self, running: &RunningFlink) -> bool;
+    /// Diagnostic reason for a readiness timeout.
+    async fn readiness_failure(&self, container_id: &str, started: std::time::Instant) -> String;
+    /// Re-attach a persisted container after a restart.
+    async fn reattach_cluster(
+        &self,
+        app_arn: &str,
+        container_id: &str,
+    ) -> Result<Option<RunningFlink>, RuntimeError>;
+    /// Tear down every container of an application and drop its tracking entry.
+    async fn remove_cluster(&self, app_arn: &str, container_id: Option<&str>);
+    async fn upload_jar(
+        &self,
+        running: &RunningFlink,
+        jar_bytes: Vec<u8>,
+        file_name: &str,
+    ) -> Result<String, JobError>;
+    async fn run_job(
+        &self,
+        running: &RunningFlink,
+        jar_id: &str,
+        parallelism: Option<i64>,
+        program_args: Option<&str>,
+        entry_class: Option<&str>,
+    ) -> Result<String, JobError>;
+    async fn job_state(&self, running: &RunningFlink, job_id: &str) -> Result<String, JobError>;
+    async fn cancel_job(&self, running: &RunningFlink, job_id: &str) -> Result<(), JobError>;
+}
+
+#[async_trait::async_trait]
+impl FlinkBackend for FlinkRuntime {
+    fn tracked(&self, app_arn: &str) -> Option<RunningFlink> {
+        FlinkRuntime::tracked(self, app_arn)
+    }
+    async fn create_cluster(&self, app_arn: &str) -> Result<RunningFlink, RuntimeError> {
+        FlinkRuntime::create_cluster(self, app_arn).await
+    }
+    async fn cluster_ready(&self, running: &RunningFlink) -> bool {
+        FlinkRuntime::cluster_ready(self, running).await
+    }
+    async fn readiness_failure(&self, container_id: &str, started: std::time::Instant) -> String {
+        FlinkRuntime::readiness_failure(self, container_id, started).await
+    }
+    async fn reattach_cluster(
+        &self,
+        app_arn: &str,
+        container_id: &str,
+    ) -> Result<Option<RunningFlink>, RuntimeError> {
+        FlinkRuntime::reattach_cluster(self, app_arn, container_id).await
+    }
+    async fn remove_cluster(&self, app_arn: &str, container_id: Option<&str>) {
+        FlinkRuntime::remove_cluster(self, app_arn, container_id).await
+    }
+    async fn upload_jar(
+        &self,
+        running: &RunningFlink,
+        jar_bytes: Vec<u8>,
+        file_name: &str,
+    ) -> Result<String, JobError> {
+        FlinkRuntime::upload_jar(self, running, jar_bytes, file_name).await
+    }
+    async fn run_job(
+        &self,
+        running: &RunningFlink,
+        jar_id: &str,
+        parallelism: Option<i64>,
+        program_args: Option<&str>,
+        entry_class: Option<&str>,
+    ) -> Result<String, JobError> {
+        FlinkRuntime::run_job(
+            self,
+            running,
+            jar_id,
+            parallelism,
+            program_args,
+            entry_class,
+        )
+        .await
+    }
+    async fn job_state(&self, running: &RunningFlink, job_id: &str) -> Result<String, JobError> {
+        FlinkRuntime::job_state(self, running, job_id).await
+    }
+    async fn cancel_job(&self, running: &RunningFlink, job_id: &str) -> Result<(), JobError> {
+        FlinkRuntime::cancel_job(self, running, job_id).await
     }
 }
 

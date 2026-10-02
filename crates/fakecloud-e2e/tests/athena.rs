@@ -9,6 +9,33 @@ use aws_sdk_glue::types as glue_types;
 use aws_sdk_s3::primitives::ByteStream;
 use helpers::TestServer;
 
+/// Poll GetQueryExecution until the query leaves QUEUED/RUNNING, the way
+/// Athena clients wait for a query: StartQueryExecution only accepts it.
+async fn wait_for_query(
+    athena: &aws_sdk_athena::Client,
+    qid: &str,
+) -> aws_sdk_athena::types::QueryExecution {
+    for _ in 0..200 {
+        let got = athena
+            .get_query_execution()
+            .query_execution_id(qid)
+            .send()
+            .await
+            .expect("get query execution");
+        let qe = got.query_execution().expect("qe").clone();
+        let state = qe
+            .status()
+            .and_then(|s| s.state())
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if state != "QUEUED" && state != "RUNNING" {
+            return qe;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("query {qid} did not finish");
+}
+
 #[tokio::test]
 async fn primary_workgroup_is_seeded_on_first_call() {
     let server = TestServer::start().await;
@@ -194,6 +221,14 @@ async fn aws_data_catalog_cannot_be_deleted() {
 async fn start_query_execution_returns_succeeded_result() {
     let server = TestServer::start().await;
     let athena = server.athena_client().await;
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("example-bucket")
+        .send()
+        .await
+        .expect("create results bucket");
     let started = athena
         .start_query_execution()
         .query_string("SELECT 1")
@@ -209,15 +244,10 @@ async fn start_query_execution_returns_succeeded_result() {
         .expect("start");
     let qid = started.query_execution_id().expect("qid").to_owned();
 
-    let got = athena
-        .get_query_execution()
-        .query_execution_id(&qid)
-        .send()
-        .await
-        .expect("get");
-    let qe = got.query_execution().expect("qe");
+    let qe = wait_for_query(&athena, &qid).await;
     let state = qe.status().and_then(|s| s.state()).expect("status state");
     assert_eq!(state.as_str(), "SUCCEEDED");
+    assert!(qe.status().and_then(|s| s.completion_date_time()).is_some());
 
     let results = athena
         .get_query_results()
@@ -406,6 +436,28 @@ async fn select_with_filter_reads_csv_via_glue_catalog() {
         .send()
         .await
         .expect("put csv");
+    // A gzip-compressed part is decoded by extension, and Hadoop marker
+    // files (`_SUCCESS`) are skipped, as on Athena.
+    let gz = {
+        use std::io::Write;
+        let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(b"4,dave,active\n").unwrap();
+        enc.finish().unwrap()
+    };
+    s3.put_object()
+        .bucket("dl-bucket")
+        .key("users/part-2.csv.gz")
+        .body(ByteStream::from(gz))
+        .send()
+        .await
+        .expect("put gz csv");
+    s3.put_object()
+        .bucket("dl-bucket")
+        .key("users/_SUCCESS")
+        .body(ByteStream::from_static(b"9,marker,active\n"))
+        .send()
+        .await
+        .expect("put marker");
 
     // 2. Register a Glue database + CSV-backed table over that prefix.
     glue.create_database()
@@ -491,13 +543,7 @@ async fn select_with_filter_reads_csv_via_glue_catalog() {
     let qid = started.query_execution_id().expect("qid").to_owned();
 
     // 5. Verify the execution completed successfully.
-    let exec = athena
-        .get_query_execution()
-        .query_execution_id(&qid)
-        .send()
-        .await
-        .expect("get exec");
-    let qe = exec.query_execution().expect("qe");
+    let qe = &wait_for_query(&athena, &qid).await;
     let state = qe
         .status()
         .and_then(|s| s.state())
@@ -510,10 +556,10 @@ async fn select_with_filter_reads_csv_via_glue_catalog() {
         .and_then(|rc| rc.output_location())
         .unwrap_or_default()
         .to_string();
-    assert!(
-        resolved_output.starts_with("s3://athena-results/queries/")
-            && resolved_output.ends_with(".csv"),
-        "expected resolved CSV output_location, got `{resolved_output}`"
+    assert_eq!(
+        resolved_output,
+        format!("s3://athena-results/queries/{qid}.csv"),
+        "Athena names the result file after the query execution id"
     );
 
     // 6. GetQueryResults: header row + matched rows, projected to (id, name).
@@ -534,10 +580,11 @@ async fn select_with_filter_reads_csv_via_glue_catalog() {
                 .collect()
         })
         .collect();
-    assert_eq!(rows.len(), 3, "header + 2 matches; got {rows:?}");
+    assert_eq!(rows.len(), 4, "header + 3 matches; got {rows:?}");
     assert_eq!(rows[0], vec!["id".to_string(), "name".to_string()]);
     assert_eq!(rows[1], vec!["1".to_string(), "alice".to_string()]);
     assert_eq!(rows[2], vec!["3".to_string(), "carol".to_string()]);
+    assert_eq!(rows[3], vec!["4".to_string(), "dave".to_string()]);
 
     // 7. The result CSV was written back to S3 — fetch and verify.
     let result_key = resolved_output
@@ -553,7 +600,7 @@ async fn select_with_filter_reads_csv_via_glue_catalog() {
     let body = got.body.collect().await.expect("body").into_bytes();
     let body_str = String::from_utf8(body.to_vec()).expect("utf8");
     assert!(
-        body_str.contains("id,name\n1,alice\n3,carol"),
+        body_str.contains("id,name\n1,alice\n3,carol\n4,dave"),
         "result CSV missing expected payload: {body_str:?}"
     );
 }
@@ -572,13 +619,7 @@ async fn select_failing_against_unknown_table_marks_query_failed() {
         .await
         .expect("start");
     let qid = started.query_execution_id().expect("qid").to_owned();
-    let exec = athena
-        .get_query_execution()
-        .query_execution_id(&qid)
-        .send()
-        .await
-        .expect("get exec");
-    let qe = exec.query_execution().expect("qe");
+    let qe = &wait_for_query(&athena, &qid).await;
     let state = qe
         .status()
         .and_then(|s| s.state())

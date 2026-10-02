@@ -16,16 +16,17 @@
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
-use chrono::Utc;
 use fakecloud_glue::{SharedGlueState, StorageDescriptor};
-use fakecloud_s3::{memory_body, S3Object, SharedS3State};
+use fakecloud_persistence::S3Store;
+use fakecloud_s3::body_io::ObjectBodyHandle;
+use fakecloud_s3::compression::{decompress, Codec};
+use fakecloud_s3::SharedS3State;
 use sqlparser::ast::{
     BinaryOperator, Expr, GroupByExpr, LimitClause, ObjectName, Query, SelectItem, SetExpr,
     Statement, TableFactor, Value as SqlValue, ValueWithSpan,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use uuid::Uuid;
 
 /// Result of executing a query: in-memory rows ready for `GetQueryResults`,
 /// plus the S3 location where we wrote the CSV result.
@@ -66,6 +67,8 @@ pub enum SqlError {
     BucketNotFound(String),
     #[error("S3 object body unreadable: {0}")]
     S3Read(String),
+    #[error("failed to write query results: {0}")]
+    S3Write(String),
     #[error("output location `{0}` is not an s3:// URL")]
     InvalidOutputLocation(String),
     #[error("only CSV-backed Glue tables are supported (got serde `{0}`)")]
@@ -76,18 +79,38 @@ pub enum SqlError {
     UnsupportedWhere,
 }
 
+/// Where a query runs: the caller's account/region, the shared Glue catalog
+/// and S3 state it reads, the durable S3 store results are written through,
+/// and the query execution id that names the result object.
+pub struct ExecEnv<'a> {
+    pub account_id: &'a str,
+    pub region: &'a str,
+    pub glue: Option<&'a SharedGlueState>,
+    pub s3: Option<&'a SharedS3State>,
+    pub s3_store: Option<&'a dyn S3Store>,
+    pub query_execution_id: &'a str,
+}
+
 /// Parse and execute the query. Returns either the executed result or a
 /// structured error so the caller can mark the query `FAILED` with a real
 /// reason.
+///
+/// This does blocking IO (S3 object reads, the result write); run it off the
+/// async request path. No S3 lock is held while object bodies are read or the
+/// result is written.
 pub fn execute(
     query: &str,
     default_database: Option<&str>,
     output_location: Option<&str>,
-    account_id: &str,
-    region: &str,
-    glue: Option<&SharedGlueState>,
-    s3: Option<&SharedS3State>,
+    env: &ExecEnv<'_>,
 ) -> Result<ExecutedQuery, SqlError> {
+    let ExecEnv {
+        account_id,
+        region,
+        glue,
+        s3,
+        ..
+    } = *env;
     let dialect = GenericDialect {};
     let mut statements =
         Parser::parse_sql(&dialect, query).map_err(|e| SqlError::Parse(e.to_string()))?;
@@ -114,7 +137,7 @@ pub fn execute(
     // Literal-only SELECT (no FROM): evaluate inline. Real Athena supports
     // this for `SELECT 1`, `SELECT 'foo'`, etc.
     if plan.source.is_none() {
-        return execute_literal_select(&plan, output_location, account_id, s3);
+        return execute_literal_select(&plan, output_location, env);
     }
     let source = plan.source.as_ref().expect("source is Some by check above");
 
@@ -234,8 +257,10 @@ pub fn execute(
     }
 
     // Write CSV result back to OutputLocation if configured.
-    let output = output_location
-        .and_then(|loc| write_result_csv(s3_state, account_id, loc, &projected, &out_rows).ok());
+    let output = match output_location {
+        Some(loc) => Some(write_result_csv(env, loc, &projected, &out_rows)?),
+        None => None,
+    };
 
     Ok(ExecutedQuery {
         columns: projected,
@@ -428,8 +453,7 @@ fn literal_value(expr: &Expr) -> Result<(String, String), SqlError> {
 fn execute_literal_select(
     plan: &Plan,
     output_location: Option<&str>,
-    account_id: &str,
-    s3: Option<&SharedS3State>,
+    env: &ExecEnv<'_>,
 ) -> Result<ExecutedQuery, SqlError> {
     let columns: Vec<(String, String)> = plan
         .literal_items
@@ -447,8 +471,8 @@ fn execute_literal_select(
         vec![row]
     };
 
-    let output = match (output_location, s3) {
-        (Some(loc), Some(state)) => write_result_csv(state, account_id, loc, &columns, &rows).ok(),
+    let output = match (output_location, env.s3) {
+        (Some(loc), Some(_)) => Some(write_result_csv(env, loc, &columns, &rows)?),
         _ => None,
     };
     Ok(ExecutedQuery {
@@ -567,39 +591,74 @@ fn read_csv_under_prefix(
     bucket_name: &str,
     prefix: &str,
 ) -> Result<(Vec<Vec<String>>, usize), SqlError> {
+    // Resolve the objects and open their bodies under the read guard (only
+    // metadata work and fd opens), then read and decode them after the guard
+    // drops so a large table scan never stalls S3 writers.
+    let mut objects: Vec<(String, Codec, ObjectBodyHandle)> = Vec::new();
+    {
+        let s3_guard = s3.read();
+        let acct = s3_guard
+            .get(account_id)
+            .ok_or_else(|| SqlError::BucketNotFound(bucket_name.to_string()))?;
+        let bucket = acct
+            .buckets
+            .get(bucket_name)
+            .ok_or_else(|| SqlError::BucketNotFound(bucket_name.to_string()))?;
+
+        // Sort keys so result ordering is deterministic across re-runs.
+        let mut keys: Vec<&String> = bucket
+            .objects
+            .keys()
+            .filter(|k| prefix.is_empty() || k.starts_with(prefix))
+            .filter(|k| !is_hidden_data_file(k))
+            .collect();
+        keys.sort();
+
+        for key in keys {
+            let obj = &bucket.objects[key];
+            if obj.is_delete_marker {
+                continue;
+            }
+            let handle = ObjectBodyHandle::open(&obj.body)
+                .map_err(|e| SqlError::S3Read(format!("{key}: {e}")))?;
+            let codec = Codec::from_key(key, obj.content_encoding.as_deref());
+            objects.push((key.clone(), codec, handle));
+        }
+    }
+
     let mut rows: Vec<Vec<String>> = Vec::new();
     let mut scanned: usize = 0;
-    let s3_guard = s3.read();
-    let acct = s3_guard
-        .get(account_id)
-        .ok_or_else(|| SqlError::BucketNotFound(bucket_name.to_string()))?;
-    let bucket = acct
-        .buckets
-        .get(bucket_name)
-        .ok_or_else(|| SqlError::BucketNotFound(bucket_name.to_string()))?;
-
-    // Sort keys so result ordering is deterministic across re-runs.
-    let mut keys: Vec<&String> = bucket
-        .objects
-        .keys()
-        .filter(|k| prefix.is_empty() || k.starts_with(prefix))
-        .collect();
-    keys.sort();
-
-    for key in keys {
-        let obj = &bucket.objects[key];
-        if obj.is_delete_marker {
-            continue;
-        }
-        let body = acct
-            .read_body(&obj.body)
+    for (key, codec, handle) in objects {
+        let raw = handle
+            .read_all()
             .map_err(|e| SqlError::S3Read(format!("{key}: {e}")))?;
-        scanned += body.len();
-        for line in csv_lines(&body) {
+        // DataScannedInBytes counts the stored (compressed) bytes, as Athena
+        // bills them.
+        scanned += raw.len();
+        let text = if codec == Codec::None {
+            raw
+        } else {
+            Bytes::from(
+                decompress(codec, &raw)
+                    .map_err(|e| SqlError::S3Read(format!("{key}: cannot decompress: {e}")))?,
+            )
+        };
+        for line in csv_lines(&text) {
             rows.push(parse_csv_line(&line));
         }
     }
     Ok((rows, scanned))
+}
+
+/// Athena skips files whose name starts with `_` or `.` (Hadoop/Hive
+/// convention for markers such as `_SUCCESS` and temporary files), and
+/// zero-length "folder" placeholder keys ending in `/`.
+fn is_hidden_data_file(key: &str) -> bool {
+    if key.ends_with('/') {
+        return true;
+    }
+    let name = key.rsplit('/').next().unwrap_or(key);
+    name.starts_with('_') || name.starts_with('.')
 }
 
 /// Split bytes into lines stripping trailing CR/LF; skip empty lines.
@@ -644,19 +703,22 @@ fn parse_csv_line(line: &str) -> Vec<String> {
 }
 
 fn write_result_csv(
-    s3: &SharedS3State,
-    account_id: &str,
+    env: &ExecEnv<'_>,
     output_location: &str,
     columns: &[(String, String)],
     rows: &[Vec<String>],
 ) -> Result<String, SqlError> {
     let (bucket_name, prefix) = parse_s3_url(output_location)
         .ok_or_else(|| SqlError::InvalidOutputLocation(output_location.to_string()))?;
+    let s3 = env
+        .s3
+        .ok_or_else(|| SqlError::BucketNotFound(bucket_name.clone()))?;
     let mut prefix = prefix;
     if !prefix.is_empty() && !prefix.ends_with('/') {
         prefix.push('/');
     }
-    let key = format!("{prefix}{}.csv", Uuid::new_v4());
+    // Athena names the result file after the query execution id.
+    let key = format!("{prefix}{}.csv", env.query_execution_id);
 
     let mut body = String::new();
     body.push_str(
@@ -677,29 +739,24 @@ fn write_result_csv(
         body.push('\n');
     }
 
-    let bytes = Bytes::from(body.into_bytes());
-    let size = bytes.len() as u64;
-    let etag = format!("\"{}\"", Uuid::new_v4().simple());
-
-    let mut s3_state = s3.write();
-    let acct = s3_state.get_or_create(account_id);
-    let bucket = acct
-        .buckets
-        .get_mut(&bucket_name)
-        .ok_or_else(|| SqlError::BucketNotFound(bucket_name.clone()))?;
-    bucket.objects.insert(
-        key.clone(),
-        S3Object {
-            key: key.clone(),
-            body: memory_body(bytes),
-            content_type: "text/csv".to_string(),
-            etag,
-            size,
-            last_modified: Utc::now(),
-            storage_class: "STANDARD".to_string(),
-            ..Default::default()
-        },
-    );
+    // Written through the durable S3 store (a disk file in persistent mode),
+    // so query results survive a restart like any other object.
+    fakecloud_s3::delivery::put_object_via_store(
+        s3,
+        env.s3_store,
+        env.account_id,
+        &bucket_name,
+        &key,
+        body.into_bytes(),
+        Some("text/csv"),
+    )
+    .map_err(|e| {
+        if e.starts_with("bucket ") {
+            SqlError::BucketNotFound(bucket_name.clone())
+        } else {
+            SqlError::S3Write(e)
+        }
+    })?;
     Ok(format!("s3://{bucket_name}/{key}"))
 }
 
@@ -756,10 +813,14 @@ mod tests {
             "SELECT 1",
             None,
             None,
-            "111111111111",
-            "us-east-1",
-            None,
-            None,
+            &ExecEnv {
+                account_id: "111111111111",
+                region: "us-east-1",
+                glue: None,
+                s3: None,
+                s3_store: None,
+                query_execution_id: "q",
+            },
         );
         let exec = result.expect("execute");
         assert_eq!(exec.rows.len(), 1);
@@ -813,5 +874,110 @@ mod tests {
         assert_eq!(escape_csv("plain"), "plain");
         assert_eq!(escape_csv("a,b"), "\"a,b\"");
         assert_eq!(escape_csv("a\"b"), "\"a\"\"b\"");
+    }
+
+    fn s3_with_bucket(bucket: &str) -> SharedS3State {
+        let mut mas: fakecloud_core::multi_account::MultiAccountState<fakecloud_s3::S3State> =
+            fakecloud_core::multi_account::MultiAccountState::new("111111111111", "us-east-1", "");
+        mas.get_or_create("111111111111").buckets.insert(
+            bucket.to_string(),
+            fakecloud_s3::S3Bucket::new(bucket, "us-east-1", "owner"),
+        );
+        std::sync::Arc::new(parking_lot::RwLock::new(mas))
+    }
+
+    fn put(s3: &SharedS3State, bucket: &str, key: &str, body: Vec<u8>) {
+        fakecloud_s3::delivery::put_object_via_store(
+            s3,
+            None,
+            "111111111111",
+            bucket,
+            key,
+            body,
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reads_compressed_objects_and_skips_marker_files() {
+        use std::io::Write;
+        let s3 = s3_with_bucket("data");
+        put(&s3, "data", "t/a.csv", b"1,plain\n".to_vec());
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        gz.write_all(b"2,gzipped\n3,gzipped\n").unwrap();
+        let gz = gz.finish().unwrap();
+        let gz_len = gz.len();
+        put(&s3, "data", "t/b.csv.gz", gz);
+        put(&s3, "data", "t/_SUCCESS", b"garbage,row\n".to_vec());
+        put(&s3, "data", "t/.tmp-part", b"garbage,row\n".to_vec());
+
+        let (rows, scanned) = read_csv_under_prefix(&s3, "111111111111", "data", "t/").unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                vec!["1".to_string(), "plain".to_string()],
+                vec!["2".to_string(), "gzipped".to_string()],
+                vec!["3".to_string(), "gzipped".to_string()],
+            ]
+        );
+        // Scanned bytes are the stored (compressed) sizes.
+        assert_eq!(scanned, "1,plain\n".len() + gz_len);
+    }
+
+    #[test]
+    fn corrupt_compressed_object_fails_the_query() {
+        let s3 = s3_with_bucket("data");
+        put(&s3, "data", "t/bad.csv.gz", b"not gzip".to_vec());
+        assert!(matches!(
+            read_csv_under_prefix(&s3, "111111111111", "data", "t/"),
+            Err(SqlError::S3Read(_))
+        ));
+    }
+
+    #[test]
+    fn result_csv_is_named_after_the_query_and_persisted_through_the_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = fakecloud_persistence::s3::DiskS3Store::new(
+            dir.path().to_path_buf(),
+            std::sync::Arc::new(fakecloud_persistence::cache::BodyCache::new(0)),
+        );
+        let s3 = s3_with_bucket("results");
+        let env = ExecEnv {
+            account_id: "111111111111",
+            region: "us-east-1",
+            glue: None,
+            s3: Some(&s3),
+            s3_store: Some(&store),
+            query_execution_id: "qe-123",
+        };
+        let exec = execute("SELECT 1 AS one", None, Some("s3://results/out"), &env).unwrap();
+        assert_eq!(
+            exec.output_location.as_deref(),
+            Some("s3://results/out/qe-123.csv")
+        );
+        let guard = s3.read();
+        let obj = &guard.get("111111111111").unwrap().buckets["results"].objects["out/qe-123.csv"];
+        let fakecloud_persistence::BodyRef::Disk { path, .. } = &obj.body else {
+            panic!("result must be written through the disk store, got memory body");
+        };
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "one\n1\n");
+    }
+
+    #[test]
+    fn missing_result_bucket_fails_the_query() {
+        let s3 = s3_with_bucket("other");
+        let env = ExecEnv {
+            account_id: "111111111111",
+            region: "us-east-1",
+            glue: None,
+            s3: Some(&s3),
+            s3_store: None,
+            query_execution_id: "qe-1",
+        };
+        assert!(matches!(
+            execute("SELECT 1", None, Some("s3://nope/out/"), &env),
+            Err(SqlError::BucketNotFound(_))
+        ));
     }
 }

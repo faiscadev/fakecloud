@@ -28,6 +28,7 @@ mod lock;
 mod multipart;
 pub(crate) mod notifications;
 mod objects;
+pub(crate) use objects::run_blocking_io;
 mod tags;
 
 // Re-export notification helpers for use in sub-modules

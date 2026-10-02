@@ -819,8 +819,13 @@ impl S3Service {
         // its own, and before the copy does any work.
         let copy_acl = self.resolve_write_acl_headers(account_id, dest_bucket, &req.headers)?;
 
-        let mut accts = self.state.write();
-        let state = accts.get_or_create(account_id);
+        // Phase 1 (read guard): resolve the source, evaluate preconditions and
+        // the destination's attributes, and open the source body. The source
+        // body itself (up to 5 GB) is read after the guard drops, so a large
+        // copy never holds the global S3 lock across its IO.
+        let accts_r = self.state.read();
+        let empty_state = crate::state::S3State::new(account_id, "us-east-1");
+        let state = accts_r.get(account_id).unwrap_or(&empty_state);
 
         // Resolve source object, possibly a specific version
         let (src_obj, src_version_id_actual) = {
@@ -1057,16 +1062,26 @@ impl S3Service {
             }
         });
 
+        let dest_region = state
+            .buckets
+            .get(dest_bucket)
+            .map_or_else(|| state.region.clone(), |b| b.region.clone());
+        let src_handle = crate::body_io::ObjectBodyHandle::open(&src_obj.body)
+            .map_err(crate::service::io_to_aws)?;
+        drop(accts_r);
+
+        // Phase 2 (no lock): read, decrypt, checksum, re-encrypt, and stage
+        // the destination body next to the store.
+        //
         // Checksum: compute new if algorithm specified, or copy from source.
         // For SSE-KMS sources we work on plaintext so the checksum + the
         // destination's stored body line up with what the caller will get
         // back from a future GetObject. Fail-closed if the source can't
-        // be decrypted (revoked key, malformed envelope) — copying the
+        // be decrypted (revoked key, malformed envelope): copying the
         // ciphertext over to the destination would silently corrupt the
         // copy.
-        let raw_src_bytes = state
-            .read_body(&src_obj.body)
-            .map_err(crate::service::io_to_aws)?;
+        let raw_src_bytes =
+            super::run_blocking_io(|| src_handle.read_all()).map_err(crate::service::io_to_aws)?;
         let src_bytes =
             if src_obj.sse_algorithm.as_deref() == Some("aws:kms") && self.kms_hook.is_some() {
                 self.decrypt_object_body(account_id, src_bucket, &raw_src_bytes)?
@@ -1088,10 +1103,6 @@ impl S3Service {
         // stored body is a fresh envelope with the dest's encryption
         // context (bucket arn), under a key in the destination bucket's
         // region.
-        let dest_region = state
-            .buckets
-            .get(dest_bucket)
-            .map_or_else(|| state.region.clone(), |b| b.region.clone());
         let dest_stored_bytes = if new_sse.as_deref() == Some("aws:kms") && self.kms_hook.is_some()
         {
             self.encrypt_object_body(
@@ -1104,6 +1115,15 @@ impl S3Service {
         } else {
             src_bytes.clone()
         };
+        let mut staged_dest = super::run_blocking_io(|| {
+            crate::body_io::SpooledBody::spool(Some(&*self.store), dest_stored_bytes.clone())
+        })
+        .map_err(crate::service::io_to_aws)?;
+
+        // Phase 3 (write guard): commit the destination object. The store
+        // write is a rename of the staged file, not a body copy.
+        let mut accts = self.state.write();
+        let state = accts.get_or_create(account_id);
 
         let db = state
             .buckets
@@ -1217,7 +1237,7 @@ impl S3Service {
                 dest_bucket,
                 dest_key,
                 dest_meta.version_id.as_deref(),
-                BodySource::Bytes(dest_stored_bytes.clone()),
+                staged_dest.source(),
                 &dest_meta,
             )
         })

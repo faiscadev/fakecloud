@@ -12,6 +12,14 @@ async fn persistence_round_trip_core_resources() {
     let tmp = tempfile::tempdir().unwrap();
     let mut server = TestServer::start_persistent(tmp.path()).await;
     let athena = server.athena_client().await;
+    server
+        .s3_client()
+        .await
+        .create_bucket()
+        .bucket("example-bucket")
+        .send()
+        .await
+        .unwrap();
 
     athena
         .create_work_group()
@@ -70,6 +78,28 @@ async fn persistence_round_trip_core_resources() {
         .unwrap()
         .query_execution_id
         .unwrap();
+    // StartQueryExecution only accepts the query; wait for the job to finish
+    // so the terminal status and the result file are what get persisted.
+    let mut finished = false;
+    for _ in 0..200 {
+        let state = athena
+            .get_query_execution()
+            .query_execution_id(&qid)
+            .send()
+            .await
+            .unwrap()
+            .query_execution()
+            .and_then(|q| q.status())
+            .and_then(|s| s.state())
+            .map(|s| s.as_str().to_string())
+            .unwrap_or_default();
+        if state == "SUCCEEDED" {
+            finished = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(finished, "query did not succeed before restart");
 
     server.restart().await;
     let athena = server.athena_client().await;
@@ -145,6 +175,20 @@ async fn persistence_round_trip_core_resources() {
             .map(|s| s.as_str()),
         Some("SUCCEEDED")
     );
+
+    // The result CSV was written through the durable S3 store, so it
+    // survives the restart too.
+    let got = server
+        .s3_client()
+        .await
+        .get_object()
+        .bucket("example-bucket")
+        .key(format!("results/{qid}.csv"))
+        .send()
+        .await
+        .expect("result csv persisted");
+    let body = got.body.collect().await.unwrap().into_bytes();
+    assert_eq!(&body[..], b"_col0\n1\n");
 }
 
 /// A deleted workgroup stays gone after restart.

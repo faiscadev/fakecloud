@@ -1407,15 +1407,8 @@ async fn logs_export_task_writes_to_storage() {
         .unwrap();
     let task_id = resp.task_id().unwrap().to_string();
 
-    // Verify task completed
-    let resp = client
-        .describe_export_tasks()
-        .task_id(&task_id)
-        .send()
-        .await
-        .unwrap();
-    let task = &resp.export_tasks()[0];
-    assert_eq!(task.status().unwrap().code().unwrap().as_str(), "COMPLETED");
+    // The export runs as a job; wait for it like a real client would.
+    assert_eq!(wait_for_export(&client, &task_id).await, "COMPLETED");
 
     // Verify exported data via internal GetExportedData action (raw HTTP)
     let http_client = reqwest::Client::new();
@@ -1437,6 +1430,29 @@ async fn logs_export_task_writes_to_storage() {
     let data = entries[0]["data"].as_str().unwrap();
     assert!(data.contains("export event A"));
     assert!(data.contains("export event B"));
+}
+
+/// Poll DescribeExportTasks until the task leaves PENDING/RUNNING and return
+/// its final status code. CreateExportTask only accepts the task.
+async fn wait_for_export(client: &aws_sdk_cloudwatchlogs::Client, task_id: &str) -> String {
+    for _ in 0..200 {
+        let resp = client
+            .describe_export_tasks()
+            .task_id(task_id)
+            .send()
+            .await
+            .unwrap();
+        let code = resp.export_tasks()[0]
+            .status()
+            .and_then(|s| s.code())
+            .map(|c| c.as_str().to_string())
+            .unwrap_or_default();
+        if code != "PENDING" && code != "RUNNING" {
+            return code;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("export task {task_id} did not finish");
 }
 
 /// Z2: CreateExportTask must write a real, gzipped object into the
@@ -1503,6 +1519,19 @@ async fn logs_export_task_writes_gzipped_object_to_real_s3() {
         .await
         .unwrap();
     let task_id = resp.task_id().unwrap().to_string();
+    assert_eq!(wait_for_export(&logs, &task_id).await, "COMPLETED");
+
+    // A finished export can no longer be cancelled.
+    let err = logs
+        .cancel_export_task()
+        .task_id(&task_id)
+        .send()
+        .await
+        .expect_err("cancelling a completed export must fail");
+    assert!(
+        format!("{err:?}").contains("InvalidOperationException"),
+        "unexpected error: {err:?}"
+    );
 
     // ListObjectsV2 should surface a single gzipped key under the prefix.
     let listed = s3
