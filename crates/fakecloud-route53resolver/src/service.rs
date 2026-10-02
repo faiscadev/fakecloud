@@ -1,5 +1,6 @@
 //! Amazon Route 53 Resolver (`route53resolver`) awsJson1_1 service.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -108,6 +109,9 @@ const SUPPORTED_ACTIONS: &[&str] = &[
 /// Actions that mutate persisted state and therefore trigger a snapshot write.
 const NON_MUTATING_PREFIXES: &[&str] = &["Get", "List"];
 
+/// Latest settle generation keyed by (resource kind, account, id).
+type SettleGenerations = Arc<parking_lot::Mutex<HashMap<(&'static str, String, String), u64>>>;
+
 /// What terminal state a background-settled resource lands in.
 enum Settle {
     Endpoint,
@@ -119,12 +123,31 @@ enum Settle {
     Outpost,
 }
 
+impl Settle {
+    /// Stable name of the resource kind, keying the settle generations.
+    fn tag(&self) -> &'static str {
+        match self {
+            Settle::Endpoint => "endpoint",
+            Settle::RuleAssociation => "rule-association",
+            Settle::QueryLogAssociation => "query-log-association",
+            Settle::FirewallAssociation => "firewall-association",
+            Settle::Dnssec(_) => "dnssec",
+            Settle::ResolverConfig(_) => "resolver-config",
+            Settle::Outpost => "outpost",
+        }
+    }
+}
+
 pub struct Route53ResolverService {
     state: SharedRoute53ResolverState,
     ec2_state: Option<fakecloud_ec2::SharedEc2State>,
     s3_state: Option<fakecloud_s3::SharedS3State>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
+    /// Latest settle generation per (kind, account, id). A settle only lands if
+    /// no newer transition re-armed the resource since it was spawned, so a
+    /// create's timer cannot flip a just-updated endpoint OPERATIONAL early.
+    settle_generations: SettleGenerations,
 }
 
 impl Route53ResolverService {
@@ -135,6 +158,7 @@ impl Route53ResolverService {
             s3_state: None,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
+            settle_generations: Arc::default(),
         }
     }
 
@@ -245,16 +269,36 @@ impl Route53ResolverService {
         let state = Arc::clone(&self.state);
         let store = self.snapshot_store.clone();
         let lock = self.snapshot_lock.clone();
+        let generations = Arc::clone(&self.settle_generations);
+        let gen_key = (kind.tag(), account.clone(), id.clone());
+        let generation = {
+            let mut g = generations.lock();
+            let slot = g.entry(gen_key.clone()).or_insert(0);
+            *slot += 1;
+            *slot
+        };
         tokio::spawn(async move {
             tokio::time::sleep(SETTLE_DELAY).await;
             {
+                // Superseded by a later transition: its own timer settles it.
+                {
+                    let mut g = generations.lock();
+                    if g.get(&gen_key) != Some(&generation) {
+                        return;
+                    }
+                    g.remove(&gen_key);
+                }
                 let mut st = state.write();
                 let Some(acc) = st.accounts.get_mut(&account) else {
                     return;
                 };
                 match kind {
                     Settle::Endpoint => {
-                        if let Some(rec) = acc.endpoints.get_mut(&id) {
+                        // Only a transient endpoint settles; anything else keeps
+                        // its status and ModificationTime.
+                        if let Some(rec) = acc.endpoints.get_mut(&id).filter(|r| {
+                            matches!(r.endpoint.status.as_str(), "CREATING" | "UPDATING")
+                        }) {
                             rec.endpoint.status = "OPERATIONAL".to_string();
                             rec.endpoint.status_message =
                                 "This Resolver Endpoint is operational.".to_string();
@@ -266,17 +310,29 @@ impl Route53ResolverService {
                         }
                     }
                     Settle::RuleAssociation => {
-                        if let Some(a) = acc.rule_associations.get_mut(&id) {
+                        if let Some(a) = acc
+                            .rule_associations
+                            .get_mut(&id)
+                            .filter(|a| a.status == "CREATING")
+                        {
                             a.status = "COMPLETE".to_string();
                         }
                     }
                     Settle::QueryLogAssociation => {
-                        if let Some(a) = acc.query_log_associations.get_mut(&id) {
+                        if let Some(a) = acc
+                            .query_log_associations
+                            .get_mut(&id)
+                            .filter(|a| a.status == "CREATING")
+                        {
                             a.status = "ACTIVE".to_string();
                         }
                     }
                     Settle::FirewallAssociation => {
-                        if let Some(a) = acc.firewall_rule_group_associations.get_mut(&id) {
+                        if let Some(a) = acc
+                            .firewall_rule_group_associations
+                            .get_mut(&id)
+                            .filter(|a| matches!(a.status.as_str(), "CREATING" | "UPDATING"))
+                        {
                             a.status = "COMPLETE".to_string();
                             a.modification_time = now_rfc3339();
                         }
@@ -292,7 +348,11 @@ impl Route53ResolverService {
                         }
                     }
                     Settle::Outpost => {
-                        if let Some(o) = acc.outpost_resolvers.get_mut(&id) {
+                        if let Some(o) = acc
+                            .outpost_resolvers
+                            .get_mut(&id)
+                            .filter(|o| matches!(o.status.as_str(), "CREATING" | "UPDATING"))
+                        {
                             o.status = "OPERATIONAL".to_string();
                             o.modification_time = now_rfc3339();
                         }
@@ -3471,6 +3531,52 @@ mod tests {
         let st = state.read();
         let c = st.accounts["123456789012"].dnssec_configs["rslvr-ds-abc"].clone();
         assert_eq!(c.validation_status, "ENABLED");
+    }
+
+    // A create's settle timer must not flip an endpoint that a later update
+    // put back into UPDATING; only the update's own timer settles it.
+    #[tokio::test]
+    async fn stale_endpoint_settle_does_not_override_later_update() {
+        let svc = Route53ResolverService::default();
+        let (status, body) = call(
+            &svc,
+            "CreateResolverEndpoint",
+            json!({
+                "CreatorRequestId": "stale-settle",
+                "Direction": "INBOUND",
+                "SecurityGroupIds": ["sg-1"],
+                "IpAddresses": [ { "SubnetId": "subnet-a" }, { "SubnetId": "subnet-b" } ],
+            }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        let id = body["ResolverEndpoint"]["Id"].as_str().unwrap().to_string();
+        tokio::time::sleep(SETTLE_DELAY - Duration::from_millis(100)).await;
+        let (status, body) = call(
+            &svc,
+            "UpdateResolverEndpoint",
+            json!({ "ResolverEndpointId": id, "Name": "renamed" }),
+        )
+        .await;
+        assert_eq!(status, 200, "{body}");
+        assert_eq!(body["ResolverEndpoint"]["Status"], "UPDATING");
+        // Past the create's timer, short of the update's.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let (_, got) = call(
+            &svc,
+            "GetResolverEndpoint",
+            json!({ "ResolverEndpointId": id }),
+        )
+        .await;
+        assert_eq!(got["ResolverEndpoint"]["Status"], "UPDATING");
+        tokio::time::sleep(SETTLE_DELAY).await;
+        let (_, got) = call(
+            &svc,
+            "GetResolverEndpoint",
+            json!({ "ResolverEndpointId": id }),
+        )
+        .await;
+        assert_eq!(got["ResolverEndpoint"]["Status"], "OPERATIONAL");
     }
 
     async fn call_err(svc: &Route53ResolverService, action: &str, body: Value) -> AwsServiceError {

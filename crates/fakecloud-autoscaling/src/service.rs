@@ -194,6 +194,16 @@ impl AutoScalingService {
             principal: None,
         };
         self.terminate_ec2_instances(ids, &req).await;
+        self.persist_ec2().await;
+    }
+
+    /// Fire the EC2 snapshot hook. The backing instances are driven through a
+    /// bare `Ec2Service` with no snapshot store, so a launch or terminate here
+    /// is lost on restart unless the hook persists it. No-op when unwired.
+    async fn persist_ec2(&self) {
+        if let Some(hook) = &self.ec2_snapshot_hook {
+            hook().await;
+        }
     }
 
     async fn terminate_ec2_instances(&self, ids: &[String], req: &AwsRequest) {
@@ -898,6 +908,9 @@ impl AutoScalingService {
         };
         // ForceDelete reaps the backing EC2 instances instead of leaking them.
         self.terminate_ec2_instances(&backing_ids, req).await;
+        if self.ec2_state.is_some() && !backing_ids.is_empty() {
+            self.persist_ec2().await;
+        }
         Ok(self.ok("DeleteAutoScalingGroup", String::new(), req))
     }
 
@@ -1607,9 +1620,7 @@ impl AutoScalingService {
         // early `return` below) cannot skip persisting them. No-op when there is
         // no EC2 backend or no hook wired (bug-hunt restart-dataloss).
         if ec2_touched {
-            if let Some(hook) = &self.ec2_snapshot_hook {
-                hook().await;
-            }
+            self.persist_ec2().await;
         }
 
         {

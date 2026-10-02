@@ -89,8 +89,10 @@ pub struct BatchService {
     /// ECS backend so a submitted job runs as a REAL container (the wedge:
     /// every rival fakes Batch compute). `None` parks jobs at SUBMITTED
     /// honestly (unit tests / no container runtime), never auto-succeeds.
-    ecs_state: Option<fakecloud_ecs::SharedEcsState>,
-    ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    /// This is the server's fully wired ECS service (snapshot store, runtime,
+    /// role-trust validator, IAM mode), so the cluster, task definitions and
+    /// tasks a job creates persist and are validated like any ECS call.
+    ecs: Option<Arc<fakecloud_ecs::EcsService>>,
 }
 
 impl BatchService {
@@ -99,8 +101,7 @@ impl BatchService {
             state,
             snapshot_store: None,
             snapshot_lock: Arc::new(AsyncMutex::new(())),
-            ecs_state: None,
-            ecs_runtime: None,
+            ecs: None,
         }
     }
 
@@ -110,14 +111,11 @@ impl BatchService {
     }
 
     /// Attach the ECS backend so SubmitJob launches a real container-backed
-    /// task and drives the job status off its real exit code.
-    pub fn with_ecs(
-        mut self,
-        state: fakecloud_ecs::SharedEcsState,
-        runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
-    ) -> Self {
-        self.ecs_state = Some(state);
-        self.ecs_runtime = runtime;
+    /// task and drives the job status off its real exit code. Pass the same
+    /// wired service the registry dispatches to, so the job's ECS resources
+    /// go through its persistence and task-role checks.
+    pub fn with_ecs(mut self, ecs: Arc<fakecloud_ecs::EcsService>) -> Self {
+        self.ecs = Some(ecs);
         self
     }
 
@@ -955,8 +953,7 @@ impl BatchService {
     fn launch_ctx(&self) -> LaunchCtx {
         LaunchCtx {
             batch_state: self.state.clone(),
-            ecs_state: self.ecs_state.clone(),
-            ecs_runtime: self.ecs_runtime.clone(),
+            ecs: self.ecs.clone(),
             snapshot_store: self.snapshot_store.clone(),
             snapshot_lock: self.snapshot_lock.clone(),
         }
@@ -1301,8 +1298,7 @@ fn merge_updates(stored: &mut Value, body: &Value, fields: &[&str], arn_key: &st
 #[derive(Clone)]
 struct LaunchCtx {
     batch_state: SharedBatchState,
-    ecs_state: Option<fakecloud_ecs::SharedEcsState>,
-    ecs_runtime: Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    ecs: Option<Arc<fakecloud_ecs::EcsService>>,
     snapshot_store: Option<Arc<dyn SnapshotStore>>,
     snapshot_lock: Arc<AsyncMutex<()>>,
 }
@@ -1322,23 +1318,14 @@ async fn launch(
     container: Option<Value>,
     now: i64,
 ) {
-    let (Some(ecs_state), Some(container)) = (ctx.ecs_state.clone(), container) else {
+    let (Some(ecs), Some(container)) = (ctx.ecs.clone(), container) else {
         return;
     };
     if container.get("image").and_then(Value::as_str).is_none() {
         return;
     }
     let src = bare_request(account, region, request_id);
-    match launch_ecs_task(
-        &ecs_state,
-        &ctx.ecs_runtime,
-        &src,
-        job_id,
-        job_name,
-        &container,
-    )
-    .await
-    {
+    match launch_ecs_task(&ecs, &src, job_id, job_name, &container).await {
         Ok((cluster, task_arn)) => {
             {
                 let mut accounts = ctx.batch_state.write();
@@ -1356,7 +1343,7 @@ async fn launch(
             }
             spawn_status_sync(
                 ctx,
-                ecs_state,
+                ecs,
                 account.to_string(),
                 region.to_string(),
                 request_id.to_string(),
@@ -1380,6 +1367,9 @@ async fn launch(
             }
         }
     }
+    // The dependency waiter launches from a detached task, outside any
+    // handler's post-mutation snapshot, so persist STARTING / FAILED here.
+    save_snapshot_now(&ctx.batch_state, &ctx.snapshot_store, &ctx.snapshot_lock).await;
 }
 
 /// Background waiter for a job with `dependsOn`: poll the dependency job
@@ -1453,17 +1443,12 @@ fn spawn_dependency_waiter(
 /// Cross-service calls go through ECS's public `handle()` — reusing all of
 /// ECS's real container / portability / k8s handling, not re-deriving it.
 async fn launch_ecs_task(
-    ecs_state: &fakecloud_ecs::SharedEcsState,
-    ecs_runtime: &Option<Arc<fakecloud_ecs::runtime::EcsRuntime>>,
+    ecs: &fakecloud_ecs::EcsService,
     src: &AwsRequest,
     job_id: &str,
     job_name: &str,
     container: &Value,
 ) -> Result<(String, String), AwsServiceError> {
-    let mut ecs = fakecloud_ecs::EcsService::new(ecs_state.clone());
-    if let Some(rt) = ecs_runtime.clone() {
-        ecs = ecs.with_runtime(rt);
-    }
     let cluster = "fakecloud-batch".to_string();
     let _ = ecs
         .handle(ecs_request(
@@ -1537,7 +1522,7 @@ async fn launch_ecs_task(
 #[allow(clippy::too_many_arguments)]
 fn spawn_status_sync(
     ctx: &LaunchCtx,
-    ecs_state: fakecloud_ecs::SharedEcsState,
+    ecs: Arc<fakecloud_ecs::EcsService>,
     account_id: String,
     region: String,
     request_id: String,
@@ -1550,9 +1535,7 @@ fn spawn_status_sync(
     let batch_state = ctx.batch_state.clone();
     let snapshot_store = ctx.snapshot_store.clone();
     let snapshot_lock = ctx.snapshot_lock.clone();
-    let ecs_runtime = ctx.ecs_runtime.clone();
     tokio::spawn(async move {
-        let ecs = fakecloud_ecs::EcsService::new(ecs_state.clone());
         let src = bare_request(&account_id, &region, &request_id);
         // retryStrategy.attempts (1-10) and timeout.attemptDurationSeconds.
         let (max_attempts, timeout_secs) = {
@@ -1662,16 +1645,7 @@ fn spawn_status_sync(
                     }
                 }
                 save_snapshot_now(&batch_state, &snapshot_store, &snapshot_lock).await;
-                match launch_ecs_task(
-                    &ecs_state,
-                    &ecs_runtime,
-                    &src,
-                    &job_id,
-                    &job_name,
-                    &container,
-                )
-                .await
-                {
+                match launch_ecs_task(&ecs, &src, &job_id, &job_name, &container).await {
                     Ok((_, new_task)) => {
                         task = new_task;
                         attempt += 1;
@@ -2380,6 +2354,85 @@ mod tests {
                 .unwrap(),
         );
         assert_eq!(d["jobs"][0]["status"], "SUBMITTED");
+    }
+
+    #[derive(Default)]
+    struct CapturingStore {
+        saves: parking_lot::Mutex<Vec<Vec<u8>>>,
+    }
+
+    impl SnapshotStore for CapturingStore {
+        fn load(&self) -> std::io::Result<Option<Vec<u8>>> {
+            Ok(self.saves.lock().last().cloned())
+        }
+
+        fn save(&self, bytes: &[u8]) -> std::io::Result<()> {
+            self.saves.lock().push(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn launch_persists_ecs_resources_and_job_status() {
+        // The job's ECS cluster / task definition / task must go through the
+        // wired ECS service's snapshot store (else they vanish on restart and
+        // ecsTaskArn dangles), and the detached launch path must persist the
+        // Batch job's resulting status itself.
+        let ecs_store = Arc::new(CapturingStore::default());
+        let ecs_state: fakecloud_ecs::SharedEcsState = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(
+                "123456789012",
+                "us-east-1",
+                "http://localhost:4566",
+            ),
+        ));
+        let ecs = Arc::new(
+            fakecloud_ecs::EcsService::new(ecs_state)
+                .with_snapshot_store(ecs_store.clone() as Arc<dyn SnapshotStore>),
+        );
+        let batch_store = Arc::new(CapturingStore::default());
+        let s = svc()
+            .with_snapshot_store(batch_store.clone() as Arc<dyn SnapshotStore>)
+            .with_ecs(ecs);
+        s.state.write().get_or_create("123456789012").jobs.insert(
+            "job-1".into(),
+            json!({"jobId": "job-1", "status": "SUBMITTED"}),
+        );
+
+        launch(
+            &s.launch_ctx(),
+            "123456789012",
+            "us-east-1",
+            "t",
+            "job-1",
+            "persisted",
+            Some(json!({"image": "alpine", "vcpus": 1, "memory": 128})),
+            0,
+        )
+        .await;
+
+        let ecs_saved = String::from_utf8(ecs_store.saves.lock().last().cloned().unwrap()).unwrap();
+        assert!(
+            ecs_saved.contains("fakecloud-batch"),
+            "cluster not persisted"
+        );
+        assert!(
+            ecs_saved.contains("batch-persisted"),
+            "task definition not persisted"
+        );
+
+        let status = s.state.read().get("123456789012").unwrap().jobs["job-1"]["status"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_ne!(status, "SUBMITTED");
+        let batch_saved: Value =
+            serde_json::from_slice(&batch_store.saves.lock().last().cloned().unwrap()).unwrap();
+        assert_eq!(
+            batch_saved.pointer("/accounts/accounts/123456789012/jobs/job-1/status"),
+            Some(&json!(status)),
+            "job status not snapshotted: {batch_saved}"
+        );
     }
 
     #[tokio::test]

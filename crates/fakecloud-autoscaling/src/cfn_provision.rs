@@ -79,7 +79,9 @@ pub async fn cfn_reconcile_capacity(
 /// orphaned instance containers via the EC2 runtime so a stack delete does not
 /// leak real EC2 containers. Intended to be `tokio::spawn`ed by the
 /// CloudFormation delete drain. No-op (nothing real to reap) with no EC2
-/// backend wired.
+/// backend wired. `ec2_snapshot_hook` persists the terminated EC2 records, as
+/// the capacity reconcile does for the ones it launches; without it they come
+/// back as running after a restart.
 pub async fn cfn_terminate_instances(
     asg_state: SharedAutoScalingState,
     ec2_state: fakecloud_ec2::SharedEc2State,
@@ -87,8 +89,11 @@ pub async fn cfn_terminate_instances(
     instance_ids: Vec<String>,
     account_id: String,
     region: String,
+    ec2_snapshot_hook: Option<SnapshotHook>,
 ) {
-    let svc = AutoScalingService::new(asg_state).with_ec2(ec2_state, ec2_runtime);
+    let svc = AutoScalingService::new(asg_state)
+        .with_ec2(ec2_state, ec2_runtime)
+        .with_ec2_snapshot_hook(ec2_snapshot_hook);
     svc.cfn_terminate_instances(&account_id, &region, &instance_ids)
         .await;
 }
@@ -235,5 +240,75 @@ mod tests {
             in_memory,
             "ASG-launched EC2 records must be persisted (bug #2)"
         );
+    }
+
+    #[tokio::test]
+    async fn cfn_terminate_persists_terminated_ec2_records() {
+        // A stack delete reaps the ASG's instances in a detached task after the
+        // stack op already serialized EC2 state; the teardown must persist the
+        // terminated records itself or they come back running after a restart.
+        let account = "123456789012";
+        let asg_state: SharedAutoScalingState = Arc::new(RwLock::new(AutoScalingAccounts::new()));
+        asg_state
+            .write()
+            .get_or_create(account)
+            .groups
+            .insert("g".to_string(), group_desired("g", 2));
+        let ec2_state: fakecloud_ec2::SharedEc2State = Arc::new(RwLock::new(
+            fakecloud_core::multi_account::MultiAccountState::new(account, "us-east-1", ""),
+        ));
+        cfn_reconcile_capacity(
+            asg_state.clone(),
+            ec2_state.clone(),
+            None,
+            "g".to_string(),
+            account.to_string(),
+            "us-east-1".to_string(),
+            CfnReconcilePersistHooks::default(),
+            CfnLaunchHooks::default(),
+        )
+        .await;
+        let ids: Vec<String> = ec2_state
+            .read()
+            .default_ref()
+            .instances
+            .keys()
+            .cloned()
+            .collect();
+        assert_eq!(ids.len(), 2);
+
+        let (ec2_cell, ec2_store) = capturing();
+        let ec2_hook = fakecloud_ec2::Ec2Service::with_state(ec2_state.clone())
+            .with_snapshot_store(ec2_store)
+            .snapshot_hook();
+        assert!(ec2_hook.is_some());
+        asg_state.write().get_or_create(account).groups.remove("g");
+        cfn_terminate_instances(
+            asg_state,
+            ec2_state.clone(),
+            None,
+            ids.clone(),
+            account.to_string(),
+            "us-east-1".to_string(),
+            ec2_hook,
+        )
+        .await;
+
+        let ec2_bytes = ec2_cell.lock().clone().expect("ec2 snapshot written");
+        let ec2_snap: fakecloud_ec2::Ec2Snapshot = serde_json::from_slice(&ec2_bytes).unwrap();
+        let persisted = ec2_snap.accounts.expect("ec2 multi-account snapshot");
+        for id in &ids {
+            let live = ec2_state.read().default_ref().instances[id].clone();
+            assert!(
+                live.state_code >= 32,
+                "{id} must be shutting down or terminated, got {}",
+                live.state_name
+            );
+            assert_eq!(
+                persisted.default_ref().instances[id].state_name,
+                live.state_name,
+                "terminated state of {id} must be persisted"
+            );
+        }
     }
 }

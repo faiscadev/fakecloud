@@ -53,14 +53,20 @@ pub async fn cfn_back_instance(
 
 /// Terminate a CFN-created instance and reap its REAL backing container when its
 /// stack is deleted. Intended to be `tokio::spawn`ed by the CloudFormation
-/// delete drain.
+/// delete drain. `snapshot_hook` persists the terminated record: the stack op
+/// serialized EC2 state before this detached task ran, so without it the
+/// instance comes back as running after a restart.
 pub async fn cfn_terminate(
     state: SharedEc2State,
     runtime: Option<Arc<Ec2Runtime>>,
     account_id: String,
     region: String,
     instance_id: String,
+    snapshot_hook: Option<fakecloud_persistence::SnapshotHook>,
 ) {
     let svc = Ec2Service::with_state(state).with_runtime(runtime);
     cfn_terminate_instance(&svc, &account_id, &region, &instance_id).await;
+    if let Some(hook) = snapshot_hook {
+        hook().await;
+    }
 }

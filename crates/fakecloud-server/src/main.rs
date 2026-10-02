@@ -3551,6 +3551,7 @@ async fn main() {
     if let Some(h) = ecs_service.snapshot_hook() {
         cfn_snapshot_hooks.insert("ecs", h);
     }
+    let ecs_service_for_batch = ecs_service.clone();
     registry.register(ecs_service);
     let elbv2_introspection_state = elbv2_state.clone();
     // Wire an S3-only delivery bus so the ALB dataplane can flush
@@ -4750,8 +4751,8 @@ async fn main() {
         } else {
             None
         };
-    let mut batch_service = fakecloud_batch::BatchService::new(batch_state.clone())
-        .with_ecs(ecs_state.clone(), ecs_runtime.clone());
+    let mut batch_service =
+        fakecloud_batch::BatchService::new(batch_state.clone()).with_ecs(ecs_service_for_batch);
     if let Some(store) = batch_snapshot_store.clone() {
         batch_service = batch_service.with_snapshot_store(store);
     }
