@@ -631,16 +631,40 @@ fn in_container_mode(env_value: Option<String>) -> bool {
 /// under podman-in-a-container (bug-audit 2026-06-20, 0.B2). Authorize all of
 /// them with the same credential; centralized here so the two builders can't
 /// drift again.
+///
+/// A `FAKECLOUD_ECR_REGISTRY_HOST` override is the host the pull URI is
+/// rewritten to (see [`ecr_registry_host`]), so it is authorized as well.
 pub fn registry_auth_hosts(server_port: u16) -> Vec<String> {
-    [
+    registry_auth_hosts_with(
+        server_port,
+        std::env::var("FAKECLOUD_ECR_REGISTRY_HOST").ok(),
+    )
+}
+
+/// Pure half of [`registry_auth_hosts`]: the built-in aliases plus a
+/// non-blank registry-host override.
+pub fn registry_auth_hosts_with(server_port: u16, override_host: Option<String>) -> Vec<String> {
+    let mut hosts: Vec<String> = [
         "localhost",
         "127.0.0.1",
         "host.docker.internal",
         "host.containers.internal",
     ]
     .iter()
-    .map(|host| format!("{host}:{server_port}"))
-    .collect()
+    .map(|h| h.to_string())
+    .collect();
+    if let Some(h) = override_host
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        if !hosts.contains(&h) {
+            hosts.push(h);
+        }
+    }
+    hosts
+        .iter()
+        .map(|host| format!("{host}:{server_port}"))
+        .collect()
 }
 
 /// Host the container engine pulls fakecloud-ECR images from.
@@ -1406,6 +1430,21 @@ mod endpoint_tests {
             resolve_ecr_registry_host(Some("10.0.0.5".into()), true, false),
             "10.0.0.5"
         );
+    }
+
+    #[test]
+    fn registry_override_host_is_authorized() {
+        // A pull rewritten to FAKECLOUD_ECR_REGISTRY_HOST must carry auth, or
+        // the registry answers 401.
+        let hosts = registry_auth_hosts_with(4566, Some("10.1.2.3".into()));
+        assert!(hosts.contains(&"10.1.2.3:4566".to_string()), "{hosts:?}");
+        assert!(hosts.contains(&"127.0.0.1:4566".to_string()));
+        // No duplicates, blank override ignored.
+        assert_eq!(
+            registry_auth_hosts_with(4566, Some("127.0.0.1".into())).len(),
+            4
+        );
+        assert_eq!(registry_auth_hosts_with(4566, Some(" ".into())).len(), 4);
     }
 
     #[test]

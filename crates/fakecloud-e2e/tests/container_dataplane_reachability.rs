@@ -532,6 +532,28 @@ async fn ec2_instance_reaches_imds_with_its_identity_and_role() {
     }
     assert_eq!(from_user_data, instance_id);
 
+    // After a reboot the readiness marker is gone (tmpfs), so the boot
+    // script waits for the new sidecar again before user-data reads IMDS.
+    docker(&["exec", &container, "rm", "-f", "/tmp/imds-id"]);
+    ec2.reboot_instances()
+        .instance_ids(&instance_id)
+        .send()
+        .await
+        .expect("reboot_instances");
+    let mut after_reboot = String::new();
+    for _ in 0..120 {
+        let out = docker(&["exec", &container, "cat", "/tmp/imds-id"]);
+        after_reboot = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if !after_reboot.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert_eq!(
+        after_reboot, instance_id,
+        "user-data after reboot missed IMDS"
+    );
+
     ec2.terminate_instances()
         .instance_ids(&instance_id)
         .send()

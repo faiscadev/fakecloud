@@ -55,6 +55,14 @@ pub(crate) const READY_DIR: &str = "/run/fakecloud";
 /// The readiness marker user-data waits for.
 pub(crate) const READY_FILE: &str = "/run/fakecloud/imds-ready";
 
+/// `run` flags putting [`READY_DIR`] on a tmpfs: every start / restart of the
+/// instance container begins without the readiness marker, so user-data waits
+/// for the sidecar of *this* boot rather than finding a stale marker in the
+/// writable layer.
+pub(crate) fn readiness_tmpfs_args() -> [String; 2] {
+    ["--tmpfs".to_string(), READY_DIR.to_string()]
+}
+
 /// How long user-data waits for IMDS before running anyway (seconds).
 pub(crate) const BOOT_WAIT_SECS: u32 = 60;
 
@@ -281,6 +289,12 @@ mod tests {
             joined.ends_with("TCP-LISTEN:8080,fork,reuseaddr TCP:172.20.0.5:8080"),
             "{joined}"
         );
+    }
+
+    #[test]
+    fn readiness_marker_does_not_survive_a_restart() {
+        assert_eq!(readiness_tmpfs_args(), ["--tmpfs", READY_DIR]);
+        assert!(READY_FILE.starts_with(READY_DIR));
     }
 
     #[test]

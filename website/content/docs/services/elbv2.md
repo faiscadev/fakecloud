@@ -66,7 +66,8 @@ aws --endpoint-url http://localhost:4566 elbv2 create-listener \
 aws --endpoint-url http://localhost:4566 elbv2 register-targets \
     --target-group-arn "$TG" --targets Id=i-deadbeef,Port=80
 
-# Health is `healthy` by default — fakecloud doesn't probe the target.
+# Health starts `initial`; the prober then health-checks the target and flips it
+# to `healthy` / `unhealthy` (see Health probes below).
 aws --endpoint-url http://localhost:4566 elbv2 describe-target-health \
     --target-group-arn "$TG"
 ```
@@ -98,6 +99,8 @@ For every ALB whose `state_code == "active"`, fakecloud binds a TCP listener on 
 - **`authenticate-oidc` / `authenticate-cognito`** — return `501 Not Implemented` with a body identifying the action; treated as next-batch work.
 
 Sticky sessions: when `ForwardConfig.Stickiness.Enabled=true`, the data plane sets an `AWSALB` cookie on the response (with `Max-Age` from `DurationSeconds`) and pins follow-up requests carrying that cookie to the same target as long as it stays healthy. Rule conditions support `host-header`, `path-pattern` (both with `*`/`?` glob wildcards; host-header is case-insensitive), `http-request-method`, `http-header`, `query-string`, and `source-ip` (IPv4 + IPv6 CIDR). Find the bound port via the `boundPort` field on `GET /_fakecloud/elbv2/load-balancers`.
+
+Targets are reached where they actually listen, while every API response keeps the target's AWS identity. An `ip` target registered by an `awsvpc` ECS service is the task's ENI private IP. The data plane and the prober connect to the host port the task's container port was published on, so this works on Docker Desktop, podman and Linux. An `instance` target (`i-...`) is reached through a forwarder fakecloud starts on first use: it publishes the instance's port on the host. Its address on the instance's subnet counts as a member of the load balancer's security groups, so with security-group enforcement on, an instance rule that admits only the load balancer's group admits the load balancer's traffic, as on AWS. ECS bridge-mode tasks and other `ip` targets are reached at their published or literal address.
 
 Set `FAKECLOUD_ELBV2_DISABLE_DATAPLANE=true` to turn off the data plane (the control plane keeps working; useful when you only need to assert API calls).
 

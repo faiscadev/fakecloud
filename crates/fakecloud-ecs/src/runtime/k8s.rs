@@ -123,15 +123,6 @@ impl CredsInit {
     }
 }
 
-/// Whether the task carries an ENI attachment (an awsvpc task).
-fn task_has_eni(state: &SharedEcsState, account_id: &str, task_id: &str) -> bool {
-    state
-        .read()
-        .get(account_id)
-        .and_then(|st| st.tasks.get(task_id))
-        .is_some_and(|t| t.attachments.iter().any(|a| a.attachment_type == "eni"))
-}
-
 /// Error initializing the Kubernetes backend at startup.
 #[derive(Debug, thiserror::Error)]
 pub enum BackendInitError {
@@ -680,7 +671,10 @@ impl EcsRuntime {
                 // its ports are served by the Pod IP, which the load
                 // balancer data plane reaches in-cluster.
                 let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.clone());
-                if let (true, Some(pod_ip)) = (task_has_eni(state, account_id, task_id), pod_ip) {
+                let awsvpc = resolved
+                    .iter()
+                    .any(|(plan, _)| plan.network_mode.as_deref() == Some("awsvpc"));
+                if let (true, Some(pod_ip)) = (awsvpc, pod_ip) {
                     let eni_ip = self.attach_task_eni(state, account_id, task_id);
                     for (plan, _) in &resolved {
                         for pm in &plan.port_mappings {

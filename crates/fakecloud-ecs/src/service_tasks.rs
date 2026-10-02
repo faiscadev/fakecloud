@@ -366,13 +366,10 @@ impl EcsService {
                 captured_logs: String::new(),
                 protection: None,
                 enable_execute_command,
-                attachments: if td_awsvpc {
-                    crate::runtime::eni::precreated_attachment(body.get("networkConfiguration"))
-                        .into_iter()
-                        .collect()
-                } else {
-                    Vec::new()
-                },
+                attachments: crate::runtime::eni::initial_attachments(
+                    td_awsvpc,
+                    body.get("networkConfiguration"),
+                ),
                 volume_configurations: volume_configurations.clone(),
                 task_set_arn: None,
             };
@@ -767,6 +764,54 @@ pub(super) mod multi_container_tests {
             Err(e) => e,
         };
         assert_eq!(err.code(), "ClusterNotFoundException");
+    }
+
+    #[tokio::test]
+    async fn awsvpc_tasks_start_with_a_precreated_eni_in_their_subnet() {
+        // RunTask and service-launched tasks of an awsvpc task definition
+        // both get an ENI attachment at creation (the runtime attaches it and
+        // registers it with the service's target groups), decided by the task
+        // definition's network mode.
+        let svc = fresh_service();
+        svc.register_task_definition(&make_request(
+            "RegisterTaskDefinition",
+            json!({
+                "family": "vpc-web",
+                "networkMode": "awsvpc",
+                "containerDefinitions": [{"name": "web", "image": "busybox", "essential": true}]
+            }),
+        ))
+        .expect("register");
+        let nc = json!({"awsvpcConfiguration": {"subnets": ["subnet-0aaa"]}});
+        svc.create_service(&make_request(
+            "CreateService",
+            json!({"serviceName": "web", "taskDefinition": "vpc-web", "desiredCount": 2,
+                   "networkConfiguration": nc}),
+        ))
+        .expect("create_service");
+        svc.run_task(&make_request(
+            "RunTask",
+            json!({"taskDefinition": "vpc-web", "count": 1, "networkConfiguration": nc}),
+        ))
+        .expect("run_task");
+        let accounts = svc.state.read();
+        let tasks: Vec<_> = accounts
+            .get("000000000000")
+            .unwrap()
+            .tasks
+            .values()
+            .cloned()
+            .collect();
+        assert_eq!(tasks.len(), 3, "two service tasks and one RunTask task");
+        for t in tasks {
+            let eni = t
+                .attachments
+                .iter()
+                .find(|a| a.attachment_type == "eni")
+                .unwrap_or_else(|| panic!("no ENI on {:?} task", t.group));
+            assert_eq!(eni.status, "PRECREATED");
+            assert_eq!(eni.details[0].value, "subnet-0aaa");
+        }
     }
 
     #[test]

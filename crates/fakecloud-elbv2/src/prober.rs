@@ -65,6 +65,9 @@ struct ProbeJob {
     timeout_secs: u64,
     healthy_threshold: u32,
     unhealthy_threshold: u32,
+    /// Security groups of the load balancers using the target group: the
+    /// source an instance target's security-group rules evaluate.
+    source_groups: Vec<String>,
 }
 
 async fn run_one_pass(state: &SharedElbv2State, client: &Client, sibling_host: &str) {
@@ -84,9 +87,10 @@ async fn run_one_pass(state: &SharedElbv2State, client: &Client, sibling_host: &
                             continue;
                         }
                     }
-                    let Some(job) = build_job(account_id, tg, t) else {
+                    let Some(mut job) = build_job(account_id, tg, t) else {
                         continue;
                     };
+                    job.source_groups = lb_security_groups(st, tg);
                     out.push(job);
                 }
             }
@@ -141,6 +145,19 @@ async fn run_one_pass(state: &SharedElbv2State, client: &Client, sibling_host: &
     }
 }
 
+/// Union of the security groups of every load balancer routing to `tg`.
+fn lb_security_groups(st: &crate::state::Elbv2State, tg: &TargetGroup) -> Vec<String> {
+    let mut groups: Vec<String> = tg
+        .load_balancer_arns
+        .iter()
+        .filter_map(|arn| st.load_balancers.get(arn))
+        .flat_map(|lb| lb.security_groups.iter().cloned())
+        .collect();
+    groups.sort();
+    groups.dedup();
+    groups
+}
+
 fn build_job(
     account_id: &str,
     tg: &TargetGroup,
@@ -180,6 +197,7 @@ fn build_job(
         timeout_secs,
         healthy_threshold: tg.healthy_threshold_count.max(1) as u32,
         unhealthy_threshold: tg.unhealthy_threshold_count.max(1) as u32,
+        source_groups: Vec::new(),
     })
 }
 
@@ -219,6 +237,7 @@ async fn probe(client: &Client, job: &ProbeJob, sibling_host: &str) -> bool {
         &job.target_id,
         probe_port,
         sibling_host,
+        &job.source_groups,
     )
     .await;
     let host = endpoint.host;
@@ -350,6 +369,7 @@ mod tests {
             timeout_secs: 5,
             healthy_threshold: 1,
             unhealthy_threshold: 1,
+            source_groups: Vec::new(),
         };
         let client = Client::new();
         assert!(probe(&client, &job, "127.0.0.1").await);

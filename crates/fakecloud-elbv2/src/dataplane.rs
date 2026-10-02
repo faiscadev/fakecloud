@@ -651,6 +651,9 @@ fn parse_lb_id(arn: &str) -> Option<String> {
 /// Snapshot of the rules/listeners/target-groups for one LB taken
 /// under the read lock so the per-request handler doesn't re-lock.
 struct LbSnapshot {
+    /// The load balancer's security groups: the source instance targets'
+    /// security-group rules must admit.
+    security_groups: Vec<String>,
     listeners: Vec<Listener>,
     rules: Vec<Rule>,
     target_groups: BTreeMap<String, TargetGroup>,
@@ -684,7 +687,8 @@ impl LbSnapshot {
 fn snapshot(dp: &DataPlane, lb_arn: &str) -> Option<LbSnapshot> {
     let accs = dp.state.read();
     for (_acct, st) in accs.iter() {
-        if st.load_balancers.contains_key(lb_arn) {
+        if let Some(lb) = st.load_balancers.get(lb_arn) {
+            let security_groups = lb.security_groups.clone();
             let listeners: Vec<Listener> = st
                 .listeners
                 .values()
@@ -705,6 +709,7 @@ fn snapshot(dp: &DataPlane, lb_arn: &str) -> Option<LbSnapshot> {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             return Some(LbSnapshot {
+                security_groups,
                 listeners,
                 rules,
                 target_groups,
@@ -991,14 +996,24 @@ fn redirect_action(
 /// historical routing -- `i-*` and ECS bridge-mode (`127.0.0.1`) targets on
 /// `sibling_host`, anything else verbatim. The account comes from the target
 /// group ARN, since target ids (private IPs) are only unique per account.
+/// `lb_security_groups` are the connecting load balancer's groups, which an
+/// instance target's security-group rules evaluate as the source.
 async fn resolve_upstream(
     tg_arn: &str,
     target_id: &str,
     port: u16,
     sibling_host: &str,
+    lb_security_groups: &[String],
 ) -> fakecloud_core::dataplane::Endpoint {
     let account = fakecloud_core::dataplane::account_of_arn(tg_arn).unwrap_or_default();
-    fakecloud_core::dataplane::resolve_target(account, target_id, port, sibling_host).await
+    fakecloud_core::dataplane::resolve_target(
+        account,
+        target_id,
+        port,
+        sibling_host,
+        lb_security_groups,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1108,7 +1123,14 @@ async fn forward_action(
     let Ok(target_port) = u16::try_from(target_port) else {
         return canned(StatusCode::BAD_GATEWAY, "target port out of range");
     };
-    let upstream = resolve_upstream(&tg_arn, &chosen.id, target_port, &dp.sibling_host).await;
+    let upstream = resolve_upstream(
+        &tg_arn,
+        &chosen.id,
+        target_port,
+        &dp.sibling_host,
+        &snap.security_groups,
+    )
+    .await;
     // Access logs name the target as AWS does (its private IP and target
     // port) when the id is an address; otherwise the socket we opened.
     if chosen.id.parse::<std::net::IpAddr>().is_ok() {
@@ -1344,9 +1366,9 @@ mod upstream_host_tests {
     #[tokio::test]
     async fn loopback_published_targets_use_sibling_host() {
         // EC2 instance + ECS bridge-mode (id "127.0.0.1") go via sibling_host.
-        let ep = resolve_upstream(TG, "i-0123456789abcdef0", 80, "host.docker.internal").await;
+        let ep = resolve_upstream(TG, "i-0123456789abcdef0", 80, "host.docker.internal", &[]).await;
         assert_eq!(ep.host, "host.docker.internal");
-        let ep = resolve_upstream(TG, "127.0.0.1", 8080, "host.containers.internal").await;
+        let ep = resolve_upstream(TG, "127.0.0.1", 8080, "host.containers.internal", &[]).await;
         assert_eq!(
             (ep.host.as_str(), ep.port),
             ("host.containers.internal", 8080)
@@ -1355,7 +1377,7 @@ mod upstream_host_tests {
 
     #[tokio::test]
     async fn unpublished_ip_used_verbatim() {
-        let ep = resolve_upstream(TG, "10.0.4.7", 80, "host.docker.internal").await;
+        let ep = resolve_upstream(TG, "10.0.4.7", 80, "host.docker.internal", &[]).await;
         assert_eq!((ep.host.as_str(), ep.port), ("10.0.4.7", 80));
     }
 
@@ -1369,7 +1391,7 @@ mod upstream_host_tests {
             80,
             fakecloud_core::dataplane::Endpoint::new("127.0.0.1", 49200),
         );
-        let ep = resolve_upstream(TG, "10.0.1.37", 80, "127.0.0.1").await;
+        let ep = resolve_upstream(TG, "10.0.1.37", 80, "127.0.0.1", &[]).await;
         assert_eq!((ep.host.as_str(), ep.port), ("127.0.0.1", 49200));
         fakecloud_core::dataplane::unregister_target("444455556666", "10.0.1.37");
     }

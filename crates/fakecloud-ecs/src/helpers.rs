@@ -843,6 +843,7 @@ pub(crate) fn spawn_service_tasks(
         return Vec::new();
     };
     let container_defs = td.container_definitions.clone();
+    let td_awsvpc = td.network_mode.as_deref() == Some("awsvpc");
     let cpu = td.cpu.clone();
     let memory = td.memory.clone();
     let task_role = td.task_role_arn.clone();
@@ -975,7 +976,11 @@ pub(crate) fn spawn_service_tasks(
             captured_logs: String::new(),
             protection: None,
             enable_execute_command: service_exec,
-            attachments: Vec::new(),
+            // A service's awsvpc tasks get their ENI in the service's subnet.
+            attachments: crate::runtime::eni::initial_attachments(
+                td_awsvpc,
+                service.network_configuration.as_ref(),
+            ),
             volume_configurations: Vec::new(),
             task_set_arn: task_set_arn.clone(),
         };

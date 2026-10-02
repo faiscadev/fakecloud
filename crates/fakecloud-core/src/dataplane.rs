@@ -61,8 +61,17 @@ pub type ResolveFuture = Pin<Box<dyn Future<Output = Option<Endpoint>> + Send>>;
 /// Publishes a port of an EC2 instance on demand and says where it landed.
 pub trait InstanceResolver: Send + Sync {
     /// The endpoint serving `port` of `instance_id` in `account_id`, or
-    /// `None` when the instance has no backing container.
-    fn resolve(&self, account_id: &str, instance_id: &str, port: u16) -> ResolveFuture;
+    /// `None` when the instance has no running backing container.
+    /// `source_groups` are the security groups of the load balancer the
+    /// traffic comes from, so the instance's security-group rules can admit
+    /// it the way they admit the load balancer on AWS.
+    fn resolve(
+        &self,
+        account_id: &str,
+        instance_id: &str,
+        port: u16,
+        source_groups: Vec<String>,
+    ) -> ResolveFuture;
 }
 
 fn instance_resolver() -> &'static RwLock<Option<Arc<dyn InstanceResolver>>> {
@@ -106,11 +115,15 @@ pub fn registered_target(account_id: &str, target_id: &str, port: u16) -> Option
 /// 3. the historical fallbacks: `i-*` and ECS bridge-mode tasks (registered
 ///    as `127.0.0.1`) publish on the daemon's host, reached at
 ///    `sibling_host`; any other id is used verbatim.
+///
+/// `source_groups` are the security groups of the load balancer connecting
+/// (see [`InstanceResolver::resolve`]).
 pub async fn resolve_target(
     account_id: &str,
     target_id: &str,
     port: u16,
     sibling_host: &str,
+    source_groups: &[String],
 ) -> Endpoint {
     if let Some(ep) = registered_target(account_id, target_id, port) {
         return ep;
@@ -118,7 +131,10 @@ pub async fn resolve_target(
     if target_id.starts_with("i-") {
         let resolver = instance_resolver().read().clone();
         if let Some(resolver) = resolver {
-            if let Some(ep) = resolver.resolve(account_id, target_id, port).await {
+            if let Some(ep) = resolver
+                .resolve(account_id, target_id, port, source_groups.to_vec())
+                .await
+            {
                 return ep;
             }
         }
@@ -184,29 +200,36 @@ mod tests {
         let acct = "111111111111";
         register_target(acct, "10.9.8.7", 80, Endpoint::new("127.0.0.1", 49153));
         assert_eq!(
-            resolve_target(acct, "10.9.8.7", 80, "127.0.0.1").await,
+            resolve_target(acct, "10.9.8.7", 80, "127.0.0.1", &[]).await,
             Endpoint::new("127.0.0.1", 49153)
         );
         // Another port of the same target, or another account, is not mapped.
         assert_eq!(
-            resolve_target(acct, "10.9.8.7", 81, "127.0.0.1").await,
+            resolve_target(acct, "10.9.8.7", 81, "127.0.0.1", &[]).await,
             Endpoint::new("10.9.8.7", 81)
         );
         assert_eq!(
-            resolve_target("222222222222", "10.9.8.7", 80, "127.0.0.1").await,
+            resolve_target("222222222222", "10.9.8.7", 80, "127.0.0.1", &[]).await,
             Endpoint::new("10.9.8.7", 80)
         );
         unregister_target(acct, "10.9.8.7");
         assert_eq!(
-            resolve_target(acct, "10.9.8.7", 80, "127.0.0.1").await,
+            resolve_target(acct, "10.9.8.7", 80, "127.0.0.1", &[]).await,
             Endpoint::new("10.9.8.7", 80)
         );
     }
 
     struct FixedResolver;
     impl InstanceResolver for FixedResolver {
-        fn resolve(&self, _account: &str, instance_id: &str, port: u16) -> ResolveFuture {
-            let known = instance_id == "i-resolvable";
+        fn resolve(
+            &self,
+            _account: &str,
+            instance_id: &str,
+            port: u16,
+            source_groups: Vec<String>,
+        ) -> ResolveFuture {
+            // The load balancer's groups reach the resolver.
+            let known = instance_id == "i-resolvable" && source_groups == ["sg-alb"];
             Box::pin(async move { known.then(|| Endpoint::new("127.0.0.1", port + 1000)) })
         }
     }
@@ -215,12 +238,26 @@ mod tests {
     async fn instance_resolver_publishes_instance_ports() {
         set_instance_resolver(Arc::new(FixedResolver));
         assert_eq!(
-            resolve_target("333333333333", "i-resolvable", 8080, "host.docker.internal").await,
+            resolve_target(
+                "333333333333",
+                "i-resolvable",
+                8080,
+                "host.docker.internal",
+                &["sg-alb".to_string()]
+            )
+            .await,
             Endpoint::new("127.0.0.1", 9080)
         );
         // An instance the resolver doesn't know keeps the sibling-host route.
         assert_eq!(
-            resolve_target("333333333333", "i-unknown", 8080, "host.docker.internal").await,
+            resolve_target(
+                "333333333333",
+                "i-unknown",
+                8080,
+                "host.docker.internal",
+                &[]
+            )
+            .await,
             Endpoint::new("host.docker.internal", 8080)
         );
     }

@@ -180,14 +180,21 @@ pub(crate) fn attach_eni(
     }
 }
 
-/// The ENI attachment a task gets at creation when it names `awsvpc`
-/// subnets: `PRECREATED` with its `subnetId`, as ECS reports before the ENI
-/// is attached.
-pub(crate) fn precreated_attachment(
+/// The attachments a task starts with: for an `awsvpc` task definition, its
+/// ENI, `PRECREATED` in the first subnet of `network_configuration` (the
+/// RunTask request's or the service's), as ECS reports before the ENI is
+/// attached; nothing for other network modes.
+pub(crate) fn initial_attachments(
+    awsvpc: bool,
     network_configuration: Option<&serde_json::Value>,
-) -> Option<crate::state::TaskAttachment> {
-    let subnet = first_subnet(network_configuration?)?;
-    Some(crate::state::TaskAttachment {
+) -> Vec<crate::state::TaskAttachment> {
+    if !awsvpc {
+        return Vec::new();
+    }
+    let subnet = network_configuration
+        .and_then(first_subnet)
+        .unwrap_or_else(|| FALLBACK_SUBNET.to_string());
+    vec![crate::state::TaskAttachment {
         id: uuid::Uuid::new_v4().to_string(),
         attachment_type: "eni".into(),
         status: "PRECREATED".into(),
@@ -195,7 +202,7 @@ pub(crate) fn precreated_attachment(
             name: "subnetId".into(),
             value: subnet,
         }],
-    })
+    }]
 }
 
 impl super::EcsRuntime {
@@ -337,9 +344,16 @@ mod tests {
         });
         assert_eq!(first_subnet(&nc).as_deref(), Some("subnet-aaa"));
         assert_eq!(first_subnet(&serde_json::json!({})), None);
-        let pre = precreated_attachment(Some(&nc)).unwrap();
+        let pre = &initial_attachments(true, Some(&nc))[0];
         assert_eq!(pre.status, "PRECREATED");
+        assert_eq!(pre.attachment_type, "eni");
         assert_eq!(pre.details[0].value, "subnet-aaa");
-        assert!(precreated_attachment(None).is_none());
+        // An awsvpc task always gets its ENI, even without subnets; other
+        // network modes get none.
+        assert_eq!(
+            initial_attachments(true, None)[0].details[0].value,
+            FALLBACK_SUBNET
+        );
+        assert!(initial_attachments(false, Some(&nc)).is_empty());
     }
 }

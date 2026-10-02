@@ -1039,6 +1039,23 @@ impl Ec2Service {
     /// Attach a container runtime so `RunInstances` boots real containers.
     /// Passing `None` leaves the service in metadata-only mode.
     pub fn with_runtime(mut self, runtime: Option<Arc<Ec2Runtime>>) -> Self {
+        if let Some(rt) = runtime.as_ref().filter(|rt| rt.firewall().enabled()) {
+            // A load balancer forwarder joining or leaving changes who is in
+            // the load balancer's security groups: re-render the firewall.
+            let state = self.state.clone();
+            let weak = Arc::downgrade(rt);
+            rt.set_group_members_hook(move || {
+                let Some(rt) = weak.upgrade() else {
+                    return;
+                };
+                let state = state.clone();
+                if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                    handle.spawn(async move {
+                        firewall_model::reconcile(&state, &rt).await;
+                    });
+                }
+            });
+        }
         self.runtime = runtime;
         self
     }
