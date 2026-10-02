@@ -395,7 +395,7 @@ import dev.fakecloud.Types.BedrockResponseRule;
 import java.util.List;
 
 FakeCloud fc = new FakeCloud();
-String modelId = "anthropic.claude-3-haiku-20.47.07-v1:0";
+String modelId = "anthropic.claude-3-haiku-20240307-v1:0";
 
 // beforeEach
 fc.reset();

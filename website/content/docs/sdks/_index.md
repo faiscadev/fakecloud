@@ -19,7 +19,7 @@ These SDKs are **not** the AWS SDK. Your application code still talks to fakeclo
 | Python     | `pip install fakecloud`                         | [Python SDK](/docs/sdks/python/) |
 | Go         | `go get github.com/faiscadev/fakecloud/sdks/go` | [Go SDK](/docs/sdks/go/) |
 | PHP        | `composer require fakecloud/fakecloud`          | [PHP SDK](/docs/sdks/php/) |
-| Java       | `dev.fakecloud:fakecloud:0.15.0`                 | [Java SDK](/docs/sdks/java/) |
+| Java       | `dev.fakecloud:fakecloud:0.47.0`                 | [Java SDK](/docs/sdks/java/) |
 | Rust       | `cargo add fakecloud-sdk`                       | [Rust SDK](/docs/sdks/rust/) |
 | C# / .NET  | `dotnet add package FakeCloud`                  | [.NET SDK](/docs/sdks/dotnet/) |
 
