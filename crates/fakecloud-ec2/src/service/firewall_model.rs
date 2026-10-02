@@ -94,10 +94,22 @@ fn subnet_nacl<'a>(state: &'a Ec2State, subnet_id: &str) -> Option<&'a NetworkAc
 
 /// Flatten every enforced (running, subnet-placed) instance's security groups
 /// into per-instance ingress/egress rules, expanding referenced groups to
-/// member `/32`s.
-pub(crate) fn instance_rules(state: &Ec2State) -> Vec<InstanceRules> {
+/// member `/32`s. `extra_members` are `(group, address)` pairs that count as
+/// members too: the load balancer forwarders, which carry a load balancer's
+/// traffic and so stand in for it when an instance's rules reference the
+/// load balancer's security group.
+pub(crate) fn instance_rules(
+    state: &Ec2State,
+    extra_members: &[(String, String)],
+) -> Vec<InstanceRules> {
     // sg-id -> running member IPs, for referenced-group expansion.
     let mut sg_members: HashMap<String, Vec<String>> = HashMap::new();
+    for (group, ip) in extra_members {
+        sg_members
+            .entry(group.clone())
+            .or_default()
+            .push(ip.clone());
+    }
     for inst in state.instances.values() {
         if enforced(inst).is_some() {
             for sg in &inst.security_group_ids {
@@ -140,10 +152,13 @@ pub(crate) fn instance_rules(state: &Ec2State) -> Vec<InstanceRules> {
 }
 
 /// Build the per-subnet nftables model for one account partition.
-pub(crate) fn build_for_state(state: &Ec2State) -> Vec<SubnetFirewall> {
+pub(crate) fn build_for_state(
+    state: &Ec2State,
+    extra_members: &[(String, String)],
+) -> Vec<SubnetFirewall> {
     let mut instances: Vec<(String, InstanceFirewall)> = Vec::new();
     let mut subnets_in_play: Vec<String> = Vec::new();
-    for r in instance_rules(state) {
+    for r in instance_rules(state, extra_members) {
         instances.push((
             subnet_network_name(&r.subnet_id),
             InstanceFirewall {
@@ -171,26 +186,31 @@ pub(crate) fn build_for_state(state: &Ec2State) -> Vec<SubnetFirewall> {
 /// the runtime — nftables for the Docker backend, NetworkPolicies for k8s. The
 /// runtime dispatches on its backend; this only assembles the global model.
 pub(crate) async fn reconcile(state: &SharedEc2State, runtime: &Arc<Ec2Runtime>) {
+    // The model is built inside the runtime's reconcile lock, so the
+    // last-applied model is always derived from the latest state.
     if runtime.is_k8s() {
         // k8s: one NetworkPolicy per instance, built from the shared flatten.
-        let rules: Vec<InstanceRules> = {
+        runtime
+            .reconcile_network_policies(|| {
+                let accounts = state.read();
+                accounts
+                    .iter()
+                    .flat_map(|(_, s)| instance_rules(s, &[]))
+                    .collect()
+            })
+            .await;
+        return;
+    }
+    runtime
+        .reconcile_firewall(|| {
+            let extra = runtime.extra_group_members();
             let accounts = state.read();
             accounts
                 .iter()
-                .flat_map(|(_, s)| instance_rules(s))
+                .flat_map(|(_, s)| build_for_state(s, &extra))
                 .collect()
-        };
-        runtime.reconcile_network_policies(rules).await;
-        return;
-    }
-    let model: Vec<SubnetFirewall> = {
-        let accounts = state.read();
-        accounts
-            .iter()
-            .flat_map(|(_, s)| build_for_state(s))
-            .collect()
-    };
-    runtime.reconcile_firewall(model).await;
+        })
+        .await;
 }
 
 #[cfg(test)]
@@ -285,12 +305,40 @@ mod tests {
             running_instance("i-1", "172.30.0.2", "subnet-1", &["sg-1"]),
         );
 
-        let model = build_for_state(&state);
+        let model = build_for_state(&state, &[]);
         assert_eq!(model.len(), 1);
         assert_eq!(model[0].network_name, subnet_network_name("subnet-1"));
         let inst = &model[0].instances[0];
         assert_eq!(inst.ingress.len(), 1);
         assert_eq!(inst.ingress[0].cidr.as_deref(), Some("10.0.0.0/8"));
+    }
+
+    #[test]
+    fn load_balancer_group_rules_admit_its_forwarders() {
+        // The instance admits port 80 only from the ALB's security group, as
+        // AWS's recommended setup does. The forwarder carrying that ALB's
+        // traffic counts as a member of sg-alb, so the rule admits it.
+        let mut state = Ec2State::new("123456789012", "us-east-1");
+        state.security_groups.insert(
+            "sg-web".into(),
+            sg(
+                "sg-web",
+                vec![ingress_tcp("sg-web", 80, None, Some("sg-alb"))],
+            ),
+        );
+        state.instances.insert(
+            "i-1".into(),
+            running_instance("i-1", "172.30.0.2", "subnet-1", &["sg-web"]),
+        );
+        assert!(build_for_state(&state, &[])[0].instances[0]
+            .ingress
+            .is_empty());
+        let extra = vec![("sg-alb".to_string(), "172.30.0.9".to_string())];
+        let model = build_for_state(&state, &extra);
+        let ingress = &model[0].instances[0].ingress;
+        assert_eq!(ingress.len(), 1);
+        assert_eq!(ingress[0].cidr.as_deref(), Some("172.30.0.9/32"));
+        assert_eq!(ingress[0].from_port, 80);
     }
 
     #[test]
@@ -310,7 +358,7 @@ mod tests {
             running_instance("i-2", "172.30.0.3", "subnet-1", &["sg-1"]),
         );
 
-        let model = build_for_state(&state);
+        let model = build_for_state(&state, &[]);
         let inst = model[0]
             .instances
             .iter()
@@ -328,6 +376,6 @@ mod tests {
         let mut inst = running_instance("i-1", "172.30.0.2", "subnet-1", &[]);
         inst.state_name = "pending".into();
         state.instances.insert("i-1".into(), inst);
-        assert!(build_for_state(&state).is_empty());
+        assert!(build_for_state(&state, &[]).is_empty());
     }
 }

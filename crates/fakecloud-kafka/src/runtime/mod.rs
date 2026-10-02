@@ -27,7 +27,16 @@
 //!   published to a fixed free host port (`-p {P}:19092`) -- what external
 //!   clients (the E2E producer/consumer, `GetBootstrapBrokers`) connect to.
 //!
-//! We allocate the free host TCP port `P` FIRST (unlike MQ's ephemeral
+//! - `CONTAINER://:29092` advertised as `CONTAINER://{host_alias}:{P2}` and
+//!   published to a second fixed host port -- what *sibling containers*
+//!   (Lambda, ECS tasks, CodeBuild builds) use. A client follows the advertised
+//!   address after bootstrapping, and `127.0.0.1` inside a container is the
+//!   container itself, so the host-facing listener can't serve them. The
+//!   `P -> P2` pair is registered with [`fakecloud_core::dataplane`], so a
+//!   bootstrap string `127.0.0.1:P` handed to a container through its
+//!   environment is rewritten to `{host_alias}:P2`.
+//!
+//! We allocate the free host TCP ports FIRST (unlike MQ's ephemeral
 //! publish-then-read) so we can both publish AND advertise it. `advertise_host`
 //! is the shared [`fakecloud_core::container_net`] sibling host (`127.0.0.1`
 //! normally, `host.docker.internal` / `host.containers.internal` when fakecloud
@@ -47,9 +56,26 @@ pub struct RunningBroker {
     /// Address clients reach the published PLAINTEXT port at (`127.0.0.1` or the
     /// sibling host alias when fakecloud is containerized).
     pub host: String,
-    /// Protocol label -> published host port (`plaintext` -> P).
+    /// Protocol label -> published host port (`plaintext` -> P, `container`
+    /// -> P2, the listener sibling containers use).
     pub ports: BTreeMap<String, u16>,
 }
+
+/// Port label of the listener sibling containers use.
+pub const CONTAINER_PORT_LABEL: &str = "container";
+
+/// Port label of the host-facing PLAINTEXT listener.
+const PLAINTEXT_LABEL: &str = "plaintext";
+
+/// In-container port of the EXTERNAL (host-facing) listener.
+const EXTERNAL_PORT: u16 = 19092;
+
+/// In-container port of the CONTAINER (sibling-facing) listener.
+const CONTAINER_LISTENER_PORT: u16 = 29092;
+
+/// How many times a bring-up retries when a pre-allocated host port turned
+/// out to be taken by the time the daemon bound it.
+const PORT_ATTEMPTS: u32 = 5;
 
 impl RunningBroker {
     /// The reachable `host:port` PLAINTEXT bootstrap string for external clients.
@@ -153,10 +179,26 @@ impl KafkaRuntime {
             return Ok(existing);
         }
         let running = self.spawn_container(cluster_arn).await?;
-        self.containers
+        self.track(cluster_arn, &running);
+        Ok(running)
+    }
+
+    /// Record a running broker and register its container-facing listener, so
+    /// container env rewriting maps the host bootstrap port to it.
+    fn track(&self, cluster_arn: &str, running: &RunningBroker) {
+        if let (Some(host), Some(container)) = (
+            running.ports.get(PLAINTEXT_LABEL),
+            running.ports.get(CONTAINER_PORT_LABEL),
+        ) {
+            fakecloud_core::dataplane::register_container_port(*host, *container);
+        }
+        let previous = self
+            .containers
             .write()
             .insert(cluster_arn.to_string(), running.clone());
-        Ok(running)
+        if let Some(prev) = previous.filter(|p| p.ports != running.ports) {
+            untrack_ports(&prev);
+        }
     }
 
     /// Reboot a cluster's broker, mirroring AWS: a reboot RESTARTS the broker in
@@ -170,20 +212,18 @@ impl KafkaRuntime {
         if let Some(existing) = existing {
             match self.restart_container(&existing.container_id).await? {
                 Some(running) => {
-                    self.containers
-                        .write()
-                        .insert(cluster_arn.to_string(), running.clone());
+                    self.track(cluster_arn, &running);
                     return Ok(running);
                 }
                 None => {
-                    self.containers.write().remove(cluster_arn);
+                    if let Some(prev) = self.containers.write().remove(cluster_arn) {
+                        untrack_ports(&prev);
+                    }
                 }
             }
         }
         let running = self.spawn_container(cluster_arn).await?;
-        self.containers
-            .write()
-            .insert(cluster_arn.to_string(), running.clone());
+        self.track(cluster_arn, &running);
         Ok(running)
     }
 
@@ -206,8 +246,7 @@ impl KafkaRuntime {
             .args(["restart", container_id])
             .output()
             .await;
-        let port = self.lookup_port(container_id, 19092).await?;
-        let ports = BTreeMap::from([("plaintext".to_string(), port)]);
+        let ports = self.published_ports(container_id).await?;
         self.wait_for_broker_ready(container_id).await?;
         Ok(Some(RunningBroker {
             container_id: container_id.to_string(),
@@ -248,17 +287,14 @@ impl KafkaRuntime {
                 stderr.trim()
             )));
         }
-        let port = self.lookup_port(container_id, 19092).await?;
-        let ports = BTreeMap::from([("plaintext".to_string(), port)]);
+        let ports = self.published_ports(container_id).await?;
         self.wait_for_broker_ready(container_id).await?;
         let running = RunningBroker {
             container_id: container_id.to_string(),
             host: self.net.sibling_host.clone(),
             ports,
         };
-        self.containers
-            .write()
-            .insert(cluster_arn.to_string(), running.clone());
+        self.track(cluster_arn, &running);
         tracing::info!(
             cluster_arn = %cluster_arn,
             container_id = %container_id,
@@ -271,6 +307,7 @@ impl KafkaRuntime {
     pub async fn stop_broker(&self, cluster_arn: &str) {
         let running = self.containers.write().remove(cluster_arn);
         if let Some(running) = running {
+            untrack_ports(&running);
             self.remove_container(&running.container_id).await;
         }
     }
@@ -282,6 +319,7 @@ impl KafkaRuntime {
             map.drain().map(|(_, c)| c).collect()
         };
         for c in containers {
+            untrack_ports(&c);
             self.remove_container(&c.container_id).await;
         }
     }
@@ -291,27 +329,45 @@ impl KafkaRuntime {
         // scoped to this cluster AND this fakecloud instance.
         self.reap_stale_cluster_containers(cluster_arn).await;
 
-        // Allocate a fixed free host port FIRST so we can BOTH publish and
-        // advertise it (the advertised listener must name a port the client can
-        // actually reach; ephemeral publishing would not let us advertise it).
-        let port = alloc_free_port()?;
-        let advertise = self.net.sibling_host.clone();
-
-        let mut args: Vec<String> = vec!["create".to_string()];
-        args.push("-p".to_string());
-        // Publish the EXTERNAL listener (container port 19092) to the fixed host
-        // port; the INTERNAL listener (9092) stays container-private.
-        args.push(format!("{port}:19092"));
-        args.push("--label".to_string());
-        args.push(format!("fakecloud-kafka={cluster_arn}"));
-        args.push("--label".to_string());
-        args.push(format!("fakecloud-instance={}", self.instance_id));
-        self.net.push_add_host_args(&mut args);
-        for (k, v) in kafka_env(&advertise, port) {
-            args.push("-e".to_string());
-            args.push(format!("{k}={v}"));
+        // The listeners advertise fixed host ports, so they are allocated before
+        // the container exists. The free-port probe binds in fakecloud's own
+        // network namespace -- not the daemon host's when fakecloud is
+        // containerized -- so a port it reports free can still be taken where
+        // the daemon publishes it; retry with fresh ports when that happens.
+        let mut last_err = String::new();
+        for _ in 0..PORT_ATTEMPTS {
+            let port = alloc_free_port()?;
+            let container_port = alloc_free_port()?;
+            if port == container_port {
+                continue;
+            }
+            match self.try_spawn(cluster_arn, port, container_port).await? {
+                Ok(running) => return Ok(running),
+                Err(err) => last_err = err,
+            }
         }
-        args.push(self.image());
+        Err(RuntimeError::ContainerStartFailed(format!(
+            "no free host port pair after {PORT_ATTEMPTS} attempts: {last_err}"
+        )))
+    }
+
+    /// One bring-up on a given port pair. `Ok(Err(_))` when the daemon could
+    /// not bind one of the ports (the caller retries with others).
+    async fn try_spawn(
+        &self,
+        cluster_arn: &str,
+        port: u16,
+        container_port: u16,
+    ) -> Result<Result<RunningBroker, String>, RuntimeError> {
+        let advertise = self.net.sibling_host.clone();
+        let args = broker_create_args(
+            port,
+            container_port,
+            cluster_arn,
+            &self.instance_id,
+            &self.net,
+            &self.image(),
+        );
 
         let output = tokio::process::Command::new(&self.cli)
             .args(&args)
@@ -331,12 +387,16 @@ impl KafkaRuntime {
             .await
             .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?;
         if !start.status.success() {
+            let stderr = String::from_utf8_lossy(&start.stderr).trim().to_string();
+            if is_port_conflict(&stderr) {
+                self.remove_container(&container_id).await;
+                return Ok(Err(stderr));
+            }
             // Leave the container un-reaped for post-mortem; the next bring-up's
             // stale-reap and the server-shutdown sweep clean it up.
             let diag = self.capture_container_diagnostics(&container_id).await;
             return Err(RuntimeError::ContainerStartFailed(format!(
-                "container start failed: {}; {diag}",
-                String::from_utf8_lossy(&start.stderr).trim()
+                "container start failed: {stderr}; {diag}"
             )));
         }
 
@@ -347,14 +407,37 @@ impl KafkaRuntime {
             container_id = %container_id,
             host = %advertise,
             port = port,
+            container_port = container_port,
             "MSK Kafka broker container started",
         );
 
-        Ok(RunningBroker {
+        Ok(Ok(RunningBroker {
             container_id,
             host: advertise,
-            ports: BTreeMap::from([("plaintext".to_string(), port)]),
-        })
+            ports: BTreeMap::from([
+                (PLAINTEXT_LABEL.to_string(), port),
+                (CONTAINER_PORT_LABEL.to_string(), container_port),
+            ]),
+        }))
+    }
+
+    /// The published listener ports of an existing broker container. A broker
+    /// created before the container listener existed has only the host one.
+    async fn published_ports(
+        &self,
+        container_id: &str,
+    ) -> Result<BTreeMap<String, u16>, RuntimeError> {
+        let mut ports = BTreeMap::from([(
+            PLAINTEXT_LABEL.to_string(),
+            self.lookup_port(container_id, EXTERNAL_PORT).await?,
+        )]);
+        if let Ok(p) = self
+            .lookup_port(container_id, CONTAINER_LISTENER_PORT)
+            .await
+        {
+            ports.insert(CONTAINER_PORT_LABEL.to_string(), p);
+        }
+        Ok(ports)
     }
 
     /// Read the host port `container_port` (9092) is published on.
@@ -749,17 +832,25 @@ fn str_args(v: &[String]) -> Vec<&str> {
 /// host port -- for external clients. Both are needed: the in-container tools
 /// follow the advertised address, so a single host-port-advertised listener
 /// would be unreachable from inside the container.
-fn kafka_env(advertise_host: &str, port: u16) -> Vec<(&'static str, String)> {
+fn kafka_env(
+    advertise_host: &str,
+    port: u16,
+    container_host: &str,
+    container_port: u16,
+) -> Vec<(&'static str, String)> {
     vec![
         ("KAFKA_NODE_ID", "1".to_string()),
         ("KAFKA_PROCESS_ROLES", "broker,controller".to_string()),
         (
             "KAFKA_LISTENERS",
-            "INTERNAL://:9092,EXTERNAL://:19092,CONTROLLER://:9093".to_string(),
+            "INTERNAL://:9092,EXTERNAL://:19092,CONTAINER://:29092,CONTROLLER://:9093".to_string(),
         ),
         (
             "KAFKA_ADVERTISED_LISTENERS",
-            format!("INTERNAL://localhost:9092,EXTERNAL://{advertise_host}:{port}"),
+            format!(
+                "INTERNAL://localhost:9092,EXTERNAL://{advertise_host}:{port},\
+                 CONTAINER://{container_host}:{container_port}"
+            ),
         ),
         (
             "KAFKA_CONTROLLER_QUORUM_VOTERS",
@@ -768,7 +859,8 @@ fn kafka_env(advertise_host: &str, port: u16) -> Vec<(&'static str, String)> {
         ("KAFKA_CONTROLLER_LISTENER_NAMES", "CONTROLLER".to_string()),
         (
             "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP",
-            "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT".to_string(),
+            "CONTROLLER:PLAINTEXT,INTERNAL:PLAINTEXT,EXTERNAL:PLAINTEXT,CONTAINER:PLAINTEXT"
+                .to_string(),
         ),
         ("KAFKA_INTER_BROKER_LISTENER_NAME", "INTERNAL".to_string()),
         ("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR", "1".to_string()),
@@ -779,6 +871,51 @@ fn kafka_env(advertise_host: &str, port: u16) -> Vec<(&'static str, String)> {
         ("KAFKA_TRANSACTION_STATE_LOG_MIN_ISR", "1".to_string()),
         ("KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS", "0".to_string()),
     ]
+}
+
+/// `create` argv for a broker publishing the host listener on `port` and the
+/// sibling-container listener on `container_port`.
+fn broker_create_args(
+    port: u16,
+    container_port: u16,
+    cluster_arn: &str,
+    instance_id: &str,
+    net: &fakecloud_core::container_net::HostNetworking,
+    image: &str,
+) -> Vec<String> {
+    let mut args: Vec<String> = vec![
+        "create".to_string(),
+        "-p".to_string(),
+        format!("{port}:{EXTERNAL_PORT}"),
+        "-p".to_string(),
+        format!("{container_port}:{CONTAINER_LISTENER_PORT}"),
+        "--label".to_string(),
+        format!("fakecloud-kafka={cluster_arn}"),
+        "--label".to_string(),
+        format!("fakecloud-instance={instance_id}"),
+    ];
+    net.push_add_host_args(&mut args);
+    for (k, v) in kafka_env(&net.sibling_host, port, &net.host_alias, container_port) {
+        args.push("-e".to_string());
+        args.push(format!("{k}={v}"));
+    }
+    args.push(image.to_string());
+    args
+}
+
+/// Whether a `start` failed because a published host port was already taken.
+fn is_port_conflict(stderr: &str) -> bool {
+    let s = stderr.to_ascii_lowercase();
+    s.contains("port is already allocated")
+        || s.contains("address already in use")
+        || s.contains("bind for")
+}
+
+/// Drop the container-listener registration of a broker that is going away.
+fn untrack_ports(running: &RunningBroker) {
+    if let Some(host) = running.ports.get(PLAINTEXT_LABEL) {
+        fakecloud_core::dataplane::unregister_container_port(*host);
+    }
 }
 
 /// Bind a `127.0.0.1:0` listener, read the assigned port, and drop it -- the
@@ -917,15 +1054,20 @@ mod tests {
 
     #[test]
     fn kafka_env_advertises_the_allocated_host_port() {
-        let env = kafka_env("127.0.0.1", 34567);
+        let env = kafka_env("127.0.0.1", 34567, "host.docker.internal", 34568);
         let adv = env
             .iter()
             .find(|(k, _)| *k == "KAFKA_ADVERTISED_LISTENERS")
             .map(|(_, v)| v.clone())
             .unwrap();
         // INTERNAL is advertised for in-container tools; EXTERNAL carries the
-        // reachable host port for external clients.
-        assert_eq!(adv, "INTERNAL://localhost:9092,EXTERNAL://127.0.0.1:34567");
+        // reachable host port for external clients; CONTAINER the host alias
+        // and second port for sibling containers.
+        assert_eq!(
+            adv,
+            "INTERNAL://localhost:9092,EXTERNAL://127.0.0.1:34567,\
+             CONTAINER://host.docker.internal:34568"
+        );
         // Single-node broker: every replication factor pinned to 1.
         for key in [
             "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR",
@@ -949,7 +1091,7 @@ mod tests {
 
     #[test]
     fn kafka_env_uses_sibling_host_when_containerized() {
-        let env = kafka_env("host.docker.internal", 5000);
+        let env = kafka_env("host.docker.internal", 5000, "host.docker.internal", 5001);
         let adv = env
             .iter()
             .find(|(k, _)| *k == "KAFKA_ADVERTISED_LISTENERS")
@@ -957,8 +1099,71 @@ mod tests {
             .unwrap();
         assert_eq!(
             adv,
-            "INTERNAL://localhost:9092,EXTERNAL://host.docker.internal:5000"
+            "INTERNAL://localhost:9092,EXTERNAL://host.docker.internal:5000,\
+             CONTAINER://host.docker.internal:5001"
         );
+    }
+
+    #[test]
+    fn broker_publishes_both_client_listeners() {
+        let net = fakecloud_core::container_net::HostNetworking {
+            host_alias: "host.docker.internal".into(),
+            add_host_arg: Some("host.docker.internal:host-gateway".into()),
+            sibling_host: "127.0.0.1".into(),
+        };
+        let args = broker_create_args(40000, 40001, "arn:c", "fakecloud-1", &net, "img");
+        let joined = args.join(" ");
+        assert!(joined.contains("-p 40000:19092"), "{joined}");
+        assert!(joined.contains("-p 40001:29092"), "{joined}");
+        assert!(joined.contains("CONTAINER:PLAINTEXT"), "{joined}");
+        assert!(
+            joined.contains("CONTAINER://host.docker.internal:40001"),
+            "{joined}"
+        );
+        assert!(joined.ends_with(" img"), "{joined}");
+    }
+
+    #[test]
+    fn port_conflicts_are_recognized() {
+        assert!(is_port_conflict(
+            "Error response from daemon: driver failed programming external connectivity: Bind for 0.0.0.0:40000 failed: port is already allocated"
+        ));
+        assert!(is_port_conflict(
+            "listen tcp4 0.0.0.0:40000: bind: address already in use"
+        ));
+        assert!(!is_port_conflict("No such image: apache/kafka"));
+    }
+
+    #[test]
+    fn tracking_registers_the_container_listener_for_env_rewriting() {
+        let rb = RunningBroker {
+            container_id: "abc".into(),
+            host: "127.0.0.1".into(),
+            ports: BTreeMap::from([
+                (PLAINTEXT_LABEL.to_string(), 45001),
+                (CONTAINER_PORT_LABEL.to_string(), 45002),
+            ]),
+        };
+        let rt = KafkaRuntime {
+            cli: "docker".into(),
+            net: fakecloud_core::container_net::HostNetworking {
+                host_alias: "host.docker.internal".into(),
+                add_host_arg: None,
+                sibling_host: "127.0.0.1".into(),
+            },
+            instance_id: "fakecloud-1".into(),
+            containers: Arc::new(RwLock::new(HashMap::new())),
+        };
+        rt.track("arn:c", &rb);
+        assert_eq!(
+            fakecloud_core::container_net::rewrite_loopback_value(
+                "127.0.0.1:45001",
+                "host.docker.internal"
+            ),
+            "host.docker.internal:45002"
+        );
+        untrack_ports(&rb);
+        assert_eq!(fakecloud_core::dataplane::container_port_for(45001), None);
     }
 
     #[test]

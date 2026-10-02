@@ -84,6 +84,8 @@ The credential JSON is the IMDS shape (`Code`, `LastUpdated`, `Type`, `AccessKey
 
 Other metadata paths served: `/latest/meta-data/instance-id`, `/latest/meta-data/placement/region`, `/latest/meta-data/placement/availability-zone`, `/latest/meta-data/iam/info`, and the instance identity document at `/latest/dynamic/instance-identity/document`. Set the reported instance ID with `--imds-instance-id` (default: a stable synthetic `i-…`).
 
+Code running *inside* an EC2 instance fakecloud backs with a container needs none of this: it reaches IMDS at `http://169.254.169.254` with the instance's own identity and instance-profile credentials. See [EC2 IMDS](/docs/services/ec2/#instance-metadata-service-imds).
+
 ### Advanced: apps that hardcode `169.254.169.254`
 
 Some apps ignore `AWS_EC2_METADATA_SERVICE_ENDPOINT` and talk to the real IMDS IP `http://169.254.169.254` directly (and some ECS SDKs hardcode the `169.254.170.2` container-credentials base). Run fakecloud with `--imds-link-local` (or `FAKECLOUD_IMDS_LINK_LOCAL=1`) and it also binds those addresses on port 80: the full IMDS surface at `169.254.169.254`, and container credentials at `169.254.170.2/creds`. Set `AWS_CONTAINER_CREDENTIALS_RELATIVE_URI=/creds` for apps that use the relative-URI base. `169.254.170.2` also serves an ECS task's role credentials at the ECS agent's relative URI, `/v2/credentials/<task-id>`.

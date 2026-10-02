@@ -364,6 +364,15 @@ impl RdsRuntime {
             args.push("--privileged".to_string());
         }
 
+        // SQL Server 2022 and Db2 Community publish linux/amd64 images only, so
+        // an arm64 daemon (Apple Silicon, Graviton) finds no matching manifest
+        // and the implicit pull fails. Ask for amd64 explicitly; the daemon
+        // runs it under emulation (a no-op on amd64 hosts).
+        if let Some(platform) = engine_platform(engine) {
+            args.push("--platform".to_string());
+            args.push(platform.to_string());
+        }
+
         // Optionally persist the data directory in a named volume so a
         // container recreated after a fakecloud restart reattaches the same
         // data instead of coming back empty (bug-audit 2026-06-20, 4.2). The
@@ -1285,6 +1294,16 @@ fn db_volumes_enabled() -> bool {
         .unwrap_or(false)
 }
 
+/// The `--platform` an engine's image must run as, when it has no image for
+/// every architecture: SQL Server and Db2 ship linux/amd64 only.
+fn engine_platform(engine: &str) -> Option<&'static str> {
+    match engine {
+        "sqlserver-ee" | "sqlserver-se" | "sqlserver-ex" | "sqlserver-web" | "db2-se"
+        | "db2-ae" => Some("linux/amd64"),
+        _ => None,
+    }
+}
+
 /// The in-container data directory to persist for an engine, or `None` for
 /// engines that manage their own state (oracle/mssql/db2) and aren't wired for
 /// volume persistence.
@@ -1382,6 +1401,11 @@ mod tests {
         assert_eq!(engine_data_dir("mariadb"), Some("/var/lib/mysql"));
         // Heavier engines manage their own state and stay out of scope.
         assert_eq!(engine_data_dir("oracle-ee"), None);
+        // amd64-only images are requested as amd64 (arm64 daemons emulate).
+        assert_eq!(engine_platform("sqlserver-ex"), Some("linux/amd64"));
+        assert_eq!(engine_platform("db2-se"), Some("linux/amd64"));
+        assert_eq!(engine_platform("postgres"), None);
+        assert_eq!(engine_platform("oracle-ee"), None);
         assert_eq!(engine_data_dir("sqlserver-ex"), None);
         assert_eq!(engine_data_dir("db2-se"), None);
     }

@@ -142,7 +142,7 @@ pub fn link_local_router(ctx: Arc<ImdsContext>) -> Router {
 
 /// The IMDS metadata paths, shared by the main and link-local handlers. Returns
 /// `None` for a path that is not a recognized IMDS lookup.
-fn serve_imds(ctx: &ImdsContext, req: &Request<Body>) -> Option<Response> {
+pub(crate) fn serve_imds(ctx: &ImdsContext, req: &Request<Body>) -> Option<Response> {
     let creds_prefix = "/latest/meta-data/iam/security-credentials/";
     match (req.method(), req.uri().path()) {
         (&Method::PUT, "/latest/api/token") => Some(token(req.headers())),
@@ -303,7 +303,7 @@ fn identity_document(ctx: &ImdsContext) -> Response {
     .into_response()
 }
 
-fn text(body: String) -> Response {
+pub(crate) fn text(body: String) -> Response {
     ([(header::CONTENT_TYPE, "text/plain")], body).into_response()
 }
 

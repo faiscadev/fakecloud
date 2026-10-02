@@ -651,6 +651,9 @@ fn parse_lb_id(arn: &str) -> Option<String> {
 /// Snapshot of the rules/listeners/target-groups for one LB taken
 /// under the read lock so the per-request handler doesn't re-lock.
 struct LbSnapshot {
+    /// The load balancer's security groups: the source instance targets'
+    /// security-group rules must admit.
+    security_groups: Vec<String>,
     listeners: Vec<Listener>,
     rules: Vec<Rule>,
     target_groups: BTreeMap<String, TargetGroup>,
@@ -684,7 +687,8 @@ impl LbSnapshot {
 fn snapshot(dp: &DataPlane, lb_arn: &str) -> Option<LbSnapshot> {
     let accs = dp.state.read();
     for (_acct, st) in accs.iter() {
-        if st.load_balancers.contains_key(lb_arn) {
+        if let Some(lb) = st.load_balancers.get(lb_arn) {
+            let security_groups = lb.security_groups.clone();
             let listeners: Vec<Listener> = st
                 .listeners
                 .values()
@@ -705,6 +709,7 @@ fn snapshot(dp: &DataPlane, lb_arn: &str) -> Option<LbSnapshot> {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             return Some(LbSnapshot {
+                security_groups,
                 listeners,
                 rules,
                 target_groups,
@@ -985,18 +990,30 @@ fn redirect_action(
     resp
 }
 
-/// Resolve the host to forward to for a chosen target. EC2-instance targets
-/// (`i-*`) and ECS bridge-mode tasks (registered with id `127.0.0.1`) publish
-/// their ports on the host daemon's loopback, so they're reached via
-/// `sibling_host` — `127.0.0.1` on the host, or the host alias when fakecloud
-/// is itself containerized. Any other id (a real container IP/DNS) is used
-/// verbatim.
-fn resolve_upstream_host(target_id: &str, sibling_host: &str) -> String {
-    if target_id.starts_with("i-") || target_id == "127.0.0.1" {
-        sibling_host.to_string()
-    } else {
-        target_id.to_string()
-    }
+/// The socket to forward to for a chosen target, via the shared
+/// [`fakecloud_core::dataplane`] resolution: an endpoint a runtime published
+/// for it (an `awsvpc` ECS task's ENI IP, an EC2 instance port), else the
+/// historical routing -- `i-*` and ECS bridge-mode (`127.0.0.1`) targets on
+/// `sibling_host`, anything else verbatim. The account comes from the target
+/// group ARN, since target ids (private IPs) are only unique per account.
+/// `lb_security_groups` are the connecting load balancer's groups, which an
+/// instance target's security-group rules evaluate as the source.
+async fn resolve_upstream(
+    tg_arn: &str,
+    target_id: &str,
+    port: u16,
+    sibling_host: &str,
+    lb_security_groups: &[String],
+) -> fakecloud_core::dataplane::Endpoint {
+    let account = fakecloud_core::dataplane::account_of_arn(tg_arn).unwrap_or_default();
+    fakecloud_core::dataplane::resolve_target(
+        account,
+        target_id,
+        port,
+        sibling_host,
+        lb_security_groups,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,12 +1119,32 @@ async fn forward_action(
 
     // Build upstream URL.
     let scheme = "http";
-    let upstream_host = resolve_upstream_host(&chosen.id, &dp.sibling_host);
-    let upstream_port = chosen.port.or(tg.port).unwrap_or(80);
-    log_ctx.target_ip = Some(upstream_host.clone());
-    log_ctx.target_port = u16::try_from(upstream_port).ok();
+    let target_port = chosen.port.or(tg.port).unwrap_or(80);
+    let Ok(target_port) = u16::try_from(target_port) else {
+        return canned(StatusCode::BAD_GATEWAY, "target port out of range");
+    };
+    let upstream = resolve_upstream(
+        &tg_arn,
+        &chosen.id,
+        target_port,
+        &dp.sibling_host,
+        &snap.security_groups,
+    )
+    .await;
+    // Access logs name the target as AWS does (its private IP and target
+    // port) when the id is an address; otherwise the socket we opened.
+    if chosen.id.parse::<std::net::IpAddr>().is_ok() {
+        log_ctx.target_ip = Some(chosen.id.clone());
+        log_ctx.target_port = Some(target_port);
+    } else {
+        log_ctx.target_ip = Some(upstream.host.clone());
+        log_ctx.target_port = Some(upstream.port);
+    }
     let path_and_query = uri.path_and_query().map(|p| p.as_str()).unwrap_or("/");
-    let upstream_url = format!("{scheme}://{upstream_host}:{upstream_port}{path_and_query}");
+    let upstream_url = format!(
+        "{scheme}://{}:{}{path_and_query}",
+        upstream.host, upstream.port
+    );
 
     // Forward via reqwest. Strip hop-by-hop headers; AWS adds
     // X-Forwarded-* headers.
@@ -1322,29 +1359,41 @@ fn short_id() -> String {
 
 #[cfg(test)]
 mod upstream_host_tests {
-    use super::resolve_upstream_host;
+    use super::resolve_upstream;
 
-    #[test]
-    fn loopback_published_targets_use_sibling_host() {
+    const TG: &str = "arn:aws:elasticloadbalancing:us-east-1:444455556666:targetgroup/tg/0123";
+
+    #[tokio::test]
+    async fn loopback_published_targets_use_sibling_host() {
         // EC2 instance + ECS bridge-mode (id "127.0.0.1") go via sibling_host.
+        let ep = resolve_upstream(TG, "i-0123456789abcdef0", 80, "host.docker.internal", &[]).await;
+        assert_eq!(ep.host, "host.docker.internal");
+        let ep = resolve_upstream(TG, "127.0.0.1", 8080, "host.containers.internal", &[]).await;
         assert_eq!(
-            resolve_upstream_host("i-0123456789abcdef0", "host.docker.internal"),
-            "host.docker.internal"
+            (ep.host.as_str(), ep.port),
+            ("host.containers.internal", 8080)
         );
-        assert_eq!(
-            resolve_upstream_host("127.0.0.1", "host.containers.internal"),
-            "host.containers.internal"
-        );
-        // On the host, sibling_host is 127.0.0.1 — unchanged behavior.
-        assert_eq!(resolve_upstream_host("i-abc", "127.0.0.1"), "127.0.0.1");
     }
 
-    #[test]
-    fn real_container_ip_used_verbatim() {
-        assert_eq!(
-            resolve_upstream_host("10.0.4.7", "host.docker.internal"),
-            "10.0.4.7"
+    #[tokio::test]
+    async fn unpublished_ip_used_verbatim() {
+        let ep = resolve_upstream(TG, "10.0.4.7", 80, "host.docker.internal", &[]).await;
+        assert_eq!((ep.host.as_str(), ep.port), ("10.0.4.7", 80));
+    }
+
+    #[tokio::test]
+    async fn published_awsvpc_eni_ip_routes_to_its_host_port() {
+        // ECS registers the ENI private IP AWS reports, plus where the
+        // container port was published; the data plane connects there.
+        fakecloud_core::dataplane::register_target(
+            "444455556666",
+            "10.0.1.37",
+            80,
+            fakecloud_core::dataplane::Endpoint::new("127.0.0.1", 49200),
         );
+        let ep = resolve_upstream(TG, "10.0.1.37", 80, "127.0.0.1", &[]).await;
+        assert_eq!((ep.host.as_str(), ep.port), ("127.0.0.1", 49200));
+        fakecloud_core::dataplane::unregister_target("444455556666", "10.0.1.37");
     }
 }
 

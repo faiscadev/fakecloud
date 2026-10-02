@@ -15,8 +15,8 @@
 //!
 //! Session mode, a SINGLE container running both the JobManager and a
 //! TaskManager via `start-cluster.sh`. The Flink REST port `8081` is published
-//! to a pre-allocated fixed free host port so external clients (the E2E suite,
-//! the presigned dashboard URL) can reach it. `flink:1.19`'s default
+//! on a host port the daemon picks (read back with `port`) so external clients
+//! (the E2E suite, the presigned dashboard URL) can reach it. `flink:1.19`'s default
 //! `config.yaml` already binds the REST endpoint to `0.0.0.0`, so no config
 //! rewrite is needed. `host` is the shared [`fakecloud_core::container_net`]
 //! sibling host (`127.0.0.1` normally, `host.docker.internal` /
@@ -219,13 +219,14 @@ impl FlinkRuntime {
         // scoped to this app AND this fakecloud instance.
         self.reap_stale_containers(app_arn).await;
 
-        // Allocate a fixed free host port FIRST so the published REST port is
-        // stable across a restart (re-read on reattach for good measure).
-        let rest_port = alloc_free_port()?;
-
+        // Let the daemon pick the REST port's host port and read it back:
+        // nothing advertises it, and a port probed free in fakecloud's own
+        // network namespace (a containerized fakecloud's, not the daemon
+        // host's) can be taken where the daemon publishes it. Reattach
+        // re-reads it the same way.
         let mut args: Vec<String> = vec!["create".to_string()];
         args.push("-p".to_string());
-        args.push(format!("{rest_port}:{FLINK_REST_PORT}"));
+        args.push(rest_publish_spec());
         args.push("--label".to_string());
         args.push(format!("fakecloud-flink={app_arn}"));
         args.push("--label".to_string());
@@ -264,6 +265,13 @@ impl FlinkRuntime {
             )));
         }
 
+        let rest_port = match self.lookup_port(&container_id, FLINK_REST_PORT).await {
+            Ok(p) => p,
+            Err(e) => {
+                self.remove_container(&container_id).await;
+                return Err(e);
+            }
+        };
         let running = RunningFlink {
             container_id: container_id.clone(),
             host: self.net.sibling_host.clone(),
@@ -591,18 +599,9 @@ pub fn is_terminal_flink_state(state: &str) -> bool {
     matches!(state, "FINISHED" | "CANCELED" | "FAILED" | "SUSPENDED")
 }
 
-/// Bind a `127.0.0.1:0` listener, read the assigned port, and drop it -- the
-/// standard free-port trick. The port is then published with `-p {P}:8081`.
-fn alloc_free_port() -> Result<u16, RuntimeError> {
-    let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).map_err(|e| {
-        RuntimeError::ContainerStartFailed(format!("could not allocate a host port: {e}"))
-    })?;
-    let port = listener
-        .local_addr()
-        .map_err(|e| RuntimeError::ContainerStartFailed(e.to_string()))?
-        .port();
-    drop(listener);
-    Ok(port)
+/// `-p` value publishing the Flink REST port on a daemon-chosen host port.
+fn rest_publish_spec() -> String {
+    format!("{FLINK_REST_PORT}")
 }
 
 /// Sanitize multi-line REST/daemon output for embedding in an error string or
@@ -645,10 +644,10 @@ mod tests {
     }
 
     #[test]
-    fn alloc_free_port_returns_a_usable_port() {
-        let p = alloc_free_port().expect("port");
-        assert!(p >= 1024, "expected an ephemeral port, got {p}");
-        let _ = alloc_free_port().expect("second port");
+    fn rest_port_is_published_on_a_daemon_chosen_host_port() {
+        // No host port in the spec: the daemon allocates one where it
+        // publishes, and the runtime reads it back.
+        assert_eq!(rest_publish_spec(), "8081");
     }
 
     #[test]

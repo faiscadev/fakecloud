@@ -289,6 +289,22 @@ impl fakecloud_core::delivery::Elbv2TargetRegistration for Elbv2TargetRegistrati
     }
 }
 
+/// EC2 subnet lookup for the ECS runtime (`awsvpc` ENI addressing).
+pub(crate) struct Ec2NetworkLookupImpl {
+    pub(crate) state: fakecloud_ec2::SharedEc2State,
+}
+
+impl fakecloud_core::delivery::Ec2NetworkLookup for Ec2NetworkLookupImpl {
+    fn subnet_cidr(&self, account_id: &str, subnet_id: &str) -> Option<String> {
+        let accounts = self.state.read();
+        accounts
+            .get(account_id)?
+            .subnets
+            .get(subnet_id)
+            .map(|s| s.cidr_block.clone())
+    }
+}
+
 /// ECS RunTask runner for cross-service universal targets. Wraps an
 /// `Arc<EcsService>` so the call goes through the same validation +
 /// runtime spawn path as a direct ECS RunTask request.

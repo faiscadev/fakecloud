@@ -116,21 +116,17 @@ impl CodeBuildBackend {
     }
 }
 
-/// Rewrite `localhost`/`127.0.0.1` in the host portion of `http(s)://` URLs in
-/// build env values to `target_host`, so a buildspec that calls back to the
-/// fakecloud endpoint reaches the host from inside the build container. Mirrors
-/// Lambda's `rewrite_localhost_envs`; other occurrences of "localhost" pass
-/// through unchanged.
+/// Rewrite loopback endpoints in build env values to `target_host`, so a
+/// buildspec that calls back to the fakecloud endpoint (or a database / broker
+/// fakecloud runs) reaches the host from inside the build container. Shares
+/// [`fakecloud_core::container_net::rewrite_loopback_value`] with Lambda and
+/// ECS; other occurrences of "localhost" pass through unchanged.
 fn rewrite_localhost_env(env: &mut [(String, String)], target_host: &str) {
     if target_host == "127.0.0.1" || target_host == "localhost" {
         return;
     }
     for (_k, v) in env.iter_mut() {
-        *v = v
-            .replace("http://127.0.0.1:", &format!("http://{target_host}:"))
-            .replace("https://127.0.0.1:", &format!("https://{target_host}:"))
-            .replace("http://localhost:", &format!("http://{target_host}:"))
-            .replace("https://localhost:", &format!("https://{target_host}:"));
+        *v = fakecloud_core::container_net::rewrite_loopback_value(v, target_host);
     }
 }
 

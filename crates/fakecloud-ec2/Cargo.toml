@@ -19,6 +19,7 @@ k8s-openapi = { workspace = true }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 bytes = { workspace = true }
 tokio = { workspace = true }
 chrono = { workspace = true }

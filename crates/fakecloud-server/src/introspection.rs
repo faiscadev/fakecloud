@@ -140,10 +140,15 @@ pub(crate) fn ecs_task_metadata_response(
     let mut vpc_id: Option<String> = None;
     for att in &task.attachments {
         if att.attachment_type.eq_ignore_ascii_case("eni") {
+            // The ENI id is the `networkInterfaceId` detail (the attachment
+            // id itself is a UUID, as on ECS).
             eni_id = Some(att.id.clone());
             for d in &att.details {
                 if d.name == "vpcId" {
                     vpc_id = Some(d.value.clone());
+                }
+                if d.name == "networkInterfaceId" {
+                    eni_id = Some(d.value.clone());
                 }
             }
         }

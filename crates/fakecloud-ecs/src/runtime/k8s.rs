@@ -667,6 +667,29 @@ impl EcsRuntime {
             if !marked_running && (phase == "Running" || phase == "Succeeded" || phase == "Failed")
             {
                 mark_running_multi(state, account_id, task_id, &started);
+                // An awsvpc task's ENI (precreated at RunTask) attaches now;
+                // its ports are served by the Pod IP, which the load
+                // balancer data plane reaches in-cluster.
+                let pod_ip = pod.status.as_ref().and_then(|s| s.pod_ip.clone());
+                let awsvpc = resolved
+                    .iter()
+                    .any(|(plan, _)| plan.network_mode.as_deref() == Some("awsvpc"));
+                if let (true, Some(pod_ip)) = (awsvpc, pod_ip) {
+                    let eni_ip = self.attach_task_eni(state, account_id, task_id);
+                    for (plan, _) in &resolved {
+                        for pm in &plan.port_mappings {
+                            fakecloud_core::dataplane::register_target(
+                                account_id,
+                                &eni_ip,
+                                pm.container_port,
+                                fakecloud_core::dataplane::Endpoint::new(
+                                    pod_ip.clone(),
+                                    pm.container_port,
+                                ),
+                            );
+                        }
+                    }
+                }
                 self.register_lb_targets(state, account_id, task_id);
                 self.emit_state_change(state, account_id, task_id, "RUNNING", None);
                 self.persist_snapshot().await;

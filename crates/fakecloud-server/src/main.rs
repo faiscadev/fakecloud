@@ -18,6 +18,7 @@ mod appas_hooks;
 mod cli;
 mod dns;
 mod dynamodb_streams_lambda_poller;
+mod ec2_imds;
 mod ecs_creds;
 mod imds;
 mod introspection;
@@ -1394,6 +1395,9 @@ async fn main() {
             .with_eventbridge(eb_delivery.clone())
             .with_elbv2_target_registration(Arc::new(Elbv2TargetRegistrationImpl {
                 state: elbv2_state.clone(),
+            }))
+            .with_ec2_network_lookup(Arc::new(hooks::Ec2NetworkLookupImpl {
+                state: ec2_state.clone(),
             })),
     );
     let ecs_base = if fakecloud_k8s::backend_choice("FAKECLOUD_ECS_BACKEND")
@@ -1448,12 +1452,14 @@ async fn main() {
                 }
             }
         } else {
-            fakecloud_ec2::runtime::Ec2Runtime::new().map(Arc::new)
+            fakecloud_ec2::runtime::Ec2Runtime::new(bound_addr.port()).map(Arc::new)
         };
     if let Some(ref rt) = ec2_runtime {
         // Sweep instance Pods left by a previous process (k8s only; no-op on
         // the Docker backend, handled by the shared container reaper).
         rt.reap_stale().await;
+        // ELBv2 `i-...` targets reach instance ports through the runtime.
+        fakecloud_core::dataplane::set_instance_resolver(rt.endpoint_resolver());
         tracing::info!(
             cli = rt.cli_name(),
             "EC2 instance execution enabled via container runtime"
@@ -7474,9 +7480,18 @@ async fn main() {
     tokio::spawn(ecs_creds::run_revocation_sweep(
         ecs_task_credentials.clone(),
     ));
+    // Per-instance IMDS: the proxy in each EC2 instance container forwards
+    // its `169.254.169.254` requests here with the instance id in the path.
+    let ec2_imds_router = ec2_imds::routes(ec2_imds::Ec2ImdsState {
+        ec2: ec2_state.clone(),
+        iam: iam_state.clone(),
+        cache: credentials_cache.clone(),
+        region: cli.region.clone(),
+    });
     let dispatch_config = Arc::new(config);
     let app = Router::new()
         .merge(imds_router)
+        .merge(ec2_imds_router)
         .route(
             // General-purpose container/instance credential endpoint. Point an
             // app's `AWS_CONTAINER_CREDENTIALS_FULL_URI` here and the AWS SDK

@@ -31,6 +31,7 @@ pub struct DeliveryBus {
     ecs_task_runner: Option<Arc<dyn EcsTaskRunner>>,
     /// Register/deregister ELBv2 targets from ECS runtime.
     elbv2_target_registration: Option<Arc<dyn Elbv2TargetRegistration>>,
+    ec2_network_lookup: Option<Arc<dyn Ec2NetworkLookup>>,
     /// Publish CloudWatch metric data points (CloudWatch Logs metric
     /// filters extract these on PutLogEvents).
     cloudwatch_metrics: Option<Arc<dyn CloudwatchDelivery>>,
@@ -338,6 +339,13 @@ pub trait Elbv2TargetRegistration: Send + Sync {
     );
 }
 
+/// Read EC2 VPC networking from outside the ec2 crate. Used by the ECS
+/// runtime to give an `awsvpc` task's ENI a private IP from its subnet.
+pub trait Ec2NetworkLookup: Send + Sync {
+    /// The IPv4 CIDR block of `subnet_id` in `account_id`, if it exists.
+    fn subnet_cidr(&self, account_id: &str, subnet_id: &str) -> Option<String>;
+}
+
 /// Publish CloudWatch metric data points from outside the cloudwatch
 /// crate. Used by CloudWatch Logs metric filters when an incoming log
 /// event matches their pattern.
@@ -585,6 +593,7 @@ impl DeliveryBus {
             ses_dispatcher: None,
             ecs_task_runner: None,
             elbv2_target_registration: None,
+            ec2_network_lookup: None,
             cloudwatch_metrics: None,
             cloudwatch_logs: None,
             cognito_jwt_verifier: None,
@@ -726,6 +735,19 @@ impl DeliveryBus {
     pub fn with_elbv2_target_registration(mut self, reg: Arc<dyn Elbv2TargetRegistration>) -> Self {
         self.elbv2_target_registration = Some(reg);
         self
+    }
+
+    pub fn with_ec2_network_lookup(mut self, lookup: Arc<dyn Ec2NetworkLookup>) -> Self {
+        self.ec2_network_lookup = Some(lookup);
+        self
+    }
+
+    /// The IPv4 CIDR of an EC2 subnet. `None` when the subnet doesn't exist
+    /// or no EC2 lookup is wired.
+    pub fn ec2_subnet_cidr(&self, account_id: &str, subnet_id: &str) -> Option<String> {
+        self.ec2_network_lookup
+            .as_ref()
+            .and_then(|l| l.subnet_cidr(account_id, subnet_id))
     }
 
     /// Register targets with an ELBv2 target group. Silently no-ops when
