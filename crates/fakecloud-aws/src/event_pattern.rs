@@ -58,7 +58,14 @@ pub fn is_valid_structure(pattern: &Value) -> bool {
 /// Rewrite every scalar leaf (`{"foo": "bar"}`) as a one-element list
 /// (`{"foo": ["bar"]}`). Patterns stored before scalar leaves were rejected
 /// are normalized this way on load so they keep matching what they used to.
+///
+/// A pattern (or sub-object) that already passes [`is_valid_structure`] is
+/// returned unchanged, so a current pattern whose field happens to be named
+/// like an operator (`{"body": {"prefix": ["abc"]}}`) is never rewritten.
 pub fn normalize_scalar_leaves(pattern: &Value) -> Value {
+    if is_valid_structure(pattern) {
+        return pattern.clone();
+    }
     match pattern {
         Value::Object(obj) => Value::Object(
             obj.iter()
@@ -66,7 +73,9 @@ pub fn normalize_scalar_leaves(pattern: &Value) -> Value {
                     let v = match v {
                         // A bare operator object (`{"k": {"prefix": "x"}}`) was
                         // a leaf matcher, not a nested field pattern.
-                        Value::Object(o) if is_operator_object(o) => Value::Array(vec![v.clone()]),
+                        Value::Object(o) if is_operator_object(o) && !is_valid_structure(v) => {
+                            Value::Array(vec![v.clone()])
+                        }
                         Value::Object(_) => normalize_scalar_leaves(v),
                         Value::Array(alts) if k == "$or" => {
                             Value::Array(alts.iter().map(normalize_scalar_leaves).collect())
@@ -559,7 +568,7 @@ mod tests {
         assert!(is_valid_structure(&norm));
         let legacy_ops = json!({
             "a": {"prefix": "x"},
-            "b": {"c": {"numeric": [">", 1]}},
+            "b": {"c": {"suffix": "z"}},
             "d": {"exists": false}
         });
         let ops = normalize_scalar_leaves(&legacy_ops);
@@ -567,16 +576,44 @@ mod tests {
             ops,
             json!({
                 "a": [{"prefix": "x"}],
-                "b": {"c": [{"numeric": [">", 1]}]},
+                "b": {"c": [{"suffix": "z"}]},
                 "d": [{"exists": false}]
             })
         );
-        assert!(matches(&ops, &json!({"a": "xyz", "b": {"c": 2}})));
-        assert!(!matches(&ops, &json!({"a": "xyz", "b": {"c": 2}, "d": 1})));
+        assert!(matches(&ops, &json!({"a": "xyz", "b": {"c": "zz"}})));
+        assert!(!matches(
+            &ops,
+            &json!({"a": "xyz", "b": {"c": "zz"}, "d": 1})
+        ));
+        // `{"numeric": [...]}` with list leaves is already a valid field
+        // pattern, so it is kept as one rather than guessed at.
+        let ambiguous = json!({"a": "x", "b": {"numeric": [">", 1]}});
+        assert_eq!(
+            normalize_scalar_leaves(&ambiguous),
+            json!({"a": ["x"], "b": {"numeric": [">", 1]}})
+        );
         assert!(matches(
             &norm,
             &json!({"a": "x", "b": {"c": 1, "d": 2}, "e": true})
         ));
+    }
+
+    #[test]
+    fn valid_patterns_are_never_rewritten_by_legacy_normalization() {
+        // A field literally named `prefix` in a valid pattern.
+        let p = json!({"body": {"prefix": ["abc"]}});
+        assert_eq!(normalize_scalar_leaves(&p), p);
+        assert!(matches(
+            &normalize_scalar_leaves(&p),
+            &json!({"body": {"prefix": "abc"}})
+        ));
+        // In an otherwise-legacy pattern, a valid operator-named sub-object
+        // also stays a field pattern; only the invalid leaf is fixed.
+        let mixed = json!({"a": "x", "body": {"prefix": ["abc"]}});
+        assert_eq!(
+            normalize_scalar_leaves(&mixed),
+            json!({"a": ["x"], "body": {"prefix": ["abc"]}})
+        );
     }
 
     #[test]

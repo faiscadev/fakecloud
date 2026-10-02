@@ -278,6 +278,13 @@ mod tests {
     }
 
     #[test]
+    fn valid_pattern_with_operator_named_field_is_not_rewritten_on_load() {
+        let f = fs(&[r#"{"body": {"prefix": ["abc"]}}"#]);
+        assert!(f.matches(&json!({"body": r#"{"prefix": "abc"}"#})));
+        assert!(!f.matches(&json!({"body": "abcdef"})));
+    }
+
+    #[test]
     fn legacy_bare_operator_leaf_patterns_still_match_after_load() {
         let f = fs(&[r#"{"body": {"name": {"prefix": "ord-"}}}"#]);
         assert!(f.matches(&json!({"body": r#"{"name": "ord-1"}"#})));
