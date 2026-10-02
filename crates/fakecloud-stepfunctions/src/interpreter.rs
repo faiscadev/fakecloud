@@ -153,7 +153,8 @@ async fn run_wait_state(
         }),
     );
 
-    if let Err((error, cause)) = execute_wait_state(state_def, &input).await {
+    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
+    if let Err((error, cause)) = execute_wait_state(state_def, &input, &ctx).await {
         return Advance::Fail(error, cause);
     }
 
@@ -247,8 +248,10 @@ async fn run_parallel_state(
         }),
     );
 
+    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
     let result = execute_parallel_state(
         state_def,
+        &ctx,
         &input,
         delivery,
         dynamodb_state,
@@ -300,8 +303,10 @@ async fn run_map_state(
         }),
     );
 
+    let ctx = context_object(shared_state, execution_arn, name, Utc::now(), 0);
     let result = execute_map_state(
         state_def,
+        &ctx,
         &input,
         delivery,
         dynamodb_state,
@@ -334,14 +339,18 @@ async fn run_map_state(
 /// Execute a Wait state: pause execution for a specified duration or until a timestamp.
 /// A `SecondsPath` / `TimestampPath` that matches nothing, or selects a value
 /// of the wrong type, fails the state with `States.Runtime`, as on AWS.
-async fn execute_wait_state(state_def: &Value, input: &Value) -> Result<(), (String, String)> {
+async fn execute_wait_state(
+    state_def: &Value,
+    input: &Value,
+    ctx: &Value,
+) -> Result<(), (String, String)> {
     if let Some(seconds) = state_def["Seconds"].as_u64() {
         tokio::time::sleep(tokio::time::Duration::from_secs(seconds)).await;
         return Ok(());
     }
 
     if let Some(path) = state_def["SecondsPath"].as_str() {
-        let val = crate::io_processing::resolve_reference(input, path)?;
+        let val = crate::io_processing::resolve_reference_with_context(input, Some(ctx), path)?;
         let seconds = val.as_u64().ok_or_else(|| {
             crate::io_processing::runtime_error(format!(
                 "The SecondsPath parameter does not reference a valid integer value: '{path}'"
@@ -354,7 +363,7 @@ async fn execute_wait_state(state_def: &Value, input: &Value) -> Result<(), (Str
     let target = if let Some(ts_str) = state_def["Timestamp"].as_str() {
         chrono::DateTime::parse_from_rfc3339(ts_str).ok()
     } else if let Some(path) = state_def["TimestampPath"].as_str() {
-        let val = crate::io_processing::resolve_reference(input, path)?;
+        let val = crate::io_processing::resolve_reference_with_context(input, Some(ctx), path)?;
         let parsed = val
             .as_str()
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
@@ -397,6 +406,8 @@ async fn execute_task_state(
     entered_event_id: i64,
 ) -> Result<Value, (String, String)> {
     let resource = state_def["Resource"].as_str().unwrap_or("").to_string();
+    let entered = Utc::now();
+    let base_ctx = context_object(shared_state, execution_arn, name, entered, 0);
 
     let input_path = state_def["InputPath"].as_str();
     let result_path = state_def["ResultPath"].as_str();
@@ -421,11 +432,8 @@ async fn execute_task_state(
             uuid::Uuid::new_v4().simple(),
         );
         let account_id = account_id_from_arn(execution_arn);
-        let context = json!({
-            "Task": { "Token": token.clone() },
-            "Execution": { "Id": execution_arn },
-            "State": { "Name": name },
-        });
+        let mut context = base_ctx.clone();
+        context["Task"] = json!({ "Token": token.clone() });
         {
             let mut accounts = shared_state.write();
             let state = accounts.get_or_create(account_id);
@@ -451,11 +459,8 @@ async fn execute_task_state(
     };
 
     let task_input = if let Some(params) = state_def.get("Parameters") {
-        if let Some((_, ctx)) = &task_token {
-            apply_parameters(params, &effective_input, Some(ctx))?
-        } else {
-            apply_parameters(params, &effective_input, None)?
-        }
+        let ctx = task_token.as_ref().map(|(_, ctx)| ctx).unwrap_or(&base_ctx);
+        apply_parameters(params, &effective_input, Some(ctx))?
     } else {
         effective_input
     };
@@ -520,7 +525,14 @@ async fn execute_task_state(
                             );
 
                             let selected = if let Some(selector) = state_def.get("ResultSelector") {
-                                apply_parameters(selector, &output, None)?
+                                let ctx = context_object(
+                                    shared_state,
+                                    execution_arn,
+                                    name,
+                                    entered,
+                                    attempt,
+                                );
+                                apply_parameters(selector, &output, Some(&ctx))?
                             } else {
                                 output
                             };
@@ -574,7 +586,8 @@ async fn execute_task_state(
                 );
 
                 let selected = if let Some(selector) = state_def.get("ResultSelector") {
-                    apply_parameters(selector, &result, None)?
+                    let ctx = context_object(shared_state, execution_arn, name, entered, attempt);
+                    apply_parameters(selector, &result, Some(&ctx))?
                 } else {
                     result
                 };
@@ -617,8 +630,10 @@ async fn execute_task_state(
 }
 
 /// Execute a Parallel state: run all branches concurrently, collect results into an array.
+#[allow(clippy::too_many_arguments)]
 async fn execute_parallel_state(
     state_def: &Value,
+    ctx: &Value,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
@@ -680,7 +695,7 @@ async fn execute_parallel_state(
 
     // Apply ResultSelector if present
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
-        apply_parameters(selector, &branch_output, None)?
+        apply_parameters(selector, &branch_output, Some(ctx))?
     } else {
         branch_output
     };
@@ -708,6 +723,7 @@ async fn execute_parallel_state(
 #[allow(clippy::too_many_arguments)]
 async fn execute_map_state(
     state_def: &Value,
+    ctx: &Value,
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
     dynamodb_state: &Option<SharedDynamoDbState>,
@@ -727,7 +743,7 @@ async fn execute_map_state(
 
     // Resolve MaxConcurrencyPath if present
     let max_concurrency = if let Some(path) = state_def["MaxConcurrencyPath"].as_str() {
-        crate::io_processing::resolve_reference(&effective_input, path)?
+        crate::io_processing::resolve_reference_with_context(&effective_input, Some(ctx), path)?
             .as_u64()
             .unwrap_or(0)
     } else {
@@ -744,7 +760,11 @@ async fn execute_map_state(
         read_items_from_s3(item_reader, registry, execution_arn).await?
     } else {
         let items_path = state_def["ItemsPath"].as_str().unwrap_or("$");
-        let items_value = crate::io_processing::resolve_reference(&effective_input, items_path)?;
+        let items_value = crate::io_processing::resolve_reference_with_context(
+            &effective_input,
+            Some(ctx),
+            items_path,
+        )?;
         match items_value {
             Value::Array(items) => items,
             other => {
@@ -810,11 +830,37 @@ async fn execute_map_state(
         None
     };
 
+    // Apply ItemSelector to every item before any iteration starts, so a
+    // failing selector fails the state without leaving earlier iterations
+    // running in the background. `$` paths read the Map state's effective
+    // input; the current item is exposed through the context object as
+    // `$$.Map.Item.Value` / `$$.Map.Item.Index`, as on AWS.
+    let item_inputs: Vec<Value> = match state_def.get("ItemSelector") {
+        Some(selector) => {
+            let mut out = Vec::with_capacity(batched_items.len());
+            for (index, batch_item) in batched_items.into_iter().enumerate() {
+                let mut item_ctx = ctx.clone();
+                item_ctx["Map"] = json!({"Item": {"Value": batch_item, "Index": index}});
+                match apply_parameters(selector, &effective_input, Some(&item_ctx)) {
+                    Ok(v) => out.push(v),
+                    Err(err) => {
+                        if let Some(arn) = &map_run_arn {
+                            finish_map_run(shared_state, arn, execution_arn, 0, 0, "FAILED");
+                        }
+                        return Err(err);
+                    }
+                }
+            }
+            out
+        }
+        None => batched_items,
+    };
+
     let semaphore = Arc::new(tokio::sync::Semaphore::new(effective_concurrency));
 
     // Process all items
     let mut handles = Vec::new();
-    for (index, batch_item) in batched_items.into_iter().enumerate() {
+    for (index, item_input) in item_inputs.into_iter().enumerate() {
         let iter_def = iterator_def.clone();
         let delivery = delivery.clone();
         let ddb = dynamodb_state.clone();
@@ -822,17 +868,6 @@ async fn execute_map_state(
         let state = shared_state.clone();
         let arn = execution_arn.to_string();
         let sem = semaphore.clone();
-
-        // Apply ItemSelector if present
-        // `$` paths read the Map state's effective input; the current item
-        // is exposed through the context object as `$$.Map.Item.Value` /
-        // `$$.Map.Item.Index`, as on AWS.
-        let item_input = if let Some(selector) = state_def.get("ItemSelector") {
-            let ctx = json!({"Map": {"Item": {"Value": batch_item, "Index": index}}});
-            apply_parameters(selector, &effective_input, Some(&ctx))?
-        } else {
-            batch_item
-        };
 
         add_event(
             shared_state,
@@ -925,7 +960,7 @@ async fn execute_map_state(
 
     // Apply ResultSelector if present
     let selected = if let Some(selector) = state_def.get("ResultSelector") {
-        apply_parameters(selector, &map_output, None)?
+        apply_parameters(selector, &map_output, Some(ctx))?
     } else {
         map_output
     };

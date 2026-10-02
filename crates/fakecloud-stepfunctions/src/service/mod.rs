@@ -790,7 +790,8 @@ fn invalid_payload_template(state_name: &str, field: &str, detail: &str) -> AwsS
 /// nested `And` / `Or` / `Not` boolean combinators.
 fn validate_choice_variables(state_name: &str, rule: &Value) -> Result<(), AwsServiceError> {
     if let Some(v) = rule.get("Variable").and_then(|v| v.as_str()) {
-        if !is_valid_path(v) {
+        // A Choice Variable may read the context object (`$$.Execution.Name`).
+        if !is_reference_or_context_path(v) {
             return Err(invalid_reference_path(state_name, "Variable", v));
         }
     }
@@ -2113,6 +2114,18 @@ mod tests {
             assert!(validate_definition(&def("OutputPath", p)).is_ok(), "{p}");
         }
         assert!(validate_definition(&def("ResultPath", "$['a'][0]")).is_ok());
+        let choice = |var: &str| {
+            json!({
+                "StartAt": "C",
+                "States": {
+                    "C": {"Type": "Choice", "Choices": [{"Variable": var, "IsPresent": true, "Next": "D"}], "Default": "D"},
+                    "D": {"Type": "Succeed"}
+                }
+            })
+            .to_string()
+        };
+        assert!(validate_definition(&choice("$$.Execution.Name")).is_ok());
+        assert!(validate_definition(&choice("$$.x[")).is_err());
         for p in ["$.items[*]", "$..a", "$.a[?(@.x)]"] {
             assert!(validate_definition(&def("ResultPath", p)).is_err(), "{p}");
         }

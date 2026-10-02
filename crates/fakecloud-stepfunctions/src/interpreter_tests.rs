@@ -2003,3 +2003,115 @@ fn execution_started_event_carries_the_role_recorded_at_start() {
         );
     });
 }
+
+// ── Context object ($$) ──────────────────────────────────────────
+
+#[test]
+fn context_object_is_complete_in_pass_choice_and_item_selector() {
+    let state = make_state();
+    let arn = arn_for("ctx-full");
+    let def = json!({
+        "StartAt": "P",
+        "States": {
+            "P": {
+                "Type": "Pass",
+                "Parameters": {
+                    "id.$": "$$.Execution.Id",
+                    "name.$": "$$.Execution.Name",
+                    "input.$": "$$.Execution.Input.xs",
+                    "start.$": "$$.Execution.StartTime",
+                    "role.$": "$$.Execution.RoleArn",
+                    "state.$": "$$.State.Name",
+                    "entered.$": "$$.State.EnteredTime",
+                    "retry.$": "$$.State.RetryCount",
+                    "sm.$": "$$.StateMachine.Name",
+                    "smid.$": "$$.StateMachine.Id",
+                    "fmt.$": "States.Format('{}/{}', $$.StateMachine.Name, $$.Execution.Name)",
+                    "xs.$": "$.xs"
+                },
+                "Next": "C"
+            },
+            "C": {
+                "Type": "Choice",
+                "Choices": [{"Variable": "$$.Execution.Name", "StringEquals": "exec-1", "Next": "M"}],
+                "Default": "Bad"
+            },
+            "Bad": {"Type": "Fail", "Error": "Bad"},
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$$.Execution.Input.xs",
+                "ItemSelector": {
+                    "v.$": "$$.Map.Item.Value",
+                    "i.$": "$$.Map.Item.Index",
+                    "exec.$": "$$.Execution.Name",
+                    "state.$": "$$.State.Name"
+                },
+                "ItemProcessor": {"StartAt": "I", "States": {"I": {"Type": "Pass", "End": true}}},
+                "ResultPath": "$.mapped",
+                "End": true
+            }
+        }
+    });
+    drive(&state, &arn, def, Some(r#"{"xs":["a","b"]}"#));
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded, "{:?}", exec.cause);
+        let out: Value = serde_json::from_str(exec.output.as_deref().unwrap()).unwrap();
+        assert_eq!(out["id"], json!(arn));
+        assert_eq!(out["name"], "exec-1");
+        assert_eq!(out["input"], json!(["a", "b"]));
+        assert!(out["start"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(out["role"], "arn:aws:iam::123456789012:role/test");
+        assert_eq!(out["state"], "P");
+        assert!(out["entered"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(out["retry"], 0);
+        assert_eq!(out["sm"], "test");
+        assert_eq!(
+            out["smid"],
+            "arn:aws:states:us-east-1:123456789012:stateMachine:test"
+        );
+        assert_eq!(out["fmt"], "test/exec-1");
+        assert_eq!(
+            out["mapped"],
+            json!([
+                {"v": "a", "i": 0, "exec": "exec-1", "state": "M"},
+                {"v": "b", "i": 1, "exec": "exec-1", "state": "M"}
+            ])
+        );
+    });
+}
+
+#[test]
+fn item_selector_failure_finishes_distributed_map_run_as_failed() {
+    let state = make_state();
+    let arn = arn_for("ctx-itemsel-fail");
+    let def = json!({
+        "StartAt": "M",
+        "States": {
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$.xs",
+                "ItemSelector": {"v.$": "$.missing"},
+                "ItemProcessor": {
+                    "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                    "StartAt": "I",
+                    "States": {"I": {"Type": "Pass", "End": true}}
+                },
+                "End": true
+            }
+        }
+    });
+    drive(&state, &arn, def, Some(r#"{"xs":[1,2,3]}"#));
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("States.Runtime"));
+        // No iteration was started before the selector failed.
+        assert!(!exec
+            .history_events
+            .iter()
+            .any(|e| e.event_type == "MapIterationStarted"));
+    });
+    let accounts = state.read();
+    let runs: Vec<_> = accounts.default_ref().map_runs.values().collect();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "FAILED");
+}

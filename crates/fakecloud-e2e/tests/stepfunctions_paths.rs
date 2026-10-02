@@ -286,3 +286,45 @@ async fn sfn_item_selector_reads_map_context() {
         ])
     );
 }
+
+#[tokio::test]
+async fn sfn_context_object_fields_resolve() {
+    let server = TestServer::start().await;
+    let client = server.sfn_client().await;
+
+    let def = json!({
+        "StartAt": "P",
+        "States": {
+            "P": {
+                "Type": "Pass",
+                "Parameters": {
+                    "exec.$": "$$.Execution.Name",
+                    "id.$": "$$.Execution.Id",
+                    "in.$": "$$.Execution.Input.k",
+                    "start.$": "$$.Execution.StartTime",
+                    "state.$": "$$.State.Name",
+                    "retry.$": "$$.State.RetryCount",
+                    "sm.$": "$$.StateMachine.Name"
+                },
+                "Next": "C"
+            },
+            "C": {
+                "Type": "Choice",
+                "Choices": [{"Variable": "$$.StateMachine.Name", "StringEquals": "ctx-sm", "Next": "Done"}],
+                "Default": "Bad"
+            },
+            "Bad": {"Type": "Fail", "Error": "Bad"},
+            "Done": {"Type": "Succeed"}
+        }
+    });
+    let (status, output, error, cause) = run(&client, "ctx-sm", def, json!({"k": "v"})).await;
+    assert_eq!(status, "SUCCEEDED", "{error:?} {cause:?}");
+    let out = output.unwrap();
+    assert_eq!(out["in"], "v");
+    assert_eq!(out["state"], "P");
+    assert_eq!(out["retry"], 0);
+    assert_eq!(out["sm"], "ctx-sm");
+    assert!(out["id"].as_str().unwrap().contains(":execution:ctx-sm:"));
+    assert!(!out["exec"].as_str().unwrap().is_empty());
+    assert!(out["start"].as_str().unwrap().ends_with('Z'));
+}

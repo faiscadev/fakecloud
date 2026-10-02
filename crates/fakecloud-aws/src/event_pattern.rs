@@ -37,10 +37,56 @@ pub fn matches(pattern: &Value, event: &Value) -> bool {
     }
 }
 
+/// Structural check AWS applies to a filter pattern: a JSON object whose
+/// leaves are all lists of matchers (or nested objects); `$or` must be a
+/// list of such objects. A bare scalar leaf such as `{"foo": "bar"}` is
+/// rejected.
+pub fn is_valid_structure(pattern: &Value) -> bool {
+    match pattern {
+        Value::Object(obj) => obj.iter().all(|(k, v)| match v {
+            Value::Object(_) => is_valid_structure(v),
+            Value::Array(alts) if k == "$or" => {
+                alts.iter().all(|a| a.is_object() && is_valid_structure(a))
+            }
+            Value::Array(_) => true,
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+/// Rewrite every scalar leaf (`{"foo": "bar"}`) as a one-element list
+/// (`{"foo": ["bar"]}`). Patterns stored before scalar leaves were rejected
+/// are normalized this way on load so they keep matching what they used to.
+pub fn normalize_scalar_leaves(pattern: &Value) -> Value {
+    match pattern {
+        Value::Object(obj) => Value::Object(
+            obj.iter()
+                .map(|(k, v)| {
+                    let v = match v {
+                        Value::Object(_) => normalize_scalar_leaves(v),
+                        Value::Array(alts) if k == "$or" => {
+                            Value::Array(alts.iter().map(normalize_scalar_leaves).collect())
+                        }
+                        Value::Array(_) => v.clone(),
+                        scalar => Value::Array(vec![scalar.clone()]),
+                    };
+                    (k.clone(), v)
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
 fn match_object(pattern: &Map<String, Value>, node: Option<&Value>) -> bool {
     // An array-valued node is crushed out: any element may satisfy the whole
     // sub-pattern.
+    // An empty array holds no leaves, so every field under it is absent.
     if let Some(Value::Array(items)) = node {
+        if items.is_empty() {
+            return match_object(pattern, None);
+        }
         return items.iter().any(|item| match_object(pattern, Some(item)));
     }
     let obj = match node {
@@ -474,6 +520,41 @@ mod tests {
             &json!({"a": [{"exists": true}]}),
             &json!({"a": []})
         ));
+    }
+
+    #[test]
+    fn structure_validation_and_legacy_normalization() {
+        assert!(is_valid_structure(&json!({"a": ["x"], "b": {"c": [1]}})));
+        assert!(is_valid_structure(
+            &json!({"$or": [{"a": ["1"]}, {"b": ["2"]}]})
+        ));
+        assert!(!is_valid_structure(&json!({"a": "x"})));
+        assert!(!is_valid_structure(&json!({"a": {"b": 1}})));
+        assert!(!is_valid_structure(&json!(["x"])));
+        let legacy = json!({"a": "x", "b": {"c": 1, "d": [2]}, "$or": [{"e": true}]});
+        let norm = normalize_scalar_leaves(&legacy);
+        assert_eq!(
+            norm,
+            json!({"a": ["x"], "b": {"c": [1], "d": [2]}, "$or": [{"e": [true]}]})
+        );
+        assert!(is_valid_structure(&norm));
+        assert!(matches(
+            &norm,
+            &json!({"a": "x", "b": {"c": 1, "d": 2}, "e": true})
+        ));
+    }
+
+    #[test]
+    fn empty_intermediate_array_is_absent() {
+        let p = json!({"detail": {"items": {"sku": [{"exists": false}]}}});
+        assert!(matches(&p, &json!({"detail": {"items": []}})));
+        assert!(matches(&p, &json!({"detail": {"items": [[]]}})));
+        assert!(!matches(&p, &json!({"detail": {"items": [{"sku": "x"}]}})));
+        let p = json!({"detail": {"items": {"sku": [{"exists": true}]}}});
+        assert!(!matches(&p, &json!({"detail": {"items": []}})));
+        // A field pattern under an empty array never matches a value.
+        let p = json!({"detail": {"items": {"sku": ["x"]}}});
+        assert!(!matches(&p, &json!({"detail": {"items": []}})));
     }
 
     #[test]

@@ -2,7 +2,7 @@ use std::cmp::Ordering;
 
 use serde_json::Value;
 
-use crate::io_processing::{resolve_path, StatesError};
+use crate::io_processing::{resolve_with_context, StatesError};
 
 /// Evaluate a Choice state's rules against the input and return the Next state name.
 /// Returns `Ok(None)` if no rule matches and there's no Default.
@@ -10,10 +10,14 @@ use crate::io_processing::{resolve_path, StatesError};
 /// A rule whose `Variable` (or `*Path` comparand) matches nothing fails the
 /// state with `States.Runtime`, as on AWS; only an `IsPresent` test may probe
 /// a missing field.
-pub fn evaluate_choice(state_def: &Value, input: &Value) -> Result<Option<String>, StatesError> {
+pub fn evaluate_choice(
+    state_def: &Value,
+    input: &Value,
+    context: Option<&Value>,
+) -> Result<Option<String>, StatesError> {
     if let Some(choices) = state_def["Choices"].as_array() {
         for choice in choices {
-            if evaluate_rule(choice, input)? {
+            if evaluate_rule(choice, input, context)? {
                 return Ok(choice["Next"].as_str().map(|s| s.to_string()));
             }
         }
@@ -32,16 +36,21 @@ fn invalid_variable(path: &str) -> StatesError {
     )
 }
 
-/// Resolve a Choice path, failing on a miss.
-fn lookup(input: &Value, path: &str) -> Result<Value, StatesError> {
-    resolve_path(input, path).map_err(|_| invalid_variable(path))
+/// Resolve a Choice path (`$...` against the input, `$$...` against the
+/// context object), failing on a miss.
+fn lookup(input: &Value, context: Option<&Value>, path: &str) -> Result<Value, StatesError> {
+    resolve_with_context(input, context, path).map_err(|_| invalid_variable(path))
 }
 
 /// Evaluate a single choice rule (may be compound via And/Or/Not).
-fn evaluate_rule(rule: &Value, input: &Value) -> Result<bool, StatesError> {
+fn evaluate_rule(
+    rule: &Value,
+    input: &Value,
+    context: Option<&Value>,
+) -> Result<bool, StatesError> {
     if let Some(and_rules) = rule["And"].as_array() {
         for r in and_rules {
-            if !evaluate_rule(r, input)? {
+            if !evaluate_rule(r, input, context)? {
                 return Ok(false);
             }
         }
@@ -49,14 +58,14 @@ fn evaluate_rule(rule: &Value, input: &Value) -> Result<bool, StatesError> {
     }
     if let Some(or_rules) = rule["Or"].as_array() {
         for r in or_rules {
-            if evaluate_rule(r, input)? {
+            if evaluate_rule(r, input, context)? {
                 return Ok(true);
             }
         }
         return Ok(false);
     }
     if rule.get("Not").is_some() {
-        return Ok(!evaluate_rule(&rule["Not"], input)?);
+        return Ok(!evaluate_rule(&rule["Not"], input, context)?);
     }
 
     let variable = match rule["Variable"].as_str() {
@@ -66,11 +75,11 @@ fn evaluate_rule(rule: &Value, input: &Value) -> Result<bool, StatesError> {
 
     // IsPresent is the one test defined on a missing field.
     if let Some(expected) = rule.get("IsPresent") {
-        let is_present = resolve_path(input, variable).is_ok();
+        let is_present = resolve_with_context(input, context, variable).is_ok();
         return Ok(expected.as_bool().unwrap_or(false) == is_present);
     }
 
-    let value = lookup(input, variable)?;
+    let value = lookup(input, context, variable)?;
 
     if let Some(result) = evaluate_type_test(rule, &value) {
         return Ok(result);
@@ -85,7 +94,7 @@ fn evaluate_rule(rule: &Value, input: &Value) -> Result<bool, StatesError> {
             let Some(path) = path.as_str() else {
                 return Ok(false);
             };
-            let other = lookup(input, path)?;
+            let other = lookup(input, context, path)?;
             return Ok(compare(*kind, op, &other, &value));
         }
     }
@@ -269,10 +278,10 @@ mod tests {
             "Next": "Active"
         });
         let input = json!({"status": "active"});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"status": "inactive"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -283,10 +292,10 @@ mod tests {
             "Next": "High"
         });
         let input = json!({"count": 15});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"count": 5});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -297,10 +306,10 @@ mod tests {
             "Next": "Enabled"
         });
         let input = json!({"enabled": true});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"enabled": false});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -313,10 +322,10 @@ mod tests {
             "Next": "Both"
         });
         let input = json!({"a": 5, "b": 50});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"a": -1, "b": 50});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -329,10 +338,10 @@ mod tests {
             "Next": "Valid"
         });
         let input = json!({"status": "active"});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"status": "closed"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -345,10 +354,10 @@ mod tests {
             "Next": "Open"
         });
         let input = json!({"status": "active"});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"status": "closed"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -359,10 +368,10 @@ mod tests {
             "Next": "HasField"
         });
         let input = json!({"optional": "value"});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"other": "value"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -373,10 +382,10 @@ mod tests {
             "Next": "HasItem"
         });
         let input = json!({"items": [10, 20, 30]});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"items": []});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -388,7 +397,7 @@ mod tests {
             "Next": "HasField"
         });
         let input = json!({"optional": null});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -399,10 +408,10 @@ mod tests {
             "Next": "Null"
         });
         let input = json!({"field": null});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"field": "value"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -413,10 +422,10 @@ mod tests {
             "Next": "Number"
         });
         let input = json!({"value": 42});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"value": "not a number"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -444,7 +453,7 @@ mod tests {
         });
         let input = json!({"status": "unknown"});
         assert_eq!(
-            evaluate_choice(&state_def, &input).unwrap(),
+            evaluate_choice(&state_def, &input, None).unwrap(),
             Some("DefaultPath".to_string())
         );
     }
@@ -469,13 +478,13 @@ mod tests {
         });
         let input = json!({"value": 150});
         assert_eq!(
-            evaluate_choice(&state_def, &input).unwrap(),
+            evaluate_choice(&state_def, &input, None).unwrap(),
             Some("High".to_string())
         );
 
         let input = json!({"value": 50});
         assert_eq!(
-            evaluate_choice(&state_def, &input).unwrap(),
+            evaluate_choice(&state_def, &input, None).unwrap(),
             Some("Low".to_string())
         );
     }
@@ -493,7 +502,7 @@ mod tests {
             ]
         });
         let input = json!({"status": "closed"});
-        assert_eq!(evaluate_choice(&state_def, &input).unwrap(), None);
+        assert_eq!(evaluate_choice(&state_def, &input, None).unwrap(), None);
     }
 
     #[test]
@@ -504,10 +513,10 @@ mod tests {
             "Next": "Equal"
         });
         let input = json!({"a": 42, "b": 42});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"a": 42, "b": 99});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -518,10 +527,10 @@ mod tests {
             "Next": "Before"
         });
         let input = json!({"ts": "2024-01-15T12:00:00Z"});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"ts": "2024-12-01T00:00:00Z"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -532,14 +541,14 @@ mod tests {
             "Next": "Before"
         });
         let input = json!({"name": "alpha"});
-        assert!(evaluate_rule(&rule, &input).unwrap());
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"name": "gamma"});
-        assert!(!evaluate_rule(&rule, &input).unwrap());
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     fn rule_ok(rule: Value, input: Value) -> bool {
-        evaluate_rule(&rule, &input).unwrap()
+        evaluate_rule(&rule, &input, None).unwrap()
     }
 
     #[test]
@@ -584,17 +593,17 @@ mod tests {
     #[test]
     fn missing_variable_is_states_runtime() {
         let rule = json!({"Variable": "$.missing", "StringEquals": "x", "Next": "X"});
-        let (err, cause) = evaluate_rule(&rule, &json!({})).unwrap_err();
+        let (err, cause) = evaluate_rule(&rule, &json!({}), None).unwrap_err();
         assert_eq!(err, "States.Runtime");
         assert!(cause.contains("$.missing"), "{cause}");
         // Missing *Path comparand fails too.
         let rule = json!({"Variable": "$.a", "NumericEqualsPath": "$.nope", "Next": "X"});
-        assert!(evaluate_rule(&rule, &json!({"a": 1})).is_err());
+        assert!(evaluate_rule(&rule, &json!({"a": 1}), None).is_err());
         // Type tests on a missing field fail; only IsPresent may probe it.
         let rule = json!({"Variable": "$.missing", "IsNull": true, "Next": "X"});
-        assert!(evaluate_rule(&rule, &json!({})).is_err());
+        assert!(evaluate_rule(&rule, &json!({}), None).is_err());
         let state = json!({"Choices": [rule], "Default": "D"});
-        assert!(evaluate_choice(&state, &json!({})).is_err());
+        assert!(evaluate_choice(&state, &json!({}), None).is_err());
     }
 
     #[test]
@@ -635,5 +644,14 @@ mod tests {
         assert!(!string_matches("axb", "a\\*b"));
         assert!(string_matches("a\\b", "a\\\\b"));
         assert!(string_matches("a\\bc", "a\\\\*"));
+    }
+
+    #[test]
+    fn variable_may_read_context_object() {
+        let ctx = json!({"Execution": {"Name": "run-1"}});
+        let rule = json!({"Variable": "$$.Execution.Name", "StringEquals": "run-1", "Next": "X"});
+        assert!(evaluate_rule(&rule, &json!({}), Some(&ctx)).unwrap());
+        let rule = json!({"Variable": "$$.Nope", "IsPresent": false, "Next": "X"});
+        assert!(evaluate_rule(&rule, &json!({}), Some(&ctx)).unwrap());
     }
 }

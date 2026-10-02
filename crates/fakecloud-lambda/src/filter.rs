@@ -41,7 +41,9 @@ impl FilterSet {
         let patterns = raw
             .into_iter()
             .filter_map(|s| match serde_json::from_str::<Value>(s.as_ref()) {
-                Ok(v) => Some(v),
+                // Patterns persisted before scalar leaves were rejected keep
+                // their old meaning: `{"k": "v"}` is read as `{"k": ["v"]}`.
+                Ok(v) => Some(fakecloud_aws::event_pattern::normalize_scalar_leaves(&v)),
                 Err(err) => {
                     tracing::warn!(
                         pattern = s.as_ref(),
@@ -67,7 +69,7 @@ impl FilterSet {
         for s in raw {
             let pattern = serde_json::from_str::<Value>(s.as_ref())
                 .map_err(|err| format!("FilterCriteria pattern is invalid JSON: {err}"))?;
-            if !pattern.is_object() || !leaves_are_lists(&pattern) {
+            if !fakecloud_aws::event_pattern::is_valid_structure(&pattern) {
                 return Err("Invalid filter pattern definition.".to_string());
             }
         }
@@ -85,22 +87,6 @@ impl FilterSet {
 
     pub fn is_empty(&self) -> bool {
         self.patterns.is_empty()
-    }
-}
-
-/// Every leaf of a filter pattern must be a list of matchers (or a nested
-/// object); a bare scalar such as `{"foo": "bar"}` is rejected by AWS.
-fn leaves_are_lists(pattern: &Value) -> bool {
-    match pattern {
-        Value::Object(obj) => obj.iter().all(|(k, v)| match v {
-            Value::Object(_) => leaves_are_lists(v),
-            Value::Array(alts) if k == "$or" => {
-                alts.iter().all(|a| a.is_object() && leaves_are_lists(a))
-            }
-            Value::Array(_) => true,
-            _ => false,
-        }),
-        _ => false,
     }
 }
 
@@ -289,5 +275,13 @@ mod tests {
         // Metadata properties are filterable at the top level.
         let f = fs(&[r#"{"partitionKey": ["pk-1"]}"#]);
         assert!(f.matches(&rec(b"not json")));
+    }
+
+    #[test]
+    fn legacy_scalar_leaf_patterns_still_match_after_load() {
+        // Stored before validation rejected scalar leaves.
+        let f = fs(&[r#"{"body": {"action": "process"}}"#]);
+        assert!(f.matches(&json!({"body": r#"{"action": "process"}"#})));
+        assert!(!f.matches(&json!({"body": r#"{"action": "skip"}"#})));
     }
 }

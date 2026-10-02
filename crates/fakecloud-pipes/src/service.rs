@@ -336,6 +336,8 @@ impl PipesService {
             .ok_or_else(|| validation_error("RoleArn is required"))?
             .to_string();
 
+        validate_filter_criteria(&body)?;
+
         let desired = desired_state_from(body.get("DesiredState"), STATE_RUNNING);
         let arn = self.arn(&req.account_id, &req.region, &name);
         let now = now_epoch_secs();
@@ -576,6 +578,7 @@ impl PipesService {
         if !has_valid_role_arn(&body) {
             return Err(validation_error("RoleArn is required"));
         }
+        validate_filter_criteria(&body)?;
         let now = now_epoch_secs();
 
         let response = {
@@ -829,7 +832,10 @@ impl AwsService for PipesService {
         // untouched); Start/Stop/Describe have no such body validation.
         let settle_before_dispatch = match action {
             "DescribePipe" | "StartPipe" | "StopPipe" => true,
-            "UpdatePipe" => has_valid_role_arn(&req.json_body()),
+            "UpdatePipe" => {
+                let body = req.json_body();
+                has_valid_role_arn(&body) && validate_filter_criteria(&body).is_ok()
+            }
             _ => false,
         };
         if settle_before_dispatch {
@@ -1211,6 +1217,31 @@ fn not_found(name: &str) -> AwsServiceError {
 /// required field)? Used both to reject an invalid UpdatePipe and to gate the
 /// pre-dispatch overdue settle in `handle`, so an invalid update never mutates
 /// state.
+/// Validate `SourceParameters.FilterCriteria.Filters[].Pattern`: each must be
+/// a JSON event pattern whose leaves are matcher lists. A malformed pattern
+/// would otherwise be stored and silently drop every event.
+fn validate_filter_criteria(body: &Value) -> Result<(), AwsServiceError> {
+    let Some(filters) = body
+        .pointer("/SourceParameters/FilterCriteria/Filters")
+        .and_then(Value::as_array)
+    else {
+        return Ok(());
+    };
+    for filter in filters {
+        let Some(pattern) = filter.get("Pattern").and_then(Value::as_str) else {
+            continue;
+        };
+        let valid = serde_json::from_str::<Value>(pattern)
+            .is_ok_and(|p| fakecloud_aws::event_pattern::is_valid_structure(&p));
+        if !valid {
+            return Err(validation_error(format!(
+                "Invalid filter pattern definition: {pattern}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn has_valid_role_arn(body: &Value) -> bool {
     body.get("RoleArn")
         .and_then(Value::as_str)
@@ -1853,6 +1884,47 @@ mod tests {
             PipesService::resolve_action(&make_request(Method::GET, "/v1/pipes")),
             Some("ListPipes")
         );
+    }
+
+    #[tokio::test]
+    async fn create_and_update_pipe_reject_scalar_leaf_filter_patterns() {
+        use parking_lot::RwLock;
+        let svc = PipesService::new(Arc::new(RwLock::new(crate::state::PipesAccounts::new())));
+        let req = |method: Method, body: Value| {
+            let mut r = make_request(method, "/v1/pipes/fp");
+            r.body = serde_json::to_vec(&body).unwrap().into();
+            r
+        };
+        let body = |pattern: &str| {
+            json!({
+                "Source": SQS,
+                "Target": "arn:aws:sqs:us-east-1:000000000000:dst",
+                "RoleArn": "arn:aws:iam::000000000000:role/p",
+                "SourceParameters": {"FilterCriteria": {"Filters": [{"Pattern": pattern}]}}
+            })
+        };
+        let err = svc
+            .handle(req(Method::POST, body(r#"{"body": "x"}"#)))
+            .await
+            .err()
+            .expect("expected ValidationException");
+        assert_eq!(err.code(), "ValidationException");
+        let err = svc
+            .handle(req(Method::POST, body("{not json")))
+            .await
+            .err()
+            .expect("expected ValidationException");
+        assert_eq!(err.code(), "ValidationException");
+        assert!(svc
+            .handle(req(Method::POST, body(r#"{"body": ["x"]}"#)))
+            .await
+            .is_ok());
+        let err = svc
+            .handle(req(Method::PUT, body(r#"{"body": {"a": 1}}"#)))
+            .await
+            .err()
+            .expect("expected ValidationException");
+        assert_eq!(err.code(), "ValidationException");
     }
 
     #[tokio::test]

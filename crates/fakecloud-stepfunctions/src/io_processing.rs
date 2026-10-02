@@ -50,6 +50,17 @@ pub fn resolve_reference(root: &Value, path: &str) -> Result<Value, StatesError>
     resolve_path(root, path).map_err(|e| runtime_error(path_error_cause(path, &e)))
 }
 
+/// [`resolve_reference`] for a path that may address the context object
+/// (`$$...`), as `ItemsPath`, `SecondsPath` and friends may.
+pub fn resolve_reference_with_context(
+    input: &Value,
+    context: Option<&Value>,
+    path: &str,
+) -> Result<Value, StatesError> {
+    resolve_with_context(input, context, path)
+        .map_err(|e| runtime_error(path_error_cause(path, &e)))
+}
+
 /// Resolve a path that may address the context object (`$$...`). Without a
 /// context object, `$$` paths resolve to null.
 pub fn resolve_with_context(

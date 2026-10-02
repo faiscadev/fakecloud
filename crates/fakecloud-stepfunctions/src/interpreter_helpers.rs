@@ -165,6 +165,69 @@ pub(crate) fn run_states<'a>(
     })
 }
 
+/// Build the Step Functions context object (`$$`) for a state of
+/// `execution_arn` entered at `entered`: `Execution` (Id, Input, Name,
+/// RoleArn, StartTime, RedriveCount), `State` (EnteredTime, Name, RetryCount)
+/// and `StateMachine` (Id, Name). Callers add `Task` (task-token
+/// integrations) and `Map.Item` (ItemSelector) where they apply.
+pub(crate) fn context_object(
+    shared_state: &SharedStepFunctionsState,
+    execution_arn: &str,
+    state_name: &str,
+    entered: chrono::DateTime<chrono::Utc>,
+    retry_count: u32,
+) -> Value {
+    let fmt = |t: chrono::DateTime<chrono::Utc>| t.format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+    let accounts = shared_state.read();
+    let exec = accounts
+        .get(account_id_from_arn(execution_arn))
+        .and_then(|s| s.executions.get(execution_arn));
+    let (input, name, role_arn, start, sm_arn, sm_name) = match exec {
+        Some(e) => (
+            e.input
+                .as_deref()
+                .and_then(|i| serde_json::from_str::<Value>(i).ok())
+                .unwrap_or_else(|| json!({})),
+            e.name.clone(),
+            e.role_arn.clone(),
+            fmt(e.start_date),
+            e.state_machine_arn.clone(),
+            e.state_machine_name.clone(),
+        ),
+        None => (
+            json!({}),
+            execution_arn
+                .rsplit(':')
+                .next()
+                .unwrap_or_default()
+                .to_string(),
+            String::new(),
+            fmt(entered),
+            String::new(),
+            String::new(),
+        ),
+    };
+    json!({
+        "Execution": {
+            "Id": execution_arn,
+            "Input": input,
+            "Name": name,
+            "RoleArn": role_arn,
+            "StartTime": start,
+            "RedriveCount": 0,
+        },
+        "State": {
+            "EnteredTime": fmt(entered),
+            "Name": state_name,
+            "RetryCount": retry_count,
+        },
+        "StateMachine": {
+            "Id": sm_arn,
+            "Name": sm_name,
+        },
+    })
+}
+
 pub(crate) fn advance_from_next(state_def: &Value, input: Value) -> Advance {
     match next_state(state_def) {
         NextState::Name(next) => Advance::Next(next, input),
@@ -204,7 +267,8 @@ pub(crate) fn run_pass_state(
         }),
     );
 
-    let result = match execute_pass_state(state_def, &input) {
+    let ctx = context_object(shared_state, execution_arn, name, chrono::Utc::now(), 0);
+    let result = match execute_pass_state(state_def, &input, Some(&ctx)) {
         Ok(r) => r,
         Err((error, cause)) => return Advance::Fail(error, cause),
     };
@@ -331,7 +395,8 @@ pub(crate) fn run_choice_state(
         }
     };
 
-    let chosen = match evaluate_choice(state_def, &processed_input) {
+    let ctx = context_object(shared_state, execution_arn, name, chrono::Utc::now(), 0);
+    let chosen = match evaluate_choice(state_def, &processed_input, Some(&ctx)) {
         Ok(chosen) => chosen,
         Err((error, cause)) => return Advance::Fail(error, cause),
     };
@@ -373,6 +438,7 @@ pub(crate) fn run_choice_state(
 pub(crate) fn execute_pass_state(
     state_def: &Value,
     input: &Value,
+    context: Option<&Value>,
 ) -> Result<Value, (String, String)> {
     let input_path = state_def["InputPath"].as_str();
     let result_path = state_def["ResultPath"].as_str();
@@ -388,7 +454,7 @@ pub(crate) fn execute_pass_state(
     // from the effective input (and intrinsics). It transforms the effective
     // input before Result/ResultPath; previously it was ignored entirely.
     let transformed = if let Some(params) = state_def.get("Parameters") {
-        apply_parameters(params, &effective_input, None)?
+        apply_parameters(params, &effective_input, context)?
     } else {
         effective_input
     };
@@ -1631,7 +1697,7 @@ mod tests {
             json!({"Type": "Pass", "OutputPath": "$.nope", "End": true}),
             json!({"Type": "Pass", "Parameters": {"a.$": "$.nope"}, "End": true}),
         ] {
-            let (error, _) = execute_pass_state(&def, &json!({"x": 1})).unwrap_err();
+            let (error, _) = execute_pass_state(&def, &json!({"x": 1}), None).unwrap_err();
             assert_eq!(error, "States.Runtime", "{def}");
         }
     }
@@ -1649,7 +1715,7 @@ mod tests {
             "End": true,
         });
         let input = json!({"value": 99, "ignored": "x"});
-        let out = execute_pass_state(&state_def, &input).unwrap();
+        let out = execute_pass_state(&state_def, &input, None).unwrap();
         assert_eq!(out["renamed"], json!(99));
         assert_eq!(out["constant"], json!("fixed"));
         // The non-templated field is dropped (Parameters builds a new payload).
@@ -1665,7 +1731,7 @@ mod tests {
             "OutputPath": "$.a",
             "End": true,
         });
-        let out = execute_pass_state(&state_def, &json!({"n": 7})).unwrap();
+        let out = execute_pass_state(&state_def, &json!({"n": 7}), None).unwrap();
         assert_eq!(out, json!(7));
     }
 }
