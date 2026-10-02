@@ -87,6 +87,7 @@ impl StepFunctionsService {
             billed_duration_ms: None,
             billed_memory_mb: None,
             role_arn: sm_role_arn,
+            redrive_count: 0,
         };
 
         state.executions.insert(exec_arn.clone(), execution);
@@ -367,6 +368,7 @@ impl StepFunctionsService {
             exec.error = None;
             exec.cause = None;
             exec.history_events.clear();
+            exec.redrive_count = exec.redrive_count.saturating_add(1);
 
             (definition, input, logging_config)
         };
@@ -465,6 +467,7 @@ impl StepFunctionsService {
                 billed_duration_ms: None,
                 billed_memory_mb: None,
                 role_arn: sm.role_arn.clone(),
+                redrive_count: 0,
             };
             state.executions.insert(exec_arn.clone(), execution);
             (

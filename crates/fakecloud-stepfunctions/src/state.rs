@@ -231,6 +231,11 @@ pub struct Execution {
     /// `ExecutionStarted` history event.
     #[serde(default)]
     pub role_arn: String,
+    /// How many times `RedriveExecution` has redriven this execution
+    /// (`redriveCount`, `$$.Execution.RedriveCount`). Defaults to 0 for state
+    /// persisted before it was tracked.
+    #[serde(default)]
+    pub redrive_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

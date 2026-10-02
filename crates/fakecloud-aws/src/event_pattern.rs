@@ -64,6 +64,9 @@ pub fn normalize_scalar_leaves(pattern: &Value) -> Value {
             obj.iter()
                 .map(|(k, v)| {
                     let v = match v {
+                        // A bare operator object (`{"k": {"prefix": "x"}}`) was
+                        // a leaf matcher, not a nested field pattern.
+                        Value::Object(o) if is_operator_object(o) => Value::Array(vec![v.clone()]),
                         Value::Object(_) => normalize_scalar_leaves(v),
                         Value::Array(alts) if k == "$or" => {
                             Value::Array(alts.iter().map(normalize_scalar_leaves).collect())
@@ -77,6 +80,22 @@ pub fn normalize_scalar_leaves(pattern: &Value) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// Keys that make an object a content-filter matcher rather than a field.
+const OPERATOR_KEYS: &[&str] = &[
+    "exists",
+    "prefix",
+    "suffix",
+    "equals-ignore-case",
+    "anything-but",
+    "numeric",
+    "cidr",
+    "wildcard",
+];
+
+fn is_operator_object(o: &Map<String, Value>) -> bool {
+    o.keys().any(|k| OPERATOR_KEYS.contains(&k.as_str()))
 }
 
 fn match_object(pattern: &Map<String, Value>, node: Option<&Value>) -> bool {
@@ -538,6 +557,22 @@ mod tests {
             json!({"a": ["x"], "b": {"c": [1], "d": [2]}, "$or": [{"e": [true]}]})
         );
         assert!(is_valid_structure(&norm));
+        let legacy_ops = json!({
+            "a": {"prefix": "x"},
+            "b": {"c": {"numeric": [">", 1]}},
+            "d": {"exists": false}
+        });
+        let ops = normalize_scalar_leaves(&legacy_ops);
+        assert_eq!(
+            ops,
+            json!({
+                "a": [{"prefix": "x"}],
+                "b": {"c": [{"numeric": [">", 1]}]},
+                "d": [{"exists": false}]
+            })
+        );
+        assert!(matches(&ops, &json!({"a": "xyz", "b": {"c": 2}})));
+        assert!(!matches(&ops, &json!({"a": "xyz", "b": {"c": 2}, "d": 1})));
         assert!(matches(
             &norm,
             &json!({"a": "x", "b": {"c": 1, "d": 2}, "e": true})

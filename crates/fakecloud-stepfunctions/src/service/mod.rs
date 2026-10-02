@@ -850,6 +850,7 @@ fn execution_to_json(exec: &Execution) -> Value {
         "name": exec.name,
         "status": exec.status.as_str(),
         "startDate": exec.start_date.timestamp() as f64,
+        "redriveCount": exec.redrive_count,
     });
 
     if let Some(ref input) = exec.input {
@@ -1050,6 +1051,7 @@ pub fn start_execution_from_delivery(
         billed_duration_ms: None,
         billed_memory_mb: None,
         role_arn: sm_role_arn,
+        redrive_count: 0,
     };
 
     st.executions.insert(exec_arn.clone(), execution);
@@ -1823,6 +1825,12 @@ mod tests {
             status, "SUCCEEDED",
             "redriven execution must run to completion"
         );
+        let req = make_request(
+            "DescribeExecution",
+            &json!({"executionArn": exec_arn}).to_string(),
+        );
+        let b = body_json(&svc.describe_execution(&req).unwrap());
+        assert_eq!(b["redriveCount"], 1);
     }
 
     #[tokio::test]
@@ -2318,6 +2326,7 @@ mod tests {
             billed_duration_ms: None,
             billed_memory_mb: None,
             role_arn: String::new(),
+            redrive_count: 0,
         }
     }
 

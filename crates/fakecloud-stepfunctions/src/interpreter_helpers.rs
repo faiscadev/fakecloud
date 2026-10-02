@@ -182,7 +182,7 @@ pub(crate) fn context_object(
     let exec = accounts
         .get(account_id_from_arn(execution_arn))
         .and_then(|s| s.executions.get(execution_arn));
-    let (input, name, role_arn, start, sm_arn, sm_name) = match exec {
+    let (input, name, role_arn, start, sm_arn, sm_name, redrive_count) = match exec {
         Some(e) => (
             e.input
                 .as_deref()
@@ -193,6 +193,7 @@ pub(crate) fn context_object(
             fmt(e.start_date),
             e.state_machine_arn.clone(),
             e.state_machine_name.clone(),
+            e.redrive_count,
         ),
         None => (
             json!({}),
@@ -205,6 +206,7 @@ pub(crate) fn context_object(
             fmt(entered),
             String::new(),
             String::new(),
+            0,
         ),
     };
     json!({
@@ -214,7 +216,7 @@ pub(crate) fn context_object(
             "Name": name,
             "RoleArn": role_arn,
             "StartTime": start,
-            "RedriveCount": 0,
+            "RedriveCount": redrive_count,
         },
         "State": {
             "EnteredTime": fmt(entered),

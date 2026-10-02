@@ -278,6 +278,15 @@ mod tests {
     }
 
     #[test]
+    fn legacy_bare_operator_leaf_patterns_still_match_after_load() {
+        let f = fs(&[r#"{"body": {"name": {"prefix": "ord-"}}}"#]);
+        assert!(f.matches(&json!({"body": r#"{"name": "ord-1"}"#})));
+        assert!(!f.matches(&json!({"body": r#"{"name": "inv-1"}"#})));
+        let f = fs(&[r#"{"gone": {"exists": false}}"#]);
+        assert!(f.matches(&json!({"other": 1})));
+    }
+
+    #[test]
     fn legacy_scalar_leaf_patterns_still_match_after_load() {
         // Stored before validation rejected scalar leaves.
         let f = fs(&[r#"{"body": {"action": "process"}}"#]);

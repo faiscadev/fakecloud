@@ -33,6 +33,7 @@ fn create_execution(state: &SharedStepFunctionsState, arn: &str, input: Option<S
             billed_duration_ms: None,
             billed_memory_mb: None,
             role_arn: "arn:aws:iam::123456789012:role/test".to_string(),
+            redrive_count: 0,
         },
     );
 }
@@ -1218,6 +1219,7 @@ fn make_exec(status: ExecutionStatus) -> Execution {
         billed_duration_ms: None,
         billed_memory_mb: None,
         role_arn: String::new(),
+        redrive_count: 0,
     }
 }
 
@@ -2114,4 +2116,59 @@ fn item_selector_failure_finishes_distributed_map_run_as_failed() {
     let runs: Vec<_> = accounts.default_ref().map_runs.values().collect();
     assert_eq!(runs.len(), 1);
     assert_eq!(runs[0].status, "FAILED");
+}
+
+#[test]
+fn context_redrive_count_reflects_execution() {
+    let state = make_state();
+    let arn = arn_for("ctx-redrive");
+    create_execution(&state, &arn, None);
+    {
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        s.executions.get_mut(&arn).unwrap().redrive_count = 2;
+    }
+    let ctx = context_object(&state, &arn, "S", Utc::now(), 0);
+    assert_eq!(ctx["Execution"]["RedriveCount"], 2);
+}
+
+#[test]
+fn execution_without_redrive_count_deserializes_as_zero() {
+    let mut v = serde_json::to_value(make_exec(ExecutionStatus::Succeeded)).unwrap();
+    v.as_object_mut().unwrap().remove("redrive_count");
+    let exec: Execution = serde_json::from_value(v).unwrap();
+    assert_eq!(exec.redrive_count, 0);
+}
+
+// Task Parameters are re-evaluated per attempt: `$$.State.RetryCount`
+// advances with each retry.
+#[test]
+fn task_parameters_reevaluated_per_retry_attempt() {
+    let state = make_state();
+    let arn = arn_for("task-retry-count");
+    let (bus, _calls) = StubLambda::bus(vec![
+        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
+        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
+        Ok(br#"{"ok":true}"#.to_vec()),
+    ]);
+    let def = lambda_invoke_def(json!({
+        "Parameters": {"FunctionName": "fn", "Payload": {"retry.$": "$$.State.RetryCount"}},
+        "Retry": [{ "ErrorEquals": ["MyCustomError"], "MaxAttempts": 3, "IntervalSeconds": 0 }]
+    }));
+    drive_with_delivery(&state, &arn, def, Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let retries: Vec<i64> = exec
+            .history_events
+            .iter()
+            .filter(|e| e.event_type == "TaskScheduled")
+            .map(|e| {
+                let params: Value =
+                    serde_json::from_str(e.details["parameters"].as_str().unwrap()).unwrap();
+                params["Payload"]["retry"].as_i64().unwrap()
+            })
+            .collect();
+        assert_eq!(retries, vec![0, 1, 2]);
+    });
 }

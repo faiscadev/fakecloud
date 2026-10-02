@@ -458,14 +458,18 @@ async fn execute_task_state(
         None
     };
 
-    let task_input = if let Some(params) = state_def.get("Parameters") {
-        let ctx = task_token.as_ref().map(|(_, ctx)| ctx).unwrap_or(&base_ctx);
-        apply_parameters(params, &effective_input, Some(ctx))?
-    } else {
-        effective_input
-    };
-
     loop {
+        // Parameters are re-evaluated for every attempt, so
+        // `$$.State.RetryCount` reflects the current retry as on AWS.
+        let task_input = if let Some(params) = state_def.get("Parameters") {
+            let mut ctx = context_object(shared_state, execution_arn, name, entered, attempt);
+            if let Some((_, token_ctx)) = &task_token {
+                ctx["Task"] = token_ctx["Task"].clone();
+            }
+            apply_parameters(params, &effective_input, Some(&ctx))?
+        } else {
+            effective_input.clone()
+        };
         add_event(
             shared_state,
             execution_arn,
