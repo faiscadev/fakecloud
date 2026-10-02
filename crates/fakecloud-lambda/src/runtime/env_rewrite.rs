@@ -9,10 +9,11 @@
 
 use std::collections::BTreeMap;
 
-/// Rewrite `localhost` and `127.0.0.1` URLs in each value to use
-/// `target_host` instead. Touches only the host portion of `http(s)://`
-/// URLs; other occurrences of the word "localhost" in env values pass
-/// through unchanged.
+/// Rewrite loopback endpoints in each value to use `target_host` instead:
+/// URLs, bare `host` / `host:port` values (an RDS endpoint, an MSK
+/// bootstrap list) -- see
+/// [`fakecloud_core::container_net::rewrite_loopback_value`]. Other
+/// occurrences of the word "localhost" pass through unchanged.
 pub fn rewrite_localhost_envs(
     env: &BTreeMap<String, String>,
     target_host: &str,
@@ -23,11 +24,7 @@ pub fn rewrite_localhost_envs(
 }
 
 fn rewrite_value(value: &str, target_host: &str) -> String {
-    value
-        .replace("http://127.0.0.1:", &format!("http://{target_host}:"))
-        .replace("https://127.0.0.1:", &format!("https://{target_host}:"))
-        .replace("http://localhost:", &format!("http://{target_host}:"))
-        .replace("https://localhost:", &format!("https://{target_host}:"))
+    fakecloud_core::container_net::rewrite_loopback_value(value, target_host)
 }
 
 #[cfg(test)]
@@ -79,6 +76,24 @@ mod tests {
         );
         assert_eq!(out[1].1, "connect to localhost soon");
         assert_eq!(out[0].1, "");
+    }
+
+    #[test]
+    fn rewrites_bare_data_plane_endpoints() {
+        // An RDS endpoint address and an MSK bootstrap list handed to the
+        // function as plain host / host:port values.
+        let out = rewrite_localhost_envs(
+            &env(&[
+                ("BROKERS", "127.0.0.1:9092,127.0.0.1:9094"),
+                ("DB_HOST", "127.0.0.1"),
+            ]),
+            "host.docker.internal",
+        );
+        assert_eq!(
+            out[0].1,
+            "host.docker.internal:9092,host.docker.internal:9094"
+        );
+        assert_eq!(out[1].1, "host.docker.internal");
     }
 
     #[test]

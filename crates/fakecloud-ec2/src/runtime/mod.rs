@@ -19,6 +19,7 @@
 //! backing is best-effort fidelity layered on top.
 
 pub mod firewall;
+mod imds;
 mod k8s;
 pub mod netpolicy;
 
@@ -134,6 +135,9 @@ struct InstanceRecord {
     /// introspection can report the backing network. `None` in metadata-only
     /// network mode.
     network: Option<InstanceNetwork>,
+    /// The backing container's current private IP (refreshed on start and
+    /// k8s recreate), which load balancer forwarders connect to.
+    private_ip: String,
 }
 
 /// The selected backing-container backend.
@@ -328,14 +332,21 @@ pub struct Ec2Runtime {
 impl Ec2Runtime {
     /// Construct the Docker/Podman backend. Returns `None` when no container
     /// CLI is available — callers then run in metadata-only mode.
-    pub fn new() -> Option<Self> {
+    /// `server_port` is fakecloud's bound port, which instance IMDS proxies
+    /// forward to.
+    pub fn new(server_port: u16) -> Option<Self> {
         let cli = fakecloud_core::container_net::detect_container_cli()?;
         let podman = fakecloud_core::container_net::is_podman(&cli);
+        let net = fakecloud_core::container_net::HostNetworking::detect(&cli);
         Some(Self {
             backend: InstanceBackend::Docker(DockerInstances {
                 cli,
                 podman,
                 instance_id: format!("fakecloud-{}", std::process::id()),
+                net,
+                server_port,
+                helper_image: Arc::new(tokio::sync::Mutex::new(None)),
+                forwarders: Arc::new(parking_lot::Mutex::new(HashMap::new())),
             }),
             instances: Arc::new(RwLock::new(HashMap::new())),
             firewall: FirewallEnforcer::detect(),
@@ -456,6 +467,7 @@ impl Ec2Runtime {
                 user_data: user_data.map(str::to_string),
                 tags: tags.clone(),
                 network: network.cloned(),
+                private_ip: running.private_ip.clone(),
             },
         );
         Ok(running)
@@ -469,7 +481,12 @@ impl Ec2Runtime {
             return;
         };
         match &self.backend {
-            InstanceBackend::Docker(d) => d.stop(&handle).await,
+            InstanceBackend::Docker(d) => {
+                d.stop(&handle).await;
+                // The namespace the sidecar joined and the IP the forwarders
+                // target are gone with the container's network.
+                d.remove_sidecars(instance_id).await;
+            }
             InstanceBackend::K8s(k) => k.delete_pod(&handle).await,
         }
     }
@@ -485,6 +502,11 @@ impl Ec2Runtime {
                 // Same container; only the IP may change. The subnet network the
                 // container was created on persists across stop/start.
                 let private_ip = d.start(&record.handle).await?;
+                // A started container has a fresh network namespace: give it
+                // IMDS again.
+                d.remove_sidecars(instance_id).await;
+                d.start_imds(instance_id, &record.handle).await;
+                self.update_ip(instance_id, &private_ip);
                 Some(RunningInstance {
                     container_id: record.handle,
                     private_ip,
@@ -505,6 +527,7 @@ impl Ec2Runtime {
                     .await
                     .ok()?;
                 self.update_handle(instance_id, &running.container_id);
+                self.update_ip(instance_id, &running.private_ip);
                 Some(running)
             }
         }
@@ -519,6 +542,13 @@ impl Ec2Runtime {
         match &self.backend {
             InstanceBackend::Docker(d) => {
                 d.reboot(&record.handle).await;
+                // The restart replaced the network namespace the sidecar had
+                // joined; the IP can change with it.
+                d.remove_sidecars(instance_id).await;
+                d.start_imds(instance_id, &record.handle).await;
+                if let Some(ip) = d.inspect_ip(&record.handle).await {
+                    self.update_ip(instance_id, &ip);
+                }
                 None
             }
             InstanceBackend::K8s(k) => {
@@ -533,6 +563,7 @@ impl Ec2Runtime {
                     .await
                     .ok()?;
                 self.update_handle(instance_id, &running.container_id);
+                self.update_ip(instance_id, &running.private_ip);
                 Some(running)
             }
         }
@@ -562,6 +593,7 @@ impl Ec2Runtime {
         self.lifecycle_locks.lock().remove(instance_id);
         match &self.backend {
             InstanceBackend::Docker(d) => {
+                d.remove_sidecars(instance_id).await;
                 if let Some(record) = record {
                     d.remove(&record.handle).await;
                 }
@@ -581,13 +613,16 @@ impl Ec2Runtime {
     /// shutdown). The Docker backend leans on the shared reaper for any
     /// container it loses track of.
     pub async fn stop_all(&self) {
-        let records: Vec<InstanceRecord> = {
+        let records: Vec<(String, InstanceRecord)> = {
             let mut instances = self.instances.write();
-            instances.drain().map(|(_, r)| r).collect()
+            instances.drain().collect()
         };
-        for record in records {
+        for (instance_id, record) in records {
             match &self.backend {
-                InstanceBackend::Docker(d) => d.remove(&record.handle).await,
+                InstanceBackend::Docker(d) => {
+                    d.remove_sidecars(&instance_id).await;
+                    d.remove(&record.handle).await
+                }
                 InstanceBackend::K8s(k) => k.delete_pod(&record.handle).await,
             }
         }
@@ -606,6 +641,9 @@ impl Ec2Runtime {
             // what that task leaves rather than racing it.
             let lifecycle = self.lock_lifecycle(&instance_id).await;
             let record = self.instances.write().remove(&instance_id);
+            if let InstanceBackend::Docker(d) = &self.backend {
+                d.remove_sidecars(&instance_id).await;
+            }
             if let Some(record) = record {
                 match &self.backend {
                     InstanceBackend::Docker(d) => d.remove(&record.handle).await,
@@ -663,6 +701,53 @@ impl Ec2Runtime {
         if let Some(record) = self.instances.write().get_mut(instance_id) {
             record.handle = handle.to_string();
         }
+    }
+
+    fn update_ip(&self, instance_id: &str, ip: &str) {
+        if let Some(record) = self.instances.write().get_mut(instance_id) {
+            record.private_ip = ip.to_string();
+        }
+    }
+
+    /// The resolver the ELBv2 data plane uses to reach `i-...` targets:
+    /// install it with [`fakecloud_core::dataplane::set_instance_resolver`].
+    pub fn endpoint_resolver(&self) -> Arc<dyn fakecloud_core::dataplane::InstanceResolver> {
+        Arc::new(InstanceEndpoints(self.clone()))
+    }
+
+    /// Where `port` of a running instance is reachable from fakecloud: a
+    /// forwarder's published host port (Docker), or the Pod IP (k8s, which
+    /// the data plane reaches in-cluster). `None` for an unbacked instance.
+    async fn instance_endpoint(
+        &self,
+        instance_id: &str,
+        port: u16,
+    ) -> Option<fakecloud_core::dataplane::Endpoint> {
+        let record = self.instances.read().get(instance_id).cloned()?;
+        match &self.backend {
+            InstanceBackend::Docker(d) => d.forward(instance_id, &record, port).await,
+            InstanceBackend::K8s(_) => Some(fakecloud_core::dataplane::Endpoint::new(
+                record.private_ip,
+                port,
+            )),
+        }
+    }
+}
+
+/// [`fakecloud_core::dataplane::InstanceResolver`] over the EC2 runtime.
+struct InstanceEndpoints(Ec2Runtime);
+
+impl fakecloud_core::dataplane::InstanceResolver for InstanceEndpoints {
+    fn resolve(
+        &self,
+        _account_id: &str,
+        instance_id: &str,
+        port: u16,
+    ) -> fakecloud_core::dataplane::ResolveFuture {
+        // Instance ids are globally unique, so the id alone picks the record.
+        let rt = self.0.clone();
+        let instance_id = instance_id.to_string();
+        Box::pin(async move { rt.instance_endpoint(&instance_id, port).await })
     }
 }
 
@@ -727,7 +812,14 @@ fn choose_data_volume(
 fn boot_command(user_data: Option<&str>) -> Vec<String> {
     match user_data.filter(|s| !s.is_empty()) {
         Some(b64) => {
-            let script = format!("printf %s '{b64}' | base64 -d | sh & exec tail -f /dev/null");
+            // Wait (bounded) for the IMDS proxy, so a boot script that reads
+            // `169.254.169.254` first thing finds it, as cloud-init would.
+            let script = format!(
+                "(i=0; while [ ! -e {ready} ] && [ $i -lt {wait} ]; do sleep 1; i=$((i+1)); done; \
+                 printf %s '{b64}' | base64 -d | sh) & exec tail -f /dev/null",
+                ready = imds::READY_FILE,
+                wait = imds::BOOT_WAIT_SECS,
+            );
             vec!["sh".to_string(), "-c".to_string(), script]
         }
         None => vec![
@@ -746,6 +838,25 @@ struct DockerInstances {
     /// so the `podman-docker` shim counts) for the introspection summary.
     podman: bool,
     instance_id: String,
+    /// Container-to-host networking: the host alias instances (and their IMDS
+    /// proxy) reach fakecloud at, and the address fakecloud reaches published
+    /// ports at.
+    net: fakecloud_core::container_net::HostNetworking,
+    /// fakecloud's bound port.
+    server_port: u16,
+    /// The IMDS / forwarder helper image (see [`imds`]), or its last failure.
+    helper_image: Arc<tokio::sync::Mutex<Option<imds::HelperImage>>>,
+    /// Live load balancer forwarders: `(instance, port)` -> the forwarder's
+    /// container, published host port and the instance IP it targets.
+    forwarders: Arc<parking_lot::Mutex<HashMap<(String, u16), Forwarder>>>,
+}
+
+/// A forwarder publishing one instance port on the host (see [`imds`]).
+#[derive(Debug, Clone)]
+struct Forwarder {
+    container: String,
+    host_port: u16,
+    target_ip: String,
 }
 
 impl DockerInstances {
@@ -798,6 +909,18 @@ impl DockerInstances {
             args.push("--network".to_string());
             args.push(name.clone());
         }
+        // The host alias resolves inside the instance (and its IMDS sidecar,
+        // which shares its /etc/hosts), so workloads can reach fakecloud.
+        self.net.push_add_host_args(&mut args);
+        // IMDS answers at 169.254.169.254 through the sidecar; without a
+        // helper image, point SDKs at fakecloud's per-instance IMDS instead.
+        let helper = self.ensure_helper_image().await;
+        if helper.is_none() {
+            let (k, v) =
+                imds::metadata_endpoint_env(&self.net.host_alias, self.server_port, instance_id);
+            args.push("-e".to_string());
+            args.push(format!("{k}={v}"));
+        }
         args.push(image.to_string());
         args.extend(boot_command(user_data));
 
@@ -825,12 +948,306 @@ impl DockerInstances {
             .inspect_ip(&container_id)
             .await
             .unwrap_or_else(|| "10.0.0.1".to_string());
+        if helper.is_some() {
+            self.start_imds(instance_id, &container_id).await;
+        } else {
+            self.mark_boot_ready(&container_id).await;
+        }
 
         Ok(RunningInstance {
             container_id,
             private_ip,
             network: attached_network,
         })
+    }
+
+    /// The helper image for IMDS sidecars and forwarders: the operator's
+    /// override, or a locally built Alpine + nftables + nginx + socat image
+    /// (built once per host and reused). `None` when it can't be had; a failure
+    /// is remembered for [`imds::HELPER_RETRY_AFTER`].
+    async fn ensure_helper_image(&self) -> Option<String> {
+        let mut cached = self.helper_image.lock().await;
+        match cached.as_ref() {
+            Some(imds::HelperImage::Ready(image)) if self.image_present(image).await => {
+                return Some(image.clone());
+            }
+            Some(imds::HelperImage::Failed { at, .. })
+                if at.elapsed() < imds::HELPER_RETRY_AFTER =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+        let resolved = match imds::helper_image_override() {
+            Some(image) => fakecloud_core::container_image::ensure_image(&self.cli, None, &image)
+                .await
+                .map(|_| image),
+            None => {
+                let tag = imds::local_helper_tag();
+                if self.image_present(&tag).await {
+                    Ok(tag)
+                } else {
+                    self.build_local_helper(&tag).await.map(|()| tag)
+                }
+            }
+        };
+        *cached = Some(match &resolved {
+            Ok(image) => imds::HelperImage::Ready(image.clone()),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "EC2 helper image unavailable; instances get AWS_EC2_METADATA_SERVICE_ENDPOINT \
+                     instead of 169.254.169.254, and load balancers cannot reach instance ports"
+                );
+                imds::HelperImage::Failed {
+                    at: std::time::Instant::now(),
+                }
+            }
+        });
+        resolved.ok()
+    }
+
+    async fn image_present(&self, tag: &str) -> bool {
+        tokio::process::Command::new(&self.cli)
+            .args(["image", "inspect", tag])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .is_ok_and(|s| s.success())
+    }
+
+    async fn build_local_helper(&self, tag: &str) -> Result<(), String> {
+        // Pull the base with the shared retry so a registry 429 doesn't fail
+        // the build's implicit pull.
+        fakecloud_core::container_image::ensure_image(&self.cli, None, imds::HELPER_BASE_IMAGE)
+            .await?;
+        let dir = tempfile::tempdir().map_err(|e| format!("helper build dir: {e}"))?;
+        std::fs::write(dir.path().join("Dockerfile"), imds::helper_dockerfile())
+            .map_err(|e| format!("helper Dockerfile: {e}"))?;
+        let mut last_err = String::new();
+        for attempt in 0..3u64 {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2 * attempt)).await;
+            }
+            let out = tokio::process::Command::new(&self.cli)
+                .args(["build", "-q", "-t", tag])
+                .arg(dir.path())
+                .output()
+                .await
+                .map_err(|e| format!("{} build: {e}", self.cli))?;
+            if out.status.success() {
+                tracing::info!(image = %tag, "built EC2 helper image");
+                return Ok(());
+            }
+            last_err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        }
+        Err(format!("building {tag}: {last_err}"))
+    }
+
+    /// Give a running instance container IMDS at `169.254.169.254`: start
+    /// its sidecar, wait for the redirect, then release the boot (user-data
+    /// waits on [`imds::READY_FILE`]). Best-effort: on failure the boot is
+    /// released anyway and the instance runs without link-local IMDS.
+    async fn start_imds(&self, instance_id: &str, container_id: &str) {
+        let Some(helper) = self.ensure_helper_image().await else {
+            self.mark_boot_ready(container_id).await;
+            return;
+        };
+        let name = imds::sidecar_name(instance_id);
+        let _ = tokio::process::Command::new(&self.cli)
+            .args(["rm", "-f", &name])
+            .output()
+            .await;
+        let argv = imds::sidecar_argv(
+            instance_id,
+            container_id,
+            &self.instance_id,
+            &helper,
+            &self.net.host_alias,
+            self.server_port,
+        );
+        let result = match tokio::process::Command::new(&self.cli)
+            .args(&argv)
+            .output()
+            .await
+        {
+            Ok(out) if out.status.success() => {
+                let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                self.wait_for_sidecar(&id).await
+            }
+            Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            Err(e) => Err(e.to_string()),
+        };
+        if let Err(error) = result {
+            tracing::warn!(
+                instance = %instance_id,
+                error = %error,
+                "could not route 169.254.169.254 to fakecloud IMDS inside the instance"
+            );
+            let _ = tokio::process::Command::new(&self.cli)
+                .args(["rm", "-f", &name])
+                .output()
+                .await;
+        }
+        self.mark_boot_ready(container_id).await;
+    }
+
+    async fn wait_for_sidecar(&self, id: &str) -> Result<(), String> {
+        let deadline = std::time::Instant::now() + imds::SIDECAR_READY_TIMEOUT;
+        let mut poll = std::time::Duration::from_millis(100);
+        loop {
+            let logs = tokio::process::Command::new(&self.cli)
+                .args(["logs", id])
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
+            let stdout = String::from_utf8_lossy(&logs.stdout);
+            if stdout.contains(imds::READY_MARKER) {
+                return Ok(());
+            }
+            let running = tokio::process::Command::new(&self.cli)
+                .args(["inspect", "-f", "{{.State.Running}}", id])
+                .output()
+                .await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+                .unwrap_or(false);
+            if !running {
+                return Err(format!(
+                    "IMDS sidecar exited during setup; stderr: {:?}",
+                    String::from_utf8_lossy(&logs.stderr).trim()
+                ));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("IMDS sidecar did not become ready in time".into());
+            }
+            tokio::time::sleep(poll).await;
+            poll = (poll * 2).min(std::time::Duration::from_secs(1));
+        }
+    }
+
+    /// Release a boot waiting on IMDS (see [`boot_command`]).
+    async fn mark_boot_ready(&self, container_id: &str) {
+        let script = format!("mkdir -p {} && : > {}", imds::READY_DIR, imds::READY_FILE);
+        let _ = tokio::process::Command::new(&self.cli)
+            .args(["exec", container_id, "sh", "-c", &script])
+            .output()
+            .await;
+    }
+
+    /// Remove an instance's IMDS sidecar and load balancer forwarders.
+    async fn remove_sidecars(&self, instance_id: &str) {
+        let mut names = vec![imds::sidecar_name(instance_id)];
+        {
+            let mut fwd = self.forwarders.lock();
+            fwd.retain(|(id, _), f| {
+                if id == instance_id {
+                    names.push(f.container.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+        }
+        for name in names {
+            let _ = tokio::process::Command::new(&self.cli)
+                .args(["rm", "-f", &name])
+                .output()
+                .await;
+        }
+    }
+
+    /// The host endpoint serving `port` of an instance, starting a forwarder
+    /// for it on first use (or when the instance's IP changed).
+    async fn forward(
+        &self,
+        instance_id: &str,
+        record: &InstanceRecord,
+        port: u16,
+    ) -> Option<fakecloud_core::dataplane::Endpoint> {
+        let key = (instance_id.to_string(), port);
+        // The record's IP is refreshed on start / reboot (the only times a
+        // container's address changes, and they also drop its forwarders), so
+        // a request through a live forwarder costs no daemon round trip.
+        let current_ip = if record.private_ip.is_empty() {
+            self.inspect_ip(&record.handle).await?
+        } else {
+            record.private_ip.clone()
+        };
+        if let Some(f) = self.forwarders.lock().get(&key).cloned() {
+            if f.target_ip == current_ip {
+                return Some(fakecloud_core::dataplane::Endpoint::new(
+                    self.net.sibling_host.clone(),
+                    f.host_port,
+                ));
+            }
+        }
+        let helper = self.ensure_helper_image().await?;
+        let name = imds::forwarder_name(instance_id, port);
+        let _ = tokio::process::Command::new(&self.cli)
+            .args(["rm", "-f", &name])
+            .output()
+            .await;
+        let argv = imds::forwarder_argv(instance_id, port, &current_ip, &self.instance_id, &helper);
+        let out = tokio::process::Command::new(&self.cli)
+            .args(&argv)
+            .output()
+            .await
+            .ok()?;
+        if !out.status.success() {
+            tracing::warn!(
+                instance = %instance_id,
+                port,
+                error = %String::from_utf8_lossy(&out.stderr).trim(),
+                "could not start a load balancer forwarder for the instance"
+            );
+            return None;
+        }
+        let container = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Reach the instance over its subnet network (the forwarder sits on
+        // the default bridge so its port can be published).
+        if let Some(net) = record.network.as_ref() {
+            let _ = tokio::process::Command::new(&self.cli)
+                .args([
+                    "network",
+                    "connect",
+                    &subnet_network_name(&net.subnet_id),
+                    &container,
+                ])
+                .output()
+                .await;
+        }
+        let spec = format!("{port}/tcp");
+        let host_port = tokio::process::Command::new(&self.cli)
+            .args(["port", &container, &spec])
+            .output()
+            .await
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| {
+                fakecloud_core::container_net::parse_published_port(&String::from_utf8_lossy(
+                    &o.stdout,
+                ))
+            });
+        let Some(host_port) = host_port else {
+            let _ = tokio::process::Command::new(&self.cli)
+                .args(["rm", "-f", &container])
+                .output()
+                .await;
+            return None;
+        };
+        self.forwarders.lock().insert(
+            key,
+            Forwarder {
+                container,
+                host_port,
+                target_ip: current_ip,
+            },
+        );
+        Some(fakecloud_core::dataplane::Endpoint::new(
+            self.net.sibling_host.clone(),
+            host_port,
+        ))
     }
 
     /// Create (idempotently) the daemon network backing a subnet and return its

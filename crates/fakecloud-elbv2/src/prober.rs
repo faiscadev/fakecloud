@@ -206,21 +206,22 @@ async fn futures_concurrent(
     out
 }
 
-/// Resolve the host to probe for a target. EC2-instance (`i-*`) and ECS
-/// bridge-mode (`127.0.0.1`) targets publish on the host daemon's loopback and
-/// are reached via `sibling_host`; any other id (a real container IP/DNS) is
-/// used verbatim. Mirrors the data plane's `resolve_upstream_host`.
-fn resolve_probe_host(target_id: &str, sibling_host: &str) -> String {
-    if target_id.starts_with("i-") || target_id == "127.0.0.1" {
-        sibling_host.to_string()
-    } else {
-        target_id.to_string()
-    }
-}
-
 async fn probe(client: &Client, job: &ProbeJob, sibling_host: &str) -> bool {
-    let host = resolve_probe_host(&job.target_id, sibling_host);
     let probe_timeout = Duration::from_secs(job.timeout_secs);
+    let Ok(probe_port) = u16::try_from(job.port) else {
+        return false;
+    };
+    // Same resolution as the data plane: a published endpoint for the
+    // target (an `awsvpc` task's ENI IP, an EC2 instance port), else the
+    // historical sibling-host / verbatim routing.
+    let endpoint = fakecloud_core::dataplane::resolve_target(
+        &job.account_id,
+        &job.target_id,
+        probe_port,
+        sibling_host,
+    )
+    .await;
+    let host = endpoint.host;
 
     match job.protocol.as_str() {
         "HTTP" | "HTTPS" => {
@@ -231,7 +232,7 @@ async fn probe(client: &Client, job: &ProbeJob, sibling_host: &str) -> bool {
             };
             let url = format!(
                 "{scheme}://{host}:{port}{path}",
-                port = job.port,
+                port = endpoint.port,
                 path = job.path
             );
             match timeout(probe_timeout, client.get(&url).send()).await {
@@ -240,11 +241,12 @@ async fn probe(client: &Client, job: &ProbeJob, sibling_host: &str) -> bool {
             }
         }
         "TCP" | "TLS" => {
-            let Ok(port) = u16::try_from(job.port) else {
-                return false;
-            };
             matches!(
-                timeout(probe_timeout, TcpStream::connect((host.as_str(), port))).await,
+                timeout(
+                    probe_timeout,
+                    TcpStream::connect((host.as_str(), endpoint.port))
+                )
+                .await,
                 Ok(Ok(_))
             )
         }
@@ -307,32 +309,55 @@ mod tests {
         assert!(!matcher_matches("200,300-399", 400));
     }
 
-    #[test]
-    fn resolve_probe_host_uses_sibling_for_ec2_and_bridge() {
-        // EC2 instance ids resolve to the sibling host (host alias when
-        // fakecloud is itself containerized), not fakecloud's own loopback.
-        assert_eq!(
-            resolve_probe_host("i-0123456789abcdef0", "host.docker.internal"),
-            "host.docker.internal"
+    #[tokio::test]
+    async fn probe_reaches_a_published_awsvpc_target() {
+        // A target registered under its ENI private IP is probed on the host
+        // port the runtime published, not on the unroutable private IP.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                    let mut buf = [0u8; 1024];
+                    let _ = sock.read(&mut buf).await;
+                    let _ = sock
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+        fakecloud_core::dataplane::register_target(
+            "777788889999",
+            "10.200.0.9",
+            80,
+            fakecloud_core::dataplane::Endpoint::new("127.0.0.1", port),
         );
-        // ECS bridge-mode tasks register as 127.0.0.1 and resolve the same way.
-        assert_eq!(
-            resolve_probe_host("127.0.0.1", "host.docker.internal"),
-            "host.docker.internal"
-        );
-        // On the host, sibling_host is plain loopback.
-        assert_eq!(resolve_probe_host("i-abc", "127.0.0.1"), "127.0.0.1");
-    }
-
-    #[test]
-    fn resolve_probe_host_passes_real_container_ip_verbatim() {
-        assert_eq!(
-            resolve_probe_host("10.0.1.5", "host.docker.internal"),
-            "10.0.1.5"
-        );
-        assert_eq!(
-            resolve_probe_host("ip-10-0-1-5.ec2.internal", "host.docker.internal"),
-            "ip-10-0-1-5.ec2.internal"
-        );
+        let job = ProbeJob {
+            account_id: "777788889999".into(),
+            tg_arn: "arn:aws:elasticloadbalancing:us-east-1:777788889999:targetgroup/t/1".into(),
+            target_id: "10.200.0.9".into(),
+            target_port: Some(80),
+            protocol: "HTTP".into(),
+            port: 80,
+            path: "/".into(),
+            matcher: "200".into(),
+            timeout_secs: 5,
+            healthy_threshold: 1,
+            unhealthy_threshold: 1,
+        };
+        let client = Client::new();
+        assert!(probe(&client, &job, "127.0.0.1").await);
+        let tcp = ProbeJob {
+            protocol: "TCP".into(),
+            ..job.clone()
+        };
+        assert!(probe(&client, &tcp, "127.0.0.1").await);
+        fakecloud_core::dataplane::unregister_target("777788889999", "10.200.0.9");
     }
 }

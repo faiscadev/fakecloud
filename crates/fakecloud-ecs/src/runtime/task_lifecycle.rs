@@ -92,13 +92,16 @@ impl EcsRuntime {
         let mut run_images: Vec<String> = Vec::with_capacity(resolved_plans.len());
         let mut image_digests: Vec<Option<String>> = Vec::with_capacity(resolved_plans.len());
         for rp in &resolved_plans {
-            // Rewrite ECR URIs to fakecloud's local registry at the sibling
-            // host (`127.0.0.1` on the host, `host.docker.internal` when
-            // fakecloud is containerized) so the daemon/sibling can reach
-            // fakecloud's published registry port (issue #1539, bug 0.8).
+            // Rewrite ECR URIs to fakecloud's local registry. The pull is run
+            // by the engine on the host, not by a sibling container, so it
+            // uses the registry host Lambda uses (loopback; podman machine's
+            // host alias; `FAKECLOUD_ECR_REGISTRY_HOST`), not the sibling
+            // host: `host.docker.internal` does not resolve on a Linux host,
+            // and Docker Desktop / OrbStack only accept the plain-HTTP
+            // registry over loopback.
             let local_pull_uri = fakecloud_core::ecr_uri::translate_to_local_at(
                 &rp.plan.image,
-                &self.net.sibling_host,
+                &self.registry_host,
                 self.server_port,
             );
             let pull_uri = local_pull_uri.as_deref().unwrap_or(&rp.plan.image);
@@ -222,55 +225,14 @@ impl EcsRuntime {
             false
         };
 
-        if network_created {
-            let eni_id = format!(
-                "eni-{}",
-                uuid::Uuid::new_v4()
-                    .to_string()
-                    .replace('-', "")
-                    .get(..17)
-                    .unwrap_or("")
-            );
-            let mac = format!(
-                "02:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
-                rand::random::<u8>(),
-                rand::random::<u8>(),
-                rand::random::<u8>(),
-                rand::random::<u8>(),
-                rand::random::<u8>()
-            );
-            let ip = format!("10.0.{}.{}", rand::random::<u8>(), rand::random::<u8>());
-            let mut accounts = state.write();
-            if let Some(st) = accounts.get_mut(account_id) {
-                if let Some(task) = st.tasks.get_mut(task_id) {
-                    task.attachments.push(crate::state::TaskAttachment {
-                        id: eni_id.clone(),
-                        attachment_type: "eni".into(),
-                        status: "ATTACHED".into(),
-                        details: vec![
-                            crate::state::AttachmentDetail {
-                                name: "subnetId".into(),
-                                value: "subnet-fakecloud".into(),
-                            },
-                            crate::state::AttachmentDetail {
-                                name: "privateIPv4Address".into(),
-                                value: ip.clone(),
-                            },
-                            crate::state::AttachmentDetail {
-                                name: "macAddress".into(),
-                                value: mac.clone(),
-                            },
-                        ],
-                    });
-                }
-            }
-            tracing::info!(
-                task = %task_id,
-                eni = %eni_id,
-                ip = %ip,
-                "populated awsvpc ENI attachment"
-            );
-        }
+        // The ENI the task's `awsvpc` network stands in for: a private IP from
+        // the task's subnet (see `eni`), reported by DescribeTasks and
+        // registered with the service's target groups.
+        let eni_ip = if network_created {
+            Some(self.attach_task_eni(state, account_id, task_id))
+        } else {
+            None
+        };
 
         // Launch every container detached, in topological order. Before
         // each `docker run` we honour the dependent's `dependsOn[]` by
@@ -374,6 +336,13 @@ impl EcsRuntime {
                 return Err(RuntimeError::ContainerStart(err));
             }
             let container_id = String::from_utf8_lossy(&run_out.stdout).trim().to_string();
+            // The ENI IP isn't routable from fakecloud: record where each
+            // container port was published so ELBv2 reaches it (see `eni`).
+            if let Some(ip) = eni_ip.as_deref() {
+                let owner = holder.as_deref().unwrap_or(&container_id);
+                self.publish_awsvpc_ports(account_id, ip, owner, &rp.plan)
+                    .await;
+            }
             // Append to the runtime map immediately so a StopTask landing
             // between this container and the next one in the launch loop can
             // reach it.

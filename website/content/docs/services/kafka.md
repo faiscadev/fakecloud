@@ -30,6 +30,18 @@ cluster reconciles on restart by re-attaching its persisted container (or
 respawning if it is gone). This is exactly the Docker-backed bar the Amazon MQ
 data plane meets.
 
+The broker has two client listeners. The one `GetBootstrapBrokers` returns
+advertises `127.0.0.1:<port>` for clients on the host. Inside a container
+`127.0.0.1` is the container itself, and a Kafka client follows the advertised
+address after bootstrapping, so the broker also has a listener that advertises
+the host alias (`host.docker.internal` / `host.containers.internal`) on a second
+port. When a Lambda function, ECS task or CodeBuild build gets the bootstrap
+string through its environment, fakecloud rewrites it to that listener, so the
+same `BootstrapBrokerString` works from both places. The same environment
+rewriting turns a bare `127.0.0.1` / `localhost` endpoint (an RDS or
+ElastiCache endpoint address, a `host:port` value, a DSN such as
+`postgres://user:pw@127.0.0.1:5432/db`) into the host alias.
+
 **Single-broker simplification** (honestly labeled): a real MSK cluster has
 three or more brokers, but fakecloud runs ONE Kafka container, which only
 satisfies replication factor 1. A requested `ReplicationFactor > 1` is clamped

@@ -217,6 +217,9 @@ impl EcsService {
         let td_exec_role =
             role_override("executionRoleArn").or_else(|| td.execution_role_arn.clone());
         let td_containers = td.container_definitions.clone();
+        // An awsvpc task's ENI is precreated in its first subnet; the runtime
+        // attaches it (private IP from that subnet) when the task starts.
+        let td_awsvpc = td.network_mode.as_deref() == Some("awsvpc");
         // RunTask supports propagateTags=TASK_DEFINITION to copy the
         // TaskDefinition's tags onto each spawned task, in addition to
         // any tags supplied directly in the request body. Real AWS
@@ -363,7 +366,13 @@ impl EcsService {
                 captured_logs: String::new(),
                 protection: None,
                 enable_execute_command,
-                attachments: Vec::new(),
+                attachments: if td_awsvpc {
+                    crate::runtime::eni::precreated_attachment(body.get("networkConfiguration"))
+                        .into_iter()
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 volume_configurations: volume_configurations.clone(),
                 task_set_arn: None,
             };
@@ -1294,7 +1303,10 @@ mod port_mapping_tests {
     }
 
     #[test]
-    fn awsvpc_network_mode_skips_publish() {
+    fn awsvpc_network_mode_publishes_ephemeral_host_ports() {
+        // awsvpc ports are ENI ports, not host ports: each container port is
+        // published on an ephemeral host port (read back and registered for
+        // the load balancer data plane), never on the declared hostPort.
         let plan = plan_with_ports(
             vec![PortMapping {
                 container_port: 80,
@@ -1305,8 +1317,53 @@ mod port_mapping_tests {
         );
         let argv = argv_string(&plan);
         assert!(
-            !argv.iter().any(|s| s == "--publish"),
-            "awsvpc must not emit --publish: {argv:?}"
+            argv_has_publish(&argv, "80/tcp"),
+            "awsvpc must publish the container port ephemerally: {argv:?}"
+        );
+        assert!(
+            !argv_has_publish(&argv, "8080:80/tcp"),
+            "awsvpc must not claim a fixed host port: {argv:?}"
+        );
+    }
+
+    #[test]
+    fn loopback_data_plane_endpoints_in_env_reach_the_host() {
+        // RDS / ElastiCache endpoint addresses and MSK bootstrap strings are
+        // bare host / host:port values on loopback; inside the container they
+        // must name the host alias, like fakecloud's own URL does.
+        let argv = build_run_argv(
+            &plan_with_ports(Vec::new(), None),
+            &[
+                ("DB_HOST".into(), "127.0.0.1".into()),
+                ("BROKERS".into(), "127.0.0.1:9092,127.0.0.1:9094".into()),
+                ("AWS_ENDPOINT_URL".into(), "http://localhost:4566".into()),
+            ],
+            "task-1",
+            "host.docker.internal",
+            crate::runtime::ContainerNetwork::Own {
+                add_host_arg: None,
+                awsvpc_network_ready: false,
+            },
+            "alpine:latest",
+        );
+        let envs: Vec<&String> = argv
+            .windows(2)
+            .filter(|w| w[0] == "-e")
+            .map(|w| &w[1])
+            .collect();
+        assert!(
+            envs.contains(&&"DB_HOST=host.docker.internal".to_string()),
+            "{envs:?}"
+        );
+        assert!(
+            envs.contains(
+                &&"BROKERS=host.docker.internal:9092,host.docker.internal:9094".to_string()
+            ),
+            "{envs:?}"
+        );
+        assert!(
+            envs.contains(&&"AWS_ENDPOINT_URL=http://host.docker.internal:4566".to_string()),
+            "{envs:?}"
         );
     }
 

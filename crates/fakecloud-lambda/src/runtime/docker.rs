@@ -75,6 +75,7 @@ impl DockerBackend {
         let net = fakecloud_core::container_net::HostNetworking::detect(&cli);
 
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
+        let registry_host = fakecloud_core::container_net::ecr_registry_host(&cli);
         Some(Self {
             cli,
             instance_id,
@@ -82,8 +83,7 @@ impl DockerBackend {
             add_host_arg: net.add_host_arg,
             server_port,
             sibling_host: net.sibling_host,
-            registry_host: std::env::var("FAKECLOUD_ECR_REGISTRY_HOST")
-                .unwrap_or_else(|_| "127.0.0.1".to_string()),
+            registry_host,
             docker_config,
         })
     }

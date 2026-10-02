@@ -53,6 +53,10 @@ pub struct EcsRuntime {
     /// the local OCI v2 endpoint (`127.0.0.1:<port>/<repo>:<tag>`) so
     /// tasks can pull images pushed to fakecloud's own ECR.
     server_port: u16,
+    /// Host the engine pulls fakecloud-ECR images from (see
+    /// [`fakecloud_core::container_net::ecr_registry_host`]); shared with
+    /// Lambda so the two can't drift.
+    registry_host: String,
     /// Isolated DOCKER_CONFIG dir pre-populated with Basic auth for
     /// `127.0.0.1:<port>`; keeps the host user's `~/.docker/config.json`
     /// untouched and lets `docker pull` succeed against fakecloud ECR
@@ -105,6 +109,7 @@ pub struct EcsRuntime {
 }
 
 mod config;
+pub(crate) mod eni;
 mod k8s;
 mod lb;
 mod monitoring;
@@ -137,10 +142,12 @@ impl EcsRuntime {
         let cli = fakecloud_core::container_net::detect_container_cli()?;
         let net = fakecloud_core::container_net::HostNetworking::detect(&cli);
         let docker_config = build_local_registry_docker_config(server_port).map(Arc::new);
+        let registry_host = fakecloud_core::container_net::ecr_registry_host(&cli);
         Some(Self {
             cli,
             net,
             server_port,
+            registry_host,
             docker_config,
             containers: RwLock::new(std::collections::HashMap::new()),
             delivery_bus: None,
@@ -171,6 +178,7 @@ impl EcsRuntime {
             cli: String::new(),
             net,
             server_port,
+            registry_host: String::new(),
             docker_config: None,
             containers: RwLock::new(std::collections::HashMap::new()),
             delivery_bus: None,
@@ -1419,14 +1427,10 @@ pub(crate) fn build_run_argv(
     if let Some(ref hc) = plan.health_check {
         argv.extend(render_health_flags(hc));
     }
-    let http_alias_prefix = format!("http://{host_alias}:");
-    let https_alias_prefix = format!("https://{host_alias}:");
     for (k, v) in env {
-        let transformed = v
-            .replace("http://127.0.0.1:", http_alias_prefix.as_str())
-            .replace("https://127.0.0.1:", https_alias_prefix.as_str())
-            .replace("http://localhost:", http_alias_prefix.as_str())
-            .replace("https://localhost:", https_alias_prefix.as_str());
+        // Loopback endpoints (fakecloud's URL, an RDS endpoint address, an
+        // MSK bootstrap list) name the container itself from inside it.
+        let transformed = fakecloud_core::container_net::rewrite_loopback_value(v, host_alias);
         argv.push("-e".into());
         argv.push(format!("{}={}", k, transformed));
     }
@@ -1949,6 +1953,7 @@ impl EcsRuntime {
                 sibling_host: String::new(),
             },
             server_port: 0,
+            registry_host: String::new(),
             docker_config: None,
             containers: RwLock::new(std::collections::HashMap::new()),
             delivery_bus: None,

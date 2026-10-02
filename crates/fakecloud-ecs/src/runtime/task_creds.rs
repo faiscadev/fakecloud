@@ -215,17 +215,22 @@ pub(crate) fn namespace_network_argv(
             argv.push(alias.to_string());
         }
     }
-    // `awsvpc` puts the container on a per-task ENI; emulating that on a
-    // local docker host means *not* publishing to the host port table.
-    // Bridge / host / default network modes still get `--publish`: `host`
-    // is emulated on a bridge whose published ports are the host ports the
-    // task binds (never the host's own namespace, which a task-role holder
-    // would otherwise have to NAT in). If
-    // the awsvpc per-task network creation failed and we fell back to
-    // bridge, we DO want to publish so the container is reachable.
-    if !use_awsvpc_network {
-        for pm in &plan.port_mappings {
-            argv.push("--publish".into());
+    // `awsvpc` puts the container on a per-task ENI whose private IP is not
+    // routable from fakecloud locally, and its ports are not host ports
+    // (every task binds its own containerPort). Publish each container port
+    // on an ephemeral host port instead: the runtime reads it back and routes
+    // load balancer traffic for `<ENI IP>:<containerPort>` there (see `eni`),
+    // without two tasks competing for one host port.
+    // Bridge / host / default network modes publish `hostPort:containerPort`:
+    // `host` is emulated on a bridge whose published ports are the host ports
+    // the task binds (never the host's own namespace, which a task-role holder
+    // would otherwise have to NAT in). If the awsvpc per-task network creation
+    // failed and we fell back to bridge, the task's declared mapping applies.
+    for pm in &plan.port_mappings {
+        argv.push("--publish".into());
+        if use_awsvpc_network {
+            argv.push(format!("{}/{}", pm.container_port, pm.protocol));
+        } else {
             argv.push(format!(
                 "{}:{}/{}",
                 pm.host_port, pm.container_port, pm.protocol
@@ -592,8 +597,11 @@ mod tests {
             joined.contains("--network fakecloud-ecs-t1 --network-alias t1-web"),
             "{joined}"
         );
-        // awsvpc doesn't publish to the host, and podman needs no --add-host.
-        assert!(!joined.contains("--publish"), "{joined}");
+        // The holder owns the namespace, so it publishes the awsvpc port on
+        // an ephemeral host port (never the declared hostPort), and podman
+        // needs no --add-host.
+        assert!(joined.contains("--publish 80/tcp"), "{joined}");
+        assert!(!joined.contains("8080:80"), "{joined}");
         assert!(!joined.contains("--add-host"), "{joined}");
     }
 

@@ -16,14 +16,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::api::core::v1::{Container, LocalObjectReference, Pod, PodSpec};
+use k8s_openapi::api::core::v1::{
+    Capabilities, Container, EmptyDirVolumeSource, EnvVar, LocalObjectReference, Pod, PodSpec,
+    SecurityContext, Volume, VolumeMount,
+};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
 use fakecloud_k8s::{labels, names, K8sClient, K8sEnv, K8sPodConfig};
 
 use super::firewall::InstanceRules;
 use super::netpolicy::{self, CniDriver};
-use super::{boot_command, BackendInitError, RunningInstance, RuntimeError};
+use super::{boot_command, imds, BackendInitError, RunningInstance, RuntimeError};
 
 /// Which `fakecloud-service` label instance Pods carry.
 const SERVICE: &str = "ec2";
@@ -32,6 +35,11 @@ const SERVICE: &str = "ec2";
 const POD_PREFIX: &str = "fakecloud-i";
 /// Container name inside each instance Pod.
 const CONTAINER: &str = "instance";
+/// Name of the IMDS sidecar container in each instance Pod.
+const IMDS_CONTAINER: &str = "fakecloud-imds";
+/// Volume shared by the instance and its IMDS sidecar for the readiness
+/// marker user-data waits on.
+const RUN_VOLUME: &str = "fakecloud-run";
 
 #[derive(Clone)]
 pub(super) struct K8sInstances {
@@ -50,6 +58,62 @@ pub(super) struct K8sInstances {
     /// (#1745 phase 4). Policies are always created; this only governs the
     /// degrade warning.
     cni: CniDriver,
+    /// The IMDS sidecar every instance Pod gets: fakecloud's in-cluster host
+    /// and port (`FAKECLOUD_K8S_SELF_URL`) and the helper image.
+    imds: ImdsSidecar,
+}
+
+/// The IMDS sidecar of an instance Pod (see [`imds`]).
+#[derive(Clone, Debug)]
+struct ImdsSidecar {
+    image: String,
+    host: String,
+    port: u16,
+}
+
+impl ImdsSidecar {
+    fn container(&self, instance_id: &str) -> Container {
+        Container {
+            name: IMDS_CONTAINER.to_string(),
+            image: Some(self.image.clone()),
+            command: Some(vec![
+                "sh".into(),
+                "-c".into(),
+                imds::SETUP_SCRIPT.into(),
+                "fakecloud-ec2-imds".into(),
+                self.host.clone(),
+                self.port.to_string(),
+                instance_id.to_string(),
+                imds::PROXY_PORT.to_string(),
+            ]),
+            env: Some(vec![EnvVar {
+                name: "READY_FILE".into(),
+                value: Some(imds::READY_FILE.into()),
+                ..EnvVar::default()
+            }]),
+            volume_mounts: Some(vec![run_mount()]),
+            security_context: Some(SecurityContext {
+                capabilities: Some(Capabilities {
+                    add: Some(vec!["NET_ADMIN".into()]),
+                    drop: None,
+                }),
+                // The rule (and, on the default Alpine image, installing
+                // nftables + nginx) needs root inside the container.
+                run_as_user: Some(0),
+                run_as_non_root: Some(false),
+                ..SecurityContext::default()
+            }),
+            ..Container::default()
+        }
+    }
+}
+
+fn run_mount() -> VolumeMount {
+    VolumeMount {
+        name: RUN_VOLUME.into(),
+        mount_path: imds::READY_DIR.into(),
+        ..VolumeMount::default()
+    }
 }
 
 impl std::fmt::Debug for K8sInstances {
@@ -83,12 +147,19 @@ impl K8sInstances {
                  cluster -- install a NetworkPolicy-enforcing CNI (e.g. Calico) for real isolation"
             );
         }
+        let imds = ImdsSidecar {
+            image: imds::helper_image_override()
+                .unwrap_or_else(|| imds::HELPER_BASE_IMAGE.to_string()),
+            host: env.self_host.clone(),
+            port: env.self_port,
+        };
         Ok(Self {
             client,
             pull_secret: env.pull_secret,
             pod_config,
             spawn_seq: Arc::new(AtomicU64::new(0)),
             cni,
+            imds,
         })
     }
 
@@ -134,6 +205,7 @@ impl K8sInstances {
             image,
             user_data,
             pull_secret: self.pull_secret.as_deref(),
+            imds: Some(&self.imds),
         });
         // Operator-configured global + EC2-service base, with this
         // instance's reserved `fakecloud-k8s/*` tag overrides merged over it
@@ -205,6 +277,8 @@ struct InstancePodContext<'a> {
     image: &'a str,
     user_data: Option<&'a str>,
     pull_secret: Option<&'a str>,
+    /// The IMDS sidecar to add, if any.
+    imds: Option<&'a ImdsSidecar>,
 }
 
 /// Build the Pod spec for one EC2 instance. Pure — no cluster I/O — so it's
@@ -225,12 +299,18 @@ fn build_instance_pod(ctx: InstancePodContext<'_>) -> Pod {
         names::label_safe(ctx.ec2_instance_id),
     );
 
-    let container = Container {
+    let mut containers = vec![Container {
         name: CONTAINER.to_string(),
         image: Some(ctx.image.to_string()),
         command: Some(boot_command(ctx.user_data)),
+        volume_mounts: Some(vec![run_mount()]),
         ..Container::default()
-    };
+    }];
+    // The Pod's network namespace is shared, so the sidecar's redirect and
+    // proxy serve the instance container's 169.254.169.254.
+    if let Some(sidecar) = ctx.imds {
+        containers.push(sidecar.container(ctx.ec2_instance_id));
+    }
 
     let pull_secrets = ctx.pull_secret.map(|name| {
         vec![LocalObjectReference {
@@ -249,7 +329,12 @@ fn build_instance_pod(ctx: InstancePodContext<'_>) -> Pod {
             // We manage lifecycle explicitly (reboot recreates the Pod), so
             // the kubelet shouldn't restart the container itself.
             restart_policy: Some("Never".to_string()),
-            containers: vec![container],
+            containers,
+            volumes: Some(vec![Volume {
+                name: RUN_VOLUME.into(),
+                empty_dir: Some(EmptyDirVolumeSource::default()),
+                ..Volume::default()
+            }]),
             image_pull_secrets: pull_secrets,
             ..PodSpec::default()
         }),
@@ -270,6 +355,7 @@ mod tests {
             image: "amazonlinux:2023",
             user_data,
             pull_secret: None,
+            imds: None,
         }
     }
 
@@ -317,6 +403,40 @@ mod tests {
             script.contains("& exec tail -f /dev/null"),
             "tails: {script}"
         );
+    }
+
+    #[test]
+    fn imds_sidecar_shares_the_pod_and_readiness_volume() {
+        let sidecar = ImdsSidecar {
+            image: "helper:1".into(),
+            host: "fakecloud.fakecloud.svc".into(),
+            port: 4566,
+        };
+        let mut c = ctx(Some("ZWNobyBoaQ=="));
+        c.imds = Some(&sidecar);
+        let spec = build_instance_pod(c).spec.unwrap();
+        assert_eq!(spec.containers.len(), 2);
+        let side = &spec.containers[1];
+        assert_eq!(side.name, IMDS_CONTAINER);
+        let cmd = side.command.as_ref().unwrap();
+        assert_eq!(
+            &cmd[cmd.len() - 4..],
+            ["fakecloud.fakecloud.svc", "4566", "i-0ABC123", "61169"]
+        );
+        let caps = side
+            .security_context
+            .as_ref()
+            .and_then(|s| s.capabilities.as_ref())
+            .and_then(|c| c.add.clone())
+            .unwrap();
+        assert_eq!(caps, vec!["NET_ADMIN".to_string()]);
+        // Both containers mount the readiness volume; user-data waits on it.
+        for container in &spec.containers {
+            let mounts = container.volume_mounts.as_ref().unwrap();
+            assert_eq!(mounts[0].mount_path, imds::READY_DIR);
+        }
+        assert!(spec.containers[0].command.as_ref().unwrap()[2].contains(imds::READY_FILE));
+        assert_eq!(spec.volumes.unwrap()[0].name, RUN_VOLUME);
     }
 
     #[test]

@@ -4724,7 +4724,7 @@ mod post_start_tests {
             None
         );
         // The lock serializes: a second holder waits for the first.
-        if let Some(rt) = crate::runtime::Ec2Runtime::new() {
+        if let Some(rt) = crate::runtime::Ec2Runtime::new(4566) {
             let rt = std::sync::Arc::new(rt);
             let first = rt.lock_lifecycle("i-1").await;
             let rt2 = rt.clone();

@@ -643,6 +643,137 @@ pub fn registry_auth_hosts(server_port: u16) -> Vec<String> {
     .collect()
 }
 
+/// Host the container engine pulls fakecloud-ECR images from.
+///
+/// The pull is performed by the engine on the *host*, not by a sibling
+/// container, so the sibling host alias is the wrong address for it: Docker
+/// Desktop and OrbStack only accept a plain-HTTP registry over loopback, and
+/// `host.docker.internal` does not resolve on a Linux host at all. Defaults to
+/// `127.0.0.1`. Podman on macOS / Windows pulls inside its machine VM, where
+/// loopback is the VM and only `host.containers.internal` reaches the host.
+/// `FAKECLOUD_ECR_REGISTRY_HOST` overrides both (e.g. when a containerized
+/// fakecloud's port is published under another address).
+pub fn ecr_registry_host(cli: &str) -> String {
+    resolve_ecr_registry_host(
+        std::env::var("FAKECLOUD_ECR_REGISTRY_HOST").ok(),
+        is_podman(cli),
+        cfg!(target_os = "linux"),
+    )
+}
+
+/// Pure half of [`ecr_registry_host`].
+pub fn resolve_ecr_registry_host(env_value: Option<String>, podman: bool, linux: bool) -> String {
+    if let Some(v) = env_value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+    {
+        return v;
+    }
+    if podman && !linux {
+        "host.containers.internal".to_string()
+    } else {
+        "127.0.0.1".to_string()
+    }
+}
+
+/// Host port from `<cli> port <container> <port>` output. Docker prints one
+/// `<ip>:<port>` line per bound address family (`0.0.0.0:49153`,
+/// `[::]:49153`); podman prints the same shape. The first parseable port wins.
+pub fn parse_published_port(output: &str) -> Option<u16> {
+    output
+        .lines()
+        .filter_map(|l| l.trim().rsplit(':').next())
+        .find_map(|p| p.parse::<u16>().ok())
+}
+
+const LOOPBACK_NAMES: [&str; 2] = ["127.0.0.1", "localhost"];
+
+/// Rewrite loopback references in an environment value a sibling container
+/// will read, so they reach the host instead of the container itself.
+///
+/// Inside a container `127.0.0.1` / `localhost` is the container, so every
+/// endpoint fakecloud hands out on loopback -- the server URL, an RDS or
+/// ElastiCache endpoint address, an MSK bootstrap string -- has to name
+/// `target_host` (the host alias) instead. Rewritten:
+///
+/// - the whole value being a loopback host (`DB_HOST=127.0.0.1`);
+/// - a loopback host followed by `:<port>`, at a token boundary -- in URLs
+///   with or without userinfo (`postgres://u:p@localhost:5432/db`), bare
+///   `host:port` values and comma-separated lists
+///   (`127.0.0.1:9092,127.0.0.1:9094`);
+/// - a URL host without a port (`http://localhost/path`).
+///
+/// A port a service registered with
+/// [`crate::dataplane::register_container_port`] is swapped for its
+/// container-view port. Prose such as `EHLO localhost`, and names that merely
+/// contain a loopback name (`127.0.0.10`, `localhost.localdomain`), are left
+/// alone. When `target_host` is itself loopback (fakecloud and the workload
+/// share a network namespace) the value is returned unchanged.
+pub fn rewrite_loopback_value(value: &str, target_host: &str) -> String {
+    if LOOPBACK_NAMES.contains(&target_host) {
+        return value.to_string();
+    }
+    if LOOPBACK_NAMES.contains(&value.trim()) {
+        return value.replacen(value.trim(), target_host, 1);
+    }
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut i = 0;
+    while i < value.len() {
+        let hit = LOOPBACK_NAMES
+            .iter()
+            .find(|name| value[i..].starts_with(**name) && loopback_at(value, i, name.len()));
+        let Some(name) = hit else {
+            let ch = value[i..].chars().next().unwrap_or_default();
+            out.push(ch);
+            i += ch.len_utf8().max(1);
+            continue;
+        };
+        out.push_str(target_host);
+        i += name.len();
+        // Swap a registered host port for its container-view port.
+        if bytes.get(i) == Some(&b':') {
+            let digits: String = value[i + 1..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect();
+            if let Some(mapped) = digits
+                .parse::<u16>()
+                .ok()
+                .and_then(crate::dataplane::container_port_for)
+            {
+                out.push(':');
+                out.push_str(&mapped.to_string());
+                i += 1 + digits.len();
+            }
+        }
+    }
+    out
+}
+
+/// Whether the loopback name at `value[i..i + len]` is a host reference: at a
+/// token boundary and followed by `:<digit>`, or a URL host (after `//` or
+/// `@`) followed by the end of the authority.
+fn loopback_at(value: &str, i: usize, len: usize) -> bool {
+    let before = value[..i].chars().next_back();
+    let boundary_before = match before {
+        None => true,
+        Some(c) => matches!(c, '/' | '@' | ',' | '=' | ';' | '(' | '"' | '\'') || c.is_whitespace(),
+    };
+    if !boundary_before {
+        return false;
+    }
+    let rest = &value[i + len..];
+    let mut after = rest.chars();
+    match after.next() {
+        Some(':') => after.next().is_some_and(|c| c.is_ascii_digit()),
+        next => {
+            let url_host = matches!(before, Some('@')) || value[..i].ends_with("//");
+            url_host && matches!(next, None | Some('/') | Some('?') | Some('#'))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1248,6 +1379,123 @@ mod bounded_cli_tests {
                 < CLI_PROBE_TIMEOUT + READER_DRAIN_GRACE + std::time::Duration::from_secs(5),
             "the call must still end at the bound, took {:?}",
             start.elapsed()
+        );
+    }
+}
+
+#[cfg(test)]
+mod endpoint_tests {
+    use super::*;
+
+    #[test]
+    fn ecr_registry_host_defaults_to_loopback() {
+        // The host daemon performs the pull; the sibling alias is wrong there.
+        assert_eq!(resolve_ecr_registry_host(None, false, true), "127.0.0.1");
+        assert_eq!(resolve_ecr_registry_host(None, false, false), "127.0.0.1");
+        assert_eq!(
+            resolve_ecr_registry_host(Some("  ".into()), false, true),
+            "127.0.0.1"
+        );
+        // Podman on Linux pulls on the host; podman machine pulls in its VM.
+        assert_eq!(resolve_ecr_registry_host(None, true, true), "127.0.0.1");
+        assert_eq!(
+            resolve_ecr_registry_host(None, true, false),
+            "host.containers.internal"
+        );
+        assert_eq!(
+            resolve_ecr_registry_host(Some("10.0.0.5".into()), true, false),
+            "10.0.0.5"
+        );
+    }
+
+    #[test]
+    fn published_port_parses_docker_and_podman_output() {
+        assert_eq!(
+            parse_published_port("0.0.0.0:49153\n[::]:49153\n"),
+            Some(49153)
+        );
+        assert_eq!(parse_published_port("[::]:5000"), Some(5000));
+        assert_eq!(parse_published_port(""), None);
+        assert_eq!(parse_published_port("garbage"), None);
+    }
+
+    #[test]
+    fn rewrite_loopback_urls_and_bare_endpoints() {
+        let h = "host.docker.internal";
+        assert_eq!(
+            rewrite_loopback_value("http://localhost:4566", h),
+            "http://host.docker.internal:4566"
+        );
+        assert_eq!(
+            rewrite_loopback_value("https://127.0.0.1:4566/path", h),
+            "https://host.docker.internal:4566/path"
+        );
+        // Bare host (an RDS / ElastiCache endpoint address).
+        assert_eq!(rewrite_loopback_value("127.0.0.1", h), h);
+        assert_eq!(rewrite_loopback_value("localhost", h), h);
+        // Bare host:port and comma-separated broker lists.
+        assert_eq!(
+            rewrite_loopback_value("127.0.0.1:6379", h),
+            "host.docker.internal:6379"
+        );
+        assert_eq!(
+            rewrite_loopback_value("127.0.0.1:9092,localhost:9094", h),
+            "host.docker.internal:9092,host.docker.internal:9094"
+        );
+        // Scheme-qualified DSNs with userinfo.
+        assert_eq!(
+            rewrite_loopback_value("postgres://u:p@localhost:5432/db", h),
+            "postgres://u:p@host.docker.internal:5432/db"
+        );
+        assert_eq!(
+            rewrite_loopback_value("redis://127.0.0.1:6379/0", h),
+            "redis://host.docker.internal:6379/0"
+        );
+        // URL host without a port.
+        assert_eq!(
+            rewrite_loopback_value("http://localhost/health", h),
+            "http://host.docker.internal/health"
+        );
+        // key=value lists.
+        assert_eq!(
+            rewrite_loopback_value("host=127.0.0.1:5432 user=x", h),
+            "host=host.docker.internal:5432 user=x"
+        );
+    }
+
+    #[test]
+    fn rewrite_loopback_leaves_prose_and_lookalikes_alone() {
+        let h = "host.docker.internal";
+        for v in [
+            "EHLO localhost",
+            "connect to localhost soon",
+            "127.0.0.10:80",
+            "localhost.localdomain:25",
+            "mylocalhost:80",
+            "",
+        ] {
+            assert_eq!(rewrite_loopback_value(v, h), v, "{v:?}");
+        }
+        // Workload sharing fakecloud's namespace: nothing to rewrite.
+        assert_eq!(
+            rewrite_loopback_value("http://localhost:4566", "127.0.0.1"),
+            "http://localhost:4566"
+        );
+    }
+
+    #[test]
+    fn rewrite_loopback_swaps_registered_container_ports() {
+        // A broker whose host listener advertises loopback registers the
+        // listener containers must use instead.
+        crate::dataplane::register_container_port(41001, 41002);
+        assert_eq!(
+            rewrite_loopback_value("127.0.0.1:41001", "host.docker.internal"),
+            "host.docker.internal:41002"
+        );
+        crate::dataplane::unregister_container_port(41001);
+        assert_eq!(
+            rewrite_loopback_value("127.0.0.1:41001", "host.docker.internal"),
+            "host.docker.internal:41001"
         );
     }
 }
