@@ -3,6 +3,7 @@ pub mod error_handling;
 pub mod interpreter;
 pub mod intrinsics;
 pub mod io_processing;
+pub mod jsonpath;
 pub(crate) mod service;
 pub(crate) mod state;
 

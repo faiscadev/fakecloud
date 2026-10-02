@@ -2929,6 +2929,65 @@ fn list_multipart_uploads() {
     assert!(body.contains("f1.bin"));
 }
 
+#[test]
+fn list_multipart_uploads_common_prefixes_count_toward_max_uploads() {
+    let svc = make_service();
+    seed_bucket(&svc, "mpcp");
+    for key in ["a.bin", "dir1/x", "dir1/y", "dir2/z", "zz.bin"] {
+        let req = make_request(
+            Method::POST,
+            &format!("/mpcp/{key}"),
+            &[("uploads", "")],
+            b"",
+        );
+        svc.create_multipart_upload("123456789012", &req, "mpcp", key)
+            .unwrap();
+    }
+    let list = |params: &[(&str, &str)]| -> String {
+        let q: std::collections::HashMap<String, String> = params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        let resp = svc
+            .list_multipart_uploads("123456789012", "mpcp", &q)
+            .unwrap();
+        std::str::from_utf8(resp.body.expect_bytes())
+            .unwrap()
+            .to_string()
+    };
+    // Entries in order: a.bin, dir1/, dir2/, zz.bin. Page of 2 = a.bin + dir1/.
+    let p1 = list(&[("delimiter", "/"), ("max-uploads", "2")]);
+    assert!(p1.contains("<IsTruncated>true</IsTruncated>"), "{p1}");
+    assert_eq!(p1.matches("<Upload>").count(), 1, "{p1}");
+    assert!(p1.contains("<Key>a.bin</Key>"), "{p1}");
+    assert_eq!(p1.matches("<CommonPrefixes>").count(), 1, "{p1}");
+    assert!(p1.contains("<Prefix>dir1/</Prefix>"), "{p1}");
+    assert!(p1.contains("<NextKeyMarker>dir1/</NextKeyMarker>"), "{p1}");
+    assert!(!p1.contains("<NextUploadIdMarker>"), "{p1}");
+
+    // Resuming from the CommonPrefix marker does not repeat dir1/.
+    let p2 = list(&[
+        ("delimiter", "/"),
+        ("max-uploads", "2"),
+        ("key-marker", "dir1/"),
+    ]);
+    assert!(!p2.contains("<Prefix>dir1/</Prefix>"), "{p2}");
+    assert!(p2.contains("<Prefix>dir2/</Prefix>"), "{p2}");
+    assert!(p2.contains("<Key>zz.bin</Key>"), "{p2}");
+    assert!(p2.contains("<IsTruncated>false</IsTruncated>"), "{p2}");
+
+    // Exactly max-uploads entries in total is not truncated.
+    let all = list(&[("delimiter", "/"), ("max-uploads", "4")]);
+    assert!(all.contains("<IsTruncated>false</IsTruncated>"), "{all}");
+    let over = list(&[("delimiter", "/"), ("max-uploads", "3")]);
+    assert!(over.contains("<IsTruncated>true</IsTruncated>"), "{over}");
+    assert!(
+        over.contains("<NextKeyMarker>dir2/</NextKeyMarker>"),
+        "{over}"
+    );
+    assert!(!over.contains("zz.bin"), "{over}");
+}
+
 // ── Config handler happy paths ──
 
 #[test]

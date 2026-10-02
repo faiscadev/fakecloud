@@ -33,6 +33,7 @@ fn create_execution(state: &SharedStepFunctionsState, arn: &str, input: Option<S
             billed_duration_ms: None,
             billed_memory_mb: None,
             role_arn: "arn:aws:iam::123456789012:role/test".to_string(),
+            redrive_count: 0,
         },
     );
 }
@@ -863,7 +864,7 @@ fn apply_parameters_substitutes_json_path_refs() {
         "list": [ { "x.$": "$.user.id" } ]
     });
     let input = json!({ "user": { "id": 42, "name": "zoe" } });
-    let out = apply_parameters(&template, &input, None);
+    let out = apply_parameters(&template, &input, None).unwrap();
     assert_eq!(out["literal"], json!("constant"));
     assert_eq!(out["ref"], json!(42));
     assert_eq!(out["nested"]["inner"], json!("zoe"));
@@ -882,7 +883,7 @@ fn apply_parameters_resolves_context_object() {
         "Task": { "Token": "abc123" },
         "Execution": { "Id": "arn:aws:states:us-east-1:123:execution:sm:exec" }
     });
-    let out = apply_parameters(&template, &input, Some(&context));
+    let out = apply_parameters(&template, &input, Some(&context)).unwrap();
     assert_eq!(out["token"], json!("abc123"));
     assert_eq!(
         out["exec"],
@@ -1218,6 +1219,7 @@ fn make_exec(status: ExecutionStatus) -> Execution {
         billed_duration_ms: None,
         billed_memory_mb: None,
         role_arn: String::new(),
+        redrive_count: 0,
     }
 }
 
@@ -1850,10 +1852,11 @@ async fn malformed_input_path_unclosed_bracket_does_not_panic() {
     )
     .await;
 
-    // No panic, and the execution reached a terminal state (did not hang RUNNING).
+    // No panic, and the execution reached a terminal state (did not hang
+    // RUNNING): an unparseable path fails the state with States.Runtime.
     read_exec(&state, &arn, |exec| {
-        assert_ne!(exec.status, ExecutionStatus::Running);
-        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("States.Runtime"));
     });
 }
 
@@ -2000,5 +2003,172 @@ fn execution_started_event_carries_the_role_recorded_at_start() {
             started.details["roleArn"],
             "arn:aws:iam::123456789012:role/test"
         );
+    });
+}
+
+// ── Context object ($$) ──────────────────────────────────────────
+
+#[test]
+fn context_object_is_complete_in_pass_choice_and_item_selector() {
+    let state = make_state();
+    let arn = arn_for("ctx-full");
+    let def = json!({
+        "StartAt": "P",
+        "States": {
+            "P": {
+                "Type": "Pass",
+                "Parameters": {
+                    "id.$": "$$.Execution.Id",
+                    "name.$": "$$.Execution.Name",
+                    "input.$": "$$.Execution.Input.xs",
+                    "start.$": "$$.Execution.StartTime",
+                    "role.$": "$$.Execution.RoleArn",
+                    "state.$": "$$.State.Name",
+                    "entered.$": "$$.State.EnteredTime",
+                    "retry.$": "$$.State.RetryCount",
+                    "sm.$": "$$.StateMachine.Name",
+                    "smid.$": "$$.StateMachine.Id",
+                    "fmt.$": "States.Format('{}/{}', $$.StateMachine.Name, $$.Execution.Name)",
+                    "xs.$": "$.xs"
+                },
+                "Next": "C"
+            },
+            "C": {
+                "Type": "Choice",
+                "Choices": [{"Variable": "$$.Execution.Name", "StringEquals": "exec-1", "Next": "M"}],
+                "Default": "Bad"
+            },
+            "Bad": {"Type": "Fail", "Error": "Bad"},
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$$.Execution.Input.xs",
+                "ItemSelector": {
+                    "v.$": "$$.Map.Item.Value",
+                    "i.$": "$$.Map.Item.Index",
+                    "exec.$": "$$.Execution.Name",
+                    "state.$": "$$.State.Name"
+                },
+                "ItemProcessor": {"StartAt": "I", "States": {"I": {"Type": "Pass", "End": true}}},
+                "ResultPath": "$.mapped",
+                "End": true
+            }
+        }
+    });
+    drive(&state, &arn, def, Some(r#"{"xs":["a","b"]}"#));
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded, "{:?}", exec.cause);
+        let out: Value = serde_json::from_str(exec.output.as_deref().unwrap()).unwrap();
+        assert_eq!(out["id"], json!(arn));
+        assert_eq!(out["name"], "exec-1");
+        assert_eq!(out["input"], json!(["a", "b"]));
+        assert!(out["start"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(out["role"], "arn:aws:iam::123456789012:role/test");
+        assert_eq!(out["state"], "P");
+        assert!(out["entered"].as_str().unwrap().ends_with('Z'));
+        assert_eq!(out["retry"], 0);
+        assert_eq!(out["sm"], "test");
+        assert_eq!(
+            out["smid"],
+            "arn:aws:states:us-east-1:123456789012:stateMachine:test"
+        );
+        assert_eq!(out["fmt"], "test/exec-1");
+        assert_eq!(
+            out["mapped"],
+            json!([
+                {"v": "a", "i": 0, "exec": "exec-1", "state": "M"},
+                {"v": "b", "i": 1, "exec": "exec-1", "state": "M"}
+            ])
+        );
+    });
+}
+
+#[test]
+fn item_selector_failure_finishes_distributed_map_run_as_failed() {
+    let state = make_state();
+    let arn = arn_for("ctx-itemsel-fail");
+    let def = json!({
+        "StartAt": "M",
+        "States": {
+            "M": {
+                "Type": "Map",
+                "ItemsPath": "$.xs",
+                "ItemSelector": {"v.$": "$.missing"},
+                "ItemProcessor": {
+                    "ProcessorConfig": {"Mode": "DISTRIBUTED", "ExecutionType": "STANDARD"},
+                    "StartAt": "I",
+                    "States": {"I": {"Type": "Pass", "End": true}}
+                },
+                "End": true
+            }
+        }
+    });
+    drive(&state, &arn, def, Some(r#"{"xs":[1,2,3]}"#));
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("States.Runtime"));
+        // No iteration was started before the selector failed.
+        assert!(!exec
+            .history_events
+            .iter()
+            .any(|e| e.event_type == "MapIterationStarted"));
+    });
+    let accounts = state.read();
+    let runs: Vec<_> = accounts.default_ref().map_runs.values().collect();
+    assert_eq!(runs.len(), 1);
+    assert_eq!(runs[0].status, "FAILED");
+}
+
+#[test]
+fn context_redrive_count_reflects_execution() {
+    let state = make_state();
+    let arn = arn_for("ctx-redrive");
+    create_execution(&state, &arn, None);
+    {
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        s.executions.get_mut(&arn).unwrap().redrive_count = 2;
+    }
+    let ctx = context_object(&state, &arn, "S", Utc::now(), 0);
+    assert_eq!(ctx["Execution"]["RedriveCount"], 2);
+}
+
+#[test]
+fn execution_without_redrive_count_deserializes_as_zero() {
+    let mut v = serde_json::to_value(make_exec(ExecutionStatus::Succeeded)).unwrap();
+    v.as_object_mut().unwrap().remove("redrive_count");
+    let exec: Execution = serde_json::from_value(v).unwrap();
+    assert_eq!(exec.redrive_count, 0);
+}
+
+// Task Parameters are re-evaluated per attempt: `$$.State.RetryCount`
+// advances with each retry.
+#[test]
+fn task_parameters_reevaluated_per_retry_attempt() {
+    let state = make_state();
+    let arn = arn_for("task-retry-count");
+    let (bus, _calls) = StubLambda::bus(vec![
+        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
+        Ok(br#"{"errorMessage":"boom","errorType":"MyCustomError"}"#.to_vec()),
+        Ok(br#"{"ok":true}"#.to_vec()),
+    ]);
+    let def = lambda_invoke_def(json!({
+        "Parameters": {"FunctionName": "fn", "Payload": {"retry.$": "$$.State.RetryCount"}},
+        "Retry": [{ "ErrorEquals": ["MyCustomError"], "MaxAttempts": 3, "IntervalSeconds": 0 }]
+    }));
+    drive_with_delivery(&state, &arn, def, Some("{}"), bus);
+
+    read_exec(&state, &arn, |exec| {
+        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        let retries: Vec<i64> = exec
+            .history_events
+            .iter()
+            .filter(|e| e.event_type == "TaskScheduled")
+            .map(|e| {
+                let params: Value =
+                    serde_json::from_str(e.details["parameters"].as_str().unwrap()).unwrap();
+                params["Payload"]["retry"].as_i64().unwrap()
+            })
+            .collect();
+        assert_eq!(retries, vec![0, 1, 2]);
     });
 }

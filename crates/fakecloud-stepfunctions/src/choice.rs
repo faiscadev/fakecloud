@@ -1,201 +1,207 @@
+use std::cmp::Ordering;
+
 use serde_json::Value;
 
-use crate::io_processing::resolve_path;
+use crate::io_processing::{resolve_with_context, StatesError};
 
 /// Evaluate a Choice state's rules against the input and return the Next state name.
-/// Returns None if no rule matches and there's no Default.
-pub fn evaluate_choice(state_def: &Value, input: &Value) -> Option<String> {
+/// Returns `Ok(None)` if no rule matches and there's no Default.
+///
+/// A rule whose `Variable` (or `*Path` comparand) matches nothing fails the
+/// state with `States.Runtime`, as on AWS; only an `IsPresent` test may probe
+/// a missing field.
+pub fn evaluate_choice(
+    state_def: &Value,
+    input: &Value,
+    context: Option<&Value>,
+) -> Result<Option<String>, StatesError> {
     if let Some(choices) = state_def["Choices"].as_array() {
         for choice in choices {
-            if evaluate_rule(choice, input) {
-                return choice["Next"].as_str().map(|s| s.to_string());
+            if evaluate_rule(choice, input, context)? {
+                return Ok(choice["Next"].as_str().map(|s| s.to_string()));
             }
         }
     }
 
     // Fall through to Default
-    state_def["Default"].as_str().map(|s| s.to_string())
+    Ok(state_def["Default"].as_str().map(|s| s.to_string()))
+}
+
+fn invalid_variable(path: &str) -> StatesError {
+    (
+        "States.Runtime".to_string(),
+        format!(
+            "Invalid path '{path}': The choice state's condition path references an invalid value."
+        ),
+    )
+}
+
+/// Resolve a Choice path (`$...` against the input, `$$...` against the
+/// context object), failing on a miss.
+fn lookup(input: &Value, context: Option<&Value>, path: &str) -> Result<Value, StatesError> {
+    resolve_with_context(input, context, path).map_err(|_| invalid_variable(path))
 }
 
 /// Evaluate a single choice rule (may be compound via And/Or/Not).
-fn evaluate_rule(rule: &Value, input: &Value) -> bool {
-    if let Some(result) = evaluate_logical(rule, input) {
-        return result;
+fn evaluate_rule(
+    rule: &Value,
+    input: &Value,
+    context: Option<&Value>,
+) -> Result<bool, StatesError> {
+    if let Some(and_rules) = rule["And"].as_array() {
+        for r in and_rules {
+            if !evaluate_rule(r, input, context)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    if let Some(or_rules) = rule["Or"].as_array() {
+        for r in or_rules {
+            if evaluate_rule(r, input, context)? {
+                return Ok(true);
+            }
+        }
+        return Ok(false);
+    }
+    if rule.get("Not").is_some() {
+        return Ok(!evaluate_rule(&rule["Not"], input, context)?);
     }
 
     let variable = match rule["Variable"].as_str() {
         Some(v) => v,
-        None => return false,
+        None => return Ok(false),
     };
-    let value = resolve_path(input, variable);
 
-    if let Some(result) = evaluate_presence_or_type(rule, input, variable, &value) {
-        return result;
-    }
-    if let Some(result) = evaluate_string_comparison(rule, input, &value) {
-        return result;
-    }
-    if let Some(result) = evaluate_numeric_comparison(rule, input, &value) {
-        return result;
-    }
-    if let Some(result) = evaluate_boolean_comparison(rule, input, &value) {
-        return result;
-    }
-    if let Some(result) = evaluate_timestamp_comparison(rule, &value) {
-        return result;
-    }
-
-    false
-}
-
-fn evaluate_logical(rule: &Value, input: &Value) -> Option<bool> {
-    if let Some(and_rules) = rule["And"].as_array() {
-        return Some(and_rules.iter().all(|r| evaluate_rule(r, input)));
-    }
-    if let Some(or_rules) = rule["Or"].as_array() {
-        return Some(or_rules.iter().any(|r| evaluate_rule(r, input)));
-    }
-    if rule.get("Not").is_some() {
-        return Some(!evaluate_rule(&rule["Not"], input));
-    }
-    None
-}
-
-fn evaluate_presence_or_type(
-    rule: &Value,
-    input: &Value,
-    variable: &str,
-    value: &Value,
-) -> Option<bool> {
+    // IsPresent is the one test defined on a missing field.
     if let Some(expected) = rule.get("IsPresent") {
-        // resolve_path returns Value::Null for both missing and null fields,
-        // so check the parent object directly.
-        let is_present = field_exists_in_input(input, variable);
-        return Some(expected.as_bool().unwrap_or(false) == is_present);
+        let is_present = resolve_with_context(input, context, variable).is_ok();
+        return Ok(expected.as_bool().unwrap_or(false) == is_present);
     }
-    if let Some(expected) = rule.get("IsNull") {
-        return Some(expected.as_bool().unwrap_or(false) == value.is_null());
+
+    let value = lookup(input, context, variable)?;
+
+    if let Some(result) = evaluate_type_test(rule, &value) {
+        return Ok(result);
     }
-    if let Some(expected) = rule.get("IsNumeric") {
-        return Some(expected.as_bool().unwrap_or(false) == value.is_number());
+
+    for (op, kind) in COMPARATORS {
+        if let Some(operand) = rule.get(*op) {
+            return Ok(compare(*kind, op, operand, &value));
+        }
+        let path_op = format!("{op}Path");
+        if let Some(path) = rule.get(path_op.as_str()) {
+            let Some(path) = path.as_str() else {
+                return Ok(false);
+            };
+            let other = lookup(input, context, path)?;
+            return Ok(compare(*kind, op, &other, &value));
+        }
     }
-    if let Some(expected) = rule.get("IsString") {
-        return Some(expected.as_bool().unwrap_or(false) == value.is_string());
-    }
-    if let Some(expected) = rule.get("IsBoolean") {
-        return Some(expected.as_bool().unwrap_or(false) == value.is_boolean());
-    }
-    if let Some(expected) = rule.get("IsTimestamp") {
-        let is_ts = value
-            .as_str()
-            .map(|s| chrono::DateTime::parse_from_rfc3339(s).is_ok())
-            .unwrap_or(false);
-        return Some(expected.as_bool().unwrap_or(false) == is_ts);
-    }
-    None
+
+    Ok(false)
 }
 
-fn evaluate_string_comparison(rule: &Value, input: &Value, value: &Value) -> Option<bool> {
-    if let Some(expected) = rule["StringEquals"].as_str() {
-        return Some(value.as_str() == Some(expected));
-    }
-    if let Some(path) = rule["StringEqualsPath"].as_str() {
-        let other = resolve_path(input, path);
-        return Some(value.as_str().is_some() && value.as_str() == other.as_str());
-    }
-    if let Some(expected) = rule["StringLessThan"].as_str() {
-        return Some(value.as_str().is_some_and(|v| v < expected));
-    }
-    if let Some(expected) = rule["StringGreaterThan"].as_str() {
-        return Some(value.as_str().is_some_and(|v| v > expected));
-    }
-    if let Some(expected) = rule["StringLessThanEquals"].as_str() {
-        return Some(value.as_str().is_some_and(|v| v <= expected));
-    }
-    if let Some(expected) = rule["StringGreaterThanEquals"].as_str() {
-        return Some(value.as_str().is_some_and(|v| v >= expected));
-    }
-    if let Some(pattern) = rule["StringMatches"].as_str() {
-        return Some(value.as_str().is_some_and(|v| string_matches(v, pattern)));
-    }
-    None
-}
-
-fn evaluate_numeric_comparison(rule: &Value, input: &Value, value: &Value) -> Option<bool> {
-    if let Some(expected) = rule["NumericEquals"].as_f64() {
-        return Some(value.as_f64() == Some(expected));
-    }
-    if let Some(path) = rule["NumericEqualsPath"].as_str() {
-        let other = resolve_path(input, path);
-        return Some(value.as_f64().is_some() && value.as_f64() == other.as_f64());
-    }
-    if let Some(expected) = rule["NumericLessThan"].as_f64() {
-        return Some(value.as_f64().is_some_and(|v| v < expected));
-    }
-    if let Some(expected) = rule["NumericGreaterThan"].as_f64() {
-        return Some(value.as_f64().is_some_and(|v| v > expected));
-    }
-    if let Some(expected) = rule["NumericLessThanEquals"].as_f64() {
-        return Some(value.as_f64().is_some_and(|v| v <= expected));
-    }
-    if let Some(expected) = rule["NumericGreaterThanEquals"].as_f64() {
-        return Some(value.as_f64().is_some_and(|v| v >= expected));
-    }
-    None
-}
-
-fn evaluate_boolean_comparison(rule: &Value, input: &Value, value: &Value) -> Option<bool> {
-    if let Some(expected) = rule["BooleanEquals"].as_bool() {
-        return Some(value.as_bool() == Some(expected));
-    }
-    if let Some(path) = rule["BooleanEqualsPath"].as_str() {
-        let other = resolve_path(input, path);
-        return Some(value.as_bool().is_some() && value.as_bool() == other.as_bool());
-    }
-    None
-}
-
-fn evaluate_timestamp_comparison(rule: &Value, value: &Value) -> Option<bool> {
-    if let Some(expected) = rule["TimestampEquals"].as_str() {
-        return Some(compare_timestamps(value, expected, |a, b| a == b));
-    }
-    if let Some(expected) = rule["TimestampLessThan"].as_str() {
-        return Some(compare_timestamps(value, expected, |a, b| a < b));
-    }
-    if let Some(expected) = rule["TimestampGreaterThan"].as_str() {
-        return Some(compare_timestamps(value, expected, |a, b| a > b));
-    }
-    if let Some(expected) = rule["TimestampLessThanEquals"].as_str() {
-        return Some(compare_timestamps(value, expected, |a, b| a <= b));
-    }
-    if let Some(expected) = rule["TimestampGreaterThanEquals"].as_str() {
-        return Some(compare_timestamps(value, expected, |a, b| a >= b));
-    }
-    None
-}
-
-/// Compare two RFC3339 timestamps using the provided comparison function.
-fn compare_timestamps<F>(value: &Value, expected: &str, cmp: F) -> bool
-where
-    F: Fn(chrono::DateTime<chrono::FixedOffset>, chrono::DateTime<chrono::FixedOffset>) -> bool,
-{
-    let val_str = match value.as_str() {
-        Some(s) => s,
-        None => return false,
+fn evaluate_type_test(rule: &Value, value: &Value) -> Option<bool> {
+    let test = |key: &str, actual: bool| {
+        rule.get(key)
+            .map(|expected| expected.as_bool().unwrap_or(false) == actual)
     };
-    let val_ts = match chrono::DateTime::parse_from_rfc3339(val_str) {
-        Ok(t) => t,
-        Err(_) => return false,
+    test("IsNull", value.is_null())
+        .or_else(|| test("IsNumeric", value.is_number()))
+        .or_else(|| test("IsString", value.is_string()))
+        .or_else(|| test("IsBoolean", value.is_boolean()))
+        .or_else(|| {
+            test(
+                "IsTimestamp",
+                value.as_str().and_then(parse_timestamp).is_some(),
+            )
+        })
+}
+
+#[derive(Clone, Copy)]
+enum Kind {
+    String,
+    Numeric,
+    Boolean,
+    Timestamp,
+    StringMatches,
+}
+
+/// Every ASL data-test comparator; each also has a `<name>Path` form whose
+/// comparand is read from the input.
+const COMPARATORS: &[(&str, Kind)] = &[
+    ("StringEquals", Kind::String),
+    ("StringLessThan", Kind::String),
+    ("StringGreaterThan", Kind::String),
+    ("StringLessThanEquals", Kind::String),
+    ("StringGreaterThanEquals", Kind::String),
+    ("StringMatches", Kind::StringMatches),
+    ("NumericEquals", Kind::Numeric),
+    ("NumericLessThan", Kind::Numeric),
+    ("NumericGreaterThan", Kind::Numeric),
+    ("NumericLessThanEquals", Kind::Numeric),
+    ("NumericGreaterThanEquals", Kind::Numeric),
+    ("BooleanEquals", Kind::Boolean),
+    ("TimestampEquals", Kind::Timestamp),
+    ("TimestampLessThan", Kind::Timestamp),
+    ("TimestampGreaterThan", Kind::Timestamp),
+    ("TimestampLessThanEquals", Kind::Timestamp),
+    ("TimestampGreaterThanEquals", Kind::Timestamp),
+];
+
+/// Apply comparator `op` with comparand `operand` to `value`. A type mismatch
+/// (e.g. a NumericEquals on a string) is simply false.
+fn compare(kind: Kind, op: &str, operand: &Value, value: &Value) -> bool {
+    let ordering = match kind {
+        Kind::StringMatches => {
+            return match (value.as_str(), operand.as_str()) {
+                (Some(v), Some(p)) => string_matches(v, p),
+                _ => false,
+            };
+        }
+        Kind::Boolean => {
+            return matches!((value.as_bool(), operand.as_bool()), (Some(a), Some(b)) if a == b);
+        }
+        Kind::String => match (value.as_str(), operand.as_str()) {
+            (Some(v), Some(o)) => Some(v.cmp(o)),
+            _ => None,
+        },
+        Kind::Numeric => match (value.as_f64(), operand.as_f64()) {
+            (Some(v), Some(o)) => v.partial_cmp(&o),
+            _ => None,
+        },
+        Kind::Timestamp => match (
+            value.as_str().and_then(parse_timestamp),
+            operand.as_str().and_then(parse_timestamp),
+        ) {
+            (Some(v), Some(o)) => Some(v.cmp(&o)),
+            _ => None,
+        },
     };
-    let exp_ts = match chrono::DateTime::parse_from_rfc3339(expected) {
-        Ok(t) => t,
-        Err(_) => return false,
+    let Some(ord) = ordering else {
+        return false;
     };
-    cmp(val_ts, exp_ts)
+    if op.ends_with("GreaterThanEquals") {
+        ord != Ordering::Less
+    } else if op.ends_with("LessThanEquals") {
+        ord != Ordering::Greater
+    } else if op.ends_with("GreaterThan") {
+        ord == Ordering::Greater
+    } else if op.ends_with("LessThan") {
+        ord == Ordering::Less
+    } else {
+        ord == Ordering::Equal
+    }
+}
+
+fn parse_timestamp(s: &str) -> Option<chrono::DateTime<chrono::FixedOffset>> {
+    chrono::DateTime::parse_from_rfc3339(s).ok()
 }
 
 /// Glob-style pattern matching for StringMatches.
-/// Supports `*` (matches any sequence) and `\*` (literal asterisk).
+/// Supports `*` (matches any sequence), `\*` (literal asterisk) and `\\`
+/// (literal backslash).
 fn string_matches(value: &str, pattern: &str) -> bool {
     let compiled = compile_glob_pattern(pattern);
     glob_dp_match(&value.chars().collect::<Vec<_>>(), &compiled)
@@ -209,8 +215,8 @@ fn compile_glob_pattern(pattern: &str) -> Vec<GlobToken> {
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
     while i < chars.len() {
-        if chars[i] == '\\' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            out.push(GlobToken::Char('*'));
+        if chars[i] == '\\' && i + 1 < chars.len() && matches!(chars[i + 1], '*' | '\\') {
+            out.push(GlobToken::Char(chars[i + 1]));
             i += 2;
         } else if chars[i] == '*' {
             out.push(GlobToken::Wildcard);
@@ -259,65 +265,6 @@ enum GlobToken {
     Wildcard,
 }
 
-/// Check if a field referenced by a JsonPath expression actually exists in the input,
-/// including fields explicitly set to null. This is different from resolve_path which
-/// returns Value::Null for both missing and null fields.
-/// Handles both object fields ($.foo.bar) and array indices ($.items[0]).
-fn field_exists_in_input(root: &Value, path: &str) -> bool {
-    if path == "$" {
-        return true;
-    }
-    let path = path.strip_prefix("$.").unwrap_or(path);
-    let parts: Vec<&str> = path.split('.').collect();
-    let mut current = root;
-
-    for (i, part) in parts.iter().enumerate() {
-        let is_last = i == parts.len() - 1;
-
-        // Check for array index syntax: field[idx]
-        if let Some(bracket_pos) = part.find('[') {
-            let field_name = &part[..bracket_pos];
-            // Ensure closing bracket exists and is at the end of the segment
-            if !part.ends_with(']') {
-                return false; // malformed segment like "foo[0]extra"
-            }
-            let close_bracket = part.len() - 1;
-            if close_bracket <= bracket_pos {
-                return false;
-            }
-            let idx_str = &part[bracket_pos + 1..close_bracket];
-
-            match current.get(field_name) {
-                Some(arr) => {
-                    if let Ok(idx) = idx_str.parse::<usize>() {
-                        if is_last {
-                            return arr.as_array().is_some_and(|a| idx < a.len());
-                        }
-                        match arr.get(idx) {
-                            Some(v) => current = v,
-                            None => return false,
-                        }
-                    } else {
-                        return false;
-                    }
-                }
-                None => return false,
-            }
-        } else if is_last {
-            return match current.as_object() {
-                Some(obj) => obj.contains_key(*part),
-                None => false,
-            };
-        } else {
-            match current.get(*part) {
-                Some(v) => current = v,
-                None => return false,
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -331,10 +278,10 @@ mod tests {
             "Next": "Active"
         });
         let input = json!({"status": "active"});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"status": "inactive"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -345,10 +292,10 @@ mod tests {
             "Next": "High"
         });
         let input = json!({"count": 15});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"count": 5});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -359,10 +306,10 @@ mod tests {
             "Next": "Enabled"
         });
         let input = json!({"enabled": true});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"enabled": false});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -375,10 +322,10 @@ mod tests {
             "Next": "Both"
         });
         let input = json!({"a": 5, "b": 50});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"a": -1, "b": 50});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -391,10 +338,10 @@ mod tests {
             "Next": "Valid"
         });
         let input = json!({"status": "active"});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"status": "closed"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -407,10 +354,10 @@ mod tests {
             "Next": "Open"
         });
         let input = json!({"status": "active"});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"status": "closed"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -421,10 +368,10 @@ mod tests {
             "Next": "HasField"
         });
         let input = json!({"optional": "value"});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"other": "value"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -435,10 +382,10 @@ mod tests {
             "Next": "HasItem"
         });
         let input = json!({"items": [10, 20, 30]});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"items": []});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -450,7 +397,7 @@ mod tests {
             "Next": "HasField"
         });
         let input = json!({"optional": null});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -461,10 +408,10 @@ mod tests {
             "Next": "Null"
         });
         let input = json!({"field": null});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"field": "value"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -475,10 +422,10 @@ mod tests {
             "Next": "Number"
         });
         let input = json!({"value": 42});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"value": "not a number"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -506,7 +453,7 @@ mod tests {
         });
         let input = json!({"status": "unknown"});
         assert_eq!(
-            evaluate_choice(&state_def, &input),
+            evaluate_choice(&state_def, &input, None).unwrap(),
             Some("DefaultPath".to_string())
         );
     }
@@ -531,12 +478,15 @@ mod tests {
         });
         let input = json!({"value": 150});
         assert_eq!(
-            evaluate_choice(&state_def, &input),
+            evaluate_choice(&state_def, &input, None).unwrap(),
             Some("High".to_string())
         );
 
         let input = json!({"value": 50});
-        assert_eq!(evaluate_choice(&state_def, &input), Some("Low".to_string()));
+        assert_eq!(
+            evaluate_choice(&state_def, &input, None).unwrap(),
+            Some("Low".to_string())
+        );
     }
 
     #[test]
@@ -552,7 +502,7 @@ mod tests {
             ]
         });
         let input = json!({"status": "closed"});
-        assert_eq!(evaluate_choice(&state_def, &input), None);
+        assert_eq!(evaluate_choice(&state_def, &input, None).unwrap(), None);
     }
 
     #[test]
@@ -563,10 +513,10 @@ mod tests {
             "Next": "Equal"
         });
         let input = json!({"a": 42, "b": 42});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"a": 42, "b": 99});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -577,10 +527,10 @@ mod tests {
             "Next": "Before"
         });
         let input = json!({"ts": "2024-01-15T12:00:00Z"});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"ts": "2024-12-01T00:00:00Z"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
     }
 
     #[test]
@@ -591,9 +541,117 @@ mod tests {
             "Next": "Before"
         });
         let input = json!({"name": "alpha"});
-        assert!(evaluate_rule(&rule, &input));
+        assert!(evaluate_rule(&rule, &input, None).unwrap());
 
         let input = json!({"name": "gamma"});
-        assert!(!evaluate_rule(&rule, &input));
+        assert!(!evaluate_rule(&rule, &input, None).unwrap());
+    }
+
+    fn rule_ok(rule: Value, input: Value) -> bool {
+        evaluate_rule(&rule, &input, None).unwrap()
+    }
+
+    #[test]
+    fn every_path_comparator() {
+        let input = json!({
+            "s": "b", "s_lo": "a", "s_hi": "c", "s_eq": "b",
+            "n": 5, "n_lo": 1, "n_hi": 9.5, "n_eq": 5.0,
+            "b": true, "b_eq": true,
+            "t": "2024-06-01T00:00:00Z", "t_lo": "2024-01-01T00:00:00Z",
+            "t_hi": "2025-01-01T00:00:00+02:00", "t_eq": "2024-06-01T02:00:00+02:00",
+            "pat": "b*"
+        });
+        let cases: &[(&str, &str, &str, bool)] = &[
+            ("$.s", "StringEqualsPath", "$.s_eq", true),
+            ("$.s", "StringEqualsPath", "$.s_lo", false),
+            ("$.s", "StringLessThanPath", "$.s_hi", true),
+            ("$.s", "StringLessThanPath", "$.s_lo", false),
+            ("$.s", "StringGreaterThanPath", "$.s_lo", true),
+            ("$.s", "StringLessThanEqualsPath", "$.s_eq", true),
+            ("$.s", "StringGreaterThanEqualsPath", "$.s_hi", false),
+            ("$.s", "StringMatchesPath", "$.pat", true),
+            ("$.n", "NumericEqualsPath", "$.n_eq", true),
+            ("$.n", "NumericLessThanPath", "$.n_hi", true),
+            ("$.n", "NumericGreaterThanPath", "$.n_lo", true),
+            ("$.n", "NumericLessThanEqualsPath", "$.n_eq", true),
+            ("$.n", "NumericGreaterThanEqualsPath", "$.n_hi", false),
+            ("$.b", "BooleanEqualsPath", "$.b_eq", true),
+            ("$.t", "TimestampEqualsPath", "$.t_eq", true),
+            ("$.t", "TimestampLessThanPath", "$.t_hi", true),
+            ("$.t", "TimestampGreaterThanPath", "$.t_lo", true),
+            ("$.t", "TimestampLessThanEqualsPath", "$.t_eq", true),
+            ("$.t", "TimestampGreaterThanEqualsPath", "$.t_hi", false),
+            // Type mismatch is false, not an error.
+            ("$.s", "NumericEqualsPath", "$.n", false),
+        ];
+        for (var, op, path, expected) in cases {
+            let rule = json!({"Variable": var, *op: path, "Next": "X"});
+            assert_eq!(rule_ok(rule, input.clone()), *expected, "{op} {path}");
+        }
+    }
+
+    #[test]
+    fn missing_variable_is_states_runtime() {
+        let rule = json!({"Variable": "$.missing", "StringEquals": "x", "Next": "X"});
+        let (err, cause) = evaluate_rule(&rule, &json!({}), None).unwrap_err();
+        assert_eq!(err, "States.Runtime");
+        assert!(cause.contains("$.missing"), "{cause}");
+        // Missing *Path comparand fails too.
+        let rule = json!({"Variable": "$.a", "NumericEqualsPath": "$.nope", "Next": "X"});
+        assert!(evaluate_rule(&rule, &json!({"a": 1}), None).is_err());
+        // Type tests on a missing field fail; only IsPresent may probe it.
+        let rule = json!({"Variable": "$.missing", "IsNull": true, "Next": "X"});
+        assert!(evaluate_rule(&rule, &json!({}), None).is_err());
+        let state = json!({"Choices": [rule], "Default": "D"});
+        assert!(evaluate_choice(&state, &json!({}), None).is_err());
+    }
+
+    #[test]
+    fn is_present_guards_missing_variable() {
+        let rule = json!({
+            "And": [
+                {"Variable": "$.x", "IsPresent": true},
+                {"Variable": "$.x", "StringEquals": "y"}
+            ],
+            "Next": "X"
+        });
+        assert!(!rule_ok(rule.clone(), json!({})));
+        assert!(rule_ok(rule, json!({"x": "y"})));
+        let rule = json!({"Variable": "$.items[3]", "IsPresent": false, "Next": "X"});
+        assert!(rule_ok(rule, json!({"items": [1]})));
+    }
+
+    #[test]
+    fn type_tests() {
+        let t = |op: &str, v: Value| {
+            rule_ok(
+                json!({"Variable": "$.v", op: true, "Next": "X"}),
+                json!({"v": v}),
+            )
+        };
+        assert!(t("IsString", json!("a")));
+        assert!(!t("IsString", json!(1)));
+        assert!(t("IsBoolean", json!(false)));
+        assert!(t("IsNumeric", json!(1.5)));
+        assert!(t("IsNull", Value::Null));
+        assert!(t("IsTimestamp", json!("2024-01-01T00:00:00Z")));
+        assert!(!t("IsTimestamp", json!("yesterday")));
+    }
+
+    #[test]
+    fn string_matches_escapes() {
+        assert!(string_matches("a*b", "a\\*b"));
+        assert!(!string_matches("axb", "a\\*b"));
+        assert!(string_matches("a\\b", "a\\\\b"));
+        assert!(string_matches("a\\bc", "a\\\\*"));
+    }
+
+    #[test]
+    fn variable_may_read_context_object() {
+        let ctx = json!({"Execution": {"Name": "run-1"}});
+        let rule = json!({"Variable": "$$.Execution.Name", "StringEquals": "run-1", "Next": "X"});
+        assert!(evaluate_rule(&rule, &json!({}), Some(&ctx)).unwrap());
+        let rule = json!({"Variable": "$$.Nope", "IsPresent": false, "Next": "X"});
+        assert!(evaluate_rule(&rule, &json!({}), Some(&ctx)).unwrap());
     }
 }

@@ -13,6 +13,9 @@ fakecloud implements **37 of 37** Step Functions operations at 100% Smithy confo
 - **ASL states** — Pass, Task, Choice, Wait, Parallel, Map, Succeed, Fail
 - **Retry and Catch** — full retry logic with exponential backoff, catch clauses with error filters
 - **JSONPath and JSONata** — both query languages for state input/output
+- **JSONPath paths**: the full JSONPath syntax AWS accepts (`$['key']`, `[-1]`, `[*]`, slices, `..` deep scan, `[?(@.x > 1)]` filters) in `InputPath` / `OutputPath` / `ItemsPath` / `Parameters` / `ResultSelector` / `ItemSelector` and Choice rules. A path that matches nothing fails the execution with `States.Runtime`, as on AWS (only `IsPresent` may probe a missing field)
+- **Choice rules**: every comparator and its `*Path` form (String/Numeric/Timestamp Equals, LessThan, GreaterThan, LessThanEquals, GreaterThanEquals, BooleanEquals, StringMatches), the `Is*` type tests and `And` / `Or` / `Not`
+- **Intrinsic functions**: all `States.*` functions, nested up to 10 levels (`States.ArrayGetItem(States.StringSplit($.s, ','), 0)`) with the `\'`, `\{`, `\}`, `\\` string escapes; a failing intrinsic fails the state with `States.IntrinsicFailure`
 - **Task integrations** — Lambda (`invoke`, `invoke.waitForTaskToken`), SQS (`sendMessage`), SNS (`publish`), EventBridge (`putEvents`), DynamoDB (`getItem` / `putItem` / `updateItem` / `deleteItem`), and **nested Step Functions** (`states:startExecution` async + `states:startExecution.sync` blocking) — `.sync` waits for the child execution to terminate and propagates its output or failure to the parent.
 - **Map state** — parallel item processing with concurrency control. Supports **distributed mode** (`ItemProcessor.ProcessorConfig.Mode=DISTRIBUTED`) with `MaxConcurrency`, `ToleratedFailurePercentage`, and `ItemReader` over S3 (JSON/JSONL/CSV manifests).
 - **Parallel state** — concurrent branch execution

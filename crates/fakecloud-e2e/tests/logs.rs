@@ -3262,3 +3262,93 @@ async fn logs_insights_stats_and_ptr() {
     let rec = record.log_record().expect("log record body");
     assert!(rec.contains_key("@message"), "resolved record has @message");
 }
+
+/// Tailing a stream with nextForwardToken from an empty start must deliver
+/// every event, including the first one written after the initial poll, and
+/// an unknown FilterLogEvents nextToken is an InvalidParameterException.
+#[tokio::test]
+async fn logs_get_log_events_polling_resumes_at_next_unseen_event() {
+    let server = TestServer::start().await;
+    let client = server.logs_client().await;
+    let group = "/poll/test";
+    client
+        .create_log_group()
+        .log_group_name(group)
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_log_stream()
+        .log_group_name(group)
+        .log_stream_name("s")
+        .send()
+        .await
+        .unwrap();
+
+    let poll = |token: Option<String>| {
+        let client = client.clone();
+        async move {
+            let mut req = client
+                .get_log_events()
+                .log_group_name(group)
+                .log_stream_name("s")
+                .start_from_head(true);
+            if let Some(t) = token {
+                req = req.next_token(t);
+            }
+            let resp = req.send().await.unwrap();
+            let msgs: Vec<String> = resp
+                .events()
+                .iter()
+                .map(|e| e.message().unwrap().to_string())
+                .collect();
+            (msgs, resp.next_forward_token().unwrap().to_string())
+        }
+    };
+    let put = |msgs: &'static [&'static str], ts: i64| {
+        let client = client.clone();
+        async move {
+            let mut req = client
+                .put_log_events()
+                .log_group_name(group)
+                .log_stream_name("s");
+            for (i, m) in msgs.iter().enumerate() {
+                req = req.log_events(
+                    InputLogEvent::builder()
+                        .timestamp(ts + i as i64)
+                        .message(*m)
+                        .build()
+                        .unwrap(),
+                );
+            }
+            req.send().await.unwrap();
+        }
+    };
+
+    let (msgs, token) = poll(None).await;
+    assert!(msgs.is_empty());
+    let (msgs, same) = poll(Some(token.clone())).await;
+    assert!(msgs.is_empty());
+    assert_eq!(same, token, "no new events hands back the same token");
+
+    let now = chrono::Utc::now().timestamp_millis();
+    put(&["first", "second"], now).await;
+    let (msgs, token) = poll(Some(token)).await;
+    assert_eq!(msgs, vec!["first", "second"]);
+
+    put(&["third"], now + 100).await;
+    let (msgs, _) = poll(Some(token)).await;
+    assert_eq!(msgs, vec!["third"]);
+
+    let err = client
+        .filter_log_events()
+        .log_group_name(group)
+        .next_token("not-a-token")
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err.into_service_error().meta().code(),
+        Some("InvalidParameterException")
+    );
+}

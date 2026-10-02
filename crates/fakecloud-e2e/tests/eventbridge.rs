@@ -1656,3 +1656,121 @@ async fn eb_put_targets_full_field_roundtrip() {
     assert_eq!(map.get("id"), Some(&"$.detail.id".to_string()));
     assert_eq!(map.get("type"), Some(&"$.detail-type".to_string()));
 }
+
+/// An object pattern against an array of objects matches when any element
+/// matches (AWS crushes arrays out of the event), and `anything-but` / `[null]`
+/// require the field to be present.
+#[tokio::test]
+async fn eb_rule_matches_array_of_objects() {
+    let server = TestServer::start().await;
+    let eb = server.eventbridge_client().await;
+    let sqs = server.sqs_client().await;
+
+    let queue_url = sqs
+        .create_queue()
+        .queue_name("eb-array-objects")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let queue_arn = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    eb.put_rule()
+        .name("array-objects-rule")
+        .event_pattern(r#"{"source": ["app.cart"], "detail": {"items": {"sku": ["gold"]}}}"#)
+        .send()
+        .await
+        .unwrap();
+    eb.put_targets()
+        .rule("array-objects-rule")
+        .targets(Target::builder().id("q").arn(&queue_arn).build().unwrap())
+        .send()
+        .await
+        .unwrap();
+
+    for detail in [
+        r#"{"tag": "hit", "items": [{"sku": "silver"}, {"sku": "gold"}]}"#,
+        r#"{"tag": "miss", "items": [{"sku": "silver"}]}"#,
+    ] {
+        eb.put_events()
+            .entries(
+                PutEventsRequestEntry::builder()
+                    .source("app.cart")
+                    .detail_type("Cart")
+                    .detail(detail)
+                    .build(),
+            )
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let msgs = sqs
+        .receive_message()
+        .queue_url(&queue_url)
+        .max_number_of_messages(10)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(msgs.messages().len(), 1, "only the gold cart matches");
+    let body: serde_json::Value = serde_json::from_str(msgs.messages()[0].body().unwrap()).unwrap();
+    assert_eq!(body["detail"]["tag"], "hit");
+
+    // TestEventPattern: presence rules and array semantics.
+    let event = |detail: &str| {
+        format!(
+            r#"{{"id":"1","account":"123456789012","source":"app","time":"2024-01-01T00:00:00Z","region":"us-east-1","resources":[],"detail-type":"T","detail":{detail}}}"#
+        )
+    };
+    let check = |pattern: &'static str, detail: &'static str| {
+        let eb = eb.clone();
+        let ev = event(detail);
+        async move {
+            eb.test_event_pattern()
+                .event_pattern(pattern)
+                .event(ev)
+                .send()
+                .await
+                .unwrap()
+                .result()
+        }
+    };
+    assert!(!check(r#"{"detail": {"s": [{"anything-but": "x"}]}}"#, "{}").await);
+    assert!(
+        check(
+            r#"{"detail": {"s": [{"anything-but": "x"}]}}"#,
+            r#"{"s": ["x", "y"]}"#
+        )
+        .await
+    );
+    assert!(
+        !check(
+            r#"{"detail": {"s": [{"anything-but": "x"}]}}"#,
+            r#"{"s": ["x"]}"#
+        )
+        .await
+    );
+    assert!(!check(r#"{"detail": {"s": [null]}}"#, "{}").await);
+    assert!(check(r#"{"detail": {"s": [null]}}"#, r#"{"s": null}"#).await);
+    assert!(check(r#"{"detail": {"s": [{"exists": true}]}}"#, r#"{"s": null}"#).await);
+    assert!(
+        !check(
+            r#"{"detail": {"n": [{"anything-but": 100}]}}"#,
+            r#"{"n": 100.0}"#
+        )
+        .await
+    );
+}

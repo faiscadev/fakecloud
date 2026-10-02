@@ -11,8 +11,6 @@
 use base64::Engine;
 use serde_json::{json, Value};
 
-use crate::io_processing::resolve_path;
-
 #[derive(Debug, Clone)]
 pub struct IntrinsicError(pub String);
 
@@ -28,139 +26,306 @@ pub fn is_intrinsic_call(value: &str) -> bool {
     value.starts_with("States.") && value.contains('(')
 }
 
+/// Maximum nesting depth of intrinsic calls within one field. AWS: "You can
+/// nest up to 10 intrinsic functions within a field."
+const MAX_NESTING: usize = 10;
+
+/// Failure evaluating an intrinsic expression.
+#[derive(Debug, Clone)]
+pub enum CallError {
+    /// The function itself failed (bad arguments, unknown function, ...):
+    /// surfaced as `States.IntrinsicFailure`.
+    Intrinsic(IntrinsicError),
+    /// A JSONPath argument matched nothing: surfaced as `States.Runtime`, as
+    /// for every other path that matches nothing.
+    Path(String),
+}
+
+impl CallError {
+    /// The `(error, cause)` pair the state fails with.
+    pub fn into_states_error(self) -> (String, String) {
+        match self {
+            CallError::Intrinsic(e) => ("States.IntrinsicFailure".to_string(), e.0),
+            CallError::Path(cause) => ("States.Runtime".to_string(), cause),
+        }
+    }
+}
+
+impl From<IntrinsicError> for CallError {
+    fn from(e: IntrinsicError) -> Self {
+        CallError::Intrinsic(e)
+    }
+}
+
 /// Evaluate an ASL intrinsic call against `input`. Returns the
 /// computed value or an error string suitable for surfacing as
 /// `States.IntrinsicFailure`.
 pub fn evaluate(call: &str, input: &Value) -> Result<Value, IntrinsicError> {
-    let (name, args_str) = split_call(call)?;
-    let args = parse_args(args_str, input)?;
+    evaluate_with_context(call, input, None).map_err(|e| match e {
+        CallError::Intrinsic(e) => e,
+        CallError::Path(cause) => IntrinsicError(cause),
+    })
+}
+
+/// Evaluate an intrinsic call whose `$$` arguments read `context` (the
+/// Step Functions context object) when one is supplied.
+pub fn evaluate_with_context(
+    call: &str,
+    input: &Value,
+    context: Option<&Value>,
+) -> Result<Value, CallError> {
+    let mut parser = CallParser {
+        chars: call.trim().chars().collect(),
+        pos: 0,
+    };
+    let expr = parser.call(1)?;
+    parser.skip_ws();
+    if parser.pos != parser.chars.len() {
+        return Err(IntrinsicError(format!("unexpected trailing input in '{call}'")).into());
+    }
+    eval_expr(&expr, input, context)
+}
+
+/// A parsed intrinsic argument.
+#[derive(Debug, Clone)]
+enum Expr {
+    Call {
+        name: String,
+        args: Vec<Expr>,
+    },
+    /// A single-quoted string literal: its unescaped value, and the raw text
+    /// between the quotes (States.Format needs the escapes to tell `\{\}`
+    /// apart from a `{}` placeholder).
+    Str {
+        value: String,
+        raw: String,
+    },
+    Path(String),
+    Literal(Value),
+}
+
+fn eval_expr(expr: &Expr, input: &Value, context: Option<&Value>) -> Result<Value, CallError> {
+    match expr {
+        Expr::Literal(v) => Ok(v.clone()),
+        Expr::Str { value, .. } => Ok(Value::String(value.clone())),
+        Expr::Path(path) => crate::io_processing::resolve_with_context(input, context, path)
+            .map_err(|e| CallError::Path(crate::io_processing::path_error_cause(path, &e))),
+        Expr::Call { name, args } => {
+            let values = args
+                .iter()
+                .map(|a| eval_expr(a, input, context))
+                .collect::<Result<Vec<_>, _>>()?;
+            if name == "States.Format" {
+                let raw = match args.first() {
+                    Some(Expr::Str { raw, .. }) => Some(raw.as_str()),
+                    _ => None,
+                };
+                return Ok(fn_format(raw, &values)?);
+            }
+            Ok(call_function(name, &values)?)
+        }
+    }
+}
+
+fn call_function(name: &str, args: &[Value]) -> Result<Value, IntrinsicError> {
     match name {
-        "States.Format" => fn_format(&args),
-        "States.JsonToString" => fn_json_to_string(&args),
-        "States.StringToJson" => fn_string_to_json(&args),
-        "States.Array" => Ok(Value::Array(args)),
-        "States.ArrayPartition" => fn_array_partition(&args),
-        "States.ArrayContains" => fn_array_contains(&args),
-        "States.ArrayRange" => fn_array_range(&args),
-        "States.ArrayGetItem" => fn_array_get_item(&args),
-        "States.ArrayLength" => fn_array_length(&args),
-        "States.ArrayUnique" => fn_array_unique(&args),
-        "States.Base64Encode" => fn_base64_encode(&args),
-        "States.Base64Decode" => fn_base64_decode(&args),
-        "States.Hash" => fn_hash(&args),
-        "States.JsonMerge" => fn_json_merge(&args),
-        "States.MathRandom" => fn_math_random(&args),
-        "States.MathAdd" => fn_math_add(&args),
-        "States.UUID" => fn_uuid(&args),
-        "States.StringSplit" => fn_string_split(&args),
+        "States.JsonToString" => fn_json_to_string(args),
+        "States.StringToJson" => fn_string_to_json(args),
+        "States.Array" => Ok(Value::Array(args.to_vec())),
+        "States.ArrayPartition" => fn_array_partition(args),
+        "States.ArrayContains" => fn_array_contains(args),
+        "States.ArrayRange" => fn_array_range(args),
+        "States.ArrayGetItem" => fn_array_get_item(args),
+        "States.ArrayLength" => fn_array_length(args),
+        "States.ArrayUnique" => fn_array_unique(args),
+        "States.Base64Encode" => fn_base64_encode(args),
+        "States.Base64Decode" => fn_base64_decode(args),
+        "States.Hash" => fn_hash(args),
+        "States.JsonMerge" => fn_json_merge(args),
+        "States.MathRandom" => fn_math_random(args),
+        "States.MathAdd" => fn_math_add(args),
+        "States.UUID" => fn_uuid(args),
+        "States.StringSplit" => fn_string_split(args),
         other => Err(IntrinsicError(format!("unknown intrinsic '{other}'"))),
     }
 }
 
-fn split_call(call: &str) -> Result<(&str, &str), IntrinsicError> {
-    let open = call
-        .find('(')
-        .ok_or_else(|| IntrinsicError(format!("missing '(' in '{call}'")))?;
-    if !call.ends_with(')') {
-        return Err(IntrinsicError(format!("missing ')' in '{call}'")));
-    }
-    let name = &call[..open];
-    let args_str = &call[open + 1..call.len() - 1];
-    Ok((name, args_str))
+/// Recursive-descent parser for `States.Fn(arg, ...)` expressions. Arguments
+/// are nested calls, single-quoted strings (escapes `\'`, `\{`, `\}`, `\\`),
+/// JSONPath references (`$...` / `$$...`, which may themselves contain
+/// brackets, parentheses, commas and quotes inside filters) or JSON literals
+/// (numbers, `true`, `false`, `null`).
+struct CallParser {
+    chars: Vec<char>,
+    pos: usize,
 }
 
-fn parse_args(args_str: &str, input: &Value) -> Result<Vec<Value>, IntrinsicError> {
-    let mut out = Vec::new();
-    if args_str.trim().is_empty() {
-        return Ok(out);
+impl CallParser {
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
     }
-    for raw in split_top_level_commas(args_str) {
-        let arg = raw.trim();
-        if arg.is_empty() {
-            continue;
+
+    fn skip_ws(&mut self) {
+        while self.peek().is_some_and(char::is_whitespace) {
+            self.pos += 1;
         }
-        out.push(parse_arg(arg, input)?);
     }
-    Ok(out)
-}
 
-/// Split a comma-separated argument list, ignoring commas that fall
-/// inside quoted strings (`'...'` or `"..."`). Backslash escapes
-/// inside single-quoted strings are honoured.
-fn split_top_level_commas(s: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut current = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' if in_single => {
-                if let Some(&next) = chars.peek() {
-                    current.push('\\');
-                    current.push(next);
-                    chars.next();
+    fn rest_starts_with(&self, s: &str) -> bool {
+        let n = s.chars().count();
+        self.chars
+            .get(self.pos..self.pos + n)
+            .is_some_and(|w| w.iter().copied().eq(s.chars()))
+    }
+
+    fn text(&self) -> String {
+        self.chars.iter().collect()
+    }
+
+    fn err<T>(&self, msg: &str) -> Result<T, IntrinsicError> {
+        Err(IntrinsicError(format!(
+            "{msg} at position {} in '{}'",
+            self.pos,
+            self.text()
+        )))
+    }
+
+    fn call(&mut self, depth: usize) -> Result<Expr, IntrinsicError> {
+        if depth > MAX_NESTING {
+            return Err(IntrinsicError(format!(
+                "intrinsic functions can be nested at most {MAX_NESTING} levels deep in '{}'",
+                self.text()
+            )));
+        }
+        self.skip_ws();
+        if !self.rest_starts_with("States.") {
+            return self.err("expected an intrinsic function");
+        }
+        let start = self.pos;
+        while self
+            .peek()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '.')
+        {
+            self.pos += 1;
+        }
+        let name: String = self.chars[start..self.pos].iter().collect();
+        self.skip_ws();
+        if self.peek() != Some('(') {
+            return Err(IntrinsicError(format!("missing '(' in '{}'", self.text())));
+        }
+        self.pos += 1;
+        let mut args = Vec::new();
+        self.skip_ws();
+        if self.peek() == Some(')') {
+            self.pos += 1;
+            return Ok(Expr::Call { name, args });
+        }
+        loop {
+            args.push(self.arg(depth)?);
+            self.skip_ws();
+            match self.peek() {
+                Some(',') => self.pos += 1,
+                Some(')') => {
+                    self.pos += 1;
+                    return Ok(Expr::Call { name, args });
+                }
+                None => return Err(IntrinsicError(format!("missing ')' in '{}'", self.text()))),
+                Some(_) => return self.err("expected ',' or ')'"),
+            }
+        }
+    }
+
+    fn arg(&mut self, depth: usize) -> Result<Expr, IntrinsicError> {
+        self.skip_ws();
+        match self.peek() {
+            Some('S') if self.rest_starts_with("States.") => self.call(depth + 1),
+            Some('\'') => self.string(),
+            Some('$') => self.path(),
+            Some(_) => self.literal(),
+            None => self.err("expected an argument"),
+        }
+    }
+
+    fn string(&mut self) -> Result<Expr, IntrinsicError> {
+        self.pos += 1; // opening quote
+        let mut value = String::new();
+        let mut raw = String::new();
+        loop {
+            match self.peek() {
+                None => return self.err("unterminated string literal"),
+                Some('\\') => {
+                    let Some(next) = self.chars.get(self.pos + 1).copied() else {
+                        return self.err("unterminated escape sequence");
+                    };
+                    raw.push('\\');
+                    raw.push(next);
+                    value.push_str(&unescape_char(next));
+                    self.pos += 2;
+                }
+                Some('\'') => {
+                    self.pos += 1;
+                    return Ok(Expr::Str { value, raw });
+                }
+                Some(c) => {
+                    value.push(c);
+                    raw.push(c);
+                    self.pos += 1;
                 }
             }
-            '\'' if !in_double => {
-                in_single = !in_single;
-                current.push(c);
-            }
-            '"' if !in_single => {
-                in_double = !in_double;
-                current.push(c);
-            }
-            ',' if !in_single && !in_double => {
-                out.push(current.clone());
-                current.clear();
-            }
-            _ => current.push(c),
         }
     }
-    if !current.is_empty() || s.ends_with(',') {
-        out.push(current);
-    }
-    out
-}
 
-fn parse_arg(arg: &str, input: &Value) -> Result<Value, IntrinsicError> {
-    if arg.starts_with('$') {
-        Ok(resolve_path(input, arg))
-    } else if arg.starts_with('\'') && arg.ends_with('\'') && arg.len() >= 2 {
-        // Single-quoted string literal with backslash escapes.
-        let inner = &arg[1..arg.len() - 1];
-        Ok(Value::String(unescape_single_quoted(inner)))
-    } else {
-        // Try JSON literal (number, bool, null, double-quoted string,
-        // object/array). Fall back to bare string.
-        serde_json::from_str(arg)
-            .map_err(|e| IntrinsicError(format!("invalid argument '{arg}': {e}")))
-    }
-}
-
-fn unescape_single_quoted(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\\' {
-            match chars.next() {
-                Some('\\') => out.push('\\'),
-                Some('\'') => out.push('\''),
-                Some('n') => out.push('\n'),
-                Some('t') => out.push('\t'),
-                Some('{') => out.push('{'),
-                Some('}') => out.push('}'),
-                Some(other) => {
-                    out.push('\\');
-                    out.push(other);
+    /// A JSONPath runs to the next top-level `,` or `)`; brackets,
+    /// parentheses and quotes inside it (filters, quoted names) are skipped.
+    fn path(&mut self) -> Result<Expr, IntrinsicError> {
+        let start = self.pos;
+        let mut depth = 0usize;
+        let mut quote: Option<char> = None;
+        while let Some(c) = self.peek() {
+            if let Some(q) = quote {
+                if c == '\\' {
+                    self.pos += 1;
+                } else if c == q {
+                    quote = None;
                 }
-                None => out.push('\\'),
+            } else {
+                match c {
+                    '\'' | '"' if depth > 0 => quote = Some(c),
+                    '[' | '(' => depth += 1,
+                    ']' | ')' if depth > 0 => depth -= 1,
+                    ',' | ')' if depth == 0 => break,
+                    _ => {}
+                }
             }
-        } else {
-            out.push(c);
+            self.pos += 1;
         }
+        let path: String = self.chars[start..self.pos.min(self.chars.len())]
+            .iter()
+            .collect();
+        Ok(Expr::Path(path.trim_end().to_string()))
     }
-    out
+
+    fn literal(&mut self) -> Result<Expr, IntrinsicError> {
+        let start = self.pos;
+        while self.peek().is_some_and(|c| c != ',' && c != ')') {
+            self.pos += 1;
+        }
+        let raw: String = self.chars[start..self.pos].iter().collect();
+        let raw = raw.trim();
+        serde_json::from_str::<Value>(raw)
+            .map(Expr::Literal)
+            .map_err(|e| IntrinsicError(format!("invalid argument '{raw}': {e}")))
+    }
+}
+
+/// Value of the character following a backslash in a string literal.
+fn unescape_char(c: char) -> String {
+    match c {
+        '\\' | '\'' | '{' | '}' => c.to_string(),
+        'n' => "\n".to_string(),
+        't' => "\t".to_string(),
+        other => format!("\\{other}"),
+    }
 }
 
 fn arg_as_str(v: &Value) -> Result<String, IntrinsicError> {
@@ -197,24 +362,33 @@ fn need_args(args: &[Value], expected: usize, name: &str) -> Result<(), Intrinsi
     }
 }
 
-fn fn_format(args: &[Value]) -> Result<Value, IntrinsicError> {
+/// `States.Format(template, args...)`. Each `{}` in the template is
+/// replaced by the next argument. In a string-literal template, `\{` and `\}`
+/// are literal braces (so `'\{\}'` is not a placeholder); `raw` carries the
+/// literal's escaped text for that. A template from a path or nested call is
+/// used as-is.
+fn fn_format(raw: Option<&str>, args: &[Value]) -> Result<Value, IntrinsicError> {
     if args.is_empty() {
         return Err(IntrinsicError(
             "States.Format requires at least one argument".into(),
         ));
     }
-    let template = args[0]
-        .as_str()
-        .ok_or_else(|| IntrinsicError("States.Format template must be a string".into()))?;
+    let template = match raw {
+        Some(raw) => raw.to_string(),
+        None => args[0]
+            .as_str()
+            .ok_or_else(|| IntrinsicError("States.Format template must be a string".into()))?
+            .to_string(),
+    };
+    let honour_escapes = raw.is_some();
     let mut out = String::with_capacity(template.len());
     let mut chars = template.chars().peekable();
     let mut idx = 1;
     while let Some(c) = chars.next() {
         match c {
-            '\\' => {
-                if let Some(&n) = chars.peek() {
-                    out.push(n);
-                    chars.next();
+            '\\' if honour_escapes => {
+                if let Some(n) = chars.next() {
+                    out.push_str(&unescape_char(n));
                 }
             }
             '{' if matches!(chars.peek(), Some('}')) => {
@@ -645,5 +819,118 @@ mod tests {
     fn unknown_intrinsic_errors() {
         let err = evaluate("States.NoSuchFunction()", &Value::Null).unwrap_err();
         assert!(format!("{err}").contains("unknown"));
+    }
+
+    #[test]
+    fn nested_intrinsics() {
+        let input = json!({"s": "a,b,c", "x": 7});
+        assert_eq!(
+            evaluate(
+                "States.ArrayGetItem(States.StringSplit($.s, ','), 1)",
+                &input
+            )
+            .unwrap(),
+            json!("b")
+        );
+        assert_eq!(
+            evaluate(
+                r#"States.StringToJson(States.Format('\{"a":\{\}, "n": {}\}', $.x))"#,
+                &input
+            )
+            .unwrap(),
+            json!({"a": {}, "n": 7})
+        );
+        assert_eq!(
+            evaluate(
+                "States.ArrayLength(States.Array(States.MathAdd($.x, 1), 'p,q', States.Array()))",
+                &input
+            )
+            .unwrap(),
+            json!(3)
+        );
+    }
+
+    #[test]
+    fn nesting_limit_is_ten() {
+        let nest = |n: usize| {
+            let mut e = "States.Array()".to_string();
+            for _ in 1..n {
+                e = format!("States.Array({e})");
+            }
+            e
+        };
+        assert!(evaluate(&nest(10), &Value::Null).is_ok());
+        let err = evaluate(&nest(11), &Value::Null).unwrap_err();
+        assert!(format!("{err}").contains("nested"), "{err}");
+    }
+
+    #[test]
+    fn string_literal_escapes() {
+        assert_eq!(
+            evaluate(r"States.Format('it\'s \\ a \{\} {}', 'x')", &Value::Null).unwrap(),
+            json!(r"it's \ a {} x")
+        );
+        // Commas and parens inside strings never split arguments.
+        assert_eq!(
+            evaluate("States.Array('a,b', '(c)')", &Value::Null).unwrap(),
+            json!(["a,b", "(c)"])
+        );
+        // Escaped braces in a non-Format literal are plain braces.
+        assert_eq!(
+            evaluate(r"States.StringToJson('\{\}')", &Value::Null).unwrap(),
+            json!({})
+        );
+    }
+
+    #[test]
+    fn path_arguments_with_brackets_and_filters() {
+        let input = json!({"items": [{"id": 1, "n": "a"}, {"id": 2, "n": "b"}], "k": {"x,y": 3}});
+        assert_eq!(
+            evaluate("States.ArrayLength($.items[?(@.id > 1)])", &input).unwrap(),
+            json!(1)
+        );
+        assert_eq!(
+            evaluate("States.Array($['k']['x,y'], $.items[-1].n)", &input).unwrap(),
+            json!([3, "b"])
+        );
+    }
+
+    #[test]
+    fn missing_path_argument_is_runtime_error() {
+        let err = evaluate_with_context("States.Format('{}', $.nope)", &json!({}), None)
+            .unwrap_err()
+            .into_states_error();
+        assert_eq!(err.0, "States.Runtime");
+        let err = evaluate_with_context("States.ArrayGetItem($.a, -1)", &json!({"a": [1]}), None)
+            .unwrap_err()
+            .into_states_error();
+        assert_eq!(err.0, "States.IntrinsicFailure");
+    }
+
+    #[test]
+    fn context_path_arguments() {
+        let ctx = json!({"Execution": {"Id": "arn:x"}});
+        assert_eq!(
+            evaluate_with_context(
+                "States.Format('id={}', $$.Execution.Id)",
+                &json!({}),
+                Some(&ctx)
+            )
+            .unwrap(),
+            json!("id=arn:x")
+        );
+    }
+
+    #[test]
+    fn malformed_calls_error() {
+        for bad in [
+            "States.Format('{}'",
+            "States.Array(1,",
+            "States.Array(1) trailing",
+            "States.Array('unterminated)",
+            "States.Array(bogus)",
+        ] {
+            assert!(evaluate(bad, &Value::Null).is_err(), "{bad}");
+        }
     }
 }

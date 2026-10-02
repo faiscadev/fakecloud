@@ -933,61 +933,38 @@ impl LogsService {
 
         let total = all_events.len();
 
-        // Determine start position from token
-        let (start_idx, is_forward) = if let Some(token) = next_token {
-            let is_forward = token.starts_with("f/");
-            let idx: usize = token[2..].parse().unwrap_or(0);
-            if is_forward {
-                // Forward token: start from idx+1
-                (idx + 1, true)
-            } else {
-                // Backward token: end at idx (exclusive), so start at max(0, idx-limit)
-                (idx, false)
-            }
-        } else {
-            (0, start_from_head)
+        // Tokens carry a cursor position into the (filtered) event list:
+        // `f/N` reads forward starting at index N (the first event not yet
+        // returned) and `b/N` reads the `limit` events before index N. A
+        // forward poll that finds nothing new hands back the same token, so a
+        // tailing client resumes exactly at the next unseen event, including
+        // when the stream was empty on the first call.
+        let cursor = match next_token {
+            Some(token) => Some(parse_get_log_events_token(token)?),
+            None => None,
         };
 
-        let events_slice: Vec<&LogEvent>;
-        let next_forward_idx: usize;
-        let next_backward_idx: usize;
-
-        if is_forward || start_from_head && next_token.is_none() {
-            // Forward: from start_idx, take limit
-            let end_idx = std::cmp::min(start_idx + limit, total);
-            if start_idx >= total {
-                events_slice = Vec::new();
-                let last_idx = if total > 0 { total - 1 } else { 0 };
-                next_forward_idx = last_idx;
-                next_backward_idx = last_idx;
-            } else {
-                events_slice = all_events[start_idx..end_idx].to_vec();
-                next_forward_idx = end_idx - 1;
-                next_backward_idx = start_idx;
-            }
-        } else {
-            // Backward (default): from end, take last `limit` events
-            if next_token.is_some() {
-                // Backward token: start_idx is the position, go backward `limit` from here
-                let begin = start_idx.saturating_sub(limit);
-                let end_idx = start_idx;
-                if begin >= total || end_idx > total || begin >= end_idx {
-                    events_slice = Vec::new();
-                    next_forward_idx = start_idx;
-                    next_backward_idx = start_idx;
-                } else {
-                    events_slice = all_events[begin..end_idx].to_vec();
-                    next_forward_idx = end_idx - 1;
-                    next_backward_idx = begin;
+        let (events_slice, next_forward_idx, next_backward_idx): (Vec<&LogEvent>, usize, usize) =
+            match cursor {
+                Some((true, pos)) => {
+                    let begin = pos.min(total);
+                    let end_idx = begin.saturating_add(limit).min(total);
+                    (all_events[begin..end_idx].to_vec(), end_idx, begin)
                 }
-            } else {
-                // No token, not start_from_head: return last `limit` events
-                let begin = total.saturating_sub(limit);
-                events_slice = all_events[begin..].to_vec();
-                next_forward_idx = if total > 0 { total - 1 } else { 0 };
-                next_backward_idx = begin;
-            }
-        }
+                Some((false, pos)) => {
+                    let end_idx = pos.min(total);
+                    let begin = end_idx.saturating_sub(limit);
+                    (all_events[begin..end_idx].to_vec(), end_idx, begin)
+                }
+                None if start_from_head => {
+                    let end_idx = limit.min(total);
+                    (all_events[..end_idx].to_vec(), end_idx, 0)
+                }
+                None => {
+                    let begin = total.saturating_sub(limit);
+                    (all_events[begin..].to_vec(), total, begin)
+                }
+            };
 
         let events_json: Vec<Value> = events_slice
             .iter()
@@ -1161,19 +1138,36 @@ impl LogsService {
 
         // Handle pagination
         // Token format: groupName@streamName@eventId
+        // A token this API never issued (wrong shape, another group, or an
+        // event id that is not in the result set) is rejected, as AWS does,
+        // rather than silently returning an empty page.
         let start_idx = if let Some(token) = next_token {
-            let parts: Vec<&str> = token.splitn(3, '@').collect();
-            if parts.len() == 3 {
-                let after_event_id = parts[2];
-                // Find the position after this eventId
-                filtered_events
-                    .iter()
-                    .position(|e| e["eventId"].as_str().unwrap_or("") == after_event_id)
-                    .map(|pos| pos + 1)
-                    .unwrap_or(filtered_events.len())
-            } else {
-                filtered_events.len() // invalid token -> empty results
-            }
+            let invalid = || {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterException",
+                    "The specified nextToken is invalid.",
+                )
+            };
+            // Token format: `group@stream@eventId`. Group names cannot contain
+            // `@` but stream names can, so match the `stream@eventId` tail
+            // whole instead of splitting it.
+            let rest = match token.split_once('@') {
+                Some((group, rest)) if group == resolved_group_name => rest,
+                _ => return Err(invalid()),
+            };
+            filtered_events
+                .iter()
+                .position(|e| {
+                    let stream = e["logStreamName"].as_str().unwrap_or("");
+                    let id = e["eventId"].as_str().unwrap_or("");
+                    rest.len() == stream.len() + 1 + id.len()
+                        && rest.starts_with(stream)
+                        && rest[stream.len()..].starts_with('@')
+                        && rest.ends_with(id)
+                })
+                .map(|pos| pos + 1)
+                .ok_or_else(invalid)?
         } else {
             0
         };
@@ -1304,6 +1298,31 @@ fn parse_log_record_pointer(pointer: &str) -> Option<(String, String, usize)> {
     }
     let idx = parts[2].parse::<usize>().ok()?;
     Some((parts[0].to_string(), parts[1].to_string(), idx))
+}
+
+/// Parse a `GetLogEvents` `nextToken` (`f/<digits>` or `b/<digits>`) into
+/// `(is_forward, position)`. Anything else is rejected the way AWS rejects a
+/// token it did not issue.
+fn parse_get_log_events_token(token: &str) -> Result<(bool, usize), AwsServiceError> {
+    let invalid = || {
+        AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            "The specified nextToken is invalid.",
+        )
+    };
+    let (is_forward, digits) = if let Some(d) = token.strip_prefix("f/") {
+        (true, d)
+    } else if let Some(d) = token.strip_prefix("b/") {
+        (false, d)
+    } else {
+        return Err(invalid());
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(invalid());
+    }
+    let pos = digits.parse::<usize>().map_err(|_| invalid())?;
+    Ok((is_forward, pos))
 }
 
 #[cfg(test)]
@@ -2327,6 +2346,139 @@ mod tests {
     }
 
     // ── get_log_events ──
+
+    fn gle(svc: &LogsService, extra: Value) -> Value {
+        let mut body = json!({"logGroupName": "g", "logStreamName": "s"});
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let resp = svc
+            .get_log_events(&make_request("GetLogEvents", body))
+            .unwrap();
+        serde_json::from_slice(resp.body.expect_bytes()).unwrap()
+    }
+
+    fn messages(body: &Value) -> Vec<String> {
+        body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["message"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn get_log_events_polling_from_empty_stream_does_not_skip_first_event() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s");
+
+        let first = gle(&svc, json!({"startFromHead": true}));
+        assert!(messages(&first).is_empty());
+        let token = first["nextForwardToken"].as_str().unwrap().to_string();
+
+        // Nothing new: the same token comes back.
+        let again = gle(&svc, json!({"nextToken": token}));
+        assert!(messages(&again).is_empty());
+        assert_eq!(again["nextForwardToken"].as_str().unwrap(), token);
+
+        let now = chrono::Utc::now().timestamp_millis();
+        put_events_at(&svc, "g", "s", &["one", "two"], now);
+        let page = gle(&svc, json!({"nextToken": token}));
+        assert_eq!(messages(&page), vec!["one", "two"]);
+        let token = page["nextForwardToken"].as_str().unwrap().to_string();
+
+        put_events_at(&svc, "g", "s", &["three"], now + 10);
+        let page = gle(&svc, json!({"nextToken": token}));
+        assert_eq!(messages(&page), vec!["three"]);
+        let token = page["nextForwardToken"].as_str().unwrap().to_string();
+        let page = gle(&svc, json!({"nextToken": token.clone()}));
+        assert!(messages(&page).is_empty());
+        assert_eq!(page["nextForwardToken"].as_str().unwrap(), token);
+    }
+
+    #[test]
+    fn get_log_events_forward_and_backward_pagination() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s");
+        put_events(&svc, "g", "s", &["a", "b", "c", "d", "e"]);
+
+        let p1 = gle(&svc, json!({"startFromHead": true, "limit": 2}));
+        assert_eq!(messages(&p1), vec!["a", "b"]);
+        let p2 = gle(
+            &svc,
+            json!({"limit": 2, "nextToken": p1["nextForwardToken"]}),
+        );
+        assert_eq!(messages(&p2), vec!["c", "d"]);
+        let p3 = gle(
+            &svc,
+            json!({"limit": 2, "nextToken": p2["nextForwardToken"]}),
+        );
+        assert_eq!(messages(&p3), vec!["e"]);
+
+        // Tail first, then walk backward without overlap or gaps.
+        let t1 = gle(&svc, json!({"limit": 2}));
+        assert_eq!(messages(&t1), vec!["d", "e"]);
+        let t2 = gle(
+            &svc,
+            json!({"limit": 2, "nextToken": t1["nextBackwardToken"]}),
+        );
+        assert_eq!(messages(&t2), vec!["b", "c"]);
+        let t3 = gle(
+            &svc,
+            json!({"limit": 2, "nextToken": t2["nextBackwardToken"]}),
+        );
+        assert_eq!(messages(&t3), vec!["a"]);
+        let t4 = gle(
+            &svc,
+            json!({"limit": 2, "nextToken": t3["nextBackwardToken"]}),
+        );
+        assert!(messages(&t4).is_empty());
+        // Forward from a backward page resumes right after it.
+        let f = gle(
+            &svc,
+            json!({"limit": 2, "nextToken": t2["nextForwardToken"]}),
+        );
+        assert_eq!(messages(&f), vec!["d", "e"]);
+    }
+
+    #[test]
+    fn filter_log_events_unknown_token_is_invalid_parameter() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "s");
+        put_events(&svc, "g", "s", &["a"]);
+        for token in ["garbage", "g@s@no-such-event", "other@s@x"] {
+            let req = make_request(
+                "FilterLogEvents",
+                json!({"logGroupName": "g", "nextToken": token}),
+            );
+            match svc.filter_log_events(&req) {
+                Err(e) => assert_eq!(e.code(), "InvalidParameterException", "{token}"),
+                Ok(_) => panic!("expected InvalidParameterException for {token}"),
+            }
+        }
+    }
+
+    #[test]
+    fn filter_log_events_token_round_trips_with_at_in_stream_name() {
+        let svc = make_service();
+        create_group(&svc, "g");
+        create_stream(&svc, "g", "a@b");
+        put_events(&svc, "g", "a@b", &["1", "2", "3"]);
+        let req = make_request("FilterLogEvents", json!({"logGroupName": "g", "limit": 2}));
+        let resp = svc.filter_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["events"].as_array().unwrap().len(), 2);
+        let req = make_request(
+            "FilterLogEvents",
+            json!({"logGroupName": "g", "limit": 2, "nextToken": body["nextToken"]}),
+        );
+        let resp = svc.filter_log_events(&req).unwrap();
+        let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
+        assert_eq!(body["events"][0]["message"], "3");
+    }
 
     #[test]
     fn get_log_events_basic_returns_events() {

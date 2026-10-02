@@ -895,6 +895,22 @@ impl LambdaService {
         req: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = body(req);
+        if let Some(filters) = body
+            .get("FilterCriteria")
+            .and_then(|v| v.get("Filters"))
+            .and_then(|v| v.as_array())
+        {
+            let patterns = filters
+                .iter()
+                .filter_map(|f| f.get("Pattern").and_then(|p| p.as_str()));
+            crate::filter::FilterSet::validate(patterns).map_err(|err| {
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidParameterValueException",
+                    err,
+                )
+            })?;
+        }
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
         let esm = state
