@@ -170,6 +170,13 @@ pub trait CredentialResolver: Send + Sync {
     /// Returns `None` when the AKID is unknown or its underlying credential
     /// has expired.
     fn resolve(&self, access_key_id: &str) -> Option<ResolvedCredential>;
+
+    /// True when `access_key_id` names a temporary credential that existed
+    /// but has expired. Lets dispatch answer `ExpiredToken` instead of
+    /// `InvalidClientTokenId` for it, as AWS does.
+    fn is_expired(&self, _access_key_id: &str) -> bool {
+        false
+    }
 }
 
 /// One IAM action that the dispatch layer should evaluate against the
@@ -196,6 +203,47 @@ impl IamAction {
     pub fn action_string(&self) -> String {
         format!("{}:{}", self.service, self.action)
     }
+
+    /// `iam:PassRole` on `role_arn`: the authorization AWS requires of the
+    /// caller whenever a request hands a role to a service (Lambda's `Role`,
+    /// a Scheduler target's `RoleArn`, an S3 replication `Role`, ...). It is
+    /// evaluated in addition to the operation's own action, and the service
+    /// supplies the `iam:PassedToService` / `iam:AssociatedResourceArn`
+    /// condition keys via [`pass_role_condition_keys`].
+    pub fn pass_role(role_arn: impl Into<String>) -> Self {
+        Self {
+            service: "iam",
+            action: "PassRole",
+            resource: role_arn.into(),
+        }
+    }
+
+    /// True for the `iam:PassRole` action built by [`IamAction::pass_role`].
+    pub fn is_pass_role(&self) -> bool {
+        self.service == "iam" && self.action == "PassRole"
+    }
+}
+
+/// Condition keys AWS sets on an `iam:PassRole` authorization:
+/// `iam:PassedToService` (the service principal receiving the role) and,
+/// when the resource the role is attached to is known,
+/// `iam:AssociatedResourceArn`.
+pub fn pass_role_condition_keys(
+    passed_to_service: &str,
+    associated_resource_arn: Option<&str>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut out = BTreeMap::new();
+    out.insert(
+        "iam:passedtoservice".to_string(),
+        vec![passed_to_service.to_string()],
+    );
+    if let Some(arn) = associated_resource_arn.filter(|a| !a.is_empty() && *a != "*") {
+        out.insert(
+            "iam:associatedresourcearn".to_string(),
+            vec![arn.to_string()],
+        );
+    }
+    out
 }
 
 /// Result of evaluating a request against an identity's effective policy
@@ -223,9 +271,9 @@ impl IamDecision {
 /// Lives in `fakecloud-core` (not `fakecloud-iam`) so the trait can
 /// reference it without creating a circular crate dependency. All
 /// fields are optional — a missing field means the key wasn't knowable
-/// at dispatch time, and any operator that references it safe-fails to
-/// `false` (unless the operator carries the `IfExists` suffix, in which
-/// case it evaluates to `true`, matching AWS).
+/// at dispatch time. As on AWS, a positive operator on an absent key
+/// evaluates to `false`, while a negated one (`StringNotEquals`,
+/// `NotIpAddress`, ...) and any `...IfExists` operator evaluate to `true`.
 ///
 /// The `service_keys` map is reserved for service-specific condition
 /// keys (`s3:prefix`, `sqs:MessageAttribute`, …) which Phase 2 ships
@@ -627,6 +675,14 @@ impl InternalCaller {
 /// gate that must allow (intersection), matching AWS SCP semantics.
 pub trait ScpResolver: Send + Sync {
     fn scps_for(&self, principal: &Principal) -> Option<Vec<String>>;
+
+    /// `aws:PrincipalOrgID` and `aws:PrincipalOrgPaths` for a principal in
+    /// `account_id`: the organization ID and the account's path
+    /// (`o-xxx/r-xxx/ou-xxx/.../`), or `None` when the account belongs to no
+    /// organization (AWS then omits both keys).
+    fn principal_org(&self, _account_id: &str) -> Option<(String, String)> {
+        None
+    }
 }
 
 /// Abstraction over "does the organization topology permit `caller_account` to

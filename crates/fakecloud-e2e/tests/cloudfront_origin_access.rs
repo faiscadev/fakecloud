@@ -253,7 +253,7 @@ fn unique(prefix: &str) -> String {
 #[tokio::test]
 async fn oac_policy_scoped_to_the_distribution_allows_the_fetch() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await;
     let oac = create_oac(
@@ -283,7 +283,7 @@ async fn oac_policy_scoped_to_the_distribution_allows_the_fetch() {
 #[tokio::test]
 async fn oac_policy_naming_another_distribution_denies_the_fetch() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await;
     let oac = create_oac(
@@ -305,7 +305,7 @@ async fn oac_policy_naming_another_distribution_denies_the_fetch() {
 #[tokio::test]
 async fn origin_without_oac_is_fetched_anonymously_and_denied() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await;
     let dist = create_distribution(&cf, None, None).await;
@@ -320,7 +320,7 @@ async fn origin_without_oac_is_fetched_anonymously_and_denied() {
 #[tokio::test]
 async fn oac_signing_behavior_never_is_unsigned() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await;
     let oac = create_oac(&cf, "oac-never", OriginAccessControlSigningBehaviors::Never).await;
@@ -334,7 +334,7 @@ async fn oac_signing_behavior_never_is_unsigned() {
 #[tokio::test]
 async fn oac_no_override_signs_when_the_viewer_sends_no_authorization() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await;
     let oac = create_oac(
@@ -354,7 +354,7 @@ async fn oac_no_override_signs_when_the_viewer_sends_no_authorization() {
 #[tokio::test]
 async fn legacy_oai_principal_policy_allows_the_fetch() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await;
     let (oai_id, canonical) = create_oai(&cf).await;
@@ -434,7 +434,7 @@ async fn default_mode_serves_private_origins_with_or_without_oac() {
 #[tokio::test]
 async fn oac_reads_a_bucket_owned_by_another_account() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     private_bucket(&s3).await;
 
     let (akid, secret) = server.create_admin("222222222222", "cdn-admin").await;
@@ -466,7 +466,7 @@ async fn oac_reads_a_bucket_owned_by_another_account() {
 #[tokio::test]
 async fn viewer_dot_segments_stay_under_the_origin_path() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await; // `index.html` at the bucket root: outside /public
     s3.put_object()
@@ -518,7 +518,7 @@ async fn raw_viewer_get(server: &TestServer, host: &str, path: &str) -> String {
 #[tokio::test]
 async fn cache_behavior_is_matched_on_the_resolved_viewer_path() {
     let server = strict_server().await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
     let cf = server.cloudfront_client().await;
     private_bucket(&s3).await;
     s3.put_object()

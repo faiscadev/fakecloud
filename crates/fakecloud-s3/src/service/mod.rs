@@ -1779,6 +1779,13 @@ impl AwsService for S3Service {
                 return actions;
             }
         }
+        // A replication configuration names the role S3 assumes to copy
+        // objects, so AWS also requires `iam:PassRole` on it.
+        if action.service == "s3" && action.action == "PutBucketReplication" {
+            if let Some(role) = replication_role_arn(&request.body) {
+                return vec![action, fakecloud_core::auth::IamAction::pass_role(role)];
+            }
+        }
         vec![action]
     }
 
@@ -1787,6 +1794,13 @@ impl AwsService for S3Service {
         request: &AwsRequest,
         action: &fakecloud_core::auth::IamAction,
     ) -> std::collections::BTreeMap<String, Vec<String>> {
+        if action.is_pass_role() {
+            let associated = self.iam_action_for(request).map(|a| a.resource);
+            return fakecloud_core::auth::pass_role_condition_keys(
+                "s3.amazonaws.com",
+                associated.as_deref(),
+            );
+        }
         let mut keys = s3_condition_keys(action.action, &request.query_params, &request.headers);
         // S3 Control UntagResource: `aws:TagKeys` lists the keys being removed.
         if action.action == "UntagResource" && control_tags::is_control_tags_request(request) {
@@ -1814,6 +1828,16 @@ impl AwsService for S3Service {
         s3_request_tags(request, action)
             .map(|m| m.into_iter().collect::<std::collections::HashMap<_, _>>())
     }
+}
+
+/// The top-level `<Role>` of a PutBucketReplication body: the role S3
+/// assumes to replicate objects.
+fn replication_role_arn(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let start = text.find("<Role>")? + "<Role>".len();
+    let end = start + text[start..].find("</Role>")?;
+    let role = text[start..end].trim();
+    (!role.is_empty()).then(|| role.to_string())
 }
 
 /// Extract service-specific IAM condition keys from an S3 request.
@@ -1888,6 +1912,28 @@ fn s3_condition_keys(
             "s3:x-amz-object-ownership".to_string(),
             vec![value.to_string()],
         );
+    }
+    // Request headers AWS exposes as `s3:` condition keys on the writes that
+    // accept them. Encryption guardrails (`DenyIncorrectEncryptionHeader`:
+    // `Deny PutObject when s3:x-amz-server-side-encryption != AES256`) and
+    // storage-class / copy restrictions read these; since a negated operator
+    // is true on an absent key, leaving them unpopulated would deny every
+    // write, compliant ones included.
+    for header in [
+        "x-amz-server-side-encryption",
+        "x-amz-server-side-encryption-aws-kms-key-id",
+        "x-amz-server-side-encryption-customer-algorithm",
+        "x-amz-storage-class",
+        "x-amz-metadata-directive",
+        "x-amz-copy-source",
+    ] {
+        if let Some(value) = headers
+            .get(header)
+            .and_then(|v| v.to_str().ok())
+            .filter(|v| !v.trim().is_empty())
+        {
+            out.insert(format!("s3:{header}"), vec![value.to_string()]);
+        }
     }
     if matches!(action, "ListObjects" | "ListObjectsV2") {
         // Both list variants share the same query param shape.

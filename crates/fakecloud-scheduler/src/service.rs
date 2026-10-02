@@ -766,11 +766,37 @@ impl AwsService for SchedulerService {
         })
     }
 
+    /// The operation's own action plus `iam:PassRole` on the target's
+    /// `RoleArn` for CreateSchedule / UpdateSchedule: EventBridge Scheduler
+    /// assumes that role to invoke the target, so AWS requires the caller to
+    /// hold PassRole on it.
+    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
+        let Some(primary) = self.iam_action_for(request) else {
+            return Vec::new();
+        };
+        let passed = match primary.action {
+            "CreateSchedule" | "UpdateSchedule" => target_role_arn(&request.body),
+            _ => None,
+        };
+        let mut out = vec![primary];
+        if let Some(role) = passed {
+            out.push(fakecloud_core::auth::IamAction::pass_role(role));
+        }
+        out
+    }
+
     fn iam_condition_keys_for(
         &self,
         request: &AwsRequest,
         action: &fakecloud_core::auth::IamAction,
     ) -> BTreeMap<String, Vec<String>> {
+        if action.is_pass_role() {
+            let associated = self.iam_action_for(request).map(|a| a.resource);
+            return fakecloud_core::auth::pass_role_condition_keys(
+                "scheduler.amazonaws.com",
+                associated.as_deref(),
+            );
+        }
         let mut out = BTreeMap::new();
         // `scheduler:ScheduleGroup` is the only documented service-
         // specific condition key on Scheduler operations. Emit it
@@ -1231,6 +1257,16 @@ fn group_name_from_tag_arn(arn: &str) -> Result<String, AwsServiceError> {
     }
 }
 
+/// `Target.RoleArn` from a CreateSchedule / UpdateSchedule body.
+fn target_role_arn(body: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    v.get("Target")?
+        .get("RoleArn")?
+        .as_str()
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1682,6 +1718,33 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.code(), "ValidationException");
+    }
+
+    #[tokio::test]
+    async fn iam_actions_for_create_schedule_include_pass_role_on_target_role() {
+        let svc = SchedulerService::new(make_state());
+        let body = json!({
+            "ScheduleExpression": "rate(1 minute)",
+            "FlexibleTimeWindow": { "Mode": "OFF" },
+            "Target": {
+                "Arn": "arn:aws:sqs:us-east-1:111122223333:q",
+                "RoleArn": "arn:aws:iam::111122223333:role/s"
+            }
+        })
+        .to_string();
+        let req = make_request(Method::POST, "/schedules/s1", &body);
+        let actions = svc.iam_actions_for(&req);
+        assert_eq!(actions.len(), 2);
+        assert!(actions[1].is_pass_role());
+        assert_eq!(actions[1].resource, "arn:aws:iam::111122223333:role/s");
+        let keys = svc.iam_condition_keys_for(&req, &actions[1]);
+        assert_eq!(
+            keys["iam:passedtoservice"],
+            vec!["scheduler.amazonaws.com".to_string()]
+        );
+        // Reads pass no role.
+        let req = make_request(Method::GET, "/schedules/s1", "");
+        assert_eq!(svc.iam_actions_for(&req).len(), 1);
     }
 
     #[tokio::test]

@@ -8,9 +8,14 @@
 //! in an `Allow` statement, regardless of the caller's identity policy.
 //!
 //! This module implements the trust-policy half via
-//! [`fakecloud_core::auth::RoleTrustValidator`]. The identity-policy
-//! half lives in the existing IAM evaluator and is invoked separately
-//! at the IAM evaluator boundary.
+//! [`fakecloud_core::auth::RoleTrustValidator`]. The identity-policy half
+//! runs at dispatch under `--iam soft|strict`: each enforced service's
+//! `iam_actions_for` returns an extra
+//! [`fakecloud_core::auth::IamAction::pass_role`] for every role a request
+//! hands over (Lambda `Role`, Scheduler `Target.RoleArn`, S3 replication
+//! `Role`, SNS feedback / subscription roles), with `iam:PassedToService`
+//! and `iam:AssociatedResourceArn` supplied as condition keys, and the
+//! evaluator authorizes it like any other action.
 
 use std::sync::Arc;
 

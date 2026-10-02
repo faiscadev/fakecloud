@@ -3240,13 +3240,58 @@ async fn sts_assume_role_trust_policy_mfa_required() {
         .unwrap_err();
     assert!(format!("{err:?}").contains("AccessDenied"));
 
-    // MFA supplied -> allowed.
+    // A virtual MFA device of the (root) caller, with a real TOTP seed.
+    let device = iam
+        .create_virtual_mfa_device()
+        .virtual_mfa_device_name("admin")
+        .send()
+        .await
+        .unwrap();
+    let device = device.virtual_mfa_device().unwrap();
+    let serial = device.serial_number().to_string();
+    let seed = device.base32_string_seed().unwrap().as_ref().to_vec();
+
+    // A code that is not the device's TOTP -> denied, no session minted.
+    let current = helpers::totp_now(&seed);
+    let wrong = if current == "000000" {
+        "111111"
+    } else {
+        "000000"
+    };
+    let err = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("bad-mfa")
+        .serial_number(&serial)
+        .token_code(wrong)
+        .send()
+        .await
+        .unwrap_err();
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("invalid MFA one time pass code"),
+        "expected MFA failure, got {msg}"
+    );
+
+    // An unregistered serial -> denied.
+    let err = sts
+        .assume_role()
+        .role_arn(&role_arn)
+        .role_session_name("ghost-mfa")
+        .serial_number("arn:aws:iam::123456789012:mfa/ghost")
+        .token_code(helpers::totp_now(&seed))
+        .send()
+        .await
+        .unwrap_err();
+    assert!(format!("{err:?}").contains("AccessDenied"));
+
+    // The device's current TOTP -> allowed.
     let resp = sts
         .assume_role()
         .role_arn(&role_arn)
         .role_session_name("with-mfa")
-        .serial_number("arn:aws:iam::123456789012:mfa/admin")
-        .token_code("123456")
+        .serial_number(&serial)
+        .token_code(helpers::totp_now(&seed))
         .send()
         .await
         .unwrap();
@@ -3661,7 +3706,10 @@ async fn iam_deny_includes_encoded_auth_failure_message() {
     // context that drove the deny.
     use aws_credential_types::Credentials;
     let server = helpers::TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
-    let root = server.iam_client().await;
+    // Bootstrap as the reserved `test` root identity: under strict, a key that
+    // resolves to no identity (the default client's example key) is rejected.
+    let root_cfg = helpers::root_config(&server).await;
+    let root = aws_sdk_iam::Client::new(&root_cfg);
     root.create_user()
         .user_name("enc-deny-user")
         .send()
@@ -3705,7 +3753,7 @@ async fn iam_deny_includes_encoded_auth_failure_message() {
 
     // Decoder hands the JSON blob back, including the action and
     // principal recorded at deny time.
-    let root_sts = aws_sdk_sts::Client::new(&server.aws_config().await);
+    let root_sts = aws_sdk_sts::Client::new(&root_cfg);
     let decoded = root_sts
         .decode_authorization_message()
         .encoded_message(&token)

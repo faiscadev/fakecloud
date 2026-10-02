@@ -7396,10 +7396,13 @@ async fn main() {
     let imds_router = imds::routes(imds_ctx.clone());
     // ECS task-role credentials: each running task's role session (named after
     // the task), revoked once the task stops.
-    let ecs_task_credentials = ecs_creds::EcsTaskCredentials::new(
+    // Under `--iam strict` a task's credentials go only to a request
+    // presenting the task's injected `AWS_CONTAINER_AUTHORIZATION_TOKEN`.
+    let ecs_task_credentials = ecs_creds::EcsTaskCredentials::with_authorization(
         ecs_introspection_state.clone(),
         iam_state.clone(),
         cli.account_id.clone(),
+        iam_mode.is_strict(),
     );
     tokio::spawn(ecs_creds::run_revocation_sweep(
         ecs_task_credentials.clone(),
@@ -10402,9 +10405,12 @@ async fn main() {
             "/_fakecloud/ecs/creds/{task_id}",
             axum::routing::get({
                 let creds = ecs_task_credentials.clone();
-                move |axum::extract::Path(task_id): axum::extract::Path<String>| {
+                move |axum::extract::Path(task_id): axum::extract::Path<String>,
+                      headers: axum::http::HeaderMap| {
                     let creds = creds.clone();
-                    async move { creds.respond(&task_id) }
+                    async move {
+                        creds.respond(&task_id, ecs_creds::authorization_header(&headers))
+                    }
                 }
             }),
         )
@@ -10415,7 +10421,7 @@ async fn main() {
                 let creds = ecs_task_credentials.clone();
                 move || {
                     let creds = creds.clone();
-                    async move { creds.respond("") }
+                    async move { creds.respond("", None) }
                 }
             }),
         )

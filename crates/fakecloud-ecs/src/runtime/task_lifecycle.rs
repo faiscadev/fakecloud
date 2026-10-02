@@ -340,7 +340,7 @@ impl EcsRuntime {
                 }
                 // A `none`-mode container gets the agent's relative URI with
                 // nothing behind it, as on ECS (it has no network).
-                env.push(super::task_creds::credentials_env(
+                env.extend(super::task_creds::credentials_env(
                     task_id,
                     holder.is_some() || !wants_holder,
                     &format!("http://{}:{}", self.net.host_alias, self.server_port),

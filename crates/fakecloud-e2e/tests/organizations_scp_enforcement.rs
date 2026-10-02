@@ -307,3 +307,85 @@ async fn no_organization_is_zero_behavior_change() {
         .await
         .unwrap();
 }
+
+/// The org-perimeter bucket policy (`Deny` unless `aws:PrincipalOrgID` is the
+/// organization). `StringNotEquals` is true on an absent key, so it only
+/// works if fakecloud populates `aws:PrincipalOrgID` from the principal's
+/// organization membership: an in-org account is let through, an account
+/// outside the organization is denied.
+#[tokio::test]
+async fn principal_org_id_perimeter_admits_org_members_only() {
+    let server = start().await;
+    let (a_akid, a_secret) = server.create_admin(ACCOUNT_A, "admin-a").await;
+    let a_cfg = config_with(&server, &a_akid, &a_secret).await;
+    let org_id = create_org(&OrgsClient::new(&a_cfg)).await;
+    let (b_akid, b_secret) = server
+        .create_admin_in_org(ACCOUNT_B, "admin-b", &org_id)
+        .await;
+    let (c_akid, c_secret) = server.create_admin("333333333333", "admin-c").await;
+
+    let s3 = |cfg: &aws_config::SdkConfig| {
+        S3Client::from_conf(
+            aws_sdk_s3::config::Builder::from(cfg)
+                .force_path_style(true)
+                .build(),
+        )
+    };
+    let s3_a = s3(&a_cfg);
+    s3_a.create_bucket()
+        .bucket("org-only")
+        .send()
+        .await
+        .unwrap();
+    s3_a.put_object()
+        .bucket("org-only")
+        .key("k")
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"x"))
+        .send()
+        .await
+        .unwrap();
+    s3_a.put_bucket_policy()
+        .bucket("org-only")
+        .policy(format!(
+            r#"{{"Version":"2012-10-17","Statement":[
+                {{"Effect":"Allow","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::org-only/*"}},
+                {{"Effect":"Deny","Principal":"*","Action":"s3:*","Resource":["arn:aws:s3:::org-only","arn:aws:s3:::org-only/*"],
+                  "Condition":{{"StringNotEquals":{{"aws:PrincipalOrgID":"{org_id}"}}}}}}
+            ]}}"#
+        ))
+        .send()
+        .await
+        .unwrap();
+
+    // The management account (the bucket owner) is in the org.
+    s3_a.get_object()
+        .bucket("org-only")
+        .key("k")
+        .send()
+        .await
+        .expect("the management account is in the org");
+    // So is the member account: the perimeter Deny must not fire. (Only the
+    // authorization decision is asserted here; what the cross-account read
+    // returns past it is the S3 handler's business.)
+    if let Err(e) = s3(&config_with(&server, &b_akid, &b_secret).await)
+        .get_object()
+        .bucket("org-only")
+        .key("k")
+        .send()
+        .await
+    {
+        assert!(
+            !format!("{e:?}").contains("AccessDenied"),
+            "member account is in the org: {e:?}"
+        );
+    }
+    // An account outside the organization is denied.
+    let err = s3(&config_with(&server, &c_akid, &c_secret).await)
+        .get_object()
+        .bucket("org-only")
+        .key("k")
+        .send()
+        .await
+        .expect_err("an account outside the org must be denied");
+    assert!(format!("{err:?}").contains("AccessDenied"), "{err:?}");
+}

@@ -271,7 +271,7 @@ impl PolicyDocument {
             .filter(|s| {
                 s.condition
                     .as_ref()
-                    .is_none_or(|c| c.matches(&request.context))
+                    .is_none_or(|c| c.matches_for_effect(&request.context, !allow))
             })
             .count()
     }
@@ -839,7 +839,9 @@ fn evaluate_inner_scoped(
                 continue;
             }
             if let Some(condition) = &statement.condition {
-                if !condition.matches(&request.context) {
+                if !condition
+                    .matches_for_effect(&request.context, matches!(statement.effect, Effect::Deny))
+                {
                     tracing::debug!(
                         target: "fakecloud::iam::audit",
                         action = %request.action,

@@ -71,7 +71,6 @@ impl StsService {
             9,
             256,
         )?;
-        let serial_number = req.query_params.get("SerialNumber").cloned();
 
         // Validate and accept optional MFA TokenCode
         validate_optional_string_length(
@@ -80,15 +79,10 @@ impl StsService {
             6,
             6,
         )?;
-        let token_code = req.query_params.get("TokenCode").cloned();
 
         // Compute expiration from DurationSeconds (default 3600s)
         let expiration_at = compute_expiration_at(req, DEFAULT_ASSUME_ROLE_DURATION)?;
         let expiration = format_expiration(expiration_at);
-
-        // Accept MFA parameters without verification (emulator behavior)
-        let _mfa_serial = serial_number;
-        let _mfa_token = token_code;
 
         let partition = partition_for_region(&req.region);
         let creds = StsCredentials::generate_with_minimum(minimum_session_token_size(req)?);
@@ -98,6 +92,10 @@ impl StsService {
         // Resolve session policies from the caller's account
         let caller_state = accounts.get_or_create(&req.account_id);
         let session_policies = collect_session_policies(req, caller_state);
+        // The MFA device must belong to the caller and the token code must
+        // be its current TOTP; only then does the session (and the trust
+        // evaluation below) carry `aws:MultiFactorAuthPresent`.
+        let mfa_present = super::verify_mfa(caller_state, req)?;
 
         // Extract account ID from role ARN if present, otherwise use caller's account
         let account_id =
@@ -111,7 +109,7 @@ impl StsService {
         // check below denies before any account is materialized.
         let role = accounts
             .get(&account_id)
-            .and_then(|s| s.roles.get(role_name).cloned());
+            .and_then(|s| super::role_for_arn(s, role_arn).cloned());
 
         // Enforce the role's trust policy through the IAM evaluator.
         // The trust policy is a resource-style policy whose Principal
@@ -168,8 +166,6 @@ impl StsService {
                 },
             };
 
-            let mfa_present = req.query_params.contains_key("SerialNumber")
-                && req.query_params.contains_key("TokenCode");
             let mut context = RequestContext {
                 aws_principal_arn: Some(caller_principal.arn.clone()),
                 aws_principal_account: Some(caller_principal.account_id.clone()),
@@ -277,8 +273,7 @@ impl StsService {
                 account_id: account_id.clone(),
             },
         );
-        let mfa_present_for_session = req.query_params.contains_key("SerialNumber")
-            && req.query_params.contains_key("TokenCode");
+        let mfa_present_for_session = mfa_present;
         target_state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {
@@ -401,7 +396,7 @@ impl StsService {
         // generated id only when the role isn't resolvable.
         let role_id = accounts
             .get(&account_id)
-            .and_then(|s| s.roles.get(role_name).map(|r| r.role_id.clone()))
+            .and_then(|s| super::role_for_arn(s, role_arn).map(|r| r.role_id.clone()))
             .unwrap_or_else(xml_responses::generate_role_id);
         let assumed_role_arn =
             super::format_assumed_role_arn(partition, &account_id, role_name, role_session_name);
@@ -741,7 +736,7 @@ impl StsService {
         // AWS), not a fresh random AROA on every assume.
         let role_id = accounts
             .get(&account_id)
-            .and_then(|s| s.roles.get(role_name).map(|r| r.role_id.clone()))
+            .and_then(|s| super::role_for_arn(s, role_arn).map(|r| r.role_id.clone()))
             .unwrap_or_else(xml_responses::generate_role_id);
         let assumed_role_arn =
             super::format_assumed_role_arn(partition, &account_id, role_name, &role_session_name);

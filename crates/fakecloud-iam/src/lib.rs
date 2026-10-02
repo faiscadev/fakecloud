@@ -4,6 +4,7 @@ pub mod credential_resolver;
 pub mod evaluator;
 pub mod iam_service;
 pub mod managed_policies;
+pub mod mfa;
 pub mod pass_role;
 pub mod persistence;
 pub mod policy_evaluator;

@@ -297,6 +297,35 @@ fn parse_dotted_value(raw: &str) -> serde_json::Value {
     serde_json::Value::String(raw.to_string())
 }
 
+/// Whether an SNS topic or subscription attribute names a role SNS assumes
+/// (and so needs `iam:PassRole`): the delivery-status logging roles and
+/// `SubscriptionRoleArn`.
+fn is_passed_role_attribute(name: &str) -> bool {
+    name == "SubscriptionRoleArn"
+        || name.ends_with("SuccessFeedbackRoleArn")
+        || name.ends_with("FailureFeedbackRoleArn")
+}
+
+/// Role ARNs an SNS request hands to the service, in request order.
+fn sns_passed_roles(action: &str, request: &AwsRequest) -> Vec<String> {
+    let mut roles: Vec<String> = match action {
+        "CreateTopic" | "Subscribe" => helpers::parse_entries(request, "Attributes")
+            .into_iter()
+            .filter(|(k, _)| is_passed_role_attribute(k))
+            .map(|(_, v)| v)
+            .collect(),
+        "SetTopicAttributes" | "SetSubscriptionAttributes" => param(request, "AttributeName")
+            .filter(|n| is_passed_role_attribute(n))
+            .and_then(|_| param(request, "AttributeValue"))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    };
+    roles.retain(|r| !r.is_empty());
+    roles.dedup();
+    roles
+}
+
 const VALID_SNS_ACTIONS: &[&str] = &[
     "GetTopicAttributes",
     "SetTopicAttributes",
@@ -456,11 +485,37 @@ impl AwsService for SnsService {
         })
     }
 
+    /// The operation's own action plus `iam:PassRole` on each role the
+    /// request hands to SNS: topic delivery-status logging roles
+    /// (`<Protocol>SuccessFeedbackRoleArn` / `...FailureFeedbackRoleArn`) and
+    /// a Firehose subscription's `SubscriptionRoleArn`. SNS assumes these
+    /// roles, so AWS requires the caller to hold PassRole on them.
+    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
+        let Some(primary) = self.iam_action_for(request) else {
+            return Vec::new();
+        };
+        let roles = sns_passed_roles(primary.action, request);
+        let mut out = vec![primary];
+        out.extend(
+            roles
+                .into_iter()
+                .map(fakecloud_core::auth::IamAction::pass_role),
+        );
+        out
+    }
+
     fn iam_condition_keys_for(
         &self,
         request: &AwsRequest,
         action: &fakecloud_core::auth::IamAction,
     ) -> std::collections::BTreeMap<String, Vec<String>> {
+        if action.is_pass_role() {
+            let associated = self.iam_action_for(request).map(|a| a.resource);
+            return fakecloud_core::auth::pass_role_condition_keys(
+                "sns.amazonaws.com",
+                associated.as_deref(),
+            );
+        }
         let mut out = std::collections::BTreeMap::new();
         if action.action == "Subscribe" {
             if let Some(protocol) = param(request, "Protocol") {

@@ -1265,9 +1265,9 @@ impl ResourceProvisioner {
             &format!("mfa{path}{name}"),
         )
         .to_string();
-        // Real AWS returns a base32 seed + a PNG QR code; we synthesize
-        // deterministic placeholders so callers can read them back.
-        let seed = format!("BASE32SEED{}", Uuid::new_v4().simple());
+        // A real base32 TOTP seed, as `CreateVirtualMFADevice` mints, so STS
+        // can verify codes from the device.
+        let seed = fakecloud_iam::mfa::generate_seed();
         let user = props
             .get("Users")
             .and_then(|v| v.as_array())

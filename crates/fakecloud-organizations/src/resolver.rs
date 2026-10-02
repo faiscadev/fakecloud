@@ -37,6 +37,33 @@ impl OrganizationsScpResolver {
 }
 
 impl ScpResolver for OrganizationsScpResolver {
+    fn principal_org(&self, account_id: &str) -> Option<(String, String)> {
+        let guard = self.state.read();
+        let org = guard.org_of_account(account_id)?;
+        let account = org.accounts.get(account_id)?;
+        // Walk from the account's parent to the root, then emit root-first:
+        // `o-xxx/r-xxx/ou-a/ou-b/`.
+        let mut chain = Vec::new();
+        let mut cursor = account.parent_id.clone();
+        loop {
+            chain.push(cursor.clone());
+            if cursor == org.root_id {
+                break;
+            }
+            match org.ous.get(&cursor) {
+                Some(ou) => cursor = ou.parent_id.clone(),
+                None => break,
+            }
+        }
+        chain.reverse();
+        let mut path = format!("{}/", org.org_id);
+        for id in chain {
+            path.push_str(&id);
+            path.push('/');
+        }
+        Some((org.org_id.clone(), path))
+    }
+
     fn scps_for(&self, principal: &Principal) -> Option<Vec<String>> {
         let guard = self.state.read();
         // The ceiling that applies is the one from the principal's OWN
@@ -289,6 +316,26 @@ mod tests {
             tags: None,
         };
         assert!(resolver.scps_for(&slr).is_none());
+    }
+
+    #[test]
+    fn principal_org_reports_org_id_and_ou_path() {
+        let mut org = OrganizationState::bootstrap("111111111111");
+        let root = org.root_id.clone();
+        let org_id = org.org_id.clone();
+        let ou = org.create_ou(&root, "team").unwrap();
+        org.enroll_account_if_missing("222222222222");
+        org.move_account("222222222222", &root, &ou.id).unwrap();
+        let resolver = OrganizationsScpResolver::new(shared(org));
+        assert_eq!(
+            resolver.principal_org("222222222222"),
+            Some((org_id.clone(), format!("{org_id}/{root}/{}/", ou.id)))
+        );
+        assert_eq!(
+            resolver.principal_org("111111111111"),
+            Some((org_id.clone(), format!("{org_id}/{root}/")))
+        );
+        assert_eq!(resolver.principal_org("999999999999"), None);
     }
 
     #[test]

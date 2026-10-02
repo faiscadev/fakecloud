@@ -410,3 +410,67 @@ pub async fn dump_mq_broker_diagnostics(server: &TestServer, broker_id: &str) {
     }
     println!("===== end MQ broker diagnostics for {broker_id} =====\n");
 }
+
+/// The current RFC 6238 TOTP code (HMAC-SHA1, 30 s, 6 digits) for a virtual
+/// MFA device, computed from the `Base32StringSeed` bytes
+/// `CreateVirtualMFADevice` returned (the base32 text, as the SDK decodes the
+/// blob). Independent of fakecloud's own implementation so the e2e suite
+/// checks it like an authenticator app would.
+pub fn totp_now(base32_seed: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut secret = Vec::new();
+    let (mut buffer, mut bits) = (0u64, 0u32);
+    for &c in base32_seed.iter().filter(|c| **c != b'=') {
+        let v = ALPHABET
+            .iter()
+            .position(|a| *a == c.to_ascii_uppercase())
+            .expect("seed must be base32") as u64;
+        buffer = (buffer << 5) | v;
+        bits += 5;
+        if bits >= 8 {
+            bits -= 8;
+            secret.push((buffer >> bits) as u8);
+        }
+    }
+    let step = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        / 30)
+        .to_be_bytes();
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(&secret).unwrap();
+    mac.update(&step);
+    let d = mac.finalize().into_bytes();
+    let o = (d[19] & 0x0f) as usize;
+    let n = (u32::from(d[o] & 0x7f) << 24)
+        | (u32::from(d[o + 1]) << 16)
+        | (u32::from(d[o + 2]) << 8)
+        | u32::from(d[o + 3]);
+    format!("{:06}", n % 1_000_000)
+}
+
+/// SDK config signed with the reserved `test` root identity, which IAM
+/// enforcement exempts. Under `--iam strict` the default test client's
+/// example key resolves to no identity and is rejected, so strict tests use
+/// this to act as the account root.
+pub async fn root_config(server: &TestServer) -> aws_config::SdkConfig {
+    aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .endpoint_url(server.endpoint())
+        .region(aws_config::Region::new("us-east-1"))
+        .credentials_provider(aws_credential_types::Credentials::new(
+            "test", "test", None, None, "test",
+        ))
+        .load()
+        .await
+}
+
+/// A path-style S3 client signed as the `test` root identity.
+pub async fn root_s3_client(server: &TestServer) -> aws_sdk_s3::Client {
+    let config = root_config(server).await;
+    aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&config)
+            .force_path_style(true)
+            .build(),
+    )
+}

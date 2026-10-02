@@ -36,9 +36,18 @@ pub async fn save_iam_snapshot(
         return;
     };
     let _guard = lock.lock().await;
+    // Don't persist STS credentials long past expiry.
+    let accounts = {
+        let mut accounts = state.read().clone();
+        let now = chrono::Utc::now();
+        for (_, account_state) in accounts.iter_mut() {
+            account_state.prune_expired_sts_credentials(now);
+        }
+        accounts
+    };
     let snapshot = IamSnapshot {
         schema_version: IAM_SNAPSHOT_SCHEMA_VERSION,
-        accounts: Some(state.read().clone()),
+        accounts: Some(accounts),
         state: None,
     };
     let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {

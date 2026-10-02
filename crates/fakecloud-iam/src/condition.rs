@@ -111,6 +111,22 @@ pub enum ConditionOperator {
 }
 
 impl ConditionOperator {
+    /// Negated matching operators, which evaluate true when the condition
+    /// key is absent from the request context.
+    pub fn is_negated(self) -> bool {
+        matches!(
+            self,
+            Self::StringNotEquals
+                | Self::StringNotEqualsIgnoreCase
+                | Self::StringNotLike
+                | Self::NumericNotEquals
+                | Self::DateNotEquals
+                | Self::NotIpAddress
+                | Self::ArnNotEquals
+                | Self::ArnNotLike
+        )
+    }
+
     fn from_str(name: &str) -> Option<Self> {
         Some(match name {
             "StringEquals" => Self::StringEquals,
@@ -274,17 +290,34 @@ impl CompiledCondition {
         self
     }
 
-    /// Evaluate this condition block against a [`ConditionContext`].
-    /// Returns `true` iff every entry matches (AND semantics).
+    /// Evaluate this condition block against a [`ConditionContext`] for an
+    /// `Allow` statement. Returns `true` iff every entry matches (AND
+    /// semantics).
     pub fn matches(&self, ctx: &ConditionContext) -> bool {
+        self.matches_for_effect(ctx, false)
+    }
+
+    /// Evaluate this condition block for a statement of the given effect.
+    ///
+    /// The effect only matters for an operator fakecloud does not recognize
+    /// (AWS rejects such a policy at validation time, so the evaluator never
+    /// meets one there). It must fail closed in both directions: an `Allow`
+    /// it guards does not apply (no grant on a condition we cannot check),
+    /// while a `Deny` it guards does (an unreadable restriction still
+    /// restricts). The remaining entries are evaluated either way.
+    pub fn matches_for_effect(&self, ctx: &ConditionContext, is_deny: bool) -> bool {
         for entry in &self.entries {
             if entry.key.starts_with("__unknown_operator__:") {
                 let op_name = entry.key.trim_start_matches("__unknown_operator__:");
                 tracing::debug!(
                     target: "fakecloud::iam::audit",
                     operator = %op_name,
-                    "unknown condition operator; treating statement as non-applicable"
+                    is_deny,
+                    "unknown condition operator; Allow does not apply, Deny applies"
                 );
+                if is_deny {
+                    continue;
+                }
                 return false;
             }
             if !evaluate_entry(entry, ctx) {
@@ -334,9 +367,18 @@ pub fn evaluate_entry(entry: &ParsedCondition, ctx: &ConditionContext) -> bool {
         // and granting on it would fail open.
         Some(_) if entry.operator.qualifier == Qualifier::ForAllValues => return true,
         _ => {
-            // Key not populated. `IfExists` -> vacuously true. Otherwise
-            // this is a safe-fail to false.
+            // Key absent. `IfExists` -> vacuously true.
             if entry.operator.if_exists {
+                return true;
+            }
+            // A single-valued negated operator (`StringNotEquals`,
+            // `ArnNotLike`, `NotIpAddress`, ...) asks "is the value anything
+            // other than these?", which AWS answers true when the key is not
+            // in the request at all. Returning false here let a
+            // `Deny ... StringNotEquals` guard be skipped by simply omitting
+            // the key. `ForAnyValue` needs at least one value to match, so it
+            // stays false.
+            if entry.operator.qualifier == Qualifier::Single && entry.operator.op.is_negated() {
                 return true;
             }
             if ctx.lookup(&entry.key).is_none() {
@@ -999,6 +1041,78 @@ mod tests {
     fn unknown_operator_fails_closed() {
         let b = compile(json!({ "NotARealOp": { "aws:username": "alice" } }));
         assert!(!b.matches(&ctx_user("alice")));
+        // Fail closed for Deny too: an unreadable restriction still applies.
+        assert!(b.matches_for_effect(&ctx_user("alice"), true));
+    }
+
+    #[test]
+    fn unknown_operator_in_deny_still_ands_with_other_entries() {
+        let b = compile(json!({
+            "NotARealOp": { "aws:username": "alice" },
+            "StringEquals": { "aws:username": "bob" }
+        }));
+        assert!(!b.matches_for_effect(&ctx_user("alice"), true));
+        assert!(b.matches_for_effect(&ctx_user("bob"), true));
+        assert!(!b.matches_for_effect(&ctx_user("bob"), false));
+    }
+
+    /// Truth table for a condition key absent from the request context:
+    /// positive operators are false, negated operators are true, any
+    /// `...IfExists` is true, and `ForAnyValue:` with a negated operator is
+    /// false (it needs a value to match).
+    #[test]
+    fn missing_key_truth_table() {
+        let ctx = ConditionContext::default();
+        let cases: &[(&str, &str, bool)] = &[
+            ("StringEquals", "x", false),
+            ("StringNotEquals", "x", true),
+            ("StringEqualsIgnoreCase", "x", false),
+            ("StringNotEqualsIgnoreCase", "x", true),
+            ("StringLike", "x*", false),
+            ("StringNotLike", "x*", true),
+            ("NumericEquals", "1", false),
+            ("NumericNotEquals", "1", true),
+            ("NumericLessThan", "1", false),
+            ("DateEquals", "2020-01-01T00:00:00Z", false),
+            ("DateNotEquals", "2020-01-01T00:00:00Z", true),
+            ("DateLessThan", "2020-01-01T00:00:00Z", false),
+            ("Bool", "true", false),
+            ("IpAddress", "10.0.0.0/8", false),
+            ("NotIpAddress", "10.0.0.0/8", true),
+            ("ArnEquals", "arn:aws:iam::1:role/r", false),
+            ("ArnNotEquals", "arn:aws:iam::1:role/r", true),
+            ("ArnLike", "arn:aws:iam::*:role/*", false),
+            ("ArnNotLike", "arn:aws:iam::*:role/*", true),
+            ("StringEqualsIfExists", "x", true),
+            ("StringNotEqualsIfExists", "x", true),
+            ("ArnLikeIfExists", "arn:*", true),
+            ("ForAnyValue:StringNotEquals", "x", false),
+            ("ForAnyValue:StringEquals", "x", false),
+        ];
+        for (op, value, want) in cases {
+            let b = compile(json!({ *op: { "aws:madeupkey": value } }));
+            assert_eq!(b.matches(&ctx), *want, "{op} with key absent");
+            assert_eq!(
+                b.matches_for_effect(&ctx, true),
+                *want,
+                "{op} with key absent (Deny)"
+            );
+        }
+    }
+
+    #[test]
+    fn deny_string_not_equals_applies_when_key_omitted() {
+        // `Deny unless aws:RequestedRegion == us-east-1` must still deny a
+        // request whose context lacks the key entirely.
+        let b = compile(json!({
+            "StringNotEquals": { "aws:RequestedRegion": "us-east-1" }
+        }));
+        assert!(b.matches_for_effect(&ConditionContext::default(), true));
+        let ctx = ConditionContext {
+            aws_requested_region: Some("us-east-1".into()),
+            ..Default::default()
+        };
+        assert!(!b.matches_for_effect(&ctx, true));
     }
 
     #[test]

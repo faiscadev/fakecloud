@@ -215,3 +215,109 @@ async fn sts_assume_role_temp_credentials_verify_successfully() {
         .unwrap()
         .contains("assumed-role/temp-role/e2e-sigv4"));
 }
+
+/// Bootstrap an IAM user with root-bypass creds and return an SdkConfig
+/// signed with that user's real key, so `--verify-sigv4` checks every
+/// signature cryptographically.
+async fn verified_user_config(server: &TestServer, name: &str) -> aws_config::SdkConfig {
+    let boot = sdk_config_with(server, "test", "test", None).await;
+    let iam_boot = aws_sdk_iam::Client::new(&boot);
+    iam_boot.create_user().user_name(name).send().await.unwrap();
+    let ak = iam_boot
+        .create_access_key()
+        .user_name(name)
+        .send()
+        .await
+        .unwrap();
+    let key = ak.access_key().unwrap();
+    sdk_config_with(server, key.access_key_id(), key.secret_access_key(), None).await
+}
+
+fn python_zip() -> Vec<u8> {
+    use std::io::Write;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("index.py", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"def handler(event, context):\n    return 1\n")
+        .unwrap();
+    zip.finish().unwrap().into_inner()
+}
+
+/// S3 signs the canonical URI by encoding the (decoded) key segments once.
+/// A key holding characters the SDK percent-encodes on the wire (`=`, space,
+/// `+`) must still verify: the server must canonicalize the decoded path, not
+/// re-encode the already-encoded wire form.
+#[tokio::test]
+async fn s3_object_key_with_reserved_characters_verifies() {
+    let server = start_verified().await;
+    let cfg = verified_user_config(&server, "s3-path-user").await;
+    let s3 = aws_sdk_s3::Client::from_conf(
+        aws_sdk_s3::config::Builder::from(&cfg)
+            .force_path_style(true)
+            .build(),
+    );
+    s3.create_bucket()
+        .bucket("sigv4-path-bucket")
+        .send()
+        .await
+        .expect("CreateBucket must verify");
+    let key = "dt=2024-01-01/a b+c.txt";
+    s3.put_object()
+        .bucket("sigv4-path-bucket")
+        .key(key)
+        .body(aws_sdk_s3::primitives::ByteStream::from_static(b"hello"))
+        .send()
+        .await
+        .expect("PutObject with an encoded key must verify");
+    let got = s3
+        .get_object()
+        .bucket("sigv4-path-bucket")
+        .key(key)
+        .send()
+        .await
+        .expect("GetObject with an encoded key must verify");
+    let body = got.body.collect().await.unwrap().into_bytes();
+    assert_eq!(&body[..], b"hello");
+}
+
+/// Non-S3 REST services sign the double-encoded path. An ARN in the path
+/// (`:` encoded as `%3A` on the wire) must verify for Lambda GetFunction and
+/// ListTags.
+#[tokio::test]
+async fn lambda_arn_in_path_verifies() {
+    let server = start_verified().await;
+    let cfg = verified_user_config(&server, "lambda-path-user").await;
+    let lambda = aws_sdk_lambda::Client::new(&cfg);
+    let created = lambda
+        .create_function()
+        .function_name("sigv4-path-fn")
+        .runtime(aws_sdk_lambda::types::Runtime::Python312)
+        .role("arn:aws:iam::123456789012:role/test-role")
+        .handler("index.handler")
+        .code(
+            aws_sdk_lambda::types::FunctionCode::builder()
+                .zip_file(aws_sdk_lambda::primitives::Blob::new(python_zip()))
+                .build(),
+        )
+        .tags("team", "a b")
+        .send()
+        .await
+        .expect("CreateFunction must verify");
+    let arn = created.function_arn().unwrap().to_string();
+    lambda
+        .get_function()
+        .function_name(&arn)
+        .send()
+        .await
+        .expect("GetFunction by ARN must verify");
+    let tags = lambda
+        .list_tags()
+        .resource(&arn)
+        .send()
+        .await
+        .expect("ListTags with an ARN in the path must verify");
+    assert_eq!(
+        tags.tags().and_then(|t| t.get("team")).map(String::as_str),
+        Some("a b")
+    );
+}

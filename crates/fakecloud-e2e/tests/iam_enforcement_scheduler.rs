@@ -70,7 +70,9 @@ fn off_window() -> FlexibleTimeWindow {
 fn sqs_target() -> Target {
     Target::builder()
         .arn("arn:aws:sqs:us-east-1:000000000000:dest")
-        .role_arn("arn:aws:iam::000000000000:role/s")
+        // Same account as the caller: a role can only be passed within its
+        // own account.
+        .role_arn("arn:aws:iam::123456789012:role/s")
         .build()
         .unwrap()
 }
@@ -121,6 +123,34 @@ async fn allow_permits_create_schedule() {
 
     let cfg = sdk_config_with(&server, &akid, &secret).await;
     let client = SchedulerClient::new(&cfg);
+    // The target's RoleArn is handed to Scheduler, so AWS also requires
+    // iam:PassRole on it, passed to scheduler.amazonaws.com.
+    let err = client
+        .create_schedule()
+        .name("no-pass-role")
+        .schedule_expression("rate(1 minute)")
+        .flexible_time_window(off_window())
+        .target(sqs_target())
+        .send()
+        .await
+        .expect_err("CreateSchedule without iam:PassRole on the target role");
+    let msg = format!("{err:?}");
+    assert!(
+        msg.contains("AccessDenied") && msg.contains("iam:PassRole"),
+        "{msg}"
+    );
+    attach_inline_policy(
+        &server,
+        "bob",
+        "pass-role",
+        r#"{
+            "Version":"2012-10-17",
+            "Statement":[{"Effect":"Allow","Action":"iam:PassRole",
+                "Resource":"arn:aws:iam::123456789012:role/s",
+                "Condition":{"StringEquals":{"iam:PassedToService":"scheduler.amazonaws.com"}}}]
+        }"#,
+    )
+    .await;
     client
         .create_schedule()
         .name("allowed")
@@ -148,6 +178,10 @@ async fn schedule_group_condition_key_gates_access() {
                 "Action":"scheduler:*",
                 "Resource":"*",
                 "Condition":{"StringEquals":{"scheduler:ScheduleGroup":"prod"}}
+            },{
+                "Effect":"Allow",
+                "Action":"iam:PassRole",
+                "Resource":"*"
             }]
         }"#,
     )

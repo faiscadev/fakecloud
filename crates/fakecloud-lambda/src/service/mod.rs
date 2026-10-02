@@ -238,6 +238,24 @@ pub(crate) fn action_takes_function_name(action: &str) -> bool {
     )
 }
 
+/// The role a Lambda request hands to the service, which the caller must
+/// hold `iam:PassRole` on: a function's execution `Role` for
+/// CreateFunction / UpdateFunctionConfiguration, and a capacity provider's
+/// `PermissionsConfig.CapacityProviderOperatorRoleArn`. `None` when the
+/// operation carries no role (or UpdateFunctionConfiguration leaves it
+/// unchanged).
+pub(crate) fn lambda_passed_role(iam_action: &str, body: &[u8]) -> Option<String> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    let role = match iam_action {
+        "CreateFunction" | "UpdateFunctionConfiguration" => v.get("Role"),
+        "CreateCapacityProvider" | "UpdateCapacityProvider" => v
+            .get("PermissionsConfig")
+            .and_then(|p| p.get("CapacityProviderOperatorRoleArn")),
+        _ => None,
+    }?;
+    role.as_str().filter(|r| !r.is_empty()).map(str::to_string)
+}
+
 /// Strip an ARN, partial ARN, or trailing `:qualifier` from a Lambda
 /// `FunctionName` input down to the bare function name used as the
 /// state map key. AWS Lambda accepts four forms in URL path slots and
@@ -1934,11 +1952,38 @@ impl AwsService for LambdaService {
         })
     }
 
+    /// The operation's own action plus `iam:PassRole` on every role the
+    /// request hands to Lambda: a function's execution `Role`
+    /// (CreateFunction / UpdateFunctionConfiguration) and a capacity
+    /// provider's operator role. AWS evaluates PassRole for the caller on
+    /// each, so a principal with only `lambda:CreateFunction` cannot attach
+    /// an arbitrary (say, admin) role to code it controls.
+    fn iam_actions_for(&self, request: &AwsRequest) -> Vec<fakecloud_core::auth::IamAction> {
+        let Some(primary) = self.iam_action_for(request) else {
+            return Vec::new();
+        };
+        let passed = lambda_passed_role(primary.action, &request.body);
+        let mut out = vec![primary];
+        if let Some(role) = passed {
+            out.push(fakecloud_core::auth::IamAction::pass_role(role));
+        }
+        out
+    }
+
     fn iam_condition_keys_for(
         &self,
         request: &AwsRequest,
         action: &fakecloud_core::auth::IamAction,
     ) -> std::collections::BTreeMap<String, Vec<String>> {
+        if action.is_pass_role() {
+            // The resource the role is attached to is the operation's own
+            // target (the function / capacity provider ARN).
+            let associated = self.iam_action_for(request).map(|a| a.resource);
+            return fakecloud_core::auth::pass_role_condition_keys(
+                "lambda.amazonaws.com",
+                associated.as_deref(),
+            );
+        }
         let mut out = std::collections::BTreeMap::new();
         if action.action == "AddPermission" {
             if action.resource != "*" {

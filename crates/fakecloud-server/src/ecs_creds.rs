@@ -45,20 +45,36 @@ pub enum CredentialsError {
     NoId,
     /// No running task with that ID has a task role.
     NotFound,
+    /// Under `--iam strict`, the request did not present the task's
+    /// `AWS_CONTAINER_AUTHORIZATION_TOKEN` in its `Authorization` header.
+    Unauthorized,
 }
 
 impl IntoResponse for CredentialsError {
     fn into_response(self) -> Response {
-        let (code, message) = match self {
-            Self::NoId => ("NoIdInRequest", "No Credential ID in the request"),
-            Self::NotFound => ("InvalidIdInRequest", "Credentials not found"),
+        let (status, code, message) = match self {
+            Self::NoId => (
+                StatusCode::BAD_REQUEST,
+                "NoIdInRequest",
+                "No Credential ID in the request",
+            ),
+            Self::NotFound => (
+                StatusCode::BAD_REQUEST,
+                "InvalidIdInRequest",
+                "Credentials not found",
+            ),
+            Self::Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "AccessDenied",
+                "Authorization token missing or invalid for this task",
+            ),
         };
         (
-            StatusCode::BAD_REQUEST,
+            status,
             axum::Json(serde_json::json!({
                 "code": code,
                 "message": format!("{ERR_PREFIX}{message}"),
-                "HTTPErrorCode": StatusCode::BAD_REQUEST.as_u16(),
+                "HTTPErrorCode": status.as_u16(),
             })),
         )
             .into_response()
@@ -72,6 +88,8 @@ pub struct EcsTaskCredentials {
     iam: SharedIamState,
     default_account_id: String,
     cache: WorkloadCredentialCache,
+    /// Require the task's authorization token (`--iam strict`).
+    require_authorization_token: bool,
 }
 
 /// The full ARN of a task's role. ECS accepts a bare role name for
@@ -93,16 +111,34 @@ fn cache_key(account_id: &str, task_id: &str) -> String {
 }
 
 impl EcsTaskCredentials {
+    /// An endpoint that requires no authorization token (`--iam` off/soft).
+    #[cfg(test)]
     pub fn new(
         ecs: SharedEcsState,
         iam: SharedIamState,
         default_account_id: impl Into<String>,
+    ) -> Arc<Self> {
+        Self::with_authorization(ecs, iam, default_account_id, false)
+    }
+
+    /// Like [`EcsTaskCredentials::new`]; with `require_authorization_token`
+    /// (set under `--iam strict`) a request must present the task's
+    /// `AWS_CONTAINER_AUTHORIZATION_TOKEN` (injected into its containers) as
+    /// its `Authorization` header. Otherwise anyone able to reach fakecloud
+    /// and name a running task ID would walk away with its role's
+    /// credentials; on ECS only the task's own network reaches the agent.
+    pub fn with_authorization(
+        ecs: SharedEcsState,
+        iam: SharedIamState,
+        default_account_id: impl Into<String>,
+        require_authorization_token: bool,
     ) -> Arc<Self> {
         let this = Arc::new(Self {
             ecs,
             iam,
             default_account_id: default_account_id.into(),
             cache: WorkloadCredentialCache::new(),
+            require_authorization_token,
         });
         this.revoke_persisted_sessions();
         this
@@ -186,8 +222,44 @@ impl EcsTaskCredentials {
         drop(accounts);
     }
 
-    /// The endpoint response for `task_id`.
-    pub fn respond(&self, task_id: &str) -> Response {
+    /// Whether `authorization` (the request's `Authorization` header) may
+    /// fetch `task_id`'s credentials.
+    fn authorized(&self, task_id: &str, authorization: Option<&str>) -> bool {
+        if !self.require_authorization_token {
+            return true;
+        }
+        let expected = fakecloud_ecs::runtime::task_credentials_token(task_id);
+        authorization
+            .is_some_and(|got| constant_time_eq(got.trim().as_bytes(), expected.as_bytes()))
+    }
+
+    /// The full-URI endpoint's response for `task_id`, given the request's
+    /// `Authorization` header (required under `--iam strict`).
+    pub fn respond(&self, task_id: &str, authorization: Option<&str>) -> Response {
+        if !task_id.is_empty() && !self.authorized(task_id, authorization) {
+            return CredentialsError::Unauthorized.into_response();
+        }
+        self.respond_relative(task_id)
+    }
+
+    /// Whether a request for the agent's relative-URI surface that reached
+    /// the main port from `peer` may be served. On ECS that address only
+    /// answers inside the task's network, so under `--iam strict` it is
+    /// served only to peers on a container network (a task's NAT rule makes
+    /// its requests arrive from the container's bridge / pod address), not to
+    /// arbitrary clients of the main port such as processes on the host
+    /// itself. Outside strict mode every peer is served, as before. The
+    /// dedicated `--imds-link-local` listener is not subject to this check.
+    pub fn relative_uri_source_allowed(&self, peer: Option<std::net::IpAddr>) -> bool {
+        !self.require_authorization_token || peer.is_some_and(is_container_network_address)
+    }
+
+    /// The agent's relative-URI (`169.254.170.2/v2/credentials/<id>`)
+    /// response for `task_id`. As on ECS it takes no authorization token:
+    /// the address is only routed from inside the task's own network
+    /// namespace, and several SDKs (JS v2, Java v1) never send the token
+    /// with a relative URI.
+    pub fn respond_relative(&self, task_id: &str) -> Response {
         match self.credentials(task_id) {
             Ok(creds) => (StatusCode::OK, axum::Json(creds.to_container_json())).into_response(),
             Err(e) => e.into_response(),
@@ -239,13 +311,25 @@ fn respond_link_local(
     };
     if method == axum::http::Method::HEAD {
         // Same status and headers as GET, no body.
-        let (parts, _) = creds.respond(task_id).into_parts();
+        let (parts, _) = creds.respond_relative(task_id).into_parts();
         return Response::from_parts(parts, axum::body::Body::empty());
     }
     if method != axum::http::Method::GET {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
-    creds.respond(task_id)
+    creds.respond_relative(task_id)
+}
+
+/// The `Authorization` header of a credentials request, where the AWS SDKs
+/// put `AWS_CONTAINER_AUTHORIZATION_TOKEN`.
+pub fn authorization_header(headers: &axum::http::HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 /// Serve the ECS agent's link-local credentials surface on the main listener.
@@ -260,9 +344,42 @@ pub async fn link_local_host_middleware(
     next: axum::middleware::Next,
 ) -> Response {
     if is_link_local_host(req.headers()) {
+        let peer = req
+            .extensions()
+            .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+            .map(|c| c.0.ip());
+        if !creds.relative_uri_source_allowed(peer) {
+            tracing::warn!(
+                target: "fakecloud::iam::audit",
+                peer = ?peer,
+                "agent credentials request on the main port from outside a container network; refused under --iam strict"
+            );
+            return CredentialsError::Unauthorized.into_response();
+        }
         return respond_link_local(&creds, req.method(), req.uri().path());
     }
     next.run(req).await
+}
+
+/// Whether `ip` is an address a container network hands out: the private
+/// IPv4 ranges Docker / Podman bridges and Kubernetes pod networks draw from
+/// (10/8, 172.16/12, 192.168/16, 100.64/10 CGNAT) and IPv6 unique-local /
+/// link-local. Loopback (the host itself) and public addresses are not.
+fn is_container_network_address(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_private() || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_container_network_address(IpAddr::V4(v4));
+            }
+            let first = v6.segments()[0];
+            (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
+        }
+    }
 }
 
 /// Revoke stopped tasks' credentials for as long as the server runs.
@@ -430,7 +547,7 @@ mod tests {
     #[tokio::test]
     async fn error_body_matches_the_agent() {
         let (_ecs, _iam, endpoint) = setup();
-        let resp = endpoint.respond("missing");
+        let resp = endpoint.respond("missing", None);
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
             .await
@@ -504,6 +621,116 @@ mod tests {
         stop_task(&ecs, "222222222222", "x");
         let _after_restart = EcsTaskCredentials::new(ecs.clone(), iam.clone(), ACCOUNT);
         assert!(!resolves(&iam, &creds));
+    }
+
+    #[tokio::test]
+    async fn strict_mode_requires_the_tasks_token_on_the_full_uri_only() {
+        let (ecs, iam, _) = setup();
+        let endpoint = EcsTaskCredentials::with_authorization(ecs.clone(), iam, ACCOUNT, true);
+        add_task(&ecs, ACCOUNT, "t", Some(ROLE));
+        add_task(&ecs, ACCOUNT, "other", Some(ROLE));
+        let token = fakecloud_ecs::runtime::task_credentials_token("t");
+
+        // No token, or another task's token: refused before any mint.
+        for auth in [
+            None,
+            Some("wrong".to_string()),
+            Some(fakecloud_ecs::runtime::task_credentials_token("other")),
+        ] {
+            let resp = endpoint.respond("t", auth.as_deref());
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "{auth:?}");
+            let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(v["code"], "AccessDenied");
+            assert_eq!(v["HTTPErrorCode"], 401);
+        }
+        // The task's own token: served.
+        assert_eq!(endpoint.respond("t", Some(&token)).status(), StatusCode::OK);
+
+        // The agent's relative-URI surface takes no token, as on ECS: it is
+        // only reachable from the task's own network namespace.
+        let app = app(endpoint);
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder()
+            .uri("/v2/credentials/t")
+            .header(axum::http::header::HOST, LINK_LOCAL_HOST)
+            .body(axum::body::Body::empty())
+            .unwrap();
+        req.extensions_mut().insert(axum::extract::ConnectInfo(
+            "172.17.0.2:40000".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn strict_mode_serves_the_agent_surface_only_to_container_networks() {
+        let (ecs, iam, default) = setup();
+        let strict = EcsTaskCredentials::with_authorization(ecs, iam, ACCOUNT, true);
+        let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+        for allowed in [
+            "172.17.0.2",
+            "172.31.255.1",
+            "10.88.0.5",
+            "10.244.1.7",
+            "192.168.65.3",
+            "100.64.0.9",
+            "fd00::5",
+            "fe80::1",
+            "::ffff:172.18.0.4",
+        ] {
+            assert!(strict.relative_uri_source_allowed(ip(allowed)), "{allowed}");
+        }
+        for refused in [
+            "127.0.0.1",
+            "::1",
+            "8.8.8.8",
+            "172.32.0.1",
+            "2001:db8::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                !strict.relative_uri_source_allowed(ip(refused)),
+                "{refused}"
+            );
+        }
+        assert!(!strict.relative_uri_source_allowed(None));
+        // Outside strict mode every peer is served, as before.
+        assert!(default.relative_uri_source_allowed(ip("127.0.0.1")));
+        assert!(default.relative_uri_source_allowed(None));
+    }
+
+    #[tokio::test]
+    async fn strict_middleware_refuses_host_loopback_and_serves_a_container_peer() {
+        use tower::ServiceExt;
+        let (ecs, iam, _) = setup();
+        let endpoint = EcsTaskCredentials::with_authorization(ecs.clone(), iam, ACCOUNT, true);
+        add_task(&ecs, ACCOUNT, "t", Some(ROLE));
+        let app = app(endpoint);
+        let req = |peer: &str| {
+            let mut r = axum::http::Request::builder()
+                .uri("/v2/credentials/t")
+                .header(axum::http::header::HOST, LINK_LOCAL_HOST)
+                .body(axum::body::Body::empty())
+                .unwrap();
+            r.extensions_mut().insert(axum::extract::ConnectInfo(
+                peer.parse::<std::net::SocketAddr>().unwrap(),
+            ));
+            r
+        };
+        let resp = app.clone().oneshot(req("127.0.0.1:5555")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let resp = app.clone().oneshot(req("172.17.0.2:5555")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn token_not_required_by_default() {
+        let (ecs, _iam, endpoint) = setup();
+        add_task(&ecs, ACCOUNT, "t", Some(ROLE));
+        assert_eq!(endpoint.respond("t", None).status(), StatusCode::OK);
     }
 
     /// A router whose own routes answer `fallthrough`, behind the link-local

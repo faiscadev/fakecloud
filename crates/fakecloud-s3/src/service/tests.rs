@@ -13,6 +13,43 @@ fn s3_condition_keys_emits_list_params() {
 }
 
 #[test]
+fn s3_condition_keys_emit_request_header_keys() {
+    let mut h = HeaderMap::new();
+    h.insert("x-amz-server-side-encryption", "aws:kms".parse().unwrap());
+    h.insert(
+        "x-amz-server-side-encryption-aws-kms-key-id",
+        "arn:aws:kms:us-east-1:123456789012:key/k".parse().unwrap(),
+    );
+    h.insert("x-amz-storage-class", "STANDARD_IA".parse().unwrap());
+    h.insert("x-amz-metadata-directive", "REPLACE".parse().unwrap());
+    h.insert("x-amz-copy-source", "/src/key".parse().unwrap());
+    h.insert(
+        "x-amz-server-side-encryption-customer-algorithm",
+        " ".parse().unwrap(),
+    );
+    let keys = s3_condition_keys("PutObject", &std::collections::HashMap::new(), &h);
+    assert_eq!(
+        keys["s3:x-amz-server-side-encryption"],
+        vec!["aws:kms".to_string()]
+    );
+    assert_eq!(
+        keys["s3:x-amz-server-side-encryption-aws-kms-key-id"],
+        vec!["arn:aws:kms:us-east-1:123456789012:key/k".to_string()]
+    );
+    assert_eq!(
+        keys["s3:x-amz-storage-class"],
+        vec!["STANDARD_IA".to_string()]
+    );
+    assert_eq!(
+        keys["s3:x-amz-metadata-directive"],
+        vec!["REPLACE".to_string()]
+    );
+    assert_eq!(keys["s3:x-amz-copy-source"], vec!["/src/key".to_string()]);
+    // A blank header names no value and is not emitted.
+    assert!(!keys.contains_key("s3:x-amz-server-side-encryption-customer-algorithm"));
+}
+
+#[test]
 fn s3_condition_keys_omits_absent_params() {
     let q = std::collections::HashMap::new();
     let keys = s3_condition_keys("ListObjectsV2", &q, &HeaderMap::new());
@@ -4959,6 +4996,25 @@ fn create_bucket_tags_decode_xml_entities() {
     assert!(
         body.contains("<Tag><Key>a&amp;b</Key><Value>c&amp;d</Value></Tag>"),
         "entity round-trip wrong: {body}"
+    );
+}
+
+#[test]
+fn put_bucket_replication_requires_pass_role_on_the_replication_role() {
+    use fakecloud_core::service::AwsService as _;
+
+    let svc = make_service();
+    let body = br#"<ReplicationConfiguration><Role>arn:aws:iam::123456789012:role/repl</Role><Rule><Status>Enabled</Status><Destination><Bucket>arn:aws:s3:::dst</Bucket></Destination></Rule></ReplicationConfiguration>"#;
+    let req = make_request(Method::PUT, "/src", &[("replication", "")], body);
+    let actions = svc.iam_actions_for(&req);
+    assert_eq!(actions.len(), 2, "{actions:?}");
+    assert_eq!(actions[0].action, "PutBucketReplication");
+    assert!(actions[1].is_pass_role());
+    assert_eq!(actions[1].resource, "arn:aws:iam::123456789012:role/repl");
+    let keys = svc.iam_condition_keys_for(&req, &actions[1]);
+    assert_eq!(
+        keys["iam:passedtoservice"],
+        vec!["s3.amazonaws.com".to_string()]
     );
 }
 

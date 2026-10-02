@@ -110,6 +110,7 @@ mod lb;
 mod monitoring;
 mod secrets;
 mod task_creds;
+pub use task_creds::{task_credentials_token, AUTHORIZATION_TOKEN_ENV};
 mod task_lifecycle;
 
 /// The initContainer the Kubernetes backend puts first in a task-role Pod:

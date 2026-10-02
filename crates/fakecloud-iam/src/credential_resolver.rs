@@ -13,8 +13,9 @@ use fakecloud_core::auth::{CredentialResolver, Principal, PrincipalType, Resolve
 use crate::state::SharedIamState;
 
 /// [`CredentialResolver`] backed by an [`IamState`] shared via
-/// [`SharedIamState`]. Acquires a write lock on lookup so expired STS
-/// temporary credentials are purged in place.
+/// [`SharedIamState`]. Expired STS temporary credentials never resolve;
+/// [`CredentialResolver::is_expired`] reports them so dispatch can answer
+/// `ExpiredToken`.
 #[derive(Clone)]
 pub struct IamCredentialResolver {
     state: SharedIamState,
@@ -33,6 +34,12 @@ impl IamCredentialResolver {
 impl CredentialResolver for IamCredentialResolver {
     fn resolve(&self, access_key_id: &str) -> Option<ResolvedCredential> {
         let mut states = self.state.write();
+        // Sweep STS credentials long past expiry while the write lock is
+        // held, so the table stays bounded without a separate task.
+        let now = chrono::Utc::now();
+        for (_, account_state) in states.iter_mut() {
+            account_state.prune_expired_sts_credentials(now);
+        }
         // Search ALL accounts' credentials — a full scan is fine for a
         // testing tool with a small number of accounts.
         for (_, account_state) in states.iter_mut() {
@@ -57,6 +64,13 @@ impl CredentialResolver for IamCredentialResolver {
             }
         }
         None
+    }
+
+    fn is_expired(&self, access_key_id: &str) -> bool {
+        self.state
+            .read()
+            .iter()
+            .any(|(_, s)| s.sts_credential_expired(access_key_id))
     }
 }
 

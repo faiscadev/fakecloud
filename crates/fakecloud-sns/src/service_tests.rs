@@ -3468,3 +3468,66 @@ fn china_region_sns_arns_use_the_aws_cn_partition() {
         "{endpoint}"
     );
 }
+
+#[test]
+fn iam_actions_for_role_attributes_include_pass_role() {
+    use fakecloud_core::service::AwsService as _;
+    let (svc, _) = make_sns();
+    let role = "arn:aws:iam::123456789012:role/sns-logging";
+
+    let req = sns_request(
+        "SetTopicAttributes",
+        vec![
+            ("TopicArn", "arn:aws:sns:us-east-1:123456789012:t"),
+            ("AttributeName", "LambdaSuccessFeedbackRoleArn"),
+            ("AttributeValue", role),
+        ],
+    );
+    let actions = svc.iam_actions_for(&req);
+    assert_eq!(actions.len(), 2);
+    assert!(actions[1].is_pass_role());
+    assert_eq!(actions[1].resource, role);
+    let keys = svc.iam_condition_keys_for(&req, &actions[1]);
+    assert_eq!(
+        keys["iam:passedtoservice"],
+        vec!["sns.amazonaws.com".to_string()]
+    );
+
+    let req = sns_request(
+        "CreateTopic",
+        vec![
+            ("Name", "t2"),
+            ("Attributes.entry.1.key", "SQSFailureFeedbackRoleArn"),
+            ("Attributes.entry.1.value", role),
+            ("Attributes.entry.2.key", "DisplayName"),
+            ("Attributes.entry.2.value", "x"),
+        ],
+    );
+    let actions = svc.iam_actions_for(&req);
+    assert_eq!(actions.len(), 2);
+    assert!(actions[1].is_pass_role());
+
+    let req = sns_request(
+        "SetSubscriptionAttributes",
+        vec![
+            (
+                "SubscriptionArn",
+                "arn:aws:sns:us-east-1:123456789012:t:abc",
+            ),
+            ("AttributeName", "SubscriptionRoleArn"),
+            ("AttributeValue", role),
+        ],
+    );
+    assert!(svc.iam_actions_for(&req)[1].is_pass_role());
+
+    // A non-role attribute passes nothing.
+    let req = sns_request(
+        "SetTopicAttributes",
+        vec![
+            ("TopicArn", "arn:aws:sns:us-east-1:123456789012:t"),
+            ("AttributeName", "DisplayName"),
+            ("AttributeValue", "x"),
+        ],
+    );
+    assert_eq!(svc.iam_actions_for(&req).len(), 1);
+}

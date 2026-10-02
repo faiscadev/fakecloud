@@ -23,23 +23,21 @@ impl StsService {
             sts_validate_range_i64("durationSeconds", v, 900, 129600)?;
         }
 
-        // Validate and accept optional MFA SerialNumber (no verification in emulator)
+        // Validate optional MFA SerialNumber (verified below)
         validate_optional_string_length(
             "serialNumber",
             req.query_params.get("SerialNumber").map(|s| s.as_str()),
             9,
             256,
         )?;
-        let _serial_number = req.query_params.get("SerialNumber").cloned();
 
-        // Validate and accept optional MFA TokenCode (no verification in emulator)
+        // Validate optional MFA TokenCode (verified below)
         validate_optional_string_length(
             "tokenCode",
             req.query_params.get("TokenCode").map(|s| s.as_str()),
             6,
             6,
         )?;
-        let _token_code = req.query_params.get("TokenCode").cloned();
 
         let minimum_token_size = minimum_session_token_size(req)?;
 
@@ -55,6 +53,9 @@ impl StsService {
         let partition = partition_for_region(&req.region);
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
+        // The MFA device must belong to the caller and the code must be its
+        // current TOTP before the session carries `aws:MultiFactorAuthPresent`.
+        let mfa_present_for_session = super::verify_mfa(state, req)?;
         let (principal_arn, user_id, account_id) =
             if let Some(akid) = extract_access_key(req).as_deref() {
                 if let Some(lookup) = state.credential_secret_readonly(akid) {
@@ -85,8 +86,6 @@ impl StsService {
         );
         // GetSessionToken does not accept a Policy parameter per AWS
         // docs, so session_policies is always empty for this operation.
-        let mfa_present_for_session = req.query_params.contains_key("SerialNumber")
-            && req.query_params.contains_key("TokenCode");
         state.sts_temp_credentials.insert(
             creds.access_key_id.clone(),
             StsTempCredential {

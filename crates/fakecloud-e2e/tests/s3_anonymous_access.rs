@@ -88,7 +88,7 @@ async fn anonymous_get_nonexistent_bucket_falls_through() {
 #[tokio::test]
 async fn anonymous_get_object_iam_strict_bucket_policy() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
 
     s3.create_bucket().bucket("probe").send().await.unwrap();
     s3.put_object()
@@ -130,7 +130,7 @@ async fn anonymous_get_object_iam_strict_bucket_policy() {
 #[tokio::test]
 async fn sigv2_presigned_request_is_attributed_to_its_caller() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
 
     s3.create_bucket().bucket("probe").send().await.unwrap();
     s3.put_object()
@@ -148,11 +148,36 @@ async fn sigv2_presigned_request_is_attributed_to_its_caller() {
     let resp = http.get(&base).send().await.unwrap();
     assert_eq!(resp.status(), 403, "anonymous GET must be denied");
 
-    // A SigV2-presigned URL (AWSAccessKeyId + Signature + Expires) for the
-    // bucket-owning account's key is attributed to that caller and allowed.
-    // The default test credentials resolve to the default account's root.
-    let signed =
+    // A SigV2-presigned URL (AWSAccessKeyId + Signature + Expires) for an IAM
+    // user allowed to read the object is attributed to that user and allowed.
+    let iam = aws_sdk_iam::Client::new(&helpers::root_config(&server).await);
+    iam.create_user().user_name("reader").send().await.unwrap();
+    iam.put_user_policy()
+        .user_name("reader")
+        .policy_name("read")
+        .policy_document(
+            r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"}]}"#,
+        )
+        .send()
+        .await
+        .unwrap();
+    let key = iam
+        .create_access_key()
+        .user_name("reader")
+        .send()
+        .await
+        .unwrap();
+    let akid = key.access_key().unwrap().access_key_id().to_string();
+
+    // A key that resolves to no identity is rejected, not read as anonymous
+    // or as the account root.
+    let unknown =
         format!("{base}?AWSAccessKeyId=AKIAIOSFODNN7EXAMPLE&Signature=dummysig&Expires=9999999999");
+    let resp = http.get(&unknown).send().await.unwrap();
+    assert_eq!(resp.status(), 403, "unresolved SigV2 key must be rejected");
+    assert!(resp.text().await.unwrap().contains("InvalidClientTokenId"));
+
+    let signed = format!("{base}?AWSAccessKeyId={akid}&Signature=dummysig&Expires=9999999999");
     let resp = http.get(&signed).send().await.unwrap();
     assert_eq!(
         resp.status(),
@@ -167,7 +192,7 @@ async fn sigv2_presigned_request_is_attributed_to_its_caller() {
 #[tokio::test]
 async fn anonymous_get_object_iam_strict_public_acl() {
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
 
     s3.create_bucket().bucket("probe").send().await.unwrap();
     s3.put_object()
@@ -286,7 +311,7 @@ async fn anonymous_get_explicit_deny_overrides_public_acl() {
     const EXPLICIT_DENY_POLICY: &str = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Deny","Principal":"*","Action":"s3:GetObject","Resource":"arn:aws:s3:::probe/*"}]}"#;
 
     let server = TestServer::start_with_env(&[("FAKECLOUD_IAM", "strict")]).await;
-    let s3 = server.s3_client().await;
+    let s3 = helpers::root_s3_client(&server).await;
 
     s3.create_bucket().bucket("probe").send().await.unwrap();
     s3.put_object()

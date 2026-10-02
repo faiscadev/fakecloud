@@ -252,7 +252,9 @@ pub fn parse_sigv4_presigned(
 #[derive(Debug, Clone)]
 pub struct VerifyRequest<'a> {
     pub method: &'a str,
-    /// URI path as-received (already URL-decoded once by the HTTP framework).
+    /// URI path exactly as it arrived on the wire, still percent-encoded
+    /// (`http::Uri::path()` does not decode). Canonicalization decodes each
+    /// segment before re-encoding it the way the signer did.
     pub path: &'a str,
     /// Query string without the leading `?`. For presigned URLs the
     /// `X-Amz-Signature` parameter is removed before signing.
@@ -409,17 +411,26 @@ fn sigv4_encode(s: &str) -> String {
     utf8_percent_encode(s, SIGV4_URI_ENCODE).to_string()
 }
 
-/// Canonicalize the URI path. S3 encodes each segment once; all other
-/// services encode twice.
+/// Canonicalize the URI path as the signer did, from the path as it
+/// arrived on the wire (still percent-encoded).
+///
+/// Each `/`-separated segment is decoded first -- splitting before decoding
+/// keeps an encoded `%2F` inside a segment (an S3 key byte) from turning into
+/// a separator -- then encoded with the SigV4 set: once for S3, twice for
+/// every other service, which signs the double-encoded path. Encoding the raw
+/// wire path again instead would encode its `%` escapes a second (or third)
+/// time, so any path holding an escaped character (an S3 key with a space or
+/// `+`, an ARN in a Lambda path) failed with `SignatureDoesNotMatch`. Neither
+/// branch normalizes `.` / `..` segments or repeated slashes: S3 never does,
+/// and the AWS SDKs send already-normalized paths for the rest.
 fn canonical_uri(path: &str, service: &str) -> String {
     if path.is_empty() {
         return "/".to_string();
     }
-    // Split on '/' so the separators themselves aren't encoded.
     let encoded: Vec<String> = path
         .split('/')
         .map(|seg| {
-            let once = sigv4_encode(seg);
+            let once = sigv4_encode(&percent_decode(seg));
             if service == "s3" {
                 once
             } else {
@@ -689,6 +700,30 @@ mod tests {
     #[test]
     fn canonical_uri_s3_single_encodes() {
         assert_eq!(canonical_uri("/foo bar", "s3"), "/foo%20bar");
+    }
+
+    #[test]
+    fn canonical_uri_decodes_wire_path_before_encoding() {
+        // S3: the SDK sends `a%20b%2Bc.txt` and signs it single-encoded.
+        assert_eq!(
+            canonical_uri("/bkt/dt%3D2024-01-01/a%20b%2Bc.txt", "s3"),
+            "/bkt/dt%3D2024-01-01/a%20b%2Bc.txt"
+        );
+        // An encoded slash inside an S3 key segment stays inside it.
+        assert_eq!(canonical_uri("/bkt/a%2Fb", "s3"), "/bkt/a%2Fb");
+        // Non-S3: an ARN label sent as `%3A` is signed double-encoded.
+        assert_eq!(
+            canonical_uri(
+                "/2015-03-31/functions/arn%3Aaws%3Alambda%3Aus-east-1%3A1%3Afunction%3Af",
+                "lambda"
+            ),
+            "/2015-03-31/functions/arn%253Aaws%253Alambda%253Aus-east-1%253A1%253Afunction%253Af"
+        );
+        // A client that left `:` unescaped on the wire signs the same thing.
+        assert_eq!(
+            canonical_uri("/2015-03-31/functions/arn:aws:lambda", "lambda"),
+            "/2015-03-31/functions/arn%253Aaws%253Alambda"
+        );
     }
 
     #[test]

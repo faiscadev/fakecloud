@@ -113,24 +113,66 @@ pub(crate) fn relative_uri(task_id: &str) -> String {
     format!("/v2/credentials/{task_id}")
 }
 
-/// The credentials env var a task container gets: the agent's relative URI
+/// Env var carrying the per-task credentials authorization token. The AWS
+/// SDKs' container credential providers send its value as the
+/// `Authorization` header on every credentials request (relative and full
+/// URI alike).
+pub const AUTHORIZATION_TOKEN_ENV: &str = "AWS_CONTAINER_AUTHORIZATION_TOKEN";
+
+/// The authorization token injected as [`AUTHORIZATION_TOKEN_ENV`] into task
+/// `task_id`'s containers that get the full credentials URI. Under
+/// `--iam strict` that endpoint only hands out a task's role credentials to a
+/// request presenting it, so knowing (or guessing) a task ID is not enough.
+///
+/// Derived as HMAC-SHA256 of the task ID under a key drawn at random once per
+/// process: stable for the life of the task without storing anything, and
+/// unforgeable without the key. Tasks never outlive the process (a restart
+/// stops every restored task), so a fresh key per run loses nothing.
+pub fn task_credentials_token(task_id: &str) -> String {
+    use hmac::{Hmac, Mac};
+    use rand::RngCore;
+    static KEY: std::sync::OnceLock<[u8; 32]> = std::sync::OnceLock::new();
+    let key = KEY.get_or_init(|| {
+        let mut k = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut k);
+        k
+    });
+    let mut mac = Hmac::<sha2::Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(task_id.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The credentials env vars a task container gets: the agent's relative URI
 /// when `169.254.170.2` reaches fakecloud inside the container, else the full
-/// URI of fakecloud's endpoint at `fakecloud_base` (no trailing slash).
+/// URI of fakecloud's endpoint at `fakecloud_base` (no trailing slash) plus
+/// the task's [`AUTHORIZATION_TOKEN_ENV`], which the full-URI endpoint
+/// requires under `--iam strict`. As on ECS, the relative URI comes with no
+/// token: only the task's own network reaches the agent address.
 pub(crate) fn credentials_env(
     task_id: &str,
     link_local: bool,
     fakecloud_base: &str,
-) -> (String, String) {
+) -> Vec<(String, String)> {
     if link_local {
-        (
+        vec![(
             "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI".into(),
             relative_uri(task_id),
-        )
+        )]
     } else {
-        (
-            "AWS_CONTAINER_CREDENTIALS_FULL_URI".into(),
-            format!("{fakecloud_base}/_fakecloud/ecs/creds/{task_id}"),
-        )
+        vec![
+            (
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI".into(),
+                format!("{fakecloud_base}/_fakecloud/ecs/creds/{task_id}"),
+            ),
+            (
+                AUTHORIZATION_TOKEN_ENV.into(),
+                task_credentials_token(task_id),
+            ),
+        ]
     }
 }
 
@@ -500,18 +542,32 @@ mod tests {
     fn credentials_env_prefers_the_agents_relative_uri() {
         assert_eq!(
             credentials_env("abc", true, "http://host.docker.internal:4566"),
-            (
+            vec![(
                 "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI".to_string(),
                 "/v2/credentials/abc".to_string()
-            )
+            )]
         );
         assert_eq!(
             credentials_env("abc", false, "http://host.docker.internal:4566"),
-            (
-                "AWS_CONTAINER_CREDENTIALS_FULL_URI".to_string(),
-                "http://host.docker.internal:4566/_fakecloud/ecs/creds/abc".to_string()
-            )
+            vec![
+                (
+                    "AWS_CONTAINER_CREDENTIALS_FULL_URI".to_string(),
+                    "http://host.docker.internal:4566/_fakecloud/ecs/creds/abc".to_string()
+                ),
+                (
+                    "AWS_CONTAINER_AUTHORIZATION_TOKEN".to_string(),
+                    task_credentials_token("abc")
+                ),
+            ]
         );
+    }
+
+    #[test]
+    fn task_credentials_token_is_stable_per_task_and_distinct_across_tasks() {
+        let a = task_credentials_token("task-a");
+        assert_eq!(a, task_credentials_token("task-a"));
+        assert_ne!(a, task_credentials_token("task-b"));
+        assert_eq!(a.len(), 64);
     }
 
     #[test]

@@ -112,7 +112,8 @@ fn ecs_creds_router(ctx: Arc<ImdsContext>, tasks: Arc<EcsTaskCredentials>) -> Ro
             get(
                 |State(tasks): State<Arc<EcsTaskCredentials>>,
                  axum::extract::Path(task_id): axum::extract::Path<String>| async move {
-                    tasks.respond(&task_id)
+                    // The agent's relative URI: no token, as on ECS.
+                    tasks.respond_relative(&task_id)
                 },
             ),
         )

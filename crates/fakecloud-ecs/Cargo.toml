@@ -24,6 +24,8 @@ chrono = { workspace = true }
 http = { workspace = true }
 parking_lot = { workspace = true }
 rand = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

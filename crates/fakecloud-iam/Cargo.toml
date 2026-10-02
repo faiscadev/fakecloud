@@ -25,6 +25,8 @@ base64 = { workspace = true }
 bytes = { workspace = true }
 flate2 = { workspace = true }
 sha1 = { workspace = true }
+hmac = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

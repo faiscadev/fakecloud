@@ -134,6 +134,21 @@ pub fn assumed_role_name(role_arn: &str) -> &str {
     role_arn.rsplit('/').next().unwrap_or("unknown")
 }
 
+/// The role a `RoleArn` names, matched on its full `role/<path><name>`
+/// resource rather than the name alone: IAM role ARNs carry the role's path,
+/// and an ARN with the wrong path names no role (AWS denies AssumeRole on
+/// it), even though a role with that name exists under another path.
+pub(super) fn role_for_arn<'a>(
+    state: &'a IamState,
+    role_arn: &str,
+) -> Option<&'a crate::state::IamRole> {
+    fn resource(arn: &str) -> Option<&str> {
+        arn.split_once(":role/").map(|(_, r)| r)
+    }
+    let role = state.roles.get(assumed_role_name(role_arn))?;
+    (resource(&role.arn).is_some() && resource(&role.arn) == resource(role_arn)).then_some(role)
+}
+
 /// Format the assumed-role principal ARN
 /// (`arn:<partition>:sts::<account>:assumed-role/<role_name>/<session_name>`).
 /// Single source of truth shared by every path that mints assumed-role
@@ -402,6 +417,67 @@ fn collect_session_policies(req: &AwsRequest, state: &IamState) -> Vec<String> {
         }
     }
     docs
+}
+
+fn mfa_denied(message: &str) -> AwsServiceError {
+    AwsServiceError::aws_error(StatusCode::FORBIDDEN, "AccessDenied", message)
+}
+
+/// Verify the MFA `SerialNumber` + `TokenCode` an `AssumeRole` /
+/// `GetSessionToken` caller presents, returning whether MFA was asserted
+/// (and so whether the minted session carries `aws:MultiFactorAuthPresent`).
+///
+/// As on AWS, the serial must name an MFA device of the caller: an IAM user
+/// may only use a device assigned to it, the account root (including the
+/// reserved `test*` identity, which acts as root) any device in its account,
+/// and a role session or federated user none at all. The token code must be
+/// the device's current TOTP (one 30-second step of drift either way). A
+/// device registered by serial alone through `EnableMFADevice` (a hardware
+/// token) has no seed fakecloud knows, so its code cannot be checked and
+/// any 6-digit code is accepted for it.
+fn verify_mfa(state: &IamState, req: &AwsRequest) -> Result<bool, AwsServiceError> {
+    let serial = req
+        .query_params
+        .get("SerialNumber")
+        .filter(|s| !s.is_empty());
+    let code = req.query_params.get("TokenCode").filter(|s| !s.is_empty());
+    let (serial, code) = match (serial, code) {
+        (None, None) => return Ok(false),
+        (Some(serial), Some(code)) => (serial, code),
+        _ => {
+            return Err(mfa_denied(
+                "MultiFactorAuthentication failed, must provide both MFA serial number and one time pass code.",
+            ))
+        }
+    };
+    let unknown_device = || {
+        mfa_denied(
+            "MultiFactorAuthentication failed, unable to validate MFA code. Please verify your MFA serial number is valid and associated with this user.",
+        )
+    };
+    let device = state
+        .virtual_mfa_devices
+        .get(serial.as_str())
+        .ok_or_else(unknown_device)?;
+    match req.principal.as_ref() {
+        // No resolved principal: the reserved root identity (or an
+        // unenforced caller fakecloud treats as the account root).
+        None => {}
+        Some(p) if p.is_root() => {}
+        Some(p) if p.principal_type == PrincipalType::User => {
+            let user_name = p.arn.rsplit('/').next().unwrap_or_default();
+            if device.user.as_deref() != Some(user_name) {
+                return Err(unknown_device());
+            }
+        }
+        Some(_) => return Err(unknown_device()),
+    }
+    match crate::mfa::verify_totp(&device.base32_string_seed, code, Utc::now()) {
+        Some(true) | None => Ok(true),
+        Some(false) => Err(mfa_denied(
+            "MultiFactorAuthentication failed with invalid MFA one time pass code.",
+        )),
+    }
 }
 
 /// Extract the caller's access key from the SigV4 Authorization header.
@@ -1213,6 +1289,40 @@ mod tests {
         create_role_in_state_with_trust(state, name, trust)
     }
 
+    /// Register a virtual MFA device with a real TOTP seed (optionally
+    /// assigned to `user`) and return the current code for it.
+    fn register_mfa_device(state: &SharedIamState, serial: &str, user: Option<&str>) -> String {
+        let seed = crate::mfa::generate_seed();
+        let code = crate::mfa::totp_code(&seed, Utc::now()).unwrap();
+        let mut accounts = state.write();
+        let s = accounts.get_or_create("123456789012");
+        s.virtual_mfa_devices.insert(
+            serial.to_string(),
+            crate::state::VirtualMfaDevice {
+                serial_number: serial.to_string(),
+                base32_string_seed: seed,
+                qr_code_png: String::new(),
+                enable_date: user.map(|_| Utc::now()),
+                user: user.map(str::to_string),
+                tags: Vec::new(),
+            },
+        );
+        code
+    }
+
+    /// A code guaranteed not to be valid in the accepted drift window.
+    fn wrong_code(state: &SharedIamState, serial: &str) -> String {
+        let accounts = state.read();
+        let seed = accounts.get("123456789012").unwrap().virtual_mfa_devices[serial]
+            .base32_string_seed
+            .clone();
+        let now = Utc::now();
+        (0..1_000_000u32)
+            .map(|n| format!("{n:06}"))
+            .find(|c| crate::mfa::verify_totp(&seed, c, now) == Some(false))
+            .unwrap()
+    }
+
     fn create_role_in_state_with_trust(
         state: &SharedIamState,
         name: &str,
@@ -1892,13 +2002,15 @@ mod tests {
         let (svc, state) = make_sts_service();
         let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole","Condition":{"Bool":{"aws:MultiFactorAuthPresent":"true"}}}]}"#;
         let role_arn = create_role_in_state_with_trust(&state, "mfa-ok", trust);
+        let serial = "arn:aws:iam::123456789012:mfa/alice";
+        let code = register_mfa_device(&state, serial, Some("alice"));
         let req = sts_request(
             "AssumeRole",
             vec![
                 ("RoleArn", &role_arn),
                 ("RoleSessionName", "sess"),
-                ("SerialNumber", "arn:aws:iam::123456789012:mfa/alice"),
-                ("TokenCode", "123456"),
+                ("SerialNumber", serial),
+                ("TokenCode", &code),
             ],
         );
         let resp = svc.handle(req).await.unwrap();
@@ -1913,6 +2025,170 @@ mod tests {
             any_mfa,
             "expected at least one minted credential with mfa_present=true"
         );
+    }
+
+    fn mfa_denial_message(err: AwsServiceError) -> String {
+        assert_eq!(err.status(), StatusCode::FORBIDDEN);
+        assert_eq!(err.code(), "AccessDenied");
+        err.message().to_string()
+    }
+
+    #[tokio::test]
+    async fn assume_role_matches_the_role_path_in_the_arn() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let real = create_role_in_state_with_trust(&state, "pathed", trust);
+        {
+            let mut accounts = state.write();
+            let role = accounts
+                .get_or_create("123456789012")
+                .roles
+                .get_mut("pathed")
+                .unwrap();
+            role.path = "/team/".to_string();
+            role.arn = real.replace("role/pathed", "role/team/pathed");
+        }
+        for wrong in [
+            "arn:aws:iam::123456789012:role/pathed",
+            "arn:aws:iam::123456789012:role/other/pathed",
+        ] {
+            let req = sts_request(
+                "AssumeRole",
+                vec![("RoleArn", wrong), ("RoleSessionName", "sess")],
+            );
+            let Err(err) = svc.handle(req).await else {
+                panic!("{wrong} names no role and must be denied");
+            };
+            assert_eq!(err.code(), "AccessDenied", "{wrong}");
+        }
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", "arn:aws:iam::123456789012:role/team/pathed"),
+                ("RoleSessionName", "sess"),
+            ],
+        );
+        svc.handle(req).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn assume_role_rejects_wrong_mfa_code() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "mfa-bad", trust);
+        let serial = "arn:aws:iam::123456789012:mfa/alice";
+        register_mfa_device(&state, serial, Some("alice"));
+        let bad = wrong_code(&state, serial);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("SerialNumber", serial),
+                ("TokenCode", &bad),
+            ],
+        );
+        let Err(err) = svc.handle(req).await else {
+            panic!("a wrong MFA code must not mint a session");
+        };
+        assert_eq!(
+            mfa_denial_message(err),
+            "MultiFactorAuthentication failed with invalid MFA one time pass code."
+        );
+    }
+
+    #[tokio::test]
+    async fn assume_role_rejects_unknown_mfa_serial() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "mfa-unknown", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("SerialNumber", "arn:aws:iam::123456789012:mfa/ghost"),
+                ("TokenCode", "123456"),
+            ],
+        );
+        let Err(err) = svc.handle(req).await else {
+            panic!("an unregistered MFA serial must be rejected");
+        };
+        assert!(mfa_denial_message(err).contains("unable to validate MFA code"));
+    }
+
+    #[tokio::test]
+    async fn assume_role_rejects_serial_without_token_code() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "mfa-half", trust);
+        let req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("SerialNumber", "arn:aws:iam::123456789012:mfa/alice"),
+            ],
+        );
+        let Err(err) = svc.handle(req).await else {
+            panic!("SerialNumber without TokenCode must be rejected");
+        };
+        assert!(mfa_denial_message(err).contains("must provide both"));
+    }
+
+    #[tokio::test]
+    async fn mfa_device_of_another_user_is_rejected() {
+        let (svc, state) = make_sts_service();
+        let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
+        let role_arn = create_role_in_state_with_trust(&state, "mfa-other", trust);
+        let serial = "arn:aws:iam::123456789012:mfa/bob";
+        let code = register_mfa_device(&state, serial, Some("bob"));
+        let mut req = sts_request(
+            "AssumeRole",
+            vec![
+                ("RoleArn", &role_arn),
+                ("RoleSessionName", "sess"),
+                ("SerialNumber", serial),
+                ("TokenCode", &code),
+            ],
+        );
+        req.principal = Some(Principal {
+            arn: "arn:aws:iam::123456789012:user/alice".to_string(),
+            user_id: "AIDAALICE".to_string(),
+            account_id: "123456789012".to_string(),
+            principal_type: PrincipalType::User,
+            source_identity: None,
+            tags: None,
+        });
+        let Err(err) = svc.handle(req).await else {
+            panic!("alice must not assert MFA with bob's device");
+        };
+        assert!(mfa_denial_message(err).contains("unable to validate MFA code"));
+    }
+
+    #[tokio::test]
+    async fn get_session_token_verifies_mfa() {
+        let (svc, state) = make_sts_service();
+        let serial = "arn:aws:iam::123456789012:mfa/root-device";
+        let code = register_mfa_device(&state, serial, None);
+        let bad = wrong_code(&state, serial);
+        let req = sts_request(
+            "GetSessionToken",
+            vec![("SerialNumber", serial), ("TokenCode", &bad)],
+        );
+        let Err(err) = svc.handle(req).await else {
+            panic!("GetSessionToken must reject a wrong MFA code");
+        };
+        assert!(mfa_denial_message(err).contains("invalid MFA one time pass code"));
+
+        let req = sts_request(
+            "GetSessionToken",
+            vec![("SerialNumber", serial), ("TokenCode", &code)],
+        );
+        svc.handle(req).await.unwrap();
+        let states = state.read();
+        let s = states.get("123456789012").unwrap();
+        assert!(s.sts_temp_credentials.values().any(|c| c.mfa_present));
     }
 
     #[tokio::test]
@@ -1933,13 +2209,15 @@ mod tests {
         let (svc, state) = make_sts_service();
         let trust = r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"}]}"#;
         let role_arn = create_role_in_state_with_trust(&state, "mfa-e2e", trust);
+        let serial = "arn:aws:iam::123456789012:mfa/alice";
+        let code = register_mfa_device(&state, serial, Some("alice"));
         let req = sts_request(
             "AssumeRole",
             vec![
                 ("RoleArn", &role_arn),
                 ("RoleSessionName", "ops"),
-                ("SerialNumber", "arn:aws:iam::123456789012:mfa/alice"),
-                ("TokenCode", "654321"),
+                ("SerialNumber", serial),
+                ("TokenCode", &code),
             ],
         );
         let resp = svc.handle(req).await.unwrap();

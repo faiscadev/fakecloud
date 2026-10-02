@@ -1018,14 +1018,17 @@ impl IamService {
         }
 
         use base64::Engine;
-        let seed = uuid::Uuid::new_v4().to_string();
+        // A real RFC 4648 base32 TOTP seed, so an authenticator (or a test
+        // computing TOTP) produces codes STS can verify. `Base32StringSeed`
+        // is a blob on the wire: the base64 of the base32 text.
+        let seed = crate::mfa::generate_seed();
         let seed_b32 = base64::engine::general_purpose::STANDARD.encode(seed.as_bytes());
         let qr_png = base64::engine::general_purpose::STANDARD
             .encode(format!("fake-qr-{}", virtual_mfa_device_name).as_bytes());
 
         let device = VirtualMfaDevice {
             serial_number: serial_number.clone(),
-            base32_string_seed: seed_b32.clone(),
+            base32_string_seed: seed,
             qr_code_png: qr_png.clone(),
             enable_date: None,
             user: None,

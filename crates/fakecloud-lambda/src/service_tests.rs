@@ -1056,6 +1056,54 @@ fn iam_action_for_maps_list_to_star() {
 }
 
 #[test]
+fn iam_actions_for_role_carrying_ops_include_pass_role() {
+    let svc = LambdaService::new(make_state());
+    let role = "arn:aws:iam::123456789012:role/admin";
+    let body = json!({
+        "FunctionName": "newfn",
+        "Runtime": "python3.12",
+        "Role": role,
+        "Handler": "index.handler",
+        "Code": {}
+    });
+    let req = make_request(Method::POST, "/2015-03-31/functions", &body.to_string());
+    let actions = svc.iam_actions_for(&req);
+    assert_eq!(actions.len(), 2);
+    assert_eq!(actions[0].action, "CreateFunction");
+    assert!(actions[1].is_pass_role());
+    assert_eq!(actions[1].resource, role);
+    let keys = svc.iam_condition_keys_for(&req, &actions[1]);
+    assert_eq!(
+        keys["iam:passedtoservice"],
+        vec!["lambda.amazonaws.com".to_string()]
+    );
+    assert_eq!(
+        keys["iam:associatedresourcearn"],
+        vec!["arn:aws:lambda:us-east-1:123456789012:function:newfn".to_string()]
+    );
+
+    // UpdateFunctionConfiguration passes the role only when it changes it.
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/newfn/configuration",
+        &json!({"Role": role}).to_string(),
+    );
+    let actions = svc.iam_actions_for(&req);
+    assert_eq!(actions[0].action, "UpdateFunctionConfiguration");
+    assert!(actions[1].is_pass_role());
+    let req = make_request(
+        Method::PUT,
+        "/2015-03-31/functions/newfn/configuration",
+        &json!({"Timeout": 10}).to_string(),
+    );
+    assert_eq!(svc.iam_actions_for(&req).len(), 1);
+
+    // Ops that carry no role need only their own action.
+    let req = make_request(Method::GET, "/2015-03-31/functions/newfn", "");
+    assert_eq!(svc.iam_actions_for(&req).len(), 1);
+}
+
+#[test]
 fn iam_action_for_create_reads_function_name_from_body() {
     let svc = LambdaService::new(make_state());
     let body = json!({

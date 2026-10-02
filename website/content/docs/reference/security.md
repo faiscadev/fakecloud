@@ -25,7 +25,7 @@ When either opt-in feature is enabled, fakecloud emits a one-time WARN at startu
 
 When on, every incoming request is cryptographically verified:
 
-1. **Canonical request** rebuilt per the AWS SigV4 spec (double-encoded path for non-S3, single-encoded for S3; sorted, URL-encoded query string; lowercased + sorted headers; payload hash from `X-Amz-Content-Sha256` when present, otherwise `sha256(body)`).
+1. **Canonical request** rebuilt per the AWS SigV4 spec (each path segment of the request URI is decoded, then re-encoded twice for non-S3 services and once for S3, the way the signer built it, so S3 keys with spaces or `+` and ARNs in REST paths verify; sorted, URL-encoded query string; lowercased + sorted headers; payload hash from `X-Amz-Content-Sha256` when present, otherwise `sha256(body)`).
 2. **Signing key** derived via the four-step HMAC chain `AWS4 -> date -> region -> service -> aws4_request`.
 3. **Constant-time comparison** against the signature the client sent.
 4. **Clock skew window** of ±15 minutes, matching AWS.
@@ -35,7 +35,8 @@ Verification failures return protocol-correct AWS errors before business logic r
 | Failure | AWS error |
 | --- | --- |
 | Wrong signature | `SignatureDoesNotMatch` |
-| Unknown access key | `InvalidClientTokenId` |
+| Unknown or deactivated access key | `InvalidClientTokenId` |
+| Expired STS temporary credentials | `ExpiredToken` |
 | Clock skew > 15 min | `RequestTimeTooSkewed` |
 | Malformed auth header | `IncompleteSignature` |
 
@@ -55,6 +56,23 @@ Filter the audit events with `RUST_LOG=fakecloud::iam::audit=warn`.
 
 The account's IAM root identity (`arn:aws:iam::<account>:root`) and the reserved `test*` bypass AKIDs always pass enforcement, matching AWS's own behavior where root bypasses identity-based policies.
 
+### Credentials that resolve to no identity
+
+Under `strict`, a request to an enforced service signed with an access key that resolves to no identity is rejected before any handler runs, even without `--verify-sigv4`: an unknown or deactivated (`Inactive`) key gets `InvalidClientTokenId`, an expired STS session `ExpiredToken`. Such a request is never treated as the account root (so `AssumeRole` cannot mint credentials for it). The exemptions are explicit: the reserved `test*` identity and truly anonymous (unsigned) requests, which are authorized against resource policies only. `soft` logs these requests to `fakecloud::iam::audit` and lets them through. Only `--verify-sigv4` additionally proves the caller holds the key's secret.
+
+### `iam:PassRole`
+
+A request that hands a role to a service also needs `iam:PassRole` on that role, evaluated for the caller like any other action, with `iam:PassedToService` set to the receiving service principal and `iam:AssociatedResourceArn` to the resource the role is attached to:
+
+| Service | Operations and role parameters | `iam:PassedToService` |
+| --- | --- | --- |
+| Lambda | `CreateFunction` / `UpdateFunctionConfiguration` `Role`; `CreateCapacityProvider` / `UpdateCapacityProvider` `PermissionsConfig.CapacityProviderOperatorRoleArn` | `lambda.amazonaws.com` |
+| EventBridge Scheduler | `CreateSchedule` / `UpdateSchedule` `Target.RoleArn` | `scheduler.amazonaws.com` |
+| S3 | `PutBucketReplication` `Role` | `s3.amazonaws.com` |
+| SNS | `CreateTopic` / `SetTopicAttributes` delivery-status roles (`<Protocol>SuccessFeedbackRoleArn`, `<Protocol>FailureFeedbackRoleArn`); `Subscribe` / `SetSubscriptionAttributes` `SubscriptionRoleArn` | `sns.amazonaws.com` |
+
+So a principal granted only `lambda:CreateFunction` cannot attach an arbitrary (say, admin) role to code it controls. As on AWS, a role can only be passed within its own account: a role ARN in another account is denied `iam:PassRole` whatever the caller's policies say.
+
 ### Enforced services
 
 Opt-in enforcement covers the services most commonly subject to real IAM policies:
@@ -69,6 +87,8 @@ Opt-in enforcement covers the services most commonly subject to real IAM policie
 | **KMS** | All 47 supported actions | `arn:aws:kms:<region>:<account>:key/<key-id>` (key-targeted actions) or `*` (account-level actions like CreateKey, ListKeys) |
 | **DynamoDB** | All 58 supported operations | `arn:aws:dynamodb:<region>:<account>:table/<name>`, with `/index/<name>` for `Query`, `Scan` and contributor insights on an index, `/backup/...`, `/export/...` and `/import/...` for those operations, `arn:aws:dynamodb::<account>:global-table/<name>` for legacy global tables, and `*` for account-level listings. Batches need the batch action on every table they name; transactions need `GetItem` / `PutItem` / `UpdateItem` / `DeleteItem` / `ConditionCheckItem` on each item's table; PartiQL statements need `PartiQLSelect` / `PartiQLInsert` / `PartiQLUpdate` / `PartiQLDelete`; `CreateTable` with `Tags` or `ResourcePolicy` also needs `TagResource` / `PutResourcePolicy`; restores also need the data-plane actions on the target table |
 | **DynamoDB Streams** | All 4 supported operations (`dynamodb:` prefix) | `arn:aws:dynamodb:<region>:<account>:table/<name>/stream/<label>`, or `*` for `ListStreams` |
+| **Lambda** | All 88 supported actions (`Invoke` / `InvokeWithResponseStream` authorize as `lambda:InvokeFunction`) | `arn:aws:lambda:<region>:<account>:function:<name>` for function-scoped actions (ARN, partial-ARN and `name:qualifier` inputs normalize to the function), `*` for listings and account-level actions |
+| **EventBridge Scheduler** | All 12 supported actions | `arn:aws:scheduler:<region>:<account>:schedule/<group>/<name>`, `arn:aws:scheduler:<region>:<account>:schedule-group/<name>`, the tagged ARN for tag operations, `*` for listings |
 
 Other services are not enforced even with `FAKECLOUD_IAM=strict`. The startup log enumerates which services are enforced vs. skipped so you always know the current surface. If a service you need is missing, [open an issue](https://github.com/faiscadev/fakecloud/issues) — the wiring is straightforward per-service.
 
@@ -106,7 +126,7 @@ A statement with a `Condition` block only applies when every entry in the block 
 | ARN | `ArnEquals`, `ArnNotEquals`, `ArnLike`, `ArnNotLike` |
 | Existence | `Null` |
 
-Every operator supports the `...IfExists` suffix (missing key evaluates to `true`) and the `ForAllValues:` / `ForAnyValue:` set-qualifier prefixes. As on AWS, `ForAllValues` is also `true` when the request carries no values for a key the service populates (every one of zero values matches), while `ForAnyValue` then evaluates to `false`. A key fakecloud does not extract for the request still safe-fails to `false`, so an unextracted key never grants.
+Every operator supports the `...IfExists` suffix (missing key evaluates to `true`) and the `ForAllValues:` / `ForAnyValue:` set-qualifier prefixes. As on AWS, `ForAllValues` is also `true` when the request carries no values for a key the service populates (every one of zero values matches), while `ForAnyValue` then evaluates to `false`. When a key is absent from the request, positive operators (`StringEquals`, `ArnLike`, `IpAddress`, ...) evaluate to `false` and the negated operators (`StringNotEquals`, `StringNotEqualsIgnoreCase`, `StringNotLike`, `NumericNotEquals`, `DateNotEquals`, `NotIpAddress`, `ArnNotEquals`, `ArnNotLike`) evaluate to `true`, as on AWS, so a `Deny` guarded by `StringNotEquals` cannot be dodged by leaving the key out. `ForAnyValue:` with a negated operator still needs a value and evaluates to `false`. A condition operator fakecloud does not recognize (AWS rejects such a policy when you create it) fails closed in both directions: the `Allow` statement it guards does not apply, while the `Deny` statement it guards does.
 
 **Supported global condition keys:**
 
@@ -122,6 +142,9 @@ Every operator supports the `...IfExists` suffix (missing key evaluates to `true
 | `aws:EpochTime` | Same moment as `aws:CurrentTime`, in seconds since the Unix epoch |
 | `aws:SecureTransport` | `true` iff the request carries `x-forwarded-proto: https` (the fakecloud server itself speaks HTTP; set this header from an upstream TLS terminator to test) |
 | `aws:RequestedRegion` | Region extracted from SigV4 / config |
+| `aws:ResourceAccount` | Account that owns the target resource (an S3 bucket's owner, the account in any other ARN) |
+| `aws:PrincipalOrgID` / `aws:PrincipalOrgPaths` | The caller's organization ID and the account's path (`o-xxx/r-xxx/ou-xxx/.../`); absent when the caller's account is in no organization, as on AWS |
+| `aws:SourceArn` / `aws:SourceAccount` | Set on requests fakecloud makes as an AWS service principal (see below) |
 
 **Supported service-specific condition keys:**
 
@@ -133,6 +156,7 @@ Every operator supports the `...IfExists` suffix (missing key evaluates to `true
 | `s3:x-amz-acl` | any request carrying the header (`CreateBucket`, `PutObject`, `CopyObject`, `CreateMultipartUpload`, `PutBucketAcl`, `PutObjectAcl`) | `x-amz-acl` header |
 | `s3:x-amz-grant-read`, `-write`, `-read-acp`, `-write-acp`, `-full-control` | any request carrying the header | matching `x-amz-grant-*` header |
 | `s3:x-amz-object-ownership` | any request carrying the header, which in practice is `CreateBucket` | `x-amz-object-ownership` header. AWS defines this key for `CreateBucket` only; `PutBucketOwnershipControls` carries the value in its XML body rather than a header, so no key is populated there |
+| `s3:x-amz-server-side-encryption`, `s3:x-amz-server-side-encryption-aws-kms-key-id`, `s3:x-amz-server-side-encryption-customer-algorithm`, `s3:x-amz-storage-class`, `s3:x-amz-metadata-directive`, `s3:x-amz-copy-source` | any request carrying the header (`PutObject`, `CopyObject`, `CreateMultipartUpload`) | matching request header, so guardrails like `DenyIncorrectEncryptionHeader` admit compliant writes |
 | `sns:Protocol` | `sns:Subscribe` | `Protocol` request parameter |
 | `sns:Endpoint` | `sns:Subscribe` | `Endpoint` request parameter |
 | `lambda:FunctionArn` | `lambda:AddPermission` | Target function ARN resolved from the path |
@@ -148,7 +172,7 @@ Every operator supports the `...IfExists` suffix (missing key evaluates to `true
 
 New services plug in by implementing `iam_condition_keys_for` on their `AwsService` impl; the dispatcher merges the result into the shared context before the evaluator runs.
 
-**Safe-fail semantics.** Any unimplemented operator, unknown key, or parse failure (malformed date, invalid CIDR, non-numeric value where numeric expected) is logged to `fakecloud::iam::audit` at debug level and evaluates to `false` — i.e. the statement *does not apply*. The evaluator will never silently treat an unrecognized condition as a match. If you see unexpected denies, raise the `fakecloud::iam::audit` log level to see which statements were skipped.
+**Safe-fail semantics.** A parse failure (malformed date, invalid CIDR, non-numeric value where numeric expected) is logged to `fakecloud::iam::audit` at debug level and evaluates to `false`. A key absent from the request follows AWS: positive operators are `false`, negated ones `true` (see above). An unrecognized operator fails closed in both directions: an `Allow` it guards does not apply, a `Deny` it guards does. The evaluator never lets a condition it cannot read grant access, nor lift a restriction. If you see unexpected denies, raise the `fakecloud::iam::audit` log level to see which statements fired or were skipped.
 
 ### Resource-based policies
 
@@ -166,7 +190,8 @@ The resource's owning account is parsed from the ARN; S3 ARNs have an empty acco
 - **SNS topic policies** are stored in the topic's `Policy` attribute by `SetTopicAttributes` (full document) or by `AddPermission` / `RemovePermission` (incremental statements). `GetTopicAttributes` returns them.
 - **Lambda function policies** are built incrementally by `AddPermission`: fakecloud composes a canonical `{"Version":"2012-10-17","Statement":[...]}` document from `(StatementId, Action, Principal, SourceArn?, SourceAccount?)` so the existing evaluator reads it without a Lambda-specific fork. `SourceArn` becomes an `ArnLike` `Condition` on `aws:SourceArn`, and `SourceAccount` becomes a `StringEquals` `Condition` on `aws:SourceAccount` — both are already in the operator set. `GetPolicy` returns the composed document; `RemovePermission` strips the matching `Sid` and leaves an empty `Statement` array behind, matching AWS.
 - **DynamoDB table and stream policies** are attached by `PutResourcePolicy` (or `CreateTable`'s `ResourcePolicy`), read by `GetResourcePolicy` and removed by `DeleteResourcePolicy`, honoring `ExpectedRevisionId` (including `NO_POLICY`). A table's policy also governs its indexes; a stream's policy is its own and belongs to that stream ARN. A principal in another account uses a table or stream by its ARN, for the data-plane, `DescribeTable` / `UpdateTable` / `DeleteTable`, tagging and stream-read operations AWS allows cross-account; the resource policy must grant it alongside the caller's identity policy.
-- **IAM role trust policies** (`assume_role_policy_document`) are evaluated on every `AssumeRole`, `AssumeRoleWithSAML`, and `AssumeRoleWithWebIdentity` call before STS issues credentials. The trust policy is the *only* authorization source for role assumption — identity policies do not factor in. Caller principal, action (`sts:AssumeRole*`), `Condition` keys (`sts:ExternalId`, `sts:RoleSessionName`, `sts:SourceIdentity`, `aws:MultiFactorAuthPresent`, `aws:SourceAccount`), and federation-specific keys (`saml:aud`, `saml:iss`, `<provider>:aud`, `<provider>:sub`) are all populated. `AssumeRoleWithWebIdentity` additionally requires the JWT's `iss` to match a registered `OpenIDConnectProvider` and `aud` to be in its `client_id_list`; service-linked roles (path `/aws-service-role/<service>/...`) refuse non-service callers regardless of trust-policy contents.
+- **MFA on `AssumeRole` / `GetSessionToken`.** A `SerialNumber` + `TokenCode` pair is verified, not taken on trust: the serial must name an MFA device of the caller (an IAM user's own assigned device; any device of the account for the root identity, including the reserved `test*` one; none for role sessions) and the code must be the device's current RFC 6238 TOTP (one 30-second step of drift either way), computed from the `Base32StringSeed` `CreateVirtualMFADevice` returned. Otherwise STS answers `AccessDenied` (`MultiFactorAuthentication failed with invalid MFA one time pass code.`, or `... unable to validate MFA code ...` for an unknown or foreign serial) and no session is minted. Only a verified pair sets `aws:MultiFactorAuthPresent` / `aws:MultiFactorAuthAge`. A device registered by serial alone through `EnableMFADevice` (a hardware token) has no seed fakecloud knows, so any 6-digit code is accepted for it.
+- **IAM role trust policies** (`assume_role_policy_document`) are evaluated on every `AssumeRole`, `AssumeRoleWithSAML`, and `AssumeRoleWithWebIdentity` call before STS issues credentials. The trust policy is the *only* authorization source for role assumption — identity policies do not factor in. Caller principal, action (`sts:AssumeRole*`), `Condition` keys (`sts:ExternalId`, `sts:RoleSessionName`, `sts:SourceIdentity`, `aws:MultiFactorAuthPresent`, `aws:SourceAccount`), and federation-specific keys (`saml:aud`, `saml:iss`, `<provider>:aud`, `<provider>:sub`) are all populated. `AssumeRoleWithWebIdentity` additionally requires the JWT's `iss` to match a registered `OpenIDConnectProvider` and `aud` to be in its `client_id_list`; service-linked roles (path `/aws-service-role/<service>/...`) refuse non-service callers regardless of trust-policy contents. `RoleArn` is matched on the role's full path: `arn:aws:iam::<account>:role/<name>` does not name a role created under `/team/`, so `AssumeRole` on it is denied.
 
 **Principal matching.** Resource policies use `Principal` / `NotPrincipal` keys that identity policies don't. The evaluator supports the shapes resource policies actually use in practice:
 
