@@ -1737,3 +1737,80 @@ async fn associate_dataset_kms_key_rejects_short_arn() {
     .await;
     assert_eq!(err.code(), "InvalidParameterValue");
 }
+
+// ---------------------------------------------------------------------------
+// awsQueryCompatible error header + rpcv2Cbor responses.
+// ---------------------------------------------------------------------------
+
+fn query_error_header(err: &AwsServiceError) -> Option<String> {
+    err.response_headers()
+        .iter()
+        .find(|(k, _)| k == "x-amzn-query-error")
+        .map(|(_, v)| v.clone())
+}
+
+#[tokio::test]
+async fn json_and_cbor_errors_carry_query_error_header() {
+    let svc = service();
+    let json_err = match svc
+        .handle(json_req(
+            "GetDashboard",
+            serde_json::json!({"DashboardName": "ghost"}),
+        ))
+        .await
+    {
+        Ok(_) => panic!("expected GetDashboard to fail"),
+        Err(e) => e,
+    };
+    assert_eq!(json_err.code(), "ResourceNotFound");
+    assert_eq!(
+        query_error_header(&json_err).as_deref(),
+        Some("ResourceNotFound;Sender")
+    );
+
+    let mut cbor = json_req(
+        "GetDashboard",
+        serde_json::json!({"DashboardName": "ghost"}),
+    );
+    cbor.headers.remove("x-amz-target");
+    cbor.headers
+        .insert("smithy-protocol", "rpc-v2-cbor".parse().unwrap());
+    let cbor_err = match svc.handle(cbor).await {
+        Ok(_) => panic!("expected GetDashboard to fail"),
+        Err(e) => e,
+    };
+    assert_eq!(
+        query_error_header(&cbor_err).as_deref(),
+        Some("ResourceNotFound;Sender")
+    );
+
+    // Query-protocol callers get the plain awsQuery error, no extra header.
+    let query_err = call_err(&svc, "GetDashboard", &[("DashboardName", "ghost")]).await;
+    assert_eq!(query_error_header(&query_err), None);
+}
+
+#[tokio::test]
+async fn cbor_request_gets_cbor_response() {
+    let svc = service();
+    let mut put = json_req(
+        "PutMetricData",
+        serde_json::json!({
+            "Namespace": "App",
+            "MetricData": [{"MetricName": "Latency", "Value": 5.0}]
+        }),
+    );
+    put.headers.remove("x-amz-target");
+    put.headers
+        .insert("smithy-protocol", "rpc-v2-cbor".parse().unwrap());
+    let resp = svc.handle(put).await.expect("put ok");
+    assert_eq!(resp.content_type, "application/cbor");
+
+    let mut list = json_req("ListMetrics", serde_json::json!({"Namespace": "App"}));
+    list.headers.remove("x-amz-target");
+    list.headers
+        .insert("smithy-protocol", "rpc-v2-cbor".parse().unwrap());
+    let resp = svc.handle(list).await.expect("list ok");
+    assert_eq!(resp.content_type, "application/cbor");
+    let json = fakecloud_core::cbor::decode_to_json(resp.body.expect_bytes()).unwrap();
+    assert_eq!(json["Metrics"][0]["MetricName"], "Latency");
+}

@@ -17,11 +17,13 @@ use std::collections::BTreeMap;
 use fakecloud_core::delivery::DeliveryBus;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
+#[allow(clippy::too_many_arguments)]
 pub fn construct_event(
     req: &AwsRequest,
     rest_api_id: &str,
     stage: &str,
     resource_path: &str,
+    request_path: &str,
     path_parameters: BTreeMap<String, String>,
     stage_variables: BTreeMap<String, String>,
     binary_media_types: &[String],
@@ -54,7 +56,9 @@ pub fn construct_event(
 
     json!({
         "resource": resource_path,
-        "path": req.raw_path,
+        // Stage-relative on the execute-api endpoint; `requestContext.path`
+        // below keeps the full path as requested.
+        "path": request_path,
         "httpMethod": req.method.as_str(),
         "headers": if headers.is_empty() { serde_json::Value::Null } else { json!(headers) },
         "multiValueHeaders": if multi_value_headers.is_empty() {
@@ -374,11 +378,14 @@ mod tests {
             "abc123",
             "prod",
             "/pets",
+            "/pets",
             BTreeMap::new(),
             BTreeMap::new(),
             &[],
         );
         assert_eq!(event["resource"], "/pets");
+        assert_eq!(event["path"], "/pets");
+        assert_eq!(event["requestContext"]["path"], req().raw_path);
         assert_eq!(event["httpMethod"], "POST");
         assert_eq!(event["requestContext"]["stage"], "prod");
         assert_eq!(event["requestContext"]["apiId"], "abc123");
@@ -492,6 +499,7 @@ mod tests {
             &req,
             "abc123",
             "prod",
+            "/pets",
             "/pets",
             BTreeMap::new(),
             BTreeMap::new(),

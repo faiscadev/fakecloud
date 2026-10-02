@@ -2,12 +2,14 @@
 
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn enforce_authorizer(
     service: &ApiGatewayService,
     req: &AwsRequest,
     api_id: &str,
     stage: &str,
     resource_path: &str,
+    request_path: &str,
     authorization_type: &str,
     authorizer: Option<&Authorizer>,
 ) -> Result<Option<AuthorizerOutcome>, AwsServiceError> {
@@ -20,7 +22,16 @@ pub(super) async fn enforce_authorizer(
             let authorizer = authorizer.ok_or_else(|| {
                 forbidden("Method requires a custom authorizer but none is configured")
             })?;
-            run_lambda_authorizer(service, req, api_id, stage, resource_path, authorizer).await
+            run_lambda_authorizer(
+                service,
+                req,
+                api_id,
+                stage,
+                resource_path,
+                request_path,
+                authorizer,
+            )
+            .await
         }
         "COGNITO_USER_POOLS" => {
             let authorizer = authorizer.ok_or_else(|| {
@@ -43,6 +54,7 @@ pub(super) async fn run_lambda_authorizer(
     api_id: &str,
     stage: &str,
     resource_path: &str,
+    request_path: &str,
     authorizer: &Authorizer,
 ) -> Result<Option<AuthorizerOutcome>, AwsServiceError> {
     // For TOKEN authorizers AWS treats the value of the configured
@@ -102,7 +114,7 @@ pub(super) async fn run_lambda_authorizer(
                 "type": "REQUEST",
                 "methodArn": method_arn,
                 "resource": resource_path,
-                "path": req.raw_path,
+                "path": request_path,
                 "httpMethod": req.method.as_str(),
                 "headers": headers,
                 "queryStringParameters": query,

@@ -595,18 +595,33 @@ fn substitute_stage_variables(uri: &str, stage_variables: &BTreeMap<String, Stri
 /// The returned `remaining_path_segments` is what should be used for
 /// route matching (the base path prefix is stripped). `resource_path`
 /// is the display path recorded in request history.
+/// The custom domain whose name is `host` (already normalized: no port,
+/// lowercase), if any.
+pub fn domain_for_host<'a>(
+    state: &'a ApiGatewayV2State,
+    host: &str,
+) -> Option<&'a serde_json::Value> {
+    state
+        .domain_names
+        .iter()
+        .find(|(name, _)| fakecloud_core::protocol::normalize_host(name) == host)
+        .map(|(_, domain)| domain)
+}
+
 fn resolve_custom_domain(
     req: &AwsRequest,
     state: &ApiGatewayV2State,
 ) -> Option<(String, String, Vec<String>, String)> {
-    let host = req.headers.get("host").and_then(|v| v.to_str().ok())?;
+    // Compare without the port and case-insensitively: a client reaching
+    // fakecloud on `api.example.com:4566` is addressing `api.example.com`.
+    let host = fakecloud_core::protocol::normalized_host_from_headers(&req.headers)?;
 
     // Only consider hosts that don't look like the default execute-api endpoint.
     if host.contains(".execute-api.") {
         return None;
     }
 
-    let domain = state.domain_names.get(host)?;
+    let domain = domain_for_host(state, &host)?;
     let domain_name = domain["DomainName"].as_str()?;
 
     let mappings = state.api_mappings.get(domain_name)?;

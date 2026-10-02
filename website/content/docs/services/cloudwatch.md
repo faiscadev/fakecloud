@@ -1,10 +1,10 @@
 +++
 title = "CloudWatch (Metrics & Alarms)"
-description = "Amazon CloudWatch metrics, alarms, dashboards, anomaly detectors, insight rules, and metric streams. awsQuery and awsJson1_0 protocols."
+description = "Amazon CloudWatch metrics, alarms, dashboards, anomaly detectors, insight rules, and metric streams. awsQuery, awsJson1_0 and Smithy RPC v2 CBOR protocols."
 weight = 33
 +++
 
-fakecloud implements Amazon CloudWatch's metrics-and-alarms surface (the `monitoring` SigV4 service) — distinct from [CloudWatch Logs](/docs/services/logs/), which is a separate service. CloudWatch's Smithy model advertises both the legacy `awsQuery` protocol (XML) and `awsJson1_0`; fakecloud accepts either, so older SDKs and newer SDKs (aws-sdk-rust / js-v3 / go-v2) that send `X-Amz-Target: GraniteServiceVersion20100801.<Operation>` with a JSON body both work, and each caller receives a response in the protocol it used. All 49 operations are implemented with persisted in-memory state.
+fakecloud implements Amazon CloudWatch's metrics-and-alarms surface (the `monitoring` SigV4 service) — distinct from [CloudWatch Logs](/docs/services/logs/), which is a separate service. CloudWatch's Smithy model advertises Smithy RPC v2 CBOR, `awsJson1_0` and the legacy `awsQuery` protocol (XML); fakecloud accepts all three, and each caller receives a response in the protocol it used. Current aws-sdk-rust speaks RPC v2 CBOR (`POST /service/GraniteServiceVersion20100801/operation/<Operation>` with `smithy-protocol: rpc-v2-cbor` and CBOR bodies: tag-1 epoch timestamps, byte-string blobs), aws-sdk-js-v3 and botocore send `X-Amz-Target: GraniteServiceVersion20100801.<Operation>` with a JSON body, and older SDKs use awsQuery. CloudWatch is `awsQueryCompatible`, so CBOR and JSON errors carry the awsQuery error code in the `x-amzn-query-error` header the SDKs use to pick the modeled error. All 49 operations are implemented with persisted in-memory state.
 
 **Status: full control plane. Metrics are stored in memory and do not persist across server restarts; alarm evaluation is driven by the metric data you publish, not by a background sampling loop.**
 

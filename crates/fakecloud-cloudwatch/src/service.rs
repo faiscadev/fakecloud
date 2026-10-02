@@ -336,20 +336,86 @@ impl AwsService for CloudWatchService {
         if mutates && result.is_ok() {
             self.save_snapshot().await;
         }
-        // A JSON-protocol caller (awsJson1_0, identified by the X-Amz-Target
-        // header) expects a JSON response body; the handlers produce awsQuery
-        // XML, so convert it. Query-protocol callers keep the XML unchanged.
-        if request_is_json(&req) {
-            return result.map(crate::json_protocol::xml_response_to_json);
+        // rpcv2Cbor and awsJson1_0 callers expect a CBOR / JSON response
+        // body; the handlers produce awsQuery XML, so convert it. CloudWatch
+        // is `awsQueryCompatible`, so their errors also carry the awsQuery
+        // error code in `x-amzn-query-error`. Query-protocol callers keep the
+        // XML unchanged.
+        match wire_protocol(&req) {
+            WireProtocol::Query => result,
+            WireProtocol::Json => result
+                .map(crate::json_protocol::xml_response_to_json)
+                .map_err(with_query_error_header),
+            WireProtocol::Cbor => result
+                .map(crate::json_protocol::xml_response_to_cbor)
+                .map_err(with_query_error_header),
         }
-        result
     }
 }
 
-/// True when the request arrived over the awsJson1_0 protocol (CloudWatch
-/// advertises both awsJson1_0 and awsQuery). JSON callers set `X-Amz-Target`.
-fn request_is_json(req: &AwsRequest) -> bool {
-    req.headers.contains_key("x-amz-target")
+/// The protocol a CloudWatch request arrived over. CloudWatch advertises
+/// rpcv2Cbor, awsJson1_0 and awsQuery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WireProtocol {
+    Query,
+    /// awsJson1_0: callers set `X-Amz-Target`.
+    Json,
+    /// rpcv2Cbor: callers set `smithy-protocol: rpc-v2-cbor`.
+    Cbor,
+}
+
+fn wire_protocol(req: &AwsRequest) -> WireProtocol {
+    let is_cbor = req
+        .headers
+        .get(fakecloud_core::cbor::SMITHY_PROTOCOL_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.trim()
+                .eq_ignore_ascii_case(fakecloud_core::cbor::RPC_V2_CBOR)
+        });
+    if is_cbor {
+        WireProtocol::Cbor
+    } else if req.headers.contains_key("x-amz-target") {
+        WireProtocol::Json
+    } else {
+        WireProtocol::Query
+    }
+}
+
+/// awsQueryCompatible: a JSON or CBOR error carries the awsQuery error code
+/// and fault (`Sender` for a 4xx, `Receiver` for a 5xx) in the
+/// `x-amzn-query-error` header, which the SDKs prefer over `__type` when
+/// matching the modeled error. CloudWatch handlers already raise the awsQuery
+/// code, so the header repeats it.
+fn with_query_error_header(err: AwsServiceError) -> AwsServiceError {
+    let AwsServiceError::AwsError {
+        status,
+        code,
+        message,
+        extra_fields,
+        mut headers,
+    } = err
+    else {
+        return err;
+    };
+    let has_header = headers
+        .iter()
+        .any(|(k, _)| k.eq_ignore_ascii_case("x-amzn-query-error"));
+    if !has_header {
+        let fault = if status.is_server_error() {
+            "Receiver"
+        } else {
+            "Sender"
+        };
+        headers.push(("x-amzn-query-error".to_string(), format!("{code};{fault}")));
+    }
+    AwsServiceError::AwsError {
+        status,
+        code,
+        message,
+        extra_fields,
+        headers,
+    }
 }
 
 pub(crate) fn xml_response(action: &str, inner: &str, request_id: &str) -> AwsResponse {

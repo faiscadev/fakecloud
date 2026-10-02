@@ -597,12 +597,7 @@ async fn cloudwatch_tagging() {
 }
 
 // ---------------------------------------------------------------------------
-// Newer surfaces absent from aws-sdk-cloudwatch 1.61.0 (alarm mute rules,
-// alarm contributors). The SDK has no operation methods for
-// these yet, so coverage is asserted directly against fakecloud's in-memory
-// implementation via the testkit state handle. The conformance probe runner
-// (`run --services monitoring`) exercises their wire contracts independently;
-// these annotations register them for the coverage audit.
+// Alarm mute rules and alarm contributors.
 // ---------------------------------------------------------------------------
 
 #[test_action("monitoring", "PutAlarmMuteRule", checksum = "4efa2946")]
@@ -611,13 +606,82 @@ async fn cloudwatch_tagging() {
 #[test_action("monitoring", "DeleteAlarmMuteRule", checksum = "64544862")]
 #[test_action("monitoring", "DescribeAlarmContributors", checksum = "3c5c78c2")]
 #[tokio::test]
-async fn cloudwatch_sdkless_surfaces() {
-    // The server boots and routes these actions (verified by the conformance
-    // probe runner); the SDK 1.61.0 simply lacks typed methods for them. This
-    // test exists so the audit registers coverage for the actions; behaviour
-    // is covered by the crate's unit tests and the probe runner.
+async fn cloudwatch_alarm_mute_rules_and_contributors() {
+    use aws_sdk_cloudwatch::types::{MuteTargets, Rule, Schedule};
+
     let server = TestServer::start().await;
-    let _client = server.cloudwatch_client().await;
+    let client = server.cloudwatch_client().await;
+
+    client
+        .put_metric_alarm()
+        .alarm_name("muted-alarm")
+        .namespace("App")
+        .metric_name("Errors")
+        .statistic(Statistic::Sum)
+        .period(60)
+        .evaluation_periods(1)
+        .threshold(1.0)
+        .comparison_operator(ComparisonOperator::GreaterThanThreshold)
+        .send()
+        .await
+        .unwrap();
+
+    client
+        .put_alarm_mute_rule()
+        .name("nightly")
+        .description("mute during deploys")
+        .rule(
+            Rule::builder()
+                .schedule(
+                    Schedule::builder()
+                        .expression("cron(0 2 * * ? *)")
+                        .duration("PT1H")
+                        .build(),
+                )
+                .build(),
+        )
+        .mute_targets(MuteTargets::builder().alarm_names("muted-alarm").build())
+        .send()
+        .await
+        .unwrap();
+
+    let got = client
+        .get_alarm_mute_rule()
+        .alarm_mute_rule_name("nightly")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(got.name(), Some("nightly"));
+    assert_eq!(got.description(), Some("mute during deploys"));
+    let schedule = got.rule().and_then(|r| r.schedule()).expect("schedule");
+    assert_eq!(schedule.expression(), Some("cron(0 2 * * ? *)"));
+    assert_eq!(schedule.duration(), Some("PT1H"));
+    assert_eq!(
+        got.mute_targets().map(|t| t.alarm_names().to_vec()),
+        Some(vec!["muted-alarm".to_string()])
+    );
+
+    let listed = client.list_alarm_mute_rules().send().await.unwrap();
+    assert!(listed.alarm_mute_rule_summaries().iter().any(|r| r
+        .alarm_mute_rule_arn()
+        .is_some_and(|a| a.ends_with("/nightly"))));
+
+    let contributors = client
+        .describe_alarm_contributors()
+        .alarm_name("muted-alarm")
+        .send()
+        .await
+        .unwrap();
+    assert!(contributors.alarm_contributors().is_empty());
+
+    client
+        .delete_alarm_mute_rule()
+        .alarm_mute_rule_name("nightly")
+        .send()
+        .await
+        .unwrap();
+    let after = client.list_alarm_mute_rules().send().await.unwrap();
+    assert!(after.alarm_mute_rule_summaries().is_empty());
 }
 
 // ---------------------------------------------------------------------------

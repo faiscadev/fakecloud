@@ -355,11 +355,20 @@ impl fakecloud_core::service::AwsService for ApiGatewayService {
             }
             return res;
         }
-        // Fallback: data-plane invocation. Execute-api resource matching,
-        // path parameters and the proxy event's path work on the path exactly
-        // as the client sent it, so hand the data plane the undecoded
-        // segments rather than dispatch's decoded `@httpLabel` view.
-        let mut req = req;
+        // Fallback: data-plane invocation.
+        self.handle_data_plane(req).await
+    }
+}
+
+impl ApiGatewayService {
+    /// Serve an execute-api (data-plane) request. Resource matching, path
+    /// parameters and the proxy event's path work on the path exactly as the
+    /// client sent it, so hand the data plane the undecoded segments rather
+    /// than dispatch's decoded `@httpLabel` view.
+    pub(crate) async fn handle_data_plane(
+        &self,
+        mut req: AwsRequest,
+    ) -> Result<AwsResponse, AwsServiceError> {
         req.path_segments = fakecloud_core::path::split_raw_path_segments(&req.raw_path);
         crate::data_plane::handle(self, &req).await
     }

@@ -25,5 +25,6 @@ uuid = { workspace = true }
 quick-xml = { workspace = true }
 
 [dev-dependencies]
+ciborium = "0.2"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 bytes = { workspace = true }

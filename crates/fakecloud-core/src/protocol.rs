@@ -27,6 +27,11 @@ pub enum AwsProtocol {
     /// REST-JSON protocol: HTTP method + path-based routing, JSON responses.
     /// Used by: Lambda, SES v2.
     RestJson,
+    /// Smithy RPC v2 CBOR: `POST /service/{Service}/operation/{Operation}`
+    /// with `smithy-protocol: rpc-v2-cbor` and CBOR bodies. The request body is
+    /// decoded to the awsJson document and handled on the service's JSON path;
+    /// see [`crate::cbor`]. Used by: CloudWatch (current aws-sdk-rust).
+    RpcV2Cbor,
 }
 
 /// Pick the Query-family protocol for a resolved service. EC2 speaks the
@@ -391,6 +396,33 @@ pub fn is_s3_control_host(headers: &HeaderMap) -> bool {
     control_label && parse_routing_host(host).is_none_or(|h| h.bucket.is_none())
 }
 
+/// Normalize a `Host` header value for comparing against configured domain
+/// names: drop the port (`api.example.com:4566`), any trailing root dot, and
+/// lowercase it (DNS names are case-insensitive). A bracketed IPv6 literal
+/// keeps its brackets.
+pub fn normalize_host(host: &str) -> String {
+    let host = host.trim();
+    let without_port = if let Some(rest) = host.strip_prefix('[') {
+        match rest.find(']') {
+            Some(end) => &host[..end + 2],
+            None => host,
+        }
+    } else {
+        match host.rsplit_once(':') {
+            Some((name, port)) if port.chars().all(|c| c.is_ascii_digit()) => name,
+            _ => host,
+        }
+    };
+    without_port.trim_end_matches('.').to_ascii_lowercase()
+}
+
+/// The normalized `Host` header (see [`normalize_host`]), if present.
+pub fn normalized_host_from_headers(headers: &HeaderMap) -> Option<String> {
+    let host = headers.get("host")?.to_str().ok()?;
+    let host = normalize_host(host);
+    (!host.is_empty()).then_some(host)
+}
+
 /// Pull the `Host` header and parse it with [`parse_routing_host`].
 pub fn parse_routing_host_from_headers(headers: &HeaderMap) -> Option<RoutingHost> {
     let host = headers.get("host")?.to_str().ok()?;
@@ -404,6 +436,13 @@ fn parse_localstack_prefix(prefix: &str) -> Option<RoutingHost> {
     let labels: Vec<&str> = prefix.split('.').collect();
     if labels.iter().any(|l| l.is_empty()) {
         return None;
+    }
+    // API Gateway execute-api hosts lead with the API id, not a service:
+    // `<api-id>.execute-api[.<region>]`. Without a region label the host
+    // carries no region at all, so let the caller fall back to its default
+    // rather than reading `execute-api` as one.
+    if let Some(host) = parse_execute_api_labels(&labels) {
+        return host;
     }
     match labels.len() {
         2 => Some(RoutingHost {
@@ -432,6 +471,22 @@ fn parse_localstack_prefix(prefix: &str) -> Option<RoutingHost> {
             region: labels[n - 1].to_string(),
             bucket: None,
         }),
+        _ => None,
+    }
+}
+
+/// Classify an API Gateway execute-api host prefix (`<api-id>.execute-api`,
+/// optionally followed by `.<region>`). Returns `None` when the labels are not
+/// an execute-api host, `Some(None)` for one without a region, and
+/// `Some(Some(host))` for one naming its region.
+fn parse_execute_api_labels(labels: &[&str]) -> Option<Option<RoutingHost>> {
+    match labels {
+        [_api_id, "execute-api"] => Some(None),
+        [_api_id, "execute-api", region] => Some(Some(RoutingHost {
+            service: "execute-api".to_string(),
+            region: region.to_string(),
+            bucket: None,
+        })),
         _ => None,
     }
 }
@@ -562,6 +617,11 @@ fn parse_aws_prefix(prefix: &str) -> Option<RoutingHost> {
         });
     }
 
+    // `<api-id>.execute-api.<region>` — API Gateway's default endpoint.
+    if let Some(host) = parse_execute_api_labels(&labels) {
+        return host;
+    }
+
     // `<service>.<region>` — the common case for every other service.
     match labels.as_slice() {
         [service, region] => Some(RoutingHost {
@@ -573,9 +633,29 @@ fn parse_aws_prefix(prefix: &str) -> Option<RoutingHost> {
     }
 }
 
+/// Detect a Smithy RPC v2 CBOR request: the `smithy-protocol: rpc-v2-cbor`
+/// header plus a `/service/{ServiceName}/operation/{Operation}` path. The
+/// service shape name is the same identifier awsJson services use as their
+/// `X-Amz-Target` prefix, so it resolves through the same table.
+pub fn detect_rpc_v2_cbor(headers: &HeaderMap, path: &str) -> Option<DetectedRequest> {
+    let is_cbor = headers
+        .get(crate::cbor::SMITHY_PROTOCOL_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.trim().eq_ignore_ascii_case(crate::cbor::RPC_V2_CBOR));
+    if !is_cbor {
+        return None;
+    }
+    let (service_shape, operation) = crate::cbor::parse_rpc_v2_path(path)?;
+    let detected = parse_amz_target(&format!("{service_shape}.{operation}"))?;
+    Some(DetectedRequest {
+        protocol: AwsProtocol::RpcV2Cbor,
+        ..detected
+    })
+}
+
 /// Parse `X-Amz-Target: AWSEvents.PutEvents` -> service=events, action=PutEvents
 /// Parse `X-Amz-Target: AmazonSSM.GetParameter` -> service=ssm, action=GetParameter
-fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
+pub(crate) fn parse_amz_target(target: &str) -> Option<DetectedRequest> {
     let (prefix, action) = target.rsplit_once('.')?;
 
     let service = match prefix {
@@ -791,7 +871,7 @@ fn infer_service_from_action(action: &str) -> Option<String> {
 }
 
 /// Extract service name from the SigV4 Authorization header credential scope.
-fn extract_service_from_auth(headers: &HeaderMap) -> Option<String> {
+pub(crate) fn extract_service_from_auth(headers: &HeaderMap) -> Option<String> {
     let auth = headers.get("authorization")?.to_str().ok()?;
     let info = fakecloud_aws::sigv4::parse_sigv4(auth)?;
     Some(normalize_service_name(&info.service).to_string())
@@ -1518,6 +1598,48 @@ mod tests {
         let detected = detect_service(&headers, &query, &body).unwrap();
         assert_eq!(detected.service, "bedrock");
         assert_eq!(detected.protocol, AwsProtocol::RestJson);
+    }
+
+    #[test]
+    fn normalize_host_strips_port_and_case() {
+        assert_eq!(normalize_host("Rest.Example.com:4566"), "rest.example.com");
+        assert_eq!(normalize_host("rest.example.com."), "rest.example.com");
+        assert_eq!(normalize_host("rest.example.com"), "rest.example.com");
+        assert_eq!(normalize_host("[::1]:4566"), "[::1]");
+        assert_eq!(normalize_host("localhost"), "localhost");
+    }
+
+    #[test]
+    fn parse_routing_host_execute_api_hosts() {
+        // LocalStack's execute-api host has no region label: it must not be
+        // read as region `execute-api`.
+        assert_eq!(
+            parse_routing_host("abc123.execute-api.localhost.localstack.cloud:4566"),
+            None
+        );
+        let h =
+            parse_routing_host("abc123.execute-api.eu-west-1.localhost.localstack.cloud").unwrap();
+        assert_eq!(h.service, "execute-api");
+        assert_eq!(h.region, "eu-west-1");
+        let h = parse_routing_host("abc123.execute-api.us-west-2.amazonaws.com").unwrap();
+        assert_eq!(h.service, "execute-api");
+        assert_eq!(h.region, "us-west-2");
+        assert_eq!(h.bucket, None);
+    }
+
+    #[test]
+    fn detect_rpc_v2_cbor_requests() {
+        let mut headers = HeaderMap::new();
+        let path = "/service/GraniteServiceVersion20100801/operation/GetMetricData";
+        // Without the protocol header the path alone is not enough.
+        assert!(detect_rpc_v2_cbor(&headers, path).is_none());
+        headers.insert("smithy-protocol", "rpc-v2-cbor".parse().unwrap());
+        let d = detect_rpc_v2_cbor(&headers, path).unwrap();
+        assert_eq!(d.service, "monitoring");
+        assert_eq!(d.action, "GetMetricData");
+        assert_eq!(d.protocol, AwsProtocol::RpcV2Cbor);
+        assert!(detect_rpc_v2_cbor(&headers, "/service/Unknown/operation/Op").is_none());
+        assert!(detect_rpc_v2_cbor(&headers, "/prod/items").is_none());
     }
 
     #[test]

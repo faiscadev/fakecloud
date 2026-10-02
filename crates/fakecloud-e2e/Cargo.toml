@@ -100,7 +100,7 @@ aws-sdk-eks = "1"
 # in every `--all-targets` job (clippy, e2e archive) without cmake or a C
 # toolchain -- the round trip uses PLAINTEXT + NoCompression.
 rskafka = { version = "0.5", default-features = false }
-aws-sdk-cloudwatch = "=1.61.0"
+aws-sdk-cloudwatch = "1.111"
 tokio-postgres = "0.7"
 mysql_async = "0.34"
 aws-smithy-types = "1"

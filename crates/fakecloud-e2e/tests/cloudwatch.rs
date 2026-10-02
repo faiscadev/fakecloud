@@ -886,3 +886,196 @@ async fn get_metric_data_drops_nan_from_divide_by_zero() {
         e.values()
     );
 }
+
+// ── Smithy RPC v2 CBOR ──
+//
+// Current aws-sdk-cloudwatch speaks rpcv2Cbor (`POST /service/
+// GraniteServiceVersion20100801/operation/{Op}`, CBOR bodies), so every test
+// in this file runs over CBOR. These cover the protocol edges: typed errors via
+// the awsQueryCompatible header, blobs, typed numbers, and the raw wire shape.
+
+#[tokio::test]
+async fn cbor_errors_map_to_modeled_errors() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let err = cw
+        .get_dashboard()
+        .dashboard_name("ghost")
+        .send()
+        .await
+        .expect_err("missing dashboard");
+    let svc = err.as_service_error().expect("service error");
+    assert!(svc.is_dashboard_not_found_error(), "{svc:?}");
+    assert_eq!(
+        aws_sdk_cloudwatch::error::ProvideErrorMetadata::code(svc),
+        Some("ResourceNotFound")
+    );
+}
+
+#[tokio::test]
+async fn cbor_blob_and_numeric_outputs_decode() {
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+
+    let image = cw
+        .get_metric_widget_image()
+        .metric_widget(r#"{"metrics":[]}"#)
+        .send()
+        .await
+        .expect("widget image");
+    let bytes = image
+        .metric_widget_image()
+        .expect("image")
+        .as_ref()
+        .to_vec();
+    assert!(bytes.starts_with(b"\x89PNG"), "blob must be raw PNG bytes");
+
+    cw.put_insight_rule()
+        .rule_name("cbor-rule")
+        .rule_definition(r#"{"Schema":{"Name":"CloudWatchLogRule","Version":1}}"#)
+        .send()
+        .await
+        .expect("put insight rule");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let report = cw
+        .get_insight_rule_report()
+        .rule_name("cbor-rule")
+        .start_time(AwsDateTime::from_secs(now - 3600))
+        .end_time(AwsDateTime::from_secs(now))
+        .period(300)
+        .send()
+        .await
+        .expect("insight rule report");
+    assert_eq!(report.aggregate_value(), Some(0.0));
+    assert_eq!(report.approximate_unique_count(), Some(0));
+}
+
+#[tokio::test]
+async fn cbor_wire_shape() {
+    let server = TestServer::start().await;
+    let http = reqwest::Client::new();
+    let url = format!(
+        "{}/service/GraniteServiceVersion20100801/operation/ListMetrics",
+        server.endpoint()
+    );
+    // `{"Namespace": "App"}` hand-encoded: a one-entry map of two text strings.
+    let mut body = vec![0xa1, 0x69];
+    body.extend_from_slice(b"Namespace");
+    body.push(0x63);
+    body.extend_from_slice(b"App");
+    let resp = http
+        .post(&url)
+        .header("smithy-protocol", "rpc-v2-cbor")
+        .header("content-type", "application/cbor")
+        .header("accept", "application/cbor")
+        .body(body)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 200);
+    assert_eq!(
+        resp.headers().get("smithy-protocol").unwrap(),
+        "rpc-v2-cbor"
+    );
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/cbor"
+    );
+    let bytes = resp.bytes().await.unwrap();
+    // A CBOR map (major type 5) holding the empty `Metrics` list.
+    assert_eq!(bytes[0] & 0xe0, 0xa0, "body must be a CBOR map: {bytes:?}");
+
+    // A body that isn't CBOR is a CBOR-framed SerializationException.
+    let resp = http
+        .post(&url)
+        .header("smithy-protocol", "rpc-v2-cbor")
+        .header("content-type", "application/cbor")
+        .body(vec![0xff, 0x00])
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 400);
+    assert_eq!(
+        resp.headers().get("smithy-protocol").unwrap(),
+        "rpc-v2-cbor"
+    );
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/cbor"
+    );
+}
+
+#[tokio::test]
+async fn json_protocol_errors_use_json_1_0_and_query_error_header() {
+    let server = TestServer::start().await;
+    let resp = reqwest::Client::new()
+        .post(server.endpoint())
+        .header("x-amz-target", "GraniteServiceVersion20100801.GetDashboard")
+        .header("content-type", "application/x-amz-json-1.0")
+        .body(r#"{"DashboardName":"ghost"}"#)
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(resp.status(), 404);
+    assert_eq!(
+        resp.headers().get("content-type").unwrap(),
+        "application/x-amz-json-1.0"
+    );
+    assert_eq!(
+        resp.headers().get("x-amzn-query-error").unwrap(),
+        "ResourceNotFound;Sender"
+    );
+    let body: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(body["__type"], "ResourceNotFound");
+}
+
+#[tokio::test]
+async fn large_put_metric_data_is_gzip_compressed_and_accepted() {
+    // PutMetricData is `@requestCompression`: aws-sdk-cloudwatch gzips bodies
+    // above 10 KiB (Content-Encoding: gzip). A few hundred datums cross that.
+    let server = TestServer::start().await;
+    let cw = server.cloudwatch_client().await;
+    let now = chrono::Utc::now();
+    let mut req = cw.put_metric_data().namespace("Gzip");
+    for i in 0..400 {
+        req = req.metric_data(
+            MetricDatum::builder()
+                .metric_name("Requests")
+                .dimensions(
+                    Dimension::builder()
+                        .name("Shard")
+                        .value(format!("shard-{i:04}"))
+                        .build(),
+                )
+                .value(1.0)
+                .unit(StandardUnit::Count)
+                .timestamp(AwsDateTime::from_secs(now.timestamp()))
+                .build(),
+        );
+    }
+    req.send().await.expect("gzip-compressed put_metric_data");
+
+    let listed = cw
+        .list_metrics()
+        .namespace("Gzip")
+        .send()
+        .await
+        .expect("list metrics");
+    let mut total = listed.metrics().len();
+    let mut token = listed.next_token().map(str::to_string);
+    while let Some(t) = token {
+        let page = cw
+            .list_metrics()
+            .namespace("Gzip")
+            .next_token(t)
+            .send()
+            .await
+            .expect("list metrics page");
+        total += page.metrics().len();
+        token = page.next_token().map(str::to_string);
+    }
+    assert_eq!(total, 400);
+}

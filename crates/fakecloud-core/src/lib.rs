@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod auth_message;
+pub mod cbor;
 pub mod cfn_template;
 pub mod container_image;
 pub mod container_net;

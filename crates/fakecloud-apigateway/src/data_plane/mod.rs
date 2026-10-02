@@ -103,6 +103,15 @@ pub async fn handle(
         }
     };
     let stage_name = stage_name.unwrap_or_else(|| req.path_segments[0].clone());
+    // The proxy / REQUEST-authorizer event `path`: on the execute-api
+    // endpoint AWS drops the stage segment (`/prod/items` -> `/items`,
+    // while `requestContext.path` keeps it); on a custom domain it is the
+    // path as requested, base path included.
+    let request_path = if via_custom_domain {
+        req.raw_path.clone()
+    } else {
+        stage_relative_path(&req.raw_path)
+    };
 
     // Find the API/stage pair that owns this request.
     let DataPlaneMatch {
@@ -301,6 +310,7 @@ pub async fn handle(
         &api_id,
         &stage_name,
         &resource_path,
+        &request_path,
         &authorization_type,
         authorizer.as_ref(),
     )
@@ -411,6 +421,7 @@ pub async fn handle(
                 &api_id,
                 &stage_name,
                 &resource_path,
+                &request_path,
                 path_params,
                 stage_vars,
                 &binary_media_types,
@@ -659,14 +670,7 @@ fn resolve_custom_domain(
     service: &ApiGatewayService,
     req: &AwsRequest,
 ) -> Option<(Option<String>, Vec<String>, Option<String>)> {
-    let host = req
-        .headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if host.is_empty() {
-        return None;
-    }
+    let host = fakecloud_core::protocol::normalized_host_from_headers(&req.headers)?;
 
     let accounts = service.state_handle().read();
     let state = accounts.get(&req.account_id)?;
@@ -676,13 +680,10 @@ fn resolve_custom_domain(
     // (`api.example.com`) as Host; the regionalDomainName is the internal
     // CloudFront/regional alias. Matching only the latter missed every
     // request that used the actual domain name.
-    let domain_entry = state.domain_names.iter().find(|(name, value)| {
-        name.eq_ignore_ascii_case(host)
-            || value
-                .get("regionalDomainName")
-                .and_then(Value::as_str)
-                .is_some_and(|rdn| rdn.eq_ignore_ascii_case(host))
-    });
+    let domain_entry = state
+        .domain_names
+        .iter()
+        .find(|(name, value)| domain_matches_host(name, value, &host));
     let (domain_name, _domain_value) = domain_entry?;
 
     let mappings = state.base_path_mappings.get(domain_name)?;
@@ -719,6 +720,28 @@ fn resolve_custom_domain(
     }
 
     None
+}
+
+/// Whether a v1 `DomainName` (its name key or its `regionalDomainName`) is the
+/// already-normalized request host (port stripped, lowercase; see
+/// [`fakecloud_core::protocol::normalize_host`]).
+pub(crate) fn domain_matches_host(name: &str, value: &Value, host: &str) -> bool {
+    let matches = |candidate: &str| fakecloud_core::protocol::normalize_host(candidate) == host;
+    matches(name)
+        || value
+            .get("regionalDomainName")
+            .and_then(Value::as_str)
+            .is_some_and(matches)
+}
+
+/// Drop the leading stage segment of an execute-api request path, keeping the
+/// rest verbatim (`/prod/items/` -> `/items/`, `/prod` -> `/`).
+fn stage_relative_path(raw_path: &str) -> String {
+    let trimmed = raw_path.trim_start_matches('/');
+    match trimmed.find('/') {
+        Some(idx) => trimmed[idx..].to_string(),
+        None => "/".to_string(),
+    }
 }
 
 /// Extract the API id from the execute-api `Host` header
@@ -2745,7 +2768,7 @@ mod tests {
             );
             // Register both 200 and 201 responses; the 201 one carries a
             // static CORS header via responseParameters (H2).
-            let rk201 = response_key(TEST_API_ID, "/items", "GET", "201");
+            let rk201 = response_key(TEST_API_ID, RES_ID, "GET", "201");
             st.integration_responses.insert(
                 rk201,
                 json!({
@@ -2756,7 +2779,7 @@ mod tests {
                     "responseTemplates": {"application/json": r#"{"picked":201}"#}
                 }),
             );
-            let rk200 = response_key(TEST_API_ID, "/items", "GET", "200");
+            let rk200 = response_key(TEST_API_ID, RES_ID, "GET", "200");
             st.integration_responses.insert(
                 rk200,
                 json!({
@@ -2913,6 +2936,38 @@ mod tests {
         // sorts first and also has a `prod`/`/items`.
         assert_eq!(lambda.invocation_count(SECOND_ARN), 1);
         assert_eq!(lambda.invocation_count(BACKEND_ARN), 0);
+    }
+
+    #[test]
+    fn stage_relative_path_drops_only_the_stage() {
+        assert_eq!(stage_relative_path("/prod/items"), "/items");
+        assert_eq!(stage_relative_path("/prod/items/a%2Fb/"), "/items/a%2Fb/");
+        assert_eq!(stage_relative_path("/prod"), "/");
+        assert_eq!(stage_relative_path("/prod/"), "/");
+    }
+
+    #[tokio::test]
+    async fn proxy_event_path_omits_the_stage() {
+        // AWS: `path` is stage-relative on the execute-api endpoint, while
+        // `requestContext.path` keeps the stage.
+        let state = build_state("NONE", None);
+        let lambda = Arc::new(StubLambda::new());
+        lambda.set(BACKEND_ARN, json!({"statusCode": 200, "body": "ok"}));
+        let service = build_service(state, lambda.clone(), None);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "host",
+            format!("{TEST_API_ID}.execute-api.us-east-1.amazonaws.com")
+                .parse()
+                .unwrap(),
+        );
+        let resp = handle(&service, &make_request(headers)).await.unwrap();
+        assert_eq!(resp.status, StatusCode::OK);
+        let event: Value =
+            serde_json::from_str(&lambda.last_payload(BACKEND_ARN).unwrap()).unwrap();
+        assert_eq!(event["path"], "/items");
+        assert_eq!(event["requestContext"]["path"], "/prod/items");
+        assert_eq!(event["resource"], "/items");
     }
 
     // ── H4: static resource beats {proxy+} catch-all ──

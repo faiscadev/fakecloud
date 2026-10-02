@@ -1951,3 +1951,141 @@ async fn update_route_response_merges_fields() {
         "modelSelectionExpression must persist across a partial update"
     );
 }
+
+#[tokio::test]
+async fn http_api_invocable_via_aws_execute_api_path() {
+    // LocalStack's path-style invocation URL names the API in the path, so a
+    // client needs no execute-api Host. Two HTTP APIs share the `prod` stage;
+    // each URL reaches its own API.
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+    let mut ids = Vec::new();
+    for route in ["GET /one", "GET /two"] {
+        let api_id = client
+            .create_api()
+            .name(format!("path-style-{}", ids.len()))
+            .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+            .send()
+            .await
+            .unwrap()
+            .api_id
+            .unwrap();
+        let integration_id = client
+            .create_integration()
+            .api_id(&api_id)
+            .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::Mock)
+            .send()
+            .await
+            .unwrap()
+            .integration_id
+            .unwrap();
+        client
+            .create_route()
+            .api_id(&api_id)
+            .route_key(route)
+            .target(format!("integrations/{integration_id}"))
+            .send()
+            .await
+            .unwrap();
+        client
+            .create_stage()
+            .api_id(&api_id)
+            .stage_name("prod")
+            .auto_deploy(true)
+            .send()
+            .await
+            .unwrap();
+        ids.push(api_id);
+    }
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+    let status = |url: String| {
+        let http = http.clone();
+        async move { http.get(url).send().await.unwrap().status().as_u16() }
+    };
+    assert_eq!(
+        status(format!("{base}/_aws/execute-api/{}/prod/one", ids[0])).await,
+        200
+    );
+    assert_eq!(
+        status(format!("{base}/_aws/execute-api/{}/prod/two", ids[1])).await,
+        200
+    );
+    // The route lives on the other API only.
+    assert_eq!(
+        status(format!("{base}/_aws/execute-api/{}/prod/two", ids[0])).await,
+        404
+    );
+}
+
+#[tokio::test]
+async fn http_api_custom_domain_mapping_resolves_with_host_port() {
+    let server = TestServer::start().await;
+    let client = server.apigatewayv2_client().await;
+    let api_id = client
+        .create_api()
+        .name("mapped-http")
+        .protocol_type(aws_sdk_apigatewayv2::types::ProtocolType::Http)
+        .send()
+        .await
+        .unwrap()
+        .api_id
+        .unwrap();
+    let integration_id = client
+        .create_integration()
+        .api_id(&api_id)
+        .integration_type(aws_sdk_apigatewayv2::types::IntegrationType::Mock)
+        .send()
+        .await
+        .unwrap()
+        .integration_id
+        .unwrap();
+    client
+        .create_route()
+        .api_id(&api_id)
+        .route_key("GET /one")
+        .target(format!("integrations/{integration_id}"))
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_stage()
+        .api_id(&api_id)
+        .stage_name("prod")
+        .auto_deploy(true)
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_domain_name()
+        .domain_name("http.example.com")
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_api_mapping()
+        .domain_name("http.example.com")
+        .api_id(&api_id)
+        .stage("prod")
+        .api_mapping_key("hello")
+        .send()
+        .await
+        .unwrap();
+
+    let http = reqwest::Client::new();
+    let ok = http
+        .get(format!("{}/hello/one", server.endpoint()))
+        .header("host", "HTTP.example.com:4566")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), 200);
+    // The mapping key is required: without it the route doesn't match.
+    let miss = http
+        .get(format!("{}/one", server.endpoint()))
+        .header("host", "http.example.com:4566")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(miss.status(), 404);
+}

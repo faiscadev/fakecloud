@@ -23,7 +23,7 @@ fakecloud implements **103 of 103** API Gateway v2 operations at 100% conformanc
 
 ## Protocol
 
-REST for management, path-based routing for the executed API. WebSocket APIs upgrade at `/_fakecloud/apigatewayv2/ws/{api_id}` and the management API is served on the same host:port — point the AWS SDK's `apigatewaymanagementapi` client at the fakecloud endpoint URL.
+REST for management, path-based routing for the executed API. A deployed stage is reached at `{api_id}.execute-api.<region>.amazonaws.com/{stage}/{path}` (or LocalStack's `{api_id}.execute-api.localhost.localstack.cloud` host), at the host-less path-style URL `/_aws/execute-api/{api_id}/{stage}/{path}`, or at plain `/{stage}/{path}`. WebSocket APIs upgrade at `/_fakecloud/apigatewayv2/ws/{api_id}` and the management API is served on the same host:port — point the AWS SDK's `apigatewaymanagementapi` client at the fakecloud endpoint URL.
 
 ## Introspection
 

@@ -27,7 +27,14 @@ REST APIs (v1) and HTTP APIs (v2) are independent AWS services. The v2 (HTTP API
 
 ## Data plane
 
-When a request arrives at a deployed stage URL (`/restapis/{api_id}/{stage}/{path...}` or via the configured stage), fakecloud walks the resource tree, picks the matching method/integration, and dispatches:
+A deployed stage is reachable at any of these URLs:
+
+- `http://{api_id}.execute-api.<region>.amazonaws.com:4566/{stage}/{path}` or `http://{api_id}.execute-api.localhost.localstack.cloud:4566/{stage}/{path}`: the execute-api host names the API (point the hostname at fakecloud, or send it as the `Host` header).
+- `http://localhost:4566/restapis/{api_id}/{stage}/_user_request_/{path}` and `http://localhost:4566/_aws/execute-api/{api_id}/{stage}/{path}`: path-style invocation URLs that need no special host.
+- `http://localhost:4566/restapis/{api_id}/{stage}/{path}`: served by the data plane when it is not a control-plane route and `{stage}` is deployed on that API. Prefer `_user_request_` when a stage is named like a control-plane collection (`resources`, `stages`, ...).
+- `http://localhost:4566/{stage}/{path}`: a plain-host request goes to the REST API that has that stage when no HTTP API (v2) defines a stage of the same name.
+
+fakecloud walks the resource tree, picks the matching method/integration, and dispatches:
 
 - `AWS_PROXY` — invokes the target Lambda via the same `DeliveryBus` used elsewhere; builds the v1.0 Lambda proxy event envelope (`event.version = "1.0"`, `requestContext.identity`, `multiValueHeaders`, `multiValueQueryStringParameters`, `pathParameters`, `stageVariables`, base64 body when the request content-type matches a configured `binaryMediaType`).
 - `HTTP` / `HTTP_PROXY` — forwards via `reqwest` to the configured URI.
@@ -41,7 +48,7 @@ Before the integration runs, methods with `apiKeyRequired = true` go through the
 
 ## Protocol
 
-REST-style URL dispatch. fakecloud's facade routes `/restapis/...`, `/apikeys`, `/usageplans`, `/vpclinks`, `/domainnames`, `/clientcertificates`, `/sdktypes`, `/tags`, `/account` to the v1 service; `/v2/...` to v2; the data plane (deployed stage URLs) is dispatched to whichever service owns the matching API. Wire format is HAL+JSON, matching the AWS SDK's expectation that list responses use the singular `item` key.
+REST-style URL dispatch. fakecloud's facade routes `/restapis/...`, `/apikeys`, `/usageplans`, `/vpclinks`, `/domainnames`, `/clientcertificates`, `/sdktypes`, `/tags`, `/account` to the v1 service; `/v2/...` to v2; the data plane (deployed stage URLs, including the path-style forms above) is dispatched to whichever service owns the matching API. Wire format is HAL+JSON, matching the AWS SDK's expectation that list responses use the singular `item` key.
 
 ## Introspection
 

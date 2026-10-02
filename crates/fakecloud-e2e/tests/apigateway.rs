@@ -1204,3 +1204,198 @@ async fn data_plane_lambda_function_error_returns_502() {
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["message"], "Internal server error");
 }
+
+// ── Invocation without an execute-api Host header ──
+//
+// Clients that can't set `Host: {api-id}.execute-api...` (curl against
+// localhost, browsers, LocalStack-style tooling) reach the REST API data
+// plane through the plain stage path and the path-style invocation URLs.
+
+/// A REST API with `GET /items` answered by a MOCK integration whose
+/// response template names the API, so each URL form can prove it reached
+/// the right deployed stage.
+async fn provision_mock_items_api(client: &aws_sdk_apigateway::Client, name: &str) -> String {
+    let api = client
+        .create_rest_api()
+        .name(name)
+        .send()
+        .await
+        .expect("create_rest_api");
+    let api_id = api.id().unwrap().to_string();
+    let root = api.root_resource_id().unwrap().to_string();
+    let res_id = client
+        .create_resource()
+        .rest_api_id(&api_id)
+        .parent_id(&root)
+        .path_part("items")
+        .send()
+        .await
+        .expect("create_resource")
+        .id()
+        .unwrap()
+        .to_string();
+    client
+        .put_method()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .authorization_type("NONE")
+        .send()
+        .await
+        .expect("put_method");
+    client
+        .put_integration()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .r#type(aws_sdk_apigateway::types::IntegrationType::Mock)
+        .request_templates("application/json", r#"{"statusCode": 200}"#)
+        .send()
+        .await
+        .expect("put_integration");
+    client
+        .put_method_response()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .status_code("200")
+        .send()
+        .await
+        .expect("put_method_response");
+    client
+        .put_integration_response()
+        .rest_api_id(&api_id)
+        .resource_id(&res_id)
+        .http_method("GET")
+        .status_code("200")
+        .response_templates("application/json", format!(r#"{{"api":"{name}"}}"#))
+        .send()
+        .await
+        .expect("put_integration_response");
+    client
+        .create_deployment()
+        .rest_api_id(&api_id)
+        .stage_name("prod")
+        .send()
+        .await
+        .expect("create_deployment");
+    api_id
+}
+
+async fn get_body(req: reqwest::RequestBuilder) -> (u16, String) {
+    let resp = req.send().await.expect("send");
+    let status = resp.status().as_u16();
+    (status, resp.text().await.expect("body"))
+}
+
+#[tokio::test]
+async fn rest_api_invocable_without_execute_api_host() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let api_id = provision_mock_items_api(&client, "plain-host").await;
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+
+    for url in [
+        // Plain host: only a REST API defines `prod`, so v1 serves it.
+        format!("{base}/prod/items"),
+        // LocalStack's long-standing path-style URL.
+        format!("{base}/restapis/{api_id}/prod/_user_request_/items"),
+        // The documented path-style URL.
+        format!("{base}/restapis/{api_id}/prod/items"),
+        // LocalStack's current path-style URL.
+        format!("{base}/_aws/execute-api/{api_id}/prod/items"),
+    ] {
+        let (status, body) = get_body(http.get(&url)).await;
+        assert_eq!(status, 200, "{url}: {body}");
+        assert_eq!(body, r#"{"api":"plain-host"}"#, "{url}");
+    }
+
+    // LocalStack's execute-api hostname (no region label) resolves the API
+    // from the host without misreading `execute-api` as a region.
+    let (status, body) = get_body(http.get(format!("{base}/prod/items")).header(
+        "host",
+        format!("{api_id}.execute-api.localhost.localstack.cloud:4566"),
+    ))
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"{"api":"plain-host"}"#);
+
+    // Path-style URLs for a stage that isn't deployed fail like AWS does
+    // rather than reaching some other API.
+    let (status, _) =
+        get_body(http.get(format!("{base}/restapis/{api_id}/dev/_user_request_/items"))).await;
+    assert_eq!(status, 404);
+
+    // The control plane under /restapis is unaffected.
+    let stages = client
+        .get_stages()
+        .rest_api_id(&api_id)
+        .send()
+        .await
+        .expect("get_stages");
+    assert_eq!(stages.item().len(), 1);
+    assert_eq!(stages.item()[0].stage_name(), Some("prod"));
+    let resources = client
+        .get_resources()
+        .rest_api_id(&api_id)
+        .send()
+        .await
+        .expect("get_resources");
+    assert!(resources.items().iter().any(|r| r.path() == Some("/items")));
+}
+
+#[tokio::test]
+async fn path_style_urls_pick_the_named_api_when_stages_collide() {
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let first = provision_mock_items_api(&client, "first").await;
+    let second = provision_mock_items_api(&client, "second").await;
+    let http = reqwest::Client::new();
+    let base = server.endpoint();
+    for (api_id, name) in [(&first, "first"), (&second, "second")] {
+        for url in [
+            format!("{base}/restapis/{api_id}/prod/_user_request_/items"),
+            format!("{base}/restapis/{api_id}/prod/items"),
+            format!("{base}/_aws/execute-api/{api_id}/prod/items"),
+        ] {
+            let (status, body) = get_body(http.get(&url)).await;
+            assert_eq!(status, 200, "{url}: {body}");
+            assert_eq!(body, format!(r#"{{"api":"{name}"}}"#), "{url}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn custom_domain_base_path_mapping_resolves_with_host_port() {
+    // Clients reach fakecloud on a port, so the Host carries it
+    // (`rest.example.com:4566`); the domain name is still matched, case
+    // insensitively, and its base path mapping picks the API and stage.
+    let server = TestServer::start().await;
+    let client = server.apigateway_client().await;
+    let api_id = provision_mock_items_api(&client, "mapped").await;
+    client
+        .create_domain_name()
+        .domain_name("rest.example.com")
+        .send()
+        .await
+        .expect("create_domain_name");
+    client
+        .create_base_path_mapping()
+        .domain_name("rest.example.com")
+        .base_path("v1")
+        .rest_api_id(&api_id)
+        .stage("prod")
+        .send()
+        .await
+        .expect("create_base_path_mapping");
+
+    let http = reqwest::Client::new();
+    let (status, body) = get_body(
+        http.get(format!("{}/v1/items", server.endpoint()))
+            .header("host", "Rest.Example.com:4566"),
+    )
+    .await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body, r#"{"api":"mapped"}"#);
+}

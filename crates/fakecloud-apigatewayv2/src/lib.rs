@@ -10,7 +10,7 @@ pub(crate) mod state;
 pub mod websocket;
 pub mod websocket_dispatch;
 
-pub use service::ApiGatewayV2Service;
+pub use service::{domain_for_host, ApiGatewayV2Service};
 pub use state::{
     apigateway_arn, execute_api_arn, AccessLogSettings, ApiGatewayV2Snapshot, ApiGatewayV2State,
     Authorizer, ConnectionInfo, CorsConfiguration, DefinitionImport, Deployment, HttpApi,
