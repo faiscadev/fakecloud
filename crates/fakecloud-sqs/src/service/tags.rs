@@ -11,7 +11,9 @@ impl SqsService {
 
         let _accts = self.state.read();
         let _empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
-        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        let state = _accts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&_empty);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -41,7 +43,7 @@ impl SqsService {
         // happy-path identity (QueueDoesNotExist beats Tags-missing) lines
         // up with what the conformance probe and the AWS SDK expect.
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -100,7 +102,7 @@ impl SqsService {
         // `QueueDoesNotExist` is declared by `UntagQueue`;
         // `InvalidParameterValue` for missing TagKeys is not.
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues

@@ -1295,7 +1295,8 @@ async fn invoke_resource(
     }
 
     if is_integration("sqs:sendMessage") {
-        return invoke_sqs_send_message(input, delivery);
+        let region = fakecloud_aws::arn::region_of(execution_arn).unwrap_or("us-east-1");
+        return invoke_sqs_send_message(input, delivery, region);
     }
 
     if is_integration("sns:publish") {

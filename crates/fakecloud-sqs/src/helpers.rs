@@ -526,9 +526,10 @@ pub(crate) fn finalize_move_task(
     task_handle: &str,
     final_status: MessageMoveTaskStatus,
 ) {
-    let _ = region; // currently only used for symmetry with constructor
     let mut accounts = state_handle.write();
-    let state = accounts.get_or_create(account_id);
+    let Some(state) = accounts.regional_get_mut(account_id, region) else {
+        return;
+    };
     if let Some(task) = state
         .message_move_tasks
         .iter_mut()
@@ -1319,6 +1320,11 @@ pub(crate) fn resolve_queue_url(input: &str, state: &crate::state::SqsState) -> 
     {
         let parts: Vec<&str> = input.split(':').collect();
         if parts.len() == 6 && parts[0] == "arn" && parts[2] == "sqs" {
+            // An ARN names its queue's region and account: one of another
+            // region (or account) never resolves to a same-name queue here.
+            if parts[3] != state.region || parts[4] != state.account_id {
+                return None;
+            }
             let name = parts[5];
             if !name.is_empty() {
                 if let Some(url) = state.name_to_url.get(name) {

@@ -402,9 +402,10 @@ impl ResetState {
                 }
             }
             "sqs" => {
+                // Every region of the account.
                 let mut mas = self.sqs.write();
                 if let Some(state) = mas.get_mut(account_id) {
-                    state.reset();
+                    state.clear();
                 }
             }
             "sns" => {

@@ -201,7 +201,12 @@ impl SqsState {
     }
 }
 
-pub type SharedSqsState = Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<SqsState>>>;
+/// SQS state partitioned by account and region: queues are regional, so the
+/// same queue name can exist independently in two regions of one account.
+/// A queue's URL (`<endpoint>/<account>/<name>`) carries no region, the way a
+/// fakecloud endpoint serves every region; the request region picks which
+/// region's queue it addresses, and a queue ARN always names its own region.
+pub type SharedSqsState = Arc<RwLock<fakecloud_core::multi_account::MultiRegionState<SqsState>>>;
 
 /// On-disk snapshot envelope for SQS. Mirrors the DynamoDB pattern: a
 /// versioned wrapper around the full [`SqsState`] so format changes fail
@@ -210,17 +215,92 @@ pub type SharedSqsState = Arc<RwLock<fakecloud_core::multi_account::MultiAccount
 pub struct SqsSnapshot {
     pub schema_version: u32,
     #[serde(default)]
-    pub accounts: Option<fakecloud_core::multi_account::MultiAccountState<SqsState>>,
-    #[serde(default)]
-    pub state: Option<SqsState>,
+    pub accounts: Option<fakecloud_core::multi_account::MultiRegionState<SqsState>>,
+    /// Only set when a v1 (single-account) snapshot is migrated: that one
+    /// account's state split by region, for the caller to merge into its own
+    /// container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<fakecloud_core::multi_account::RegionalState<SqsState>>,
 }
 
-pub const SQS_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// v3: state partitioned by (account, region). v2 kept one state per
+/// account, every queue in one map keyed by URL; v1 a single account's.
+pub const SQS_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
 
 impl fakecloud_core::multi_account::AccountState for SqsState {
     fn new_for_account(account_id: &str, region: &str, endpoint: &str) -> Self {
         Self::new(account_id, region, endpoint)
     }
+}
+
+impl fakecloud_core::multi_account::SplitByRegion for SqsState {
+    /// Every queue goes to the region its ARN names; a message move task
+    /// follows its source queue.
+    fn split_by_region(self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
+        let mut queue_regions: BTreeMap<String, String> = BTreeMap::new();
+        for (url, queue) in self.queues {
+            let region = fakecloud_aws::arn::region_of(&queue.arn).map(str::to_string);
+            let target = into.region_or_default_mut(region.as_deref());
+            queue_regions.insert(queue.arn.clone(), target.region.clone());
+            target
+                .name_to_url
+                .insert(queue.queue_name.clone(), url.clone());
+            target.queues.insert(url, queue);
+        }
+        for task in self.message_move_tasks {
+            let region = queue_regions
+                .get(&task.source_arn)
+                .cloned()
+                .or_else(|| fakecloud_aws::arn::region_of(&task.source_arn).map(str::to_string));
+            into.region_or_default_mut(region.as_deref())
+                .message_move_tasks
+                .push(task);
+        }
+    }
+}
+
+/// The shape v1 and v2 snapshots stored: one state per account.
+#[derive(Debug, Deserialize)]
+struct LegacySqsSnapshot {
+    #[serde(default)]
+    accounts: Option<fakecloud_core::multi_account::MultiAccountState<SqsState>>,
+    #[serde(default)]
+    state: Option<SqsState>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotVersion {
+    schema_version: u32,
+}
+
+/// Parse a persisted SQS snapshot, migrating older schemas to the current one
+/// by moving every queue into the region its ARN names. A snapshot newer than
+/// this build comes back with its on-disk `schema_version` and no state, for
+/// the caller to refuse.
+pub fn parse_sqs_snapshot(bytes: &[u8]) -> Result<SqsSnapshot, serde_json::Error> {
+    let SnapshotVersion { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version > SQS_SNAPSHOT_SCHEMA_VERSION {
+        return Ok(SqsSnapshot {
+            schema_version,
+            accounts: None,
+            state: None,
+        });
+    }
+    if schema_version == SQS_SNAPSHOT_SCHEMA_VERSION {
+        return serde_json::from_slice(bytes);
+    }
+    let legacy: LegacySqsSnapshot = serde_json::from_slice(bytes)?;
+    Ok(SqsSnapshot {
+        schema_version: SQS_SNAPSHOT_SCHEMA_VERSION,
+        accounts: legacy.accounts.map(|a| a.into_regional()),
+        state: legacy.state.map(|s| {
+            let (account, region, endpoint) =
+                (s.account_id.clone(), s.region.clone(), s.endpoint.clone());
+            fakecloud_core::multi_account::RegionalState::from_legacy(
+                &account, &region, &endpoint, s,
+            )
+        }),
+    })
 }
 
 #[cfg(test)]
@@ -254,5 +334,102 @@ mod tests {
         let state = SqsState::new_for_account("111122223333", "eu-west-1", "http://x");
         assert_eq!(state.account_id, "111122223333");
         assert_eq!(state.region, "eu-west-1");
+    }
+
+    fn queue(name: &str, region: &str) -> SqsQueue {
+        SqsQueue {
+            queue_name: name.to_string(),
+            queue_url: format!("http://localhost:4566/123456789012/{name}"),
+            arn: format!("arn:aws:sqs:{region}:123456789012:{name}"),
+            created_at: Utc::now(),
+            messages: VecDeque::new(),
+            inflight: Vec::new(),
+            attributes: BTreeMap::new(),
+            is_fifo: false,
+            dedup_cache: BTreeMap::new(),
+            redrive_policy: None,
+            tags: BTreeMap::new(),
+            next_sequence_number: 0,
+            permission_labels: Vec::new(),
+            receipt_handle_map: BTreeMap::new(),
+            receive_attempt_cache: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn v2_snapshot_migrates_queues_into_their_arn_region() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        let mut legacy: MultiAccountState<SqsState> =
+            MultiAccountState::new("123456789012", "us-east-1", "http://localhost:4566");
+        let st = legacy.default_mut();
+        for (name, region) in [("east", "us-east-1"), ("west", "eu-west-1")] {
+            let q = queue(name, region);
+            st.name_to_url.insert(name.into(), q.queue_url.clone());
+            st.queues.insert(q.queue_url.clone(), q);
+        }
+        st.message_move_tasks.push(MessageMoveTask {
+            task_handle: "h".into(),
+            source_arn: "arn:aws:sqs:eu-west-1:123456789012:west".into(),
+            destination_arn: None,
+            max_messages_per_second: None,
+            status: MessageMoveTaskStatus::Completed,
+            messages_moved: 0,
+            messages_to_move: 0,
+            started_timestamp: 0,
+            failure_reason: None,
+            driver_pid: 0,
+            cancel_flag: default_cancel_flag(),
+        });
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "accounts": legacy,
+        }))
+        .unwrap();
+        let snap = parse_sqs_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, SQS_SNAPSHOT_SCHEMA_VERSION);
+        let accounts = snap.accounts.unwrap();
+        let east = accounts.regional("123456789012", "us-east-1").unwrap();
+        let west = accounts.regional("123456789012", "eu-west-1").unwrap();
+        assert_eq!(east.region, "us-east-1");
+        assert_eq!(west.region, "eu-west-1");
+        assert!(east.name_to_url.contains_key("east") && !east.name_to_url.contains_key("west"));
+        assert!(west.name_to_url.contains_key("west") && !west.name_to_url.contains_key("east"));
+        assert_eq!(west.message_move_tasks.len(), 1);
+        assert!(east.message_move_tasks.is_empty());
+
+        // The migrated snapshot round-trips as the current schema.
+        let current = serde_json::to_vec(&SqsSnapshot {
+            schema_version: SQS_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(accounts),
+            state: None,
+        })
+        .unwrap();
+        let again = parse_sqs_snapshot(&current).unwrap().accounts.unwrap();
+        assert!(again.regional("123456789012", "eu-west-1").is_some());
+    }
+
+    #[test]
+    fn v1_single_account_snapshot_migrates_by_region() {
+        let mut st = SqsState::new("123456789012", "us-east-1", "http://localhost:4566");
+        let q = queue("west", "eu-west-1");
+        st.name_to_url.insert("west".into(), q.queue_url.clone());
+        st.queues.insert(q.queue_url.clone(), q);
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({"schema_version": 1, "state": st})).unwrap();
+        let snap = parse_sqs_snapshot(&bytes).unwrap();
+        let regional = snap.state.unwrap();
+        assert!(regional
+            .region("eu-west-1")
+            .unwrap()
+            .name_to_url
+            .contains_key("west"));
+        assert!(regional.region("us-east-1").is_none());
+    }
+
+    #[test]
+    fn newer_snapshot_is_reported_not_parsed() {
+        let snap = parse_sqs_snapshot(br#"{"schema_version": 99, "accounts": 5}"#).unwrap();
+        assert_eq!(snap.schema_version, 99);
+        assert!(snap.accounts.is_none());
     }
 }

@@ -354,6 +354,12 @@ impl<T: AccountState> MultiAccountState<RegionalState<T>> {
         self.default_mut().region_mut(&region)
     }
 
+    /// The default account's state in the server's default region, `None`
+    /// until something creates it.
+    pub fn default_regional(&self) -> Option<&T> {
+        self.default_ref().region(self.region())
+    }
+
     /// Every (account, region, state) triple.
     pub fn iter_regional(&self) -> impl Iterator<Item = (&str, &str, &T)> {
         self.iter()

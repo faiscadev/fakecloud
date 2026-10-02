@@ -47,9 +47,8 @@ impl ResourcePolicyProvider for SqsResourcePolicyProvider {
             return None;
         }
         let accts = self.state.read();
-        let acct = resource_arn.split(':').nth(4).unwrap_or("");
-        let state = accts.get(acct).unwrap_or_else(|| accts.default_ref());
-        state
+        accts
+            .by_arn(resource_arn)?
             .queues
             .values()
             .find(|q| q.arn == resource_arn)
@@ -77,12 +76,12 @@ mod tests {
     use super::*;
     use crate::state::{SqsQueue, SqsState};
     use chrono::Utc;
-    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::multi_account::MultiRegionState;
     use parking_lot::RwLock;
     use std::collections::{BTreeMap, VecDeque};
 
     fn state_with_queue(arn: &str, policy: Option<&str>) -> SharedSqsState {
-        let state = Arc::new(RwLock::new(MultiAccountState::<SqsState>::new(
+        let state = Arc::new(RwLock::new(MultiRegionState::<SqsState>::new(
             "123456789012",
             "us-east-1",
             "http://localhost:4566",
@@ -110,7 +109,11 @@ mod tests {
             receipt_handle_map: BTreeMap::new(),
             receive_attempt_cache: BTreeMap::new(),
         };
-        state.write().default_mut().queues.insert(queue_url, queue);
+        state
+            .write()
+            .default_regional_mut()
+            .queues
+            .insert(queue_url, queue);
         state
     }
 

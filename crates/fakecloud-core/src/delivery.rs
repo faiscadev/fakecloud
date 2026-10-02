@@ -116,11 +116,12 @@ pub trait SqsDelivery: Send + Sync {
     }
 
     /// The stored ARN of the queue a QueueUrl (`<endpoint>/<account>/<name>`)
-    /// names, looked up by account and queue name. A QueueUrl carries no
-    /// region, so callers holding only a URL must not rebuild the ARN from
-    /// their own region. `None` when no such queue exists.
-    fn queue_arn_for_url(&self, queue_url: &str) -> Option<String> {
-        let _ = queue_url;
+    /// names in `region`, looked up by account and queue name. A QueueUrl
+    /// carries no region, so the caller passes the region it is acting in
+    /// (the region an SQS request would be signed for). `None` when no such
+    /// queue exists there.
+    fn queue_arn_for_url(&self, region: &str, queue_url: &str) -> Option<String> {
+        let _ = (region, queue_url);
         None
     }
 
@@ -891,9 +892,12 @@ impl DeliveryBus {
         self
     }
 
-    /// The stored ARN of the SQS queue a QueueUrl names, if it exists.
-    pub fn sqs_queue_arn_for_url(&self, queue_url: &str) -> Option<String> {
-        self.sqs_sender.as_ref()?.queue_arn_for_url(queue_url)
+    /// The stored ARN of the SQS queue a QueueUrl names in `region`, if it
+    /// exists.
+    pub fn sqs_queue_arn_for_url(&self, region: &str, queue_url: &str) -> Option<String> {
+        self.sqs_sender
+            .as_ref()?
+            .queue_arn_for_url(region, queue_url)
     }
 
     /// Send a message to an SQS queue identified by ARN.

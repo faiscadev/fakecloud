@@ -169,14 +169,11 @@ impl SqsLambdaPoller {
         // doesn't produce inside a single visibility window.
         let (messages, account_id, queue_encrypted) = {
             let mut sqs_mas = self.sqs_state.write();
-            let default_acct = sqs_mas.default_account_id().to_string();
-            let acct = mapping
-                .queue_arn
-                .split(':')
-                .nth(4)
-                .unwrap_or(&default_acct)
-                .to_string();
-            let sqs = sqs_mas.get_or_create(&acct);
+            // The queue lives in the account and region its ARN names.
+            let Some(sqs) = sqs_mas.by_arn_mut(&mapping.queue_arn) else {
+                return;
+            };
+            let acct = sqs.account_id.clone();
             let queue = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn);
             let queue = match queue {
                 Some(q) => q,
@@ -323,10 +320,10 @@ impl SqsLambdaPoller {
         if !dropped_ids.is_empty() {
             {
                 let mut sqs_mas = self.sqs_state.write();
-                let default_acct = sqs_mas.default_account_id().to_string();
-                let acct = mapping.queue_arn.split(':').nth(4).unwrap_or(&default_acct);
-                let sqs = sqs_mas.get_or_create(acct);
-                if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn) {
+                if let Some(queue) = sqs_mas
+                    .by_arn_mut(&mapping.queue_arn)
+                    .and_then(|sqs| sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn))
+                {
                     queue
                         .messages
                         .retain(|m| !dropped_ids.contains(&m.message_id));
@@ -389,10 +386,10 @@ impl SqsLambdaPoller {
         if !acked_ids.is_empty() || !failed_ids.is_empty() {
             {
                 let mut sqs_mas = self.sqs_state.write();
-                let default_acct = sqs_mas.default_account_id().to_string();
-                let acct = mapping.queue_arn.split(':').nth(4).unwrap_or(&default_acct);
-                let sqs = sqs_mas.get_or_create(acct);
-                if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn) {
+                if let Some(queue) = sqs_mas
+                    .by_arn_mut(&mapping.queue_arn)
+                    .and_then(|sqs| sqs.queues.values_mut().find(|q| q.arn == mapping.queue_arn))
+                {
                     queue
                         .messages
                         .retain(|m| !acked_ids.contains(&m.message_id));
@@ -581,10 +578,10 @@ mod tests {
             receive_attempt_cache: BTreeMap::new(),
         };
 
-        let mut sqs: MultiAccountState<SqsState> =
+        let mut sqs: fakecloud_core::multi_account::MultiRegionState<SqsState> =
             MultiAccountState::new(ACCOUNT, REGION, "http://localhost:4566");
         {
-            let s = sqs.default_mut();
+            let s = sqs.default_regional_mut();
             s.name_to_url.insert("k2-poll".to_string(), queue_url);
             s.queues.insert(queue.queue_url.clone(), queue);
         }
@@ -663,7 +660,7 @@ mod tests {
         // got stamped on the body that just got delivered.
         {
             let mut sqs = sqs_state.write();
-            let s = sqs.default_mut();
+            let s = sqs.default_regional_mut();
             let queue = s.queues.values_mut().next().unwrap();
             queue.messages.push_back(SqsMessage {
                 message_id: "msg-2".to_string(),
@@ -692,7 +689,13 @@ mod tests {
             "second poll should invoke once more"
         );
         let sqs = sqs_state.read();
-        let queue = sqs.default_ref().queues.values().next().unwrap();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
         assert!(
             queue.messages.is_empty(),
             "successful invoke must delete acked messages, found: {:?}",
@@ -733,7 +736,13 @@ mod tests {
         // The delivered message was acked + removed.
         {
             let sqs = sqs_state.read();
-            let queue = sqs.default_ref().queues.values().next().unwrap();
+            let queue = sqs
+                .default_regional()
+                .unwrap()
+                .queues
+                .values()
+                .next()
+                .unwrap();
             assert!(queue.messages.is_empty(), "acked message must be removed");
         }
         // ...and the removal must have been persisted through the hook.
@@ -770,7 +779,7 @@ mod tests {
         // Hide the existing message in the future.
         {
             let mut sqs = sqs_state.write();
-            let s = sqs.default_mut();
+            let s = sqs.default_regional_mut();
             let queue = s.queues.values_mut().next().unwrap();
             queue.messages[0].visible_at = Some(Utc::now() + chrono::Duration::seconds(60));
         }
@@ -791,7 +800,13 @@ mod tests {
         );
         // Message still in queue.messages, untouched.
         let sqs = sqs_state.read();
-        let queue = sqs.default_ref().queues.values().next().unwrap();
+        let queue = sqs
+            .default_regional()
+            .unwrap()
+            .queues
+            .values()
+            .next()
+            .unwrap();
         assert_eq!(queue.messages.len(), 1);
     }
 }

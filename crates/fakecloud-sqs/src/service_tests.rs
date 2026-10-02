@@ -2492,7 +2492,7 @@ fn start_message_move_task_blocks_concurrent_running() {
     // "already running" guard, force a Running entry directly.
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         state.message_move_tasks.push(MessageMoveTask {
             task_handle: "FakeCloudMessageMoveTask-running".to_string(),
             source_arn: dlq_arn.clone(),
@@ -2519,7 +2519,7 @@ fn cancel_message_move_task_cancels_running() {
     // ApproximateNumberOfMessagesMoved.
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         state.message_move_tasks.push(MessageMoveTask {
             task_handle: "running-handle".to_string(),
             source_arn: "arn:aws:sqs:us-east-1:123456789012:src".to_string(),
@@ -2554,7 +2554,7 @@ fn list_message_move_tasks_caps_at_max_and_excludes_running_handle() {
     // Insert 12 tasks; ListMessageMoveTasks should cap MaxResults at 10.
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         for i in 0..12 {
             state.message_move_tasks.push(MessageMoveTask {
                 task_handle: format!("h{i}"),
@@ -2802,7 +2802,7 @@ async fn resume_message_move_tasks_drains_orphaned_running_task() {
     // Inject an orphaned RUNNING task (stale pid => left by a prior process).
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         state.message_move_tasks.push(MessageMoveTask {
             task_handle: "FakeCloudMessageMoveTask-orphan".to_string(),
             source_arn: dlq_arn.clone(),
@@ -2825,7 +2825,7 @@ async fn resume_message_move_tasks_drains_orphaned_running_task() {
     for _ in 0..200 {
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         let accounts = svc.state.read();
-        let state = accounts.get("123456789012").unwrap();
+        let state = accounts.regional("123456789012", "us-east-1").unwrap();
         let task = state
             .message_move_tasks
             .iter()
@@ -3263,11 +3263,127 @@ fn queue_arn_uses_region_partition_and_resolves() {
     assert_eq!(body_json(resp)["Attributes"]["QueueArn"], arn);
 
     // Sending via that partition-correct ARN resolves the queue.
-    let id = send_msg(&svc, arn, "ni-hao");
-    assert!(!id.is_empty());
-    let msgs = receive_msgs(&svc, arn, 1);
+    svc.send_message(&cn_request(
+        "SendMessage",
+        json!({ "QueueUrl": arn, "MessageBody": "ni-hao" }),
+    ))
+    .unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let resp = rt
+        .block_on(svc.receive_message(&cn_request(
+            "ReceiveMessage",
+            json!({ "QueueUrl": arn, "MaxNumberOfMessages": 1 }),
+        )))
+        .unwrap();
+    let msgs = body_json(resp)["Messages"].as_array().cloned().unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0]["Body"], "ni-hao");
+
+    // The queue lives in cn-north-1 only: a us-east-1 request cannot reach it
+    // by URL, name or ARN.
+    for queue_ref in [url.as_str(), "cn-queue", arn] {
+        let err = expect_err(svc.send_message(&make_request(
+            "SendMessage",
+            json!({ "QueueUrl": queue_ref, "MessageBody": "x" }),
+        )));
+        assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
+    }
+}
+
+fn regional_request(action: &str, body: Value, region: &str) -> AwsRequest {
+    let mut req = make_request(action, body);
+    req.region = region.to_string();
+    req
+}
+
+#[test]
+fn same_queue_name_coexists_in_two_regions() {
+    let svc = make_service();
+    let mut urls = Vec::new();
+    for region in ["us-east-1", "eu-west-1"] {
+        let resp = svc
+            .create_queue(&regional_request(
+                "CreateQueue",
+                json!({ "QueueName": "orders", "Attributes": {"DelaySeconds": if region == "us-east-1" { "0" } else { "5" }} }),
+                region,
+            ))
+            .unwrap();
+        urls.push(body_json(resp)["QueueUrl"].as_str().unwrap().to_string());
+    }
+    // QueueUrls carry no region, so both regions mint the same URL.
+    assert_eq!(urls[0], urls[1]);
+
+    for (region, delay) in [("us-east-1", "0"), ("eu-west-1", "5")] {
+        let resp = svc
+            .get_queue_attributes(&regional_request(
+                "GetQueueAttributes",
+                json!({ "QueueUrl": urls[0], "AttributeNames": ["All"] }),
+                region,
+            ))
+            .unwrap();
+        let attrs = body_json(resp)["Attributes"].clone();
+        assert_eq!(attrs["DelaySeconds"], delay);
+        assert_eq!(
+            attrs["QueueArn"],
+            format!("arn:aws:sqs:{region}:123456789012:orders")
+        );
+    }
+
+    // Each region lists only its own queues.
+    svc.create_queue(&regional_request(
+        "CreateQueue",
+        json!({ "QueueName": "west-only" }),
+        "eu-west-1",
+    ))
+    .unwrap();
+    let list = |region: &str| -> Vec<String> {
+        let resp = svc
+            .list_queues(&regional_request("ListQueues", json!({}), region))
+            .unwrap();
+        body_json(resp)["QueueUrls"]
+            .as_array()
+            .map(|a| a.iter().map(|v| v.as_str().unwrap().to_string()).collect())
+            .unwrap_or_default()
+    };
+    assert_eq!(list("us-east-1").len(), 1);
+    assert_eq!(list("eu-west-1").len(), 2);
+    assert!(list("ap-south-1").is_empty());
+
+    // GetQueueUrl is region-scoped.
+    let err = expect_err(svc.get_queue_url(&regional_request(
+        "GetQueueUrl",
+        json!({ "QueueName": "west-only" }),
+        "us-east-1",
+    )));
+    assert_eq!(err.code(), "AWS.SimpleQueueService.NonExistentQueue");
+
+    // Messages stay in their region's queue.
+    svc.send_message(&regional_request(
+        "SendMessage",
+        json!({ "QueueUrl": urls[0], "MessageBody": "west" }),
+        "eu-west-1",
+    ))
+    .unwrap();
+    assert!(receive_msgs(&svc, &urls[0], 10).is_empty());
+
+    // Deleting one region's queue leaves the other's.
+    svc.delete_queue(&regional_request(
+        "DeleteQueue",
+        json!({ "QueueUrl": urls[0] }),
+        "eu-west-1",
+    ))
+    .unwrap();
+    assert_eq!(list("us-east-1").len(), 1);
+    assert_eq!(list("eu-west-1").len(), 1);
+    // A read in an untouched region never creates state for it.
+    assert!(svc
+        .state
+        .read()
+        .regional("123456789012", "ap-south-1")
+        .is_none());
 }
 
 // ── Host-aware QueueUrl rendering (bug-hunt 1.10) ───────────────
