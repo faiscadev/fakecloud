@@ -5,15 +5,18 @@
 //! supplied pattern matches; a record is dropped when *every* pattern
 //! fails to match.
 //!
-//! Operators implemented (matches AWS's documented surface):
-//! - exact-string / number / boolean / null match
-//! - `{"exists": bool}` — field presence
-//! - `{"prefix": "..."}` / `{"suffix": "..."}` / `{"equals-ignore-case": "..."}`
-//! - `{"anything-but": value | [values]}`
-//! - `{"numeric": [op, n, op, n, ...]}` with `=`, `<`, `<=`, `>`, `>=`
-//! - SQS body decode: when the pattern contains a top-level `body`
-//!   key whose value is an object, the SQS message body is parsed as
-//!   JSON before pattern matching, mirroring AWS behavior.
+//! Matching uses the shared AWS event-pattern evaluator
+//! ([`fakecloud_aws::event_pattern`]), the same one EventBridge rules use, so
+//! array flattening, presence rules and every operator behave identically.
+//!
+//! Before matching, the record is shaped the way AWS filters it:
+//! - SQS: a `body` that is valid JSON is parsed, so patterns can address
+//!   `{"body": {"field": [...]}}`; a non-JSON body stays a plain string.
+//! - Kinesis: the pattern applies to the record's `kinesis` object, whose
+//!   base64 `data` is decoded and parsed as JSON (so `{"data": {...}}`
+//!   patterns work). Non-JSON data stays the base64 string and never matches
+//!   a `data` object pattern, which drops the record as AWS does.
+//! - DynamoDB Streams records are already JSON and are matched as-is.
 
 use serde_json::Value;
 
@@ -62,8 +65,11 @@ impl FilterSet {
         S: AsRef<str>,
     {
         for s in raw {
-            serde_json::from_str::<Value>(s.as_ref())
+            let pattern = serde_json::from_str::<Value>(s.as_ref())
                 .map_err(|err| format!("FilterCriteria pattern is invalid JSON: {err}"))?;
+            if !pattern.is_object() || !leaves_are_lists(&pattern) {
+                return Err("Invalid filter pattern definition.".to_string());
+            }
         }
         Ok(())
     }
@@ -82,128 +88,53 @@ impl FilterSet {
     }
 }
 
-fn match_value(pattern: &Value, value: &Value) -> bool {
-    // The top-level entry has the value present, so wrap as Some.
-    eval_field(pattern, Some(value))
-}
-
-/// Evaluate `pattern` against an optional `value`. `None` means the
-/// parent object did not contain the key the pattern targets — this
-/// matters for the `exists` operator, which is defined in terms of
-/// field *presence*, not value-is-null.
-fn eval_field(pattern: &Value, value: Option<&Value>) -> bool {
-    if let Value::Object(po) = pattern {
-        if is_operator_object(po) {
-            return apply_operator(po, value);
-        }
-    }
+/// Every leaf of a filter pattern must be a list of matchers (or a nested
+/// object); a bare scalar such as `{"foo": "bar"}` is rejected by AWS.
+fn leaves_are_lists(pattern: &Value) -> bool {
     match pattern {
-        Value::Object(po) => match value {
-            Some(Value::Object(vo)) => po.iter().all(|(k, sub_pattern)| {
-                if k == "body" {
-                    if let Some(Value::String(s)) = vo.get("body") {
-                        if let Ok(parsed) = serde_json::from_str::<Value>(s) {
-                            return eval_field(sub_pattern, Some(&parsed));
-                        }
-                    }
-                }
-                eval_field(sub_pattern, vo.get(k))
-            }),
+        Value::Object(obj) => obj.iter().all(|(k, v)| match v {
+            Value::Object(_) => leaves_are_lists(v),
+            Value::Array(alts) if k == "$or" => {
+                alts.iter().all(|a| a.is_object() && leaves_are_lists(a))
+            }
+            Value::Array(_) => true,
             _ => false,
-        },
-        Value::Array(arr) => arr.iter().any(|p| eval_field(p, value)),
-        scalar => match (scalar, value) {
-            (Value::Null, Some(Value::Null)) => true,
-            (Value::Bool(a), Some(Value::Bool(b))) => a == b,
-            (Value::Number(a), Some(Value::Number(b))) => a == b,
-            (Value::String(a), Some(Value::String(b))) => a == b,
-            _ => false,
-        },
-    }
-}
-
-const OPERATOR_KEYS: &[&str] = &[
-    "exists",
-    "prefix",
-    "suffix",
-    "equals-ignore-case",
-    "anything-but",
-    "numeric",
-];
-
-fn is_operator_object(o: &serde_json::Map<String, Value>) -> bool {
-    o.keys().any(|k| OPERATOR_KEYS.contains(&k.as_str()))
-}
-
-fn apply_operator(o: &serde_json::Map<String, Value>, value: Option<&Value>) -> bool {
-    o.iter().all(|(op, arg)| match op.as_str() {
-        // `exists` is the only operator defined in terms of *field
-        // presence*. AWS treats `null` as present, so a literal
-        // `{"foo": null}` matches `{"foo": [{"exists": true}]}`.
-        "exists" => matches!(
-            (arg, value),
-            (Value::Bool(true), Some(_)) | (Value::Bool(false), None)
-        ),
-        op_name => match value {
-            Some(v) => apply_value_operator(op_name, arg, v),
-            None => false,
-        },
-    })
-}
-
-fn apply_value_operator(op: &str, arg: &Value, value: &Value) -> bool {
-    match op {
-        "prefix" => match (arg.as_str(), value.as_str()) {
-            (Some(p), Some(s)) => s.starts_with(p),
-            _ => false,
-        },
-        "suffix" => match (arg.as_str(), value.as_str()) {
-            (Some(p), Some(s)) => s.ends_with(p),
-            _ => false,
-        },
-        "equals-ignore-case" => match (arg.as_str(), value.as_str()) {
-            (Some(p), Some(s)) => p.eq_ignore_ascii_case(s),
-            _ => false,
-        },
-        "anything-but" => match arg {
-            Value::Array(arr) => !arr.iter().any(|v| v == value),
-            other => other != value,
-        },
-        "numeric" => apply_numeric(arg, value),
+        }),
         _ => false,
     }
 }
 
-fn apply_numeric(arg: &Value, value: &Value) -> bool {
-    let Some(n) = value.as_f64() else {
-        return false;
-    };
-    let Some(arr) = arg.as_array() else {
-        return false;
-    };
-    // AWS rejects malformed numeric arrays at create time; defensively
-    // treat odd-length arrays here as a no-match instead of letting
-    // a leftover element silently pass.
-    if arr.len() % 2 != 0 || arr.is_empty() {
-        return false;
-    }
-    for chunk in arr.chunks(2) {
-        let Some(target) = chunk[1].as_f64() else {
-            return false;
-        };
-        let ok = match chunk[0].as_str() {
-            Some("=") => n == target,
-            Some("<") => n < target,
-            Some("<=") => n <= target,
-            Some(">") => n > target,
-            Some(">=") => n >= target,
-            _ => false,
-        };
-        if !ok {
-            return false;
+fn match_value(pattern: &Value, record: &Value) -> bool {
+    let target = filter_target(record);
+    fakecloud_aws::event_pattern::matches(pattern, &target)
+}
+
+/// Build the value a filter pattern is evaluated against (see module docs).
+fn filter_target(record: &Value) -> Value {
+    if record.get("eventSource").and_then(Value::as_str) == Some("aws:kinesis") {
+        if let Some(Value::Object(kinesis)) = record.get("kinesis") {
+            let mut target = kinesis.clone();
+            if let Some(Value::String(data)) = kinesis.get("data") {
+                use base64::Engine;
+                if let Some(parsed) = base64::engine::general_purpose::STANDARD
+                    .decode(data)
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                {
+                    target.insert("data".to_string(), parsed);
+                }
+            }
+            return Value::Object(target);
         }
     }
-    true
+    if let Some(Value::String(body)) = record.get("body") {
+        if let Ok(parsed) = serde_json::from_str::<Value>(body) {
+            let mut target = record.clone();
+            target["body"] = parsed;
+            return target;
+        }
+    }
+    record.clone()
 }
 
 #[cfg(test)]
@@ -223,7 +154,7 @@ mod tests {
 
     #[test]
     fn exact_string_match() {
-        let f = fs(&[r#"{"foo": "bar"}"#]);
+        let f = fs(&[r#"{"foo": ["bar"]}"#]);
         assert!(f.matches(&json!({"foo": "bar"})));
         assert!(!f.matches(&json!({"foo": "baz"})));
     }
@@ -258,7 +189,12 @@ mod tests {
     #[test]
     fn validate_rejects_invalid_json() {
         assert!(FilterSet::validate(["{not json"].iter()).is_err());
-        assert!(FilterSet::validate([r#"{"ok": true}"#].iter()).is_ok());
+        assert!(FilterSet::validate([r#"{"ok": [true]}"#].iter()).is_ok());
+        // Scalar leaves and non-object patterns are not valid patterns.
+        assert!(FilterSet::validate([r#"{"ok": true}"#].iter()).is_err());
+        assert!(FilterSet::validate([r#"{"a": {"b": "x"}}"#].iter()).is_err());
+        assert!(FilterSet::validate([r#"["x"]"#].iter()).is_err());
+        assert!(FilterSet::validate([r#"{"$or": [{"a": ["1"]}, {"b": ["2"]}]}"#].iter()).is_ok());
     }
 
     #[test]
@@ -274,7 +210,7 @@ mod tests {
 
     #[test]
     fn sqs_body_decode() {
-        let f = fs(&[r#"{"body": {"action": "process"}}"#]);
+        let f = fs(&[r#"{"body": {"action": ["process"]}}"#]);
         let record = json!({
             "body": "{\"action\": \"process\", \"id\": 42}",
         });
@@ -287,16 +223,71 @@ mod tests {
 
     #[test]
     fn nested_object_match() {
-        let f = fs(&[r#"{"order": {"status": "paid"}}"#]);
+        let f = fs(&[r#"{"order": {"status": ["paid"]}}"#]);
         assert!(f.matches(&json!({"order": {"status": "paid", "id": 1}})));
         assert!(!f.matches(&json!({"order": {"status": "pending"}})));
     }
 
     #[test]
     fn multiple_patterns_or() {
-        let f = fs(&[r#"{"a": "x"}"#, r#"{"b": "y"}"#]);
+        let f = fs(&[r#"{"a": ["x"]}"#, r#"{"b": ["y"]}"#]);
         assert!(f.matches(&json!({"a": "x"})));
         assert!(f.matches(&json!({"b": "y"})));
         assert!(!f.matches(&json!({"c": "z"})));
+    }
+
+    #[test]
+    fn scalar_pattern_matches_array_value() {
+        let f = fs(&[r#"{"body": {"tags": ["b"]}}"#]);
+        assert!(f.matches(&json!({"body": "{\"tags\": [\"a\", \"b\"]}"})));
+        assert!(!f.matches(&json!({"body": "{\"tags\": [\"a\"]}"})));
+    }
+
+    #[test]
+    fn object_pattern_matches_array_of_objects() {
+        let f = fs(&[r#"{"body": {"items": {"sku": ["x"]}}}"#]);
+        assert!(f.matches(&json!({"body": r#"{"items": [{"sku": "a"}, {"sku": "x"}]}"#})));
+        assert!(!f.matches(&json!({"body": r#"{"items": [{"sku": "a"}]}"#})));
+    }
+
+    #[test]
+    fn anything_but_on_array_and_numeric_repr() {
+        let f = fs(&[r#"{"c": [{"anything-but": ["rugby"]}]}"#]);
+        assert!(f.matches(&json!({"c": ["rugby", "golf"]})));
+        assert!(!f.matches(&json!({"c": ["rugby"]})));
+        // anything-but requires the field.
+        assert!(!f.matches(&json!({})));
+        let f = fs(&[r#"{"n": [{"anything-but": 100}]}"#]);
+        assert!(!f.matches(&json!({"n": 100.0})));
+        assert!(f.matches(&json!({"n": 7})));
+    }
+
+    #[test]
+    fn non_json_sqs_body_matches_as_string() {
+        let f = fs(&[r#"{"body": ["plain text"]}"#]);
+        assert!(f.matches(&json!({"body": "plain text"})));
+        assert!(!f.matches(&json!({"body": "other"})));
+    }
+
+    #[test]
+    fn kinesis_data_is_base64_decoded_for_filtering() {
+        use base64::Engine;
+        let rec = |data: &[u8]| {
+            json!({
+                "eventSource": "aws:kinesis",
+                "kinesis": {
+                    "partitionKey": "pk-1",
+                    "data": base64::engine::general_purpose::STANDARD.encode(data),
+                }
+            })
+        };
+        let f = fs(&[r#"{"data": {"order": {"type": ["buy"]}}}"#]);
+        assert!(f.matches(&rec(br#"{"order": {"type": "buy"}}"#)));
+        assert!(!f.matches(&rec(br#"{"order": {"type": "sell"}}"#)));
+        // Non-JSON data never matches a data pattern.
+        assert!(!f.matches(&rec(b"not json")));
+        // Metadata properties are filterable at the top level.
+        let f = fs(&[r#"{"partitionKey": ["pk-1"]}"#]);
+        assert!(f.matches(&rec(b"not json")));
     }
 }

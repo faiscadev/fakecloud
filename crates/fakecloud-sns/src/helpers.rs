@@ -803,7 +803,10 @@ fn attr_key_matches(
         }
     };
     let attr_value = msg_attr.string_value.as_deref().unwrap_or("");
-    let is_numeric_type = msg_attr.data_type == "Number";
+    // Custom types such as `Number.float` / `Number.int` are numbers too: AWS
+    // keys numeric filtering off the `Number` base type.
+    let is_numeric_type =
+        msg_attr.data_type == "Number" || msg_attr.data_type.starts_with("Number.");
     // String.Array: match if any element satisfies the rule set.
     if msg_attr.data_type.starts_with("String.Array") {
         if let Ok(arr) = serde_json::from_str::<Vec<Value>>(attr_value) {
@@ -1764,5 +1767,43 @@ mod filter_consistency_tests {
         // A well-formed range still works.
         let ok = vec![json!({ "numeric": [">", 0, "<", 200] })];
         assert!(check_filter_values_typed(&ok, "100", Some(true)));
+    }
+
+    #[test]
+    fn custom_number_subtype_is_numeric() {
+        let attr = |t: &str, v: &str| MessageAttribute {
+            data_type: t.to_string(),
+            string_value: Some(v.to_string()),
+            binary_value: None,
+        };
+        let sub = sub_with_filter(json!({ "price": [{ "numeric": [">", 50] }] }));
+        let mut attrs = BTreeMap::new();
+        attrs.insert("price".to_string(), attr("Number.float", "99.5"));
+        assert!(matches_filter_policy(&sub, &attrs, ""));
+        attrs.insert("price".to_string(), attr("Number.float", "10"));
+        assert!(!matches_filter_policy(&sub, &attrs, ""));
+        // A numeric exact match equally applies, and a string filter does not.
+        let sub = sub_with_filter(json!({ "price": [100] }));
+        attrs.insert("price".to_string(), attr("Number.int", "100"));
+        assert!(matches_filter_policy(&sub, &attrs, ""));
+        let sub = sub_with_filter(json!({ "price": ["100"] }));
+        assert!(!matches_filter_policy(&sub, &attrs, ""));
+    }
+
+    #[test]
+    fn anything_but_on_string_array_matches_if_any_element_not_excluded() {
+        // AWS docs: `["rugby", "baseball"]` matches
+        // `{"anything-but": ["rugby", "tennis"]}`; `["rugby"]` does not.
+        let arr = |v: &str| MessageAttribute {
+            data_type: "String.Array".to_string(),
+            string_value: Some(v.to_string()),
+            binary_value: None,
+        };
+        let sub = sub_with_filter(json!({ "c": [{ "anything-but": ["rugby", "tennis"] }] }));
+        let mut attrs = BTreeMap::new();
+        attrs.insert("c".to_string(), arr(r#"["rugby", "baseball"]"#));
+        assert!(matches_filter_policy(&sub, &attrs, ""));
+        attrs.insert("c".to_string(), arr(r#"["rugby"]"#));
+        assert!(!matches_filter_policy(&sub, &attrs, ""));
     }
 }

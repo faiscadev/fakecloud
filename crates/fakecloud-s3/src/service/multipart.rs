@@ -1024,9 +1024,21 @@ impl S3Service {
         // Skip everything at or before (key-marker, upload-id-marker). With an
         // upload-id-marker the boundary key is resumed mid-way; without one,
         // every upload up to and including the marker key is skipped.
+        // A key-marker that is itself a CommonPrefix (the NextKeyMarker of a
+        // page that ended on a rolled-up prefix) resumes after every key
+        // rolled into it, so the prefix is not listed twice.
+        let marker_is_common_prefix = !delimiter.is_empty()
+            && key_marker.starts_with(&prefix)
+            && key_marker.len() > prefix.len()
+            && key_marker.ends_with(&delimiter)
+            && key_marker[prefix.len()..].find(&delimiter)
+                == Some(key_marker.len() - prefix.len() - delimiter.len());
         let after_marker = |key: &str, upload_id: &str| -> bool {
             if key_marker.is_empty() {
                 return true;
+            }
+            if marker_is_common_prefix && key.starts_with(key_marker.as_str()) {
+                return false;
             }
             match key.cmp(key_marker.as_str()) {
                 std::cmp::Ordering::Greater => true,
@@ -1037,9 +1049,12 @@ impl S3Service {
             }
         };
 
+        // Uploads and distinct CommonPrefixes together fill the page: each
+        // rolled-up prefix counts once toward max-uploads, as on AWS. Keys
+        // sharing a prefix are contiguous in key order, so a prefix is
+        // complete once the next key falls outside it.
         let mut uploads_xml = String::new();
-        let mut common_prefixes: std::collections::BTreeSet<String> =
-            std::collections::BTreeSet::new();
+        let mut common_prefixes: Vec<String> = Vec::new();
         let mut emitted = 0usize;
         let mut is_truncated = false;
         let mut next_key_marker = String::new();
@@ -1049,22 +1064,30 @@ impl S3Service {
             .iter()
             .filter(|u| after_marker(&u.key, &u.upload_id))
         {
-            // Roll keys up under a delimiter into CommonPrefixes (deduped),
-            // matching ListObjects semantics.
-            if !delimiter.is_empty() {
+            let rolled_up = if delimiter.is_empty() {
+                None
+            } else {
                 let rest = &upload.key[prefix.len()..];
-                if let Some(idx) = rest.find(&delimiter) {
-                    let cp = format!("{}{}", prefix, &rest[..idx + delimiter.len()]);
-                    common_prefixes.insert(cp);
+                rest.find(&delimiter)
+                    .map(|idx| format!("{}{}", prefix, &rest[..idx + delimiter.len()]))
+            };
+            if let Some(cp) = &rolled_up {
+                if common_prefixes.last() == Some(cp) {
                     continue;
                 }
             }
             if emitted >= max_uploads {
-                // The page is full: mark truncated. The Next*Marker pair points
-                // at the LAST emitted upload so the next page resumes strictly
-                // after it (AWS semantics).
+                // The page is full. The Next*Marker pair names the LAST entry
+                // on the page so the next page resumes strictly after it.
                 is_truncated = true;
                 break;
+            }
+            emitted += 1;
+            if let Some(cp) = rolled_up {
+                next_key_marker = cp.clone();
+                next_upload_id_marker.clear();
+                common_prefixes.push(cp);
+                continue;
             }
             uploads_xml.push_str(&format!(
                 "<Upload>\
@@ -1080,7 +1103,6 @@ impl S3Service {
             ));
             next_key_marker = upload.key.clone();
             next_upload_id_marker = upload.upload_id.clone();
-            emitted += 1;
         }
 
         let mut markers_xml = String::new();
@@ -1098,10 +1120,16 @@ impl S3Service {
         }
         if is_truncated {
             markers_xml.push_str(&format!(
-                "<NextKeyMarker>{}</NextKeyMarker><NextUploadIdMarker>{}</NextUploadIdMarker>",
-                xml_escape(&next_key_marker),
-                xml_escape(&next_upload_id_marker)
+                "<NextKeyMarker>{}</NextKeyMarker>",
+                xml_escape(&next_key_marker)
             ));
+            // A page ending on a CommonPrefix has no upload to resume after.
+            if !next_upload_id_marker.is_empty() {
+                markers_xml.push_str(&format!(
+                    "<NextUploadIdMarker>{}</NextUploadIdMarker>",
+                    xml_escape(&next_upload_id_marker)
+                ));
+            }
         }
         if !prefix.is_empty() {
             markers_xml.push_str(&format!("<Prefix>{}</Prefix>", xml_escape(&prefix)));

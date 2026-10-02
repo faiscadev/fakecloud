@@ -368,10 +368,15 @@ fn array_valued_field_matches_prefix_filter() {
     ));
 }
 
-// ---- anything-but against array-valued event fields (filter bypass) ----
+// ---- anything-but against array-valued event fields ----
+//
+// AWS's event-ruler evaluates every matcher per array element, so an
+// `anything-but` against an array matches when at least one element is not
+// excluded (the SNS filter-policy docs spell this out: `["rugby", "baseball"]`
+// matches `{"anything-but": ["rugby", "tennis"]}`; `["rugby"]` does not).
 
 #[test]
-fn anything_but_array_field_excludes_when_element_forbidden() {
+fn anything_but_array_field_matches_when_any_element_allowed() {
     let pattern = r#"{"detail":{"category":[{"anything-but":["blocked"]}]}}"#;
     // Array contains only the forbidden value -> must NOT match.
     assert!(!test_matches(
@@ -380,16 +385,14 @@ fn anything_but_array_field_excludes_when_element_forbidden() {
         "Event",
         r#"{"category":["blocked"]}"#
     ));
-    // Array contains an allowed value only -> match.
     assert!(test_matches(
         Some(pattern),
         "app",
         "Event",
         r#"{"category":["allowed"]}"#
     ));
-    // Array contains one allowed and one forbidden -> one element is excluded,
-    // so the whole array must NOT match.
-    assert!(!test_matches(
+    // One allowed element is enough.
+    assert!(test_matches(
         Some(pattern),
         "app",
         "Event",
@@ -406,6 +409,12 @@ fn anything_but_string_array_field_excludes() {
         "Event",
         r#"{"category":["blocked"]}"#
     ));
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"category":["blocked","blocked"]}"#
+    ));
     assert!(test_matches(
         Some(pattern),
         "app",
@@ -415,7 +424,7 @@ fn anything_but_string_array_field_excludes() {
 }
 
 #[test]
-fn anything_but_number_array_field_excludes() {
+fn anything_but_number_array_field() {
     let pattern = r#"{"detail":{"code":[{"anything-but":404}]}}"#;
     assert!(!test_matches(
         Some(pattern),
@@ -423,14 +432,20 @@ fn anything_but_number_array_field_excludes() {
         "Event",
         r#"{"code":[404]}"#
     ));
+    // 404.0 is the same number as 404.
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"code":[404.0]}"#
+    ));
     assert!(test_matches(
         Some(pattern),
         "app",
         "Event",
         r#"{"code":[200]}"#
     ));
-    // Mixed array with one forbidden value -> NO match.
-    assert!(!test_matches(
+    assert!(test_matches(
         Some(pattern),
         "app",
         "Event",
@@ -439,21 +454,76 @@ fn anything_but_number_array_field_excludes() {
 }
 
 #[test]
-fn anything_but_nested_prefix_array_field_excludes() {
+fn anything_but_nested_prefix_array_field() {
     let pattern = r#"{"detail":{"name":[{"anything-but":{"prefix":"tmp-"}}]}}"#;
-    // Every element must avoid the forbidden prefix.
     assert!(test_matches(
         Some(pattern),
         "app",
         "Event",
         r#"{"name":["prod-a","prod-b"]}"#
     ));
-    // One element hits the forbidden prefix -> NO match.
-    assert!(!test_matches(
+    assert!(test_matches(
         Some(pattern),
         "app",
         "Event",
         r#"{"name":["prod-a","tmp-b"]}"#
+    ));
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"name":["tmp-a","tmp-b"]}"#
+    ));
+}
+
+#[test]
+fn anything_but_does_not_match_absent_field() {
+    let pattern = r#"{"detail":{"state":[{"anything-but":"stopped"}]}}"#;
+    assert!(!test_matches(Some(pattern), "app", "Event", r#"{}"#));
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"state":"running"}"#
+    ));
+}
+
+#[test]
+fn object_pattern_matches_array_of_objects() {
+    let pattern = r#"{"detail":{"items":{"sku":["b"]}}}"#;
+    assert!(test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"items":[{"sku":"a"},{"sku":"b"}]}"#
+    ));
+    assert!(!test_matches(
+        Some(pattern),
+        "app",
+        "Event",
+        r#"{"items":[{"sku":"a"}]}"#
+    ));
+}
+
+#[test]
+fn exists_true_matches_present_null_and_null_pattern_needs_presence() {
+    assert!(test_matches(
+        Some(r#"{"detail":{"v":[{"exists":true}]}}"#),
+        "app",
+        "Event",
+        r#"{"v":null}"#
+    ));
+    assert!(test_matches(
+        Some(r#"{"detail":{"v":[null]}}"#),
+        "app",
+        "Event",
+        r#"{"v":null}"#
+    ));
+    assert!(!test_matches(
+        Some(r#"{"detail":{"v":[null]}}"#),
+        "app",
+        "Event",
+        r#"{}"#
     ));
 }
 
