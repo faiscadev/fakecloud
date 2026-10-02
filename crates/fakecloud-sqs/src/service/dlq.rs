@@ -14,7 +14,9 @@ impl SqsService {
 
         let _accts = self.state.read();
         let _empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
-        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        let state = _accts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&_empty);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues

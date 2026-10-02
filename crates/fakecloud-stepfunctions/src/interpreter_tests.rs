@@ -1906,7 +1906,7 @@ impl fakecloud_core::delivery::SqsDelivery for RecordingSqs {
         self.delivered.lock().push(queue_arn.to_string());
     }
 
-    fn queue_arn_for_url(&self, queue_url: &str) -> Option<String> {
+    fn queue_arn_for_url(&self, _region: &str, queue_url: &str) -> Option<String> {
         (queue_url == self.queue_url).then(|| self.queue_arn.clone())
     }
 }

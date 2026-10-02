@@ -49,7 +49,7 @@ impl SqsService {
         // queue is real, which conformance probing never reaches.
         {
             let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
+            let state = accounts.regional_mut(&req.account_id, &req.region);
             resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         }
 
@@ -106,7 +106,7 @@ impl SqsService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -204,7 +204,7 @@ impl SqsService {
             .ok_or_else(|| missing_param("Label"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues

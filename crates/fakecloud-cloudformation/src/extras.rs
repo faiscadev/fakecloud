@@ -606,6 +606,7 @@ impl CloudFormationService {
     pub(crate) fn resource_exists(
         &self,
         account_id: &str,
+        region: &str,
         resource: &StackResource,
     ) -> Option<bool> {
         let aid = account_id;
@@ -614,7 +615,7 @@ impl CloudFormationService {
                 .deps
                 .sqs
                 .read()
-                .get(aid)
+                .regional(aid, region)
                 .map(|s| s.queues.contains_key(&resource.physical_id))
                 .unwrap_or(false),
             "AWS::SNS::Topic" => self
@@ -2069,7 +2070,9 @@ impl CloudFormationService {
                 let mut drifted_resources: Vec<Value> = Vec::new();
 
                 for resource in &resources {
-                    let exists = self.resource_exists(&aid, resource).unwrap_or(true);
+                    let exists = self
+                        .resource_exists(&aid, &region, resource)
+                        .unwrap_or(true);
                     if !exists {
                         drifted_resources.push(json!({
                             "LogicalResourceId": resource.logical_id,
@@ -2125,7 +2128,9 @@ impl CloudFormationService {
                     .and_then(|s| s.live_stack(&stack_name))
                     .and_then(|stack| stack.resources.iter().find(|r| r.logical_id == logical))
                     .map(|resource| {
-                        let exists = self.resource_exists(&aid, resource).unwrap_or(true);
+                        let exists = self
+                            .resource_exists(&aid, &region, resource)
+                            .unwrap_or(true);
                         if exists {
                             "IN_SYNC"
                         } else {
@@ -3017,7 +3022,7 @@ pub(crate) mod tests {
             )))
         }
         CloudFormationDeps {
-            sqs: shared::<SqsState>(),
+            sqs: shared::<fakecloud_core::multi_account::RegionalState<SqsState>>(),
             sns: shared::<SnsState>(),
             ssm: shared::<SsmState>(),
             iam: shared::<IamState>(),

@@ -49,7 +49,7 @@ impl SqsService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // Render the returned QueueUrl against the caller's host (external-URL
         // override -> request Host -> boot-time endpoint). The stored URL stays
         // host-independent; only the rendered value reflects the caller.
@@ -229,7 +229,7 @@ impl SqsService {
             .to_string();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(&queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -250,7 +250,9 @@ impl SqsService {
         let prefix = body["QueueNamePrefix"].as_str();
         let _accts = self.state.read();
         let _empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
-        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        let state = _accts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&_empty);
 
         let max_results = body["MaxResults"]
             .as_u64()
@@ -316,7 +318,9 @@ impl SqsService {
 
         let _accts = self.state.read();
         let _empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
-        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        let state = _accts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&_empty);
         let url = state
             .name_to_url
             .get(queue_name)
@@ -342,7 +346,9 @@ impl SqsService {
 
         let _accts = self.state.read();
         let _empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
-        let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+        let state = _accts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&_empty);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -468,7 +474,7 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -496,7 +502,7 @@ impl SqsService {
             .ok_or_else(|| missing_param("QueueUrl"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
 
         // Validate the redrive DLQ target the same way CreateQueue does,

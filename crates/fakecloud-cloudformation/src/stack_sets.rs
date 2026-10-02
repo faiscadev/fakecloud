@@ -4721,14 +4721,15 @@ impl CloudFormationService {
             };
             let mut drifted = false;
             for resource in &stack.resources {
-                let status = match self.resource_exists(&instance.account, resource) {
-                    Some(true) => "IN_SYNC",
-                    Some(false) => {
-                        drifted = true;
-                        "DELETED"
-                    }
-                    None => "NOT_CHECKED",
-                };
+                let status =
+                    match self.resource_exists(&instance.account, &instance.region, resource) {
+                        Some(true) => "IN_SYNC",
+                        Some(false) => {
+                            drifted = true;
+                            "DELETED"
+                        }
+                        None => "NOT_CHECKED",
+                    };
                 op.resource_drifts.push(InstanceResourceDrift {
                     account: instance.account.clone(),
                     region: instance.region.clone(),

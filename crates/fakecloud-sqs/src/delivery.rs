@@ -53,12 +53,12 @@ impl SqsDeliveryImpl {
 }
 
 impl SqsDelivery for SqsDeliveryImpl {
-    fn queue_arn_for_url(&self, queue_url: &str) -> Option<String> {
+    fn queue_arn_for_url(&self, region: &str, queue_url: &str) -> Option<String> {
         let mut segments = queue_url.trim_end_matches('/').rsplit('/');
         let name = segments.next().filter(|s| !s.is_empty())?;
         let account = segments.next().filter(|s| !s.is_empty())?;
         let accounts = self.state.read();
-        let state = accounts.get(account)?;
+        let state = accounts.regional(account, region)?;
         let url = state.name_to_url.get(name)?;
         state.queues.get(url).map(|q| q.arn.clone())
     }
@@ -101,21 +101,17 @@ impl SqsDelivery for SqsDeliveryImpl {
     ) -> Result<(), SqsDeliveryError> {
         let mut accounts = self.state.write();
 
-        // Parse account from queue ARN (arn:aws:sqs:region:ACCOUNT:name)
-        let default_id = accounts.default_account_id().to_string();
-        let target_account = queue_arn
-            .split(':')
-            .nth(4)
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| SqsDeliveryError::InvalidArn(queue_arn.to_string()))?
-            .to_string();
-        let target_account = if target_account.is_empty() {
-            default_id
-        } else {
-            target_account
+        // The queue lives in the account and region its ARN names
+        // (arn:PARTITION:sqs:REGION:ACCOUNT:name).
+        let (Some(target_account), Some(region)) = (
+            fakecloud_aws::arn::account_of(queue_arn).map(str::to_string),
+            fakecloud_aws::arn::region_of(queue_arn).map(str::to_string),
+        ) else {
+            return Err(SqsDeliveryError::InvalidArn(queue_arn.to_string()));
         };
-        let region = accounts.region().to_string();
-        let state = accounts.get_or_create(&target_account);
+        let state = accounts
+            .regional_get_mut(&target_account, &region)
+            .ok_or_else(|| SqsDeliveryError::QueueNotFound(queue_arn.to_string()))?;
 
         // Find queue by ARN
         let queue = state
@@ -203,10 +199,9 @@ impl SqsDelivery for SqsDeliveryImpl {
                 let mut ctx = HashMap::new();
                 ctx.insert("aws:sqs:arn".to_string(), queue_arn_owned.clone());
                 // The key (or alias) lives in the queue's region.
-                let key_region = fakecloud_aws::arn::region_of(&queue_arn_owned).unwrap_or(&region);
                 hook.encrypt(
                     &target_account,
-                    key_region,
+                    &region,
                     key,
                     message_body.as_bytes(),
                     "sqs.amazonaws.com",
@@ -223,7 +218,8 @@ impl SqsDelivery for SqsDeliveryImpl {
         // Reacquire mutable queue after the borrow drop above (hook call
         // used `&self.kms_hook` not `state`).
         let queue = accounts
-            .get_or_create(&target_account)
+            .regional_get_mut(&target_account, &region)
+            .ok_or_else(|| SqsDeliveryError::QueueNotFound(queue_arn_owned.clone()))?
             .queues
             .values_mut()
             .find(|q| q.arn == queue_arn_owned)
@@ -321,7 +317,7 @@ mod tests {
     use crate::state::{SharedSqsState, SqsQueue, SqsState};
     use chrono::Utc;
     use fakecloud_aws::arn::Arn;
-    use fakecloud_core::multi_account::MultiAccountState;
+    use fakecloud_core::multi_account::MultiRegionState;
     use parking_lot::RwLock;
     use std::collections::VecDeque;
     use std::sync::Arc;
@@ -355,9 +351,9 @@ mod tests {
     }
 
     fn make_state_with_queue(queue: SqsQueue) -> SharedSqsState {
-        let mut multi: MultiAccountState<SqsState> =
-            MultiAccountState::new(ACCOUNT, REGION, ENDPOINT);
-        let state = multi.default_mut();
+        let mut multi: MultiRegionState<SqsState> =
+            MultiRegionState::new(ACCOUNT, REGION, ENDPOINT);
+        let state = multi.default_regional_mut();
         state
             .name_to_url
             .insert(queue.queue_name.clone(), queue.queue_url.clone());
@@ -366,25 +362,83 @@ mod tests {
     }
 
     #[test]
-    fn queue_arn_for_url_resolves_the_stored_arn_by_account_and_name() {
+    fn queue_arn_for_url_resolves_the_stored_arn_by_account_name_and_region() {
         let mut queue = make_queue("orders", false, false);
         queue.arn = Arn::regional("sqs", "eu-west-1", ACCOUNT, "orders").to_string();
-        let delivery = SqsDeliveryImpl::new(make_state_with_queue(queue));
-        // Any host: a QueueUrl names the queue by account and name only.
+        let state = make_state_with_queue(make_queue("other", false, false));
+        {
+            let mut guard = state.write();
+            let west = guard.regional_mut(ACCOUNT, "eu-west-1");
+            west.name_to_url
+                .insert(queue.queue_name.clone(), queue.queue_url.clone());
+            west.queues.insert(queue.queue_url.clone(), queue);
+        }
+        let delivery = SqsDeliveryImpl::new(state);
+        // Any host: a QueueUrl names the queue by account and name; the
+        // region comes from the caller.
         assert_eq!(
             delivery
-                .queue_arn_for_url(&format!("https://sqs.example.internal/{ACCOUNT}/orders"))
+                .queue_arn_for_url(
+                    "eu-west-1",
+                    &format!("https://sqs.example.internal/{ACCOUNT}/orders")
+                )
                 .as_deref(),
             Some("arn:aws:sqs:eu-west-1:123456789012:orders")
         );
+        // The same URL in another region names a queue that does not exist.
         assert_eq!(
-            delivery.queue_arn_for_url(&format!("{ENDPOINT}/{ACCOUNT}/missing")),
+            delivery.queue_arn_for_url(REGION, &format!("{ENDPOINT}/{ACCOUNT}/orders")),
             None
         );
         assert_eq!(
-            delivery.queue_arn_for_url(&format!("{ENDPOINT}/999999999999/orders")),
+            delivery.queue_arn_for_url("eu-west-1", &format!("{ENDPOINT}/{ACCOUNT}/missing")),
             None
         );
+        assert_eq!(
+            delivery.queue_arn_for_url("eu-west-1", &format!("{ENDPOINT}/999999999999/orders")),
+            None
+        );
+    }
+
+    #[test]
+    fn delivery_targets_the_queue_in_its_arn_region() {
+        // Two same-name queues in two regions: a delivery by ARN lands only
+        // in the queue of the ARN's region.
+        let east = make_queue("orders", false, false);
+        let east_arn = east.arn.clone();
+        let state = make_state_with_queue(east);
+        let mut west = make_queue("orders", false, false);
+        west.arn = Arn::regional("sqs", "eu-west-1", ACCOUNT, "orders").to_string();
+        let west_arn = west.arn.clone();
+        {
+            let mut guard = state.write();
+            let w = guard.regional_mut(ACCOUNT, "eu-west-1");
+            w.name_to_url
+                .insert(west.queue_name.clone(), west.queue_url.clone());
+            w.queues.insert(west.queue_url.clone(), west);
+        }
+        let delivery = SqsDeliveryImpl::new(state.clone());
+        delivery
+            .try_deliver_to_queue_with_attrs(&west_arn, "hello-west", &HashMap::new(), None, None)
+            .unwrap();
+        let guard = state.read();
+        let w = guard.regional(ACCOUNT, "eu-west-1").unwrap();
+        let e = guard.regional(ACCOUNT, REGION).unwrap();
+        assert_eq!(w.queues.values().next().unwrap().messages.len(), 1);
+        assert_eq!(e.queues.values().next().unwrap().messages.len(), 0);
+        assert_eq!(e.queues.values().next().unwrap().arn, east_arn);
+        drop(guard);
+        // A queue ARN of a region with no such queue is QueueNotFound.
+        let err = delivery
+            .try_deliver_to_queue_with_attrs(
+                &Arn::regional("sqs", "ap-south-1", ACCOUNT, "orders").to_string(),
+                "x",
+                &HashMap::new(),
+                None,
+                None,
+            )
+            .unwrap_err();
+        assert!(matches!(err, SqsDeliveryError::QueueNotFound(_)));
     }
 
     #[test]
@@ -396,7 +450,7 @@ mod tests {
         let delivery = SqsDeliveryImpl::new(state.clone());
         delivery.deliver_to_queue(&arn, "hello", &HashMap::new());
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
         let msg = q.messages.front().unwrap();
         assert_eq!(msg.body, "hello");
@@ -413,7 +467,7 @@ mod tests {
         let delivery = SqsDeliveryImpl::new(state.clone());
         delivery.deliver_to_queue_with_attrs(&arn, "body", &HashMap::new(), Some("g1"), None);
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert!(q.messages.is_empty());
     }
 
@@ -426,7 +480,7 @@ mod tests {
         let delivery = SqsDeliveryImpl::new(state.clone());
         delivery.deliver_to_queue_with_attrs(&arn, "body", &HashMap::new(), Some("g1"), None);
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
         assert!(q.messages.front().unwrap().message_dedup_id.is_some());
     }
@@ -441,7 +495,7 @@ mod tests {
         delivery.deliver_to_queue_with_attrs(&arn, "first", &HashMap::new(), Some("g1"), None);
         delivery.deliver_to_queue_with_attrs(&arn, "second", &HashMap::new(), Some("g1"), None);
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 2);
         let s0 = q.messages[0].sequence_number.as_deref().unwrap();
         let s1 = q.messages[1].sequence_number.as_deref().unwrap();
@@ -486,7 +540,7 @@ mod tests {
             Some("dedup-123"),
         );
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
         let msg = q.messages.front().unwrap();
         assert_eq!(msg.message_dedup_id.as_deref(), Some("dedup-123"));
@@ -511,7 +565,7 @@ mod tests {
         );
         delivery.deliver_to_queue_with_attrs(&arn, "body", &attrs, None, None);
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         let msg = q.messages.front().unwrap();
         let trace = msg.message_attributes.get("TraceId").unwrap();
         assert_eq!(trace.data_type, "String");
@@ -537,7 +591,7 @@ mod tests {
         );
         delivery.deliver_to_queue_with_attrs(&arn, "body", &attrs, None, None);
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         let msg = q.messages.front().unwrap();
         let blob = msg.message_attributes.get("Blob").unwrap();
         assert_eq!(
@@ -582,7 +636,7 @@ mod tests {
         let delivery = SqsDeliveryImpl::new(state.clone()).with_kms_hook(Arc::new(StubKmsHook));
         delivery.deliver_to_queue(&arn, "secret-body", &HashMap::new());
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages.len(), 1);
         assert_eq!(q.messages[0].body, "ENC:secret-body");
     }
@@ -596,7 +650,7 @@ mod tests {
         let delivery = SqsDeliveryImpl::new(state.clone()).with_kms_hook(Arc::new(StubKmsHook));
         delivery.deliver_to_queue(&arn, "plain-body", &HashMap::new());
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert_eq!(q.messages[0].body, "plain-body");
     }
 
@@ -632,7 +686,7 @@ mod tests {
         let bytes = store.load().unwrap().expect("snapshot written");
         let snapshot: crate::state::SqsSnapshot = serde_json::from_slice(&bytes).unwrap();
         let accounts = snapshot.accounts.expect("multi-account snapshot");
-        let restored = accounts.default_ref();
+        let restored = accounts.default_regional().unwrap();
         let q = restored
             .queues
             .get(&url)
@@ -657,7 +711,7 @@ mod tests {
             &HashMap::new(),
         );
         let guard = state.read();
-        let q = guard.default_ref().queues.get(&url).unwrap();
+        let q = guard.default_regional().unwrap().queues.get(&url).unwrap();
         assert!(q.messages.is_empty());
     }
 }

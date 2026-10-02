@@ -34,7 +34,7 @@ impl SqsService {
         let max_per_sec = max_per_sec_i64.map(|rate| rate.clamp(1, 500) as i32);
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         let source_url = state
             .queues
@@ -240,7 +240,7 @@ impl SqsService {
             .to_string();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let task = state
             .message_move_tasks
             .iter_mut()
@@ -297,7 +297,9 @@ impl SqsService {
 
         let accounts = self.state.read();
         let empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         // Source queue must exist.
         if !state.queues.values().any(|q| q.arn == source_arn) {
@@ -392,7 +394,7 @@ impl SqsService {
         let mut to_resume: Vec<Resume> = Vec::new();
         {
             let mut accounts = self.state.write();
-            for (account_id, state) in accounts.iter_mut() {
+            for (account_id, _region, state) in accounts.iter_regional_mut() {
                 let account_id = account_id.to_string();
                 // Snapshot the orphaned tasks first (immutable read), then
                 // mutate each one below — avoids overlapping borrows of

@@ -366,8 +366,7 @@ impl PipesRunner {
     /// idle pipe never contends on the global SQS write lock.
     fn sqs_source_has_visible_messages(&self, source_arn: &str, now: DateTime<Utc>) -> bool {
         let sqs_mas = self.sqs_state.read();
-        let acct = source_arn.split(':').nth(4).unwrap_or("");
-        let Some(sqs) = sqs_mas.get(acct) else {
+        let Some(sqs) = sqs_mas.by_arn(source_arn) else {
             return false;
         };
         let Some(queue) = sqs.queues.values().find(|q| q.arn == source_arn) else {
@@ -389,18 +388,12 @@ impl PipesRunner {
         now: DateTime<Utc>,
     ) -> Vec<(String, Value)> {
         let mut sqs_mas = self.sqs_state.write();
-        let default_acct = sqs_mas.default_account_id().to_string();
-        let acct = source_arn
-            .split(':')
-            .nth(4)
-            .unwrap_or(&default_acct)
-            .to_string();
-        let region = source_arn
-            .split(':')
-            .nth(3)
-            .unwrap_or("us-east-1")
-            .to_string();
-        let sqs = sqs_mas.get_or_create(&acct);
+        // The queue lives in the account and region its ARN names.
+        let Some(sqs) = sqs_mas.by_arn_mut(source_arn) else {
+            return Vec::new();
+        };
+        let acct = sqs.account_id.clone();
+        let region = sqs.region.clone();
         let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == source_arn) else {
             return Vec::new();
         };
@@ -471,14 +464,10 @@ impl PipesRunner {
 
     fn delete_messages(&self, source_arn: &str, ids: &[String]) {
         let mut sqs_mas = self.sqs_state.write();
-        let default_acct = sqs_mas.default_account_id().to_string();
-        let acct = source_arn
-            .split(':')
-            .nth(4)
-            .unwrap_or(&default_acct)
-            .to_string();
-        let sqs = sqs_mas.get_or_create(&acct);
-        if let Some(queue) = sqs.queues.values_mut().find(|q| q.arn == source_arn) {
+        if let Some(queue) = sqs_mas
+            .by_arn_mut(source_arn)
+            .and_then(|sqs| sqs.queues.values_mut().find(|q| q.arn == source_arn))
+        {
             let before = queue.messages.len();
             queue.messages.retain(|m| !ids.contains(&m.message_id));
             // Deleting acked messages is the durable mutation that must survive a
@@ -1525,9 +1514,9 @@ mod tests {
             receipt_handle_map: BTreeMap::new(),
             receive_attempt_cache: BTreeMap::new(),
         };
-        let mut sqs: MultiAccountState<SqsState> =
+        let mut sqs: fakecloud_core::multi_account::MultiRegionState<SqsState> =
             MultiAccountState::new(ACCOUNT, REGION, "http://localhost:4566");
-        sqs.default_mut()
+        sqs.default_regional_mut()
             .queues
             .insert(queue.queue_url.clone(), queue);
         let sqs_state = Arc::new(RwLock::new(sqs));

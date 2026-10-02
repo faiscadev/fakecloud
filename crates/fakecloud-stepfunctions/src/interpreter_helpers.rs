@@ -394,6 +394,7 @@ pub(crate) fn execute_pass_state(state_def: &Value, input: &Value) -> Value {
 pub(crate) fn invoke_sqs_send_message(
     input: &Value,
     delivery: &Option<Arc<DeliveryBus>>,
+    region: &str,
 ) -> Result<Value, (String, String)> {
     let delivery = delivery.as_ref().ok_or_else(|| {
         (
@@ -418,15 +419,18 @@ pub(crate) fn invoke_sqs_send_message(
                 .expect("serde_json::Value serialization is infallible")
         });
 
-    // A QueueUrl (`<endpoint>/<account>/<name>`) carries no region, so the
-    // queue is resolved by account and name to its stored ARN rather than
-    // rebuilt from the execution's region.
-    let queue_arn = delivery.sqs_queue_arn_for_url(queue_url).ok_or_else(|| {
-        (
-            "SQS.QueueDoesNotExistException".to_string(),
-            format!("The specified queue does not exist: {queue_url}"),
-        )
-    })?;
+    // A QueueUrl (`<endpoint>/<account>/<name>`) carries no region: like the
+    // SQS client a state machine's role would use, it addresses the queue of
+    // that account and name in the execution's region, resolved to its
+    // stored ARN.
+    let queue_arn = delivery
+        .sqs_queue_arn_for_url(region, queue_url)
+        .ok_or_else(|| {
+            (
+                "SQS.QueueDoesNotExistException".to_string(),
+                format!("The specified queue does not exist: {queue_url}"),
+            )
+        })?;
 
     delivery.send_to_sqs(&queue_arn, &message_body, &HashMap::new());
 

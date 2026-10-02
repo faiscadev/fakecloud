@@ -1741,7 +1741,10 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_sqs::SqsSnapshot>(&bytes) {
+                    // Older schemas are migrated on parse: v2 kept one
+                    // state per account, split into regions by each queue's
+                    // ARN.
+                    match fakecloud_sqs::parse_sqs_snapshot(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version > fakecloud_sqs::SQS_SNAPSHOT_SCHEMA_VERSION
                             {
@@ -1759,8 +1762,9 @@ async fn main() {
                                     "loaded sqs persistence snapshot (multi-account)"
                                 );
                             } else if let Some(single_state) = snapshot.state {
-                                let queue_count = single_state.queues.len();
-                                let account_id = single_state.account_id.clone();
+                                let queue_count: usize =
+                                    single_state.regions().map(|(_, s)| s.queues.len()).sum();
+                                let account_id = single_state.account_id().to_string();
                                 let mut mas = sqs_state.write();
                                 *mas.get_or_create(&account_id) = single_state;
                                 tracing::info!(
@@ -8466,9 +8470,10 @@ async fn main() {
                 // API (host-aware, bug-hunt 1.10).
                 move |headers: axum::http::HeaderMap| async move {
                     let mas = ss.read();
+                    // Every account and region's queues.
                     let queues = mas
-                        .iter()
-                        .flat_map(|(_, state)| {
+                        .iter_regional()
+                        .flat_map(|(_, _, state)| {
                             let base =
                                 fakecloud_sqs::resolve_endpoint_base(&headers, &state.endpoint);
                             state.queues.values().map(move |queue| {

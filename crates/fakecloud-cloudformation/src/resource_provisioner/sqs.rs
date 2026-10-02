@@ -8,7 +8,7 @@ use super::*;
 impl ResourceProvisioner {
     pub(super) fn get_att_sqs_queue(&self, physical_id: &str, attribute: &str) -> Option<String> {
         let mut accounts = self.sqs_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let queue = state.queues.get(physical_id)?;
         match attribute {
             "Arn" => Some(queue.arn.clone()),
@@ -31,7 +31,7 @@ impl ResourceProvisioner {
         let props = &resource.properties;
         let url = &existing.physical_id;
         let mut __sqs_mas = self.sqs_state.write();
-        let state = __sqs_mas.get_or_create(&self.account_id);
+        let state = __sqs_mas.regional_mut(&self.account_id, &self.region);
         let queue = state
             .queues
             .get_mut(url)
@@ -90,7 +90,7 @@ impl ResourceProvisioner {
             .unwrap_or(&generated_name);
 
         let mut __sqs_mas = self.sqs_state.write();
-        let state = __sqs_mas.get_or_create(&self.account_id);
+        let state = __sqs_mas.regional_mut(&self.account_id, &self.region);
         if let Some(existing_url) = state.name_to_url.get(queue_name) {
             return Err(resource_already_exists("AWS::SQS::Queue", existing_url));
         }
@@ -192,7 +192,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_sqs_queue(&self, physical_id: &str) -> Result<(), String> {
         let mut __sqs_mas = self.sqs_state.write();
-        let state = __sqs_mas.get_or_create(&self.account_id);
+        let state = __sqs_mas.regional_mut(&self.account_id, &self.region);
         if let Some(queue) = state.queues.remove(physical_id) {
             state.name_to_url.remove(&queue.queue_name);
         }
@@ -216,7 +216,7 @@ impl ResourceProvisioner {
         let policy = policy_document_string(&resource.properties)?;
 
         let mut __sqs_mas = self.sqs_state.write();
-        let state = __sqs_mas.get_or_create(&self.account_id);
+        let state = __sqs_mas.regional_mut(&self.account_id, &self.region);
         for url in &queue_urls {
             let queue = state
                 .queues
@@ -246,7 +246,7 @@ impl ResourceProvisioner {
         let policy = policy_document_string(&resource.properties)?;
 
         let mut __sqs_mas = self.sqs_state.write();
-        let state = __sqs_mas.get_or_create(&self.account_id);
+        let state = __sqs_mas.regional_mut(&self.account_id, &self.region);
         for url in &old_urls {
             if !new_urls.contains(url) {
                 if let Some(queue) = state.queues.get_mut(url) {
@@ -268,7 +268,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_sqs_queue_policy(&self, physical_id: &str) -> Result<(), String> {
         let mut __sqs_mas = self.sqs_state.write();
-        let state = __sqs_mas.get_or_create(&self.account_id);
+        let state = __sqs_mas.regional_mut(&self.account_id, &self.region);
         for url in physical_id.split('\n').filter(|s| !s.is_empty()) {
             if let Some(queue) = state.queues.get_mut(url) {
                 queue.attributes.remove("Policy");

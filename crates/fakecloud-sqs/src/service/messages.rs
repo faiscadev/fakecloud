@@ -127,7 +127,7 @@ impl SqsService {
         // first to avoid emitting an undeclared error code.
         {
             let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
+            let state = accounts.regional_mut(&req.account_id, &req.region);
             resolve_queue_url(&queue_url, state).ok_or_else(queue_not_found)?;
         }
 
@@ -165,7 +165,7 @@ impl SqsService {
         // --- Acquire write lock ONLY for queue validation + mutation ---
         let (message_id, sequence_number) = {
             let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
+            let state = accounts.regional_mut(&req.account_id, &req.region);
             let resolved_url = resolve_queue_url(&queue_url, state).ok_or_else(queue_not_found)?;
             let queue = state
                 .queues
@@ -357,7 +357,9 @@ impl SqsService {
         let (queue_url, queue_wait_default) = {
             let _accts = self.state.read();
             let _empty = crate::state::SqsState::new(&req.account_id, &req.region, "");
-            let state = _accts.get(&req.account_id).unwrap_or(&_empty);
+            let state = _accts
+                .regional(&req.account_id, &req.region)
+                .unwrap_or(&_empty);
             let url = resolve_queue_url(&queue_url_input, state).ok_or_else(queue_not_found)?;
             let default = state
                 .queues
@@ -459,6 +461,7 @@ impl SqsService {
         loop {
             let result = self.try_receive_messages(
                 &req.account_id,
+                &req.region,
                 &queue_url,
                 max_messages,
                 visibility_timeout,
@@ -493,13 +496,14 @@ impl SqsService {
     pub(super) fn try_receive_messages(
         &self,
         account_id: &str,
+        region: &str,
         queue_url: &str,
         max_messages: usize,
         req_visibility_timeout: Option<i64>,
         receive_request_attempt_id: Option<&str>,
     ) -> Result<Vec<SqsMessage>, AwsServiceError> {
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
+        let state = accounts.regional_mut(account_id, region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -868,7 +872,7 @@ impl SqsService {
             .ok_or_else(|| missing_param("ReceiptHandle"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -926,7 +930,7 @@ impl SqsService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -1034,7 +1038,7 @@ impl SqsService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -1227,7 +1231,7 @@ impl SqsService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(&queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues
@@ -1346,7 +1350,7 @@ impl SqsService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let resolved_url = resolve_queue_url(queue_url, state).ok_or_else(queue_not_found)?;
         let queue = state
             .queues

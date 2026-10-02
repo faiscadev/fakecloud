@@ -336,9 +336,8 @@ impl AwsService for SqsService {
             return None;
         }
         let queue_name = parts[5];
-        let account_id = parts[4];
         let _accts = self.state.read();
-        let state = _accts.get(account_id)?;
+        let state = _accts.by_arn(resource_arn)?;
         let queue_url = state.name_to_url.get(queue_name)?;
         let queue = state.queues.get(queue_url)?;
         Some(
@@ -470,7 +469,7 @@ async fn run_message_move_task(
         // acquires the lock, so we can't hold one when we call it.
         let step: Step = {
             let mut accounts = state_handle.write();
-            let state = accounts.get_or_create(&account_id);
+            let state = accounts.regional_mut(&account_id, &region);
 
             // Source queue must exist (immutable check before any mutation).
             if !state.queues.contains_key(&source_url) {
