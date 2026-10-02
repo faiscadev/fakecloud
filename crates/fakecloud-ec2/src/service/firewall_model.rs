@@ -186,27 +186,31 @@ pub(crate) fn build_for_state(
 /// the runtime — nftables for the Docker backend, NetworkPolicies for k8s. The
 /// runtime dispatches on its backend; this only assembles the global model.
 pub(crate) async fn reconcile(state: &SharedEc2State, runtime: &Arc<Ec2Runtime>) {
+    // The model is built inside the runtime's reconcile lock, so the
+    // last-applied model is always derived from the latest state.
     if runtime.is_k8s() {
         // k8s: one NetworkPolicy per instance, built from the shared flatten.
-        let rules: Vec<InstanceRules> = {
+        runtime
+            .reconcile_network_policies(|| {
+                let accounts = state.read();
+                accounts
+                    .iter()
+                    .flat_map(|(_, s)| instance_rules(s, &[]))
+                    .collect()
+            })
+            .await;
+        return;
+    }
+    runtime
+        .reconcile_firewall(|| {
+            let extra = runtime.extra_group_members();
             let accounts = state.read();
             accounts
                 .iter()
-                .flat_map(|(_, s)| instance_rules(s, &[]))
+                .flat_map(|(_, s)| build_for_state(s, &extra))
                 .collect()
-        };
-        runtime.reconcile_network_policies(rules).await;
-        return;
-    }
-    let extra = runtime.extra_group_members();
-    let model: Vec<SubnetFirewall> = {
-        let accounts = state.read();
-        accounts
-            .iter()
-            .flat_map(|(_, s)| build_for_state(s, &extra))
-            .collect()
-    };
-    runtime.reconcile_firewall(model).await;
+        })
+        .await;
 }
 
 #[cfg(test)]

@@ -1045,15 +1045,13 @@ impl Ec2Service {
             let state = self.state.clone();
             let weak = Arc::downgrade(rt);
             rt.set_group_members_hook(move || {
-                let Some(rt) = weak.upgrade() else {
-                    return;
-                };
+                let weak = weak.clone();
                 let state = state.clone();
-                if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                    handle.spawn(async move {
+                Box::pin(async move {
+                    if let Some(rt) = weak.upgrade() {
                         firewall_model::reconcile(&state, &rt).await;
-                    });
-                }
+                    }
+                })
             });
         }
         self.runtime = runtime;

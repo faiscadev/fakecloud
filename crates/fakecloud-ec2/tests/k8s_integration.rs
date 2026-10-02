@@ -238,7 +238,7 @@ async fn security_groups_become_network_policies() {
     // Reconcile creates one NetworkPolicy selecting the instance pod, with the
     // SG's ingress rule. (kindnet doesn't enforce it, but the object must exist
     // -- a NetworkPolicy-enforcing CNI like Calico would then enforce it.)
-    rt.reconcile_network_policies(rules).await;
+    rt.reconcile_network_policies(|| rules).await;
     let name = policy_name(instance_id);
     let np = np_api.get(&name).await.expect("NetworkPolicy should exist");
     let spec = np.spec.expect("spec");
@@ -253,7 +253,7 @@ async fn security_groups_become_network_policies() {
     assert_eq!(spec.ingress.as_ref().map(|i| i.len()), Some(1));
 
     // Reconciling with no instances prunes the policy.
-    rt.reconcile_network_policies(vec![]).await;
+    rt.reconcile_network_policies(Vec::new).await;
     let pruned = poll_until(20, || async {
         np_api.get_opt(&name).await.ok().flatten().is_none()
     })

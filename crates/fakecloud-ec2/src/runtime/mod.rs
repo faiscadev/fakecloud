@@ -136,8 +136,11 @@ struct InstanceRecord {
     /// network mode.
     network: Option<InstanceNetwork>,
     /// The backing container's current private IP (refreshed on start and
-    /// k8s recreate), which load balancer forwarders connect to.
+    /// k8s recreate), which load balancer forwarders connect to. Empty while
+    /// unknown (mid-reboot, or a failed inspect): re-read on demand.
     private_ip: String,
+    /// Whether the backing container should be running (false once stopped).
+    running: bool,
 }
 
 /// The selected backing-container backend.
@@ -381,8 +384,11 @@ impl Ec2Runtime {
     /// Re-render and atomically apply the security-group/NACL ruleset for the
     /// given per-subnet model. No-op (cheap) when enforcement is disabled.
     /// Serialized against other reconciles (finding 4.3).
-    pub async fn reconcile_firewall(&self, subnets: Vec<SubnetFirewall>) {
+    /// `build` derives the model and runs under the lock, so a model built
+    /// from older state can never be applied after a newer one.
+    pub async fn reconcile_firewall(&self, build: impl FnOnce() -> Vec<SubnetFirewall>) {
         let _guard = self.reconcile_lock.lock().await;
+        let subnets = build();
         self.firewall.reconcile(&subnets).await;
     }
 
@@ -402,9 +408,10 @@ impl Ec2Runtime {
     /// Docker backend (which uses nftables instead). Serialized against other
     /// reconciles so a concurrent apply+prune can't delete a just-applied
     /// policy (finding 4.3).
-    pub async fn reconcile_network_policies(&self, rules: Vec<InstanceRules>) {
+    pub async fn reconcile_network_policies(&self, build: impl FnOnce() -> Vec<InstanceRules>) {
         if let InstanceBackend::K8s(k) = &self.backend {
             let _guard = self.reconcile_lock.lock().await;
+            let rules = build();
             k.reconcile_network_policies(&rules).await;
         }
     }
@@ -470,6 +477,7 @@ impl Ec2Runtime {
                 tags: tags.clone(),
                 network: network.cloned(),
                 private_ip: running.private_ip.clone(),
+                running: true,
             },
         );
         Ok(running)
@@ -484,7 +492,10 @@ impl Ec2Runtime {
         };
         // A stopped instance has no address: nothing may be forwarded to the
         // IP it held, which the daemon can hand to another container.
-        self.update_ip(instance_id, "");
+        if let Some(record) = self.instances.write().get_mut(instance_id) {
+            record.private_ip.clear();
+            record.running = false;
+        }
         match &self.backend {
             InstanceBackend::Docker(d) => {
                 d.stop(&handle).await;
@@ -713,6 +724,9 @@ impl Ec2Runtime {
     fn update_ip(&self, instance_id: &str, ip: &str) {
         if let Some(record) = self.instances.write().get_mut(instance_id) {
             record.private_ip = ip.to_string();
+            if !ip.is_empty() {
+                record.running = true;
+            }
         }
     }
 
@@ -732,38 +746,43 @@ impl Ec2Runtime {
         source_groups: Vec<String>,
     ) -> Option<fakecloud_core::dataplane::Endpoint> {
         let record = self.instances.read().get(instance_id).cloned()?;
-        // Not running (stopped, rebooting, not yet booted): nothing to reach.
-        if record.private_ip.is_empty() {
+        // Stopped: nothing to reach (its old IP may belong to another
+        // container now).
+        if !record.running {
             return None;
         }
         match &self.backend {
             InstanceBackend::Docker(d) => {
-                let ep = d
-                    .forward(
-                        instance_id,
-                        &record.private_ip,
-                        record.network.as_ref(),
-                        port,
-                        source_groups,
-                    )
-                    .await?;
-                // A stop / reboot that landed while the forwarder was starting
-                // changed or cleared the address it targets: drop it.
-                let still = self
-                    .instances
-                    .read()
-                    .get(instance_id)
-                    .is_some_and(|r| r.private_ip == record.private_ip);
-                if !still {
-                    d.remove_forwarder(instance_id, port).await;
-                    return None;
-                }
-                Some(ep)
+                // Running with no known address (a reboot whose inspect
+                // failed): read it again rather than staying unreachable.
+                let ip = if record.private_ip.is_empty() {
+                    let ip = d.inspect_ip(&record.handle).await?;
+                    self.update_ip(instance_id, &ip);
+                    ip
+                } else {
+                    record.private_ip.clone()
+                };
+                let instances = self.instances.clone();
+                let id = instance_id.to_string();
+                let current_ip = move || {
+                    instances
+                        .read()
+                        .get(&id)
+                        .filter(|r| r.running)
+                        .map(|r| r.private_ip.clone())
+                };
+                d.forward(
+                    instance_id,
+                    &ip,
+                    record.network.as_ref(),
+                    port,
+                    source_groups,
+                    current_ip,
+                )
+                .await
             }
-            InstanceBackend::K8s(_) => Some(fakecloud_core::dataplane::Endpoint::new(
-                record.private_ip,
-                port,
-            )),
+            InstanceBackend::K8s(_) => (!record.private_ip.is_empty())
+                .then(|| fakecloud_core::dataplane::Endpoint::new(record.private_ip, port)),
         }
     }
 
@@ -779,7 +798,13 @@ impl Ec2Runtime {
 
     /// Install the hook run when the extra group members change (the control
     /// plane re-renders the firewall). First call wins.
-    pub fn set_group_members_hook(&self, hook: impl Fn() + Send + Sync + 'static) {
+    pub fn set_group_members_hook(
+        &self,
+        hook: impl Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+            + Send
+            + Sync
+            + 'static,
+    ) {
         if let InstanceBackend::Docker(d) = &self.backend {
             let _ = d.forwarders_changed.0.set(Arc::new(hook));
         }
@@ -927,7 +952,11 @@ struct Forwarder {
 
 /// Hook the control plane installs to re-render the firewall (set once).
 #[derive(Default)]
-struct ChangeHook(std::sync::OnceLock<Arc<dyn Fn() + Send + Sync>>);
+struct ChangeHook(std::sync::OnceLock<HookFn>);
+
+/// The hook itself: returns the re-render to await.
+type HookFn =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 impl std::fmt::Debug for ChangeHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1243,16 +1272,27 @@ impl DockerInstances {
             });
             before != fwd.len()
         };
-        if let Some(out) = fakecloud_core::container_net::bounded_output(
-            &self.cli,
-            &[
-                "ps",
-                "-aq",
-                "--filter",
-                &format!("label=fakecloud-ec2-fwd={instance_id}"),
-            ],
-        ) {
-            names.extend(out.split_whitespace().map(str::to_string));
+        let ps = tokio::time::timeout(
+            fakecloud_core::container_net::CLI_PROBE_TIMEOUT,
+            tokio::process::Command::new(&self.cli)
+                .args([
+                    "ps",
+                    "-aq",
+                    "--filter",
+                    &format!("label=fakecloud-ec2-fwd={instance_id}"),
+                ])
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await;
+        if let Ok(Ok(out)) = ps {
+            if out.status.success() {
+                names.extend(
+                    String::from_utf8_lossy(&out.stdout)
+                        .split_whitespace()
+                        .map(str::to_string),
+                );
+            }
         }
         for name in names {
             let _ = tokio::process::Command::new(&self.cli)
@@ -1261,30 +1301,16 @@ impl DockerInstances {
                 .await;
         }
         if had_forwarders {
-            self.forwarders_changed();
-        }
-    }
-
-    /// Remove one forwarder (its target went away while it was starting).
-    async fn remove_forwarder(&self, instance_id: &str, port: u16) {
-        let removed = self
-            .forwarders
-            .lock()
-            .remove(&(instance_id.to_string(), port));
-        let _ = tokio::process::Command::new(&self.cli)
-            .args(["rm", "-f", &imds::forwarder_name(instance_id, port)])
-            .output()
-            .await;
-        if removed.is_some() {
-            self.forwarders_changed();
+            self.forwarders_changed().await;
         }
     }
 
     /// Tell the control plane the forwarders' security-group membership
-    /// changed, so the firewall is re-rendered with them.
-    fn forwarders_changed(&self) {
-        if let Some(hook) = self.forwarders_changed.0.get() {
-            hook();
+    /// changed and wait for the firewall to be re-rendered with them.
+    async fn forwarders_changed(&self) {
+        let hook = self.forwarders_changed.0.get().cloned();
+        if let Some(hook) = hook {
+            hook().await;
         }
     }
 
@@ -1306,6 +1332,10 @@ impl DockerInstances {
     /// instance's IP changed). Serialized per `(instance, port)`, so
     /// concurrent callers (the data plane and the health prober) never race
     /// to create the same forwarder.
+    ///
+    /// `current_ip` reads the instance's address as it is now: checked under
+    /// the lock once the forwarder is up, so a stop / reboot that landed
+    /// meanwhile drops this forwarder (and never a newer one).
     async fn forward(
         &self,
         instance_id: &str,
@@ -1313,6 +1343,7 @@ impl DockerInstances {
         network: Option<&InstanceNetwork>,
         port: u16,
         source_groups: Vec<String>,
+        current_ip: impl Fn() -> Option<String>,
     ) -> Option<fakecloud_core::dataplane::Endpoint> {
         let key = (instance_id.to_string(), port);
         let lock = self
@@ -1328,11 +1359,17 @@ impl DockerInstances {
         let cached = self.forwarders.lock().get(&key).cloned();
         if let Some(f) = cached {
             if f.target_ip == instance_ip {
-                if f.source_groups != source_groups {
-                    if let Some(entry) = self.forwarders.lock().get_mut(&key) {
-                        entry.source_groups = source_groups;
-                    }
-                    self.forwarders_changed();
+                // Several load balancers can share a target: the forwarder
+                // stands in for all of them, so their groups accumulate.
+                let grew = self.forwarders.lock().get_mut(&key).is_some_and(|entry| {
+                    let before = entry.source_groups.len();
+                    entry.source_groups.extend(source_groups);
+                    entry.source_groups.sort();
+                    entry.source_groups.dedup();
+                    entry.source_groups.len() != before
+                });
+                if grew && f.subnet_ip.is_some() {
+                    self.forwarders_changed().await;
                 }
                 return Some(fakecloud_core::dataplane::Endpoint::new(
                     self.net.sibling_host.clone(),
@@ -1400,6 +1437,15 @@ impl DockerInstances {
                 .await;
             return None;
         };
+        // A stop / reboot landed while the forwarder was starting: it
+        // targets an address the instance no longer has.
+        if current_ip().as_deref() != Some(instance_ip) {
+            let _ = tokio::process::Command::new(&self.cli)
+                .args(["rm", "-f", &container])
+                .output()
+                .await;
+            return None;
+        }
         let has_groups = !source_groups.is_empty() && subnet_ip.is_some();
         self.forwarders.lock().insert(
             key,
@@ -1411,8 +1457,10 @@ impl DockerInstances {
                 source_groups,
             },
         );
+        // With security groups enforced, the first request must not race
+        // the rule admitting the forwarder.
         if has_groups {
-            self.forwarders_changed();
+            self.forwarders_changed().await;
         }
         Some(fakecloud_core::dataplane::Endpoint::new(
             self.net.sibling_host.clone(),
@@ -1696,6 +1744,7 @@ mod reachability_tests {
             tags: BTreeMap::new(),
             network,
             private_ip: ip.into(),
+            running: true,
         }
     }
 
@@ -1754,9 +1803,9 @@ mod reachability_tests {
         let rt = runtime_with_cli(&cli);
         // A stopped instance's address is cleared: the daemon may already
         // have handed its old IP to another container.
-        rt.instances
-            .write()
-            .insert("i-stopped".into(), record("", None));
+        let mut stopped = record("172.30.0.4", None);
+        stopped.running = false;
+        rt.instances.write().insert("i-stopped".into(), stopped);
         let ep = rt
             .endpoint_resolver()
             .resolve("123456789012", "i-stopped", 80, Vec::new())
@@ -1791,7 +1840,13 @@ mod reachability_tests {
         let changed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let c = changed.clone();
         rt.set_group_members_hook(move || {
-            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let c = c.clone();
+            Box::pin(async move {
+                // The re-render takes a while; the endpoint must not be
+                // handed out before it lands.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            })
         });
         rt.instances.write().insert(
             "i-sg".into(),
@@ -1813,12 +1868,88 @@ mod reachability_tests {
             .await
             .expect("forwarded");
         // The forwarder's subnet address joins the load balancer's group, and
-        // the control plane is told to re-render the firewall.
+        // the firewall re-render finished before the endpoint was returned.
         assert_eq!(
             rt.extra_group_members(),
             vec![("sg-alb".to_string(), "172.30.0.9".to_string())]
         );
         assert_eq!(changed.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+        // A second load balancer sharing the target adds its group; the
+        // first's stays (no flip-flop), and a repeat changes nothing.
+        let resolver = rt.endpoint_resolver();
+        resolver
+            .resolve("123456789012", "i-sg", 80, vec!["sg-nlb".into()])
+            .await
+            .expect("forwarded");
+        let mut members = rt.extra_group_members();
+        members.sort();
+        assert_eq!(
+            members,
+            vec![
+                ("sg-alb".to_string(), "172.30.0.9".to_string()),
+                ("sg-nlb".to_string(), "172.30.0.9".to_string()),
+            ]
+        );
+        assert_eq!(changed.load(std::sync::atomic::Ordering::SeqCst), 2);
+        for _ in 0..3 {
+            resolver
+                .resolve("123456789012", "i-sg", 80, vec!["sg-alb".into()])
+                .await
+                .expect("forwarded");
+        }
+        assert_eq!(changed.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn running_instance_with_unknown_address_is_reinspected() {
+        // A reboot whose inspect failed leaves the address unknown; the next
+        // resolve reads it again instead of leaving the instance unreachable.
+        let dir = tempfile::tempdir().unwrap();
+        let (cli, log) = fake_cli(dir.path());
+        let rt = runtime_with_cli(&cli);
+        rt.instances
+            .write()
+            .insert("i-reboot".into(), record("", None));
+        let ep = rt
+            .endpoint_resolver()
+            .resolve("123456789012", "i-reboot", 80, Vec::new())
+            .await;
+        assert!(ep.is_some());
+        assert_eq!(rt.instances.read()["i-reboot"].private_ip, "172.30.0.9");
+        assert!(std::fs::read_to_string(&log)
+            .unwrap()
+            .contains("run -d --name fakecloud-ec2-fwd-i-reboot-80"));
+    }
+
+    #[tokio::test]
+    async fn stop_during_forwarder_start_drops_only_that_forwarder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (cli, _log) = fake_cli(dir.path());
+        let rt = runtime_with_cli(&cli);
+        rt.instances
+            .write()
+            .insert("i-race".into(), record("172.30.0.8", None));
+        let resolver = rt.endpoint_resolver();
+        let pending = tokio::spawn(async move {
+            resolver
+                .resolve("123456789012", "i-race", 80, Vec::new())
+                .await
+        });
+        // The fake `run` takes 300ms; stop lands while it is in flight.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        rt.stop_instance("i-race").await;
+        assert_eq!(pending.await.unwrap(), None);
+        assert!(rt.with_docker(|d| d.forwarders.lock().is_empty()).unwrap());
+    }
+
+    impl Ec2Runtime {
+        fn with_docker<T>(&self, f: impl FnOnce(&DockerInstances) -> T) -> Option<T> {
+            match &self.backend {
+                InstanceBackend::Docker(d) => Some(f(d)),
+                InstanceBackend::K8s(_) => None,
+            }
+        }
     }
 
     #[test]
