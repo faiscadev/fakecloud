@@ -245,6 +245,7 @@ impl DynamoDbService {
             on_demand_throughput: on_demand_throughput.clone(),
             table_class,
             vector_indexes,
+            pitr_history: Default::default(),
         };
 
         // Build the response from the inserted table so CreateTable returns
@@ -1285,6 +1286,7 @@ impl DynamoDbService {
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
             vector_indexes: Vec::new(),
+            pitr_history: Default::default(),
         };
         table.recalculate_stats();
 
@@ -1398,6 +1400,7 @@ impl DynamoDbService {
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
             vector_indexes: Vec::new(),
+            pitr_history: Default::default(),
         };
         table.recalculate_stats();
 
@@ -1440,7 +1443,8 @@ impl DynamoDbService {
         let state = accounts.get_or_create(&req.account_id);
         let table =
             get_table_mut_with_code(&mut state.tables, table_name, "TableNotFoundException")?;
-        table.pitr_enabled = enabled;
+        table.set_pitr(enabled);
+        let earliest = table.pitr_history.enabled_at.unwrap_or_else(Utc::now);
 
         let status = if enabled { "ENABLED" } else { "DISABLED" };
         Self::ok_json(json!({
@@ -1448,7 +1452,7 @@ impl DynamoDbService {
                 "ContinuousBackupsStatus": status,
                 "PointInTimeRecoveryDescription": {
                     "PointInTimeRecoveryStatus": status,
-                    "EarliestRestorableDateTime": Utc::now().timestamp() as f64,
+                    "EarliestRestorableDateTime": earliest.timestamp() as f64,
                     "LatestRestorableDateTime": Utc::now().timestamp() as f64
                 }
             }
@@ -1474,12 +1478,19 @@ impl DynamoDbService {
         } else {
             "DISABLED"
         };
+        // The earliest restorable time is when recovery was enabled (the
+        // history only reaches back that far), capped to the recovery window.
+        let window_start = Utc::now() - chrono::Duration::days(crate::state::PITR_RETENTION_DAYS);
+        let earliest = table
+            .pitr_history
+            .enabled_at
+            .map_or_else(Utc::now, |t| t.max(window_start));
         Self::ok_json(json!({
             "ContinuousBackupsDescription": {
                 "ContinuousBackupsStatus": status,
                 "PointInTimeRecoveryDescription": {
                     "PointInTimeRecoveryStatus": status,
-                    "EarliestRestorableDateTime": Utc::now().timestamp() as f64,
+                    "EarliestRestorableDateTime": earliest.timestamp() as f64,
                     "LatestRestorableDateTime": Utc::now().timestamp() as f64
                 }
             }

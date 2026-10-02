@@ -1061,8 +1061,13 @@ impl DynamoDbService {
         // UpdateExpression). DDB transactions are all-or-nothing — without
         // this, an UpdateExpression error after a successful Put would
         // leave the Put committed.
-        let mut snapshots: HashMap<(String, String), Vec<HashMap<String, AttributeValue>>> =
-            HashMap::new();
+        // Each touched table's rows and point-in-time history length, so a
+        // revert also drops the history entries the partial writes recorded.
+        #[allow(clippy::type_complexity)]
+        let mut snapshots: HashMap<
+            (String, String),
+            (Vec<HashMap<String, AttributeValue>>, usize),
+        > = HashMap::new();
         for ti in transact_items {
             for op_key in ["Put", "Delete", "Update"] {
                 if let Some(op) = ti.get(op_key) {
@@ -1075,7 +1080,7 @@ impl DynamoDbService {
                         .or_insert_with(|| {
                             tables_of(&accounts, req, table_name)
                                 .get(super::resolve_table_name(table_name))
-                                .map(|t| t.items.to_vec())
+                                .map(|t| (t.items.to_vec(), t.change_count()))
                                 .unwrap_or_default()
                         });
                 }
@@ -1297,12 +1302,13 @@ impl DynamoDbService {
             // surface the failure as a TransactionCanceledException
             // whose CancellationReasons array marks the offending op
             // with `ValidationError` and leaves siblings as `None`.
-            for ((account, table_name), items) in snapshots {
+            for ((account, table_name), (items, change_count)) in snapshots {
                 if let Some(table) = accounts
                     .get_mut(&account)
                     .and_then(|state| state.tables.get_mut(&table_name))
                 {
                     table.replace_items(items);
+                    table.truncate_changes(change_count);
                 }
             }
             let reasons: Vec<Value> = (0..transact_items.len())
@@ -1484,6 +1490,7 @@ mod tests {
             on_demand_throughput: None,
             table_class: "STANDARD".to_string(),
             vector_indexes: Vec::new(),
+            pitr_history: Default::default(),
         };
         s.tables.insert(name.to_string(), table);
     }
@@ -2301,6 +2308,42 @@ mod tests {
                 .items
                 .len(),
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn reverted_transaction_leaves_no_pitr_history() {
+        let state = make_state();
+        seed_table_with_stream(&state, "Widgets");
+        state
+            .write()
+            .get_or_create("123456789012")
+            .tables
+            .get_mut("Widgets")
+            .unwrap()
+            .set_pitr(true);
+        let svc = DynamoDbService::new(state.clone());
+        svc.transact_write_items(&req_for(
+            "TransactWriteItems",
+            json!({
+                "TransactItems": [
+                    {"Put": {"TableName": "Widgets", "Item": {"pk": {"S": "a"}}}},
+                    {"Update": {
+                        "TableName": "Widgets",
+                        "Key": {"pk": {"S": "b"}},
+                        "UpdateExpression": "BOGUS expression that won't parse"
+                    }},
+                ]
+            }),
+        ))
+        .unwrap();
+        let accts = state.read();
+        let table = &accts.get("123456789012").unwrap().tables["Widgets"];
+        assert_eq!(table.items.len(), 0);
+        assert_eq!(
+            table.change_count(),
+            0,
+            "a reverted transaction must not leave writes in the PITR history"
         );
     }
 

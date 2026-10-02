@@ -28,8 +28,8 @@ use fakecloud_s3::body_io::ObjectBodyHandle;
 use fakecloud_s3::SharedS3State;
 
 use crate::state::{
-    DynamoDbState, DynamoTable, ExportDescription, ImportDescription, ProvisionedThroughput,
-    SharedDynamoDbState,
+    DynamoDbState, DynamoTable, ExportDescription, ImportDescription, ItemChange,
+    ProvisionedThroughput, SharedDynamoDbState,
 };
 
 use super::import_formats::{self, CsvOptions, ParsedRow};
@@ -386,11 +386,136 @@ struct ExportJob {
     bucket_account: String,
     prefix: Option<String>,
     format: String,
-    items: Vec<Item>,
+    /// What the job writes, captured under the caller's short lock.
+    content: ExportContent,
     start_time: DateTime<Utc>,
     export_time: DateTime<Utc>,
     sse_algorithm: Option<String>,
     sse_kms_key_id: Option<String>,
+}
+
+/// The data an export job writes.
+enum ExportContent {
+    /// A full export: the table's items as of `ExportTime`.
+    Full(Vec<Item>),
+    /// An incremental export: the changes in `[from, to)`, one record per
+    /// changed item.
+    Incremental {
+        from: DateTime<Utc>,
+        to: DateTime<Utc>,
+        view_type: String,
+        changes: Vec<ItemChange>,
+    },
+    /// The request cannot be served from the table's history; the job fails
+    /// with this error code and message.
+    Invalid { code: String, message: String },
+}
+
+/// Minimum and maximum span of an incremental export window, per DynamoDB.
+const INCREMENTAL_MIN_WINDOW_MINUTES: i64 = 15;
+const INCREMENTAL_MAX_WINDOW_HOURS: i64 = 24;
+
+/// A stable string for an item key, independent of map iteration order.
+fn key_string(keys: &Item) -> String {
+    let sorted: BTreeMap<&String, &Value> = keys.iter().collect();
+    serde_json::to_string(&sorted).unwrap_or_default()
+}
+
+fn item_keys(table: &DynamoTable, item: &Item) -> Item {
+    table
+        .key_schema
+        .iter()
+        .filter_map(|k| {
+            item.get(&k.attribute_name)
+                .map(|v| (k.attribute_name.clone(), v.clone()))
+        })
+        .collect()
+}
+
+/// The table's items as they stood at `t`, rebuilt from the current items by
+/// undoing every recorded change after `t` (newest first).
+fn items_as_of(table: &DynamoTable, t: DateTime<Utc>) -> Vec<Item> {
+    let mut rows: BTreeMap<String, Item> = table
+        .items()
+        .iter()
+        .map(|item| (key_string(&item_keys(table, item)), item.clone()))
+        .collect();
+    for change in table
+        .pitr_history
+        .changes
+        .iter()
+        .rev()
+        .take_while(|c| c.at > t)
+    {
+        let key = key_string(&change.keys);
+        match &change.old_image {
+            Some(old) => {
+                rows.insert(key, old.clone());
+            }
+            None => {
+                rows.remove(&key);
+            }
+        }
+    }
+    rows.into_values().collect()
+}
+
+/// Collapse the changes in a window into one incremental-export record per
+/// item: the image before the window's first change and after its last, with
+/// the last write's timestamp. An item created and deleted inside the window
+/// left no trace and yields no record.
+fn incremental_records(changes: &[ItemChange], view_type: &str) -> Vec<Value> {
+    struct Acc<'a> {
+        keys: &'a Item,
+        old: Option<&'a Item>,
+        new: Option<&'a Item>,
+        last: DateTime<Utc>,
+    }
+    let mut order: Vec<String> = Vec::new();
+    let mut by_key: HashMap<String, Acc<'_>> = HashMap::new();
+    for c in changes {
+        let key = key_string(&c.keys);
+        match by_key.get_mut(&key) {
+            Some(acc) => {
+                acc.new = c.new_image.as_ref();
+                acc.last = c.at;
+            }
+            None => {
+                order.push(key.clone());
+                by_key.insert(
+                    key,
+                    Acc {
+                        keys: &c.keys,
+                        old: c.old_image.as_ref(),
+                        new: c.new_image.as_ref(),
+                        last: c.at,
+                    },
+                );
+            }
+        }
+    }
+    order
+        .iter()
+        .filter_map(|k| by_key.get(k))
+        .filter(|acc| acc.old.is_some() || acc.new.is_some())
+        .map(|acc| {
+            let mut rec = json!({
+                "Metadata": {
+                    "WriteTimestampMicros": { "N": acc.last.timestamp_micros().to_string() }
+                },
+                "Keys": acc.keys,
+            });
+            if view_type == "NEW_AND_OLD_IMAGES" {
+                if let Some(old) = acc.old {
+                    rec["OldImage"] = json!(old);
+                }
+            }
+            if let Some(new) = acc.new {
+                rec["NewImage"] = json!(new);
+            }
+            rec
+        })
+        .collect()
 }
 
 fn random_file_stem() -> String {
@@ -436,22 +561,45 @@ fn fail_export(ctx: &JobContext, job: &ExportJob, code: &str, message: &str) {
 }
 
 fn run_export(ctx: &JobContext, job: &ExportJob) {
-    let item_count = job.items.len() as i64;
+    if let ExportContent::Invalid { code, message } = &job.content {
+        return fail_export(ctx, job, code, message);
+    }
     if ctx.s3_state.is_some() && !bucket_exists(ctx, &job.bucket_account, &job.bucket) {
         return fail_export(ctx, job, "S3NoSuchBucket", NO_SUCH_BUCKET_MESSAGE);
     }
 
     // Serialize + compress with no lock held.
-    let (ext, line): (&str, fn(&Item) -> String) = if job.format == "ION" {
-        ("ion.gz", import_formats::ion_line)
-    } else {
-        ("json.gz", import_formats::dynamodb_json_line)
-    };
+    let ion = job.format == "ION";
+    let ext = if ion { "ion.gz" } else { "json.gz" };
     let mut data = String::new();
-    for item in &job.items {
-        data.push_str(&line(item));
-        data.push('\n');
-    }
+    let item_count = match &job.content {
+        ExportContent::Full(items) => {
+            for item in items {
+                data.push_str(&if ion {
+                    import_formats::ion_line(item)
+                } else {
+                    import_formats::dynamodb_json_line(item)
+                });
+                data.push('\n');
+            }
+            items.len() as i64
+        }
+        ExportContent::Incremental {
+            changes, view_type, ..
+        } => {
+            let records = incremental_records(changes, view_type);
+            for rec in &records {
+                data.push_str(&if ion {
+                    import_formats::ion_record_line(rec)
+                } else {
+                    rec.to_string()
+                });
+                data.push('\n');
+            }
+            records.len() as i64
+        }
+        ExportContent::Invalid { .. } => 0,
+    };
     let billed_size_bytes = data.len() as i64;
     let compressed = gzip(data.as_bytes());
 
@@ -493,6 +641,19 @@ fn run_export(ctx: &JobContext, job: &ExportJob) {
         "outputFormat": job.format,
         "exportType": "FULL_EXPORT",
     });
+    let mut summary = summary;
+    if let ExportContent::Incremental {
+        from,
+        to,
+        view_type,
+        ..
+    } = &job.content
+    {
+        summary["exportType"] = json!("INCREMENTAL_EXPORT");
+        summary["exportFromTime"] = json!(ts(*from));
+        summary["exportToTime"] = json!(ts(*to));
+        summary["outputView"] = json!(view_type);
+    }
 
     let started_key = format!("{base}/_started");
     let writes: [(&str, Vec<u8>, &str); 4] = [
@@ -611,13 +772,93 @@ fn export_job(account_id: &str, exp: &ExportDescription, table: &DynamoTable) ->
             .unwrap_or_else(|| account_id.to_string()),
         prefix: exp.s3_prefix.clone(),
         format: exp.export_format.clone(),
-        // Snapshot the rows under the caller's (short) lock; serialization
-        // and the S3 writes happen on the job.
-        items: table.items().iter().cloned().collect(),
+        // Snapshot the rows (or changes) under the caller's (short) lock;
+        // serialization and the S3 writes happen on the job.
+        content: export_content(exp, table),
         start_time: exp.start_time,
         export_time: exp.export_time,
         sse_algorithm: exp.s3_sse_algorithm.clone(),
         sse_kms_key_id: exp.s3_sse_kms_key_id.clone(),
+    }
+}
+
+/// What an export writes, resolved against the table's point-in-time
+/// history. Requests the history cannot serve become [`ExportContent::Invalid`]
+/// so the job fails with the error DynamoDB reports.
+fn export_content(exp: &ExportDescription, table: &DynamoTable) -> ExportContent {
+    let invalid = |code: &str, message: String| ExportContent::Invalid {
+        code: code.to_string(),
+        message,
+    };
+    let enabled_at = table.pitr_history.enabled_at.filter(|_| table.pitr_enabled);
+    if exp.export_type.as_deref() != Some("INCREMENTAL_EXPORT") {
+        // A full export reflects the table at ExportTime. With recovery on,
+        // the history rebuilds that state; a time before the history starts
+        // cannot be served.
+        return match enabled_at {
+            Some(start) if exp.export_time < start => invalid(
+                "InvalidExportTimeException",
+                format!(
+                    "ExportTime {} is before the earliest restorable time {}",
+                    exp.export_time.to_rfc3339(),
+                    start.to_rfc3339()
+                ),
+            ),
+            Some(_) => ExportContent::Full(items_as_of(table, exp.export_time)),
+            None => ExportContent::Full(table.items().iter().cloned().collect()),
+        };
+    }
+    let Some(start) = enabled_at else {
+        return invalid(
+            "PointInTimeRecoveryUnavailableException",
+            format!(
+                "Point in time recovery is not enabled for table '{}'",
+                table.name
+            ),
+        );
+    };
+    let from = exp.export_from_time.unwrap_or(start);
+    let to = exp.export_to_time.unwrap_or(exp.start_time);
+    let view_type = exp
+        .export_view_type
+        .clone()
+        .unwrap_or_else(|| "NEW_AND_OLD_IMAGES".to_string());
+    let span = to - from;
+    let problem = if from >= to {
+        Some("ExportFromTime must be earlier than ExportToTime".to_string())
+    } else if to > exp.start_time {
+        Some("ExportToTime is in the future".to_string())
+    } else if from < start {
+        Some(format!(
+            "ExportFromTime {} is before the earliest restorable time {}",
+            from.to_rfc3339(),
+            start.to_rfc3339()
+        ))
+    } else if span < chrono::Duration::minutes(INCREMENTAL_MIN_WINDOW_MINUTES) {
+        Some(format!(
+            "The incremental export window must be at least {INCREMENTAL_MIN_WINDOW_MINUTES} minutes"
+        ))
+    } else if span > chrono::Duration::hours(INCREMENTAL_MAX_WINDOW_HOURS) {
+        Some(format!(
+            "The incremental export window must be at most {INCREMENTAL_MAX_WINDOW_HOURS} hours"
+        ))
+    } else {
+        None
+    };
+    if let Some(message) = problem {
+        return invalid("InvalidExportTimeException", message);
+    }
+    ExportContent::Incremental {
+        from,
+        to,
+        view_type,
+        changes: table
+            .pitr_history
+            .changes
+            .iter()
+            .filter(|c| c.at >= from && c.at < to)
+            .cloned()
+            .collect(),
     }
 }
 
@@ -733,7 +974,7 @@ fn export_description_json(exp: &ExportDescription) -> Value {
         "TableArn": exp.table_arn,
         "S3Bucket": exp.s3_bucket,
         "ExportFormat": exp.export_format,
-        "ExportType": "FULL_EXPORT",
+        "ExportType": exp.export_type.as_deref().unwrap_or("FULL_EXPORT"),
         "StartTime": epoch_secs(exp.start_time),
         "ExportTime": epoch_secs(exp.export_time),
         "S3SseAlgorithm": exp.s3_sse_algorithm.clone().unwrap_or_else(|| "AES256".to_string()),
@@ -751,6 +992,19 @@ fn export_description_json(exp: &ExportDescription) -> Value {
     opt(&mut d, "ExportManifest", &exp.export_manifest);
     opt(&mut d, "FailureCode", &exp.failure_code);
     opt(&mut d, "FailureMessage", &exp.failure_message);
+    if exp.export_type.as_deref() == Some("INCREMENTAL_EXPORT") {
+        let mut spec = json!({});
+        if let Some(t) = exp.export_from_time {
+            spec["ExportFromTime"] = json!(epoch_secs(t));
+        }
+        if let Some(t) = exp.export_to_time {
+            spec["ExportToTime"] = json!(epoch_secs(t));
+        }
+        if let Some(v) = &exp.export_view_type {
+            spec["ExportViewType"] = json!(v);
+        }
+        d["IncrementalExportSpecification"] = spec;
+    }
     if let Some(end) = exp.end_time {
         d["EndTime"] = json!(epoch_secs(end));
     }
@@ -776,7 +1030,7 @@ impl DynamoDbService {
     /// background and only commit when they finish, so a persisted
     /// `IN_PROGRESS` job has written nothing yet (an import's table is still
     /// empty and `CREATING`); running it again settles it exactly as the
-    /// interrupted run would have. An export whose table is gone fails.
+    /// interrupted run would have. A job whose table is gone fails.
     pub(crate) fn resume_interrupted_jobs(&self) {
         let ctx = self.job_context();
         let mut imports = Vec::new();
@@ -785,7 +1039,7 @@ impl DynamoDbService {
             let mut accounts = self.state.write();
             for (account_id, state) in accounts.iter_mut() {
                 let account_id = account_id.to_string();
-                for imp in state.imports.values() {
+                for imp in state.imports.values_mut() {
                     if imp.import_status != "IN_PROGRESS" {
                         continue;
                     }
@@ -793,7 +1047,19 @@ impl DynamoDbService {
                         Some(t) if imp.table_id.as_deref().is_none_or(|id| id == t.table_id) => {
                             imports.push(import_job(&account_id, imp, t));
                         }
-                        _ => {}
+                        // The import's table was deleted (or replaced by a
+                        // same-name table) before the job could finish: it
+                        // can never complete, so settle it instead of leaving
+                        // it IN_PROGRESS forever.
+                        _ => {
+                            imp.import_status = "FAILED".to_string();
+                            imp.failure_code = Some("ResourceNotFoundException".to_string());
+                            imp.failure_message = Some(format!(
+                                "Table {} was deleted while the import was in progress",
+                                imp.table_name
+                            ));
+                            imp.end_time = Some(Utc::now());
+                        }
                     }
                 }
                 for exp in state.exports.values_mut() {
@@ -855,6 +1121,40 @@ impl DynamoDbService {
             None => now,
         };
 
+        let export_type = body["ExportType"]
+            .as_str()
+            .unwrap_or("FULL_EXPORT")
+            .to_string();
+        // IncrementalExportSpecification: an absent ExportFromTime starts at
+        // the earliest restorable time, an absent ExportToTime ends now
+        // (resolved by the job against the table's history).
+        let incremental = if export_type == "INCREMENTAL_EXPORT" {
+            let spec = body
+                .get("IncrementalExportSpecification")
+                .cloned()
+                .unwrap_or(Value::Null);
+            check_enum(
+                &spec,
+                "ExportViewType",
+                &["NEW_IMAGE", "NEW_AND_OLD_IMAGES"],
+            )?;
+            let at = |field: &str| {
+                spec.get(field)
+                    .and_then(Value::as_f64)
+                    .and_then(|secs| DateTime::<Utc>::from_timestamp_millis((secs * 1000.0) as i64))
+            };
+            Some((
+                at("ExportFromTime"),
+                at("ExportToTime"),
+                spec.get("ExportViewType")
+                    .and_then(Value::as_str)
+                    .unwrap_or("NEW_AND_OLD_IMAGES")
+                    .to_string(),
+            ))
+        } else {
+            None
+        };
+
         let export_id = job_id(now);
         // Snapshot the table's rows under a read guard; the job serializes and
         // writes them with no lock held.
@@ -896,6 +1196,10 @@ impl DynamoDbService {
                 ),
                 s3_sse_kms_key_id: body["S3SseKmsKeyId"].as_str().map(str::to_string),
                 client_token: body["ClientToken"].as_str().map(str::to_string),
+                export_type: Some(export_type.clone()),
+                export_from_time: incremental.as_ref().and_then(|i| i.0),
+                export_to_time: incremental.as_ref().and_then(|i| i.1),
+                export_view_type: incremental.as_ref().map(|i| i.2.clone()),
             };
             (export_job(&req.account_id, &export, table), export)
         };
@@ -951,7 +1255,7 @@ impl DynamoDbService {
                     json!({
                         "ExportArn": e.export_arn,
                         "ExportStatus": e.export_status,
-                        "ExportType": "FULL_EXPORT",
+                        "ExportType": e.export_type.as_deref().unwrap_or("FULL_EXPORT"),
                     }),
                 )
             })
@@ -1764,5 +2068,317 @@ mod tests {
         let d = describe_import(&svc, &import_arn);
         assert_eq!(d["ImportStatus"], "COMPLETED", "{d}");
         assert_eq!(table_status(&svc, "pending"), Some(("ACTIVE".into(), 1)));
+    }
+
+    fn item(pk: &str, v: Option<&str>) -> Item {
+        let mut m: Item = serde_json::from_value(json!({ "pk": {"S": pk} })).unwrap();
+        if let Some(v) = v {
+            m.insert("v".into(), json!({"N": v}));
+        }
+        m
+    }
+
+    fn change(mins_ago: i64, pk: &str, old: Option<Item>, new: Option<Item>) -> ItemChange {
+        ItemChange {
+            at: Utc::now() - chrono::Duration::minutes(mins_ago),
+            keys: item(pk, None),
+            old_image: old,
+            new_image: new,
+        }
+    }
+
+    /// A PITR-enabled table whose current items and recorded history agree:
+    /// a, b, c seeded before recovery was enabled (2h ago), then x inserted
+    /// (-100m), a modified twice (-50m, -40m), b deleted (-30m), and y
+    /// inserted (-20m) and deleted again (-10m).
+    fn seed_history(svc: &DynamoDbService) -> String {
+        let arn = seed_table(svc);
+        let mut accounts = svc.state.write();
+        let t = accounts
+            .get_or_create(ACCOUNT)
+            .tables
+            .get_mut("src-table")
+            .unwrap();
+        let a0 = t
+            .items()
+            .iter()
+            .find(|i| i["pk"]["S"] == "a")
+            .cloned()
+            .unwrap();
+        let b0 = t
+            .items()
+            .iter()
+            .find(|i| i["pk"]["S"] == "b")
+            .cloned()
+            .unwrap();
+        t.put_item_at_key(item("x", Some("1")));
+        t.put_item_at_key(item("a", Some("3")));
+        t.remove_item_by_key(&item("b", None));
+        t.pitr_enabled = true;
+        t.pitr_history = crate::state::PitrHistory {
+            enabled_at: Some(Utc::now() - chrono::Duration::hours(2)),
+            changes: vec![
+                change(100, "x", None, Some(item("x", Some("1")))),
+                change(50, "a", Some(a0), Some(item("a", Some("2")))),
+                change(
+                    40,
+                    "a",
+                    Some(item("a", Some("2"))),
+                    Some(item("a", Some("3"))),
+                ),
+                change(30, "b", Some(b0), None),
+                change(20, "y", None, Some(item("y", Some("9")))),
+                change(10, "y", Some(item("y", Some("9"))), None),
+            ],
+        };
+        arn
+    }
+
+    fn secs_ago(mins: i64) -> f64 {
+        (Utc::now() - chrono::Duration::minutes(mins)).timestamp() as f64
+    }
+
+    fn start_export(svc: &DynamoDbService, extra: Value) -> String {
+        let mut body = json!({ "TableArn": crate::state::table_arn("us-east-1", ACCOUNT, "src-table"),
+                               "S3Bucket": "src", "S3Prefix": "inc" });
+        for (k, v) in extra.as_object().unwrap() {
+            body[k] = v.clone();
+        }
+        let resp = body_of(
+            svc.export_table_to_point_in_time(&request("ExportTableToPointInTime", body))
+                .unwrap(),
+        );
+        resp["ExportDescription"]["ExportArn"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    }
+
+    fn export_lines(s3: &SharedS3State, d: &Value) -> Vec<String> {
+        let summary: Value =
+            serde_json::from_slice(&get_bytes(s3, d["ExportManifest"].as_str().unwrap())).unwrap();
+        let files = String::from_utf8(get_bytes(
+            s3,
+            summary["manifestFilesS3Key"].as_str().unwrap(),
+        ))
+        .unwrap();
+        let entry: Value = serde_json::from_str(files.lines().next().unwrap()).unwrap();
+        let data = import_formats::decompress(
+            &get_bytes(s3, entry["dataFileS3Key"].as_str().unwrap()),
+            "GZIP",
+        )
+        .unwrap();
+        String::from_utf8(data)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn incremental_export_writes_one_record_per_changed_item() {
+        let (svc, s3) = setup();
+        seed_history(&svc);
+        let arn = start_export(
+            &svc,
+            json!({ "ExportType": "INCREMENTAL_EXPORT",
+                    "IncrementalExportSpecification": {
+                        "ExportFromTime": secs_ago(60), "ExportToTime": secs_ago(5) } }),
+        );
+        let d = describe_export(&svc, &arn);
+        assert_eq!(d["ExportStatus"], "COMPLETED", "{d}");
+        assert_eq!(d["ExportType"], "INCREMENTAL_EXPORT");
+        assert_eq!(
+            d["IncrementalExportSpecification"]["ExportViewType"],
+            "NEW_AND_OLD_IMAGES"
+        );
+        // a (modified) and b (deleted); x changed before the window and y was
+        // created and deleted inside it.
+        assert_eq!(d["ItemCount"], 2);
+        let summary: Value =
+            serde_json::from_slice(&get_bytes(&s3, d["ExportManifest"].as_str().unwrap())).unwrap();
+        assert_eq!(summary["exportType"], "INCREMENTAL_EXPORT");
+        assert_eq!(summary["outputView"], "NEW_AND_OLD_IMAGES");
+        let records: Vec<Value> = export_lines(&s3, &d)
+            .iter()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let a = records
+            .iter()
+            .find(|r| r["Keys"]["pk"]["S"] == "a")
+            .unwrap();
+        assert_eq!(a["OldImage"]["v"], json!({"N": "1.5"}));
+        assert_eq!(a["NewImage"]["v"], json!({"N": "3"}));
+        assert!(a["Metadata"]["WriteTimestampMicros"]["N"].is_string());
+        let b = records
+            .iter()
+            .find(|r| r["Keys"]["pk"]["S"] == "b")
+            .unwrap();
+        assert!(b.get("NewImage").is_none());
+        assert_eq!(b["OldImage"]["pk"], json!({"S": "b"}));
+    }
+
+    #[test]
+    fn incremental_export_new_image_view_and_ion_format() {
+        let (svc, s3) = setup();
+        seed_history(&svc);
+        let arn = start_export(
+            &svc,
+            json!({ "ExportType": "INCREMENTAL_EXPORT", "ExportFormat": "ION",
+                    "IncrementalExportSpecification": {
+                        "ExportFromTime": secs_ago(60), "ExportToTime": secs_ago(5),
+                        "ExportViewType": "NEW_IMAGE" } }),
+        );
+        let d = describe_export(&svc, &arn);
+        assert_eq!(d["ExportStatus"], "COMPLETED", "{d}");
+        let lines = export_lines(&s3, &d);
+        assert_eq!(lines.len(), 2);
+        assert!(lines.iter().all(|l| l.starts_with("$ion_1_0 {")));
+        assert!(lines.iter().all(|l| !l.contains("OldImage")));
+        assert_eq!(lines.iter().filter(|l| l.contains("NewImage")).count(), 1);
+    }
+
+    #[test]
+    fn incremental_export_failures_follow_pitr_rules() {
+        let (svc, _s3) = setup();
+        // No point-in-time recovery: nothing to export incrementally.
+        seed_table(&svc);
+        let arn = start_export(&svc, json!({ "ExportType": "INCREMENTAL_EXPORT" }));
+        let d = describe_export(&svc, &arn);
+        assert_eq!(d["ExportStatus"], "FAILED");
+        assert_eq!(d["FailureCode"], "PointInTimeRecoveryUnavailableException");
+
+        let (svc, _s3) = setup();
+        seed_history(&svc);
+        for (from, to) in [(30, 25), (60, 70), (180, 60), (60 * 26, 5)] {
+            let arn = start_export(
+                &svc,
+                json!({ "ExportType": "INCREMENTAL_EXPORT",
+                        "IncrementalExportSpecification": {
+                            "ExportFromTime": secs_ago(from), "ExportToTime": secs_ago(to) } }),
+            );
+            let d = describe_export(&svc, &arn);
+            assert_eq!(d["ExportStatus"], "FAILED", "{from}..{to}: {d}");
+            assert_eq!(
+                d["FailureCode"], "InvalidExportTimeException",
+                "{from}..{to}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_export_reflects_the_table_at_export_time() {
+        let (svc, s3) = setup();
+        seed_history(&svc);
+        let arn = start_export(&svc, json!({ "ExportTime": secs_ago(45) }));
+        let d = describe_export(&svc, &arn);
+        assert_eq!(d["ExportStatus"], "COMPLETED", "{d}");
+        assert_eq!(d["ExportType"], "FULL_EXPORT");
+        // 45 minutes ago: x existed, a held its first update, b was not yet
+        // deleted, y did not exist yet.
+        let mut rows: Vec<(String, Value)> = export_lines(&s3, &d)
+            .iter()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).unwrap();
+                (
+                    v["Item"]["pk"]["S"].as_str().unwrap().to_string(),
+                    v["Item"]["v"].clone(),
+                )
+            })
+            .collect();
+        rows.sort_by(|x, y| x.0.cmp(&y.0));
+        let pks: Vec<&str> = rows.iter().map(|r| r.0.as_str()).collect();
+        assert_eq!(pks, vec!["a", "b", "c", "x"]);
+        assert_eq!(rows[0].1, json!({"N": "2"}));
+
+        // Before recovery was enabled, the history cannot rebuild the table.
+        let arn = start_export(&svc, json!({ "ExportTime": secs_ago(180) }));
+        let d = describe_export(&svc, &arn);
+        assert_eq!(d["FailureCode"], "InvalidExportTimeException", "{d}");
+    }
+
+    #[test]
+    fn resume_fails_an_import_whose_table_is_gone() {
+        let (svc, _s3) = setup();
+        let import_arn = "arn:aws:dynamodb:us-east-1:123456789012:table/gone/import/1".to_string();
+        svc.state.write().get_or_create(ACCOUNT).imports.insert(
+            import_arn.clone(),
+            ImportDescription {
+                import_arn: import_arn.clone(),
+                import_status: "IN_PROGRESS".into(),
+                table_arn: "arn:aws:dynamodb:us-east-1:123456789012:table/gone".into(),
+                table_name: "gone".into(),
+                s3_bucket_source: "src".into(),
+                input_format: "DYNAMODB_JSON".into(),
+                start_time: Utc::now(),
+                end_time: None,
+                processed_item_count: 0,
+                processed_size_bytes: 0,
+                imported_item_count: 0,
+                error_count: 0,
+                table_id: Some("gone-id".into()),
+                s3_key_prefix: None,
+                s3_bucket_owner: None,
+                input_compression_type: None,
+                input_format_options: None,
+                table_creation_parameters: None,
+                client_token: None,
+                failure_code: None,
+                failure_message: None,
+            },
+        );
+        svc.resume_interrupted_jobs();
+        let d = describe_import(&svc, &import_arn);
+        assert_eq!(d["ImportStatus"], "FAILED", "{d}");
+        assert_eq!(d["FailureCode"], "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn out_of_range_numbers_are_counted_row_errors() {
+        let (svc, s3) = setup();
+        put_bytes(&s3, "big/a.csv", b"id,v\n1e999999999999,x\n5,y\n".to_vec());
+        put_bytes(
+            &s3,
+            "bigion/a.ion",
+            b"$ion_1_0 {Item:{pk:\"a\",n:1d999999999999}}\n$ion_1_0 {Item:{pk:\"b\",n:7.}}\n"
+                .to_vec(),
+        );
+        let arn = start_import(
+            &svc,
+            request(
+                "ImportTable",
+                json!({
+                    "InputFormat": "CSV",
+                    "S3BucketSource": { "S3Bucket": "src", "S3KeyPrefix": "big/" },
+                    "TableCreationParameters": {
+                        "TableName": "imported",
+                        "KeySchema": [{ "AttributeName": "id", "KeyType": "HASH" }],
+                        "AttributeDefinitions": [{ "AttributeName": "id", "AttributeType": "N" }]
+                    }
+                }),
+            ),
+        );
+        let d = describe_import(&svc, &arn);
+        assert_eq!(d["ErrorCount"], 1, "{d}");
+        assert_eq!(d["ImportedItemCount"], 1, "{d}");
+
+        let arn = start_import(
+            &svc,
+            request(
+                "ImportTable",
+                json!({
+                    "InputFormat": "ION",
+                    "S3BucketSource": { "S3Bucket": "src", "S3KeyPrefix": "bigion/" },
+                    "TableCreationParameters": {
+                        "TableName": "imported-ion",
+                        "KeySchema": [{ "AttributeName": "pk", "KeyType": "HASH" }],
+                        "AttributeDefinitions": [{ "AttributeName": "pk", "AttributeType": "S" }]
+                    }
+                }),
+            ),
+        );
+        let d = describe_import(&svc, &arn);
+        assert_eq!(d["ErrorCount"], 1, "{d}");
+        assert_eq!(d["ImportedItemCount"], 1, "{d}");
     }
 }

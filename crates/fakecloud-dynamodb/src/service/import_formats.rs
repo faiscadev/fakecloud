@@ -10,6 +10,10 @@ use base64::Engine;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 
+use super::helpers::{
+    canonical_number, parse_number, MAX_SCIENTIFIC_EXPONENT, MIN_SCIENTIFIC_EXPONENT,
+};
+
 /// One imported row, or the reason it could not form an item.
 pub(crate) type ParsedRow = Result<HashMap<String, Value>, String>;
 
@@ -198,6 +202,9 @@ enum Ion {
     /// Any Ion numeric (int, decimal, float), normalized to a plain decimal
     /// string DynamoDB accepts as a Number.
     Number(String),
+    /// A well-formed numeric outside DynamoDB's range. Valid Ion, so parsing
+    /// carries on; converting it to an attribute fails the row.
+    NumberOutOfRange(String),
     String(String),
     Symbol(String),
     Blob(Vec<u8>),
@@ -214,6 +221,8 @@ struct Annotated {
 }
 
 struct IonParser<'a> {
+    /// The input as text, for decoding one char at the cursor in O(1).
+    text: &'a str,
     src: &'a [u8],
     pos: usize,
 }
@@ -231,6 +240,7 @@ const OPERATOR_CHARS: &[u8] = b"!#%&*+-./;<=>?@^`|~";
 impl<'a> IonParser<'a> {
     fn new(text: &'a str) -> Self {
         Self {
+            text,
             src: text.as_bytes(),
             pos: 0,
         }
@@ -383,13 +393,19 @@ impl<'a> IonParser<'a> {
         char::from_u32(code).ok_or_else(|| "invalid unicode escape".to_string())
     }
 
+    /// The char at the cursor, decoded from the input text without
+    /// re-validating the rest of it (`pos` always sits on a char boundary:
+    /// it only advances by ASCII bytes or by a decoded char's length).
+    fn next_char(&self) -> Option<char> {
+        self.text.get(self.pos..)?.chars().next()
+    }
+
     /// Read the body of a `"`- or `'`-quoted string/symbol (no long strings).
     fn quoted(&mut self, quote: char) -> Result<String, String> {
         self.pos += 1; // opening quote
         let mut out = String::new();
         loop {
-            let rest = std::str::from_utf8(&self.src[self.pos..]).map_err(|e| e.to_string())?;
-            let c = rest.chars().next().ok_or("unterminated Ion string")?;
+            let c = self.next_char().ok_or("unterminated Ion string")?;
             self.pos += c.len_utf8();
             if c == quote {
                 return Ok(out);
@@ -447,8 +463,7 @@ impl<'a> IonParser<'a> {
                     self.pos += 3;
                     break;
                 }
-                let rest = std::str::from_utf8(&self.src[self.pos..]).map_err(|e| e.to_string())?;
-                let c = rest.chars().next().ok_or("unterminated Ion long string")?;
+                let c = self.next_char().ok_or("unterminated Ion long string")?;
                 self.pos += c.len_utf8();
                 if c == '\\' {
                     self.escape(&mut out)?;
@@ -581,7 +596,13 @@ impl<'a> IonParser<'a> {
             self.pos += 1;
         }
         let token = std::str::from_utf8(&self.src[start..self.pos]).map_err(|e| e.to_string())?;
-        ion_number(token).map(Ion::Number)
+        match ion_number(token) {
+            Ok(n) => Ok(Ion::Number(n)),
+            Err(e) if e.starts_with("Number overflow") || e.starts_with("Number underflow") => {
+                Ok(Ion::NumberOutOfRange(e))
+            }
+            Err(e) => Err(e),
+        }
     }
 }
 
@@ -612,10 +633,14 @@ fn ion_number(token: &str) -> Result<String, String> {
     let lower = body.to_ascii_lowercase();
     let (mantissa, exp) = match lower.find(['d', 'e']) {
         Some(i) => {
-            let exp: i64 = lower[i + 1..].parse().map_err(|_| bad())?;
+            let exp = &lower[i + 1..];
+            let digits = exp.strip_prefix(['+', '-']).unwrap_or(exp);
+            if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+                return Err(bad());
+            }
             (&lower[..i], exp)
         }
-        None => (lower.as_str(), 0),
+        None => (lower.as_str(), "0"),
     };
     let (int_part, frac_part) = match mantissa.split_once('.') {
         Some((i, f)) => (i, f),
@@ -627,45 +652,26 @@ fn ion_number(token: &str) -> Result<String, String> {
     {
         return Err(bad());
     }
-    Ok(plain_decimal(neg, int_part, frac_part, exp))
-}
-
-/// Render `[-]int.frac * 10^exp` as a plain decimal without exponent,
-/// trimming redundant zeros.
-fn plain_decimal(neg: bool, int_part: &str, frac_part: &str, exp: i64) -> String {
-    let digits = format!("{int_part}{frac_part}");
-    // Position of the decimal point within `digits`.
-    let point = int_part.len() as i64 + exp;
-    let (int_digits, frac_digits) = if point <= 0 {
-        (
-            "0".to_string(),
-            format!("{}{}", "0".repeat((-point) as usize), digits),
-        )
-    } else if point as usize >= digits.len() {
-        (
-            format!("{}{}", digits, "0".repeat(point as usize - digits.len())),
-            String::new(),
-        )
-    } else {
-        (
-            digits[..point as usize].to_string(),
-            digits[point as usize..].to_string(),
-        )
-    };
-    let int_trim = int_digits.trim_start_matches('0');
-    let int_trim = if int_trim.is_empty() { "0" } else { int_trim };
-    let frac_trim = frac_digits.trim_end_matches('0');
-    let mut out = String::new();
-    let is_zero = int_trim == "0" && frac_trim.is_empty();
-    if neg && !is_zero {
-        out.push('-');
+    // Decide the range from the coefficient and exponent and only then render
+    // the plain decimal: expanding `1d999999999999` digit by digit would
+    // allocate without bound and abort the process. An out-of-range number is
+    // a row error (counted in ErrorCount), exactly as PutItem rejects it.
+    let sign = if neg { "-" } else { "" };
+    let literal = format!("{sign}{mantissa}e{exp}");
+    let parsed = parse_number(&literal).ok_or_else(bad)?;
+    if let Some(e) = parsed.scientific_exponent() {
+        if e > MAX_SCIENTIFIC_EXPONENT {
+            return Err(format!(
+                "Number overflow. Attempting to store a number with magnitude larger than supported range: '{token}'"
+            ));
+        }
+        if e < MIN_SCIENTIFIC_EXPONENT {
+            return Err(format!(
+                "Number underflow. Attempting to store a number with magnitude smaller than supported range: '{token}'"
+            ));
+        }
     }
-    out.push_str(int_trim);
-    if !frac_trim.is_empty() {
-        out.push('.');
-        out.push_str(frac_trim);
-    }
-    out
+    canonical_number(&literal).ok_or_else(bad)
 }
 
 fn b64(bytes: &[u8]) -> String {
@@ -686,6 +692,7 @@ fn ion_to_attribute(v: &Annotated) -> Result<Value, String> {
                 let member = match (&m.value, kind) {
                     (Ion::String(s) | Ion::Symbol(s), "SS") => Value::String(s.clone()),
                     (Ion::Number(n), "NS") => Value::String(n.clone()),
+                    (Ion::NumberOutOfRange(e), _) => return Err(e.clone()),
                     (Ion::Blob(b) | Ion::Clob(b), "BS") => Value::String(b64(b)),
                     _ => return Err(format!("invalid member in $dynamodb_{kind} set")),
                 };
@@ -696,6 +703,7 @@ fn ion_to_attribute(v: &Annotated) -> Result<Value, String> {
         (Ion::Null, _) => Ok(json!({ "NULL": true })),
         (Ion::Bool(b), _) => Ok(json!({ "BOOL": b })),
         (Ion::Number(n), _) => Ok(json!({ "N": n })),
+        (Ion::NumberOutOfRange(e), _) => Err(e.clone()),
         (Ion::String(s) | Ion::Symbol(s), _) => Ok(json!({ "S": s })),
         (Ion::Blob(b) | Ion::Clob(b), _) => Ok(json!({ "B": b64(b) })),
         (Ion::List(members), None) => {
@@ -888,6 +896,24 @@ pub(crate) fn ion_line(item: &HashMap<String, Value>) -> String {
     format!("$ion_1_0 {{Item:{}}}", ion_struct(item.iter()))
 }
 
+/// One incremental-export record (`Metadata`, `Keys`, optional `OldImage` /
+/// `NewImage`) as an Ion line, mirroring the DynamoDB JSON record shape.
+pub(crate) fn ion_record_line(record: &Value) -> String {
+    let mut parts = Vec::new();
+    if let Some(ts) = record
+        .pointer("/Metadata/WriteTimestampMicros/N")
+        .and_then(Value::as_str)
+    {
+        parts.push(format!("Metadata:{{WriteTimestampMicros:{ts}}}"));
+    }
+    for field in ["Keys", "OldImage", "NewImage"] {
+        if let Some(obj) = record.get(field).and_then(Value::as_object) {
+            parts.push(format!("{field}:{}", ion_struct(obj.iter())));
+        }
+    }
+    format!("$ion_1_0 {{{}}}", parts.join(","))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1052,5 +1078,49 @@ $ion_1_0 {Item:{Id:104.}}"#;
         assert_eq!(ion_number("-0.0").unwrap(), "0");
         assert_eq!(ion_number("1.5e2").unwrap(), "150");
         assert_eq!(ion_number("007.100").unwrap(), "7.1");
+    }
+
+    #[test]
+    fn ion_number_range_is_checked_without_expanding_the_exponent() {
+        let started = std::time::Instant::now();
+        let err = ion_number("1d999999999999").unwrap_err();
+        assert!(err.starts_with("Number overflow"), "{err}");
+        let err = ion_number("1d-999999999999").unwrap_err();
+        assert!(err.starts_with("Number underflow"), "{err}");
+        let err = ion_number("1e9223372036854775807").unwrap_err();
+        assert!(err.starts_with("Number overflow"), "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "range checks must not materialize the digits"
+        );
+        assert_eq!(ion_number("1.5d3").unwrap(), "1500");
+        assert_eq!(ion_number("-2.50d-1").unwrap(), "-0.25");
+        assert_eq!(ion_number("9.9d125").unwrap().len(), 126);
+        assert_eq!(ion_number("0d999999999999").unwrap(), "0");
+    }
+
+    #[test]
+    fn out_of_range_ion_number_is_a_row_error_not_an_abort() {
+        let rows = parse_ion(
+            "$ion_1_0 {Item:{pk:\"a\",n:1d999999999999}}\n$ion_1_0 {Item:{pk:\"b\",n:2.}}\n",
+        );
+        assert_eq!(rows.len(), 2);
+        assert!(rows[0].is_err());
+        assert_eq!(rows[1].as_ref().unwrap()["n"], json!({"N": "2"}));
+    }
+
+    #[test]
+    fn long_ion_strings_parse_in_linear_time() {
+        let body = "x".repeat(1 << 20);
+        let text = format!("$ion_1_0 {{Item:{{pk:\"{body}\",l:\'\'\'{body}\'\'\'}}}}\n");
+        let started = std::time::Instant::now();
+        let rows = parse_ion(&text);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "string decoding must not rescan the remaining input per char"
+        );
+        let row = rows[0].as_ref().unwrap();
+        assert_eq!(row["pk"]["S"].as_str().unwrap().len(), 1 << 20);
+        assert_eq!(row["l"]["S"].as_str().unwrap().len(), 1 << 20);
     }
 }

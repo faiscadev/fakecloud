@@ -1216,6 +1216,7 @@ mod tests {
                     on_demand_throughput: None,
                     table_class: "STANDARD".into(),
                     vector_indexes: Vec::new(),
+                    pitr_history: Default::default(),
                 },
             );
         }

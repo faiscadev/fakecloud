@@ -311,6 +311,7 @@ fn build_table(
         on_demand_throughput: None,
         table_class: "STANDARD".to_string(),
         vector_indexes: Vec::new(),
+        pitr_history: Default::default(),
     };
     table.recalculate_stats(); // fills item_count / size_bytes
     Ok(table)

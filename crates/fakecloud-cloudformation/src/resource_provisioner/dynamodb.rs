@@ -68,12 +68,13 @@ fn apply_cfn_table_settings(
     // --- PointInTimeRecoverySpecification ---
     match props.get("PointInTimeRecoverySpecification") {
         Some(spec) => {
-            table.pitr_enabled = spec
-                .get("PointInTimeRecoveryEnabled")
-                .and_then(cfn_bool)
-                .unwrap_or(false);
+            table.set_pitr(
+                spec.get("PointInTimeRecoveryEnabled")
+                    .and_then(cfn_bool)
+                    .unwrap_or(false),
+            );
         }
-        None if is_update => table.pitr_enabled = false,
+        None if is_update => table.set_pitr(false),
         None => {}
     }
 
