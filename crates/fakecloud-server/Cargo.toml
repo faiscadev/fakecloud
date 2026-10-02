@@ -141,6 +141,19 @@ tokio = { workspace = true }
 tower-http = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+# Only pulled in by the `vendored-openssl` feature (see below). The RDS MySQL
+# client reaches OpenSSL through native-tls; enabling this optional direct
+# dependency with `vendored` unifies the feature so OpenSSL is compiled from
+# source and linked statically.
+openssl = { version = "0.10", optional = true }
+
+[features]
+# Statically link a vendored OpenSSL instead of the build host's libssl. The
+# release workflow enables this for the Linux binaries so they do not require
+# the libssl.so.3 of the runner they were built on (Amazon Linux 2, RHEL 8,
+# Debian 11 and Ubuntu 20.04 ship older or no OpenSSL 3), and so the musl
+# builds are fully static.
+vendored-openssl = ["dep:openssl", "openssl/vendored"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

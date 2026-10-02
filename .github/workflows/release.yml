@@ -62,12 +62,32 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux glibc builds link against glibc 2.17 through cargo-zigbuild
+          # (the `.2.17` suffix on zig_target), not the runner's own glibc
+          # (2.39 on ubuntu-24.04). A plain `cargo build` on the runner
+          # produced binaries that refuse to start on Amazon Linux 2, RHEL 8,
+          # Debian 11 and Ubuntu 20.04 ("GLIBC_2.3x not found"). 2.17 is the
+          # oldest glibc Rust's std still supports, so the binary runs on
+          # every glibc distro that is still around.
           - name: linux-amd64
             runner: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            zig_target: x86_64-unknown-linux-gnu.2.17
           - name: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
+            zig_target: aarch64-unknown-linux-gnu.2.17
+          # Fully static musl builds for Alpine and other musl distros,
+          # where the glibc binary cannot run at all. install.sh picks these
+          # automatically on musl systems.
+          - name: linux-amd64-musl
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            zig_target: x86_64-unknown-linux-musl
+          - name: linux-arm64-musl
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            zig_target: aarch64-unknown-linux-musl
           - name: darwin-amd64
             runner: macos-14
             target: x86_64-apple-darwin
@@ -83,7 +103,64 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      - name: Build
+      - name: Install zig + cargo-zigbuild
+        if: matrix.zig_target != ''
+        run: |
+          python3 -m pip install --user --break-system-packages "ziglang==${ZIG_VERSION}"
+          cargo install --locked cargo-zigbuild --version "${CARGO_ZIGBUILD_VERSION}"
+        env:
+          ZIG_VERSION: "0.16.0"
+          CARGO_ZIGBUILD_VERSION: "0.23.4"
+
+      - name: Build (Linux, cargo-zigbuild)
+        if: matrix.zig_target != ''
+        # vendored-openssl: the RDS MySQL client links OpenSSL through
+        # native-tls; vendoring builds it from source and links it statically
+        # so the binary does not depend on the runner's libssl.so.3.
+        # LIBZ_SYS_STATIC / LZMA_API_STATIC: build zlib / liblzma from source
+        # and link them statically instead of picking up the runner's shared
+        # libraries, which zig's sysroot does not see.
+        env:
+          LIBZ_SYS_STATIC: "1"
+          LZMA_API_STATIC: "1"
+        run: cargo zigbuild --release --locked --target ${{ matrix.zig_target }} --bin fakecloud --features vendored-openssl
+
+      - name: Verify Linux binary portability
+        if: matrix.zig_target != ''
+        shell: bash
+        run: |
+          BIN="target/${{ matrix.target }}/release/fakecloud"
+          file "$BIN"
+          # The only shared objects allowed are glibc's own (musl builds have
+          # none at all).
+          NEEDED="$(readelf -d "$BIN" | sed -n 's/.*Shared library: \[\(.*\)\]/\1/p')"
+          echo "NEEDED: ${NEEDED:-<none>}"
+          BAD="$(printf '%s\n' "$NEEDED" | grep -vE '^(libc|libm|libdl|libpthread|librt|libgcc_s|ld-linux-(x86-64|aarch64))\.so' | grep . || true)"
+          if [ -n "$BAD" ]; then
+            echo "::error::unexpected shared library dependencies: $BAD"
+            exit 1
+          fi
+          case "${{ matrix.target }}" in
+            *-musl)
+              if [ -n "$NEEDED" ]; then
+                echo "::error::musl build is not fully static"
+                exit 1
+              fi
+              ;;
+            *-gnu)
+              # Highest GLIBC_x.y symbol version referenced must be <= 2.17.
+              MAX="$(objdump -T "$BIN" | grep -o 'GLIBC_[0-9.]*' | sed 's/GLIBC_//' | sort -uV | tail -1)"
+              echo "max GLIBC symbol version: $MAX"
+              if [ "$(printf '%s\n2.17\n' "$MAX" | sort -V | tail -1)" != "2.17" ]; then
+                echo "::error::binary requires GLIBC_$MAX (> 2.17)"
+                exit 1
+              fi
+              ;;
+          esac
+          "$BIN" --version
+
+      - name: Build (macOS)
+        if: matrix.zig_target == ''
         run: cargo build --release --locked --target ${{ matrix.target }} --bin fakecloud
 
       - name: Package
@@ -358,7 +435,7 @@ jobs:
           SHA=$(git subtree split --prefix=sdks/php)
 
           # Push to mirror repo
-          git remote add php-mirror https://x-access-token:${MIRROR_TOKEN}@github.com/faiscadev/fakecloud-php.git
+          git remote add php-mirror "https://x-access-token:${MIRROR_TOKEN}@github.com/faiscadev/fakecloud-php.git"
           git push php-mirror "${SHA}:refs/heads/main" --force
 
           # Create version tag on mirror (-f because v${TAG} exists in this checkout)

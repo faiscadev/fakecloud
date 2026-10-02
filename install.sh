@@ -2,18 +2,26 @@
 # FakeCloud installer — downloads pre-built binaries from GitHub Releases.
 # Usage: curl -fsSL https://fakecloud.dev/install.sh | bash
 #    or: curl -fsSL https://fakecloud.dev/install.sh | bash -s -- --version v0.1.0
+#
+# On Linux the libc is detected automatically: musl systems (Alpine, ...) get
+# the fully static musl build, glibc systems get the glibc build (linked
+# against glibc 2.17, so it runs on Amazon Linux 2, RHEL/CentOS 7+, Debian,
+# Ubuntu, ...). Override with --libc musl|gnu or FAKECLOUD_LIBC=musl|gnu; the
+# static musl build also runs on glibc systems.
 
 set -eu
 
 REPO="faiscadev/fakecloud"
 INSTALL_DIR="/usr/local/bin"
 VERSION=""
+LIBC="${FAKECLOUD_LIBC:-}"
 
 # Parse arguments
 while [ $# -gt 0 ]; do
   case "$1" in
     --version) VERSION="$2"; shift 2 ;;
     --install-dir) INSTALL_DIR="$2"; shift 2 ;;
+    --libc) LIBC="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -34,7 +42,43 @@ case "$ARCH" in
   *) echo "Unsupported architecture: $ARCH"; exit 1 ;;
 esac
 
+# Detect the C library on Linux. The glibc build cannot start on musl
+# systems (no glibc dynamic loader), so they need the static musl build.
+detect_libc() {
+  # `ldd --version` names its libc on both: glibc prints "GNU libc" /
+  # "GLIBC", musl prints "musl libc" (to stderr, exiting non-zero).
+  if command -v ldd >/dev/null 2>&1; then
+    LDD_OUT="$(ldd --version 2>&1 || true)"
+    case "$LDD_OUT" in
+      *musl*) echo "musl"; return ;;
+      *"GNU libc"*|*GLIBC*|*"GNU C Library"*) echo "gnu"; return ;;
+    esac
+  fi
+  if command -v getconf >/dev/null 2>&1 && getconf GNU_LIBC_VERSION >/dev/null 2>&1; then
+    echo "gnu"; return
+  fi
+  if [ -f /etc/alpine-release ]; then
+    echo "musl"; return
+  fi
+  for loader in /lib/ld-musl-*.so.1; do
+    if [ -e "$loader" ]; then
+      echo "musl"; return
+    fi
+  done
+  echo "gnu"
+}
+
 PLATFORM="${OS}-${ARCH}"
+if [ "$OS" = "linux" ]; then
+  if [ -z "$LIBC" ]; then
+    LIBC="$(detect_libc)"
+  fi
+  case "$LIBC" in
+    musl) PLATFORM="${PLATFORM}-musl" ;;
+    gnu|glibc) LIBC="gnu" ;;
+    *) echo "Unsupported --libc value: $LIBC (expected musl or gnu)"; exit 1 ;;
+  esac
+fi
 echo "Detected platform: ${PLATFORM}"
 
 # Determine version to download
@@ -60,7 +104,14 @@ trap 'rm -rf "$TMP_DIR"' EXIT
 
 # Download tarball and checksum
 echo "Downloading ${TARBALL}..."
-curl -fsSL "${BASE_URL}/${TARBALL}" -o "${TMP_DIR}/${TARBALL}"
+if ! curl -fsSL "${BASE_URL}/${TARBALL}" -o "${TMP_DIR}/${TARBALL}"; then
+  echo "Error: could not download ${BASE_URL}/${TARBALL}"
+  if [ "${LIBC:-}" = "musl" ]; then
+    echo "This release may predate the musl (Alpine) builds. Install a newer"
+    echo "version, or build from source: cargo install fakecloud"
+  fi
+  exit 1
+fi
 curl -fsSL "${BASE_URL}/${CHECKSUM}" -o "${TMP_DIR}/${CHECKSUM}"
 
 # Verify checksum

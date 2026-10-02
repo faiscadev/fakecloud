@@ -15,7 +15,16 @@ curl -fsSL https://fakecloud.dev/install.sh | bash
 fakecloud
 ```
 
-The script downloads the latest release for your platform and puts the `fakecloud` binary somewhere on your `PATH`.
+The script downloads the latest release for your platform and puts the `fakecloud` binary in `/usr/local/bin` (override with `--install-dir <dir>`; pin a release with `--version vX.Y.Z`).
+
+On Linux it picks the build that matches your C library:
+
+- **glibc** distros get a binary linked against glibc 2.17, so it runs on Amazon Linux 2 and 2023, RHEL/CentOS 7 and later, Debian 10+, Ubuntu 18.04+ and anything newer.
+- **musl** distros such as Alpine get a fully static musl binary. Alpine ships without bash, so pipe to `sh` instead: `apk add curl && curl -fsSL https://fakecloud.dev/install.sh | sh`.
+
+Pass `--libc musl` or `--libc gnu` (or set `FAKECLOUD_LIBC`) to override the detection. The static musl build also runs on glibc systems.
+
+Release assets are named `fakecloud-<version>-<os>-<arch>[-musl].tar.gz` (`linux-amd64`, `linux-arm64`, `linux-amd64-musl`, `linux-arm64-musl`, `darwin-amd64`, `darwin-arm64`), each with a `.sha256` next to it, if you prefer to download from [GitHub Releases](https://github.com/faiscadev/fakecloud/releases) by hand.
 
 ## Homebrew
 

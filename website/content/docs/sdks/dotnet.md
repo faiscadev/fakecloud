@@ -14,7 +14,7 @@ Or in your test project file:
 
 ```xml
 <ItemGroup>
-  <PackageReference Include="FakeCloud" Version="0.44.1" />
+  <PackageReference Include="FakeCloud" Version="0.47.0" />
 </ItemGroup>
 ```
 
