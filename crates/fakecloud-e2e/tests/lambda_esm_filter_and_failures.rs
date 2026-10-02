@@ -191,3 +191,127 @@ async fn sqs_filter_criteria_drops_non_matching_messages() {
 
     let _ = QueueAttributeName::ApproximateNumberOfMessages;
 }
+
+/// FilterCriteria use the EventBridge pattern language: a scalar pattern
+/// matches any element of an array value, and an object pattern matches an
+/// array of objects when any element matches.
+#[tokio::test]
+async fn sqs_filter_criteria_matches_array_values() {
+    let server = TestServer::start().await;
+    let lambda = server.lambda_client().await;
+    let sqs = server.sqs_client().await;
+    let http = reqwest::Client::new();
+
+    let function_arn = create_function(&lambda, "filter-array-fn").await;
+    let queue_url = sqs
+        .create_queue()
+        .queue_name("filter-array-q")
+        .send()
+        .await
+        .unwrap()
+        .queue_url()
+        .unwrap()
+        .to_string();
+    let queue_arn = sqs
+        .get_queue_attributes()
+        .queue_url(&queue_url)
+        .attribute_names(QueueAttributeName::QueueArn)
+        .send()
+        .await
+        .unwrap()
+        .attributes()
+        .unwrap()
+        .get(&QueueAttributeName::QueueArn)
+        .unwrap()
+        .to_string();
+
+    // A scalar leaf is not a valid pattern.
+    let bad = lambda
+        .create_event_source_mapping()
+        .function_name(&function_arn)
+        .event_source_arn(&queue_arn)
+        .filter_criteria(
+            LambdaFilterCriteria::builder()
+                .filters(Filter::builder().pattern(r#"{"body": "x"}"#).build())
+                .build(),
+        )
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        bad.into_service_error().meta().code(),
+        Some("InvalidParameterValueException")
+    );
+
+    let filter = LambdaFilterCriteria::builder()
+        .filters(
+            Filter::builder()
+                .pattern(r#"{"body": {"tags": ["urgent"], "lines": {"sku": ["gold"]}}}"#)
+                .build(),
+        )
+        .build();
+    lambda
+        .create_event_source_mapping()
+        .function_name(&function_arn)
+        .event_source_arn(&queue_arn)
+        .batch_size(10)
+        .filter_criteria(filter)
+        .send()
+        .await
+        .unwrap();
+
+    for body in [
+        r#"{"id":"match","tags":["low","urgent"],"lines":[{"sku":"tin"},{"sku":"gold"}]}"#,
+        r#"{"id":"no-tag","tags":["low"],"lines":[{"sku":"gold"}]}"#,
+        r#"{"id":"no-sku","tags":["urgent"],"lines":[{"sku":"tin"}]}"#,
+    ] {
+        sqs.send_message()
+            .queue_url(&queue_url)
+            .message_body(body)
+            .send()
+            .await
+            .unwrap();
+    }
+
+    let mut payloads: Vec<String> = Vec::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let resp: serde_json::Value = http
+            .get(format!(
+                "{}/_fakecloud/lambda/invocations",
+                server.endpoint()
+            ))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        payloads = resp["invocations"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|inv| {
+                inv["functionArn"]
+                    .as_str()
+                    .or_else(|| inv["function_arn"].as_str())
+                    == Some(function_arn.as_str())
+            })
+            .filter_map(|inv| inv["payload"].as_str().map(String::from))
+            .collect();
+        if !payloads.is_empty() {
+            break;
+        }
+    }
+    assert!(
+        payloads.iter().any(|p| p.contains("match")),
+        "the matching message must be delivered: {payloads:?}"
+    );
+    assert!(
+        !payloads
+            .iter()
+            .any(|p| p.contains("no-tag") || p.contains("no-sku")),
+        "non-matching messages must be filtered out: {payloads:?}"
+    );
+}

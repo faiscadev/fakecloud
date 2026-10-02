@@ -636,7 +636,12 @@ fn validate_state_paths(state_name: &str, state: &Value) -> Result<(), AwsServic
             // `InputPath`/`OutputPath` accept the literal "null" to mean "no
             // value"; `ResultPath` accepts JSON null (handled separately) but
             // not the string "null". Both accept "$"-rooted reference paths.
-            if (field != "ResultPath" && p == "null") || is_valid_reference_path(p) {
+            let valid = if field == "ResultPath" {
+                is_valid_reference_path(p)
+            } else {
+                p == "null" || is_valid_path(p)
+            };
+            if valid {
                 continue;
             }
             return Err(invalid_reference_path(state_name, field, p));
@@ -765,10 +770,9 @@ fn validate_payload_template(
 /// parse, or a `$$`-rooted context-object reference.
 fn is_reference_or_context_path(p: &str) -> bool {
     if let Some(rest) = p.strip_prefix("$$") {
-        // "$$" alone, or "$$.Foo.Bar" — accept any context reference.
-        return rest.is_empty() || rest.starts_with('.') || rest.starts_with('[');
+        return is_valid_path(&format!("${rest}"));
     }
-    is_valid_reference_path(p)
+    is_valid_path(p)
 }
 
 fn invalid_payload_template(state_name: &str, field: &str, detail: &str) -> AwsServiceError {
@@ -786,7 +790,7 @@ fn invalid_payload_template(state_name: &str, field: &str, detail: &str) -> AwsS
 /// nested `And` / `Or` / `Not` boolean combinators.
 fn validate_choice_variables(state_name: &str, rule: &Value) -> Result<(), AwsServiceError> {
     if let Some(v) = rule.get("Variable").and_then(|v| v.as_str()) {
-        if !is_valid_reference_path(v) {
+        if !is_valid_path(v) {
             return Err(invalid_reference_path(state_name, "Variable", v));
         }
     }
@@ -806,34 +810,17 @@ fn validate_choice_variables(state_name: &str, rule: &Value) -> Result<(), AwsSe
 /// A reference path must start with `$` and every `[...]` index segment must be
 /// a balanced, non-empty, decimal-integer index. This mirrors the subset of
 /// JSONPath the interpreter understands; anything it cannot parse is rejected.
+/// A Reference Path (ResultPath): a JSONPath that identifies a single node,
+/// i.e. only property names and single array indexes.
 fn is_valid_reference_path(path: &str) -> bool {
-    if path != "$" && !path.starts_with("$.") && !path.starts_with("$[") {
-        return false;
-    }
-    let body = path
-        .strip_prefix("$.")
-        .or_else(|| path.strip_prefix('$'))
-        .unwrap_or(path);
-    for part in body.split('.') {
-        if !segment_is_valid(part) {
-            return false;
-        }
-    }
-    true
+    crate::jsonpath::JsonPath::parse(path).is_ok_and(|p| p.is_definite())
 }
 
-fn segment_is_valid(part: &str) -> bool {
-    match part.find('[') {
-        None => !part.contains(']'),
-        Some(open) => {
-            if !part.ends_with(']') {
-                return false;
-            }
-            let inner = &part[open + 1..part.len() - 1];
-            // Empty `[]` or non-integer (incl. multibyte/garbage) indices are invalid.
-            !inner.is_empty() && inner.parse::<usize>().is_ok()
-        }
-    }
+/// A Path (InputPath, OutputPath, ItemsPath, Choice `Variable`, ...): any
+/// JSONPath the interpreter can evaluate, including wildcards, slices and
+/// filters.
+fn is_valid_path(path: &str) -> bool {
+    crate::jsonpath::JsonPath::parse(path).is_ok()
 }
 
 fn invalid_reference_path(state_name: &str, field: &str, path: &str) -> AwsServiceError {
@@ -2103,6 +2090,32 @@ mod tests {
         let arr = r#"{"StartAt":"P","States":{"P":{"Type":"Pass",
             "ResultSelector":{"items":[{"bad.$":"literal"}]},"End":true}}}"#;
         assert!(validate_definition(arr).is_err());
+    }
+
+    #[test]
+    fn test_paths_accept_full_jsonpath_but_result_path_must_be_definite() {
+        let def = |field: &str, path: &str| {
+            json!({
+                "StartAt": "P",
+                "States": {"P": {"Type": "Pass", field: path, "End": true}}
+            })
+            .to_string()
+        };
+        for p in [
+            "$.items[*].id",
+            "$.a[?(@.x == 1)]",
+            "$['a']",
+            "$.a[-1]",
+            "$..id",
+            "$.a[1:2]",
+        ] {
+            assert!(validate_definition(&def("InputPath", p)).is_ok(), "{p}");
+            assert!(validate_definition(&def("OutputPath", p)).is_ok(), "{p}");
+        }
+        assert!(validate_definition(&def("ResultPath", "$['a'][0]")).is_ok());
+        for p in ["$.items[*]", "$..a", "$.a[?(@.x)]"] {
+            assert!(validate_definition(&def("ResultPath", p)).is_err(), "{p}");
+        }
     }
 
     #[test]

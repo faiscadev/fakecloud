@@ -204,7 +204,10 @@ pub(crate) fn run_pass_state(
         }),
     );
 
-    let result = execute_pass_state(state_def, &input);
+    let result = match execute_pass_state(state_def, &input) {
+        Ok(r) => r,
+        Err((error, cause)) => return Advance::Fail(error, cause),
+    };
 
     add_event(
         shared_state,
@@ -244,13 +247,19 @@ pub(crate) fn run_succeed_state(
     let processed = if input_path == Some("null") {
         json!({})
     } else {
-        apply_input_path(&input, input_path)
+        match apply_input_path(&input, input_path) {
+            Ok(v) => v,
+            Err((error, cause)) => return Advance::Fail(error, cause),
+        }
     };
 
     let output = if output_path == Some("null") {
         json!({})
     } else {
-        apply_output_path(&processed, output_path)
+        match apply_output_path(&processed, output_path) {
+            Ok(v) => v,
+            Err((error, cause)) => return Advance::Fail(error, cause),
+        }
     };
 
     add_event(
@@ -316,10 +325,17 @@ pub(crate) fn run_choice_state(
     let processed_input = if input_path == Some("null") {
         json!({})
     } else {
-        apply_input_path(&input, input_path)
+        match apply_input_path(&input, input_path) {
+            Ok(v) => v,
+            Err((error, cause)) => return Advance::Fail(error, cause),
+        }
     };
 
-    match evaluate_choice(state_def, &processed_input) {
+    let chosen = match evaluate_choice(state_def, &processed_input) {
+        Ok(chosen) => chosen,
+        Err((error, cause)) => return Advance::Fail(error, cause),
+    };
+    match chosen {
         Some(next) => {
             // A Choice state has no Parameters/ResultPath, so its effective
             // result is the InputPath-filtered input; OutputPath then filters
@@ -329,7 +345,10 @@ pub(crate) fn run_choice_state(
             let output = if output_path == Some("null") {
                 json!({})
             } else {
-                apply_output_path(&processed_input, output_path)
+                match apply_output_path(&processed_input, output_path) {
+                    Ok(v) => v,
+                    Err((error, cause)) => return Advance::Fail(error, cause),
+                }
             };
             add_event(
                 shared_state,
@@ -351,7 +370,10 @@ pub(crate) fn run_choice_state(
 }
 
 /// Execute a Pass state: apply InputPath, use Result if present, apply ResultPath and OutputPath.
-pub(crate) fn execute_pass_state(state_def: &Value, input: &Value) -> Value {
+pub(crate) fn execute_pass_state(
+    state_def: &Value,
+    input: &Value,
+) -> Result<Value, (String, String)> {
     let input_path = state_def["InputPath"].as_str();
     let result_path = state_def["ResultPath"].as_str();
     let output_path = state_def["OutputPath"].as_str();
@@ -359,14 +381,14 @@ pub(crate) fn execute_pass_state(state_def: &Value, input: &Value) -> Value {
     let effective_input = if input_path == Some("null") {
         json!({})
     } else {
-        apply_input_path(input, input_path)
+        apply_input_path(input, input_path)?
     };
 
     // A Pass state may carry a Parameters template that builds a new payload
     // from the effective input (and intrinsics). It transforms the effective
     // input before Result/ResultPath; previously it was ignored entirely.
     let transformed = if let Some(params) = state_def.get("Parameters") {
-        apply_parameters(params, &effective_input, None)
+        apply_parameters(params, &effective_input, None)?
     } else {
         effective_input
     };
@@ -384,7 +406,7 @@ pub(crate) fn execute_pass_state(state_def: &Value, input: &Value) -> Value {
     };
 
     if output_path == Some("null") {
-        json!({})
+        Ok(json!({}))
     } else {
         apply_output_path(&after_result, output_path)
     }
@@ -1173,7 +1195,11 @@ pub(crate) async fn poll_task_token(
 /// against the context object (Step Functions context object) instead of
 /// the state input. This is how `$$.Task.Token` is substituted for
 /// `.waitForTaskToken` integrations.
-pub(crate) fn apply_parameters(template: &Value, input: &Value, context: Option<&Value>) -> Value {
+pub(crate) fn apply_parameters(
+    template: &Value,
+    input: &Value,
+    context: Option<&Value>,
+) -> Result<Value, (String, String)> {
     match template {
         Value::Object(map) => {
             let mut result = serde_json::Map::new();
@@ -1181,34 +1207,42 @@ pub(crate) fn apply_parameters(template: &Value, input: &Value, context: Option<
                 if let Some(stripped) = key.strip_suffix(".$") {
                     if let Some(expr) = value.as_str() {
                         let resolved = if crate::intrinsics::is_intrinsic_call(expr) {
-                            crate::intrinsics::evaluate(expr, input).unwrap_or_else(|err| {
-                                tracing::warn!(error = %err, "States intrinsic failed");
-                                Value::Null
-                            })
-                        } else if expr.starts_with("$$.") {
-                            if let Some(ctx) = context {
-                                let path = expr.strip_prefix("$$.").unwrap_or(expr);
-                                crate::io_processing::resolve_path(ctx, path)
-                            } else {
-                                Value::Null
-                            }
+                            // A failing intrinsic fails the state
+                            // (States.IntrinsicFailure; a path argument that
+                            // matches nothing is States.Runtime).
+                            crate::intrinsics::evaluate_with_context(expr, input, context)
+                                .map_err(|e| e.into_states_error())?
                         } else {
-                            crate::io_processing::resolve_path(input, expr)
+                            crate::io_processing::resolve_with_context(input, context, expr)
+                                .map_err(|_| {
+                                    let scope = if expr.starts_with("$$") {
+                                        context.cloned().unwrap_or(Value::Null)
+                                    } else {
+                                        input.clone()
+                                    };
+                                    (
+                                        "States.Runtime".to_string(),
+                                        format!(
+                                            "The JSONPath '{expr}' specified for the field '{key}' \
+                                             could not be found in the input '{scope}'"
+                                        ),
+                                    )
+                                })?
                         };
                         result.insert(stripped.to_string(), resolved);
                     }
                 } else {
-                    result.insert(key.clone(), apply_parameters(value, input, context));
+                    result.insert(key.clone(), apply_parameters(value, input, context)?);
                 }
             }
-            Value::Object(result)
+            Ok(Value::Object(result))
         }
-        Value::Array(arr) => Value::Array(
+        Value::Array(arr) => Ok(Value::Array(
             arr.iter()
                 .map(|v| apply_parameters(v, input, context))
-                .collect(),
-        ),
-        other => other.clone(),
+                .collect::<Result<_, _>>()?,
+        )),
+        other => Ok(other.clone()),
     }
 }
 
@@ -1550,7 +1584,7 @@ mod tests {
             "literal": "static",
         });
         let input = json!({"name": "Eve", "n": 7});
-        let out = apply_parameters(&template, &input, None);
+        let out = apply_parameters(&template, &input, None).unwrap();
         assert_eq!(out["greeting"], json!("Hello Eve, count is 7"));
         assert_eq!(out["literal"], json!("static"));
     }
@@ -1559,22 +1593,47 @@ mod tests {
     fn apply_parameters_falls_back_to_jsonpath_for_non_intrinsics() {
         let template = json!({"x.$": "$.value"});
         let input = json!({"value": 42});
-        let out = apply_parameters(&template, &input, None);
+        let out = apply_parameters(&template, &input, None).unwrap();
         assert_eq!(out["x"], json!(42));
     }
 
     #[test]
-    fn apply_parameters_intrinsic_failure_yields_null() {
+    fn apply_parameters_intrinsic_failure_fails_the_state() {
         // Bad call: missing closing paren.
         let template = json!({"y.$": "States.Format('{}'"});
-        let out = apply_parameters(&template, &Value::Null, None);
-        // Falls through resolve_path since not detected as intrinsic
-        // (no `(` after States.Format... actually has `(`, so this *is*
-        // an intrinsic and should return Null on failure).
-        // But this missing-) call is detected: `is_intrinsic_call` =>
-        // contains '(' and starts with States. -> true, then evaluate
-        // returns Err -> Null.
-        assert_eq!(out["y"], Value::Null);
+        let (error, _) = apply_parameters(&template, &Value::Null, None).unwrap_err();
+        assert_eq!(error, "States.IntrinsicFailure");
+        // Nested inside an array/object too.
+        let template = json!({"a": [{"r.$": "States.ArrayGetItem($.arr, -1)"}]});
+        let (error, _) = apply_parameters(&template, &json!({"arr": [1]}), None).unwrap_err();
+        assert_eq!(error, "States.IntrinsicFailure");
+    }
+
+    #[test]
+    fn apply_parameters_missing_path_is_states_runtime() {
+        let template = json!({"x.$": "$.missing"});
+        let (error, cause) = apply_parameters(&template, &json!({"a": 1}), None).unwrap_err();
+        assert_eq!(error, "States.Runtime");
+        assert_eq!(
+            cause,
+            r#"The JSONPath '$.missing' specified for the field 'x.$' could not be found in the input '{"a":1}'"#
+        );
+        // An intrinsic path argument that matches nothing is States.Runtime too.
+        let template = json!({"x.$": "States.Format('{}', $.missing)"});
+        let (error, _) = apply_parameters(&template, &json!({}), None).unwrap_err();
+        assert_eq!(error, "States.Runtime");
+    }
+
+    #[test]
+    fn missing_paths_fail_pass_state() {
+        for def in [
+            json!({"Type": "Pass", "InputPath": "$.nope", "End": true}),
+            json!({"Type": "Pass", "OutputPath": "$.nope", "End": true}),
+            json!({"Type": "Pass", "Parameters": {"a.$": "$.nope"}, "End": true}),
+        ] {
+            let (error, _) = execute_pass_state(&def, &json!({"x": 1})).unwrap_err();
+            assert_eq!(error, "States.Runtime", "{def}");
+        }
     }
 
     #[test]
@@ -1590,7 +1649,7 @@ mod tests {
             "End": true,
         });
         let input = json!({"value": 99, "ignored": "x"});
-        let out = execute_pass_state(&state_def, &input);
+        let out = execute_pass_state(&state_def, &input).unwrap();
         assert_eq!(out["renamed"], json!(99));
         assert_eq!(out["constant"], json!("fixed"));
         // The non-templated field is dropped (Parameters builds a new payload).
@@ -1606,7 +1665,7 @@ mod tests {
             "OutputPath": "$.a",
             "End": true,
         });
-        let out = execute_pass_state(&state_def, &json!({"n": 7}));
+        let out = execute_pass_state(&state_def, &json!({"n": 7})).unwrap();
         assert_eq!(out, json!(7));
     }
 }

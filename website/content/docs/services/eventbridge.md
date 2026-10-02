@@ -15,7 +15,7 @@ fakecloud implements **57 of 57** EventBridge operations at 100% Smithy conforma
 - **Replay** — re-send archived events to targets
 - **Connections** — API connection management for HTTP targets
 - **API destinations** — outbound HTTP integrations
-- **Pattern matching** — full EventBridge pattern language including prefix, suffix, numeric comparisons, exists, and anything-but
+- **Pattern matching**: full EventBridge pattern language including prefix, suffix, equals-ignore-case, wildcard, cidr (IPv4 and IPv6), numeric comparisons, exists, anything-but and `$or`, with AWS array semantics (an array of objects matches when any element matches; every matcher except `exists: false` requires the field to be present)
 
 ## Protocol
 

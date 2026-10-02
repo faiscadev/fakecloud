@@ -863,7 +863,7 @@ fn apply_parameters_substitutes_json_path_refs() {
         "list": [ { "x.$": "$.user.id" } ]
     });
     let input = json!({ "user": { "id": 42, "name": "zoe" } });
-    let out = apply_parameters(&template, &input, None);
+    let out = apply_parameters(&template, &input, None).unwrap();
     assert_eq!(out["literal"], json!("constant"));
     assert_eq!(out["ref"], json!(42));
     assert_eq!(out["nested"]["inner"], json!("zoe"));
@@ -882,7 +882,7 @@ fn apply_parameters_resolves_context_object() {
         "Task": { "Token": "abc123" },
         "Execution": { "Id": "arn:aws:states:us-east-1:123:execution:sm:exec" }
     });
-    let out = apply_parameters(&template, &input, Some(&context));
+    let out = apply_parameters(&template, &input, Some(&context)).unwrap();
     assert_eq!(out["token"], json!("abc123"));
     assert_eq!(
         out["exec"],
@@ -1850,10 +1850,11 @@ async fn malformed_input_path_unclosed_bracket_does_not_panic() {
     )
     .await;
 
-    // No panic, and the execution reached a terminal state (did not hang RUNNING).
+    // No panic, and the execution reached a terminal state (did not hang
+    // RUNNING): an unparseable path fails the state with States.Runtime.
     read_exec(&state, &arn, |exec| {
-        assert_ne!(exec.status, ExecutionStatus::Running);
-        assert_eq!(exec.status, ExecutionStatus::Succeeded);
+        assert_eq!(exec.status, ExecutionStatus::Failed);
+        assert_eq!(exec.error.as_deref(), Some("States.Runtime"));
     });
 }
 
