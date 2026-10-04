@@ -116,10 +116,11 @@ pub trait SqsDelivery: Send + Sync {
     }
 
     /// The stored ARN of the queue a QueueUrl (`<endpoint>/<account>/<name>`)
-    /// names in `region`, looked up by account and queue name. A QueueUrl
-    /// carries no region, so the caller passes the region it is acting in
-    /// (the region an SQS request would be signed for). `None` when no such
-    /// queue exists there.
+    /// names, looked up by account and queue name. A fakecloud QueueUrl
+    /// carries no region, so the caller passes the region it is acting in:
+    /// that region's queue wins, else the queue of that account and name in
+    /// the one other region that has it. `None` when there is no such queue
+    /// (or it is ambiguous).
     fn queue_arn_for_url(&self, region: &str, queue_url: &str) -> Option<String> {
         let _ = (region, queue_url);
         None

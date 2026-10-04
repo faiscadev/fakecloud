@@ -58,9 +58,23 @@ impl SqsDelivery for SqsDeliveryImpl {
         let name = segments.next().filter(|s| !s.is_empty())?;
         let account = segments.next().filter(|s| !s.is_empty())?;
         let accounts = self.state.read();
-        let state = accounts.regional(account, region)?;
-        let url = state.name_to_url.get(name)?;
-        state.queues.get(url).map(|q| q.arn.clone())
+        let arn_in = |state: &crate::state::SqsState| {
+            let url = state.name_to_url.get(name)?;
+            state.queues.get(url).map(|q| q.arn.clone())
+        };
+        // The caller's region first. A fakecloud QueueUrl carries no region
+        // (an AWS one names it in its host), so a queue of that account and
+        // name that exists in exactly one other region is the one the URL
+        // was minted for.
+        if let Some(arn) = accounts.regional(account, region).and_then(arn_in) {
+            return Some(arn);
+        }
+        let mut found = accounts
+            .get(account)?
+            .regions()
+            .filter_map(|(_, state)| arn_in(state));
+        let only = found.next()?;
+        found.next().is_none().then_some(only)
     }
 
     fn deliver_to_queue(
@@ -385,10 +399,29 @@ mod tests {
                 .as_deref(),
             Some("arn:aws:sqs:eu-west-1:123456789012:orders")
         );
-        // The same URL in another region names a queue that does not exist.
+        // Called from another region, the URL still names the one queue of
+        // that account and name...
         assert_eq!(
-            delivery.queue_arn_for_url(REGION, &format!("{ENDPOINT}/{ACCOUNT}/orders")),
-            None
+            delivery
+                .queue_arn_for_url(REGION, &format!("{ENDPOINT}/{ACCOUNT}/orders"))
+                .as_deref(),
+            Some("arn:aws:sqs:eu-west-1:123456789012:orders")
+        );
+        // ...but once the caller's region has its own queue of that name, the
+        // caller's region wins.
+        {
+            let mut guard = delivery.state.write();
+            let east = guard.regional_mut(ACCOUNT, REGION);
+            let q = make_queue("orders", false, false);
+            east.name_to_url
+                .insert(q.queue_name.clone(), q.queue_url.clone());
+            east.queues.insert(q.queue_url.clone(), q);
+        }
+        assert_eq!(
+            delivery
+                .queue_arn_for_url(REGION, &format!("{ENDPOINT}/{ACCOUNT}/orders"))
+                .as_deref(),
+            Some("arn:aws:sqs:us-east-1:123456789012:orders")
         );
         assert_eq!(
             delivery.queue_arn_for_url("eu-west-1", &format!("{ENDPOINT}/{ACCOUNT}/missing")),
