@@ -267,6 +267,20 @@ impl<T> RegionalState<T> {
     pub fn clear(&mut self) {
         self.regions.clear();
     }
+
+    /// Project every region's state, keeping the account's routing defaults.
+    pub fn map<U>(&self, mut f: impl FnMut(&T) -> U) -> RegionalState<U> {
+        RegionalState {
+            account_id: self.account_id.clone(),
+            default_region: self.default_region.clone(),
+            endpoint: self.endpoint.clone(),
+            regions: self
+                .regions
+                .iter()
+                .map(|(k, v)| (k.clone(), f(v)))
+                .collect(),
+        }
+    }
 }
 
 impl<T: AccountState> RegionalState<T> {
