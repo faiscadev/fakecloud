@@ -6046,7 +6046,7 @@ mod tests {
         let accounts = svc.deps.sqs.read();
         accounts
             .get("123456789012")
-            .map(|s| s.queues.len())
+            .map(|s| s.regions().map(|(_, r)| r.queues.len()).sum())
             .unwrap_or(0)
     }
 

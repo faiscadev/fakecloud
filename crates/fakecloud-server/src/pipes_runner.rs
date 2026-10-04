@@ -1560,7 +1560,13 @@ mod tests {
         // The consumed message was acked (deleted) from the source queue...
         {
             let sqs = sqs_state.read();
-            let queue = sqs.get(ACCOUNT).unwrap().queues.values().next().unwrap();
+            let queue = sqs
+                .regional(ACCOUNT, REGION)
+                .unwrap()
+                .queues
+                .values()
+                .next()
+                .unwrap();
             assert!(
                 queue.messages.is_empty(),
                 "filtered-out source message must be acked (deleted)"

@@ -4993,7 +4993,7 @@ mod tests {
             .sqs
             .read()
             .get(account)
-            .map_or(0, |s| s.queues.len())
+            .map_or(0, |s| s.regions().map(|(_, r)| r.queues.len()).sum())
     }
 
     async fn create_set(svc: &CloudFormationService, name: &str, template: &str) {
@@ -7670,8 +7670,8 @@ mod tests {
             .sqs
             .write()
             .get_or_create(ACCT_B)
-            .queues
-            .remove(&queue_url)
+            .regions_mut()
+            .find_map(|(_, r)| r.queues.remove(&queue_url))
             .expect("queue existed");
 
         let xml = ok(&svc, "DetectStackSetDrift", &[("StackSetName", "app")]).await;

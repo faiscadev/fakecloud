@@ -6902,7 +6902,7 @@ mod tests {
 
         {
             let mut accounts = prov.sns_state.write();
-            let state = accounts.regional_mut(&prov.account_id, &prov.region);
+            let state = accounts.get_or_create(&prov.account_id);
             let stored = state.topics[&topic.physical_id]
                 .attributes
                 .get("Policy")
@@ -6913,7 +6913,7 @@ mod tests {
         prov.delete_resource(&sr).unwrap();
         {
             let mut accounts = prov.sns_state.write();
-            let state = accounts.regional_mut(&prov.account_id, &prov.region);
+            let state = accounts.get_or_create(&prov.account_id);
             assert!(!state.topics[&topic.physical_id]
                 .attributes
                 .contains_key("Policy"));
@@ -6948,7 +6948,7 @@ mod tests {
 
         {
             let mut accounts = prov.s3_state.write();
-            let state = accounts.regional_mut(&prov.account_id, &prov.region);
+            let state = accounts.get_or_create(&prov.account_id);
             let stored = state.buckets[&bucket.physical_id]
                 .policy
                 .as_ref()
@@ -6959,7 +6959,7 @@ mod tests {
         prov.delete_resource(&sr).unwrap();
         {
             let mut accounts = prov.s3_state.write();
-            let state = accounts.regional_mut(&prov.account_id, &prov.region);
+            let state = accounts.get_or_create(&prov.account_id);
             assert!(state.buckets[&bucket.physical_id].policy.is_none());
         }
     }
