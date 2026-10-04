@@ -11141,7 +11141,8 @@ mod tests {
             .expect_err("DelaySeconds 901 accepted on update");
         assert!(err.contains("DelaySeconds"), "{err}");
         let sqs = prov.sqs_state.read();
-        let queue = &sqs.get("123456789012").unwrap().queues[&created.physical_id];
+        let queue =
+            &sqs.regional("123456789012", "us-east-1").unwrap().queues[&created.physical_id];
         assert_eq!(
             queue.attributes.get("DelaySeconds").map(String::as_str),
             Some("0")
