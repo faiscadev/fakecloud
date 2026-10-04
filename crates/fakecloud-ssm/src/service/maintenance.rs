@@ -167,7 +167,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all_windows: Vec<Value> = state
             .maintenance_windows
             .values()
@@ -246,7 +248,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -482,7 +486,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -618,7 +624,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -838,7 +846,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -895,7 +905,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let exec = state
             .maintenance_window_executions
             .iter()
@@ -934,7 +946,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let exec = state
             .maintenance_window_executions
             .iter()
@@ -989,7 +1003,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let exec = state
             .maintenance_window_executions
             .iter()
@@ -1069,7 +1085,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all: Vec<Value> = state
             .maintenance_window_executions
             .iter()
@@ -1132,7 +1150,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let tasks: Vec<Value> = state
             .maintenance_window_executions
             .iter()
@@ -1204,7 +1224,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let invocations: Vec<Value> = state
             .maintenance_window_executions
             .iter()
@@ -1287,7 +1309,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let windows: Vec<Value> = state
             .maintenance_windows
             .values()

@@ -323,7 +323,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let doc = state
             .documents
             .get(name)
@@ -493,7 +495,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let doc = state
             .documents
             .get(name)
@@ -610,7 +614,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all_docs: Vec<Value> = state
             .documents
             .values()
@@ -641,7 +647,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let doc = state.documents.get(name).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -795,7 +803,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let doc = state
             .documents
             .get(name)
@@ -842,7 +852,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let doc = state
             .documents
             .get(name)
@@ -1016,7 +1028,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let policies: Vec<Value> = state
             .resource_policies
             .iter()

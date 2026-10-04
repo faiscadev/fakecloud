@@ -15,8 +15,8 @@ use fakecloud_core::validation::*;
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    ReplicaSetting, RotationRules, Secret, SecretVersion, SecretsManagerSnapshot, SecretsManagerState,
-    SharedSecretsManagerState, SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION,
+    ReplicaSetting, RotationRules, Secret, SecretVersion, SecretsManagerSnapshot,
+    SecretsManagerState, SharedSecretsManagerState, SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION,
 };
 
 /// Information needed to invoke the rotation Lambda after releasing state lock.
@@ -805,7 +805,9 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
         let mut response = json!({
@@ -946,7 +948,9 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         let mut secrets: Vec<&Secret> = state
             .secrets
@@ -1113,7 +1117,9 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
         // Stable order so the NextToken (a version id) resumes deterministically:
@@ -1680,7 +1686,9 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let mut secret_values: Vec<Value> = Vec::new();
         let mut errors: Vec<Value> = Vec::new();
         let mut next_token: Option<String> = None;
@@ -1866,7 +1874,9 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
         // Real AWS omits ResourcePolicy when none is attached; terraform
@@ -1899,7 +1909,9 @@ impl SecretsManagerService {
         if let Some(secret_id) = body["SecretId"].as_str() {
             let accounts = self.state.read();
             let empty = SecretsManagerState::new(&req.account_id, &req.region);
-            let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+            let state = accounts
+                .regional(&req.account_id, &req.region)
+                .unwrap_or(&empty);
             self.find_secret_key(state, secret_id)?;
         }
 

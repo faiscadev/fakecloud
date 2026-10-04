@@ -108,7 +108,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all_items: Vec<Value> = state
             .compliance_items
             .iter()
@@ -162,7 +164,9 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         // Group by compliance_type
         let mut type_counts: BTreeMap<String, (i64, i64)> = BTreeMap::new(); // (compliant, non_compliant)
@@ -207,7 +211,9 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         // Group by resource_id
         let mut resource_status: BTreeMap<String, (String, String, i64, i64)> = BTreeMap::new();

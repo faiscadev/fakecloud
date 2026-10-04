@@ -80,7 +80,9 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let syncs: Vec<Value> = state
             .resource_data_syncs
             .values()

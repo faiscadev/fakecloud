@@ -4303,7 +4303,15 @@ fn create_activation_stores_record() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body["ActivationId"].is_string());
     assert!(body["ActivationCode"].is_string());
-    assert_eq!(svc.state.read().default_regional().unwrap().activations.len(), 1);
+    assert_eq!(
+        svc.state
+            .read()
+            .default_regional()
+            .unwrap()
+            .activations
+            .len(),
+        1
+    );
 }
 
 #[test]
@@ -4332,7 +4340,13 @@ fn delete_activation_removes_existing() {
         json!({"ActivationId": id}),
     ))
     .unwrap();
-    assert!(svc.state.read().default_regional().unwrap().activations.is_empty());
+    assert!(svc
+        .state
+        .read()
+        .default_regional()
+        .unwrap()
+        .activations
+        .is_empty());
 }
 
 #[test]
@@ -5996,10 +6010,10 @@ fn same_parameter_name_coexists_in_two_regions() {
     }
     // A region that never saw the parameter does not have it.
     let err = expect_err(svc.get_parameter(&regional_request(
-            "GetParameter",
-            "ap-south-1",
-            json!({"Name": "/app/db"}),
-        )));
+        "GetParameter",
+        "ap-south-1",
+        json!({"Name": "/app/db"}),
+    )));
     assert_eq!(err.code(), "ParameterNotFound");
 }
 
@@ -6059,10 +6073,10 @@ fn parameter_arn_of_another_region_is_not_found() {
     }
     let west_arn = "arn:aws:ssm:eu-west-1:123456789012:parameter/x";
     let err = expect_err(svc.get_parameter(&regional_request(
-            "GetParameter",
-            "us-east-1",
-            json!({"Name": west_arn}),
-        )));
+        "GetParameter",
+        "us-east-1",
+        json!({"Name": west_arn}),
+    )));
     assert_eq!(err.code(), "ParameterNotFound");
     let got = json_body(
         svc.get_parameters(&regional_request(
@@ -6188,10 +6202,10 @@ fn default_patch_baseline_is_registered_per_region_and_os() {
     // region's AWS-provided baseline.
     for id in [custom.as_str(), aws_ubuntu_east.as_str()] {
         let err = expect_err(svc.register_default_patch_baseline(&regional_request(
-                "RegisterDefaultPatchBaseline",
-                "eu-west-1",
-                json!({"BaselineId": id}),
-            )));
+            "RegisterDefaultPatchBaseline",
+            "eu-west-1",
+            json!({"BaselineId": id}),
+        )));
         assert_eq!(err.code(), "DoesNotExistException");
     }
 
@@ -6247,10 +6261,10 @@ fn documents_and_maintenance_windows_are_region_scoped() {
     assert_eq!(windows("eu-west-1"), 1);
     assert_eq!(windows("us-east-1"), 0);
     let err = expect_err(svc.get_maintenance_window(&regional_request(
-            "GetMaintenanceWindow",
-            "us-east-1",
-            json!({"WindowId": window_id}),
-        )));
+        "GetMaintenanceWindow",
+        "us-east-1",
+        json!({"WindowId": window_id}),
+    )));
     assert_eq!(err.code(), "DoesNotExistException");
     // Deleting the document in one region leaves the other's.
     svc.delete_document(&regional_request(

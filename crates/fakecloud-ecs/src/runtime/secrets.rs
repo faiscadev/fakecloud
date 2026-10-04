@@ -156,14 +156,14 @@ impl EcsRuntime {
                     version_id,
                 )
                 .map_err(|e| format!("unable to retrieve secret from asm: {e}")),
-            SecretReference::Parameter(name) => {
-                self.read_ssm_parameter(account_id, region, name).map_err(|e| {
+            SecretReference::Parameter(name) => self
+                .read_ssm_parameter(account_id, region, name)
+                .map_err(|e| {
                     format!(
                         "unable to retrieve secrets from ssm: fetching secret data from SSM \
                          Parameter Store: {e}"
                     )
-                })
-            }
+                }),
         }
     }
 
@@ -235,14 +235,14 @@ impl EcsRuntime {
             region,
             name,
         )
-            .map(|p| p.value)
-            .map_err(|e| {
-                if e.code() == "ParameterNotFound" {
-                    invalid()
-                } else {
-                    format!("{}: {}", e.code(), e.message())
-                }
-            })
+        .map(|p| p.value)
+        .map_err(|e| {
+            if e.code() == "ParameterNotFound" {
+                invalid()
+            } else {
+                format!("{}: {}", e.code(), e.message())
+            }
+        })
     }
 }
 

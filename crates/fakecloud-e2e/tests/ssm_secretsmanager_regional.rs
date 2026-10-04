@@ -187,13 +187,14 @@ async fn secrets_are_region_scoped() {
         .expect("CreateSecret west (same name, other region)")
         .arn
         .unwrap();
-    assert!(east_arn.starts_with("arn:aws:secretsmanager:us-east-1:123456789012:secret:svc/password-"));
-    assert!(west_arn.starts_with("arn:aws:secretsmanager:eu-west-1:123456789012:secret:svc/password-"));
+    assert!(
+        east_arn.starts_with("arn:aws:secretsmanager:us-east-1:123456789012:secret:svc/password-")
+    );
+    assert!(
+        west_arn.starts_with("arn:aws:secretsmanager:eu-west-1:123456789012:secret:svc/password-")
+    );
 
-    for (client, value, arn) in [
-        (&east, "east-pw", &east_arn),
-        (&west, "west-pw", &west_arn),
-    ] {
+    for (client, value, arn) in [(&east, "east-pw", &east_arn), (&west, "west-pw", &west_arn)] {
         let got = client
             .get_secret_value()
             .secret_id("svc/password")

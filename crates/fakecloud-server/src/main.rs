@@ -2256,10 +2256,8 @@ async fn main() {
                                     "loaded secretsmanager persistence snapshot (multi-account)"
                                 );
                             } else if let Some(single_state) = snapshot.state {
-                                let secret_count: usize = single_state
-                                    .regions()
-                                    .map(|(_, s)| s.secrets.len())
-                                    .sum();
+                                let secret_count: usize =
+                                    single_state.regions().map(|(_, s)| s.secrets.len()).sum();
                                 let account_id = single_state.account_id().to_string();
                                 let mut mas = secretsmanager_state.write();
                                 *mas.get_or_create(&account_id) = single_state;

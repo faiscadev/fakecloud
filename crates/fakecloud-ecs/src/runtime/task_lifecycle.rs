@@ -61,7 +61,10 @@ impl EcsRuntime {
         for plan in plans {
             let mut env = plan.env.clone();
             for (name, value_from) in &plan.secrets_refs {
-                env.push((name.clone(), self.resolve_secret(account_id, &region, value_from)?));
+                env.push((
+                    name.clone(),
+                    self.resolve_secret(account_id, &region, value_from)?,
+                ));
             }
             // The agent/metadata endpoints live on fakecloud (the host);
             // the container reaches them via the platform host alias —

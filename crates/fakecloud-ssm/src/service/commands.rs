@@ -374,7 +374,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all_commands: Vec<Value> = state
             .commands
             .iter()
@@ -454,7 +456,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let cmd = state
             .commands
             .iter()
@@ -524,7 +528,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all_invocations: Vec<Value> = state
             .commands
             .iter()

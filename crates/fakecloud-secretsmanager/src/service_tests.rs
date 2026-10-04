@@ -1772,7 +1772,7 @@ async fn describe_secret_with_huge_persisted_rotation_days_does_not_panic() {
     {
         let mut accounts = state.write();
         let secret = accounts
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .values_mut()
             .find(|s| s.name == "rot-huge")
@@ -2762,7 +2762,8 @@ async fn test_rotate_secret_immediately_false_with_lambda_runs_test_step_only() 
     let original_current = {
         let accts = state.read();
         accts
-            .default_regional().unwrap()
+            .default_regional()
+            .unwrap()
             .secrets
             .get("rot-test-step")
             .unwrap()
@@ -2781,7 +2782,12 @@ async fn test_rotate_secret_immediately_false_with_lambda_runs_test_step_only() 
 
     {
         let accts = state.read();
-        let secret = accts.default_regional().unwrap().secrets.get("rot-test-step").unwrap();
+        let secret = accts
+            .default_regional()
+            .unwrap()
+            .secrets
+            .get("rot-test-step")
+            .unwrap();
         // A temporary AWSPENDING version was staged for the testSecret step,
         // carrying a copy of the current value.
         let pending = secret
@@ -2798,7 +2804,12 @@ async fn test_rotate_secret_immediately_false_with_lambda_runs_test_step_only() 
     // The cleanup removes the temporary AWSPENDING version.
     super::remove_rotation_test_pending(&state, &cleanup);
     let accts = state.read();
-    let secret = accts.default_regional().unwrap().secrets.get("rot-test-step").unwrap();
+    let secret = accts
+        .default_regional()
+        .unwrap()
+        .secrets
+        .get("rot-test-step")
+        .unwrap();
     assert!(
         !secret.versions.contains_key(token),
         "temporary AWSPENDING version must be cleaned up after the test step"
@@ -2854,7 +2865,12 @@ async fn test_rotate_immediately_false_pending_not_persisted() {
     // In-memory state is already clean.
     {
         let accts = state.read();
-        let secret = accts.default_regional().unwrap().secrets.get("rot-persist").unwrap();
+        let secret = accts
+            .default_regional()
+            .unwrap()
+            .secrets
+            .get("rot-persist")
+            .unwrap();
         assert!(!secret.versions.contains_key(token));
         assert!(secret
             .versions
@@ -3461,7 +3477,12 @@ async fn update_secret_prunes_deprecated_versions() {
     .unwrap();
 
     let accts = state.read();
-    let secret = accts.default_regional().unwrap().secrets.get("prune").unwrap();
+    let secret = accts
+        .default_regional()
+        .unwrap()
+        .secrets
+        .get("prune")
+        .unwrap();
     assert_eq!(
         secret.versions.len(),
         2,
@@ -3488,7 +3509,11 @@ async fn list_secret_version_ids_honors_include_deprecated() {
     // Inject a deprecated version (no staging labels) directly.
     {
         let mut accts = state.write();
-        let secret = accts.default_regional_mut().secrets.get_mut("listdep").unwrap();
+        let secret = accts
+            .default_regional_mut()
+            .secrets
+            .get_mut("listdep")
+            .unwrap();
         secret.versions.insert(
             "deprecated-vid".to_string(),
             SecretVersion {
@@ -3634,7 +3659,13 @@ async fn same_secret_name_coexists_in_two_regions() {
         json!({"SecretId": "db", "ForceDeleteWithoutRecovery": true}),
     )
     .await;
-    let got = call_in(&svc, "GetSecretValue", "eu-west-1", json!({"SecretId": "db"})).await;
+    let got = call_in(
+        &svc,
+        "GetSecretValue",
+        "eu-west-1",
+        json!({"SecretId": "db"}),
+    )
+    .await;
     assert_eq!(got["SecretString"], "west");
 }
 
@@ -3698,11 +3729,23 @@ async fn replicated_secret_exists_in_the_replica_region() {
     assert_eq!(created["ReplicationStatus"][0]["Status"], "InSync");
 
     // The replica is a secret of its own in eu-west-1, same name and suffix.
-    let replica = call_in(&svc, "DescribeSecret", "eu-west-1", json!({"SecretId": "rep"})).await;
+    let replica = call_in(
+        &svc,
+        "DescribeSecret",
+        "eu-west-1",
+        json!({"SecretId": "rep"}),
+    )
+    .await;
     assert_eq!(replica["ARN"], replica_arn);
     assert_eq!(replica["PrimaryRegion"], "us-east-1");
     assert!(replica.get("ReplicationStatus").is_none());
-    let got = call_in(&svc, "GetSecretValue", "eu-west-1", json!({"SecretId": "rep"})).await;
+    let got = call_in(
+        &svc,
+        "GetSecretValue",
+        "eu-west-1",
+        json!({"SecretId": "rep"}),
+    )
+    .await;
     assert_eq!(got["SecretString"], "v1");
     assert_eq!(got["ARN"], replica_arn);
 
@@ -3714,7 +3757,13 @@ async fn replicated_secret_exists_in_the_replica_region() {
         json!({"SecretId": "rep", "SecretString": "v2"}),
     )
     .await;
-    let got = call_in(&svc, "GetSecretValue", "eu-west-1", json!({"SecretId": "rep"})).await;
+    let got = call_in(
+        &svc,
+        "GetSecretValue",
+        "eu-west-1",
+        json!({"SecretId": "rep"}),
+    )
+    .await;
     assert_eq!(got["SecretString"], "v2");
 
     // The replica is read-only.
@@ -3746,7 +3795,13 @@ async fn replicated_secret_exists_in_the_replica_region() {
     )
     .await;
     assert_eq!(removed["ReplicationStatus"], json!([]));
-    let err = err_in(&svc, "DescribeSecret", "eu-west-1", json!({"SecretId": "rep"})).await;
+    let err = err_in(
+        &svc,
+        "DescribeSecret",
+        "eu-west-1",
+        json!({"SecretId": "rep"}),
+    )
+    .await;
     assert_eq!(err.code(), "ResourceNotFoundException");
 }
 
@@ -3775,7 +3830,13 @@ async fn replicate_to_region_with_name_clash_fails_unless_forced() {
     )
     .await;
     assert_eq!(out["ReplicationStatus"][0]["Status"], "Failed");
-    let got = call_in(&svc, "GetSecretValue", "eu-west-1", json!({"SecretId": "clash"})).await;
+    let got = call_in(
+        &svc,
+        "GetSecretValue",
+        "eu-west-1",
+        json!({"SecretId": "clash"}),
+    )
+    .await;
     assert_eq!(got["SecretString"], "local");
 
     let out = call_in(
@@ -3787,7 +3848,13 @@ async fn replicate_to_region_with_name_clash_fails_unless_forced() {
     )
     .await;
     assert_eq!(out["ReplicationStatus"][0]["Status"], "InSync");
-    let got = call_in(&svc, "GetSecretValue", "eu-west-1", json!({"SecretId": "clash"})).await;
+    let got = call_in(
+        &svc,
+        "GetSecretValue",
+        "eu-west-1",
+        json!({"SecretId": "clash"}),
+    )
+    .await;
     assert_eq!(got["SecretString"], "primary");
 
     // Replicating into the primary's own region is refused.
@@ -3852,7 +3919,13 @@ async fn stop_replication_promotes_the_replica() {
         json!({"SecretId": "promote", "SecretString": "independent"}),
     )
     .await;
-    let got = call_in(&svc, "GetSecretValue", "us-east-1", json!({"SecretId": "promote"})).await;
+    let got = call_in(
+        &svc,
+        "GetSecretValue",
+        "us-east-1",
+        json!({"SecretId": "promote"}),
+    )
+    .await;
     assert_eq!(got["SecretString"], "v");
 }
 
@@ -3887,7 +3960,11 @@ fn v2_snapshot_migrates_secrets_into_their_arn_region() {
         .unwrap()
         .state
         .unwrap();
-    assert!(regional.region("eu-west-1").unwrap().secrets.contains_key("w"));
+    assert!(regional
+        .region("eu-west-1")
+        .unwrap()
+        .secrets
+        .contains_key("w"));
     assert!(regional.region("us-east-1").is_none());
 
     let newer = crate::parse_secretsmanager_snapshot(br#"{"schema_version": 99}"#).unwrap();

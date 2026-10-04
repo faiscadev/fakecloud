@@ -93,7 +93,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all_baselines: Vec<Value> = state
             .patch_baselines
             .values()
@@ -163,7 +165,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let pb = state.patch_baselines.get(baseline_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -352,7 +356,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         // Find a patch group association matching both patch group and OS
         let found = state.patch_groups.iter().find(|pg| {
@@ -393,7 +399,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let all_mappings: Vec<Value> = state
             .patch_groups
             .iter()
@@ -548,7 +556,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         let all: Vec<Value> = instance_ids
             .iter()
@@ -579,7 +589,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         let all: Vec<Value> = state
             .inventory_entries
@@ -610,7 +622,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         let patches: Vec<Value> = state
             .inventory_entries
@@ -665,7 +679,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let pb = state.patch_baselines.get(baseline_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -869,7 +885,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         // A default registered for this OS in this region wins.
         if let Some(baseline_id) = state.default_patch_baselines.get(operating_system) {
@@ -1305,4 +1323,3 @@ pub(crate) fn default_baseline_os(baseline_id: &str) -> Option<&'static str> {
     let region = fakecloud_aws::arn::region_of(baseline_id)?;
     default_baseline_os_in(region, baseline_id)
 }
-

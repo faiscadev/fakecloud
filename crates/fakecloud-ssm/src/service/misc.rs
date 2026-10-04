@@ -58,7 +58,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
 
         let mut aggregate_closed = false;
         let mut next_transition: Option<DateTime<Utc>> = None;
@@ -116,7 +118,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         if let Some(setting) = state.service_settings.get(setting_id) {
             Ok(AwsResponse::ok_json(json!({
                 "ServiceSetting": {

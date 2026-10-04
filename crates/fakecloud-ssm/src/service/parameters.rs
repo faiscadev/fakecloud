@@ -1058,15 +1058,15 @@ impl SsmService {
             .regional(account_id, region)
             .and_then(|sm| sm.secrets.get(secret_name))
             .ok_or_else(|| {
-            AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ParameterNotFound",
-                format!(
-                    "An error occurred (ParameterNotFound) when referencing \
+                AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "ParameterNotFound",
+                    format!(
+                        "An error occurred (ParameterNotFound) when referencing \
                      Secrets Manager: Secret {raw_name} not found.",
-                ),
-            )
-        })?;
+                    ),
+                )
+            })?;
 
         if secret.deleted {
             return Err(AwsServiceError::aws_error(
@@ -1181,12 +1181,8 @@ impl SsmService {
                     })));
                 }
                 if let Some(hist) = param.history.iter().find(|h| h.version == ver) {
-                    let v = self.render_history_value(
-                        param,
-                        hist,
-                        with_decryption,
-                        &req.account_id,
-                    );
+                    let v =
+                        self.render_history_value(param, hist, with_decryption, &req.account_id);
                     return Ok(AwsResponse::ok_json(json!({ "Parameter": v })));
                 }
                 Err(AwsServiceError::aws_error(
@@ -1449,9 +1445,7 @@ impl SsmService {
                 .map_err(|_| super::invalid_next_token())?;
         let parameters: Vec<Value> = page_params
             .iter()
-            .map(|p| {
-                self.render_param_to_json(p, true, with_decryption, &req.account_id)
-            })
+            .map(|p| self.render_param_to_json(p, true, with_decryption, &req.account_id))
             .collect();
 
         let mut resp = json!({ "Parameters": parameters });
@@ -1907,11 +1901,7 @@ pub fn param_arn(region: &str, account_id: &str, name: &str) -> String {
     Arn::regional("ssm", region, account_id, &resource).to_string()
 }
 
-pub(super) fn param_to_json(
-    p: &SsmParameter,
-    with_value: bool,
-    with_decryption: bool,
-) -> Value {
+pub(super) fn param_to_json(p: &SsmParameter, with_value: bool, with_decryption: bool) -> Value {
     let arn = &p.arn;
     let mut v = json!({
         "Name": p.name,

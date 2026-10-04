@@ -167,7 +167,9 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let tag_map = Self::resolve_tags(state, resource_type, resource_id)?;
         let result = tags::tags_to_json(tag_map, "Key", "Value");
 

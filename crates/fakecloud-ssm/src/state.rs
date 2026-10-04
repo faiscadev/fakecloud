@@ -961,13 +961,14 @@ impl fakecloud_core::multi_account::SplitByRegion for SsmState {
                 None => true,
             });
         let mut moved_connectors = Vec::new();
-        self.cloud_connectors.retain(|k, c| match elsewhere(&c.arn) {
-            Some(region) => {
-                moved_connectors.push((region, k.clone(), c.clone()));
-                false
-            }
-            None => true,
-        });
+        self.cloud_connectors
+            .retain(|k, c| match elsewhere(&c.arn) {
+                Some(region) => {
+                    moved_connectors.push((region, k.clone(), c.clone()));
+                    false
+                }
+                None => true,
+            });
 
         // The single pre-per-OS registered default becomes the default of
         // the operating system its baseline targets.
@@ -1199,7 +1200,9 @@ mod tests {
         // default became that baseline's OS default.
         assert!(east.patch_baselines.contains_key("pb-1"));
         assert_eq!(
-            east.default_patch_baselines.get("UBUNTU").map(String::as_str),
+            east.default_patch_baselines
+                .get("UBUNTU")
+                .map(String::as_str),
             Some("pb-1")
         );
         // A region created by the migration still has the public parameters.

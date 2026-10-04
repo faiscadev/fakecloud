@@ -113,7 +113,9 @@ impl SsmService {
             .ok_or_else(|| missing("CloudConnectorId"))?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let c = state
             .cloud_connectors
             .get(id)
@@ -141,7 +143,9 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 10)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let connectors: Vec<Value> = state
             .cloud_connectors
             .values()
@@ -228,7 +232,9 @@ impl SsmService {
             .ok_or_else(|| missing("CloudConnectorId"))?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let _c = state
             .cloud_connectors
             .get(id)

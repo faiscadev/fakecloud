@@ -328,10 +328,10 @@ mod tests {
         let secret = make_secret("huge", true, Some(i64::MAX), Some(1));
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("huge".to_string(), secret);
-        let rotated = check_and_rotate(&state, None, None).await;
+        let rotated = check_and_rotate(&state, None, None, None).await;
         assert!(rotated.is_empty());
     }
 
