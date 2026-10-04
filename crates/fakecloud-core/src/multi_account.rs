@@ -405,6 +405,83 @@ impl<T: SplitByRegion> MultiAccountState<T> {
     }
 }
 
+/// Versioned on-disk snapshot of a regional service's state.
+///
+/// `accounts` holds every account's per-region state. `state` is only set
+/// when a legacy single-account snapshot is migrated: that one account's
+/// state split by region, for the loader to merge into its own container.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionalSnapshot<T> {
+    pub schema_version: u32,
+    #[serde(default = "none")]
+    pub accounts: Option<MultiRegionState<T>>,
+    #[serde(default = "none", skip_serializing_if = "Option::is_none")]
+    pub state: Option<RegionalState<T>>,
+}
+
+fn none<T>() -> Option<T> {
+    None
+}
+
+impl<T> RegionalSnapshot<T> {
+    /// A snapshot of the whole container at `schema_version`.
+    pub fn of(schema_version: u32, accounts: MultiRegionState<T>) -> Self {
+        Self {
+            schema_version,
+            accounts: Some(accounts),
+            state: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct SnapshotVersionProbe {
+    schema_version: u32,
+}
+
+#[derive(Deserialize)]
+#[serde(bound = "T: serde::de::DeserializeOwned")]
+struct LegacySnapshot<T> {
+    #[serde(default = "none")]
+    accounts: Option<MultiAccountState<T>>,
+    #[serde(default = "none")]
+    state: Option<T>,
+}
+
+/// Parse a regional service's snapshot. `current` is the first schema
+/// version that stores per-region state: an older snapshot (one state per
+/// account, or one single-account `state`) is migrated with
+/// [`SplitByRegion`]; `legacy_single` splits a single-account state (it knows
+/// the state's own account, region and endpoint fields). A snapshot newer
+/// than `current` comes back with its on-disk `schema_version` and no state,
+/// for the caller to refuse.
+pub fn parse_regional_snapshot<T>(
+    bytes: &[u8],
+    current: u32,
+    legacy_single: impl FnOnce(T) -> RegionalState<T>,
+) -> Result<RegionalSnapshot<T>, serde_json::Error>
+where
+    T: SplitByRegion + serde::de::DeserializeOwned,
+{
+    let SnapshotVersionProbe { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version > current {
+        return Ok(RegionalSnapshot {
+            schema_version,
+            accounts: None,
+            state: None,
+        });
+    }
+    if schema_version == current {
+        return serde_json::from_slice(bytes);
+    }
+    let legacy: LegacySnapshot<T> = serde_json::from_slice(bytes)?;
+    Ok(RegionalSnapshot {
+        schema_version: current,
+        accounts: legacy.accounts.map(MultiAccountState::into_regional),
+        state: legacy.state.map(legacy_single),
+    })
+}
+
 /// The region an ARN names, or `default` when it names none. Convenience for
 /// [`SplitByRegion`] implementations.
 pub fn arn_region_or<'a>(arn: &'a str, default: &'a str) -> &'a str {
@@ -579,5 +656,60 @@ mod tests {
             MultiAccountState::new("111111111111", "eu-central-1", "http://localhost:4566");
         mrs.default_regional_mut().items.push("z".into());
         assert!(mrs.regional("111111111111", "eu-central-1").is_some());
+    }
+
+    #[test]
+    fn parse_regional_snapshot_migrates_legacy_and_reports_newer() {
+        let mut legacy: MultiAccountState<TestState> =
+            MultiAccountState::new("111111111111", "us-east-1", "http://localhost:4566");
+        legacy
+            .default_mut()
+            .items
+            .push("arn:aws:sqs:eu-west-1:111111111111:a".into());
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({"schema_version": 1, "accounts": legacy}))
+                .unwrap();
+        let snap = parse_regional_snapshot::<TestState>(&bytes, 2, |_| unreachable!()).unwrap();
+        assert_eq!(snap.schema_version, 2);
+        let accounts = snap.accounts.unwrap();
+        assert_eq!(
+            accounts
+                .regional("111111111111", "eu-west-1")
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+
+        let current = serde_json::to_vec(&RegionalSnapshot::of(2, accounts)).unwrap();
+        let again = parse_regional_snapshot::<TestState>(&current, 2, |_| unreachable!()).unwrap();
+        assert!(again
+            .accounts
+            .unwrap()
+            .regional("111111111111", "eu-west-1")
+            .is_some());
+
+        let single = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "state": {"account_id": "111111111111", "items": ["x"]}
+        }))
+        .unwrap();
+        let snap = parse_regional_snapshot::<TestState>(&single, 2, |s| {
+            RegionalState::from_legacy("111111111111", "us-east-1", "", s)
+        })
+        .unwrap();
+        assert_eq!(
+            snap.state.unwrap().region("us-east-1").unwrap().items,
+            ["x"]
+        );
+
+        let newer = parse_regional_snapshot::<TestState>(
+            br#"{"schema_version": 9}"#,
+            2,
+            |_| unreachable!(),
+        )
+        .unwrap();
+        assert_eq!(newer.schema_version, 9);
+        assert!(newer.accounts.is_none());
     }
 }
