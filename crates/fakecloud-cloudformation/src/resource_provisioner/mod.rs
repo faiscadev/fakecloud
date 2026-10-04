@@ -8316,7 +8316,7 @@ mod tests {
             "P",
             serde_json::json!({"Name": "/cn/param", "Value": "v", "Type": "String"}),
         );
-        let param_arn = prov.ssm_state.read().get(ACCT).unwrap().parameters["/cn/param"]
+        let param_arn = prov.ssm_state.read().regional(ACCT, CN).unwrap().parameters["/cn/param"]
             .arn
             .clone();
         assert_eq!(param_arn, fakecloud_ssm::param_arn(CN, ACCT, "/cn/param"));
@@ -9693,7 +9693,7 @@ mod tests {
         let prov = make_provisioner();
         let seed = |name: &str, deletion_date: chrono::DateTime<Utc>| {
             let mut sm = prov.secretsmanager_state.write();
-            let st = sm.get_or_create("123456789012");
+            let st = sm.regional_mut("123456789012", "us-east-1");
             let now = Utc::now();
             st.secrets.insert(
                 name.to_string(),
@@ -9719,6 +9719,8 @@ mod tests {
                     last_rotated_at: None,
                     resource_policy: None,
                     replica_regions: Vec::new(),
+                    replica_settings: Default::default(),
+                    primary_region: None,
                 },
             );
         };
@@ -9744,7 +9746,7 @@ mod tests {
             .expect("an expired recovery window frees the name");
         assert!(!created.physical_id.ends_with("-OldOld"));
         let sm = prov.secretsmanager_state.read();
-        let secret = &sm.get("123456789012").unwrap().secrets["expired"];
+        let secret = &sm.regional("123456789012", "us-east-1").unwrap().secrets["expired"];
         assert!(!secret.deleted);
         assert_eq!(secret.arn, created.physical_id);
 
@@ -9781,7 +9783,7 @@ mod tests {
         assert_eq!(sr.physical_id, arn);
         // Keyed by name like API-created secrets, so name lookups resolve it.
         let sm = prov.secretsmanager_state.read();
-        let acct = sm.get("123456789012").unwrap();
+        let acct = sm.regional("123456789012", "us-east-1").unwrap();
         assert_eq!(
             acct.secrets.get("my-secret").map(|s| s.arn.as_str()),
             Some(arn.as_str())
@@ -10595,7 +10597,7 @@ mod tests {
         .expect("update succeeds")
         .expect("AWS::SSM::Parameter is updatable");
         let ssm = prov.ssm_state.read();
-        let acct = ssm.get("123456789012").unwrap();
+        let acct = ssm.regional("123456789012", "us-east-1").unwrap();
         let param = acct.parameters.get("/app/db").unwrap();
         assert_eq!(param.value, "v2", "GetParameter must return the new value");
         assert_eq!(param.version, 2, "overwrite bumps the version");
@@ -10670,7 +10672,7 @@ mod tests {
             .expect("delete returns ok");
         {
             let ssm = prov.ssm_state.read();
-            let acct = ssm.get("123456789012").unwrap();
+            let acct = ssm.regional("123456789012", "us-east-1").unwrap();
             assert!(
                 acct.parameters.contains_key("/keep/me"),
                 "DeletionPolicy: Retain must preserve the parameter"
@@ -10680,7 +10682,7 @@ mod tests {
         // The unconditional delete still tears it down (control).
         prov.delete_resource(&created).expect("hard delete ok");
         let ssm = prov.ssm_state.read();
-        let acct = ssm.get("123456789012").unwrap();
+        let acct = ssm.regional("123456789012", "us-east-1").unwrap();
         assert!(
             !acct.parameters.contains_key("/keep/me"),
             "an explicit delete removes the parameter"
@@ -10701,7 +10703,7 @@ mod tests {
         prov.delete_resource_respecting_policy(&created)
             .expect("delete ok");
         let ssm = prov.ssm_state.read();
-        let acct = ssm.get("123456789012").unwrap();
+        let acct = ssm.regional("123456789012", "us-east-1").unwrap();
         assert!(
             !acct.parameters.contains_key("/gone"),
             "default (None) policy deletes the parameter"
@@ -10908,7 +10910,7 @@ mod tests {
         .expect("update succeeds")
         .expect("AWS::SecretsManager::Secret is updatable");
         let sm = prov.secretsmanager_state.read();
-        let acct = sm.get("123456789012").unwrap();
+        let acct = sm.regional("123456789012", "us-east-1").unwrap();
         let key = acct.secret_key(&created.physical_id).unwrap();
         let secret = acct.secrets.get(&key).unwrap();
         let current = secret

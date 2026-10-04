@@ -23,6 +23,7 @@ use crate::state::{SecretVersion, SharedSecretsManagerState};
 pub async fn check_and_rotate(
     state: &SharedSecretsManagerState,
     delivery_bus: Option<&Arc<DeliveryBus>>,
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     snapshot_store: Option<Arc<dyn fakecloud_persistence::SnapshotStore>>,
 ) -> Vec<String> {
     let now = Utc::now();
@@ -32,10 +33,12 @@ pub async fn check_and_rotate(
     let due_secrets: Vec<DueSecret> = {
         let accounts = state.read();
         accounts
-            .iter()
-            .flat_map(|(_, acct)| acct.secrets.values())
+            .iter_regional()
+            .flat_map(|(_, _, st)| st.secrets.values())
             .filter_map(|secret| {
-                if secret.deleted {
+                // A replica rotates with its primary (in the primary's
+                // region), never on its own.
+                if secret.deleted || secret.primary_region.is_some() {
                     return None;
                 }
                 if secret.rotation_enabled != Some(true) {
@@ -66,13 +69,11 @@ pub async fn check_and_rotate(
         // Mutate state: create pending version, update timestamps
         let (invocation, version_created) = {
             let mut accounts = state.write();
-            // Find the account that owns this secret by ARN prefix
-            let account_id = due.arn.split(':').nth(4).unwrap_or("").to_string();
-            let acct = match accounts.get_mut(&account_id) {
-                Some(a) => a,
-                None => continue,
-            };
-            let secret = match acct.secrets.get_mut(&due.name) {
+            // The account and region that own this secret, from its ARN.
+            let secret = match accounts
+                .by_arn_mut(&due.arn)
+                .and_then(|st| st.secrets.get_mut(&due.name))
+            {
                 Some(s) => s,
                 None => continue,
             };
@@ -132,6 +133,22 @@ pub async fn check_and_rotate(
             } else {
                 None
             };
+
+            // Carry the new version to the secret's replicas.
+            if version_created {
+                if let (Some(account), Some(region)) = (
+                    fakecloud_aws::arn::account_of(&due.arn),
+                    fakecloud_aws::arn::region_of(&due.arn),
+                ) {
+                    crate::service::sync_replicas(
+                        &mut accounts,
+                        kms_hook,
+                        account,
+                        region,
+                        &due.name,
+                    );
+                }
+            }
 
             (invocation, version_created)
         };
@@ -264,6 +281,8 @@ mod tests {
             last_rotated_at: last_rotated,
             resource_policy: None,
             replica_regions: Vec::new(),
+            replica_settings: BTreeMap::new(),
+            primary_region: None,
         }
     }
 
@@ -274,16 +293,16 @@ mod tests {
         let secret = make_secret("due-secret", true, Some(1), Some(2));
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("due-secret".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None, None).await;
+        let rotated = check_and_rotate(&state, None, None, None).await;
         assert_eq!(rotated, vec!["due-secret"]);
 
         // Verify a new version was created (simple rotation without Lambda)
         let _accts = state.read();
-        let s = _accts.default_ref();
+        let s = _accts.default_regional().unwrap();
         let secret = &s.secrets["due-secret"];
         assert!(secret.versions.len() > 1, "new version should be created");
     }
@@ -295,11 +314,11 @@ mod tests {
         let secret = make_secret("not-due", true, Some(30), Some(1));
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("not-due".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None, None).await;
+        let rotated = check_and_rotate(&state, None, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -322,11 +341,11 @@ mod tests {
         let secret = make_secret("disabled", false, Some(1), Some(2));
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("disabled".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None, None).await;
+        let rotated = check_and_rotate(&state, None, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -336,11 +355,11 @@ mod tests {
         let secret = make_secret("no-rules", true, None, Some(2));
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("no-rules".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None, None).await;
+        let rotated = check_and_rotate(&state, None, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -350,11 +369,11 @@ mod tests {
         let secret = make_secret("no-last", true, Some(1), None);
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("no-last".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None, None).await;
+        let rotated = check_and_rotate(&state, None, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -365,11 +384,11 @@ mod tests {
         secret.deleted = true;
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("deleted".to_string(), secret);
 
-        let rotated = check_and_rotate(&state, None, None).await;
+        let rotated = check_and_rotate(&state, None, None, None).await;
         assert!(rotated.is_empty());
     }
 
@@ -399,13 +418,14 @@ mod tests {
         let original_vid = secret.current_version_id.clone();
         state
             .write()
-            .default_mut()
+            .default_regional_mut()
             .secrets
             .insert("due-secret".to_string(), secret);
 
         let store = Arc::new(RecordingStore::default());
         let rotated = check_and_rotate(
             &state,
+            None,
             None,
             Some(store.clone() as Arc<dyn fakecloud_persistence::SnapshotStore>),
         )
@@ -419,7 +439,7 @@ mod tests {
             .expect("rotation must persist a snapshot");
         let snap: crate::SecretsManagerSnapshot = serde_json::from_slice(&bytes).unwrap();
         let accounts = snap.accounts.expect("multi-account snapshot");
-        let persisted = &accounts.default_ref().secrets["due-secret"];
+        let persisted = &accounts.default_regional().unwrap().secrets["due-secret"];
         assert_ne!(
             persisted.current_version_id, original_vid,
             "persisted snapshot must hold the rotated version"

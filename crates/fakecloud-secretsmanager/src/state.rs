@@ -23,10 +23,45 @@ pub struct Secret {
     pub rotation_rules: Option<RotationRules>,
     pub last_rotated_at: Option<DateTime<Utc>>,
     pub resource_policy: Option<String>,
-    /// Replica regions added via ReplicateSecretToRegions. Reflected in
-    /// ReplicationStatus on describe/replicate responses.
+    /// Replica regions added via ReplicateSecretToRegions (or CreateSecret's
+    /// AddReplicaRegions), in the order they were added. Set on a primary
+    /// secret only; each healthy replica exists as its own [`Secret`] in that
+    /// region's state. Reflected in ReplicationStatus.
     #[serde(default)]
     pub replica_regions: Vec<String>,
+    /// Per-replica-region settings of a primary secret, keyed by region.
+    #[serde(default)]
+    pub replica_settings: BTreeMap<String, ReplicaSetting>,
+    /// Set on a replica secret: the region of its primary. A replica is
+    /// read-only and kept in sync with the primary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_region: Option<String>,
+}
+
+/// One replica region of a primary secret.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ReplicaSetting {
+    /// The KMS key the replica is encrypted with (`AddReplicaRegions[].KmsKeyId`);
+    /// `None` for the region's `aws/secretsmanager` key.
+    #[serde(default)]
+    pub kms_key_id: Option<String>,
+    /// `InSync` or `Failed`.
+    pub status: String,
+    pub status_message: String,
+}
+
+impl ReplicaSetting {
+    pub fn in_sync(kms_key_id: Option<String>) -> Self {
+        Self {
+            kms_key_id,
+            status: "InSync".to_string(),
+            status_message: "Replication succeeded".to_string(),
+        }
+    }
+
+    pub fn is_in_sync(&self) -> bool {
+        self.status == "InSync"
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -129,12 +164,29 @@ fn is_partial_secret_arn(stored: &str, partial: &str) -> bool {
         .is_some_and(|suffix| suffix.chars().count() == 6)
 }
 
+/// Secrets Manager state partitioned by account and region: secrets are
+/// regional, so the same secret name can exist independently in two regions of
+/// one account, and a request only sees the secrets of its own region. A
+/// replicated secret exists once per region: the primary in its region and a
+/// read-only replica (ARN naming the replica region) in each replica region.
 pub type SharedSecretsManagerState =
-    Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<SecretsManagerState>>>;
+    Arc<RwLock<fakecloud_core::multi_account::MultiRegionState<SecretsManagerState>>>;
 
 impl fakecloud_core::multi_account::AccountState for SecretsManagerState {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         Self::new(account_id, region)
+    }
+}
+
+impl fakecloud_core::multi_account::SplitByRegion for SecretsManagerState {
+    /// Every secret goes to the region its ARN names.
+    fn split_by_region(self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
+        for (key, secret) in self.secrets {
+            let region = fakecloud_aws::arn::region_of(&secret.arn).map(str::to_string);
+            into.region_or_default_mut(region.as_deref())
+                .secrets
+                .insert(key, secret);
+        }
     }
 }
 
@@ -144,12 +196,60 @@ impl fakecloud_core::multi_account::AccountState for SecretsManagerState {
 pub struct SecretsManagerSnapshot {
     pub schema_version: u32,
     #[serde(default)]
-    pub accounts: Option<fakecloud_core::multi_account::MultiAccountState<SecretsManagerState>>,
-    #[serde(default)]
-    pub state: Option<SecretsManagerState>,
+    pub accounts: Option<fakecloud_core::multi_account::MultiRegionState<SecretsManagerState>>,
+    /// Only set when a v1 (single-account) snapshot is migrated: that one
+    /// account's state split by region, for the caller to merge into its own
+    /// container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<fakecloud_core::multi_account::RegionalState<SecretsManagerState>>,
 }
 
-pub const SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// v3: state partitioned by (account, region). v2 kept one state per
+/// account; v1 a single account's.
+pub const SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+
+/// The shape v1 and v2 snapshots stored: one state per account.
+#[derive(Debug, serde::Deserialize)]
+struct LegacySecretsManagerSnapshot {
+    #[serde(default)]
+    accounts: Option<fakecloud_core::multi_account::MultiAccountState<SecretsManagerState>>,
+    #[serde(default)]
+    state: Option<SecretsManagerState>,
+}
+
+#[derive(serde::Deserialize)]
+struct SnapshotVersion {
+    schema_version: u32,
+}
+
+/// Parse a persisted Secrets Manager snapshot, migrating older schemas to the
+/// current one by moving every secret into the region its ARN names. A
+/// snapshot newer than this build comes back with its on-disk
+/// `schema_version` and no state, for the caller to refuse.
+pub fn parse_secretsmanager_snapshot(
+    bytes: &[u8],
+) -> Result<SecretsManagerSnapshot, serde_json::Error> {
+    let SnapshotVersion { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version > SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION {
+        return Ok(SecretsManagerSnapshot {
+            schema_version,
+            accounts: None,
+            state: None,
+        });
+    }
+    if schema_version == SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION {
+        return serde_json::from_slice(bytes);
+    }
+    let legacy: LegacySecretsManagerSnapshot = serde_json::from_slice(bytes)?;
+    Ok(SecretsManagerSnapshot {
+        schema_version: SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION,
+        accounts: legacy.accounts.map(|a| a.into_regional()),
+        state: legacy.state.map(|s| {
+            let (account, region) = (s.account_id.clone(), s.region.clone());
+            fakecloud_core::multi_account::RegionalState::from_legacy(&account, &region, "", s)
+        }),
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -188,6 +288,8 @@ mod tests {
                 last_rotated_at: None,
                 resource_policy: None,
                 replica_regions: Vec::new(),
+                replica_settings: BTreeMap::new(),
+                primary_region: None,
             },
         );
         state.reset();
@@ -215,6 +317,8 @@ mod tests {
             last_rotated_at: None,
             resource_policy: None,
             replica_regions: Vec::new(),
+            replica_settings: BTreeMap::new(),
+            primary_region: None,
         }
     }
 

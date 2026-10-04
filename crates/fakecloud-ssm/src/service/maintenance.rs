@@ -116,7 +116,7 @@ impl SsmService {
         let input = CreateMaintenanceWindowInput::from_body(&req.json_body())?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         // Idempotency: if a window with the same ClientToken already exists,
         // hand back its id without creating a new window.
@@ -167,7 +167,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let all_windows: Vec<Value> = state
             .maintenance_windows
             .values()
@@ -246,7 +246,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -298,7 +298,7 @@ impl SsmService {
             .ok_or_else(|| missing("WindowId"))?;
         validate_string_length("WindowId", window_id, 20, 20)?;
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.maintenance_windows.remove(window_id);
         Ok(AwsResponse::ok_json(json!({ "WindowId": window_id })))
     }
@@ -326,7 +326,7 @@ impl SsmService {
         validate_optional_range_i64("Cutoff", body["Cutoff"].as_i64(), 0, 23)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mw = state
             .maintenance_windows
             .get_mut(window_id)
@@ -424,7 +424,7 @@ impl SsmService {
         );
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mw = state
             .maintenance_windows
             .get_mut(window_id)
@@ -457,7 +457,7 @@ impl SsmService {
             .ok_or_else(|| missing("WindowTargetId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mw = state
             .maintenance_windows
             .get_mut(window_id)
@@ -482,7 +482,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -552,7 +552,7 @@ impl SsmService {
         );
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mw = state
             .maintenance_windows
             .get_mut(window_id)
@@ -593,7 +593,7 @@ impl SsmService {
             .ok_or_else(|| missing("WindowTaskId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mw = state
             .maintenance_windows
             .get_mut(window_id)
@@ -618,7 +618,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -674,7 +674,7 @@ impl SsmService {
             .ok_or_else(|| missing("WindowTargetId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mw = state
             .maintenance_windows
             .get_mut(window_id)
@@ -736,7 +736,7 @@ impl SsmService {
             .ok_or_else(|| missing("WindowTaskId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mw = state
             .maintenance_windows
             .get_mut(window_id)
@@ -838,7 +838,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let mw = state
             .maintenance_windows
             .get(window_id)
@@ -895,7 +895,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let exec = state
             .maintenance_window_executions
             .iter()
@@ -934,7 +934,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let exec = state
             .maintenance_window_executions
             .iter()
@@ -989,7 +989,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let exec = state
             .maintenance_window_executions
             .iter()
@@ -1069,7 +1069,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let all: Vec<Value> = state
             .maintenance_window_executions
             .iter()
@@ -1132,7 +1132,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let tasks: Vec<Value> = state
             .maintenance_window_executions
             .iter()
@@ -1204,7 +1204,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let invocations: Vec<Value> = state
             .maintenance_window_executions
             .iter()
@@ -1287,7 +1287,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let windows: Vec<Value> = state
             .maintenance_windows
             .values()
@@ -1330,7 +1330,7 @@ impl SsmService {
             .ok_or_else(|| missing("WindowExecutionId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let exec = state
             .maintenance_window_executions
             .iter_mut()

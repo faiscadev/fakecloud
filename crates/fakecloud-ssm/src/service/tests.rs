@@ -931,7 +931,7 @@ fn maintenance_window_execution_lifecycle() {
     {
         let now = chrono::Utc::now();
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         let exec = crate::state::MaintenanceWindowExecution {
             window_execution_id: exec_id.to_string(),
             window_id: window_id.clone(),
@@ -2830,14 +2830,9 @@ fn put_parameter_invalid_type_errors() {
 }
 
 #[test]
-fn param_arn_and_rewrite_region_helpers() {
+fn param_arn_helper() {
     let arn = crate::service::parameters::param_arn("us-east-1", "123456789012", "/a/b");
     assert_eq!(arn, "arn:aws:ssm:us-east-1:123456789012:parameter/a/b");
-    let rewritten = crate::service::parameters::rewrite_arn_region(&arn, "eu-west-1");
-    assert_eq!(
-        rewritten,
-        "arn:aws:ssm:eu-west-1:123456789012:parameter/a/b"
-    );
 }
 
 #[test]
@@ -4308,7 +4303,7 @@ fn create_activation_stores_record() {
     let body: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     assert!(body["ActivationId"].is_string());
     assert!(body["ActivationCode"].is_string());
-    assert_eq!(svc.state.read().default_ref().activations.len(), 1);
+    assert_eq!(svc.state.read().default_regional().unwrap().activations.len(), 1);
 }
 
 #[test]
@@ -4337,7 +4332,7 @@ fn delete_activation_removes_existing() {
         json!({"ActivationId": id}),
     ))
     .unwrap();
-    assert!(svc.state.read().default_ref().activations.is_empty());
+    assert!(svc.state.read().default_regional().unwrap().activations.is_empty());
 }
 
 #[test]
@@ -5627,7 +5622,7 @@ fn persisted_command_status(store: &CapturingSnapshotStore, command_id: &str) ->
     let snapshot: SsmSnapshot = serde_json::from_slice(&bytes).ok()?;
     let accounts = snapshot.accounts?;
     accounts
-        .get("123456789012")?
+        .regional("123456789012", "us-east-1")?
         .commands
         .iter()
         .find(|c| c.command_id == command_id)
@@ -5637,7 +5632,7 @@ fn persisted_command_status(store: &CapturingSnapshotStore, command_id: &str) ->
 fn insert_pending_command(svc: &SsmService, command_id: &str, instance_id: &str) {
     let now = chrono::Utc::now();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create("123456789012");
+    let state = accounts.regional_mut("123456789012", "us-east-1");
     state.commands.push(crate::state::SsmCommand {
         command_id: command_id.to_string(),
         document_name: "AWS-RunShellScript".to_string(),
@@ -5677,7 +5672,7 @@ async fn wait_for_command_status(svc: &SsmService, command_id: &str, want: &str)
         let status = {
             let accounts = svc.state.read();
             accounts
-                .get("123456789012")
+                .regional("123456789012", "us-east-1")
                 .and_then(|s| s.commands.iter().find(|c| c.command_id == command_id))
                 .map(|c| c.status.clone())
         };
@@ -5905,7 +5900,7 @@ fn persisted_unrepresentable_window_does_not_poison_reads() {
     .unwrap();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         let param = state.parameters.get_mut("/persisted").unwrap();
         param.policies = Some(
             json!([
@@ -5941,7 +5936,7 @@ fn persisted_unrepresentable_window_keeps_expiration_working() {
     .unwrap();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("123456789012");
+        let state = accounts.regional_mut("123456789012", "us-east-1");
         let param = state.parameters.get_mut("/legacy-expired").unwrap();
         param.policies = Some(
             json!([
@@ -5958,4 +5953,317 @@ fn persisted_unrepresentable_window_keeps_expiration_working() {
         Ok(_) => panic!("the expired parameter must be purged"),
         Err(err) => assert_eq!(err.code(), "ParameterNotFound"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Region scoping: every SSM resource lives in exactly one region.
+// ---------------------------------------------------------------------------
+
+fn regional_request(action: &str, region: &str, body: Value) -> AwsRequest {
+    let mut r = make_request(action, body);
+    r.region = region.to_string();
+    r
+}
+
+#[test]
+fn same_parameter_name_coexists_in_two_regions() {
+    let svc = make_service();
+    for (region, value) in [("us-east-1", "east"), ("eu-west-1", "west")] {
+        svc.put_parameter(&regional_request(
+            "PutParameter",
+            region,
+            json!({"Name": "/app/db", "Value": value, "Type": "String"}),
+        ))
+        .unwrap();
+    }
+    for (region, value) in [("us-east-1", "east"), ("eu-west-1", "west")] {
+        let got = json_body(
+            svc.get_parameter(&regional_request(
+                "GetParameter",
+                region,
+                json!({"Name": "/app/db"}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(got["Parameter"]["Value"], value);
+        assert_eq!(got["Parameter"]["Version"], 1);
+        // The ARN names the parameter's own region, byte-identical to the
+        // one stored at creation.
+        assert_eq!(
+            got["Parameter"]["ARN"],
+            format!("arn:aws:ssm:{region}:123456789012:parameter/app/db")
+        );
+    }
+    // A region that never saw the parameter does not have it.
+    let err = expect_err(svc.get_parameter(&regional_request(
+            "GetParameter",
+            "ap-south-1",
+            json!({"Name": "/app/db"}),
+        )));
+    assert_eq!(err.code(), "ParameterNotFound");
+}
+
+#[test]
+fn parameter_lists_are_region_scoped() {
+    let svc = make_service();
+    svc.put_parameter(&regional_request(
+        "PutParameter",
+        "us-east-1",
+        json!({"Name": "/svc/east", "Value": "1", "Type": "String"}),
+    ))
+    .unwrap();
+    svc.put_parameter(&regional_request(
+        "PutParameter",
+        "eu-west-1",
+        json!({"Name": "/svc/west", "Value": "2", "Type": "String"}),
+    ))
+    .unwrap();
+    let names = |resp: Value, key: &str| -> Vec<String> {
+        resp[key]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["Name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let by_path = json_body(
+        svc.get_parameters_by_path(&regional_request(
+            "GetParametersByPath",
+            "eu-west-1",
+            json!({"Path": "/svc"}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(names(by_path, "Parameters"), vec!["/svc/west"]);
+    let described = json_body(
+        svc.describe_parameters(&regional_request(
+            "DescribeParameters",
+            "us-east-1",
+            json!({"ParameterFilters": [{"Key": "Path", "Values": ["/svc"]}]}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(names(described, "Parameters"), vec!["/svc/east"]);
+}
+
+#[test]
+fn parameter_arn_of_another_region_is_not_found() {
+    let svc = make_service();
+    for region in ["us-east-1", "eu-west-1"] {
+        svc.put_parameter(&regional_request(
+            "PutParameter",
+            region,
+            json!({"Name": "/x", "Value": region, "Type": "String"}),
+        ))
+        .unwrap();
+    }
+    let west_arn = "arn:aws:ssm:eu-west-1:123456789012:parameter/x";
+    let err = expect_err(svc.get_parameter(&regional_request(
+            "GetParameter",
+            "us-east-1",
+            json!({"Name": west_arn}),
+        )));
+    assert_eq!(err.code(), "ParameterNotFound");
+    let got = json_body(
+        svc.get_parameters(&regional_request(
+            "GetParameters",
+            "us-east-1",
+            json!({"Names": [west_arn]}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["InvalidParameters"], json!([west_arn]));
+    let got = json_body(
+        svc.get_parameter(&regional_request(
+            "GetParameter",
+            "eu-west-1",
+            json!({"Name": west_arn}),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(got["Parameter"]["Value"], "eu-west-1");
+}
+
+#[test]
+fn public_parameters_are_available_in_every_region() {
+    let svc = make_service();
+    let name = "/aws/service/global-infrastructure/regions/eu-west-1/longName";
+    for region in ["us-east-1", "eu-west-1", "ap-southeast-2"] {
+        let got = json_body(
+            svc.get_parameter(&regional_request(
+                "GetParameter",
+                region,
+                json!({"Name": name}),
+            ))
+            .unwrap(),
+        );
+        assert_eq!(got["Parameter"]["Value"], "Europe (Ireland)");
+        assert_eq!(
+            got["Parameter"]["ARN"],
+            format!("arn:aws:ssm:{region}:123456789012:parameter{name}")
+        );
+    }
+}
+
+#[test]
+fn read_parameter_value_resolves_names_in_the_caller_region_and_arns_in_theirs() {
+    let svc = make_service();
+    for (region, value) in [("us-east-1", "east"), ("eu-west-1", "west")] {
+        svc.put_parameter(&regional_request(
+            "PutParameter",
+            region,
+            json!({"Name": "/shared", "Value": value, "Type": "String"}),
+        ))
+        .unwrap();
+    }
+    let read = |region: &str, name: &str| {
+        crate::read_parameter_value(&svc.state, None, "123456789012", region, name)
+    };
+    assert_eq!(read("eu-west-1", "/shared").unwrap().value, "west");
+    assert_eq!(read("us-east-1", "/shared").unwrap().value, "east");
+    // An ARN reaches the parameter in the region it names.
+    assert_eq!(
+        read(
+            "us-east-1",
+            "arn:aws:ssm:eu-west-1:123456789012:parameter/shared"
+        )
+        .unwrap()
+        .value,
+        "west"
+    );
+    assert_eq!(
+        read("ap-south-1", "/shared").unwrap_err().code(),
+        "ParameterNotFound"
+    );
+}
+
+#[test]
+fn default_patch_baseline_is_registered_per_region_and_os() {
+    let svc = make_service();
+    let get = |region: &str, os: &str| -> String {
+        json_body(
+            svc.get_default_patch_baseline(&regional_request(
+                "GetDefaultPatchBaseline",
+                region,
+                json!({"OperatingSystem": os}),
+            ))
+            .unwrap(),
+        )["BaselineId"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let aws_ubuntu_east = default_patch_baseline_for_test("us-east-1", "UBUNTU");
+    let aws_ubuntu_west = default_patch_baseline_for_test("eu-west-1", "UBUNTU");
+    let aws_windows_east = default_patch_baseline_for_test("us-east-1", "WINDOWS");
+    assert_eq!(get("us-east-1", "UBUNTU"), aws_ubuntu_east);
+    assert_eq!(get("eu-west-1", "UBUNTU"), aws_ubuntu_west);
+
+    // A custom Ubuntu baseline registered as the default in us-east-1.
+    let custom = json_body(
+        svc.create_patch_baseline(&regional_request(
+            "CreatePatchBaseline",
+            "us-east-1",
+            json!({"Name": "ubuntu-custom", "OperatingSystem": "UBUNTU"}),
+        ))
+        .unwrap(),
+    )["BaselineId"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    svc.register_default_patch_baseline(&regional_request(
+        "RegisterDefaultPatchBaseline",
+        "us-east-1",
+        json!({"BaselineId": custom}),
+    ))
+    .unwrap();
+
+    // It is the default for Ubuntu in us-east-1 only: other OSes keep the
+    // AWS default, and eu-west-1 is untouched.
+    assert_eq!(get("us-east-1", "UBUNTU"), custom);
+    assert_eq!(get("us-east-1", "WINDOWS"), aws_windows_east);
+    assert_eq!(get("eu-west-1", "UBUNTU"), aws_ubuntu_west);
+
+    // The custom baseline does not exist in eu-west-1, nor does another
+    // region's AWS-provided baseline.
+    for id in [custom.as_str(), aws_ubuntu_east.as_str()] {
+        let err = expect_err(svc.register_default_patch_baseline(&regional_request(
+                "RegisterDefaultPatchBaseline",
+                "eu-west-1",
+                json!({"BaselineId": id}),
+            )));
+        assert_eq!(err.code(), "DoesNotExistException");
+    }
+
+    // Registering the region's own AWS baseline restores the AWS default.
+    svc.register_default_patch_baseline(&regional_request(
+        "RegisterDefaultPatchBaseline",
+        "us-east-1",
+        json!({"BaselineId": aws_ubuntu_east}),
+    ))
+    .unwrap();
+    assert_eq!(get("us-east-1", "UBUNTU"), aws_ubuntu_east);
+}
+
+fn default_patch_baseline_for_test(region: &str, os: &str) -> String {
+    crate::service::patches::default_patch_baseline(region, os).unwrap()
+}
+
+#[test]
+fn documents_and_maintenance_windows_are_region_scoped() {
+    let svc = make_service();
+    let content = json!({"schemaVersion": "2.2", "mainSteps": []}).to_string();
+    for region in ["us-east-1", "eu-west-1"] {
+        svc.create_document(&regional_request(
+            "CreateDocument",
+            region,
+            json!({"Name": "MyDoc", "Content": content, "DocumentType": "Command"}),
+        ))
+        .unwrap();
+    }
+    let window = json_body(
+        svc.create_maintenance_window(&regional_request(
+            "CreateMaintenanceWindow",
+            "eu-west-1",
+            json!({"Name": "west-window", "Schedule": "rate(1 day)", "Duration": 2, "Cutoff": 1,
+                   "AllowUnassociatedTargets": true}),
+        ))
+        .unwrap(),
+    );
+    let window_id = window["WindowId"].as_str().unwrap();
+    let windows = |region: &str| {
+        json_body(
+            svc.describe_maintenance_windows(&regional_request(
+                "DescribeMaintenanceWindows",
+                region,
+                json!({}),
+            ))
+            .unwrap(),
+        )["WindowIdentities"]
+            .as_array()
+            .unwrap()
+            .len()
+    };
+    assert_eq!(windows("eu-west-1"), 1);
+    assert_eq!(windows("us-east-1"), 0);
+    let err = expect_err(svc.get_maintenance_window(&regional_request(
+            "GetMaintenanceWindow",
+            "us-east-1",
+            json!({"WindowId": window_id}),
+        )));
+    assert_eq!(err.code(), "DoesNotExistException");
+    // Deleting the document in one region leaves the other's.
+    svc.delete_document(&regional_request(
+        "DeleteDocument",
+        "us-east-1",
+        json!({"Name": "MyDoc"}),
+    ))
+    .unwrap();
+    assert!(svc
+        .describe_document(&regional_request(
+            "DescribeDocument",
+            "eu-west-1",
+            json!({"Name": "MyDoc"}),
+        ))
+        .is_ok());
 }

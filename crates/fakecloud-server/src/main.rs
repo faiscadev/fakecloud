@@ -2056,7 +2056,10 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_ssm::SsmSnapshot>(&bytes) {
+                    // Older schemas are migrated on parse: v2 kept one
+                    // state per account, split into regions by each
+                    // parameter's ARN.
+                    match fakecloud_ssm::parse_ssm_snapshot(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version > fakecloud_ssm::SSM_SNAPSHOT_SCHEMA_VERSION
                             {
@@ -2074,8 +2077,11 @@ async fn main() {
                                     "loaded ssm persistence snapshot (multi-account)"
                                 );
                             } else if let Some(single_state) = snapshot.state {
-                                let param_count = single_state.parameters.len();
-                                let account_id = single_state.account_id.clone();
+                                let param_count: usize = single_state
+                                    .regions()
+                                    .map(|(_, s)| s.parameters.len())
+                                    .sum();
+                                let account_id = single_state.account_id().to_string();
                                 let mut mas = ssm_state.write();
                                 *mas.get_or_create(&account_id) = single_state;
                                 tracing::info!(
@@ -2228,9 +2234,10 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_secretsmanager::SecretsManagerSnapshot>(
-                        &bytes,
-                    ) {
+                    // Older schemas are migrated on parse: v2 kept one
+                    // state per account, split into regions by each secret's
+                    // ARN.
+                    match fakecloud_secretsmanager::parse_secretsmanager_snapshot(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
                                 > fakecloud_secretsmanager::SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION
@@ -2249,8 +2256,11 @@ async fn main() {
                                     "loaded secretsmanager persistence snapshot (multi-account)"
                                 );
                             } else if let Some(single_state) = snapshot.state {
-                                let secret_count = single_state.secrets.len();
-                                let account_id = single_state.account_id.clone();
+                                let secret_count: usize = single_state
+                                    .regions()
+                                    .map(|(_, s)| s.secrets.len())
+                                    .sum();
+                                let account_id = single_state.account_id().to_string();
                                 let mut mas = secretsmanager_state.write();
                                 *mas.get_or_create(&account_id) = single_state;
                                 tracing::info!(
@@ -9182,10 +9192,12 @@ async fn main() {
                 let ss = secretsmanager_rotation_state;
                 let bus = delivery_for_rotation_scheduler;
                 let store = secretsmanager_rotation_snapshot_store;
+                let kms = kms_hook_for_services.clone();
                 move || async move {
                     let rotated = fakecloud_secretsmanager::rotation::check_and_rotate(
                         &ss,
                         Some(&bus),
+                        Some(kms.as_ref()),
                         store.clone(),
                     )
                     .await;

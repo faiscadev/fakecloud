@@ -29,6 +29,7 @@ impl SsmService {
         &self,
         body: &Value,
         account_id: &str,
+        region: &str,
     ) -> Result<Value, AwsServiceError> {
         let input = CreateAssociationInput::from_body(body)?;
 
@@ -83,7 +84,7 @@ impl SsmService {
         let resp = association_to_json(&assoc);
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
+        let state = accounts.regional_mut(account_id, region);
         state.associations.insert(association_id, assoc);
 
         Ok(resp)
@@ -99,7 +100,7 @@ impl SsmService {
         // validate_* helpers. Remap so strict-Smithy clients see one
         // of the op's declared errors.
         let resp = self
-            .create_association_inner(&body, &req.account_id)
+            .create_association_inner(&body, &req.account_id, &req.region)
             .map_err(remap_validation_to_invalid_parameters)?;
         Ok(AwsResponse::ok_json(
             json!({ "AssociationDescription": resp }),
@@ -117,7 +118,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
         let assoc = if let Some(id) = association_id {
             state.associations.get(id)
@@ -157,7 +158,7 @@ impl SsmService {
         let instance_id = body["InstanceId"].as_str();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         let key = if let Some(id) = association_id {
             if state.associations.contains_key(id) {
@@ -204,7 +205,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let all: Vec<Value> = state
             .associations
             .values()
@@ -252,7 +253,7 @@ impl SsmService {
             .ok_or_else(|| missing("AssociationId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let assoc = state.associations.get_mut(association_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -355,7 +356,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let assoc = state.associations.get(association_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -425,7 +426,7 @@ impl SsmService {
             .to_string();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let assoc = state
             .associations
             .values_mut()
@@ -462,7 +463,7 @@ impl SsmService {
             .collect();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         // Validate every association exists before mutating any of them so we
         // never leave half the batch flipped to Pending on a failed call.
@@ -507,7 +508,7 @@ impl SsmService {
         let mut failed = Vec::new();
 
         for entry in entries {
-            match self.create_association_inner(entry, &req.account_id) {
+            match self.create_association_inner(entry, &req.account_id, &req.region) {
                 Ok(desc) => successful.push(desc),
                 Err(e) => {
                     let entry_name = entry["Name"].as_str().unwrap_or("");
@@ -569,7 +570,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let associations: Vec<Value> = state
             .associations
             .values()
@@ -610,7 +611,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let statuses: Vec<Value> = state
             .associations
             .values()

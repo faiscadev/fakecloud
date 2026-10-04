@@ -58,7 +58,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
         let mut aggregate_closed = false;
         let mut next_transition: Option<DateTime<Utc>> = None;
@@ -116,7 +116,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         if let Some(setting) = state.service_settings.get(setting_id) {
             Ok(AwsResponse::ok_json(json!({
                 "ServiceSetting": {
@@ -154,7 +154,7 @@ impl SsmService {
             .ok_or_else(|| missing("SettingId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.service_settings.remove(setting_id);
 
         let default_value = get_default_service_setting(setting_id);
@@ -187,7 +187,7 @@ impl SsmService {
             .to_string();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let now = Utc::now();
         let account_id = state.account_id.clone();
         state.service_settings.insert(

@@ -4,7 +4,7 @@ use chrono::Utc;
 use http::StatusCode;
 use serde_json::{json, Value};
 
-use fakecloud_aws::arn::{arn_resource, partition_for, Arn};
+use fakecloud_aws::arn::{arn_resource, Arn};
 use fakecloud_core::pagination::paginate_checked;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 use fakecloud_core::validation::*;
@@ -405,13 +405,12 @@ fn build_param_history_value(
     param: &SsmParameter,
     hist: &SsmParameterVersion,
     with_decryption: bool,
-    region: &str,
 ) -> Value {
     let mut v = json!({
         "Name": param.name,
         "Type": hist.param_type,
         "Version": hist.version,
-        "ARN": rewrite_arn_region(&param.arn, region),
+        "ARN": param.arn,
         "LastModifiedDate": hist.last_modified.timestamp_millis() as f64 / 1000.0,
         "DataType": param.data_type,
     });
@@ -788,7 +787,7 @@ impl SsmService {
             .map_err(|e| remap_validation_to(e, "InvalidAllowedPatternException"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         // A non-overwrite write to a parameter that already exists fails fast
         // with ParameterAlreadyExists, BEFORE the tier/policy validation (which
@@ -1000,7 +999,6 @@ impl SsmService {
         p: &SsmParameter,
         with_value: bool,
         with_decryption: bool,
-        region: &str,
         account_id: &str,
     ) -> Value {
         if with_value
@@ -1010,9 +1008,9 @@ impl SsmService {
         {
             let mut clone = p.clone();
             clone.value = self.decrypt_secure_value(account_id, &p.arn, &p.value);
-            return param_to_json(&clone, with_value, with_decryption, region);
+            return param_to_json(&clone, with_value, with_decryption);
         }
-        param_to_json(p, with_value, with_decryption, region)
+        param_to_json(p, with_value, with_decryption)
     }
 
     /// Wrapper around [`build_param_history_value`] that decrypts the
@@ -1023,15 +1021,14 @@ impl SsmService {
         param: &SsmParameter,
         hist: &SsmParameterVersion,
         with_decryption: bool,
-        region: &str,
         account_id: &str,
     ) -> Value {
         if with_decryption && hist.param_type == "SecureString" && self.kms_hook.is_some() {
             let mut clone = hist.clone();
             clone.value = self.decrypt_secure_value(account_id, &param.arn, &hist.value);
-            return build_param_history_value(param, &clone, with_decryption, region);
+            return build_param_history_value(param, &clone, with_decryption);
         }
-        build_param_history_value(param, hist, with_decryption, region)
+        build_param_history_value(param, hist, with_decryption)
     }
 
     /// Resolve a Secrets Manager reference parameter.
@@ -1054,9 +1051,13 @@ impl SsmService {
             )
         })?;
 
+        // The secret is read from the caller's own account and region, the
+        // way the Secrets Manager endpoint of that region resolves it.
         let sm_accounts = sm_state.read();
-        let sm = sm_accounts.default_ref();
-        let secret = sm.secrets.get(secret_name).ok_or_else(|| {
+        let secret = sm_accounts
+            .regional(account_id, region)
+            .and_then(|sm| sm.secrets.get(secret_name))
+            .ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "ParameterNotFound",
@@ -1146,7 +1147,7 @@ impl SsmService {
         // Take the write lock so the lazy-policy sweep (delete expired,
         // emit notifications) can mutate state in line with this read.
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         purge_expired_params(state);
         tick_policy_notifications(state);
 
@@ -1154,7 +1155,7 @@ impl SsmService {
         if arn_resource(raw_name, "ssm").is_some() {
             let param = resolve_param_by_name_or_arn(state, raw_name)?;
             return Ok(AwsResponse::ok_json(json!({
-                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.region, &req.account_id),
+                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
             })));
         }
 
@@ -1171,12 +1172,12 @@ impl SsmService {
 
         match selector {
             ParamSelector::None => Ok(AwsResponse::ok_json(json!({
-                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.region, &req.account_id),
+                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
             }))),
             ParamSelector::Version(ver) => {
                 if param.version == ver {
                     return Ok(AwsResponse::ok_json(json!({
-                        "Parameter": self.render_param_to_json(param, true, with_decryption, &req.region, &req.account_id),
+                        "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
                     })));
                 }
                 if let Some(hist) = param.history.iter().find(|h| h.version == ver) {
@@ -1184,7 +1185,6 @@ impl SsmService {
                         param,
                         hist,
                         with_decryption,
-                        &req.region,
                         &req.account_id,
                     );
                     return Ok(AwsResponse::ok_json(json!({ "Parameter": v })));
@@ -1204,7 +1204,7 @@ impl SsmService {
                     if labels.contains(&label) {
                         if *ver == param.version {
                             return Ok(AwsResponse::ok_json(json!({
-                                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.region, &req.account_id),
+                                "Parameter": self.render_param_to_json(param, true, with_decryption, &req.account_id),
                             })));
                         }
                         if let Some(hist) = param.history.iter().find(|h| h.version == *ver) {
@@ -1212,7 +1212,6 @@ impl SsmService {
                                 param,
                                 hist,
                                 with_decryption,
-                                &req.region,
                                 &req.account_id,
                             );
                             return Ok(AwsResponse::ok_json(json!({ "Parameter": v })));
@@ -1254,7 +1253,7 @@ impl SsmService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         purge_expired_params(state);
         tick_policy_notifications(state);
         let mut parameters = Vec::new();
@@ -1279,7 +1278,6 @@ impl SsmService {
                             param,
                             true,
                             with_decryption,
-                            &req.region,
                             &req.account_id,
                         )),
                         Err(_) => invalid.push(raw_name.to_string()),
@@ -1299,7 +1297,6 @@ impl SsmService {
                                 param,
                                 true,
                                 with_decryption,
-                                &req.region,
                                 &req.account_id,
                             ));
                         } else {
@@ -1313,7 +1310,6 @@ impl SsmService {
                                     param,
                                     true,
                                     with_decryption,
-                                    &req.region,
                                     &req.account_id,
                                 ));
                             } else if let Some(hist) =
@@ -1323,7 +1319,6 @@ impl SsmService {
                                     param,
                                     hist,
                                     with_decryption,
-                                    &req.region,
                                     &req.account_id,
                                 ));
                             } else {
@@ -1343,7 +1338,6 @@ impl SsmService {
                                             param,
                                             true,
                                             with_decryption,
-                                            &req.region,
                                             &req.account_id,
                                         ));
                                     } else if let Some(hist) =
@@ -1353,7 +1347,6 @@ impl SsmService {
                                             param,
                                             hist,
                                             with_decryption,
-                                            &req.region,
                                             &req.account_id,
                                         ));
                                     }
@@ -1441,7 +1434,7 @@ impl SsmService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         purge_expired_params(state);
         tick_policy_notifications(state);
         let all_params: Vec<&SsmParameter> = state
@@ -1457,7 +1450,7 @@ impl SsmService {
         let parameters: Vec<Value> = page_params
             .iter()
             .map(|p| {
-                self.render_param_to_json(p, true, with_decryption, &req.region, &req.account_id)
+                self.render_param_to_json(p, true, with_decryption, &req.account_id)
             })
             .collect();
 
@@ -1477,7 +1470,7 @@ impl SsmService {
         let name = body["Name"].as_str().ok_or_else(|| missing("Name"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if remove_param(&mut state.parameters, name).is_none() {
             return Err(param_not_found(name));
         }
@@ -1493,7 +1486,7 @@ impl SsmService {
         let names = body["Names"].as_array().ok_or_else(|| missing("Names"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mut deleted = Vec::new();
         let mut invalid = Vec::new();
 
@@ -1542,7 +1535,7 @@ impl SsmService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         purge_expired_params(state);
         tick_policy_notifications(state);
 
@@ -1589,7 +1582,7 @@ impl SsmService {
                 .map_err(|_| super::invalid_next_token())?;
         let parameters: Vec<Value> = page_params
             .iter()
-            .map(|p| param_to_describe_json(p, &req.region))
+            .map(|p| param_to_describe_json(p))
             .collect();
 
         let mut resp = json!({ "Parameters": parameters });
@@ -1625,7 +1618,7 @@ impl SsmService {
         let max_results = max_results.unwrap_or(50) as usize;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         purge_expired_params(state);
         tick_policy_notifications(state);
         let param = state
@@ -1711,7 +1704,7 @@ impl SsmService {
         validate_label_lengths(&label_strings)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let param =
             lookup_param_mut(&mut state.parameters, name).ok_or_else(|| param_not_found(name))?;
 
@@ -1797,7 +1790,7 @@ impl SsmService {
             .ok_or_else(|| missing("ParameterVersion"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let param =
             lookup_param_mut(&mut state.parameters, name).ok_or_else(|| param_not_found(name))?;
 
@@ -1914,32 +1907,12 @@ pub fn param_arn(region: &str, account_id: &str, name: &str) -> String {
     Arn::regional("ssm", region, account_id, &resource).to_string()
 }
 
-/// Rewrite the region component of a parameter ARN, and its partition to
-/// that region's.
-pub(super) fn rewrite_arn_region(arn: &str, region: &str) -> String {
-    let parts: Vec<&str> = arn.splitn(6, ':').collect();
-    if parts.len() == 6 {
-        format!(
-            "{}:{}:{}:{}:{}:{}",
-            parts[0],
-            partition_for(region),
-            parts[2],
-            region,
-            parts[4],
-            parts[5]
-        )
-    } else {
-        arn.to_string()
-    }
-}
-
 pub(super) fn param_to_json(
     p: &SsmParameter,
     with_value: bool,
     with_decryption: bool,
-    region: &str,
 ) -> Value {
-    let arn = rewrite_arn_region(&p.arn, region);
+    let arn = &p.arn;
     let mut v = json!({
         "Name": p.name,
         "Type": p.param_type,
@@ -1965,8 +1938,8 @@ pub(super) fn param_to_json(
     v
 }
 
-pub(super) fn param_to_describe_json(p: &SsmParameter, region: &str) -> Value {
-    let arn = rewrite_arn_region(&p.arn, region);
+pub(super) fn param_to_describe_json(p: &SsmParameter) -> Value {
+    let arn = &p.arn;
     let mut v = json!({
         "Name": p.name,
         "Type": p.param_type,
@@ -2596,8 +2569,16 @@ pub(super) fn resolve_param_by_name_or_arn<'a>(
         return Ok(p);
     }
 
-    // ARN lookup: arn:PARTITION:ssm:REGION:ACCOUNT:parameter/NAME
+    // ARN lookup: arn:PARTITION:ssm:REGION:ACCOUNT:parameter/NAME. The ARN
+    // must name this state's region and account: a parameter ARN from
+    // another region is not visible here, even when a parameter of the same
+    // name exists in this region.
     if arn_resource(name, "ssm").is_some() {
+        let same_home = fakecloud_aws::arn::region_of(name) == Some(state.region.as_str())
+            && fakecloud_aws::arn::account_of(name) == Some(state.account_id.as_str());
+        if !same_home {
+            return Err(param_not_found(name));
+        }
         if let Some(param_part) = name.split(":parameter").nth(1) {
             if let Some(p) = lookup_param(&state.parameters, param_part) {
                 return Ok(p);
@@ -2747,17 +2728,25 @@ pub struct ParameterValue {
 /// does, as `caller_account`.
 ///
 /// `name` is a parameter name or ARN, optionally followed by a `:version`
-/// or `:label` selector. A name is looked up in `caller_account`; an ARN in
-/// the ARN's account, where a parameter owned by another account is readable
-/// only when a resource policy on it (the sharing `PutResourcePolicy`
-/// creates) allows the caller `ssm:GetParameters`. A missing parameter,
-/// version or label is `ParameterNotFound`.
+/// or `:label` selector. A name is looked up in `caller_account` and
+/// `caller_region` (the region of the task, build or stack resolving it); an
+/// ARN in the ARN's account and region (how ECS and CodeBuild reach a
+/// parameter in another region), where a parameter owned by another account
+/// is readable only when a resource policy on it (the sharing
+/// `PutResourcePolicy` creates) allows the caller `ssm:GetParameters`. A
+/// missing parameter, version or label is `ParameterNotFound`.
 pub fn read_parameter_value(
     state: &crate::state::SharedSsmState,
     kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
     caller_account: &str,
+    caller_region: &str,
     name: &str,
 ) -> Result<ParameterValue, AwsServiceError> {
+    let owner_region = if arn_resource(name, "ssm").is_some() {
+        fakecloud_aws::arn::region_of(name).unwrap_or(caller_region)
+    } else {
+        caller_region
+    };
     let (owner_account, reference) = if arn_resource(name, "ssm").is_some() {
         // arn:<partition>:ssm:<region>:<account>:parameter/<name>[:<selector>]
         let reference = name
@@ -2775,9 +2764,15 @@ pub fn read_parameter_value(
 
     let (value, param_arn) = {
         let mut accounts = state.write();
-        let state = accounts
-            .get_mut(&owner_account)
-            .ok_or_else(|| param_not_found(name))?;
+        // The caller's own region always exists (with the AWS-owned public
+        // parameters seeded); another account's only once it has state.
+        let state = if owner_account == caller_account {
+            accounts.regional_mut(&owner_account, owner_region)
+        } else {
+            accounts
+                .regional_get_mut(&owner_account, owner_region)
+                .ok_or_else(|| param_not_found(name))?
+        };
         purge_expired_params(state);
         let param =
             lookup_param(&state.parameters, base_name).ok_or_else(|| param_not_found(name))?;

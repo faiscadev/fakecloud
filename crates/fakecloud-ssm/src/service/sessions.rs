@@ -89,7 +89,7 @@ impl SsmService {
         // can't mistake it for a real websocket handshake.
         let now = Utc::now();
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.session_counter += 1;
         let session_id = format!("session-{:012x}", state.session_counter);
         let account_id = state.account_id.clone();
@@ -127,7 +127,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let session = state.sessions.get(session_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -160,7 +160,7 @@ impl SsmService {
         // so we mirror that: flip the status if the session exists, return
         // success either way.
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(session) = state.sessions.get_mut(&session_id) {
             session.status = "Terminated".to_string();
             session.end_date = Some(Utc::now());
@@ -180,7 +180,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         // DescribeSessions is the read-side of both the echo-mode flow and
         // the admin inject endpoint, so it always serves whatever state
         // contains regardless of FAKECLOUD_SSM_SESSION_ECHO.
@@ -225,7 +225,7 @@ impl SsmService {
             .ok_or_else(|| missing("Targets"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.session_counter += 1;
         let access_request_id = format!("ar-{:012x}", state.session_counter);
         // Persist the request (auto-approved, no human approver) so
@@ -261,7 +261,7 @@ impl SsmService {
         // Returning approved credentials for an unknown id (the old behavior)
         // is a security-relevant fiction.
         let request = accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .and_then(|s| s.access_requests.get(access_request_id))
             .ok_or_else(|| {
                 AwsServiceError::aws_error(

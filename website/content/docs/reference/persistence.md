@@ -29,8 +29,8 @@ Every implemented service persists its control-plane state in this mode — a sn
 - **SNS** — topics, subscriptions, attributes, tags, platform applications and endpoints, SMS settings.
 - **EventBridge** — event buses, rules, targets, archives, replays, connections.
 - **IAM / STS** — users, groups, roles, policies, instance profiles, access keys.
-- **SSM Parameter Store** — parameters (String/SecureString/StringList), history.
-- **Secrets Manager** — secrets, versions, rotation settings.
+- **SSM Parameter Store** — parameters (String/SecureString/StringList), history, and the rest of the SSM control plane, per account and region. Snapshots written before SSM was region-partitioned load with each parameter in the region its ARN names.
+- **Secrets Manager** — secrets, versions, rotation settings, replicas, per account and region. Snapshots written before Secrets Manager was region-partitioned load with each secret in the region its ARN names.
 - **CloudWatch Logs** — log groups, streams, and log events.
 - **KMS** — keys, aliases, key policies, grants.
 - **DynamoDB** — tables, items, indexes, streams metadata.

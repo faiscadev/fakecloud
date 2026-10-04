@@ -249,13 +249,17 @@ impl SsmService {
 
         {
             let mut accounts = self.state.write();
-            let state = accounts.get_or_create(&req.account_id);
+            let state = accounts.regional_mut(&req.account_id, &req.region);
             state.commands.push(cmd);
         }
 
         // Spawn the lifecycle transition. Detached on purpose — clients
         // poll `GetCommandInvocation`; we don't await completion here.
-        self.spawn_command_advance(req.account_id.clone(), command_id.clone());
+        self.spawn_command_advance(
+            req.account_id.clone(),
+            req.region.clone(),
+            command_id.clone(),
+        );
 
         let mut cmd_obj = json!({
             "CommandId": command_id,
@@ -299,7 +303,12 @@ impl SsmService {
     /// When invoked outside a tokio runtime (e.g. a plain `#[test]` that
     /// calls `send_command` directly), `try_current` returns `Err` and the
     /// command stays `Pending`, which those unit tests assert against.
-    pub(super) fn spawn_command_advance(&self, account_id: String, command_id: String) {
+    pub(super) fn spawn_command_advance(
+        &self,
+        account_id: String,
+        region: String,
+        command_id: String,
+    ) {
         if tokio::runtime::Handle::try_current().is_err() {
             return;
         }
@@ -308,11 +317,11 @@ impl SsmService {
         let lock = self.snapshot_lock.clone();
         tokio::spawn(async move {
             tokio::time::sleep(PENDING_TO_IN_PROGRESS).await;
-            if advance_pending_to_in_progress(&state, &account_id, &command_id) {
+            if advance_pending_to_in_progress(&state, &account_id, &region, &command_id) {
                 super::save_ssm_snapshot(&state, store.clone(), &lock).await;
             }
             tokio::time::sleep(IN_PROGRESS_TO_SUCCESS).await;
-            if advance_in_progress_to_success(&state, &account_id, &command_id) {
+            if advance_in_progress_to_success(&state, &account_id, &region, &command_id) {
                 super::save_ssm_snapshot(&state, store, &lock).await;
             }
         });
@@ -327,24 +336,28 @@ impl SsmService {
     /// `OrganizationsService::rearm_in_progress_account_creations` and
     /// `AcmService::rearm_pending_validations`.
     pub fn rearm_in_flight_commands(&self) {
-        let in_flight: Vec<(String, String)> = {
+        let in_flight: Vec<(String, String, String)> = {
             let accounts = self.state.read();
             let mut out = Vec::new();
-            for (account_id, state) in accounts.iter() {
+            for (account_id, region, state) in accounts.iter_regional() {
                 for cmd in state.commands.iter() {
                     let non_terminal =
                         cmd.invocations.iter().any(|inv| {
                             matches!(inv.status.as_str(), "Pending" | "InProgress" | "Delayed")
                         }) || matches!(cmd.status.as_str(), "Pending" | "InProgress" | "Delayed");
                     if non_terminal {
-                        out.push((account_id.to_string(), cmd.command_id.clone()));
+                        out.push((
+                            account_id.to_string(),
+                            region.to_string(),
+                            cmd.command_id.clone(),
+                        ));
                     }
                 }
             }
             out
         };
-        for (account_id, command_id) in in_flight {
-            self.spawn_command_advance(account_id, command_id);
+        for (account_id, region, command_id) in in_flight {
+            self.spawn_command_advance(account_id, region, command_id);
         }
     }
 
@@ -361,7 +374,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let all_commands: Vec<Value> = state
             .commands
             .iter()
@@ -441,7 +454,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let cmd = state
             .commands
             .iter()
@@ -511,7 +524,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let all_invocations: Vec<Value> = state
             .commands
             .iter()
@@ -564,7 +577,7 @@ impl SsmService {
         });
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(cmd) = state
             .commands
             .iter_mut()
@@ -601,10 +614,13 @@ impl SsmService {
 pub(super) fn advance_pending_to_in_progress(
     state: &crate::state::SharedSsmState,
     account_id: &str,
+    region: &str,
     command_id: &str,
 ) -> bool {
     let mut accounts = state.write();
-    let st = accounts.get_or_create(account_id);
+    let Some(st) = accounts.regional_get_mut(account_id, region) else {
+        return false;
+    };
     let Some(cmd) = st.commands.iter_mut().find(|c| c.command_id == command_id) else {
         return false;
     };
@@ -628,10 +644,13 @@ pub(super) fn advance_pending_to_in_progress(
 pub(super) fn advance_in_progress_to_success(
     state: &crate::state::SharedSsmState,
     account_id: &str,
+    region: &str,
     command_id: &str,
 ) -> bool {
     let mut accounts = state.write();
-    let st = accounts.get_or_create(account_id);
+    let Some(st) = accounts.regional_get_mut(account_id, region) else {
+        return false;
+    };
     let Some(cmd) = st.commands.iter_mut().find(|c| c.command_id == command_id) else {
         return false;
     };

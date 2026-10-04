@@ -1051,11 +1051,13 @@ fn settle_command_execution(record: &mut Value) -> bool {
 /// `PARAMETER_STORE` reads the named SSM parameter; `SECRETS_MANAGER` reads the
 /// named secret (with an optional `:json-key` selector). A miss yields an empty
 /// string so the container env still carries the (empty) variable, matching a
-/// dereference of a missing value.
+/// dereference of a missing value. A name resolves in the build's `region`; a
+/// full ARN in the account and region it names.
 fn resolve_env_value(
     ssm: Option<&SharedSsmState>,
     secrets: Option<&SharedSecretsManagerState>,
     account: &str,
+    region: &str,
     ty: &str,
     value: &str,
 ) -> String {
@@ -1065,7 +1067,19 @@ fn resolve_env_value(
                 return String::new();
             };
             let accounts = ssm.read();
-            let Some(st) = accounts.get(account) else {
+            // arn:<partition>:ssm:<region>:<account>:parameter/<name>
+            let parameter_arn_name = arn_resource(value, "ssm")
+                .and_then(|_| value.splitn(6, ':').nth(5))
+                .and_then(|resource| resource.strip_prefix("parameter"));
+            let (account, region, value) = match parameter_arn_name {
+                Some(name) => (
+                    fakecloud_aws::arn::account_of(value).unwrap_or(account),
+                    fakecloud_aws::arn::region_of(value).unwrap_or(region),
+                    name,
+                ),
+                None => (account, region, value),
+            };
+            let Some(st) = accounts.regional(account, region) else {
                 return String::new();
             };
             let name = value.trim_start_matches('/');
@@ -1085,7 +1099,15 @@ fn resolve_env_value(
             // colons must be handled explicitly before splitting off the json key.
             let (secret_ref, json_key) = split_secret_ref(value);
             let accounts = secrets.read();
-            let Some(st) = accounts.get(account) else {
+            let (account, region) = if arn_resource(&secret_ref, "secretsmanager").is_some() {
+                (
+                    fakecloud_aws::arn::account_of(&secret_ref).unwrap_or(account),
+                    fakecloud_aws::arn::region_of(&secret_ref).unwrap_or(region),
+                )
+            } else {
+                (account, region)
+            };
+            let Some(st) = accounts.regional(account, region) else {
                 return String::new();
             };
             let Some(secret) = find_secret(st, &secret_ref) else {
@@ -1369,10 +1391,13 @@ impl CodeBuildService {
                 };
                 let ty = v.get("type").and_then(Value::as_str).unwrap_or("PLAINTEXT");
                 let value = v.get("value").and_then(Value::as_str).unwrap_or("");
+                // Parameters and secrets resolve in the build's region.
+                let region = fakecloud_aws::arn::region_of(build_arn).unwrap_or("us-east-1");
                 let resolved = resolve_env_value(
                     self.ssm_state.as_ref(),
                     self.secrets_state.as_ref(),
                     account,
+                    region,
                     ty,
                     value,
                 );
@@ -3720,9 +3745,10 @@ mod tests {
     fn secrets_state(entries: &[(&str, &str, &str)]) -> SharedSecretsManagerState {
         use fakecloud_secretsmanager::{Secret, SecretVersion};
         use std::collections::BTreeMap;
-        let mut accounts: MultiAccountState<fakecloud_secretsmanager::SecretsManagerState> =
-            MultiAccountState::new("000000000000", "us-east-1", "");
-        let st = accounts.get_or_create("000000000000");
+        let mut accounts: fakecloud_core::multi_account::MultiRegionState<
+            fakecloud_secretsmanager::SecretsManagerState,
+        > = MultiAccountState::new("000000000000", "us-east-1", "");
+        let st = accounts.regional_mut("000000000000", "us-east-1");
         for (name, arn, secret_string) in entries {
             let mut versions = BTreeMap::new();
             versions.insert(
@@ -3757,6 +3783,8 @@ mod tests {
                     last_rotated_at: None,
                     resource_policy: None,
                     replica_regions: Vec::new(),
+                    replica_settings: BTreeMap::new(),
+                    primary_region: None,
                 },
             );
         }
@@ -3764,7 +3792,14 @@ mod tests {
     }
 
     fn resolve_secret(state: &SharedSecretsManagerState, value: &str) -> String {
-        resolve_env_value(None, Some(state), "000000000000", "SECRETS_MANAGER", value)
+        resolve_env_value(
+            None,
+            Some(state),
+            "000000000000",
+            "us-east-1",
+            "SECRETS_MANAGER",
+            value,
+        )
     }
 
     #[test]

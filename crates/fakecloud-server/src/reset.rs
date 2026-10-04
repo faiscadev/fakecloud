@@ -422,9 +422,10 @@ impl ResetState {
                 }
             }
             "ssm" => {
+                // Every region of the account.
                 let mut mas = self.ssm.write();
                 if let Some(state) = mas.get_mut(account_id) {
-                    state.reset();
+                    state.clear();
                 }
             }
             "dynamodb" => {
@@ -440,9 +441,10 @@ impl ResetState {
                 }
             }
             "secretsmanager" => {
+                // Every region of the account.
                 let mut mas = self.secretsmanager.write();
                 if let Some(state) = mas.get_mut(account_id) {
-                    state.reset();
+                    state.clear();
                 }
             }
             "s3" => {

@@ -542,6 +542,18 @@ pub(crate) fn task_desired_stopped(
     }
 }
 
+/// The region a task runs in: the region its ARN names, else the ECS state's
+/// region.
+pub(super) fn task_region(state: &SharedEcsState, account_id: &str, task_id: &str) -> String {
+    let accounts = state.read();
+    let account = accounts.get(account_id);
+    account
+        .and_then(|s| s.tasks.get(task_id))
+        .and_then(|t| fakecloud_aws::arn::region_of(&t.task_arn).map(str::to_string))
+        .or_else(|| account.map(|s| s.region.clone()))
+        .unwrap_or_else(|| accounts.region().to_string())
+}
+
 fn build_container_plans(
     state: &SharedEcsState,
     account_id: &str,

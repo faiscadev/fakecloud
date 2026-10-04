@@ -122,7 +122,7 @@ impl Fixture {
 
     fn resolve(&self, value_from: &str) -> Result<String, String> {
         self.runtime
-            .resolve_secret(ACCOUNT, value_from)
+            .resolve_secret(ACCOUNT, REGION, value_from)
             .map_err(|e| e.to_string())
     }
 }

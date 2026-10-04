@@ -53,7 +53,7 @@ impl SsmService {
 
         let now = Utc::now();
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.activation_counter += 1;
         let activation_id = format!(
             "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
@@ -91,7 +91,7 @@ impl SsmService {
             .ok_or_else(|| missing("ActivationId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if state.activations.remove(activation_id).is_none() {
             return Err(AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -111,7 +111,7 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let activations: Vec<Value> = state
             .activations
             .values()
@@ -160,7 +160,7 @@ impl SsmService {
             .ok_or_else(|| missing("InstanceId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.managed_instances.remove(instance_id);
         // AWS doesn't error on non-existent instances
 
@@ -175,7 +175,7 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 5, 50)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let instances: Vec<Value> = state
             .managed_instances
             .values()
@@ -211,7 +211,7 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 5, 1000)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let instances: Vec<Value> = state
             .managed_instances
             .values()
@@ -250,7 +250,7 @@ impl SsmService {
             .to_string();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let instance = state
             .managed_instances
             .get_mut(instance_id)

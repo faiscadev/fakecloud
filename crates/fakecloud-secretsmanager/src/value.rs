@@ -29,24 +29,33 @@ pub struct SecretValue {
 
 /// Read a secret's value the way `GetSecretValue` does, as `caller_account`.
 ///
-/// `secret_id` is a name (looked up in `caller_account`), a full ARN or a
-/// partial ARN (looked up in the ARN's account; the region is part of the
-/// match). `version_id` / `version_stage` select the version; with neither,
+/// `secret_id` is a name (looked up in `caller_account` and `caller_region`,
+/// the region of the request, task or build resolving it), a full ARN or a
+/// partial ARN (looked up in the ARN's account and region, which is how ECS
+/// and CodeBuild reach a secret in another region; the Secrets Manager API
+/// itself refuses an ARN of another region before calling this).
+/// `version_id` / `version_stage` select the version; with neither,
 /// the `AWSCURRENT` version is read. A cross-account read needs the secret's
 /// resource policy to allow the caller. Marks the secret as accessed.
 pub fn read_secret_value(
     state: &SharedSecretsManagerState,
     kms_hook: Option<&dyn KmsHook>,
     caller_account: &str,
+    caller_region: &str,
     secret_id: &str,
     version_id: Option<&str>,
     version_stage: Option<&str>,
 ) -> Result<SecretValue, AwsServiceError> {
     let owner_account = secret_owner_account(secret_id, caller_account);
+    let owner_region = if fakecloud_aws::arn::arn_resource(secret_id, "secretsmanager").is_some() {
+        fakecloud_aws::arn::region_of(secret_id).unwrap_or(caller_region)
+    } else {
+        caller_region
+    };
     let (value, kms_key_id) = {
         let mut accounts = state.write();
         let state = accounts
-            .get_mut(&owner_account)
+            .regional_get_mut(&owner_account, owner_region)
             .ok_or_else(secret_not_found)?;
         let key = state
             .secret_key(secret_id)

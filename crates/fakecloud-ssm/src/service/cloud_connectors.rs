@@ -97,7 +97,7 @@ impl SsmService {
         };
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.cloud_connectors.insert(id.clone(), connector);
 
         Ok(AwsResponse::ok_json(json!({ "CloudConnectorId": id })))
@@ -113,7 +113,7 @@ impl SsmService {
             .ok_or_else(|| missing("CloudConnectorId"))?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let c = state
             .cloud_connectors
             .get(id)
@@ -141,7 +141,7 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 10)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let connectors: Vec<Value> = state
             .cloud_connectors
             .values()
@@ -181,7 +181,7 @@ impl SsmService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let c = state
             .cloud_connectors
             .get_mut(&id)
@@ -210,7 +210,7 @@ impl SsmService {
             .ok_or_else(|| missing("CloudConnectorId"))?
             .to_string();
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if state.cloud_connectors.remove(&id).is_none() {
             return Err(not_found(&id));
         }
@@ -228,7 +228,7 @@ impl SsmService {
             .ok_or_else(|| missing("CloudConnectorId"))?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let _c = state
             .cloud_connectors
             .get(id)

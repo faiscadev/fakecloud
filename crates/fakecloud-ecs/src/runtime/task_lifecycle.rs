@@ -46,6 +46,8 @@ impl EcsRuntime {
         // lock once. Each entry carries everything needed to compose a
         // `docker run` invocation for one container in the task.
         let plans = build_container_plans(state, account_id, task_id, self.server_port)?;
+        // Secrets resolve in the task's region (its ARN names it).
+        let region = task_region(state, account_id, task_id);
         if plans.is_empty() {
             return Err(RuntimeError::ContainerStart(
                 "task has no containers".into(),
@@ -59,7 +61,7 @@ impl EcsRuntime {
         for plan in plans {
             let mut env = plan.env.clone();
             for (name, value_from) in &plan.secrets_refs {
-                env.push((name.clone(), self.resolve_secret(account_id, value_from)?));
+                env.push((name.clone(), self.resolve_secret(account_id, &region, value_from)?));
             }
             // The agent/metadata endpoints live on fakecloud (the host);
             // the container reaches them via the platform host alias —

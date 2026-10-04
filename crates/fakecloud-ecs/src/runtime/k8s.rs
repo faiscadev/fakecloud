@@ -430,6 +430,8 @@ impl EcsRuntime {
             .expect("k8s_run_task_inner called without k8s backend");
 
         let plans = build_container_plans(state, account_id, task_id, self.server_port)?;
+        // Secrets resolve in the task's region (its ARN names it).
+        let region = super::task_region(state, account_id, task_id);
         if plans.is_empty() {
             return Err(RuntimeError::ContainerStart(
                 "task has no containers".into(),
@@ -443,7 +445,7 @@ impl EcsRuntime {
         for plan in plans {
             let mut env = plan.env.clone();
             for (name, value_from) in &plan.secrets_refs {
-                env.push((name.clone(), self.resolve_secret(account_id, value_from)?));
+                env.push((name.clone(), self.resolve_secret(account_id, &region, value_from)?));
             }
             let base = backend.self_url.trim_end_matches('/');
             env.push((

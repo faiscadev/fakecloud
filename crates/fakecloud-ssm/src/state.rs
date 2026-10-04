@@ -469,6 +469,15 @@ pub struct SsmState {
     pub ops_items: BTreeMap<String, SsmOpsItem>,
     pub resource_policies: Vec<SsmResourcePolicy>,
     pub service_settings: BTreeMap<String, SsmServiceSetting>,
+    /// The default patch baseline registered with
+    /// `RegisterDefaultPatchBaseline`, per operating system: AWS keeps one
+    /// default per region (this state) per OS. An OS without an entry uses
+    /// the AWS-provided default baseline of the region.
+    #[serde(default)]
+    pub default_patch_baselines: BTreeMap<String, String>,
+    /// The pre-per-OS single registered default, read from old snapshots
+    /// only and folded into `default_patch_baselines` on load.
+    #[serde(default, skip_serializing)]
     pub default_patch_baseline_id: Option<String>,
     pub ops_item_counter: u64,
     pub maintenance_window_executions: Vec<MaintenanceWindowExecution>,
@@ -553,6 +562,7 @@ impl SsmState {
             ops_items: BTreeMap::new(),
             resource_policies: Vec::new(),
             service_settings: BTreeMap::new(),
+            default_patch_baselines: BTreeMap::new(),
             default_patch_baseline_id: None,
             ops_item_counter: 0,
             maintenance_window_executions: Vec::new(),
@@ -594,6 +604,7 @@ impl SsmState {
         self.ops_items.clear();
         self.resource_policies.clear();
         self.service_settings.clear();
+        self.default_patch_baselines.clear();
         self.default_patch_baseline_id = None;
         self.ops_item_counter = 0;
         self.maintenance_window_executions.clear();
@@ -879,11 +890,115 @@ pub struct ResourceDataSync {
     pub sync_last_modified_time: DateTime<Utc>,
 }
 
-pub type SharedSsmState = Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<SsmState>>>;
+/// SSM state partitioned by account and region. Everything SSM keeps
+/// (parameters, documents, maintenance windows, patch baselines and the
+/// registered default baseline, associations, OpsItems, inventory, managed
+/// instances, sessions, resource data syncs, service settings, ...) is
+/// regional in AWS: the same parameter name can hold different values in two
+/// regions of one account, and a request only sees its own region. The
+/// AWS-owned public parameters (`/aws/service/...`) are seeded into every
+/// region's state when it is first created.
+pub type SharedSsmState = Arc<RwLock<fakecloud_core::multi_account::MultiRegionState<SsmState>>>;
 
 impl fakecloud_core::multi_account::AccountState for SsmState {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         Self::new(account_id, region)
+    }
+}
+
+impl fakecloud_core::multi_account::SplitByRegion for SsmState {
+    /// The legacy account-wide state lands in its own (the server's) region;
+    /// then every ARN-bearing record whose ARN names another region moves
+    /// there: parameters (with the resource policies and policy events that
+    /// name them), OpsMetadata and cloud connectors. Records without an ARN
+    /// (documents, windows, baselines, associations, ...) stay in the home
+    /// region, where every pre-regional request put them.
+    fn split_by_region(mut self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
+        let home = if self.region.is_empty() {
+            into.default_region().to_string()
+        } else {
+            self.region.clone()
+        };
+        let elsewhere = |arn: &str| -> Option<String> {
+            fakecloud_aws::arn::region_of(arn)
+                .filter(|r| !r.is_empty() && *r != home)
+                .map(str::to_string)
+        };
+
+        let mut moved_params = Vec::new();
+        self.parameters.retain(|name, p| match elsewhere(&p.arn) {
+            Some(region) => {
+                moved_params.push((region, name.clone(), p.clone()));
+                false
+            }
+            None => true,
+        });
+        let mut moved_policies = Vec::new();
+        self.resource_policies
+            .retain(|p| match elsewhere(&p.resource_arn) {
+                Some(region) => {
+                    moved_policies.push((region, p.clone()));
+                    false
+                }
+                None => true,
+            });
+        let mut moved_events = Vec::new();
+        self.parameter_policy_events
+            .retain(|e| match elsewhere(&e.parameter_arn) {
+                Some(region) => {
+                    moved_events.push((region, e.clone()));
+                    false
+                }
+                None => true,
+            });
+        let mut moved_metadata = Vec::new();
+        self.ops_metadata
+            .retain(|k, m| match elsewhere(&m.ops_metadata_arn) {
+                Some(region) => {
+                    moved_metadata.push((region, k.clone(), m.clone()));
+                    false
+                }
+                None => true,
+            });
+        let mut moved_connectors = Vec::new();
+        self.cloud_connectors.retain(|k, c| match elsewhere(&c.arn) {
+            Some(region) => {
+                moved_connectors.push((region, k.clone(), c.clone()));
+                false
+            }
+            None => true,
+        });
+
+        // The single pre-per-OS registered default becomes the default of
+        // the operating system its baseline targets.
+        if let Some(id) = self.default_patch_baseline_id.take() {
+            let os = self
+                .patch_baselines
+                .get(&id)
+                .map(|b| b.operating_system.clone())
+                .or_else(|| crate::service::default_baseline_os(&id).map(str::to_string));
+            if let Some(os) = os {
+                self.default_patch_baselines.entry(os).or_insert(id);
+            }
+        }
+
+        self.region = home.clone();
+        into.insert_region(&home, self);
+        for (region, name, p) in moved_params {
+            into.region_mut(&region).parameters.insert(name, p);
+        }
+        for (region, p) in moved_policies {
+            into.region_mut(&region).resource_policies.push(p);
+        }
+        for (region, e) in moved_events {
+            into.region_mut(&region).parameter_policy_events.push(e);
+        }
+        for (region, k, m) in moved_metadata {
+            into.region_mut(&region).ops_metadata.insert(k, m);
+        }
+        for (region, k, c) in moved_connectors {
+            into.region_mut(&region).cloud_connectors.insert(k, c);
+        }
     }
 }
 
@@ -893,12 +1008,58 @@ impl fakecloud_core::multi_account::AccountState for SsmState {
 pub struct SsmSnapshot {
     pub schema_version: u32,
     #[serde(default)]
-    pub accounts: Option<fakecloud_core::multi_account::MultiAccountState<SsmState>>,
-    #[serde(default)]
-    pub state: Option<SsmState>,
+    pub accounts: Option<fakecloud_core::multi_account::MultiRegionState<SsmState>>,
+    /// Only set when a v1 (single-account) snapshot is migrated: that one
+    /// account's state split by region, for the caller to merge into its own
+    /// container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<fakecloud_core::multi_account::RegionalState<SsmState>>,
 }
 
-pub const SSM_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// v3: state partitioned by (account, region). v2 kept one state per
+/// account; v1 a single account's.
+pub const SSM_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+
+/// The shape v1 and v2 snapshots stored: one state per account.
+#[derive(Debug, serde::Deserialize)]
+struct LegacySsmSnapshot {
+    #[serde(default)]
+    accounts: Option<fakecloud_core::multi_account::MultiAccountState<SsmState>>,
+    #[serde(default)]
+    state: Option<SsmState>,
+}
+
+#[derive(serde::Deserialize)]
+struct SnapshotVersion {
+    schema_version: u32,
+}
+
+/// Parse a persisted SSM snapshot, migrating older schemas to the current one
+/// (see [`SsmState`]'s `SplitByRegion`). A snapshot newer than this build
+/// comes back with its on-disk `schema_version` and no state, for the caller
+/// to refuse.
+pub fn parse_ssm_snapshot(bytes: &[u8]) -> Result<SsmSnapshot, serde_json::Error> {
+    let SnapshotVersion { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version > SSM_SNAPSHOT_SCHEMA_VERSION {
+        return Ok(SsmSnapshot {
+            schema_version,
+            accounts: None,
+            state: None,
+        });
+    }
+    if schema_version == SSM_SNAPSHOT_SCHEMA_VERSION {
+        return serde_json::from_slice(bytes);
+    }
+    let legacy: LegacySsmSnapshot = serde_json::from_slice(bytes)?;
+    Ok(SsmSnapshot {
+        schema_version: SSM_SNAPSHOT_SCHEMA_VERSION,
+        accounts: legacy.accounts.map(|a| a.into_regional()),
+        state: legacy.state.map(|s| {
+            let (account, region) = (s.account_id.clone(), s.region.clone());
+            fakecloud_core::multi_account::RegionalState::from_legacy(&account, &region, "", s)
+        }),
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -954,5 +1115,137 @@ mod tests {
         assert_eq!(state.session_counter, 0);
         assert_eq!(state.activation_counter, 0);
         assert_eq!(state.execution_preview_counter, 0);
+    }
+
+    fn user_param(name: &str, region: &str, value: &str) -> SsmParameter {
+        SsmParameter {
+            name: name.to_string(),
+            value: value.to_string(),
+            param_type: "String".to_string(),
+            version: 1,
+            arn: format!("arn:aws:ssm:{region}:123456789012:parameter{name}"),
+            last_modified: Utc::now(),
+            history: Vec::new(),
+            tags: BTreeMap::new(),
+            labels: BTreeMap::new(),
+            description: None,
+            allowed_pattern: None,
+            key_id: None,
+            data_type: "text".to_string(),
+            tier: "Standard".to_string(),
+            policies: None,
+            expiration_notified: false,
+            no_change_notified: false,
+        }
+    }
+
+    #[test]
+    fn v2_snapshot_migrates_parameters_into_their_arn_region() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        let mut legacy: MultiAccountState<SsmState> =
+            MultiAccountState::new("123456789012", "us-east-1", "http://localhost:4566");
+        let st = legacy.default_mut();
+        st.parameters
+            .insert("/east".into(), user_param("/east", "us-east-1", "e"));
+        st.parameters
+            .insert("/west".into(), user_param("/west", "eu-west-1", "w"));
+        st.resource_policies.push(SsmResourcePolicy {
+            policy_id: "p".into(),
+            policy_hash: "h".into(),
+            policy: "{}".into(),
+            resource_arn: "arn:aws:ssm:eu-west-1:123456789012:parameter/west".into(),
+        });
+        st.patch_baselines.insert(
+            "pb-1".into(),
+            PatchBaseline {
+                id: "pb-1".into(),
+                name: "b".into(),
+                operating_system: "UBUNTU".into(),
+                description: None,
+                approval_rules: None,
+                approved_patches: vec![],
+                rejected_patches: vec![],
+                tags: BTreeMap::new(),
+                approved_patches_compliance_level: "UNSPECIFIED".into(),
+                rejected_patches_action: "ALLOW_AS_DEPENDENCY".into(),
+                global_filters: None,
+                sources: vec![],
+                approved_patches_enable_non_security: false,
+                available_security_updates_compliance_status: None,
+                client_token: None,
+            },
+        );
+        st.default_patch_baseline_id = Some("pb-1".into());
+        let mut bytes = serde_json::to_value(serde_json::json!({
+            "schema_version": 2,
+            "accounts": legacy,
+        }))
+        .unwrap();
+        // v2 snapshots serialized the single registered default.
+        bytes["accounts"]["accounts"]["123456789012"]["default_patch_baseline_id"] =
+            serde_json::json!("pb-1");
+        let snap = parse_ssm_snapshot(&serde_json::to_vec(&bytes).unwrap()).unwrap();
+        assert_eq!(snap.schema_version, SSM_SNAPSHOT_SCHEMA_VERSION);
+        let accounts = snap.accounts.unwrap();
+        let east = accounts.regional("123456789012", "us-east-1").unwrap();
+        let west = accounts.regional("123456789012", "eu-west-1").unwrap();
+        assert_eq!(east.region, "us-east-1");
+        assert_eq!(west.region, "eu-west-1");
+        assert!(east.parameters.contains_key("/east") && !east.parameters.contains_key("/west"));
+        assert!(west.parameters.contains_key("/west") && !west.parameters.contains_key("/east"));
+        assert_eq!(west.resource_policies.len(), 1);
+        assert!(east.resource_policies.is_empty());
+        // Records without an ARN stay in the home region; the old single
+        // default became that baseline's OS default.
+        assert!(east.patch_baselines.contains_key("pb-1"));
+        assert_eq!(
+            east.default_patch_baselines.get("UBUNTU").map(String::as_str),
+            Some("pb-1")
+        );
+        // A region created by the migration still has the public parameters.
+        assert!(west
+            .parameters
+            .contains_key("/aws/service/global-infrastructure/services/ssm"));
+
+        // The migrated snapshot round-trips as the current schema.
+        let current = serde_json::to_vec(&SsmSnapshot {
+            schema_version: SSM_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(accounts),
+            state: None,
+        })
+        .unwrap();
+        let again = parse_ssm_snapshot(&current).unwrap().accounts.unwrap();
+        assert!(again
+            .regional("123456789012", "eu-west-1")
+            .unwrap()
+            .parameters
+            .contains_key("/west"));
+    }
+
+    #[test]
+    fn v1_single_account_snapshot_migrates_by_region() {
+        let mut st = SsmState::new("123456789012", "us-east-1");
+        st.parameters
+            .insert("/west".into(), user_param("/west", "eu-west-1", "w"));
+        let bytes =
+            serde_json::to_vec(&serde_json::json!({"schema_version": 1, "state": st})).unwrap();
+        let regional = parse_ssm_snapshot(&bytes).unwrap().state.unwrap();
+        assert!(regional
+            .region("eu-west-1")
+            .unwrap()
+            .parameters
+            .contains_key("/west"));
+        assert!(!regional
+            .region("us-east-1")
+            .unwrap()
+            .parameters
+            .contains_key("/west"));
+    }
+
+    #[test]
+    fn newer_snapshot_is_reported_not_parsed() {
+        let snap = parse_ssm_snapshot(br#"{"schema_version": 99, "accounts": 5}"#).unwrap();
+        assert_eq!(snap.schema_version, 99);
+        assert!(snap.accounts.is_none());
     }
 }

@@ -69,7 +69,7 @@ impl SsmService {
 
         let now = Utc::now();
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.automation_execution_counter += 1;
         let exec_id = format!(
             "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
@@ -118,7 +118,7 @@ impl SsmService {
             .ok_or_else(|| missing("AutomationExecutionId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let exec = state
             .automation_executions
             .get_mut(exec_id)
@@ -147,7 +147,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let exec = state.automation_executions.get(exec_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -169,7 +169,7 @@ impl SsmService {
         validate_optional_range_i64("MaxResults", body["MaxResults"].as_i64(), 1, 50)?;
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let items: Vec<Value> = state
             .automation_executions
             .values()
@@ -202,7 +202,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let exec = state.automation_executions.get(exec_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -244,7 +244,7 @@ impl SsmService {
             .to_string();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let exec = state
             .automation_executions
             .get_mut(&exec_id)
@@ -335,7 +335,7 @@ impl SsmService {
 
         let now = Utc::now();
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.automation_execution_counter += 1;
         let exec_id = format!(
             "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
@@ -386,7 +386,7 @@ impl SsmService {
 
         let now = Utc::now();
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.execution_preview_counter += 1;
         let preview_id = format!(
             "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
@@ -417,7 +417,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let preview = state.execution_previews.get(preview_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,

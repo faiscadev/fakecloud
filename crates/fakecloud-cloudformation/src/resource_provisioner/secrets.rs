@@ -12,7 +12,7 @@ impl ResourceProvisioner {
         attribute: &str,
     ) -> Option<String> {
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let key = state.secret_key(physical_id)?;
         let secret = state.secrets.get(&key)?;
         match attribute {
@@ -46,7 +46,7 @@ impl ResourceProvisioner {
             .map(|s| s.to_string());
 
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         // Same ARN form Secrets Manager's CreateSecret mints: the name plus
         // the random six-character suffix. The secret is keyed by name, like
         // every secret the service itself creates.
@@ -121,6 +121,8 @@ impl ResourceProvisioner {
             last_rotated_at: None,
             resource_policy: None,
             replica_regions: Vec::new(),
+            replica_settings: Default::default(),
+            primary_region: None,
         };
         state.secrets.insert(name.clone(), secret);
 
@@ -145,7 +147,7 @@ impl ResourceProvisioner {
         let arn = &existing.physical_id;
 
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let secret = state
             .secret_key(arn)
             .and_then(|key| state.secrets.get_mut(&key))
@@ -208,7 +210,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_secrets_manager_secret(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         if let Some(key) = state.secret_key(physical_id) {
             state.secrets.remove(&key);
         }
@@ -254,7 +256,7 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .map(String::from);
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let secret = state
             .secret_key(&secret_id)
             .and_then(|key| state.secrets.get_mut(&key))
@@ -276,7 +278,7 @@ impl ResourceProvisioner {
         physical_id: &str,
     ) -> Result<(), String> {
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         if let Some(secret) = state
             .secret_key(physical_id)
             .and_then(|key| state.secrets.get_mut(&key))
@@ -307,7 +309,7 @@ impl ResourceProvisioner {
             other => other.to_string(),
         };
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let secret = state
             .secret_key(&secret_id)
             .and_then(|key| state.secrets.get_mut(&key))
@@ -323,7 +325,7 @@ impl ResourceProvisioner {
         physical_id: &str,
     ) -> Result<(), String> {
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         if let Some(secret) = state
             .secret_key(physical_id)
             .and_then(|key| state.secrets.get_mut(&key))
@@ -353,7 +355,7 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .ok_or("TargetId is required")?;
         let mut accounts = self.secretsmanager_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let secret = state
             .secret_key(&secret_id)
             .and_then(|key| state.secrets.get_mut(&key))

@@ -27,7 +27,7 @@ impl ResourceProvisioner {
             .unwrap_or("String");
 
         let mut accounts = self.ssm_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let arn = fakecloud_ssm::param_arn(&self.region, &self.account_id, name);
 
         let parameter = SsmParameter {
@@ -77,7 +77,7 @@ impl ResourceProvisioner {
             .ok_or("SSM Parameter requires Value")?;
 
         let mut accounts = self.ssm_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         let param = state
             .parameters
             .get_mut(name)
@@ -120,7 +120,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_ssm_parameter(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.ssm_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         state.parameters.remove(physical_id);
         Ok(())
     }

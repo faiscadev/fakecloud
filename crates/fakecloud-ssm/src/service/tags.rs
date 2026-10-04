@@ -116,7 +116,7 @@ impl SsmService {
         validate_required("Tags", &body["Tags"])?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let tag_map = Self::resolve_tags_mut(state, resource_type, resource_id)?;
         tags::apply_tags(tag_map, &body, "Tags", "Key", "Value").map_err(|f| {
             AwsServiceError::aws_error(
@@ -142,7 +142,7 @@ impl SsmService {
         validate_required("TagKeys", &body["TagKeys"])?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let tag_map = Self::resolve_tags_mut(state, resource_type, resource_id)?;
         tags::remove_tags(tag_map, &body, "TagKeys").map_err(|f| {
             AwsServiceError::aws_error(
@@ -167,7 +167,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let tag_map = Self::resolve_tags(state, resource_type, resource_id)?;
         let result = tags::tags_to_json(tag_map, "Key", "Value");
 

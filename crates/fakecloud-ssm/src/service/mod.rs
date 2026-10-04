@@ -11,6 +11,7 @@ mod misc;
 mod ops;
 mod parameters;
 pub use parameters::{param_arn, read_parameter_value, ParameterValue};
+pub(crate) use patches::default_baseline_os;
 mod patches;
 mod resource_sync;
 mod sessions;
@@ -71,12 +72,16 @@ impl SsmService {
     /// All invocations on the command move to the same status so
     /// `GetCommandInvocation` reflects the override on the next read.
     /// Returns `true` when the command was found and updated.
+    /// Commands are regional; the command id is unique, so every region of
+    /// the account is searched.
     pub fn set_command_status(&self, account_id: &str, command_id: &str, status: &str) -> bool {
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        if let Some(c) = state
-            .commands
-            .iter_mut()
+        let Some(account) = accounts.get_mut(account_id) else {
+            return false;
+        };
+        if let Some(c) = account
+            .regions_mut()
+            .flat_map(|(_, state)| state.commands.iter_mut())
             .find(|c| c.command_id == command_id)
         {
             let now = chrono::Utc::now();
@@ -111,10 +116,13 @@ impl SsmService {
         standard_error_content: Option<&str>,
     ) -> usize {
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        let Some(cmd) = state
-            .commands
-            .iter_mut()
+        let Some(account) = accounts.get_mut(account_id) else {
+            return 0;
+        };
+        // Commands are regional; the command id is unique across regions.
+        let Some(cmd) = account
+            .regions_mut()
+            .flat_map(|(_, state)| state.commands.iter_mut())
             .find(|c| c.command_id == command_id)
         else {
             return 0;
@@ -153,19 +161,29 @@ impl SsmService {
         &self,
         account_id: &str,
     ) -> Vec<crate::state::ParameterPolicyEvent> {
+        // Every region of the account, in region order.
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        parameters::purge_expired_params(state);
-        parameters::tick_policy_notifications(state);
-        state.parameter_policy_events.clone()
+        let Some(account) = accounts.get_mut(account_id) else {
+            return Vec::new();
+        };
+        let mut events = Vec::new();
+        for (_, state) in account.regions_mut() {
+            parameters::purge_expired_params(state);
+            parameters::tick_policy_notifications(state);
+            events.extend(state.parameter_policy_events.iter().cloned());
+        }
+        events
     }
 
     /// Admin: drop the recorded parameter-policy event log for the
     /// given account. Tests use this to reset between assertions.
     pub fn clear_parameter_policy_events(&self, account_id: &str) {
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
-        state.parameter_policy_events.clear();
+        if let Some(account) = accounts.get_mut(account_id) {
+            for (_, state) in account.regions_mut() {
+                state.parameter_policy_events.clear();
+            }
+        }
     }
 
     /// Admin: inject a fake SSM session record so DescribeSessions /
@@ -186,7 +204,17 @@ impl SsmService {
     ) -> String {
         let now = chrono::Utc::now();
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
+        // A session lives in the region of its target managed instance; a
+        // target fakecloud does not know lands in the server's region.
+        let region = accounts
+            .get(account_id)
+            .and_then(|a| {
+                a.regions()
+                    .find(|(_, s)| s.managed_instances.contains_key(target))
+                    .map(|(r, _)| r.to_string())
+            })
+            .unwrap_or_else(|| accounts.region().to_string());
+        let state = accounts.regional_mut(account_id, &region);
         let id = match session_id {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => {

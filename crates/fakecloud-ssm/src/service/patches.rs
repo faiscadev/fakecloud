@@ -19,7 +19,7 @@ impl SsmService {
         let input = CreatePatchBaselineInput::from_body(&req.json_body())?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         // Idempotency: if a baseline with the same ClientToken already exists, return it
         if let Some(ref token) = input.client_token {
@@ -72,7 +72,7 @@ impl SsmService {
         validate_string_length("BaselineId", baseline_id, 20, 128)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.patch_baselines.remove(baseline_id);
         // Also remove any patch group associations
         state
@@ -93,7 +93,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let all_baselines: Vec<Value> = state
             .patch_baselines
             .values()
@@ -163,7 +163,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let pb = state.patch_baselines.get(baseline_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -220,7 +220,7 @@ impl SsmService {
         validate_string_length("PatchGroup", &patch_group, 1, 256)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         // Check baseline exists (AWS returns "Maintenance window" in this error, not "Patch baseline")
         if !state.patch_baselines.contains_key(&baseline_id) {
@@ -290,7 +290,7 @@ impl SsmService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         // Check if the association exists
         let exists = state
@@ -303,7 +303,7 @@ impl SsmService {
                 .retain(|pg| !(pg.baseline_id == baseline_id && pg.patch_group == patch_group));
         } else {
             // Allow deregistering default baselines (they are implicitly registered)
-            let is_default = is_default_patch_baseline(baseline_id);
+            let is_default = default_baseline_os_in(&req.region, baseline_id).is_some();
             if !is_default {
                 return Err(aws_400(
                     "InvalidResourceId",
@@ -352,7 +352,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
         // Find a patch group association matching both patch group and OS
         let found = state.patch_groups.iter().find(|pg| {
@@ -393,7 +393,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let all_mappings: Vec<Value> = state
             .patch_groups
             .iter()
@@ -465,7 +465,7 @@ impl SsmService {
             .ok_or_else(|| missing("BaselineId"))?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let pb = state.patch_baselines.get_mut(baseline_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -548,7 +548,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
         let all: Vec<Value> = instance_ids
             .iter()
@@ -579,7 +579,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
         let all: Vec<Value> = state
             .inventory_entries
@@ -610,7 +610,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
         let patches: Vec<Value> = state
             .inventory_entries
@@ -665,7 +665,7 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let pb = state.patch_baselines.get(baseline_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -869,10 +869,10 @@ impl SsmService {
 
         let accounts = self.state.read();
         let empty = SsmState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
-        // Check if a custom default has been registered
-        if let Some(ref baseline_id) = state.default_patch_baseline_id {
+        // A default registered for this OS in this region wins.
+        if let Some(baseline_id) = state.default_patch_baselines.get(operating_system) {
             return Ok(AwsResponse::ok_json(json!({
                 "BaselineId": baseline_id,
                 "OperatingSystem": operating_system,
@@ -900,20 +900,27 @@ impl SsmService {
             .to_string();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
-        // Verify baseline exists (custom or default)
-        if !state.patch_baselines.contains_key(&baseline_id)
-            && !is_default_patch_baseline(&baseline_id)
-        {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "DoesNotExistException",
-                format!("Patch baseline {baseline_id} does not exist"),
-            ));
-        }
+        // The baseline must exist in this region: one of the account's own
+        // baselines here, or an AWS-provided baseline of this region. Its
+        // operating system picks which per-OS default it becomes.
+        let operating_system = match state.patch_baselines.get(&baseline_id) {
+            Some(baseline) => baseline.operating_system.clone(),
+            None => default_baseline_os_in(&req.region, &baseline_id)
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    AwsServiceError::aws_error(
+                        StatusCode::BAD_REQUEST,
+                        "DoesNotExistException",
+                        format!("Patch baseline {baseline_id} does not exist"),
+                    )
+                })?,
+        };
 
-        state.default_patch_baseline_id = Some(baseline_id.clone());
+        state
+            .default_patch_baselines
+            .insert(operating_system, baseline_id.clone());
         Ok(AwsResponse::ok_json(json!({
             "BaselineId": baseline_id,
         })))
@@ -1078,7 +1085,7 @@ fn build_instance_patch_state(state: &SsmState, instance_id: &str) -> Option<Val
     let baseline_id = row
         .get("BaselineId")
         .cloned()
-        .or_else(|| state.default_patch_baseline_id.clone())
+        .or_else(|| registered_default_for_instance(state, instance_id))
         .unwrap_or_default();
     let patch_group = row
         .get("PatchGroup")
@@ -1212,31 +1219,90 @@ fn patch_property_values(os: &str, property: &str) -> &'static [&'static str] {
 
 /// Look up the default patch baseline for a given region and OS.
 pub(super) fn default_patch_baseline(region: &str, operating_system: &str) -> Option<String> {
-    static DEFAULT_BASELINES: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
-        serde_json::from_str(include_str!("../default_baselines.json")).unwrap_or(json!({}))
-    });
-    DEFAULT_BASELINES
+    default_baselines()
         .get(region)
         .and_then(|r| r.get(operating_system))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
 }
 
-/// Check if a baseline ID is a known default baseline.
-pub(super) fn is_default_patch_baseline(baseline_id: &str) -> bool {
+/// The registered default baseline that applies to a managed instance: the
+/// one registered for the instance's operating system, or, when the OS is
+/// unknown, the only registered default if there is exactly one.
+fn registered_default_for_instance(state: &SsmState, instance_id: &str) -> Option<String> {
+    let os = state
+        .managed_instances
+        .get(instance_id)
+        .and_then(|mi| instance_operating_system(&mi.platform_type, &mi.platform_name));
+    match os {
+        Some(os) => state.default_patch_baselines.get(os).cloned(),
+        None if state.default_patch_baselines.len() == 1 => {
+            state.default_patch_baselines.values().next().cloned()
+        }
+        None => None,
+    }
+}
+
+/// The patch-baseline operating system of a managed instance's platform.
+fn instance_operating_system(platform_type: &str, platform_name: &str) -> Option<&'static str> {
+    if platform_type.eq_ignore_ascii_case("windows") {
+        return Some("WINDOWS");
+    }
+    if platform_type.eq_ignore_ascii_case("macos") {
+        return Some("MACOS");
+    }
+    let name = platform_name.to_ascii_lowercase();
+    let os = if name.contains("amazon linux 2023") {
+        "AMAZON_LINUX_2023"
+    } else if name.contains("amazon linux 2") {
+        "AMAZON_LINUX_2"
+    } else if name.contains("amazon linux") {
+        "AMAZON_LINUX"
+    } else if name.contains("ubuntu") {
+        "UBUNTU"
+    } else if name.contains("debian") {
+        "DEBIAN"
+    } else if name.contains("red hat") {
+        "REDHAT_ENTERPRISE_LINUX"
+    } else if name.contains("suse") {
+        "SUSE"
+    } else if name.contains("centos") {
+        "CENTOS"
+    } else if name.contains("oracle") {
+        "ORACLE_LINUX"
+    } else if name.contains("rocky") {
+        "ROCKY_LINUX"
+    } else if name.contains("alma") {
+        "ALMA_LINUX"
+    } else if name.contains("raspbian") {
+        "RASPBIAN"
+    } else {
+        return None;
+    };
+    Some(os)
+}
+
+fn default_baselines() -> &'static Value {
     static DEFAULT_BASELINES: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
         serde_json::from_str(include_str!("../default_baselines.json")).unwrap_or(json!({}))
     });
-    if let Some(obj) = DEFAULT_BASELINES.as_object() {
-        for region_data in obj.values() {
-            if let Some(region_obj) = region_data.as_object() {
-                for val in region_obj.values() {
-                    if val.as_str() == Some(baseline_id) {
-                        return true;
-                    }
-                }
-            }
-        }
-    }
-    false
+    &DEFAULT_BASELINES
 }
+
+/// The operating system of an AWS-provided default baseline of `region`,
+/// `None` when `baseline_id` is not one of that region's.
+pub(super) fn default_baseline_os_in(region: &str, baseline_id: &str) -> Option<&'static str> {
+    default_baselines()
+        .get(region)?
+        .as_object()?
+        .iter()
+        .find(|(_, v)| v.as_str() == Some(baseline_id))
+        .map(|(os, _)| os.as_str())
+}
+
+/// The operating system of an AWS-provided default baseline of any region.
+pub(crate) fn default_baseline_os(baseline_id: &str) -> Option<&'static str> {
+    let region = fakecloud_aws::arn::region_of(baseline_id)?;
+    default_baseline_os_in(region, baseline_id)
+}
+

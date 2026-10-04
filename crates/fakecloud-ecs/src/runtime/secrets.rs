@@ -120,18 +120,26 @@ fn go_float_text(f: f64) -> String {
 
 impl EcsRuntime {
     /// Resolve a `secrets[].valueFrom` reference to the value injected into
-    /// the container, reading as `account_id` (the task's account). The error
-    /// becomes the task's `stoppedReason`.
+    /// the container, reading as `account_id` in `region` (the task's account
+    /// and region): a name resolves in the task's region, a full ARN in the
+    /// region it names (how ECS reaches a secret or parameter in another
+    /// region). The error becomes the task's `stoppedReason`.
     pub(super) fn resolve_secret(
         &self,
         account_id: &str,
+        region: &str,
         value_from: &str,
     ) -> Result<String, RuntimeError> {
-        self.resolve_secret_value(account_id, value_from)
+        self.resolve_secret_value(account_id, region, value_from)
             .map_err(RuntimeError::SecretRetrieval)
     }
 
-    fn resolve_secret_value(&self, account_id: &str, value_from: &str) -> Result<String, String> {
+    fn resolve_secret_value(
+        &self,
+        account_id: &str,
+        region: &str,
+        value_from: &str,
+    ) -> Result<String, String> {
         match parse_value_from(value_from)? {
             SecretReference::SecretsManager {
                 secret_id,
@@ -139,10 +147,17 @@ impl EcsRuntime {
                 version_stage,
                 version_id,
             } => self
-                .read_asm_secret(account_id, &secret_id, json_key, version_stage, version_id)
+                .read_asm_secret(
+                    account_id,
+                    region,
+                    &secret_id,
+                    json_key,
+                    version_stage,
+                    version_id,
+                )
                 .map_err(|e| format!("unable to retrieve secret from asm: {e}")),
             SecretReference::Parameter(name) => {
-                self.read_ssm_parameter(account_id, name).map_err(|e| {
+                self.read_ssm_parameter(account_id, region, name).map_err(|e| {
                     format!(
                         "unable to retrieve secrets from ssm: fetching secret data from SSM \
                          Parameter Store: {e}"
@@ -156,6 +171,7 @@ impl EcsRuntime {
     fn read_asm_secret(
         &self,
         account_id: &str,
+        region: &str,
         secret_id: &str,
         json_key: Option<&str>,
         version_stage: Option<&str>,
@@ -176,6 +192,7 @@ impl EcsRuntime {
             state,
             self.kms_hook.as_deref(),
             account_id,
+            region,
             secret_id,
             version_id,
             version_stage,
@@ -203,10 +220,21 @@ impl EcsRuntime {
     }
 
     /// `GetParameters` with decryption, with the agent's errors.
-    fn read_ssm_parameter(&self, account_id: &str, name: &str) -> Result<String, String> {
+    fn read_ssm_parameter(
+        &self,
+        account_id: &str,
+        region: &str,
+        name: &str,
+    ) -> Result<String, String> {
         let invalid = || format!("invalid parameters: {name}");
         let state = self.ssm_state.as_ref().ok_or_else(invalid)?;
-        fakecloud_ssm::read_parameter_value(state, self.kms_hook.as_deref(), account_id, name)
+        fakecloud_ssm::read_parameter_value(
+            state,
+            self.kms_hook.as_deref(),
+            account_id,
+            region,
+            name,
+        )
             .map(|p| p.value)
             .map_err(|e| {
                 if e.code() == "ParameterNotFound" {

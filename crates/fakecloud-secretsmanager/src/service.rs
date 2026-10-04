@@ -15,7 +15,7 @@ use fakecloud_core::validation::*;
 use fakecloud_persistence::SnapshotStore;
 
 use crate::state::{
-    RotationRules, Secret, SecretVersion, SecretsManagerSnapshot, SecretsManagerState,
+    ReplicaSetting, RotationRules, Secret, SecretVersion, SecretsManagerSnapshot, SecretsManagerState,
     SharedSecretsManagerState, SECRETSMANAGER_SNAPSHOT_SCHEMA_VERSION,
 };
 
@@ -37,6 +37,7 @@ struct RotationInvocation {
 /// Locates a temporary AWSPENDING version to delete after a test-only rotation.
 struct PendingCleanup {
     account_id: String,
+    region: String,
     secret_name: String,
     version_id: String,
 }
@@ -45,9 +46,8 @@ struct PendingCleanup {
 fn remove_rotation_test_pending(state: &SharedSecretsManagerState, cleanup: &PendingCleanup) {
     let mut accounts = state.write();
     if let Some(secret) = accounts
-        .get_or_create(&cleanup.account_id)
-        .secrets
-        .get_mut(&cleanup.secret_name)
+        .regional_get_mut(&cleanup.account_id, &cleanup.region)
+        .and_then(|s| s.secrets.get_mut(&cleanup.secret_name))
     {
         secret.versions.remove(&cleanup.version_id);
     }
@@ -138,38 +138,14 @@ impl SecretsManagerService {
         kms_key_id: Option<&str>,
         plaintext: Option<String>,
     ) -> Option<String> {
-        let pt = plaintext?;
-        let (Some(hook), Some(key)) = (&self.kms_hook, kms_key_id) else {
-            return Some(pt);
-        };
-        let key = if key.is_empty() {
-            "aws/secretsmanager"
-        } else {
-            key
-        };
-        let mut ctx = HashMap::new();
-        ctx.insert(
-            "aws:secretsmanager:secretArn".to_string(),
-            secret_arn.to_string(),
-        );
-        match hook.encrypt(
+        encrypt_secret_string(
+            self.kms_hook.as_deref(),
             account_id,
             region,
-            key,
-            pt.as_bytes(),
-            "secretsmanager.amazonaws.com",
-            ctx,
-        ) {
-            Ok(ciphertext) => Some(ciphertext),
-            Err(err) => {
-                tracing::warn!(
-                    secret_arn = %secret_arn,
-                    error = %err,
-                    "KMS encrypt failed for secret; storing plaintext"
-                );
-                Some(pt)
-            }
-        }
+            secret_arn,
+            kms_key_id,
+            plaintext,
+        )
     }
 
     fn maybe_decrypt_secret_string(
@@ -226,7 +202,7 @@ impl SecretsManagerService {
         let has_value = input.secret_string.is_some() || input.secret_binary.is_some();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         // A name that is scheduled for deletion can't be recreated while its
         // recovery window is still open — AWS returns InvalidRequestException
@@ -317,7 +293,19 @@ impl SecretsManagerService {
         };
 
         let tags_ever_set = !input.tags.is_empty();
-        let replica_regions = input.add_replica_regions.clone();
+        let replica_regions: Vec<String> = input
+            .add_replica_regions
+            .iter()
+            .map(|(r, _)| r.clone())
+            .collect();
+        for region in &replica_regions {
+            validate_replica_region(region, &req.region)?;
+        }
+        let replica_settings = input
+            .add_replica_regions
+            .iter()
+            .map(|(r, kms)| (r.clone(), ReplicaSetting::in_sync(kms.clone())))
+            .collect();
         let secret = Secret {
             name: input.name.clone(),
             arn: arn.clone(),
@@ -338,9 +326,14 @@ impl SecretsManagerService {
             last_rotated_at: None,
             resource_policy: None,
             replica_regions,
+            replica_settings,
+            primary_region: None,
         };
 
         state.secrets.insert(input.name.clone(), secret);
+        // Create the replicas (a name clash in a replica region marks that
+        // replica Failed).
+        self.sync_replicas(&mut accounts, &req.account_id, &req.region, &input.name);
 
         let mut response = json!({
             "ARN": arn,
@@ -352,7 +345,12 @@ impl SecretsManagerService {
         // CreateSecret echoes ReplicationStatus when replica regions were
         // requested via AddReplicaRegions.
         if !input.add_replica_regions.is_empty() {
-            response["ReplicationStatus"] = replication_status_json(&input.add_replica_regions);
+            if let Some(secret) = accounts
+                .regional(&req.account_id, &req.region)
+                .and_then(|s| s.secrets.get(&input.name))
+            {
+                response["ReplicationStatus"] = replication_status_json(secret);
+            }
         }
 
         Ok(AwsResponse::ok_json(response))
@@ -364,10 +362,19 @@ impl SecretsManagerService {
         validate_optional_string_length("versionId", body["VersionId"].as_str(), 32, 64)?;
         validate_optional_string_length("versionStage", body["VersionStage"].as_str(), 1, 256)?;
 
+        // The Secrets Manager endpoint of one region only serves that
+        // region's secrets: an ARN naming another region is not found here
+        // (the caller must use a client of that region).
+        if arn_resource(&secret_id, "secretsmanager").is_some()
+            && fakecloud_aws::arn::region_of(&secret_id) != Some(req.region.as_str())
+        {
+            return Err(secret_not_found());
+        }
         let value = crate::value::read_secret_value(
             &self.state,
             self.kms_hook.as_deref(),
             &req.account_id,
+            &req.region,
             &secret_id,
             body["VersionId"].as_str(),
             body["VersionStage"].as_str(),
@@ -418,7 +425,7 @@ impl SecretsManagerService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = match self.find_secret_mut(state, &secret_id) {
             Ok(s) => s,
             Err(_) => {
@@ -564,7 +571,7 @@ impl SecretsManagerService {
         validate_optional_string_length("secretString", body["SecretString"].as_str(), 1, 65536)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = match self.find_secret_mut(state, &secret_id) {
             Ok(s) => s,
             Err(_) => {
@@ -710,11 +717,14 @@ impl SecretsManagerService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
 
         if force_delete {
             // Force delete: if secret doesn't exist, create a fake response
             match self.find_secret_mut(state, &secret_id) {
+                Ok(secret) if !secret.replica_regions.is_empty() => {
+                    return Err(primary_has_replicas_error());
+                }
                 Ok(secret) => {
                     let arn = secret.arn.clone();
                     let name = secret.name.clone();
@@ -750,6 +760,9 @@ impl SecretsManagerService {
                 "You can't perform this operation on the secret because it was already scheduled for deletion.",
             ));
         }
+        if !secret.replica_regions.is_empty() {
+            return Err(primary_has_replicas_error());
+        }
 
         let now = Utc::now();
         let days = recovery_window.unwrap_or(30);
@@ -771,7 +784,7 @@ impl SecretsManagerService {
         let secret_id = require_secret_id(&body)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
 
         // AWS allows restoring a secret that is not deleted (no-op)
@@ -792,7 +805,7 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
         let mut response = json!({
@@ -851,7 +864,10 @@ impl SecretsManagerService {
             response["LastRotatedDate"] = json!(last_rotated.timestamp_millis() as f64 / 1000.0);
         }
         if !secret.replica_regions.is_empty() {
-            response["ReplicationStatus"] = replication_status_json(&secret.replica_regions);
+            response["ReplicationStatus"] = replication_status_json(secret);
+        }
+        if let Some(primary) = primary_region_of(secret, &req.region) {
+            response["PrimaryRegion"] = json!(primary);
         }
         // Calculate NextRotationDate if rotation is enabled
         if secret.rotation_enabled == Some(true) {
@@ -930,7 +946,7 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
 
         let mut secrets: Vec<&Secret> = state
             .secrets
@@ -1017,6 +1033,9 @@ impl SecretsManagerService {
                         .deletion_date
                         .map(|d| d.timestamp_millis() as f64 / 1000.0));
                 }
+                if let Some(primary) = primary_region_of(s, &req.region) {
+                    entry["PrimaryRegion"] = json!(primary);
+                }
                 entry
             })
             .collect();
@@ -1041,7 +1060,7 @@ impl SecretsManagerService {
         let new_tags = parse_tags(&body["Tags"]);
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
 
         if !new_tags.is_empty() {
@@ -1073,7 +1092,7 @@ impl SecretsManagerService {
             .unwrap_or_default();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
 
         secret.tags.retain(|(k, _)| !tag_keys.contains(k));
@@ -1094,7 +1113,7 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
         // Stable order so the NextToken (a version id) resumes deterministically:
@@ -1333,7 +1352,7 @@ impl SecretsManagerService {
         }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
 
         if secret.deleted {
@@ -1472,6 +1491,7 @@ impl SecretsManagerService {
                         steps: vec!["testSecret"],
                         cleanup_pending: Some(PendingCleanup {
                             account_id: req.account_id.clone(),
+                            region: req.region.clone(),
                             secret_name: secret.name.clone(),
                             version_id: version_id.clone(),
                         }),
@@ -1494,7 +1514,7 @@ impl SecretsManagerService {
         let secret_id = require_secret_id(&body)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
 
         if secret.deleted {
@@ -1557,7 +1577,7 @@ impl SecretsManagerService {
         let remove_from = body["RemoveFromVersionId"].as_str().map(|s| s.to_string());
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
 
         // Validate: if moving AWSCURRENT, must specify RemoveFromVersionId
@@ -1660,7 +1680,7 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let mut secret_values: Vec<Value> = Vec::new();
         let mut errors: Vec<Value> = Vec::new();
         let mut next_token: Option<String> = None;
@@ -1846,7 +1866,7 @@ impl SecretsManagerService {
 
         let accounts = self.state.read();
         let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
         let secret = self.find_secret_ref(state, &secret_id)?;
 
         // Real AWS omits ResourcePolicy when none is attached; terraform
@@ -1879,7 +1899,7 @@ impl SecretsManagerService {
         if let Some(secret_id) = body["SecretId"].as_str() {
             let accounts = self.state.read();
             let empty = SecretsManagerState::new(&req.account_id, &req.region);
-            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            let state = accounts.regional(&req.account_id, &req.region).unwrap_or(&empty);
             self.find_secret_key(state, secret_id)?;
         }
 
@@ -1903,7 +1923,7 @@ impl SecretsManagerService {
         let policy = body["ResourcePolicy"].as_str().map(|s| s.to_string());
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
         secret.resource_policy = policy;
 
@@ -1920,7 +1940,7 @@ impl SecretsManagerService {
         let secret_id = require_secret_id(&body)?;
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let secret = self.find_secret_mut(state, &secret_id)?;
         secret.resource_policy = None;
 
@@ -1938,27 +1958,58 @@ impl SecretsManagerService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let body = req.json_body();
         let secret_id = require_secret_id(&body)?;
-        // AddReplicaRegions[].Region — the regions to replicate into.
-        let add_regions: Vec<String> = body["AddReplicaRegions"]
-            .as_array()
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|r| r["Region"].as_str().map(String::from))
-                    .collect()
-            })
-            .unwrap_or_default();
+        // AddReplicaRegions[].Region (+ optional KmsKeyId): the regions to
+        // replicate into.
+        let add_regions = parse_replica_regions(&body);
+        let force_overwrite = body["ForceOverwriteReplicaSecret"]
+            .as_bool()
+            .unwrap_or(false);
+        for (region, _) in &add_regions {
+            validate_replica_region(region, &req.region)?;
+        }
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let secret = self.find_secret_mut(state, &secret_id)?;
-        for region in add_regions {
-            if !secret.replica_regions.contains(&region) {
-                secret.replica_regions.push(region);
+        let name = {
+            let state = accounts.regional_mut(&req.account_id, &req.region);
+            let secret = self.find_secret_mut(state, &secret_id)?;
+            for (region, kms_key_id) in add_regions {
+                if !secret.replica_regions.contains(&region) {
+                    secret.replica_regions.push(region.clone());
+                }
+                secret
+                    .replica_settings
+                    .insert(region, ReplicaSetting::in_sync(kms_key_id));
+            }
+            secret.name.clone()
+        };
+        if force_overwrite {
+            // Drop any secret of the same name in the replica regions so the
+            // sync below can replace it with the replica.
+            let regions = accounts
+                .regional(&req.account_id, &req.region)
+                .and_then(|s| s.secrets.get(&name))
+                .map(|s| s.replica_regions.clone())
+                .unwrap_or_default();
+            for region in regions {
+                if let Some(target) = accounts.regional_get_mut(&req.account_id, &region) {
+                    if target
+                        .secrets
+                        .get(&name)
+                        .is_some_and(|s| s.primary_region.as_deref() != Some(req.region.as_str()))
+                    {
+                        target.secrets.remove(&name);
+                    }
+                }
             }
         }
+        self.sync_replicas(&mut accounts, &req.account_id, &req.region, &name);
+        let secret = accounts
+            .regional(&req.account_id, &req.region)
+            .and_then(|s| s.secrets.get(&name))
+            .ok_or_else(secret_not_found)?;
         let response = json!({
             "ARN": secret.arn,
-            "ReplicationStatus": replication_status_json(&secret.replica_regions),
+            "ReplicationStatus": replication_status_json(secret),
         });
         Ok(AwsResponse::ok_json(response))
     }
@@ -1979,18 +2030,48 @@ impl SecretsManagerService {
             .unwrap_or_default();
 
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(&req.account_id);
-        let secret = self.find_secret_mut(state, &secret_id)?;
-        secret
-            .replica_regions
-            .retain(|r| !remove_regions.contains(r));
+        let (name, removed) = {
+            let state = accounts.regional_mut(&req.account_id, &req.region);
+            let secret = self.find_secret_mut(state, &secret_id)?;
+            let removed: Vec<String> = secret
+                .replica_regions
+                .iter()
+                .filter(|r| remove_regions.contains(r))
+                .cloned()
+                .collect();
+            secret
+                .replica_regions
+                .retain(|r| !remove_regions.contains(r));
+            for region in &removed {
+                secret.replica_settings.remove(region);
+            }
+            (secret.name.clone(), removed)
+        };
+        // Removing a region deletes its replica secret.
+        for region in removed {
+            if let Some(target) = accounts.regional_get_mut(&req.account_id, &region) {
+                if target
+                    .secrets
+                    .get(&name)
+                    .is_some_and(|s| s.primary_region.as_deref() == Some(req.region.as_str()))
+                {
+                    target.secrets.remove(&name);
+                }
+            }
+        }
+        let secret = accounts
+            .regional(&req.account_id, &req.region)
+            .and_then(|s| s.secrets.get(&name))
+            .ok_or_else(secret_not_found)?;
         let response = json!({
             "ARN": secret.arn,
-            "ReplicationStatus": replication_status_json(&secret.replica_regions),
+            "ReplicationStatus": replication_status_json(secret),
         });
         Ok(AwsResponse::ok_json(response))
     }
 
+    /// Promote a replica (called in the replica's region) to a standalone
+    /// primary secret, detaching it from its former primary.
     fn stop_replication_to_replica(
         &self,
         req: &AwsRequest,
@@ -1998,15 +2079,55 @@ impl SecretsManagerService {
         let body = req.json_body();
         let secret_id = require_secret_id(&body)?;
 
-        let accounts = self.state.read();
-        let empty = SecretsManagerState::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
-        let secret = self.find_secret_ref(state, &secret_id)?;
+        let mut accounts = self.state.write();
+        let (arn, name, primary_region) = {
+            let state = accounts.regional_mut(&req.account_id, &req.region);
+            let secret = self.find_secret_mut(state, &secret_id)?;
+            let Some(primary_region) = secret.primary_region.take() else {
+                return Err(AwsServiceError::aws_error(
+                    StatusCode::BAD_REQUEST,
+                    "InvalidRequestException",
+                    "StopReplicationToReplica can only be called on a replica secret, in the replica's Region.",
+                ));
+            };
+            (secret.arn.clone(), secret.name.clone(), primary_region)
+        };
+        if let Some(primary) = accounts
+            .regional_get_mut(&req.account_id, &primary_region)
+            .and_then(|s| s.secrets.get_mut(&name))
+        {
+            primary.replica_regions.retain(|r| r != &req.region);
+            primary.replica_settings.remove(&req.region);
+        }
 
         let response = json!({
-            "ARN": secret.arn,
+            "ARN": arn,
         });
         Ok(AwsResponse::ok_json(response))
+    }
+
+    /// See [`sync_replicas`].
+    pub(crate) fn sync_replicas(
+        &self,
+        accounts: &mut fakecloud_core::multi_account::MultiRegionState<SecretsManagerState>,
+        account: &str,
+        region: &str,
+        name: &str,
+    ) {
+        sync_replicas(accounts, self.kms_hook.as_deref(), account, region, name);
+    }
+
+    /// The `secrets` key of the secret a mutating request names with
+    /// `SecretId`, and whether it is a replica, resolved in the request's
+    /// account and region. `None` when the request names no existing secret.
+    fn mutation_target(&self, req: &AwsRequest) -> Option<(String, bool)> {
+        let body = req.json_body();
+        let secret_id = body["SecretId"].as_str()?;
+        let accounts = self.state.read();
+        let state = accounts.regional(&req.account_id, &req.region)?;
+        let key = state.secret_key(secret_id)?;
+        let is_replica = state.secrets.get(&key)?.primary_region.is_some();
+        Some((key, is_replica))
     }
 
     /// Find a secret by name, full ARN, or partial ARN (mutable).
@@ -2117,7 +2238,7 @@ struct CreateSecretInput {
     /// Regions requested via CreateSecret's `AddReplicaRegions`. Persisted
     /// as replica regions so DescribeSecret and the CreateSecret response
     /// both report `ReplicationStatus`.
-    add_replica_regions: Vec<String>,
+    add_replica_regions: Vec<(String, Option<String>)>,
 }
 
 impl CreateSecretInput {
@@ -2159,14 +2280,7 @@ impl CreateSecretInput {
             secret_string,
             secret_binary,
             tags: parse_tags(&body["Tags"]),
-            add_replica_regions: body["AddReplicaRegions"]
-                .as_array()
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|r| r["Region"].as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default(),
+            add_replica_regions: parse_replica_regions(body),
         })
     }
 }
@@ -2179,6 +2293,19 @@ impl AwsService for SecretsManagerService {
 
     async fn handle(&self, req: AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let mutates = is_mutating_action(req.action.as_str());
+        // The secret a mutating call targets (by name), resolved in the
+        // request's region before the call: a replica only accepts
+        // StopReplicationToReplica; every other write goes to the primary.
+        let target = if mutates {
+            self.mutation_target(&req)
+        } else {
+            None
+        };
+        if let Some((_, true)) = &target {
+            if req.action != "StopReplicationToReplica" {
+                return Err(replica_read_only_error());
+            }
+        }
         let result = match req.action.as_str() {
             "CreateSecret" => self.create_secret(&req),
             "GetSecretValue" => self.get_secret_value(&req),
@@ -2236,6 +2363,11 @@ impl AwsService for SecretsManagerService {
             )),
         };
         if mutates && matches!(result.as_ref(), Ok(resp) if resp.status.is_success()) {
+            // Keep the primary's replicas in step with the write.
+            if let Some((name, _)) = target {
+                let mut accounts = self.state.write();
+                self.sync_replicas(&mut accounts, &req.account_id, &req.region, &name);
+            }
             self.save_snapshot().await;
         }
         result.map_err(remap_validation_error)
@@ -2280,20 +2412,109 @@ pub(crate) use service_helpers::*;
 /// error is `InvalidParameterException`. Translate at the dispatcher
 /// boundary so the wire-level error code matches real AWS without
 /// duplicating every validator.
-/// Build the `ReplicationStatus` array from a secret's replica regions.
-/// Each replica reports `InSync`, matching a healthy replication.
-fn replication_status_json(regions: &[String]) -> Value {
+/// Build the `ReplicationStatus` array of a primary secret, one entry per
+/// replica region in the order they were added.
+fn replication_status_json(secret: &Secret) -> Value {
     Value::Array(
-        regions
+        secret
+            .replica_regions
             .iter()
             .map(|r| {
-                json!({
+                let setting = secret
+                    .replica_settings
+                    .get(r)
+                    .cloned()
+                    .unwrap_or_else(|| ReplicaSetting::in_sync(None));
+                let mut entry = json!({
                     "Region": r,
-                    "Status": "InSync",
-                    "StatusMessage": "Replication succeeded",
-                })
+                    "KmsKeyId": setting
+                        .kms_key_id
+                        .clone()
+                        .unwrap_or_else(|| "alias/aws/secretsmanager".to_string()),
+                    "Status": setting.status,
+                    "StatusMessage": setting.status_message,
+                });
+                if !setting.is_in_sync() {
+                    entry.as_object_mut().unwrap().remove("KmsKeyId");
+                }
+                entry
             })
             .collect(),
+    )
+}
+
+/// The `PrimaryRegion` a secret reports: its primary's region for a replica,
+/// its own region for a primary that has replicas, `None` otherwise.
+fn primary_region_of<'a>(secret: &'a Secret, own_region: &'a str) -> Option<&'a str> {
+    match &secret.primary_region {
+        Some(primary) => Some(primary.as_str()),
+        None if !secret.replica_regions.is_empty() => Some(own_region),
+        None => None,
+    }
+}
+
+/// A replica's ARN: the primary's ARN (same name and random suffix) in the
+/// replica region and that region's partition.
+fn replica_arn(primary_arn: &str, replica_region: &str) -> String {
+    match primary_arn.parse::<Arn>().ok() {
+        Some(arn) => Arn::regional(
+            "secretsmanager",
+            replica_region,
+            &arn.account_id,
+            &arn.resource,
+        )
+        .to_string(),
+        None => primary_arn.to_string(),
+    }
+}
+
+/// `AddReplicaRegions` of CreateSecret / ReplicateSecretToRegions: each
+/// region with its optional KMS key.
+fn parse_replica_regions(body: &Value) -> Vec<(String, Option<String>)> {
+    body["AddReplicaRegions"]
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|r| {
+                    let region = r["Region"].as_str()?.to_string();
+                    let kms = r["KmsKeyId"]
+                        .as_str()
+                        .filter(|k| !k.is_empty())
+                        .map(String::from);
+                    Some((region, kms))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A secret can't be replicated into its own region.
+fn validate_replica_region(region: &str, primary_region: &str) -> Result<(), AwsServiceError> {
+    if region == primary_region {
+        return Err(AwsServiceError::aws_error(
+            StatusCode::BAD_REQUEST,
+            "InvalidParameterException",
+            format!(
+                "Invalid replica region {region}: a secret can't be replicated to its primary region."
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn primary_has_replicas_error() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidRequestException",
+        "You can't delete a primary secret that is replicated to other Regions. Remove the replicas with RemoveRegionsFromReplication first.",
+    )
+}
+
+fn replica_read_only_error() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidRequestException",
+        "Operation not permitted on a replica secret. Call must be made in primary secret's region.",
     )
 }
 
@@ -2388,3 +2609,141 @@ pub(crate) fn resource_policy_allows(
 #[cfg(test)]
 #[path = "service_tests.rs"]
 mod tests;
+
+/// Encrypt a `SecretString` for storage with the secret's KMS key, when a KMS
+/// hook is wired and the secret has a key; otherwise stored as is.
+pub(crate) fn encrypt_secret_string(
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account_id: &str,
+    region: &str,
+    secret_arn: &str,
+    kms_key_id: Option<&str>,
+    plaintext: Option<String>,
+) -> Option<String> {
+    let pt = plaintext?;
+    let (Some(hook), Some(key)) = (kms_hook, kms_key_id) else {
+        return Some(pt);
+    };
+    let key = if key.is_empty() {
+        "aws/secretsmanager"
+    } else {
+        key
+    };
+    let mut ctx = HashMap::new();
+    ctx.insert(
+        "aws:secretsmanager:secretArn".to_string(),
+        secret_arn.to_string(),
+    );
+    match hook.encrypt(
+        account_id,
+        region,
+        key,
+        pt.as_bytes(),
+        "secretsmanager.amazonaws.com",
+        ctx,
+    ) {
+        Ok(ciphertext) => Some(ciphertext),
+        Err(err) => {
+            tracing::warn!(
+                secret_arn = %secret_arn,
+                error = %err,
+                "KMS encrypt failed for secret; storing plaintext"
+            );
+            Some(pt)
+        }
+    }
+}
+
+/// Bring every replica of the primary secret `name` in (`account`,
+/// `region`) in line with it: create missing replicas, refresh existing
+/// ones (values, staging labels, description, tags, resource policy,
+/// rotation and deletion status). A replica region already holding a
+/// secret of that name that is not this secret's replica is marked
+/// `Failed`, as AWS does without `ForceOverwriteReplicaSecret`. Secret
+/// values are re-encrypted for the replica's own ARN and KMS key.
+pub fn sync_replicas(
+    accounts: &mut fakecloud_core::multi_account::MultiRegionState<SecretsManagerState>,
+    kms_hook: Option<&dyn fakecloud_core::delivery::KmsHook>,
+    account: &str,
+    region: &str,
+    name: &str,
+) {
+    let Some(primary) = accounts
+        .regional(account, region)
+        .and_then(|s| s.secrets.get(name))
+        .filter(|s| s.primary_region.is_none() && !s.replica_regions.is_empty())
+        .cloned()
+    else {
+        return;
+    };
+    let mut failures: Vec<(String, String)> = Vec::new();
+    for replica_region in &primary.replica_regions {
+        let setting = primary
+            .replica_settings
+            .get(replica_region)
+            .cloned()
+            .unwrap_or_else(|| ReplicaSetting::in_sync(None));
+        let target = accounts.regional_mut(account, replica_region);
+        let existing = target.secrets.get(name);
+        if existing.is_some_and(|s| s.primary_region.as_deref() != Some(region)) {
+            failures.push((
+                replica_region.clone(),
+                format!(
+                    "Replication failed: Secret name already exists in region {replica_region}."
+                ),
+            ));
+            continue;
+        }
+        let replica_arn = replica_arn(&primary.arn, replica_region);
+        let mut replica = primary.clone();
+        replica.arn = replica_arn.clone();
+        replica.primary_region = Some(region.to_string());
+        replica.replica_regions = Vec::new();
+        replica.replica_settings = BTreeMap::new();
+        replica.kms_key_id = setting.kms_key_id.clone();
+        if let Some(existing) = existing {
+            replica.created_at = existing.created_at;
+            replica.last_accessed_at = existing.last_accessed_at;
+        }
+        for version in replica.versions.values_mut() {
+            let plaintext = version.secret_string.take().map(|stored| {
+                crate::value::decrypt_secret_string(
+                    kms_hook,
+                    account,
+                    &primary.arn,
+                    primary.kms_key_id.as_deref(),
+                    stored,
+                )
+            });
+            version.secret_string = encrypt_secret_string(
+                kms_hook,
+                account,
+                replica_region,
+                &replica_arn,
+                setting.kms_key_id.as_deref(),
+                plaintext,
+            );
+        }
+        target.secrets.insert(name.to_string(), replica);
+    }
+    if let Some(primary) = accounts
+        .regional_get_mut(account, region)
+        .and_then(|s| s.secrets.get_mut(name))
+    {
+        for (replica_region, message) in failures {
+            if let Some(setting) = primary.replica_settings.get_mut(&replica_region) {
+                setting.status = "Failed".to_string();
+                setting.status_message = message;
+            } else {
+                primary.replica_settings.insert(
+                    replica_region,
+                    ReplicaSetting {
+                        kms_key_id: None,
+                        status: "Failed".to_string(),
+                        status_message: message,
+                    },
+                );
+            }
+        }
+    }
+}
