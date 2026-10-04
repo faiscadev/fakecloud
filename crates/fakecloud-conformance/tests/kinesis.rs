@@ -1047,10 +1047,12 @@ async fn kinesis_channel_tags() {
 #[test_action("kinesis", "ListChannels", checksum = "1fbca5f2")]
 #[test_action("kinesis", "DeleteStream", checksum = "51c62afa")]
 #[tokio::test]
-async fn kinesis_channel_resolution_is_region_tolerant() {
+async fn kinesis_channel_resolution_is_region_scoped() {
     let server = TestServer::start().await;
     let client = server.kinesis_client().await;
 
+    // A us-east-1 stream and a same-named eu-west-1 stream: streams are
+    // regional, so each region resolves only its own.
     client
         .create_stream()
         .stream_name("xregion-stream")
@@ -1058,22 +1060,24 @@ async fn kinesis_channel_resolution_is_region_tolerant() {
         .send()
         .await
         .unwrap();
-    // The stream is stored with a us-east-1 ARN; the channel is created by a
-    // caller whose credential scope is eu-west-1, naming the same stream by
-    // its own regional ARN.
-    let source_arn = stream_arn(&client, "xregion-stream").await;
-    let foreign_arn = source_arn.replace(":us-east-1:", ":eu-west-1:");
-    assert_ne!(foreign_arn, source_arn, "{source_arn}");
-
+    let east_arn = stream_arn(&client, "xregion-stream").await;
+    let west_arn = east_arn.replace(":us-east-1:", ":eu-west-1:");
+    assert_ne!(west_arn, east_arn, "{east_arn}");
     let (status, created) = channel_op_in_region(
         &server,
         "eu-west-1",
-        "CreateChannel",
+        "CreateStream",
+        json!({ "StreamName": "xregion-stream", "ShardCount": 1 }),
+    )
+    .await;
+    assert_eq!(status, 200, "create eu-west-1 stream: {created}");
+
+    let channel_body = |stream: &str| {
         json!({
             "ChannelName": "xregion-channel",
             "ServiceExecutionRoleARN": "arn:aws:iam::000000000000:role/xregion-channel",
             "StreamConfigurationList": [{
-                "StreamARN": foreign_arn,
+                "StreamARN": stream,
                 "RecordConfiguration": { "RecordFormatType": "JSON" },
             }],
             "S3DestinationConfiguration": {
@@ -1083,7 +1087,27 @@ async fn kinesis_channel_resolution_is_region_tolerant() {
                     "CompressionType": "ZSTD",
                 }
             },
-        }),
+        })
+    };
+    // A eu-west-1 caller cannot attach the us-east-1 stream.
+    let (status, rejected) = channel_op_in_region(
+        &server,
+        "eu-west-1",
+        "CreateChannel",
+        channel_body(&east_arn),
+    )
+    .await;
+    assert_eq!(status, 400, "cross-region source: {rejected}");
+    assert_eq!(
+        rejected["__type"], "ResourceNotFoundException",
+        "{rejected}"
+    );
+
+    let (status, created) = channel_op_in_region(
+        &server,
+        "eu-west-1",
+        "CreateChannel",
+        channel_body(&west_arn),
     )
     .await;
     assert_eq!(status, 200, "create channel: {created}");
@@ -1092,29 +1116,50 @@ async fn kinesis_channel_resolution_is_region_tolerant() {
         .unwrap()
         .to_string();
 
-    // The creating client filters by the only stream ARN it knows: its own.
+    // The channel lists in eu-west-1 under its own stream's filter only.
     let (status, listed) = channel_op_in_region(
         &server,
         "eu-west-1",
         "ListChannels",
-        json!({ "StreamFilter": [{ "StreamARN": foreign_arn }] }),
+        json!({ "StreamFilter": [{ "StreamARN": west_arn }] }),
     )
     .await;
     assert_eq!(status, 200, "list channels: {listed}");
     let summaries = listed["ChannelSummaries"].as_array().unwrap();
     assert_eq!(summaries.len(), 1, "{listed}");
     assert_eq!(summaries[0]["ChannelName"], "xregion-channel");
+    let (status, east_listed) =
+        channel_op_in_region(&server, "us-east-1", "ListChannels", json!({})).await;
+    assert_eq!(status, 200, "list east channels: {east_listed}");
+    assert!(
+        east_listed["ChannelSummaries"]
+            .as_array()
+            .unwrap()
+            .is_empty(),
+        "{east_listed}"
+    );
 
-    // And the in-use guard holds for that same client.
+    // The in-use guard holds the eu-west-1 stream; the us-east-1 one is free.
     let (status, in_use) = channel_op_in_region(
         &server,
         "eu-west-1",
         "DeleteStream",
-        json!({ "StreamARN": foreign_arn }),
+        json!({ "StreamARN": west_arn }),
     )
     .await;
     assert_eq!(status, 400, "delete attached stream: {in_use}");
     assert_eq!(in_use["__type"], "ResourceInUseException", "{in_use}");
+    let (status, east_dropped) = channel_op_in_region(
+        &server,
+        "us-east-1",
+        "DeleteStream",
+        json!({ "StreamARN": east_arn }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "delete unattached us-east-1 stream: {east_dropped}"
+    );
 
     let (status, deleted) = channel_op_in_region(
         &server,
@@ -1128,7 +1173,7 @@ async fn kinesis_channel_resolution_is_region_tolerant() {
         &server,
         "eu-west-1",
         "DeleteStream",
-        json!({ "StreamARN": foreign_arn }),
+        json!({ "StreamARN": west_arn }),
     )
     .await;
     assert_eq!(status, 200, "delete detached stream: {dropped}");
