@@ -6,7 +6,9 @@ weight = 74
 
 fakecloud implements **AWS X-Ray** as a restJson1 service. All **38 operations**
 ship with **100% conformance** against AWS's own Smithy model, backed by
-account-partitioned state that persists across restarts in persistent mode.
+state partitioned by account and region that persists across restarts in
+persistent mode: groups, sampling rules, the encryption config, resource
+policies, indexing rules and traces are all per region.
 X-Ray signs SigV4 with the `xray` scope; every operation is a fixed
 `POST /<UriPath>` (e.g. `POST /TraceSegments`, `POST /ServiceGraph`), routed by
 its `@http` URI path.
@@ -53,7 +55,7 @@ service graph compute over that real ingested data.
 
 - **Sampling rules** - `CreateSamplingRule` / `GetSamplingRules` /
   `UpdateSamplingRule` / `DeleteSamplingRule`, plus `GetSamplingTargets` and
-  `GetSamplingStatisticSummaries`. Every account is seeded with the built-in
+  `GetSamplingStatisticSummaries`. Every region of every account has the built-in
   **`Default`** sampling rule (priority 10000, 1 req/s reservoir + 5% of the
   rest), which `GetSamplingRules` returns and which cannot be deleted.
 
@@ -62,7 +64,7 @@ service graph compute over that real ingested data.
   `arn:aws:xray:<region>:<account>:group/<name>/<id>` ARN, a `FilterExpression`,
   and an `InsightsConfiguration`.
 
-- **Encryption config** - `GetEncryptionConfig` returns the account config
+- **Encryption config** - `GetEncryptionConfig` returns the region's config
   (defaulting to `Type: NONE`, `Status: ACTIVE`); `PutEncryptionConfig` sets
   `NONE` or a `KMS` key.
 

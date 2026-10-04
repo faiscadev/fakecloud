@@ -20,8 +20,9 @@ use fakecloud_persistence::SnapshotStore;
 
 use crate::persistence::save_snapshot;
 use crate::state::{
-    Acl, Cluster, Endpoint, MemoryDbAccountsExt, MemoryDbState, MultiRegionCluster, Node, ParameterGroup, ReservedNode,
-    Shard, SharedMemoryDbState, Snapshot, SubnetGroup, User, UserAuthentication,
+    Acl, Cluster, Endpoint, MemoryDbAccountsExt, MemoryDbState, MultiRegionCluster, Node,
+    ParameterGroup, ReservedNode, Shard, SharedMemoryDbState, Snapshot, SubnetGroup, User,
+    UserAuthentication,
 };
 
 /// Every operation name in the MemoryDB Smithy model.
@@ -2216,7 +2217,8 @@ mod tests {
         )
         .unwrap();
         // A user created in us-east-1 does not exist in eu-west-1.
-        let err = call_in(&s, "eu-west-1", "DescribeUsers", json!({"UserName": "app"})).unwrap_err();
+        let err =
+            call_in(&s, "eu-west-1", "DescribeUsers", json!({"UserName": "app"})).unwrap_err();
         assert_eq!(err.code(), "UserNotFoundFault");
         let west_users = call_in(&s, "eu-west-1", "DescribeUsers", json!({})).unwrap();
         let names: Vec<&str> = west_users["Users"]
@@ -2243,7 +2245,13 @@ mod tests {
             west["Clusters"][0]["ARN"],
             "arn:aws:memorydb:eu-west-1:123456789012:cluster/app"
         );
-        call_in(&s, "eu-west-1", "DeleteCluster", json!({"ClusterName": "app"})).unwrap();
+        call_in(
+            &s,
+            "eu-west-1",
+            "DeleteCluster",
+            json!({"ClusterName": "app"}),
+        )
+        .unwrap();
         let east = call(&s, "DescribeClusters", json!({"ClusterName": "app"})).unwrap();
         assert_eq!(east["Clusters"].as_array().unwrap().len(), 1);
 
@@ -2269,7 +2277,10 @@ mod tests {
                    "Tags": [{"Key": "team", "Value": "a"}]}),
         )
         .unwrap();
-        let arn = out["MultiRegionCluster"]["ARN"].as_str().unwrap().to_string();
+        let arn = out["MultiRegionCluster"]["ARN"]
+            .as_str()
+            .unwrap()
+            .to_string();
         let west = call_in(&s, "eu-west-1", "DescribeMultiRegionClusters", json!({})).unwrap();
         assert_eq!(west["MultiRegionClusters"].as_array().unwrap().len(), 1);
         let tags = call_in(&s, "eu-west-1", "ListTags", json!({"ResourceArn": arn})).unwrap();

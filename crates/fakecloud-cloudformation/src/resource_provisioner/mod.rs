@@ -5470,7 +5470,7 @@ mod tests {
         );
 
         let mut st = prov.route53resolver_state.write();
-        let acc = st.account_mut("123456789012");
+        let acc = st.region_mut("123456789012", &prov.region);
         let r = acc.rules.get(&rule_id).expect("rule preserved");
         assert_eq!(
             r.name.as_deref(),
@@ -5534,7 +5534,7 @@ mod tests {
         let qlc_id = qlc.physical_id.clone();
         {
             let mut st = prov.route53resolver_state.write();
-            let acc = st.account_mut("123456789012");
+            let acc = st.region_mut("123456789012", &prov.region);
             acc.query_log_configs
                 .get_mut(&qlc_id)
                 .unwrap()
@@ -5555,7 +5555,7 @@ mod tests {
         assert_eq!(qlc_up.physical_id, qlc_id, "query log config id preserved");
 
         let mut st = prov.route53resolver_state.write();
-        let acc = st.account_mut("123456789012");
+        let acc = st.region_mut("123456789012", &prov.region);
         assert_eq!(
             acc.firewall_rules.get(&frg_id).map(|r| r.len()),
             Some(2),
@@ -5812,7 +5812,7 @@ mod tests {
         assert_eq!(ep_up.physical_id, ep_id, "resolver endpoint id preserved");
 
         let st = prov.route53resolver_state.read();
-        let acc = st.accounts.get(&prov.account_id).unwrap();
+        let acc = st.region(&prov.account_id, &prov.region).unwrap();
         let rec = acc.endpoints.get(&ep_id).unwrap();
         assert_eq!(rec.endpoint.name.as_deref(), Some("ep2"), "name updated");
         assert_eq!(

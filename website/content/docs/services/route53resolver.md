@@ -21,7 +21,7 @@ This is the **hybrid-DNS control plane** for a VPC — distinct from [Route 53](
 - **Resource policies** — `Put`/`Get` for `FirewallRuleGroupPolicy`, `ResolverQueryLogConfigPolicy`, and `ResolverRulePolicy` (the RAM cross-account share policies).
 - **Tags** — `TagResource`, `UntagResource`, and `ListTagsForResource` keyed by resource ARN, applied at create time from each resource's `Tags`.
 
-Real AWS id and ARN formats are used throughout (`rslvr-in-*`, `rslvr-out-*`, `rslvr-rr-*`, `rslvr-rrassoc-*`, `rslvr-qlc-*`, `rslvr-frg-*`, `rslvr-fdl-*`, `rslvr-frgassoc-*`; `arn:aws:route53resolver:<region>:<account>:<kind>/<id>`). Smithy `@length` / `@range` / enum constraints are enforced on every operation, state machines and deletion guards match AWS, and every resource type is account-partitioned, persisted, and restored across restarts.
+Real AWS id and ARN formats are used throughout (`rslvr-in-*`, `rslvr-out-*`, `rslvr-rr-*`, `rslvr-rrassoc-*`, `rslvr-qlc-*`, `rslvr-frg-*`, `rslvr-fdl-*`, `rslvr-frgassoc-*`; `arn:aws:route53resolver:<region>:<account>:<kind>/<id>`). Smithy `@length` / `@range` / enum constraints are enforced on every operation, state machines and deletion guards match AWS, and every resource type is partitioned by account and region (per-VPC configs are keyed by VPC id within the region), persisted, and restored across restarts.
 
 ## CloudFormation
 

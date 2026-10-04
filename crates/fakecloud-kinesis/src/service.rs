@@ -341,7 +341,9 @@ impl KinesisService {
         validate_optional_json_range("Limit", &body["Limit"], 1, 10000)?;
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let stream = state.lookup_stream(&body)?;
 
         let enhanced_monitoring = if stream.enhanced_metrics.is_empty() {
@@ -395,7 +397,9 @@ impl KinesisService {
         let body = request.json_body();
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let stream = state.lookup_stream(&body)?;
         let consumer_count = state
             .consumers
@@ -473,7 +477,9 @@ impl KinesisService {
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let mut names: Vec<String> = state.streams.keys().cloned().collect();
         names.sort();
 
@@ -881,7 +887,9 @@ impl KinesisService {
         let body = request.json_body();
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let stream = state.lookup_stream(&body)?;
 
         let tags: Vec<Value> = stream
@@ -1026,7 +1034,9 @@ impl KinesisService {
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let tags: Vec<Value> = resource_tags(state, resource_arn)?
             .iter()
             .map(|(key, value)| json!({ "Key": key, "Value": value }))
@@ -1042,7 +1052,9 @@ impl KinesisService {
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         state
             .stream_name_from_arn(resource_arn)
             .ok_or_else(|| resource_not_found_arn(resource_arn))?;
@@ -1262,7 +1274,9 @@ impl KinesisService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         Ok(AwsResponse::ok_json(json!({
             "MinimumThroughputBillingCommitment": {
                 "Status": state.billing_commitment_status,
@@ -1299,7 +1313,9 @@ impl KinesisService {
     fn describe_limits(&self, request: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let open_shard_count: i32 = state.streams.values().map(|s| s.open_shard_count).sum();
         let on_demand_count = state
             .streams
@@ -1581,7 +1597,9 @@ impl KinesisService {
         validate_stream_id(&body)?;
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
 
         let consumer = if let Some(arn) = body["ConsumerARN"].as_str().filter(|v| !v.is_empty()) {
             validate_string_length("ConsumerARN", arn, 1, 2048)?;
@@ -1638,7 +1656,9 @@ impl KinesisService {
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let mut consumers: Vec<Value> = state
             .consumers
             .values()
@@ -1697,7 +1717,9 @@ impl KinesisService {
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let stream = state.lookup_stream(&body)?;
 
         // Resume position: a NextToken (opaque cursor) takes precedence over
@@ -2116,7 +2138,9 @@ impl KinesisService {
         // expects.
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let consumer = state.consumers.get(consumer_arn).ok_or_else(|| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
@@ -2263,7 +2287,9 @@ impl KinesisService {
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         let channel_name = state
             .channel_name_from_arn(channel_arn)
             .ok_or_else(|| resource_not_found_arn(channel_arn))?;
@@ -2294,7 +2320,9 @@ impl KinesisService {
 
         let accounts = self.state.read();
         let empty = KinesisState::new(&request.account_id, &request.region);
-        let state = accounts.regional(&request.account_id, &request.region).unwrap_or(&empty);
+        let state = accounts
+            .regional(&request.account_id, &request.region)
+            .unwrap_or(&empty);
         // Filters resolve source ARNs against the account's streams, so they
         // are parsed once the state is in hand rather than off the raw body.
         let filters = parse_channel_stream_filters(state, &body["StreamFilter"])?;

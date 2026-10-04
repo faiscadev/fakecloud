@@ -348,7 +348,13 @@ mod tests {
             delivery.put_record(&arn, &encoded, pk);
         }
         let mas = state.read();
-        let s = mas.default_regional().unwrap().streams.get("split").unwrap().clone();
+        let s = mas
+            .default_regional()
+            .unwrap()
+            .streams
+            .get("split")
+            .unwrap()
+            .clone();
         assert_eq!(
             s.shards[0].records.len(),
             0,

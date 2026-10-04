@@ -207,8 +207,7 @@ impl fakecloud_core::multi_account::SplitByRegion for XrayData {
         // The built-in `Default` rule goes where its ARN points like any
         // other (keeping its edits there); other regions get a fresh seed.
         for (name, rule) in self.sampling_rules {
-            let region =
-                region_of_member(&rule, &["SamplingRule", "RuleARN"]).map(str::to_string);
+            let region = region_of_member(&rule, &["SamplingRule", "RuleARN"]).map(str::to_string);
             into.region_or_default_mut(region.as_deref())
                 .sampling_rules
                 .insert(name, rule);

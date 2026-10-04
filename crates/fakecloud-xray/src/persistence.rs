@@ -6,7 +6,9 @@ use tokio::sync::Mutex as AsyncMutex;
 
 use fakecloud_persistence::SnapshotStore;
 
-use crate::state::{LegacyXraySnapshot, SharedXrayState, XraySnapshot, XRAY_SNAPSHOT_SCHEMA_VERSION};
+use crate::state::{
+    LegacyXraySnapshot, SharedXrayState, XraySnapshot, XRAY_SNAPSHOT_SCHEMA_VERSION,
+};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum LoadOutcome {
@@ -180,7 +182,8 @@ mod tests {
             [("k".to_string(), "v".to_string())].into(),
         );
         data.encryption_config = Some(json!({ "Type": "KMS" }));
-        let bytes = serde_json::to_vec(&json!({ "schema_version": 1, "accounts": legacy })).unwrap();
+        let bytes =
+            serde_json::to_vec(&json!({ "schema_version": 1, "accounts": legacy })).unwrap();
         let store = MemStore(Mutex::new(Some(bytes)));
         let restored = state();
         load_into(&store, &restored).unwrap();

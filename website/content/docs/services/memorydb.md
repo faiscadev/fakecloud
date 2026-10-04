@@ -6,8 +6,9 @@ weight = 45
 
 fakecloud implements **Amazon MemoryDB** (`memorydb`), the Redis/Valkey-compatible
 in-memory database service. All **45 operations** from the AWS Smithy model ship
-now, backed by account-partitioned state that persists across restarts in
-persistent mode.
+now, backed by state partitioned by account and region that persists across
+restarts in persistent mode. Every resource is regional except multi-region
+clusters, which are account-wide and visible from every region.
 
 ## Supported features
 
@@ -18,7 +19,9 @@ persistent mode.
   are validated against the model bounds.
 - **Access control** (`CreateACL`, `DescribeACLs`, `UpdateACL`, `DeleteACL`,
   `CreateUser`, `DescribeUsers`, `UpdateUser`, `DeleteUser`). A default
-  `open-access` ACL and `default` user are seeded per account, matching AWS.
+  `open-access` ACL and `default` user (and the `default.memorydb-*` parameter
+  groups) exist in every region of every account with that region's ARNs,
+  matching AWS.
 - **Parameter and subnet groups** (`CreateParameterGroup`,
   `DescribeParameterGroups`, `DescribeParameters`, `UpdateParameterGroup`,
   `ResetParameterGroup`, `DeleteParameterGroup`, `CreateSubnetGroup`,
@@ -41,7 +44,7 @@ persistent mode.
 ## Control plane vs data plane
 
 MemoryDB ships as a full control plane today: every resource is real, validated,
-account-partitioned, and persisted. The Redis/Valkey **data-plane** container
+partitioned by account and region, and persisted. The Redis/Valkey **data-plane** container
 backing (a real engine you can `SET`/`GET` against, as ElastiCache already
 provides) is a roadmap item, mirroring how Aurora DSQL shipped its control plane
 first.

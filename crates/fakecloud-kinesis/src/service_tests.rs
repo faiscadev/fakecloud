@@ -556,7 +556,11 @@ fn delete_stream_removes_entry_and_consumers() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
     // Register a consumer on the stream.
-    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
+    let stream_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -633,7 +637,8 @@ fn get_shard_iterator_and_records_happy_path() {
     .unwrap();
     let shard_id = state
         .read()
-        .default_regional().unwrap()
+        .default_regional()
+        .unwrap()
         .streams
         .get("orders")
         .unwrap()
@@ -822,7 +827,8 @@ fn increase_retention_period_bumps_value() {
     assert_eq!(
         state
             .read()
-            .default_regional().unwrap()
+            .default_regional()
+            .unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -848,7 +854,8 @@ fn decrease_retention_period_after_increase() {
     assert_eq!(
         state
             .read()
-            .default_regional().unwrap()
+            .default_regional()
+            .unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -888,7 +895,8 @@ fn start_and_stop_stream_encryption() {
     assert_eq!(
         state
             .read()
-            .default_regional().unwrap()
+            .default_regional()
+            .unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -907,7 +915,8 @@ fn start_and_stop_stream_encryption() {
     assert_eq!(
         state
             .read()
-            .default_regional().unwrap()
+            .default_regional()
+            .unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -931,7 +940,8 @@ fn enable_and_disable_enhanced_monitoring() {
     assert_eq!(
         state
             .read()
-            .default_regional().unwrap()
+            .default_regional()
+            .unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -957,7 +967,11 @@ fn enable_and_disable_enhanced_monitoring() {
 fn update_stream_mode_writes_new_mode() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
+    let stream_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "orders");
     svc.update_stream_mode(&request(
         "UpdateStreamMode",
         json!({
@@ -969,7 +983,8 @@ fn update_stream_mode_writes_new_mode() {
     assert_eq!(
         state
             .read()
-            .default_regional().unwrap()
+            .default_regional()
+            .unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -984,7 +999,11 @@ fn update_stream_mode_writes_new_mode() {
 fn register_describe_deregister_consumer() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
+    let stream_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1005,14 +1024,23 @@ fn register_describe_deregister_consumer() {
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
     ))
     .unwrap();
-    assert!(state.read().default_regional().unwrap().consumers.is_empty());
+    assert!(state
+        .read()
+        .default_regional()
+        .unwrap()
+        .consumers
+        .is_empty());
 }
 
 #[test]
 fn register_consumer_duplicate_errors() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
+    let stream_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1031,7 +1059,11 @@ fn register_consumer_duplicate_errors() {
 fn list_stream_consumers_returns_registered_consumer() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
+    let stream_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1055,7 +1087,11 @@ fn list_stream_consumers_returns_registered_consumer() {
 fn put_get_delete_resource_policy() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
+    let stream_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "orders");
     let policy_body = json!({"Version":"2012-10-17","Statement":[]}).to_string();
 
     svc.put_resource_policy(&request(
@@ -1113,7 +1149,11 @@ fn update_account_settings_toggles_billing_commitment() {
     ))
     .unwrap();
     assert_eq!(
-        state.read().default_regional().unwrap().billing_commitment_status,
+        state
+            .read()
+            .default_regional()
+            .unwrap()
+            .billing_commitment_status,
         "ENABLED"
     );
 
@@ -1123,7 +1163,11 @@ fn update_account_settings_toggles_billing_commitment() {
     ))
     .unwrap();
     assert_eq!(
-        state.read().default_regional().unwrap().billing_commitment_status,
+        state
+            .read()
+            .default_regional()
+            .unwrap()
+            .billing_commitment_status,
         "DISABLED"
     );
 }
@@ -2202,7 +2246,8 @@ fn update_shard_count_preserves_parent_lineage() {
     // (ExplicitHashKey 0 always routes to the shard covering hash 0).
     let original_ids: Vec<String> = {
         let g = state.read();
-        g.default_regional().unwrap()
+        g.default_regional()
+            .unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -3299,7 +3344,10 @@ fn same_stream_name_coexists_in_two_regions() {
     create_stream_in(&svc, "eu-west-1", "west-only");
 
     assert_eq!(list_stream_names(&svc, "us-east-1"), vec!["orders"]);
-    assert_eq!(list_stream_names(&svc, "eu-west-1"), vec!["orders", "west-only"]);
+    assert_eq!(
+        list_stream_names(&svc, "eu-west-1"),
+        vec!["orders", "west-only"]
+    );
     assert!(list_stream_names(&svc, "ap-south-1").is_empty());
 
     let west = json_response(
@@ -3535,8 +3583,16 @@ fn update_record_distribution_strategy_round_trips_and_validates() {
     let (svc, state) = make_service();
     create_on_demand_stream(&svc, "od", None);
     create_stream_action(&svc, "prov", 1);
-    let od_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "od");
-    let prov_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "prov");
+    let od_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "od");
+    let prov_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "prov");
 
     svc.update_stream_record_distribution_strategy(&request(
         "UpdateStreamRecordDistributionStrategy",
@@ -3770,7 +3826,11 @@ fn create_stream_rejects_out_of_range_max_record_size() {
 fn consumer_tags_round_trip_through_tags_v2() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
+    let stream_arn = state
+        .read()
+        .default_regional()
+        .unwrap()
+        .stream_arn("us-east-1", "orders");
     let reg = json_response(
         svc.register_stream_consumer(&request(
             "RegisterStreamConsumer",
@@ -3803,7 +3863,9 @@ fn consumer_tags_round_trip_through_tags_v2() {
     .unwrap();
     assert_eq!(list(&svc), json!([{"Key": "team", "Value": "core"}]));
     // The stream's own tags are untouched.
-    assert!(state.read().default_ref().streams["orders"].tags.is_empty());
+    assert!(state.read().default_regional().unwrap().streams["orders"]
+        .tags
+        .is_empty());
 
     svc.deregister_stream_consumer(&request(
         "DeregisterStreamConsumer",

@@ -118,6 +118,10 @@ On load, such a snapshot is split once: every resource moves to the region its A
 
 - **SQS** - each queue goes to the region of its queue ARN; message move tasks follow their source queue. Queue URLs (`<endpoint>/<account>/<name>`) carry no region, so they stay byte-identical, and the request region selects which region's queue a URL addresses.
 - **CloudFormation** - each stack goes to the region of its stack ID; change sets, events, policies, exports and stack sets follow it.
+- **Kinesis** - streams, consumers, channels and resource policies go to the region of their ARN; account settings and Lambda event source mapping checkpoints are copied into every resulting region.
+- **MemoryDB** - clusters, ACLs, users, parameter groups, subnet groups, snapshots, reserved nodes and their tags go to the region of their ARN, and every region gets its own default ACL, user and parameter groups. Multi-region clusters and their tags stay account-wide.
+- **X-Ray** - groups, sampling rules and tags go to the region of their ARN; traces, retrievals, resource policies, indexing rules, the encryption config and the trace-segment destination name no region and go to the server's `--region`. Every region gets its own built-in `Default` sampling rule.
+- **Route 53 Resolver** - endpoints, resolver rules, query-log configs, firewall rule groups, domain lists, associations and Outpost resolvers go to the region of their ARN; rule and query-log associations, firewall rules and domains follow their parent; per-VPC firewall, resolver and DNSSEC configs go to the server's `--region`.
 
 ## S3 object body handling
 

@@ -619,11 +619,8 @@ mod tests {
             );
         }
         let west_arn = format!("arn:aws:kinesis:eu-west-1:{account}:stream/orders");
-        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis.clone()).put_record(
-            &west_arn,
-            "aGVsbG8=",
-            "pk",
-        );
+        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis.clone())
+            .put_record(&west_arn, "aGVsbG8=", "pk");
 
         let delivery = Arc::new(RecordingDelivery(parking_lot::Mutex::new(Vec::new())));
         let poller = KinesisLambdaPoller::new(
@@ -653,7 +650,10 @@ mod tests {
         assert!(payloads[0].contains("eu-west-1"));
         let mas = kinesis.read();
         let west = mas.regional(account, "eu-west-1").unwrap();
-        assert_eq!(west.lambda_checkpoint("esm-west", "shardId-000000000000"), 1);
+        assert_eq!(
+            west.lambda_checkpoint("esm-west", "shardId-000000000000"),
+            1
+        );
         let east = mas.regional(account, "us-east-1").unwrap();
         assert!(east.lambda_checkpoints.is_empty());
     }

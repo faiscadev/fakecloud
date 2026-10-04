@@ -781,6 +781,7 @@ mod tests {
                     consumer_status: "ACTIVE".to_string(),
                     consumer_creation_timestamp: Utc::now(),
                     stream_arn: arn,
+                    tags: BTreeMap::new(),
                 },
             );
         }

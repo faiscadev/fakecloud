@@ -194,27 +194,52 @@ impl Route53ResolverService {
             for (account, region, acc) in st.iter_regional() {
                 for (id, rec) in acc.endpoints.iter() {
                     if rec.endpoint.status == "CREATING" || rec.endpoint.status == "UPDATING" {
-                        pending.push((account.to_string(), region.to_string(), Settle::Endpoint, id.clone()));
+                        pending.push((
+                            account.to_string(),
+                            region.to_string(),
+                            Settle::Endpoint,
+                            id.clone(),
+                        ));
                     }
                 }
                 for (id, a) in acc.rule_associations.iter() {
                     if a.status == "CREATING" {
-                        pending.push((account.to_string(), region.to_string(), Settle::RuleAssociation, id.clone()));
+                        pending.push((
+                            account.to_string(),
+                            region.to_string(),
+                            Settle::RuleAssociation,
+                            id.clone(),
+                        ));
                     }
                 }
                 for (id, a) in acc.query_log_associations.iter() {
                     if a.status == "CREATING" {
-                        pending.push((account.to_string(), region.to_string(), Settle::QueryLogAssociation, id.clone()));
+                        pending.push((
+                            account.to_string(),
+                            region.to_string(),
+                            Settle::QueryLogAssociation,
+                            id.clone(),
+                        ));
                     }
                 }
                 for (id, a) in acc.firewall_rule_group_associations.iter() {
                     if a.status == "UPDATING" {
-                        pending.push((account.to_string(), region.to_string(), Settle::FirewallAssociation, id.clone()));
+                        pending.push((
+                            account.to_string(),
+                            region.to_string(),
+                            Settle::FirewallAssociation,
+                            id.clone(),
+                        ));
                     }
                 }
                 for (id, o) in acc.outpost_resolvers.iter() {
                     if o.status == "CREATING" {
-                        pending.push((account.to_string(), region.to_string(), Settle::Outpost, id.clone()));
+                        pending.push((
+                            account.to_string(),
+                            region.to_string(),
+                            Settle::Outpost,
+                            id.clone(),
+                        ));
                     }
                 }
                 // DNSSEC + resolver configs snapshotted mid-transition
@@ -223,12 +248,22 @@ impl Route53ResolverService {
                 // wedges them in the transient state forever.
                 for (id, c) in acc.dnssec_configs.iter() {
                     if let Some(target) = transient_terminal(&c.validation_status) {
-                        pending.push((account.to_string(), region.to_string(), Settle::Dnssec(target), id.clone()));
+                        pending.push((
+                            account.to_string(),
+                            region.to_string(),
+                            Settle::Dnssec(target),
+                            id.clone(),
+                        ));
                     }
                 }
                 for (id, c) in acc.resolver_configs.iter() {
                     if let Some(target) = transient_terminal(&c.autodefined_reverse) {
-                        pending.push((account.to_string(), region.to_string(), Settle::ResolverConfig(target), id.clone()));
+                        pending.push((
+                            account.to_string(),
+                            region.to_string(),
+                            Settle::ResolverConfig(target),
+                            id.clone(),
+                        ));
                     }
                 }
             }
@@ -655,8 +690,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverEndpointId")?;
         let st = self.state.read();
         let rec = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.endpoints.get(&id))
             .ok_or_else(|| not_found(format!("Resolver endpoint '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -672,8 +706,7 @@ impl Route53ResolverService {
         {
             let mut st = self.state.write();
             let rec = st
-                .region_get_mut(&account,
-                &req.region)
+                .region_get_mut(&account, &req.region)
                 .and_then(|a| a.endpoints.get_mut(&id))
                 .ok_or_else(|| not_found(format!("Resolver endpoint '{id}' not found")))?;
             if let Some(name) = body.get("Name").and_then(Value::as_str) {
@@ -723,8 +756,7 @@ impl Route53ResolverService {
         let account = account_id(req);
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account,
-            &req.region)
+            .region_get_mut(&account, &req.region)
             .ok_or_else(|| not_found(format!("Resolver endpoint '{id}' not found")))?;
         let mut rec = acc
             .endpoints
@@ -743,8 +775,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.endpoints.values().map(|r| to_val(&r.endpoint)).collect())
             .unwrap_or_default();
         let all = apply_filters(all, &body, |name| match name {
@@ -772,8 +803,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverEndpointId")?;
         let st = self.state.read();
         let rec = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.endpoints.get(&id))
             .ok_or_else(|| not_found(format!("Resolver endpoint '{id}' not found")))?;
         let ips: Vec<Value> = rec.ip_addresses.iter().map(to_val).collect();
@@ -808,8 +838,7 @@ impl Route53ResolverService {
         {
             let mut st = self.state.write();
             let rec = st
-                .region_get_mut(&account,
-                &req.region)
+                .region_get_mut(&account, &req.region)
                 .and_then(|a| a.endpoints.get_mut(&id))
                 .ok_or_else(|| not_found(format!("Resolver endpoint '{id}' not found")))?;
             rec.ip_addresses.push(IpAddressResponse {
@@ -854,8 +883,7 @@ impl Route53ResolverService {
         {
             let mut st = self.state.write();
             let rec = st
-                .region_get_mut(&account,
-                &req.region)
+                .region_get_mut(&account, &req.region)
                 .and_then(|a| a.endpoints.get_mut(&id))
                 .ok_or_else(|| not_found(format!("Resolver endpoint '{id}' not found")))?;
             // A Resolver endpoint must retain at least two IP addresses.
@@ -919,8 +947,7 @@ impl Route53ResolverService {
                 .ok_or_else(|| invalid_parameter("A FORWARD rule requires a ResolverEndpointId"))?;
             let st = self.state.read();
             let ep = st
-                .region(&account,
-                &req.region)
+                .region(&account, &req.region)
                 .and_then(|a| a.endpoints.get(&ep_id))
                 .ok_or_else(|| not_found(format!("Resolver endpoint '{ep_id}' not found")))?;
             if ep.endpoint.direction != "OUTBOUND" {
@@ -968,8 +995,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverRuleId")?;
         let st = self.state.read();
         let rule = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.rules.get(&id))
             .ok_or_else(|| not_found(format!("Resolver rule '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -987,8 +1013,7 @@ impl Route53ResolverService {
         let target_ips = parse_target_ips(config.get("TargetIps"))?;
         let mut st = self.state.write();
         let rule = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .and_then(|a| a.rules.get_mut(&id))
             .ok_or_else(|| not_found(format!("Resolver rule '{id}' not found")))?;
         if let Some(name) = config.get("Name").and_then(Value::as_str) {
@@ -1011,8 +1036,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverRuleId")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Resolver rule '{id}' not found")))?;
         if acc
             .rule_associations
@@ -1039,8 +1063,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.rules.values().map(to_val).collect())
             .unwrap_or_default();
         let all = apply_filters(all, &body, |name| match name {
@@ -1071,7 +1094,7 @@ impl Route53ResolverService {
         }
         {
             let st = self.state.read();
-            let acc = st.region(&account,&req.region);
+            let acc = st.region(&account, &req.region);
             if acc.map(|a| !a.rules.contains_key(&rule_id)).unwrap_or(true) {
                 return Err(not_found(format!("Resolver rule '{rule_id}' not found")));
             }
@@ -1116,8 +1139,7 @@ impl Route53ResolverService {
         let vpc_id = required_str(&body, "VPCId")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account,
-            &req.region)
+            .region_get_mut(&account, &req.region)
             .ok_or_else(|| not_found("Association not found"))?;
         let key = acc
             .rule_associations
@@ -1140,8 +1162,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverRuleAssociationId")?;
         let st = self.state.read();
         let assoc = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.rule_associations.get(&id))
             .ok_or_else(|| not_found(format!("Association '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -1157,8 +1178,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.rule_associations.values().map(to_val).collect())
             .unwrap_or_default();
         let all = apply_filters(all, &body, |name| match name {
@@ -1217,8 +1237,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverQueryLogConfigId")?;
         let st = self.state.read();
         let cfg = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.query_log_configs.get(&id))
             .ok_or_else(|| not_found(format!("Query log config '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -1231,8 +1250,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverQueryLogConfigId")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Query log config '{id}' not found")))?;
         if acc
             .query_log_associations
@@ -1259,8 +1277,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.query_log_configs.values().map(to_val).collect())
             .unwrap_or_default();
         let total = all.len();
@@ -1300,7 +1317,7 @@ impl Route53ResolverService {
         }
         {
             let st = self.state.read();
-            let acc = st.region(&account,&req.region);
+            let acc = st.region(&account, &req.region);
             if acc
                 .map(|a| !a.query_log_configs.contains_key(&cfg_id))
                 .unwrap_or(true)
@@ -1357,8 +1374,7 @@ impl Route53ResolverService {
         let resource_id = required_str(&body, "ResourceId")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account,
-            &req.region)
+            .region_get_mut(&account, &req.region)
             .ok_or_else(|| not_found("Association not found"))?;
         let key = acc
             .query_log_associations
@@ -1381,8 +1397,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "ResolverQueryLogConfigAssociationId")?;
         let st = self.state.read();
         let assoc = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.query_log_associations.get(&id))
             .ok_or_else(|| not_found(format!("Association '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -1398,8 +1413,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.query_log_associations.values().map(to_val).collect())
             .unwrap_or_default();
         let total = all.len();
@@ -1485,20 +1499,23 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.resolver_configs.values().map(to_val).collect())
             .unwrap_or_default();
         let (page, next) = paginate(&body, all);
         Ok(list_response(json!({ "ResolverConfigs": page }), next))
     }
 
-    fn resolver_config_or_default(&self, account: &str, region: &str, resource_id: &str) -> ResolverConfig {
+    fn resolver_config_or_default(
+        &self,
+        account: &str,
+        region: &str,
+        resource_id: &str,
+    ) -> ResolverConfig {
         if let Some(cfg) = self
             .state
             .read()
-            .region(account,
-            region)
+            .region(account, region)
             .and_then(|a| a.resolver_configs.get(resource_id))
         {
             return cfg.clone();
@@ -1571,8 +1588,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.dnssec_configs.values().map(to_val).collect())
             .unwrap_or_default();
         let (page, next) = paginate(&body, all);
@@ -1582,8 +1598,13 @@ impl Route53ResolverService {
         ))
     }
 
-    fn dnssec_config_or_default(&self, account: &str, region: &str, resource_id: &str) -> ResolverDnssecConfig {
-        if let Some(cfg) = self.state.read().region(account,region).and_then(|a| {
+    fn dnssec_config_or_default(
+        &self,
+        account: &str,
+        region: &str,
+        resource_id: &str,
+    ) -> ResolverDnssecConfig {
+        if let Some(cfg) = self.state.read().region(account, region).and_then(|a| {
             a.dnssec_configs
                 .values()
                 .find(|c| c.resource_id == resource_id)
@@ -1641,8 +1662,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallRuleGroupId")?;
         let st = self.state.read();
         let group = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.firewall_rule_groups.get(&id))
             .ok_or_else(|| not_found(format!("Firewall rule group '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -1655,8 +1675,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallRuleGroupId")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Firewall rule group '{id}' not found")))?;
         if acc
             .firewall_rules
@@ -1694,8 +1713,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| {
                 a.firewall_rule_groups
                     .values()
@@ -1760,8 +1778,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallDomainListId")?;
         let st = self.state.read();
         let list = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.firewall_domain_lists.get(&id))
             .ok_or_else(|| not_found(format!("Firewall domain list '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -1777,8 +1794,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallDomainListId")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Firewall domain list '{id}' not found")))?;
         // A domain list referenced by any firewall rule cannot be deleted.
         let referenced = acc
@@ -1808,8 +1824,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| {
                 a.firewall_domain_lists
                     .values()
@@ -1843,8 +1858,7 @@ impl Route53ResolverService {
         let imported = self.fetch_domain_file(&account, &url);
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account,
-            &req.region)
+            .region_get_mut(&account, &req.region)
             .ok_or_else(|| not_found(format!("Firewall domain list '{id}' not found")))?;
         if !acc.firewall_domain_lists.contains_key(&id) {
             return Err(not_found(format!("Firewall domain list '{id}' not found")));
@@ -1921,8 +1935,7 @@ impl Route53ResolverService {
             .unwrap_or_default();
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account,
-            &req.region)
+            .region_get_mut(&account, &req.region)
             .ok_or_else(|| not_found(format!("Firewall domain list '{id}' not found")))?;
         if !acc.firewall_domain_lists.contains_key(&id) {
             return Err(not_found(format!("Firewall domain list '{id}' not found")));
@@ -1958,8 +1971,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallDomainListId")?;
         let st = self.state.read();
         let acc = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Firewall domain list '{id}' not found")))?;
         if !acc.firewall_domain_lists.contains_key(&id) {
             return Err(not_found(format!("Firewall domain list '{id}' not found")));
@@ -2003,7 +2015,7 @@ impl Route53ResolverService {
         // Validate references exist.
         {
             let st = self.state.read();
-            let acc = st.region(account,region);
+            let acc = st.region(account, region);
             if acc
                 .map(|a| !a.firewall_rule_groups.contains_key(&group_id))
                 .unwrap_or(true)
@@ -2142,8 +2154,7 @@ impl Route53ResolverService {
             .map(str::to_string);
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account,
-            &req.region)
+            .region_get_mut(&account, &req.region)
             .ok_or_else(|| not_found("Firewall rule not found"))?;
         let bucket = acc
             .firewall_rules
@@ -2210,8 +2221,7 @@ impl Route53ResolverService {
             .map(str::to_string);
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account,
-            &req.region)
+            .region_get_mut(&account, &req.region)
             .ok_or_else(|| not_found("Firewall rule not found"))?;
         let bucket = acc
             .firewall_rules
@@ -2237,8 +2247,7 @@ impl Route53ResolverService {
         let group_id = required_str(&body, "FirewallRuleGroupId")?;
         let st = self.state.read();
         let acc = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Firewall rule group '{group_id}' not found")))?;
         if !acc.firewall_rule_groups.contains_key(&group_id) {
             return Err(not_found(format!(
@@ -2311,8 +2320,7 @@ impl Route53ResolverService {
             let qtype = e.get("Qtype").and_then(Value::as_str).map(str::to_string);
             let mut st = self.state.write();
             let acc = st
-                .region_get_mut(&account,
-                &req.region)
+                .region_get_mut(&account, &req.region)
                 .ok_or_else(|| validation("Firewall rule not found"))?;
             let bucket = acc
                 .firewall_rules
@@ -2384,8 +2392,7 @@ impl Route53ResolverService {
             let qtype = e.get("Qtype").and_then(Value::as_str).map(str::to_string);
             let mut st = self.state.write();
             let acc = st
-                .region_get_mut(&account,
-                &req.region)
+                .region_get_mut(&account, &req.region)
                 .ok_or_else(|| validation("Firewall rule not found"))?;
             let bucket = acc
                 .firewall_rules
@@ -2433,8 +2440,7 @@ impl Route53ResolverService {
         {
             let st = self.state.read();
             if st
-                .region(&account,
-                &req.region)
+                .region(&account, &req.region)
                 .map(|a| !a.firewall_rule_groups.contains_key(&group_id))
                 .unwrap_or(true)
             {
@@ -2487,8 +2493,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallRuleGroupAssociationId")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Association '{id}' not found")))?;
         let mut assoc = acc
             .firewall_rule_group_associations
@@ -2509,8 +2514,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallRuleGroupAssociationId")?;
         let st = self.state.read();
         let assoc = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.firewall_rule_group_associations.get(&id))
             .ok_or_else(|| not_found(format!("Association '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -2526,8 +2530,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "FirewallRuleGroupAssociationId")?;
         let mut st = self.state.write();
         let assoc = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .and_then(|a| a.firewall_rule_group_associations.get_mut(&id))
             .ok_or_else(|| not_found(format!("Association '{id}' not found")))?;
         if let Some(p) = body.get("Priority").and_then(Value::as_i64) {
@@ -2561,8 +2564,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| {
                 a.firewall_rule_group_associations
                     .values()
@@ -2624,20 +2626,23 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.firewall_configs.values().map(to_val).collect())
             .unwrap_or_default();
         let (page, next) = paginate(&body, all);
         Ok(list_response(json!({ "FirewallConfigs": page }), next))
     }
 
-    fn firewall_config_or_default(&self, account: &str, region: &str, resource_id: &str) -> FirewallConfig {
+    fn firewall_config_or_default(
+        &self,
+        account: &str,
+        region: &str,
+        resource_id: &str,
+    ) -> FirewallConfig {
         if let Some(cfg) = self
             .state
             .read()
-            .region(account,
-            region)
+            .region(account, region)
             .and_then(|a| a.firewall_configs.get(resource_id))
         {
             return cfg.clone();
@@ -2700,8 +2705,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "Id")?;
         let st = self.state.read();
         let r = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.outpost_resolvers.get(&id))
             .ok_or_else(|| not_found(format!("Outpost resolver '{id}' not found")))?;
         Ok(AwsResponse::ok_json(
@@ -2714,8 +2718,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "Id")?;
         let mut st = self.state.write();
         let r = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .and_then(|a| a.outpost_resolvers.get_mut(&id))
             .ok_or_else(|| not_found(format!("Outpost resolver '{id}' not found")))?;
         if let Some(n) = body.get("Name").and_then(Value::as_str) {
@@ -2739,8 +2742,7 @@ impl Route53ResolverService {
         let id = required_str(&body, "Id")?;
         let mut st = self.state.write();
         let acc = st
-            .region_get_mut(&account_id(req),
-            &req.region)
+            .region_get_mut(&account_id(req), &req.region)
             .ok_or_else(|| not_found(format!("Outpost resolver '{id}' not found")))?;
         let mut r = acc
             .outpost_resolvers
@@ -2758,8 +2760,7 @@ impl Route53ResolverService {
         let all: Vec<Value> = self
             .state
             .read()
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .map(|a| a.outpost_resolvers.values().map(to_val).collect())
             .unwrap_or_default();
         let (page, next) = paginate(&body, all);
@@ -2793,8 +2794,7 @@ impl Route53ResolverService {
         let arn = required_str(&body, "Arn")?;
         let st = self.state.read();
         let policy = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.firewall_rule_group_policies.get(&arn))
             .cloned()
             .ok_or_else(|| not_found("No policy found for the specified resource"))?;
@@ -2826,8 +2826,7 @@ impl Route53ResolverService {
         let arn = required_str(&body, "Arn")?;
         let st = self.state.read();
         let policy = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.query_log_config_policies.get(&arn))
             .cloned()
             .ok_or_else(|| unknown_resource("No policy found for the specified resource"))?;
@@ -2853,8 +2852,7 @@ impl Route53ResolverService {
         let arn = required_str(&body, "Arn")?;
         let st = self.state.read();
         let policy = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.resolver_rule_policies.get(&arn))
             .cloned()
             .ok_or_else(|| unknown_resource("No policy found for the specified resource"))?;
@@ -2890,7 +2888,11 @@ impl Route53ResolverService {
             })
             .unwrap_or_default();
         let mut st = self.state.write();
-        if let Some(entry) = st.region_mut(&account_id(req), &req.region).tags.get_mut(&arn) {
+        if let Some(entry) = st
+            .region_mut(&account_id(req), &req.region)
+            .tags
+            .get_mut(&arn)
+        {
             entry.retain(|e| !keys.contains(&e.key));
         }
         Ok(AwsResponse::ok_json(json!({})))
@@ -2901,8 +2903,7 @@ impl Route53ResolverService {
         let arn = required_str(&body, "ResourceArn")?;
         let st = self.state.read();
         let tags: Vec<Value> = st
-            .region(&account_id(req),
-            &req.region)
+            .region(&account_id(req), &req.region)
             .and_then(|a| a.tags.get(&arn))
             .map(|t| t.iter().map(to_val).collect())
             .unwrap_or_default();
@@ -3555,13 +3556,23 @@ mod tests {
         )
         .await
         .unwrap();
-        let east = call_in(&svc, "us-east-1", "GetFirewallConfig", json!({ "ResourceId": "vpc-1" }))
-            .await
-            .unwrap();
+        let east = call_in(
+            &svc,
+            "us-east-1",
+            "GetFirewallConfig",
+            json!({ "ResourceId": "vpc-1" }),
+        )
+        .await
+        .unwrap();
         assert_eq!(east["FirewallConfig"]["FirewallFailOpen"], "DISABLED");
-        let west = call_in(&svc, "eu-west-1", "GetFirewallConfig", json!({ "ResourceId": "vpc-1" }))
-            .await
-            .unwrap();
+        let west = call_in(
+            &svc,
+            "eu-west-1",
+            "GetFirewallConfig",
+            json!({ "ResourceId": "vpc-1" }),
+        )
+        .await
+        .unwrap();
         assert_eq!(west["FirewallConfig"]["FirewallFailOpen"], "ENABLED");
 
         // Reads of an untouched region create nothing.

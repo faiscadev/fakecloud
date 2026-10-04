@@ -52,7 +52,9 @@ impl Route53ResolverAccounts {
 
     /// The account's state in `region` without creating it.
     pub fn region_get_mut(&mut self, account: &str, region: &str) -> Option<&mut AccountState> {
-        self.accounts.get_mut(account).and_then(|r| r.get_mut(region))
+        self.accounts
+            .get_mut(account)
+            .and_then(|r| r.get_mut(region))
     }
 
     /// Every (account, region, state) triple.
@@ -449,7 +451,10 @@ impl AccountState {
         };
         for (id, a) in self.rule_associations {
             let region = follow(&a.resolver_rule_id);
-            out.entry(region).or_default().rule_associations.insert(id, a);
+            out.entry(region)
+                .or_default()
+                .rule_associations
+                .insert(id, a);
         }
         for (id, a) in self.query_log_associations {
             let region = follow(&a.resolver_query_log_config_id);
@@ -460,7 +465,10 @@ impl AccountState {
         }
         for (group, rules) in self.firewall_rules {
             let region = follow(&group);
-            out.entry(region).or_default().firewall_rules.insert(group, rules);
+            out.entry(region)
+                .or_default()
+                .firewall_rules
+                .insert(group, rules);
         }
         for (list, domains) in self.firewall_domains {
             let region = follow(&list);
@@ -488,7 +496,10 @@ impl AccountState {
             }
         }
         for (arn, tags) in self.tags {
-            out.entry(region_of(&arn)).or_default().tags.insert(arn, tags);
+            out.entry(region_of(&arn))
+                .or_default()
+                .tags
+                .insert(arn, tags);
         }
         out
     }
@@ -549,12 +560,14 @@ mod tests {
     #[test]
     fn v1_snapshot_splits_resources_by_region() {
         let mut legacy = AccountState::default();
-        legacy
-            .firewall_rule_groups
-            .insert("rslvr-frg-east".into(), group("rslvr-frg-east", "us-east-1"));
-        legacy
-            .firewall_rule_groups
-            .insert("rslvr-frg-west".into(), group("rslvr-frg-west", "eu-west-1"));
+        legacy.firewall_rule_groups.insert(
+            "rslvr-frg-east".into(),
+            group("rslvr-frg-east", "us-east-1"),
+        );
+        legacy.firewall_rule_groups.insert(
+            "rslvr-frg-west".into(),
+            group("rslvr-frg-west", "eu-west-1"),
+        );
         // Rules follow their group; per-VPC configs land in the default region.
         legacy
             .firewall_rules
@@ -609,7 +622,8 @@ mod tests {
 
     #[test]
     fn newer_snapshot_is_reported_not_parsed() {
-        let snap = parse_route53resolver_snapshot(br#"{"schema_version": 99}"#, "us-east-1").unwrap();
+        let snap =
+            parse_route53resolver_snapshot(br#"{"schema_version": 99}"#, "us-east-1").unwrap();
         assert_eq!(snap.schema_version, 99);
         assert!(snap.accounts.is_none());
     }
