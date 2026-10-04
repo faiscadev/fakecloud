@@ -17,6 +17,10 @@ fakecloud implements **23 of 23** SQS operations at 100% Smithy conformance.
 - **Message retention** — expiration via `/_fakecloud/sqs/expiration-processor/tick`
 - **Visibility timeout** — ChangeMessageVisibility, per-receive timeout
 
+## Regions
+
+Queues are regional. The same queue name can exist independently in every region of an account, and `ListQueues`, `GetQueueUrl` and every queue-addressed call see only the queues of the region the request is signed for. A fakecloud QueueUrl (`<endpoint>/<account>/<name>`) carries no region, since one endpoint serves every region, so the same URL addresses a different queue in each region; the queue ARN (`arn:aws:sqs:<region>:<account>:<name>`) always names its own region. Deliveries by queue ARN (SNS, EventBridge, S3 notifications, Lambda event source mappings, Pipes) land in the ARN's region and account.
+
 ## Protocol
 
 Query protocol. Form-encoded body, `Action` parameter, XML responses.

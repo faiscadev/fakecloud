@@ -94,7 +94,7 @@ Data directories written by builds before this scoping used unscoped volume name
 
 On startup fakecloud reads `<data-path>/fakecloud.version.toml`. The file records the on-disk format version and the fakecloud version that created the directory. If the format version doesn't match the running binary, startup fails with an actionable error that points at the file.
 
-Except for the ARN partition migration and the legacy CloudWatch Logs migration described below, there is no automatic migration. The intent is that you either keep using the binary that wrote the directory or start from an empty data path.
+Except for the ARN partition migration, the regional state migration and the legacy CloudWatch Logs migration described below, there is no automatic migration. The intent is that you either keep using the binary that wrote the directory or start from an empty data path.
 
 ### ARN partition migration
 
@@ -109,6 +109,15 @@ The first time a newer binary opens such a directory it rewrites those ARNs once
 - These payloads and customer-data fields are not rewritten: SQS message bodies and attributes (their MD5 digests would stop matching), ECR image manifests (addressed by digest), DynamoDB items, SSM parameter values, Secrets Manager secrets, SES email template content, SNS published messages, EventBridge published and archived events, CloudWatch dashboard bodies, S3 object keys, user metadata, object and multipart-upload tags and client-supplied object headers (`Content-Type`, `Content-Disposition`, ...), CloudWatch Logs events, S3 object bodies, and container data volumes. An item or object keyed by an ARN string stays reachable by the key your application wrote.
 
 After the migration, responses return the partition-correct ARN for these resources, the same as for resources created afterwards, and ARN-keyed lookups (for example SNS `GetTopicAttributes`) take the new ARN.
+
+### Regional state migration
+
+Regional services keep a separate set of resources per account and region, so the same queue or stack name can exist in two regions at once. Older releases kept one set per account for some services, so a data directory written before a service was split by region holds all of that account's resources together.
+
+On load, such a snapshot is split once: every resource moves to the region its ARN names, records that carry no ARN of their own follow the resource they belong to, and anything left goes to the server's `--region`. The snapshot is written back in the per-region format on the next change. Services migrated this way:
+
+- **SQS** - each queue goes to the region of its queue ARN; message move tasks follow their source queue. Queue URLs (`<endpoint>/<account>/<name>`) carry no region, so they stay byte-identical, and the request region selects which region's queue a URL addresses.
+- **CloudFormation** - each stack goes to the region of its stack ID; change sets, events, policies, exports and stack sets follow it.
 
 ## S3 object body handling
 
