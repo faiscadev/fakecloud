@@ -499,7 +499,8 @@ impl PipesRunner {
         }
         let windows: Vec<ShardWindow> = {
             let ks = kinesis_state.read();
-            let Some(kinesis) = ks.get(&account) else {
+            // The stream lives in the account and region its ARN names.
+            let Some(kinesis) = ks.by_arn(&pipe.source_arn) else {
                 return;
             };
             let Some(stream) = kinesis

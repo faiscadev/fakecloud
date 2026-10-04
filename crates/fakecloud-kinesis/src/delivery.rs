@@ -50,16 +50,20 @@ impl KinesisDelivery for KinesisDeliveryImpl {
             stream_arn
         };
 
-        let default_id = self.state.read().default_account_id().to_string();
-        let target_account = stream_arn
-            .split(':')
-            .nth(4)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&default_id);
+        // The stream lives in the account and region its ARN names; a bare
+        // stream name falls back to the default account and server region.
         let mut delivered = false;
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(target_account);
-        if let Some(stream) = state.streams.get_mut(stream_name) {
+        let account = fakecloud_aws::arn::account_of(stream_arn)
+            .unwrap_or(accounts.default_account_id())
+            .to_string();
+        let region = fakecloud_aws::arn::region_of(stream_arn)
+            .unwrap_or(accounts.region())
+            .to_string();
+        let stream = accounts
+            .regional_get_mut(&account, &region)
+            .and_then(|state| state.streams.get_mut(stream_name));
+        if let Some(stream) = stream {
             // Route by the MD5 hash-key range over OPEN shards, exactly like the
             // direct PutRecord path. The old hand-rolled `sum(bytes) % len`
             // included CLOSED parent shards (post-split/merge) and ignored hash
@@ -211,9 +215,9 @@ mod tests {
     }
 
     fn make_state(stream: KinesisStream) -> SharedKinesisState {
-        let mut mas: fakecloud_core::multi_account::MultiAccountState<KinesisState> =
+        let mut mas: fakecloud_core::multi_account::MultiRegionState<KinesisState> =
             fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", "");
-        mas.get_or_create("123456789012")
+        mas.regional_mut("123456789012", "us-east-1")
             .streams
             .insert(stream.stream_name.clone(), stream);
         Arc::new(RwLock::new(mas))
@@ -231,7 +235,7 @@ mod tests {
             "pk-1",
         );
         let mas = state.read();
-        let guard = mas.default_ref();
+        let guard = mas.default_regional().unwrap();
         let stream = guard.streams.get("my-stream").unwrap();
         assert_eq!(stream.shards[0].records.len(), 1);
         let rec = &stream.shards[0].records[0];
@@ -269,7 +273,7 @@ mod tests {
         let bytes = store.load().unwrap().expect("snapshot written");
         let snapshot: crate::state::KinesisSnapshot = serde_json::from_slice(&bytes).unwrap();
         let accounts = snapshot.accounts.expect("multi-account snapshot");
-        let restored = accounts.default_ref();
+        let restored = accounts.default_regional().unwrap();
         let s = restored
             .streams
             .get("durable")
@@ -344,7 +348,7 @@ mod tests {
             delivery.put_record(&arn, &encoded, pk);
         }
         let mas = state.read();
-        let s = mas.default_ref().streams.get("split").unwrap().clone();
+        let s = mas.default_regional().unwrap().streams.get("split").unwrap().clone();
         assert_eq!(
             s.shards[0].records.len(),
             0,
@@ -364,7 +368,7 @@ mod tests {
             "p",
         );
         let mas = state.read();
-        let guard = mas.default_ref();
+        let guard = mas.default_regional().unwrap();
         let rec = &guard.streams.get("s").unwrap().shards[0].records[0];
         assert_eq!(rec.data, b"not-base64!");
     }
@@ -385,7 +389,7 @@ mod tests {
             "B",
         );
         let mas = state.read();
-        let guard = mas.default_ref();
+        let guard = mas.default_regional().unwrap();
         let stream = guard.streams.get("s").unwrap();
         let total: usize = stream.shards.iter().map(|s| s.records.len()).sum();
         assert_eq!(total, 2);
@@ -402,7 +406,7 @@ mod tests {
             "p",
         );
         let mas = state.read();
-        let guard = mas.default_ref();
+        let guard = mas.default_regional().unwrap();
         assert!(guard.streams.get("s").unwrap().shards[0].records.is_empty());
     }
 
@@ -413,7 +417,7 @@ mod tests {
         let delivery = KinesisDeliveryImpl::new(state.clone());
         delivery.put_record("plain", "AAA=", "p");
         let mas = state.read();
-        let guard = mas.default_ref();
+        let guard = mas.default_regional().unwrap();
         assert_eq!(
             guard.streams.get("plain").unwrap().shards[0].records.len(),
             1

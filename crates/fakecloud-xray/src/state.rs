@@ -1,4 +1,6 @@
-//! Account-partitioned, serializable state for AWS X-Ray (`xray`).
+//! Account- and region-partitioned, serializable state for AWS X-Ray
+//! (`xray`). Every X-Ray resource (groups, sampling rules, the encryption
+//! config, resource policies, traces, retrievals) is regional.
 //!
 //! Control-plane resources (groups, sampling rules, the encryption config,
 //! resource policies, the indexing rule, the trace-segment destination) are
@@ -18,11 +20,13 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use fakecloud_core::multi_account::{AccountState, MultiAccountState};
+use fakecloud_core::multi_account::{AccountState, MultiAccountState, MultiRegionState};
 
 use crate::segment::StoredSegment;
 
-pub const XRAY_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+/// v2: state partitioned by (account, region). v1 kept one state per account
+/// with every region's resources in it.
+pub const XRAY_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// The name of the built-in sampling rule X-Ray always provides.
 pub const DEFAULT_SAMPLING_RULE: &str = "Default";
@@ -30,7 +34,7 @@ pub const DEFAULT_SAMPLING_RULE: &str = "Default";
 /// The name of the single built-in Transaction Search indexing rule.
 pub const DEFAULT_INDEXING_RULE: &str = "Default";
 
-/// Per-account AWS X-Ray state.
+/// One account's AWS X-Ray state in one region.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct XrayData {
     /// Groups keyed by `GroupName`, stored as their `Group` wire object.
@@ -63,7 +67,7 @@ pub struct XrayData {
     pub tags: BTreeMap<String, BTreeMap<String, String>>,
     /// Transaction Search indexing rules keyed by rule `Name`, stored as their
     /// `IndexingRule` wire object. X-Ray provides exactly one, `Default`,
-    /// seeded by [`XrayData::ensure_default_rule`]; `UpdateIndexingRule`
+    /// seeded by [`XrayData::seed_default_rule`]; `UpdateIndexingRule`
     /// rewrites it in place.
     #[serde(default)]
     pub indexing_rules: BTreeMap<String, Value>,
@@ -90,16 +94,11 @@ impl Default for XrayData {
 }
 
 impl XrayData {
-    /// Seed the built-in, undeletable `Default` sampling rule that every X-Ray
-    /// account carries (matched last, 1 req/s reservoir + 5% of the rest), and
-    /// keep its `RuleARN` pointed at the region the caller is asking about.
-    ///
-    /// Account state is shared across regions, so a rule seeded when the
-    /// account was first touched from `us-east-1` would otherwise keep
-    /// answering `GetSamplingRules` in `eu-west-1` with a `us-east-1` ARN.
-    /// The built-in rule exists in every region, so re-point it instead of
-    /// freezing whichever region happened to create the account.
-    pub(crate) fn ensure_default_rule(&mut self, region: &str, account: &str) {
+    /// Seed what X-Ray provides in every region of every account: the
+    /// built-in, undeletable `Default` sampling rule (matched last, 1 req/s
+    /// reservoir + 5% of the rest), with that region's ARN, and the built-in
+    /// `Default` Transaction Search indexing rule.
+    pub(crate) fn seed_default_rule(&mut self, region: &str, account: &str) {
         self.indexing_rules
             .entry(DEFAULT_INDEXING_RULE.to_string())
             .or_insert_with(|| {
@@ -112,18 +111,16 @@ impl XrayData {
                     } },
                 })
             });
-        let partition = fakecloud_aws::arn::partition_for(region);
-        let want = format!(
-            "arn:{partition}:xray:{region}:{account}:sampling-rule/{DEFAULT_SAMPLING_RULE}"
-        );
-        if let Some(existing) = self.sampling_rules.get_mut(DEFAULT_SAMPLING_RULE) {
-            if let Some(rule) = existing.get_mut("SamplingRule") {
-                if rule.get("RuleARN").and_then(|v| v.as_str()) != Some(want.as_str()) {
-                    rule["RuleARN"] = json!(want);
-                }
-            }
+        if self.sampling_rules.contains_key(DEFAULT_SAMPLING_RULE) {
             return;
         }
+        let want = fakecloud_aws::arn::Arn::regional(
+            "xray",
+            region,
+            account,
+            &format!("sampling-rule/{DEFAULT_SAMPLING_RULE}"),
+        )
+        .to_string();
         let now = now_epoch();
         let record = json!({
             "SamplingRule": {
@@ -159,17 +156,70 @@ pub fn now_epoch() -> f64 {
 impl AccountState for XrayData {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         let mut data = Self::default();
-        data.ensure_default_rule(region, account_id);
+        data.seed_default_rule(region, account_id);
         data
     }
 }
 
-pub type SharedXrayState = Arc<RwLock<MultiAccountState<XrayData>>>;
+pub type SharedXrayState = Arc<RwLock<MultiRegionState<XrayData>>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct XraySnapshot {
     pub schema_version: u32,
-    pub accounts: MultiAccountState<XrayData>,
+    pub accounts: MultiRegionState<XrayData>,
+}
+
+/// The shape v1 snapshots stored: one state per account.
+#[derive(Debug, Deserialize)]
+pub(crate) struct LegacyXraySnapshot {
+    pub(crate) accounts: MultiAccountState<XrayData>,
+}
+
+/// The region a stored X-Ray wire object's ARN member names.
+fn region_of_member<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut v = value;
+    for key in path {
+        v = v.get(*key)?;
+    }
+    fakecloud_aws::arn::region_of(v.as_str()?)
+}
+
+impl fakecloud_core::multi_account::SplitByRegion for XrayData {
+    /// Groups, sampling rules and resource-tag entries go to the region their
+    /// ARN names. Traces, retrievals, resource policies, the encryption config
+    /// and the trace-segment destination carry no region, so they stay in the
+    /// server's default region, where an account-wide v1 state served them.
+    /// Every region gets its own built-in `Default` rule.
+    fn split_by_region(self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
+        let home = into.region_or_default_mut(None);
+        home.encryption_config = self.encryption_config;
+        home.resource_policies = self.resource_policies;
+        home.trace_segment_destination = self.trace_segment_destination;
+        home.indexing_rules = self.indexing_rules;
+        home.traces = self.traces;
+        home.retrievals = self.retrievals;
+        for (name, group) in self.groups {
+            let region = region_of_member(&group, &["GroupARN"]).map(str::to_string);
+            into.region_or_default_mut(region.as_deref())
+                .groups
+                .insert(name, group);
+        }
+        // The built-in `Default` rule goes where its ARN points like any
+        // other (keeping its edits there); other regions get a fresh seed.
+        for (name, rule) in self.sampling_rules {
+            let region =
+                region_of_member(&rule, &["SamplingRule", "RuleARN"]).map(str::to_string);
+            into.region_or_default_mut(region.as_deref())
+                .sampling_rules
+                .insert(name, rule);
+        }
+        for (arn, tags) in self.tags {
+            let region = fakecloud_aws::arn::region_of(&arn).map(str::to_string);
+            into.region_or_default_mut(region.as_deref())
+                .tags
+                .insert(arn, tags);
+        }
+    }
 }
 
 #[cfg(test)]

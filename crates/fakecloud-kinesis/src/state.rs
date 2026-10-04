@@ -6,8 +6,11 @@ use fakecloud_aws::arn::Arn;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
+/// Kinesis state partitioned by account and region: streams, consumers,
+/// channels and resource policies are regional, so the same stream name can
+/// exist independently in two regions of one account.
 pub type SharedKinesisState =
-    Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<KinesisState>>>;
+    Arc<RwLock<fakecloud_core::multi_account::MultiRegionState<KinesisState>>>;
 
 impl fakecloud_core::multi_account::AccountState for KinesisState {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
@@ -277,15 +280,25 @@ impl KinesisState {
         self.billing_commitment_status = "DISABLED".to_string();
     }
 
+    /// Whether an ARN names this state's region. Streams and channels are
+    /// regional: an ARN naming another region addresses a resource that does
+    /// not live here, even when a resource of the same name does.
+    pub fn arn_in_region(&self, arn: &str) -> bool {
+        fakecloud_aws::arn::region_of(arn).is_none_or(|r| r == self.region)
+    }
+
     pub fn stream_name_from_arn(&self, arn: &str) -> Option<String> {
+        if !self.arn_in_region(arn) {
+            return None;
+        }
         arn.rsplit('/')
             .next()
             .filter(|name| self.streams.contains_key(*name))
             .map(|name| name.to_string())
     }
 
-    // ARN carries the request's credential-scope region (req.region), not the
-    // frozen server default. Streams are keyed by name, so keying is unchanged.
+    // ARN carries the request's credential-scope region (req.region), which
+    // is the region this state holds.
     pub fn stream_arn(&self, region: &str, stream_name: &str) -> String {
         Arn::regional(
             "kinesis",
@@ -308,12 +321,13 @@ impl KinesisState {
         .to_string()
     }
 
-    /// Resolve a `ChannelARN` to the name of an existing channel. Like
-    /// [`KinesisState::stream_name_from_arn`] the lookup keys off the ARN's
-    /// resource segment, so a caller whose credential-scope region differs
-    /// from the region the channel was created in still resolves it. The
-    /// segment is the channel id, so the match is against `channel_id`.
+    /// Resolve a `ChannelARN` to the name of an existing channel in this
+    /// region. The ARN's resource segment is the channel id, so the match is
+    /// against `channel_id`.
     pub fn channel_name_from_arn(&self, arn: &str) -> Option<String> {
+        if !self.arn_in_region(arn) {
+            return None;
+        }
         let (_, channel_id) = arn.rsplit_once(":channel/")?;
         self.channels
             .values()
@@ -324,12 +338,8 @@ impl KinesisState {
     /// Names of the channels that draw from the stream named `stream_name`. A
     /// stream cannot be deleted while any channel is attached to it.
     ///
-    /// A channel stores its sources' canonical ARNs, which carry the region
-    /// of whichever credential scope created the channel. Resolving each one
-    /// through [`KinesisState::stream_name_from_arn`], the same way
-    /// `CreateChannel` resolved the caller's ARN, keeps the attachment
-    /// visible to a caller scoped to a different region, which a raw ARN
-    /// comparison would miss.
+    /// Each source is resolved through [`KinesisState::stream_name_from_arn`],
+    /// the same way `CreateChannel` resolved the caller's ARN.
     pub fn channels_for_stream(&self, stream_name: &str) -> Vec<String> {
         self.channels
             .values()
@@ -438,12 +448,107 @@ impl KinesisState {
 pub struct KinesisSnapshot {
     pub schema_version: u32,
     #[serde(default)]
-    pub accounts: Option<fakecloud_core::multi_account::MultiAccountState<KinesisState>>,
-    #[serde(default)]
-    pub state: Option<KinesisState>,
+    pub accounts: Option<fakecloud_core::multi_account::MultiRegionState<KinesisState>>,
+    /// Only set when a v1 (single-account) snapshot is migrated: that one
+    /// account's state split by region, for the caller to merge into its own
+    /// container.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<fakecloud_core::multi_account::RegionalState<KinesisState>>,
 }
 
-pub const KINESIS_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
+/// v3: state partitioned by (account, region). v2 kept one state per
+/// account with every region's streams in one name-keyed map; v1 a single
+/// account's.
+pub const KINESIS_SNAPSHOT_SCHEMA_VERSION: u32 = 3;
+
+impl fakecloud_core::multi_account::SplitByRegion for KinesisState {
+    /// Streams, consumers, channels and resource policies go to the region
+    /// their ARN names. Account-level settings and Lambda checkpoints (keyed
+    /// by event source mapping UUID, which names no region) are copied into
+    /// every resulting region so nothing a region relied on is lost.
+    fn split_by_region(self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
+        use fakecloud_aws::arn::region_of;
+        let region_of_owned = |arn: &str| region_of(arn).map(str::to_string);
+        // Make sure the default region exists even when the account was empty.
+        into.region_or_default_mut(None);
+        for (name, stream) in self.streams {
+            let region = region_of_owned(&stream.stream_arn);
+            into.region_or_default_mut(region.as_deref())
+                .streams
+                .insert(name, stream);
+        }
+        for (arn, consumer) in self.consumers {
+            let region = region_of_owned(&consumer.consumer_arn)
+                .or_else(|| region_of_owned(&consumer.stream_arn));
+            into.region_or_default_mut(region.as_deref())
+                .consumers
+                .insert(arn, consumer);
+        }
+        for (name, channel) in self.channels {
+            let region = region_of_owned(&channel.channel_arn);
+            into.region_or_default_mut(region.as_deref())
+                .channels
+                .insert(name, channel);
+        }
+        for (arn, policy) in self.resource_policies {
+            let region = region_of_owned(&arn);
+            into.region_or_default_mut(region.as_deref())
+                .resource_policies
+                .insert(arn, policy);
+        }
+        for (_, state) in into.regions_mut() {
+            state.shard_limit = self.shard_limit;
+            state.on_demand_stream_count_limit = self.on_demand_stream_count_limit;
+            state
+                .billing_commitment_status
+                .clone_from(&self.billing_commitment_status);
+            state
+                .lambda_checkpoints
+                .extend(self.lambda_checkpoints.iter().map(|(k, v)| (k.clone(), *v)));
+        }
+    }
+}
+
+/// The shape v1 and v2 snapshots stored: one state per account.
+#[derive(Deserialize)]
+struct LegacyKinesisSnapshot {
+    #[serde(default)]
+    accounts: Option<fakecloud_core::multi_account::MultiAccountState<KinesisState>>,
+    #[serde(default)]
+    state: Option<KinesisState>,
+}
+
+#[derive(Deserialize)]
+struct SnapshotVersion {
+    schema_version: u32,
+}
+
+/// Parse a persisted Kinesis snapshot, migrating older schemas to the current
+/// one by moving every resource into the region its ARN names. A snapshot
+/// newer than this build comes back with its on-disk `schema_version` and no
+/// state, for the caller to refuse.
+pub fn parse_kinesis_snapshot(bytes: &[u8]) -> Result<KinesisSnapshot, serde_json::Error> {
+    let SnapshotVersion { schema_version } = serde_json::from_slice(bytes)?;
+    if schema_version > KINESIS_SNAPSHOT_SCHEMA_VERSION {
+        return Ok(KinesisSnapshot {
+            schema_version,
+            accounts: None,
+            state: None,
+        });
+    }
+    if schema_version == KINESIS_SNAPSHOT_SCHEMA_VERSION {
+        return serde_json::from_slice(bytes);
+    }
+    let legacy: LegacyKinesisSnapshot = serde_json::from_slice(bytes)?;
+    Ok(KinesisSnapshot {
+        schema_version: KINESIS_SNAPSHOT_SCHEMA_VERSION,
+        accounts: legacy.accounts.map(|a| a.into_regional()),
+        state: legacy.state.map(|s| {
+            let (account, region) = (s.account_id.clone(), s.region.clone());
+            fakecloud_core::multi_account::RegionalState::from_legacy(&account, &region, "", s)
+        }),
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -544,12 +649,13 @@ mod tests {
             state.channel_name_from_arn(&arn),
             Some("deliveries".to_string())
         );
-        // Another region's ARN still resolves: the id is region-independent.
+        // Channels are regional: another region's ARN names a channel that
+        // does not live in this region's state.
         assert_eq!(
             state.channel_name_from_arn(
                 "arn:aws:kinesis:eu-west-1:123456789012:channel/11111111-2222-3333-4444-555555555555"
             ),
-            Some("deliveries".to_string())
+            None
         );
         assert_eq!(
             state.channel_name_from_arn("arn:aws:kinesis:us-east-1:123456789012:channel/ghost"),
@@ -624,10 +730,9 @@ mod tests {
     }
 
     #[test]
-    fn channels_for_stream_ignores_the_source_arns_region() {
-        // The channel was created by a caller scoped to us-east-1, so it holds
-        // a us-east-1 source ARN; a caller scoped elsewhere still resolves to
-        // the same stream name and must see the attachment.
+    fn channels_for_stream_only_matches_this_regions_stream() {
+        // A source ARN naming another region's stream of the same name is not
+        // an attachment of this region's stream.
         let mut state = KinesisState::new("123456789012", "eu-west-1");
         insert_test_stream(&mut state, "orders");
         let mut channel = test_channel(&state, "deliveries");
@@ -635,10 +740,97 @@ mod tests {
             "arn:aws:kinesis:us-east-1:123456789012:stream/orders".to_string();
         state.channels.insert("deliveries".to_string(), channel);
 
+        assert!(state.channels_for_stream("orders").is_empty());
+    }
+
+    #[test]
+    fn stream_name_from_arn_rejects_other_regions() {
+        let mut state = KinesisState::new("123456789012", "eu-west-1");
+        insert_test_stream(&mut state, "orders");
         assert_eq!(
-            state.channels_for_stream("orders"),
-            vec!["deliveries".to_string()]
+            state.stream_name_from_arn("arn:aws:kinesis:eu-west-1:123456789012:stream/orders"),
+            Some("orders".to_string())
         );
+        assert_eq!(
+            state.stream_name_from_arn("arn:aws:kinesis:us-east-1:123456789012:stream/orders"),
+            None
+        );
+    }
+
+    #[test]
+    fn v2_snapshot_migrates_resources_into_their_arn_region() {
+        use fakecloud_core::multi_account::MultiAccountState;
+        let mut legacy: MultiAccountState<KinesisState> =
+            MultiAccountState::new("123456789012", "us-east-1", "");
+        let st = legacy.default_mut();
+        st.shard_limit = 77;
+        st.set_lambda_checkpoint("uuid-1", "shardId-000000000000", 5);
+        // Same-named streams cannot coexist in the legacy name-keyed map, so
+        // use distinct names whose ARNs name different regions.
+        for (name, region) in [("east", "us-east-1"), ("west", "eu-west-1")] {
+            insert_test_stream(st, name);
+            let arn = format!("arn:aws:kinesis:{region}:123456789012:stream/{name}");
+            st.streams.get_mut(name).unwrap().stream_arn = arn.clone();
+            st.resource_policies.insert(arn.clone(), "{}".to_string());
+            let consumer_arn = format!("{arn}/consumer/c:1");
+            st.consumers.insert(
+                consumer_arn.clone(),
+                KinesisConsumer {
+                    consumer_name: "c".to_string(),
+                    consumer_arn,
+                    consumer_status: "ACTIVE".to_string(),
+                    consumer_creation_timestamp: Utc::now(),
+                    stream_arn: arn,
+                },
+            );
+        }
+        let mut channel = test_channel(st, "deliveries");
+        channel.channel_arn =
+            "arn:aws:kinesis:eu-west-1:123456789012:channel/11111111-2222-3333-4444-555555555555"
+                .to_string();
+        st.channels.insert("deliveries".to_string(), channel);
+
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 2,
+            "accounts": legacy,
+        }))
+        .unwrap();
+        let snap = parse_kinesis_snapshot(&bytes).unwrap();
+        assert_eq!(snap.schema_version, KINESIS_SNAPSHOT_SCHEMA_VERSION);
+        let accounts = snap.accounts.unwrap();
+        let east = accounts.regional("123456789012", "us-east-1").unwrap();
+        let west = accounts.regional("123456789012", "eu-west-1").unwrap();
+        assert_eq!(west.region, "eu-west-1");
+        assert!(east.streams.contains_key("east") && !east.streams.contains_key("west"));
+        assert!(west.streams.contains_key("west") && !west.streams.contains_key("east"));
+        assert_eq!(east.consumers.len(), 1);
+        assert_eq!(west.consumers.len(), 1);
+        assert_eq!(east.resource_policies.len(), 1);
+        assert!(west.channels.contains_key("deliveries"));
+        assert!(east.channels.is_empty());
+        assert_eq!(west.shard_limit, 77);
+        assert_eq!(west.lambda_checkpoint("uuid-1", "shardId-000000000000"), 5);
+
+        // The migrated snapshot round-trips as the current schema.
+        let current = serde_json::to_vec(&KinesisSnapshot {
+            schema_version: KINESIS_SNAPSHOT_SCHEMA_VERSION,
+            accounts: Some(accounts),
+            state: None,
+        })
+        .unwrap();
+        let again = parse_kinesis_snapshot(&current).unwrap().accounts.unwrap();
+        assert!(again
+            .regional("123456789012", "eu-west-1")
+            .unwrap()
+            .streams
+            .contains_key("west"));
+    }
+
+    #[test]
+    fn newer_snapshot_is_reported_not_parsed() {
+        let snap = parse_kinesis_snapshot(br#"{"schema_version": 99, "accounts": 5}"#).unwrap();
+        assert_eq!(snap.schema_version, 99);
+        assert!(snap.accounts.is_none());
     }
 
     #[test]

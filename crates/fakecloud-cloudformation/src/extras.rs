@@ -3032,7 +3032,7 @@ pub(crate) mod tests {
             logs: shared::<LogsState>(),
             lambda: shared::<LambdaState>(),
             secretsmanager: shared::<SecretsManagerState>(),
-            kinesis: shared::<KinesisState>(),
+            kinesis: shared::<fakecloud_core::multi_account::RegionalState<KinesisState>>(),
             kms: shared::<KmsState>(),
             ecr: shared::<EcrState>(),
             cloudwatch: Arc::new(RwLock::new(fakecloud_cloudwatch::CloudWatchAccounts::new())),

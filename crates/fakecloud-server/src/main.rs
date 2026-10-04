@@ -3016,7 +3016,10 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_kinesis::KinesisSnapshot>(&bytes) {
+                    // Older schemas are migrated on parse: v2 kept one
+                    // state per account, split into regions by each
+                    // resource's ARN.
+                    match fakecloud_kinesis::parse_kinesis_snapshot(&bytes) {
                         Ok(snapshot) => {
                             if snapshot.schema_version
                                 > fakecloud_kinesis::KINESIS_SNAPSHOT_SCHEMA_VERSION
@@ -3035,8 +3038,9 @@ async fn main() {
                                     "loaded kinesis persistence snapshot (multi-account)"
                                 );
                             } else if let Some(single_state) = snapshot.state {
-                                let stream_count = single_state.streams.len();
-                                let account_id = single_state.account_id.clone();
+                                let stream_count: usize =
+                                    single_state.regions().map(|(_, s)| s.streams.len()).sum();
+                                let account_id = single_state.account_id().to_string();
                                 let mut mas = kinesis_state.write();
                                 *mas.get_or_create(&account_id) = single_state;
                                 tracing::info!(
@@ -3918,8 +3922,11 @@ async fn main() {
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
                 Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_route53resolver::Route53ResolverSnapshot>(
+                    // Older schemas are migrated on parse: v1 kept one state
+                    // per account, split into regions by each resource's ARN.
+                    match fakecloud_route53resolver::parse_route53resolver_snapshot(
                         &bytes,
+                        &cli.region,
                     ) {
                         Ok(snapshot) => {
                             if snapshot.schema_version

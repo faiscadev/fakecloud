@@ -75,7 +75,7 @@ fn test_shard() -> KinesisShard {
 #[test]
 fn create_stream_stores_metadata() {
     let state = Arc::new(RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new(
+        fakecloud_core::multi_account::MultiRegionState::new(
             "123456789012",
             "us-east-1",
             "http://localhost:4566",
@@ -91,7 +91,7 @@ fn create_stream_stores_metadata() {
         .unwrap();
 
     let _accts = state.read();
-    let st = _accts.default_ref();
+    let st = _accts.default_regional().unwrap();
     let stream = st.streams.get("orders").unwrap();
     assert_eq!(stream.stream_status, "ACTIVE");
     assert_eq!(stream.shard_count, 2);
@@ -102,7 +102,7 @@ fn create_stream_stores_metadata() {
 #[test]
 fn create_stream_rejects_duplicate_names() {
     let state = Arc::new(RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new(
+        fakecloud_core::multi_account::MultiRegionState::new(
             "123456789012",
             "us-east-1",
             "http://localhost:4566",
@@ -130,7 +130,7 @@ fn create_stream_rejects_duplicate_names() {
 #[test]
 fn update_retention_period_validates_direction() {
     let state = Arc::new(RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new(
+        fakecloud_core::multi_account::MultiRegionState::new(
             "123456789012",
             "us-east-1",
             "http://localhost:4566",
@@ -294,7 +294,7 @@ fn at_timestamp_iterator_rejects_missing_field() {
 
 fn make_service() -> (KinesisService, SharedKinesisState) {
     let state = Arc::new(RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new(
+        fakecloud_core::multi_account::MultiRegionState::new(
             "123456789012",
             "us-east-1",
             "http://localhost:4566",
@@ -556,7 +556,7 @@ fn delete_stream_removes_entry_and_consumers() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
     // Register a consumer on the stream.
-    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
+    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -567,7 +567,7 @@ fn delete_stream_removes_entry_and_consumers() {
         .unwrap();
 
     let _accts = state.read();
-    let s = _accts.default_ref();
+    let s = _accts.default_regional().unwrap();
     assert!(!s.streams.contains_key("orders"));
     assert!(s.consumers.is_empty());
 }
@@ -611,7 +611,7 @@ fn put_records_delivers_each_entry_to_a_shard() {
 
     // Verify records landed somewhere.
     let _accts = state.read();
-    let s = _accts.default_ref();
+    let s = _accts.default_regional().unwrap();
     let stream = s.streams.get("orders").unwrap();
     let total: usize = stream.shards.iter().map(|sh| sh.records.len()).sum();
     assert_eq!(total, 2);
@@ -633,7 +633,7 @@ fn get_shard_iterator_and_records_happy_path() {
     .unwrap();
     let shard_id = state
         .read()
-        .default_ref()
+        .default_regional().unwrap()
         .streams
         .get("orders")
         .unwrap()
@@ -687,7 +687,7 @@ fn get_records_returns_null_iterator_for_closed_drained_shard() {
     // Close the shard, as SplitShard/MergeShards would.
     let shard_id = {
         let mut g = state.write();
-        let stream = g.default_mut().streams.get_mut("orders").unwrap();
+        let stream = g.default_regional_mut().streams.get_mut("orders").unwrap();
         stream.shards[0].is_open = false;
         stream.shards[0].shard_id.clone()
     };
@@ -822,7 +822,7 @@ fn increase_retention_period_bumps_value() {
     assert_eq!(
         state
             .read()
-            .default_ref()
+            .default_regional().unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -848,7 +848,7 @@ fn decrease_retention_period_after_increase() {
     assert_eq!(
         state
             .read()
-            .default_ref()
+            .default_regional().unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -888,7 +888,7 @@ fn start_and_stop_stream_encryption() {
     assert_eq!(
         state
             .read()
-            .default_ref()
+            .default_regional().unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -907,7 +907,7 @@ fn start_and_stop_stream_encryption() {
     assert_eq!(
         state
             .read()
-            .default_ref()
+            .default_regional().unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -931,7 +931,7 @@ fn enable_and_disable_enhanced_monitoring() {
     assert_eq!(
         state
             .read()
-            .default_ref()
+            .default_regional().unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -948,7 +948,7 @@ fn enable_and_disable_enhanced_monitoring() {
     ))
     .unwrap();
     let _accts = state.read();
-    let s = _accts.default_ref();
+    let s = _accts.default_regional().unwrap();
     let metrics = &s.streams.get("orders").unwrap().enhanced_metrics;
     assert_eq!(metrics, &vec!["OutgoingBytes".to_string()]);
 }
@@ -957,7 +957,7 @@ fn enable_and_disable_enhanced_monitoring() {
 fn update_stream_mode_writes_new_mode() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
+    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
     svc.update_stream_mode(&request(
         "UpdateStreamMode",
         json!({
@@ -969,7 +969,7 @@ fn update_stream_mode_writes_new_mode() {
     assert_eq!(
         state
             .read()
-            .default_ref()
+            .default_regional().unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -984,7 +984,7 @@ fn update_stream_mode_writes_new_mode() {
 fn register_describe_deregister_consumer() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
+    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1005,14 +1005,14 @@ fn register_describe_deregister_consumer() {
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
     ))
     .unwrap();
-    assert!(state.read().default_ref().consumers.is_empty());
+    assert!(state.read().default_regional().unwrap().consumers.is_empty());
 }
 
 #[test]
 fn register_consumer_duplicate_errors() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
+    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1031,7 +1031,7 @@ fn register_consumer_duplicate_errors() {
 fn list_stream_consumers_returns_registered_consumer() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
+    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
     svc.register_stream_consumer(&request(
         "RegisterStreamConsumer",
         json!({ "StreamARN": stream_arn, "ConsumerName": "c1" }),
@@ -1055,7 +1055,7 @@ fn list_stream_consumers_returns_registered_consumer() {
 fn put_get_delete_resource_policy() {
     let (svc, state) = make_service();
     create_stream_action(&svc, "orders", 1);
-    let stream_arn = state.read().default_ref().stream_arn("us-east-1", "orders");
+    let stream_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "orders");
     let policy_body = json!({"Version":"2012-10-17","Statement":[]}).to_string();
 
     svc.put_resource_policy(&request(
@@ -1113,7 +1113,7 @@ fn update_account_settings_toggles_billing_commitment() {
     ))
     .unwrap();
     assert_eq!(
-        state.read().default_ref().billing_commitment_status,
+        state.read().default_regional().unwrap().billing_commitment_status,
         "ENABLED"
     );
 
@@ -1123,7 +1123,7 @@ fn update_account_settings_toggles_billing_commitment() {
     ))
     .unwrap();
     assert_eq!(
-        state.read().default_ref().billing_commitment_status,
+        state.read().default_regional().unwrap().billing_commitment_status,
         "DISABLED"
     );
 }
@@ -1665,7 +1665,7 @@ fn put_record_routes_into_shard_whose_range_contains_the_hash() {
         // Verify the chosen shard's hash range actually contains MD5(key).
         let hash = partition_key_hash(key);
         let accts = state.read();
-        let st = accts.default_ref();
+        let st = accts.default_regional().unwrap();
         let stream = st.streams.get("routed").unwrap();
         let shard = stream
             .shards
@@ -1899,7 +1899,7 @@ fn create_stream_honors_on_demand_mode() {
     ))
     .unwrap();
     let _accts = state.read();
-    let st = _accts.default_ref();
+    let st = _accts.default_regional().unwrap();
     let stream = st.streams.get("demand").unwrap();
     assert_eq!(stream.stream_mode, "ON_DEMAND");
     // ON_DEMAND ignores ShardCount; we seed a small fixed count.
@@ -1931,7 +1931,7 @@ fn create_stream_defaults_to_provisioned_mode() {
     ))
     .unwrap();
     let _accts = state.read();
-    let st = _accts.default_ref();
+    let st = _accts.default_regional().unwrap();
     let stream = st.streams.get("default-mode").unwrap();
     assert_eq!(stream.stream_mode, "PROVISIONED");
 }
@@ -1948,7 +1948,7 @@ fn get_records_skips_records_past_retention() {
     // Push two records: one stale (well past retention), one fresh.
     {
         let mut accts = state.write();
-        let st = accts.default_mut();
+        let st = accts.default_regional_mut();
         let stream = st.streams.get_mut("ret").unwrap();
         let shard = &mut stream.shards[0];
         let stale_ts = chrono::Utc::now() - chrono::Duration::hours(48);
@@ -2118,7 +2118,7 @@ fn put_record_honors_configured_max_record_size() {
     // Raise the per-record ceiling to 2 MiB for this stream.
     state
         .write()
-        .default_mut()
+        .default_regional_mut()
         .streams
         .get_mut("orders")
         .unwrap()
@@ -2202,7 +2202,7 @@ fn update_shard_count_preserves_parent_lineage() {
     // (ExplicitHashKey 0 always routes to the shard covering hash 0).
     let original_ids: Vec<String> = {
         let g = state.read();
-        g.default_ref()
+        g.default_regional().unwrap()
             .streams
             .get("orders")
             .unwrap()
@@ -2236,7 +2236,7 @@ fn update_shard_count_preserves_parent_lineage() {
     // consumers can discover the post-scale shards from the closed originals.
     {
         let g = state.read();
-        let stream = g.default_ref().streams.get("orders").unwrap();
+        let stream = g.default_regional().unwrap().streams.get("orders").unwrap();
         for original in &original_ids {
             let is_parent = stream.shards.iter().any(|s| {
                 s.parent_shard_id.as_deref() == Some(original.as_str())
@@ -2302,7 +2302,7 @@ fn at_sequence_number_below_trim_horizon_resolves_to_earliest() {
     .unwrap();
     {
         let mut g = state.write();
-        let stream = g.default_mut().streams.get_mut("orders").unwrap();
+        let stream = g.default_regional_mut().streams.get_mut("orders").unwrap();
         stream.shards[0].records.remove(0); // drop the trimmed record
     }
 
@@ -2346,7 +2346,7 @@ fn at_sequence_number_from_another_shard_is_invalid() {
     // Seed shard 1 (discriminator 1) with a record directly.
     {
         let mut g = state.write();
-        let stream = g.default_mut().streams.get_mut("xshard").unwrap();
+        let stream = g.default_regional_mut().streams.get_mut("xshard").unwrap();
         stream.shards[1].records.push(KinesisRecord {
             sequence_number: format!("{:05}{:051}", 1, 10),
             partition_key: "p".to_string(),
@@ -2427,7 +2427,7 @@ fn put_record_on_shardless_stream_errors_without_panic() {
     // Force the (unreachable-via-API) shard-less state.
     state
         .write()
-        .default_mut()
+        .default_regional_mut()
         .streams
         .get_mut("orders")
         .unwrap()
@@ -2560,7 +2560,7 @@ fn create_channel_stores_tags_and_encryption() {
     assert_eq!(logs["LogStreamName"], "DestinationDelivery");
 
     let guard = state.read();
-    let stored = &guard.default_ref().channels["deliveries"];
+    let stored = &guard.default_regional().unwrap().channels["deliveries"];
     assert_eq!(stored.tags["env"], "prod");
 }
 
@@ -2904,7 +2904,7 @@ fn delete_channel_removes_it() {
 
     svc.delete_channel(&request("DeleteChannel", json!({ "ChannelARN": arn })))
         .unwrap();
-    assert!(state.read().default_ref().channels.is_empty());
+    assert!(state.read().default_regional().unwrap().channels.is_empty());
 
     assert_code_kinesis(
         svc.delete_channel(&request("DeleteChannel", json!({ "ChannelARN": arn }))),
@@ -3067,7 +3067,7 @@ fn delete_stream_is_blocked_while_a_channel_is_attached() {
 #[test]
 fn channel_actions_are_supported_and_mutating() {
     let svc = KinesisService::new(Arc::new(RwLock::new(
-        fakecloud_core::multi_account::MultiAccountState::new(
+        fakecloud_core::multi_account::MultiRegionState::new(
             "123456789012",
             "us-east-1",
             "http://localhost:4566",
@@ -3184,28 +3184,22 @@ fn tag_operations_reach_channels_by_arn() {
 }
 
 #[test]
-fn tag_operations_resolve_channels_from_another_region() {
+fn tag_operations_do_not_resolve_another_regions_channel() {
     let (svc, _) = make_service();
     create_stream_action(&svc, "orders", 1);
     let created = create_channel_action(&svc, "deliveries", "orders");
     let channel_id = created["ChannelDescription"]["ChannelId"].as_str().unwrap();
     let foreign_arn = format!("arn:aws:kinesis:eu-west-1:123456789012:channel/{channel_id}");
 
-    svc.tag_resource(&request_in_region(
-        "TagResource",
-        "eu-west-1",
-        json!({ "ResourceARN": foreign_arn, "Tags": { "env": "test" } }),
-    ))
-    .unwrap();
-
-    let listed = json_response(
-        svc.list_tags_for_resource(&request(
-            "ListTagsForResource",
-            json!({ "ResourceARN": created["ChannelDescription"]["ChannelARN"] }),
-        ))
-        .unwrap(),
+    // The channel lives in us-east-1; eu-west-1 has no such channel.
+    assert_code_kinesis(
+        svc.tag_resource(&request_in_region(
+            "TagResource",
+            "eu-west-1",
+            json!({ "ResourceARN": foreign_arn, "Tags": { "env": "test" } }),
+        )),
+        "ResourceNotFoundException",
     );
-    assert_eq!(listed["Tags"], json!([{ "Key": "env", "Value": "test" }]));
 }
 
 #[test]
@@ -3275,81 +3269,168 @@ fn create_channel_enforces_the_models_arn_lengths() {
         .unwrap();
 }
 
-/// A CreateChannel body whose source ARN carries `region` rather than the
-/// region the stream was created in.
-fn s3_channel_body_in_region(name: &str, stream_name: &str, region: &str) -> Value {
-    let mut body = s3_channel_body(name, stream_name);
-    body["StreamConfigurationList"][0]["StreamARN"] = json!(format!(
-        "arn:aws:kinesis:{region}:123456789012:stream/{stream_name}"
-    ));
-    body
+fn create_stream_in(svc: &KinesisService, region: &str, name: &str) {
+    svc.create_stream(&request_in_region(
+        "CreateStream",
+        region,
+        json!({ "StreamName": name, "ShardCount": 1 }),
+    ))
+    .unwrap();
+}
+
+fn list_stream_names(svc: &KinesisService, region: &str) -> Vec<String> {
+    let body = json_response(
+        svc.list_streams(&request_in_region("ListStreams", region, json!({})))
+            .unwrap(),
+    );
+    body["StreamNames"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect()
 }
 
 #[test]
-fn list_channels_filter_matches_a_cross_region_stream_arn() {
-    let (svc, _) = make_service();
-    create_stream_action(&svc, "orders", 1);
-    // The channel is created by a eu-west-1-scoped caller naming the stream by
-    // its own regional ARN; the stored source ARN is the stream's canonical
-    // us-east-1 one.
-    svc.create_channel(&request_in_region(
-        "CreateChannel",
+fn same_stream_name_coexists_in_two_regions() {
+    let (svc, state) = make_service();
+    create_stream_in(&svc, "us-east-1", "orders");
+    create_stream_in(&svc, "eu-west-1", "orders");
+    create_stream_in(&svc, "eu-west-1", "west-only");
+
+    assert_eq!(list_stream_names(&svc, "us-east-1"), vec!["orders"]);
+    assert_eq!(list_stream_names(&svc, "eu-west-1"), vec!["orders", "west-only"]);
+    assert!(list_stream_names(&svc, "ap-south-1").is_empty());
+
+    let west = json_response(
+        svc.describe_stream_summary(&request_in_region(
+            "DescribeStreamSummary",
+            "eu-west-1",
+            json!({ "StreamName": "orders" }),
+        ))
+        .unwrap(),
+    );
+    assert_eq!(
+        west["StreamDescriptionSummary"]["StreamARN"],
+        "arn:aws:kinesis:eu-west-1:123456789012:stream/orders"
+    );
+    // Reading a region that was never written leaves no empty state behind.
+    assert!(state
+        .read()
+        .regional("123456789012", "ap-south-1")
+        .is_none());
+
+    // Deleting one region's stream leaves the other's alone.
+    svc.delete_stream(&request_in_region(
+        "DeleteStream",
         "eu-west-1",
-        s3_channel_body_in_region("deliveries", "orders", "eu-west-1"),
+        json!({ "StreamName": "orders" }),
     ))
     .unwrap();
-
-    let filtered = json_response(
-        svc.list_channels(&request_in_region(
-            "ListChannels",
-            "eu-west-1",
-            json!({
-                "StreamFilter": [{
-                    "StreamARN": "arn:aws:kinesis:eu-west-1:123456789012:stream/orders",
-                }]
-            }),
-        ))
-        .unwrap(),
-    );
-    let summaries = filtered["ChannelSummaries"].as_array().unwrap();
-    assert_eq!(summaries.len(), 1, "{filtered}");
-    assert_eq!(summaries[0]["ChannelName"], "deliveries");
-
-    // A filter naming a stream that does not exist still matches nothing.
-    let unmatched = json_response(
-        svc.list_channels(&request_in_region(
-            "ListChannels",
-            "eu-west-1",
-            json!({
-                "StreamFilter": [{
-                    "StreamARN": "arn:aws:kinesis:eu-west-1:123456789012:stream/ghost",
-                }]
-            }),
-        ))
-        .unwrap(),
-    );
-    assert!(unmatched["ChannelSummaries"].as_array().unwrap().is_empty());
+    assert_eq!(list_stream_names(&svc, "us-east-1"), vec!["orders"]);
+    assert_eq!(list_stream_names(&svc, "eu-west-1"), vec!["west-only"]);
 }
 
 #[test]
-fn delete_stream_guard_holds_for_a_cross_region_caller() {
+fn records_are_isolated_per_region() {
     let (svc, _) = make_service();
-    create_stream_action(&svc, "orders", 1);
-    svc.create_channel(&request_in_region(
-        "CreateChannel",
+    create_stream_in(&svc, "us-east-1", "orders");
+    create_stream_in(&svc, "eu-west-1", "orders");
+    svc.put_record(&request_in_region(
+        "PutRecord",
         "eu-west-1",
-        s3_channel_body_in_region("deliveries", "orders", "eu-west-1"),
+        json!({ "StreamName": "orders", "PartitionKey": "pk", "Data": "aGVsbG8=" }),
     ))
     .unwrap();
 
+    let read = |region: &str| -> usize {
+        let it = json_response(
+            svc.get_shard_iterator(&request_in_region(
+                "GetShardIterator",
+                region,
+                json!({
+                    "StreamName": "orders",
+                    "ShardId": "shardId-000000000000",
+                    "ShardIteratorType": "TRIM_HORIZON",
+                }),
+            ))
+            .unwrap(),
+        );
+        let records = json_response(
+            svc.get_records(&request_in_region(
+                "GetRecords",
+                region,
+                json!({ "ShardIterator": it["ShardIterator"] }),
+            ))
+            .unwrap(),
+        );
+        records["Records"].as_array().unwrap().len()
+    };
+    assert_eq!(read("eu-west-1"), 1);
+    assert_eq!(read("us-east-1"), 0);
+}
+
+#[test]
+fn stream_arn_of_another_region_is_not_found() {
+    let (svc, _) = make_service();
+    create_stream_action(&svc, "orders", 1);
+    // The us-east-1 stream's ARN, sent to eu-west-1 where no stream exists.
     assert_code_kinesis(
-        svc.delete_stream(&request_in_region(
-            "DeleteStream",
+        svc.describe_stream_summary(&request_in_region(
+            "DescribeStreamSummary",
             "eu-west-1",
-            json!({ "StreamARN": "arn:aws:kinesis:eu-west-1:123456789012:stream/orders" }),
+            json!({ "StreamARN": stream_arn_for("orders") }),
         )),
-        "ResourceInUseException",
+        "ResourceNotFoundException",
     );
+    // A same-named eu-west-1 stream does not answer for the us-east-1 ARN.
+    create_stream_in(&svc, "eu-west-1", "orders");
+    assert_code_kinesis(
+        svc.describe_stream_summary(&request_in_region(
+            "DescribeStreamSummary",
+            "eu-west-1",
+            json!({ "StreamARN": stream_arn_for("orders") }),
+        )),
+        "ResourceNotFoundException",
+    );
+}
+
+#[test]
+fn cross_service_delivery_targets_the_arns_region() {
+    use fakecloud_core::delivery::KinesisDelivery;
+    let (svc, state) = make_service();
+    create_stream_in(&svc, "us-east-1", "orders");
+    create_stream_in(&svc, "eu-west-1", "orders");
+    let delivery = crate::delivery::KinesisDeliveryImpl::new(state.clone());
+    delivery.put_record(
+        "arn:aws:kinesis:eu-west-1:123456789012:stream/orders",
+        "aGVsbG8=",
+        "pk",
+    );
+    let count = |region: &str| -> usize {
+        state
+            .read()
+            .regional("123456789012", region)
+            .unwrap()
+            .streams["orders"]
+            .shards
+            .iter()
+            .map(|s| s.records.len())
+            .sum()
+    };
+    assert_eq!(count("eu-west-1"), 1);
+    assert_eq!(count("us-east-1"), 0);
+
+    // A region with no state is not created by a delivery that misses.
+    delivery.put_record(
+        "arn:aws:kinesis:ap-south-1:123456789012:stream/orders",
+        "aGVsbG8=",
+        "pk",
+    );
+    assert!(state
+        .read()
+        .regional("123456789012", "ap-south-1")
+        .is_none());
 }
 
 #[test]
@@ -3454,8 +3535,8 @@ fn update_record_distribution_strategy_round_trips_and_validates() {
     let (svc, state) = make_service();
     create_on_demand_stream(&svc, "od", None);
     create_stream_action(&svc, "prov", 1);
-    let od_arn = state.read().default_ref().stream_arn("us-east-1", "od");
-    let prov_arn = state.read().default_ref().stream_arn("us-east-1", "prov");
+    let od_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "od");
+    let prov_arn = state.read().default_regional().unwrap().stream_arn("us-east-1", "prov");
 
     svc.update_stream_record_distribution_strategy(&request(
         "UpdateStreamRecordDistributionStrategy",

@@ -139,8 +139,8 @@ impl KinesisLambdaPoller {
         // then collect a batch from each shard up to batch_size.
         let deliveries = {
             let mut kinesis_accounts = self.kinesis_state.write();
-            let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
-            let kinesis = match kinesis_accounts.get_mut(account_id) {
+            // The stream lives in the account and region its ARN names.
+            let kinesis = match kinesis_accounts.by_arn_mut(&mapping.stream_arn) {
                 Some(k) => k,
                 None => return,
             };
@@ -248,10 +248,7 @@ impl KinesisLambdaPoller {
             // checkpoint past them — AWS treats filtered-out records
             // as consumed and never retries them.
             if matched.is_empty() {
-                {
-                    let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
-                    let mut kinesis_accounts = self.kinesis_state.write();
-                    let kinesis = kinesis_accounts.get_or_create(account_id);
+                if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&mapping.stream_arn) {
                     kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, end);
                 }
                 self.persist().await;
@@ -311,10 +308,7 @@ impl KinesisLambdaPoller {
                 continue;
             };
 
-            {
-                let account_id = mapping.stream_arn.split(':').nth(4).unwrap_or("");
-                let mut kinesis_accounts = self.kinesis_state.write();
-                let kinesis = kinesis_accounts.get_or_create(account_id);
+            if let Some(kinesis) = self.kinesis_state.write().by_arn_mut(&mapping.stream_arn) {
                 kinesis.set_lambda_checkpoint(&mapping.uuid, &shard_id, new_checkpoint);
             }
             // Persist the advanced checkpoint so a restart resumes past the
@@ -567,6 +561,101 @@ mod tests {
         assert_eq!(ev["invokeIdentityArn"], role.as_str());
         let ev = kinesis_event_record(&record, "shardId-000000000000", &stream_arn, None);
         assert!(ev.get("invokeIdentityArn").is_none());
+    }
+
+    struct RecordingDelivery(parking_lot::Mutex<Vec<String>>);
+
+    impl LambdaDelivery for RecordingDelivery {
+        fn invoke_lambda(
+            &self,
+            _function_arn: &str,
+            payload: &str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<u8>, String>> + Send>>
+        {
+            self.0.lock().push(payload.to_string());
+            Box::pin(async { Ok(b"{}".to_vec()) })
+        }
+    }
+
+    /// The poller reads the stream in the region its ARN names, not a
+    /// same-named stream of another region, and checkpoints there.
+    #[tokio::test]
+    async fn poller_reads_the_stream_in_its_arn_region() {
+        use fakecloud_core::delivery::KinesisDelivery;
+        use fakecloud_core::multi_account::MultiAccountState;
+        use parking_lot::RwLock;
+
+        let account = "123456789012";
+        let kinesis: fakecloud_kinesis::SharedKinesisState = Arc::new(RwLock::new(
+            MultiAccountState::new(account, "us-east-1", "http://localhost:4566"),
+        ));
+        for region in ["us-east-1", "eu-west-1"] {
+            let mut mas = kinesis.write();
+            let st = mas.regional_mut(account, region);
+            let arn = st.stream_arn(region, "orders");
+            st.streams.insert(
+                "orders".to_string(),
+                fakecloud_kinesis::KinesisStream {
+                    stream_name: "orders".to_string(),
+                    stream_arn: arn,
+                    stream_status: "ACTIVE".to_string(),
+                    stream_creation_timestamp: Utc::now(),
+                    retention_period_hours: 24,
+                    stream_mode: "PROVISIONED".to_string(),
+                    encryption_type: "NONE".to_string(),
+                    key_id: None,
+                    shard_count: 1,
+                    open_shard_count: 1,
+                    tags: Default::default(),
+                    shards: fakecloud_kinesis::build_stream_shards(1),
+                    next_shard_index: 1,
+                    enhanced_metrics: Vec::new(),
+                    warm_throughput_mibps: None,
+                    max_record_size_kib: None,
+                    record_distribution_strategy:
+                        fakecloud_kinesis::default_record_distribution_strategy(),
+                    auto_distribution_cursor: 0,
+                },
+            );
+        }
+        let west_arn = format!("arn:aws:kinesis:eu-west-1:{account}:stream/orders");
+        fakecloud_kinesis::delivery::KinesisDeliveryImpl::new(kinesis.clone()).put_record(
+            &west_arn,
+            "aGVsbG8=",
+            "pk",
+        );
+
+        let delivery = Arc::new(RecordingDelivery(parking_lot::Mutex::new(Vec::new())));
+        let poller = KinesisLambdaPoller::new(
+            kinesis.clone(),
+            Arc::new(RwLock::new(MultiAccountState::new(
+                account,
+                "us-east-1",
+                "http://localhost:4566",
+            ))),
+        )
+        .with_lambda_delivery(delivery.clone());
+        let mapping = Mapping {
+            uuid: "esm-west".to_string(),
+            function_arn: format!("arn:aws:lambda:eu-west-1:{account}:function:f"),
+            stream_arn: west_arn,
+            batch_size: 10,
+            filter: FilterSet::from_strings(std::iter::empty::<&String>()),
+            starting_position: Some("TRIM_HORIZON".to_string()),
+            starting_position_timestamp: None,
+            report_batch_item_failures: false,
+            invoke_identity_arn: None,
+        };
+        poller.process_mapping(&mapping).await;
+
+        let payloads = delivery.0.lock().clone();
+        assert_eq!(payloads.len(), 1, "one batch from the eu-west-1 stream");
+        assert!(payloads[0].contains("eu-west-1"));
+        let mas = kinesis.read();
+        let west = mas.regional(account, "eu-west-1").unwrap();
+        assert_eq!(west.lambda_checkpoint("esm-west", "shardId-000000000000"), 1);
+        let east = mas.regional(account, "us-east-1").unwrap();
+        assert!(east.lambda_checkpoints.is_empty());
     }
 
     #[test]

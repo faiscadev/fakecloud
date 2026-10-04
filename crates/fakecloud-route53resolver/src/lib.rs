@@ -29,3 +29,4 @@ pub use state::{
     Route53ResolverAccounts, Route53ResolverSnapshot, SharedRoute53ResolverState, Tag,
     TargetAddress, R53R_SNAPSHOT_SCHEMA_VERSION,
 };
+pub use state::parse_route53resolver_snapshot;

@@ -31,7 +31,7 @@ impl ResourceProvisioner {
         attribute: &str,
     ) -> Option<String> {
         let st = self.route53resolver_state.read();
-        let acc = st.accounts.get(&self.account_id)?;
+        let acc = st.region(&self.account_id, &self.region)?;
         let pid = resource.physical_id.as_str();
         match resource.resource_type.as_str() {
             "AWS::Route53Resolver::ResolverEndpoint" => {
@@ -296,7 +296,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             acc.endpoints.insert(
                 id.clone(),
                 EndpointRecord {
@@ -334,7 +334,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         let (arn, ip_count, direction, host_vpc) = {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             let rec = acc
                 .endpoints
                 .get_mut(&id)
@@ -396,7 +396,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_r53r_resolver_endpoint(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.endpoints.remove(physical_id);
         }
         Ok(())
@@ -468,7 +468,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             acc.rules.insert(id.clone(), rule);
             if !tags.is_empty() {
                 acc.tags.insert(arn.clone(), tags);
@@ -526,7 +526,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         let (arn, domain_name) = {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             let rule = acc
                 .rules
                 .get_mut(&id)
@@ -559,7 +559,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_r53r_resolver_rule(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.rules.remove(physical_id);
         }
         Ok(())
@@ -594,7 +594,7 @@ impl ResourceProvisioner {
         };
         self.route53resolver_state
             .write()
-            .account_mut(&self.account_id)
+            .region_mut(&self.account_id, &self.region)
             .rule_associations
             .insert(id.clone(), assoc);
         Ok(ProvisionResult::new(id.clone())
@@ -604,7 +604,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_r53r_rule_association(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.rule_associations.remove(physical_id);
         }
         Ok(())
@@ -649,7 +649,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             acc.query_log_configs.insert(id.clone(), cfg);
             if !tags.is_empty() {
                 acc.tags.insert(arn.clone(), tags);
@@ -671,8 +671,7 @@ impl ResourceProvisioner {
         let id = existing.physical_id.clone();
         let arn = {
             let st = self.route53resolver_state.read();
-            st.accounts
-                .get(&self.account_id)
+            st.region(&self.account_id, &self.region)
                 .and_then(|a| a.query_log_configs.get(&id))
                 .map(|c| c.arn.clone())
                 .ok_or_else(|| format!("Query log config {id} not yet provisioned"))?
@@ -684,7 +683,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_r53r_query_log_config(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.query_log_configs.remove(physical_id);
         }
         Ok(())
@@ -719,7 +718,7 @@ impl ResourceProvisioner {
         };
         {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             acc.query_log_associations.insert(id.clone(), assoc);
             if let Some(cfg) = acc.query_log_configs.get_mut(&cfg_id) {
                 cfg.association_count += 1;
@@ -733,7 +732,7 @@ impl ResourceProvisioner {
         physical_id: &str,
     ) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.query_log_associations.remove(physical_id);
         }
         Ok(())
@@ -776,7 +775,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             acc.firewall_domain_lists.insert(id.clone(), list);
             acc.firewall_domains.insert(id.clone(), domains);
             if !tags.is_empty() {
@@ -811,7 +810,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
 
         let mut st = self.route53resolver_state.write();
-        let acc = st.account_mut(&self.account_id);
+        let acc = st.region_mut(&self.account_id, &self.region);
         let arn = {
             let list = acc
                 .firewall_domain_lists
@@ -838,7 +837,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_r53r_firewall_domain_list(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.firewall_domain_lists.remove(physical_id);
             acc.firewall_domains.remove(physical_id);
         }
@@ -931,7 +930,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             acc.firewall_rule_groups.insert(id.clone(), group);
             acc.firewall_rules.insert(id.clone(), rules);
             if !tags.is_empty() {
@@ -1014,7 +1013,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
 
         let mut st = self.route53resolver_state.write();
-        let acc = st.account_mut(&self.account_id);
+        let acc = st.region_mut(&self.account_id, &self.region);
         let arn = {
             let group = acc
                 .firewall_rule_groups
@@ -1042,7 +1041,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_r53r_firewall_rule_group(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.firewall_rule_groups.remove(physical_id);
             acc.firewall_rules.remove(physical_id);
         }
@@ -1101,7 +1100,7 @@ impl ResourceProvisioner {
         let tags = self.r53r_tags(props);
         {
             let mut st = self.route53resolver_state.write();
-            let acc = st.account_mut(&self.account_id);
+            let acc = st.region_mut(&self.account_id, &self.region);
             acc.firewall_rule_group_associations
                 .insert(id.clone(), assoc);
             if !tags.is_empty() {
@@ -1118,7 +1117,7 @@ impl ResourceProvisioner {
         physical_id: &str,
     ) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.firewall_rule_group_associations.remove(physical_id);
         }
         Ok(())
@@ -1149,7 +1148,7 @@ impl ResourceProvisioner {
         };
         self.route53resolver_state
             .write()
-            .account_mut(&self.account_id)
+            .region_mut(&self.account_id, &self.region)
             .firewall_configs
             .insert(resource_id.clone(), cfg);
         Ok(ProvisionResult::new(id.clone())
@@ -1163,7 +1162,7 @@ impl ResourceProvisioner {
         // physical id is the config's own `rslvr-fc-*` id; drop the singleton
         // whose id matches so a stack teardown does not leave it behind.
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             let key = acc
                 .firewall_configs
                 .iter()
@@ -1206,7 +1205,7 @@ impl ResourceProvisioner {
         };
         self.route53resolver_state
             .write()
-            .account_mut(&self.account_id)
+            .region_mut(&self.account_id, &self.region)
             .resolver_configs
             .insert(resource_id.clone(), cfg);
         Ok(ProvisionResult::new(id.clone())
@@ -1219,7 +1218,7 @@ impl ResourceProvisioner {
         // Keyed by VPC (resource) id; the physical id is the `rslvr-rc-*` config
         // id. Remove the singleton whose id matches on stack teardown.
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             let key = acc
                 .resolver_configs
                 .iter()
@@ -1253,7 +1252,7 @@ impl ResourceProvisioner {
         };
         self.route53resolver_state
             .write()
-            .account_mut(&self.account_id)
+            .region_mut(&self.account_id, &self.region)
             .dnssec_configs
             .insert(id.clone(), cfg);
         Ok(ProvisionResult::new(id.clone())
@@ -1264,7 +1263,7 @@ impl ResourceProvisioner {
 
     pub(super) fn delete_r53r_dnssec_config(&self, physical_id: &str) -> Result<(), String> {
         let mut st = self.route53resolver_state.write();
-        if let Some(acc) = st.accounts.get_mut(&self.account_id) {
+        if let Some(acc) = st.region_get_mut(&self.account_id, &self.region) {
             acc.dnssec_configs.remove(physical_id);
         }
         Ok(())

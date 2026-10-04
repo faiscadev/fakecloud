@@ -217,6 +217,25 @@ struct Ctx {
     region: String,
 }
 
+/// The request region's state for reading. A region nothing has written to
+/// yet still shows what X-Ray provides in every region (the built-in
+/// `Default` sampling rule), without creating any state.
+fn region_view<'a>(
+    guard: &'a fakecloud_core::multi_account::MultiRegionState<XrayData>,
+    ctx: &Ctx,
+) -> std::borrow::Cow<'a, XrayData> {
+    match guard.regional(&ctx.account, &ctx.region) {
+        Some(data) => std::borrow::Cow::Borrowed(data),
+        None => std::borrow::Cow::Owned(
+            <XrayData as fakecloud_core::multi_account::AccountState>::new_for_account(
+                &ctx.account,
+                &ctx.region,
+                "",
+            ),
+        ),
+    }
+}
+
 impl XrayService {
     fn dispatch(&self, action: &str, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let body = parse_body(req)?;
@@ -225,13 +244,6 @@ impl XrayService {
             account: req.account_id.clone(),
             region: req.region.clone(),
         };
-        // Account state is shared across regions; re-point the built-in
-        // `Default` sampling rule's ARN at the region this request names
-        // before any handler reads it (bug-hunt 2026-08-22 §0.5).
-        self.state
-            .write()
-            .get_or_create(&ctx.account)
-            .ensure_default_rule(&ctx.region, &ctx.account);
         match action {
             "PutTraceSegments" => self.put_trace_segments(&ctx, &body),
             "BatchGetTraces" => self.batch_get_traces(&ctx, &body),
@@ -285,7 +297,7 @@ impl XrayService {
             .unwrap_or_default();
         let mut unprocessed: Vec<Value> = Vec::new();
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         for doc in &docs {
             let Some(s) = doc.as_str() else {
                 unprocessed.push(json!({
@@ -319,7 +331,7 @@ impl XrayService {
     fn batch_get_traces(&self, ctx: &Ctx, body: &Value) -> Result<AwsResponse, AwsServiceError> {
         let ids = string_list(body, "TraceIds");
         let guard = self.state.read();
-        let data = guard.get(&ctx.account);
+        let data = guard.regional(&ctx.account, &ctx.region);
         let mut traces: Vec<Value> = Vec::new();
         let mut unprocessed: Vec<Value> = Vec::new();
         for id in &ids {
@@ -341,7 +353,7 @@ impl XrayService {
             .and_then(Value::as_str)
             .unwrap_or("");
         let guard = self.state.read();
-        let data = guard.get(&ctx.account);
+        let data = guard.regional(&ctx.account, &ctx.region);
         let mut summaries: Vec<Value> = Vec::new();
         let mut processed: i64 = 0;
         if let Some(data) = data {
@@ -368,7 +380,7 @@ impl XrayService {
     fn get_service_graph(&self, ctx: &Ctx, body: &Value) -> Result<AwsResponse, AwsServiceError> {
         let (start, end) = time_range(body);
         let guard = self.state.read();
-        let services = match guard.get(&ctx.account) {
+        let services = match guard.regional(&ctx.account, &ctx.region) {
             Some(data) => {
                 let segs = segments_in_range(data, start, end);
                 build_service_graph(&segs)
@@ -386,7 +398,7 @@ impl XrayService {
     fn get_trace_graph(&self, ctx: &Ctx, body: &Value) -> Result<AwsResponse, AwsServiceError> {
         let ids: BTreeSet<String> = string_list(body, "TraceIds").into_iter().collect();
         let guard = self.state.read();
-        let services = match guard.get(&ctx.account) {
+        let services = match guard.regional(&ctx.account, &ctx.region) {
             Some(data) => {
                 let segs: Vec<&StoredSegment> = data
                     .traces
@@ -415,7 +427,7 @@ impl XrayService {
             .unwrap_or(60) as f64;
         let guard = self.state.read();
         let mut out: Vec<Value> = Vec::new();
-        if let Some(data) = guard.get(&ctx.account) {
+        if let Some(data) = guard.regional(&ctx.account, &ctx.region) {
             let span = end - start;
             if span > 0.0 && period > 0.0 {
                 if span / period > MAX_BUCKETS as f64 {
@@ -458,7 +470,7 @@ impl XrayService {
             .unwrap_or_default()
             .to_string();
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         if data.groups.contains_key(&name) {
             return Err(invalid(&format!("Group {name} already exists.")));
         }
@@ -481,7 +493,7 @@ impl XrayService {
 
     fn get_group(&self, ctx: &Ctx, body: &Value) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
-        let data = guard.get(&ctx.account);
+        let data = guard.regional(&ctx.account, &ctx.region);
         let group = data
             .and_then(|d| find_group(d, body))
             .ok_or_else(|| invalid("Group not found."))?;
@@ -491,7 +503,7 @@ impl XrayService {
     fn get_groups(&self, ctx: &Ctx) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
         let groups: Vec<Value> = guard
-            .get(&ctx.account)
+            .regional(&ctx.account, &ctx.region)
             .map(|d| d.groups.values().cloned().collect())
             .unwrap_or_default();
         Ok(ok(json!({ "Groups": groups })))
@@ -499,7 +511,7 @@ impl XrayService {
 
     fn update_group(&self, ctx: &Ctx, body: &Value) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         let Some(name) = group_key(data, body) else {
             return Err(invalid("Group not found."));
         };
@@ -523,7 +535,7 @@ impl XrayService {
 
     fn delete_group(&self, ctx: &Ctx, body: &Value) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         let Some(name) = group_key(data, body) else {
             return Err(invalid("Group not found."));
         };
@@ -550,7 +562,7 @@ impl XrayService {
             .map(std::string::ToString::to_string)
             .unwrap_or_else(|| format!("rule-{}", short_id()));
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         if data.sampling_rules.contains_key(&name) {
             return Err(invalid(&format!("Sampling rule {name} already exists.")));
         }
@@ -574,10 +586,11 @@ impl XrayService {
 
     fn get_sampling_rules(&self, ctx: &Ctx) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
-        let records: Vec<Value> = guard
-            .get(&ctx.account)
-            .map(|d| d.sampling_rules.values().cloned().collect())
-            .unwrap_or_default();
+        let records: Vec<Value> = region_view(&guard, ctx)
+            .sampling_rules
+            .values()
+            .cloned()
+            .collect();
         Ok(ok(json!({ "SamplingRuleRecords": records })))
     }
 
@@ -588,7 +601,7 @@ impl XrayService {
     ) -> Result<AwsResponse, AwsServiceError> {
         let update = body.get("SamplingRuleUpdate").cloned().unwrap_or(json!({}));
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         let Some(name) = sampling_rule_key(data, &update) else {
             return Err(invalid("Sampling rule not found."));
         };
@@ -629,7 +642,7 @@ impl XrayService {
         body: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         let Some(name) = sampling_rule_key(data, body) else {
             return Err(invalid("Sampling rule not found."));
         };
@@ -661,7 +674,7 @@ impl XrayService {
             .cloned()
             .unwrap_or_default();
         let guard = self.state.read();
-        let data = guard.get(&ctx.account);
+        let data = guard.regional(&ctx.account, &ctx.region);
         let mut targets: Vec<Value> = Vec::new();
         for doc in &docs {
             let rule_name = doc
@@ -698,7 +711,7 @@ impl XrayService {
     fn get_encryption_config(&self, ctx: &Ctx) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
         let cfg = guard
-            .get(&ctx.account)
+            .regional(&ctx.account, &ctx.region)
             .and_then(|d| d.encryption_config.clone())
             .unwrap_or_else(default_encryption_config);
         Ok(ok(json!({ "EncryptionConfig": cfg })))
@@ -722,7 +735,7 @@ impl XrayService {
         }
         let cfg = Value::Object(cfg);
         let mut guard = self.state.write();
-        guard.get_or_create(&ctx.account).encryption_config = Some(cfg.clone());
+        guard.regional_mut(&ctx.account, &ctx.region).encryption_config = Some(cfg.clone());
         Ok(ok(json!({ "EncryptionConfig": cfg })))
     }
 
@@ -740,7 +753,7 @@ impl XrayService {
             .unwrap_or_default()
             .to_string();
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         let policy = json!({
             "PolicyName": name,
             "PolicyDocument": doc,
@@ -762,7 +775,7 @@ impl XrayService {
             .unwrap_or_default();
         let mut guard = self.state.write();
         guard
-            .get_or_create(&ctx.account)
+            .regional_mut(&ctx.account, &ctx.region)
             .resource_policies
             .remove(name);
         Ok(ok(json!({})))
@@ -771,7 +784,7 @@ impl XrayService {
     fn list_resource_policies(&self, ctx: &Ctx) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
         let policies: Vec<Value> = guard
-            .get(&ctx.account)
+            .regional(&ctx.account, &ctx.region)
             .map(|d| d.resource_policies.values().cloned().collect())
             .unwrap_or_default();
         Ok(ok(json!({ "ResourcePolicies": policies })))
@@ -786,7 +799,7 @@ impl XrayService {
             .unwrap_or_default()
             .to_string();
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         if !resource_exists(data, &arn) {
             return Err(not_found(&format!("Resource {arn} not found.")));
         }
@@ -818,7 +831,7 @@ impl XrayService {
             .unwrap_or_default()
             .to_string();
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         if !resource_exists(data, &arn) {
             return Err(not_found(&format!("Resource {arn} not found.")));
         }
@@ -841,9 +854,8 @@ impl XrayService {
             .unwrap_or_default()
             .to_string();
         let guard = self.state.read();
-        let data = guard
-            .get(&ctx.account)
-            .ok_or_else(|| not_found(&format!("Resource {arn} not found.")))?;
+        let data = region_view(&guard, ctx);
+        let data = &*data;
         if !resource_exists(data, &arn) {
             return Err(not_found(&format!("Resource {arn} not found.")));
         }
@@ -863,10 +875,11 @@ impl XrayService {
 
     fn get_indexing_rules(&self, ctx: &Ctx) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
-        let rules: Vec<Value> = guard
-            .get(&ctx.account)
-            .map(|d| d.indexing_rules.values().cloned().collect())
-            .unwrap_or_default();
+        let rules: Vec<Value> = region_view(&guard, ctx)
+            .indexing_rules
+            .values()
+            .cloned()
+            .collect();
         Ok(ok(json!({ "IndexingRules": rules })))
     }
 
@@ -887,7 +900,7 @@ impl XrayService {
             .get("DesiredSamplingPercentage")
             .and_then(Value::as_f64);
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         let Some(rule) = data.indexing_rules.get_mut(name) else {
             return Err(not_found(&format!("Indexing rule {name} not found.")));
         };
@@ -906,7 +919,7 @@ impl XrayService {
     fn get_trace_segment_destination(&self, ctx: &Ctx) -> Result<AwsResponse, AwsServiceError> {
         let guard = self.state.read();
         let dest = guard
-            .get(&ctx.account)
+            .regional(&ctx.account, &ctx.region)
             .map(|d| d.trace_segment_destination.clone())
             .unwrap_or_else(|| "XRay".to_string());
         Ok(ok(json!({ "Destination": dest, "Status": "ACTIVE" })))
@@ -923,7 +936,7 @@ impl XrayService {
             .unwrap_or("XRay")
             .to_string();
         let mut guard = self.state.write();
-        guard.get_or_create(&ctx.account).trace_segment_destination = dest.clone();
+        guard.regional_mut(&ctx.account, &ctx.region).trace_segment_destination = dest.clone();
         Ok(ok(json!({ "Destination": dest, "Status": "ACTIVE" })))
     }
 
@@ -942,7 +955,7 @@ impl XrayService {
         });
         let mut guard = self.state.write();
         guard
-            .get_or_create(&ctx.account)
+            .regional_mut(&ctx.account, &ctx.region)
             .retrievals
             .insert(token.clone(), record);
         Ok(ok(json!({ "RetrievalToken": token })))
@@ -963,7 +976,7 @@ impl XrayService {
             .unwrap_or("XRAY");
         let guard = self.state.read();
         let exists = guard
-            .get(&ctx.account)
+            .regional(&ctx.account, &ctx.region)
             .map(|d| d.retrievals.contains_key(token))
             .unwrap_or(false);
         if !exists {
@@ -987,7 +1000,7 @@ impl XrayService {
             .unwrap_or_default();
         let guard = self.state.read();
         let data = guard
-            .get(&ctx.account)
+            .regional(&ctx.account, &ctx.region)
             .ok_or_else(|| not_found("Trace retrieval not found for the given token."))?;
         let record = data
             .retrievals
@@ -1026,7 +1039,7 @@ impl XrayService {
             .unwrap_or_default()
             .to_string();
         let mut guard = self.state.write();
-        let data = guard.get_or_create(&ctx.account);
+        let data = guard.regional_mut(&ctx.account, &ctx.region);
         if data.retrievals.remove(&token).is_none() {
             return Err(not_found("Trace retrieval not found for the given token."));
         }
@@ -1671,6 +1684,76 @@ mod tests {
         assert_eq!(err.status(), StatusCode::NOT_FOUND);
         let err = err_of(s.update_indexing_rule(&ctx(), &json!({ "Name": "Default", "Rule": {} })));
         assert_eq!(err.status(), StatusCode::BAD_REQUEST);
+    }
+
+    fn ctx_in(region: &str) -> Ctx {
+        Ctx {
+            account: "000000000000".into(),
+            region: region.into(),
+        }
+    }
+
+    #[test]
+    fn resources_are_scoped_to_the_request_region() {
+        let s = svc();
+        let west = ctx_in("eu-west-1");
+        // Same group and rule names coexist in two regions.
+        for c in [ctx(), ctx_in("eu-west-1")] {
+            s.create_group(&c, &json!({ "GroupName": "g", "FilterExpression": "fault" }))
+                .unwrap();
+            let rule = json!({ "SamplingRule": {
+                "RuleName": "r1", "ResourceARN": "*", "Priority": 5, "FixedRate": 0.1,
+                "ReservoirSize": 2, "ServiceName": "*", "ServiceType": "*", "Host": "*",
+                "HTTPMethod": "*", "URLPath": "*", "Version": 1
+            }});
+            s.create_sampling_rule(&c, &rule).unwrap();
+        }
+        let groups = body_json(&s.get_groups(&west).unwrap());
+        assert_eq!(groups["Groups"].as_array().unwrap().len(), 1);
+        assert!(groups["Groups"][0]["GroupARN"]
+            .as_str()
+            .unwrap()
+            .starts_with("arn:aws:xray:eu-west-1:"));
+        s.delete_group(&west, &json!({ "GroupName": "g" })).unwrap();
+        let east = body_json(&s.get_groups(&ctx()).unwrap());
+        assert_eq!(east["Groups"].as_array().unwrap().len(), 1);
+
+        // Encryption config is per region.
+        s.put_encryption_config(&west, &json!({ "Type": "KMS", "KeyId": "alias/xray" }))
+            .unwrap();
+        let east_cfg = body_json(&s.get_encryption_config(&ctx()).unwrap());
+        assert_eq!(east_cfg["EncryptionConfig"]["Type"], json!("NONE"));
+
+        // Traces ingested in one region are not visible from another.
+        ingest(
+            &s,
+            &[r#"{"trace_id":"1-aaaa","id":"1111","name":"web","start_time":1.0,"end_time":2.0}"#],
+        );
+        let west_traces = body_json(
+            &s.batch_get_traces(&west, &json!({ "TraceIds": ["1-aaaa"] }))
+                .unwrap(),
+        );
+        assert!(west_traces["Traces"].as_array().unwrap().is_empty());
+
+        // Another region's group ARN is not found here.
+        let east_group = east["Groups"][0]["GroupARN"].as_str().unwrap().to_string();
+        let err = err_of(s.list_tags_for_resource(&west, &json!({ "ResourceARN": east_group })));
+        assert_eq!(err.code(), "ResourceNotFoundException");
+    }
+
+    #[test]
+    fn untouched_region_shows_default_rule_without_creating_state() {
+        let s = svc();
+        let body = body_json(&s.get_sampling_rules(&ctx_in("ap-south-1")).unwrap());
+        assert_eq!(
+            body["SamplingRuleRecords"][0]["SamplingRule"]["RuleARN"],
+            "arn:aws:xray:ap-south-1:000000000000:sampling-rule/Default"
+        );
+        assert!(s
+            .state
+            .read()
+            .regional("000000000000", "ap-south-1")
+            .is_none());
     }
 
     #[test]

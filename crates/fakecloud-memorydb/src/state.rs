@@ -1,11 +1,13 @@
-//! Account-partitioned, serializable state for AWS MemoryDB.
+//! Account- and region-partitioned, serializable state for AWS MemoryDB.
 //!
 //! MemoryDB is a Redis/Valkey-compatible in-memory database. This models the
 //! full control plane — clusters (with shards/nodes), ACLs, users, parameter
 //! groups, subnet groups, and snapshots — as typed, serializable state keyed
-//! by name within each account. Cluster data-plane backing (a real Redis
+//! by name within each (account, region). Multi-region clusters span regions
+//! and are kept once per account. Cluster data-plane backing (a real Redis
 //! container) is layered on top of this control plane, mirroring ElastiCache.
 
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -13,10 +15,12 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use fakecloud_aws::arn::{partition_for, Arn};
-use fakecloud_core::multi_account::{AccountState, MultiAccountState};
+use fakecloud_aws::arn::Arn;
+use fakecloud_core::multi_account::{AccountState, MultiAccountState, RegionalState};
 
-pub const MEMORYDB_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+/// v2: per-account state split by region, multi-region clusters kept
+/// account-wide. v1 kept one state per account for every region.
+pub const MEMORYDB_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 /// Tags on a resource, stored by ARN so `ListTags`/`TagResource` work
 /// uniformly across every MemoryDB resource type.
@@ -172,6 +176,9 @@ pub struct ReservedNode {
     pub arn: String,
 }
 
+/// One account's MemoryDB resources in one region. Every region carries its
+/// own AWS-provided defaults (`default` user, `open-access` ACL,
+/// `default.memorydb-*` parameter groups) with that region's ARNs.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MemoryDbState {
     pub clusters: BTreeMap<String, Cluster>,
@@ -180,48 +187,53 @@ pub struct MemoryDbState {
     pub parameter_groups: BTreeMap<String, ParameterGroup>,
     pub subnet_groups: BTreeMap<String, SubnetGroup>,
     pub snapshots: BTreeMap<String, Snapshot>,
-    pub multi_region_clusters: BTreeMap<String, MultiRegionCluster>,
     pub reserved_nodes: BTreeMap<String, ReservedNode>,
     /// Tags keyed by resource ARN.
     pub tags: BTreeMap<String, TagMap>,
 }
 
-impl MemoryDbState {
-    /// Re-point the ARNs of the AWS-provided defaults (`default` user,
-    /// `open-access` ACL, `default.memorydb-*` parameter groups) at the region
-    /// the caller is asking about.
-    ///
-    /// Account state is shared across regions, so defaults seeded when the
-    /// account was first touched from `us-east-1` would otherwise keep
-    /// answering `DescribeUsers`/`DescribeACLs`/`DescribeParameterGroups` in
-    /// `eu-west-1` with `us-east-1` ARNs, which the Terraform provider reads
-    /// back as drift. These resources exist in every region, so re-point them
-    /// rather than freezing whichever region created the account.
-    pub fn retarget_default_arns(&mut self, region: &str, account_id: &str) {
-        let partition = partition_for(region);
-        // `arn:<partition>:memorydb:<region>:` -- matched field by field so the
-        // common case (already in this region) neither allocates nor rewrites.
-        let targets_region = |arn: &str| {
-            let mut fields = arn.splitn(5, ':');
-            fields.next() == Some("arn")
-                && fields.next() == Some(partition)
-                && fields.next() == Some("memorydb")
-                && fields.next() == Some(region)
-        };
-        if let Some(user) = self.users.get_mut("default") {
-            if !targets_region(&user.arn) {
-                user.arn = memorydb_arn("user", region, account_id, "default");
-            }
+/// One account's MemoryDB state: the regional resources split per region,
+/// plus the multi-region clusters. A multi-region cluster spans regions, so
+/// it is account-wide (visible from every region) rather than regional.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MemoryDbAccount {
+    pub regions: RegionalState<MemoryDbState>,
+    pub multi_region_clusters: BTreeMap<String, MultiRegionCluster>,
+    /// Tags on multi-region clusters, keyed by ARN.
+    pub multi_region_cluster_tags: BTreeMap<String, TagMap>,
+}
+
+impl AccountState for MemoryDbAccount {
+    fn new_for_account(account_id: &str, region: &str, endpoint: &str) -> Self {
+        Self {
+            regions: RegionalState::new(account_id, region, endpoint),
+            multi_region_clusters: BTreeMap::new(),
+            multi_region_cluster_tags: BTreeMap::new(),
         }
-        if let Some(acl) = self.acls.get_mut("open-access") {
-            if !targets_region(&acl.arn) {
-                acl.arn = memorydb_arn("acl", region, account_id, "open-access");
-            }
-        }
-        for (name, pg) in self.parameter_groups.iter_mut() {
-            if name.starts_with("default.") && !targets_region(&pg.arn) {
-                pg.arn = memorydb_arn("parametergroup", region, account_id, name);
-            }
+    }
+}
+
+/// Region-addressed access to the MemoryDB account container.
+pub trait MemoryDbAccountsExt {
+    /// The account's state in `region`, created (with that region's
+    /// AWS-provided defaults) on first use.
+    fn region_state_mut(&mut self, account_id: &str, region: &str) -> &mut MemoryDbState;
+
+    /// The account's state in `region` for reading. A region nothing has
+    /// written to yet still shows the AWS-provided defaults, without
+    /// creating any state.
+    fn region_state(&self, account_id: &str, region: &str) -> Cow<'_, MemoryDbState>;
+}
+
+impl MemoryDbAccountsExt for MultiAccountState<MemoryDbAccount> {
+    fn region_state_mut(&mut self, account_id: &str, region: &str) -> &mut MemoryDbState {
+        self.get_or_create(account_id).regions.region_mut(region)
+    }
+
+    fn region_state(&self, account_id: &str, region: &str) -> Cow<'_, MemoryDbState> {
+        match self.get(account_id).and_then(|a| a.regions.region(region)) {
+            Some(state) => Cow::Borrowed(state),
+            None => Cow::Owned(MemoryDbState::new_for_account(account_id, region, "")),
         }
     }
 }
@@ -285,10 +297,118 @@ impl AccountState for MemoryDbState {
     }
 }
 
-pub type SharedMemoryDbState = Arc<RwLock<MultiAccountState<MemoryDbState>>>;
+pub type SharedMemoryDbState = Arc<RwLock<MultiAccountState<MemoryDbAccount>>>;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryDbSnapshot {
     pub schema_version: u32,
-    pub accounts: MultiAccountState<MemoryDbState>,
+    pub accounts: MultiAccountState<MemoryDbAccount>,
+}
+
+/// The per-account state v1 snapshots stored: every region's resources (and
+/// the multi-region clusters) in one name-keyed state.
+#[derive(Debug, Deserialize)]
+pub(crate) struct LegacyMemoryDbState {
+    #[serde(flatten)]
+    regional: MemoryDbState,
+    #[serde(default)]
+    multi_region_clusters: BTreeMap<String, MultiRegionCluster>,
+}
+
+// Only so the legacy shape can sit in a `MultiAccountState` while it is
+// migrated; nothing creates a legacy account.
+impl AccountState for LegacyMemoryDbState {
+    fn new_for_account(account_id: &str, region: &str, endpoint: &str) -> Self {
+        Self {
+            regional: MemoryDbState::new_for_account(account_id, region, endpoint),
+            multi_region_clusters: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct LegacyMemoryDbSnapshot {
+    pub(crate) accounts: MultiAccountState<LegacyMemoryDbState>,
+}
+
+impl LegacyMemoryDbState {
+    /// Split a v1 account state into regions: every resource goes to the
+    /// region its ARN names (the server default region when it names none),
+    /// and its tags follow it. Multi-region clusters and their tags stay
+    /// account-wide.
+    pub(crate) fn into_account(
+        self,
+        account_id: &str,
+        default_region: &str,
+        endpoint: &str,
+    ) -> MemoryDbAccount {
+        use fakecloud_core::multi_account::arn_region_or;
+        let mut account = MemoryDbAccount::new_for_account(account_id, default_region, endpoint);
+        let MemoryDbState {
+            clusters,
+            acls,
+            users,
+            parameter_groups,
+            subnet_groups,
+            snapshots,
+            reserved_nodes,
+            mut tags,
+        } = self.regional;
+        for (name, mrc) in self.multi_region_clusters {
+            if let Some(t) = tags.remove(&mrc.arn) {
+                account.multi_region_cluster_tags.insert(mrc.arn.clone(), t);
+            }
+            account.multi_region_clusters.insert(name, mrc);
+        }
+        macro_rules! split {
+            ($map:expr, $field:ident) => {
+                for (name, item) in $map {
+                    let region = arn_region_or(&item.arn, default_region).to_string();
+                    account
+                        .regions
+                        .region_mut(&region)
+                        .$field
+                        .insert(name, item);
+                }
+            };
+        }
+        split!(clusters, clusters);
+        split!(acls, acls);
+        split!(users, users);
+        split!(parameter_groups, parameter_groups);
+        split!(subnet_groups, subnet_groups);
+        split!(snapshots, snapshots);
+        split!(reserved_nodes, reserved_nodes);
+        for (arn, t) in tags {
+            let region = arn_region_or(&arn, default_region).to_string();
+            account.regions.region_mut(&region).tags.insert(arn, t);
+        }
+        account
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn each_region_seeds_its_own_defaults() {
+        let mut accounts: MultiAccountState<MemoryDbAccount> =
+            MultiAccountState::new("123456789012", "us-east-1", "");
+        let west = accounts.region_state_mut("123456789012", "eu-west-1");
+        assert_eq!(
+            west.users["default"].arn,
+            "arn:aws:memorydb:eu-west-1:123456789012:user/default"
+        );
+        let east = accounts.region_state("123456789012", "us-east-1");
+        assert!(matches!(east, Cow::Owned(_)), "a read creates nothing");
+        assert_eq!(
+            east.acls["open-access"].arn,
+            "arn:aws:memorydb:us-east-1:123456789012:acl/open-access"
+        );
+        assert_eq!(
+            east.parameter_groups["default.memorydb-redis7"].arn,
+            "arn:aws:memorydb:us-east-1:123456789012:parametergroup/default.memorydb-redis7"
+        );
+    }
 }

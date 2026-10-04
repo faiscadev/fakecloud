@@ -10755,7 +10755,7 @@ mod tests {
         .expect("update succeeds")
         .expect("AWS::Kinesis::Stream is updatable");
         let kinesis = prov.kinesis_state.read();
-        let acct = kinesis.get("123456789012").unwrap();
+        let acct = kinesis.regional("123456789012", "us-east-1").unwrap();
         let stream = acct.streams.get("events").unwrap();
         assert_eq!(stream.retention_period_hours, 48);
         assert_eq!(stream.open_shard_count, 2);

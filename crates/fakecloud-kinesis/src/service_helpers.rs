@@ -132,7 +132,7 @@ pub(crate) fn resolve_stream_name(
 
     if let Some(stream_arn) = body["StreamARN"].as_str().filter(|value| !value.is_empty()) {
         if let Some(stream_name) = stream_arn.rsplit('/').next() {
-            if state.streams.contains_key(stream_name) {
+            if state.arn_in_region(stream_arn) && state.streams.contains_key(stream_name) {
                 return Ok(stream_name.to_string());
             }
             return Err(stream_not_found(&state.account_id, stream_name));
