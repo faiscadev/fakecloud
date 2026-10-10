@@ -360,6 +360,7 @@ fc.service_quotas.approve_request(pending[0].request_id)
 | `get_auth_events()` | List auth events |
 | `get_pre_token_gen_invocations()` | PreTokenGeneration Lambda trigger invocation log |
 | `mint_authorization_code(req)` | Mint an OAuth authorization code |
+| `set_software_token(req)`      | Give a user a verified authenticator-app (TOTP) secret chosen by the caller |
 | `set_compromised_passwords(req)` | Seed compromised-password records |
 | `get_webauthn_credentials()` | List stored WebAuthn credentials |
 

@@ -748,6 +748,20 @@ type MintAuthorizationCodeResponse struct {
 	Code string `json:"code"`
 }
 
+// SetSoftwareTokenRequest is the payload for the
+// /_fakecloud/cognito/software-token admin endpoint. SecretCode is base32,
+// like AssociateSoftwareToken's SecretCode.
+type SetSoftwareTokenRequest struct {
+	UserPoolID string `json:"userPoolId"`
+	Username   string `json:"username"`
+	SecretCode string `json:"secretCode"`
+}
+
+// SetSoftwareTokenResponse is returned after enrolling the secret.
+type SetSoftwareTokenResponse struct {
+	Enrolled bool `json:"enrolled"`
+}
+
 // CompromisedPasswordsRequest is the payload for the
 // /_fakecloud/cognito/compromised-passwords admin endpoint. Each
 // supplied plaintext password is SHA-256 hashed and added to the

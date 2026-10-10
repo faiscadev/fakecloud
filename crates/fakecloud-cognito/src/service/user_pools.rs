@@ -11,13 +11,173 @@ use crate::state::{
 
 use super::{
     ensure_user_pool_exists, generate_client_id, generate_client_secret, generate_pool_id,
-    parse_account_recovery_setting, parse_admin_create_user_config, parse_email_configuration,
-    parse_password_policy, parse_refresh_token_rotation, parse_schema_attribute,
-    parse_sign_in_policy, parse_sms_configuration, parse_string_array, parse_tags,
-    parse_token_validity_units, parse_verification_message_template, require_str,
+    invalid_parameter, parse_account_recovery_setting, parse_admin_create_user_config,
+    parse_email_configuration, parse_password_policy, parse_refresh_token_rotation,
+    parse_schema_attribute, parse_sign_in_policy, parse_sms_configuration, parse_string_array,
+    parse_tags, parse_token_validity_units, parse_verification_message_template, require_str,
     resolve_token_validity, user_pool_client_to_json, user_pool_to_json, validate_enum,
     validate_range, validate_string_length, CognitoService,
 };
+
+/// Reserved `UserPoolTags` key (and `ClientName` prefix, as
+/// `_custom_id_:<id>`) that picks the id of a new user pool or app client
+/// instead of a random one, the same convention LocalStack uses.
+pub const CUSTOM_ID_TAG: &str = "_custom_id_";
+
+type CognitoAccounts = fakecloud_core::multi_account::MultiAccountState<CognitoState>;
+
+/// Validate a `_custom_id_` user pool tag value. The region is read back out
+/// of the pool id, so it must be `<region>_<alphanumeric id>` in `region`.
+pub fn custom_user_pool_id(tag_value: &str, region: &str) -> Result<String, String> {
+    let valid = tag_value
+        .strip_prefix(region)
+        .and_then(|rest| rest.strip_prefix('_'))
+        .is_some_and(|suffix| {
+            !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+        })
+        && tag_value.len() <= 55;
+    if !valid {
+        return Err(format!(
+            "Invalid {CUSTOM_ID_TAG} tag value {tag_value}: a custom user pool id must be <region>_<alphanumeric id> in the request's region ({region}) and at most 55 characters."
+        ));
+    }
+    Ok(tag_value.to_string())
+}
+
+/// The custom client id a `_custom_id_:<id>` client name asks for, if any.
+/// App clients have no tags, so the name carries it.
+pub fn custom_client_id(client_name: &str) -> Result<Option<String>, String> {
+    let Some(id) = client_name
+        .strip_prefix(CUSTOM_ID_TAG)
+        .and_then(|rest| rest.strip_prefix(':'))
+    else {
+        return Ok(None);
+    };
+    let valid = (1..=128).contains(&id.len())
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+');
+    if !valid {
+        return Err(format!(
+            "Invalid custom client id {id}: it must be 1-128 characters of letters, digits, _ and +."
+        ));
+    }
+    Ok(Some(id.to_string()))
+}
+
+/// Pool ids are global: the JWKS, discovery and hosted-UI routes find a pool
+/// by id across every account, so a custom id must be unused everywhere.
+pub fn ensure_user_pool_id_unused(accounts: &CognitoAccounts, id: &str) -> Result<(), String> {
+    if accounts.iter().any(|(_, a)| a.user_pools.contains_key(id)) {
+        return Err(format!("User pool {id} already exists."));
+    }
+    Ok(())
+}
+
+/// Client ids are global: the OAuth2 endpoints find a client by id across
+/// every account, so a custom id must be unused everywhere.
+pub fn ensure_user_pool_client_id_unused(
+    accounts: &CognitoAccounts,
+    id: &str,
+) -> Result<(), String> {
+    if accounts
+        .iter()
+        .any(|(_, a)| a.user_pool_clients.contains_key(id))
+    {
+        return Err(format!("User pool client {id} already exists."));
+    }
+    Ok(())
+}
+
+/// A pool with `DeletionProtection` `ACTIVE` cannot be deleted until it is
+/// switched off.
+pub fn ensure_user_pool_deletable(state: &CognitoState, pool_id: &str) -> Result<(), String> {
+    let protected = state
+        .user_pools
+        .get(pool_id)
+        .is_some_and(|p| p.deletion_protection.as_deref() == Some("ACTIVE"));
+    if protected {
+        return Err("The user pool cannot be deleted because deletion protection is activated. Deletion protection must be inactivated first.".to_string());
+    }
+    Ok(())
+}
+
+/// Remove a user pool and everything that belongs to it: clients, users,
+/// groups, identity providers, resource servers, domains, replicas, import
+/// jobs, tags, UI/risk/log-delivery config, managed-login branding, terms,
+/// WebAuthn credentials, every token, session and authorization code issued
+/// in the pool, and its auth-event and PreTokenGeneration logs. Each map is
+/// filtered by pool, which also covers the client-scoped entries of the
+/// pool's clients. Custom ids make a pool id reusable, so nothing of a
+/// deleted pool may survive into a new pool with the same id. Returns the
+/// removed pool, or `None` (touching nothing) when it does not exist.
+pub fn purge_user_pool(state: &mut CognitoState, pool_id: &str) -> Option<UserPool> {
+    let pool = state.user_pools.remove(pool_id)?;
+    state
+        .user_pool_clients
+        .retain(|_, c| c.user_pool_id != pool_id);
+    state.users.remove(pool_id);
+    state.groups.remove(pool_id);
+    state.user_groups.remove(pool_id);
+    state.identity_providers.remove(pool_id);
+    state.resource_servers.remove(pool_id);
+    state.user_pool_replicas.remove(pool_id);
+    state.import_jobs.remove(pool_id);
+    state.domains.retain(|_, d| d.user_pool_id != pool_id);
+    state.tags.remove(&pool.arn);
+    state.log_delivery_configs.remove(pool_id);
+    // `{pool_id}:{client_id|""}` and `{pool_id}:{username}` keys.
+    let prefix = format!("{pool_id}:");
+    state
+        .ui_customizations
+        .retain(|k, _| !k.starts_with(&prefix));
+    state
+        .risk_configurations
+        .retain(|k, _| !k.starts_with(&prefix));
+    state
+        .webauthn_credentials
+        .retain(|k, _| !k.starts_with(&prefix));
+    state
+        .managed_login_brandings
+        .retain(|_, b| b["UserPoolId"] != pool_id);
+    state.terms.retain(|_, t| t["UserPoolId"] != pool_id);
+    state
+        .refresh_tokens
+        .retain(|_, t| t.user_pool_id != pool_id);
+    state.access_tokens.retain(|_, t| t.user_pool_id != pool_id);
+    state.sessions.retain(|_, s| s.user_pool_id != pool_id);
+    state
+        .authorization_codes
+        .retain(|_, c| c.user_pool_id != pool_id);
+    state.auth_events.retain(|e| e.user_pool_id != pool_id);
+    state
+        .pre_token_gen_invocations
+        .retain(|i| i.pool_id != pool_id);
+    Some(pool)
+}
+
+/// Remove an app client and everything issued to or configured for it:
+/// tokens, sessions, authorization codes, client-level UI/risk config,
+/// managed-login branding and terms. Custom ids make a client id reusable,
+/// so none of it may survive into a new client with the same id. Returns
+/// the removed client, or `None` (touching nothing) when it does not exist.
+pub fn purge_user_pool_client(state: &mut CognitoState, client_id: &str) -> Option<UserPoolClient> {
+    let client = state.user_pool_clients.remove(client_id)?;
+    let key = format!("{}:{client_id}", client.user_pool_id);
+    state.ui_customizations.remove(&key);
+    state.risk_configurations.remove(&key);
+    state
+        .managed_login_brandings
+        .retain(|_, b| b["ClientId"] != client_id);
+    state.terms.retain(|_, t| t["ClientId"] != client_id);
+    state.refresh_tokens.retain(|_, t| t.client_id != client_id);
+    state.access_tokens.retain(|_, t| t.client_id != client_id);
+    state.sessions.retain(|_, s| s.client_id != client_id);
+    state
+        .authorization_codes
+        .retain(|_, c| c.client_id != client_id);
+    Some(client)
+}
 
 impl CognitoService {
     pub(super) async fn create_user_pool(
@@ -79,6 +239,17 @@ impl CognitoService {
             ));
         }
 
+        let custom_pool_id = body["UserPoolTags"][CUSTOM_ID_TAG]
+            .as_str()
+            .map(|id| custom_user_pool_id(id, req.region.as_str()))
+            .transpose()
+            .map_err(invalid_parameter)?;
+        // Fail a taken id before paying for keygen; the write-lock check
+        // below still catches a pool created in between.
+        if let Some(id) = &custom_pool_id {
+            ensure_user_pool_id_unused(&self.state.read(), id).map_err(invalid_parameter)?;
+        }
+
         // Generate the per-pool RSA-2048 keypair eagerly so every
         // token-issuing path (InitiateAuth, RespondToAuthChallenge,
         // AdminInitiateAuth, GetTokensFromRefreshToken, OAuth2 token
@@ -104,12 +275,17 @@ impl CognitoService {
         let signing_kid = signing.kid;
 
         let mut accounts = self.state.write();
+        if let Some(id) = &custom_pool_id {
+            ensure_user_pool_id_unused(&accounts, id).map_err(invalid_parameter)?;
+        }
         let state = accounts.get_or_create(&req.account_id);
         // The pool id bakes in the request's credential-scope region
         // (`{region}_{rand}`) so it becomes the single source of truth for the
         // pool's region; the ARN and every issuer/discovery derivation read the
         // region back out of the pool id. Storage is keyed by pool id, unchanged.
-        let pool_id = generate_pool_id(req.region.as_str());
+        // A `_custom_id_` tag picks the id instead, so local setups can create
+        // a pool whose id is known in advance.
+        let pool_id = custom_pool_id.unwrap_or_else(|| generate_pool_id(req.region.as_str()));
         let arn = crate::user_pool_arn(req.region.as_str(), &state.account_id, &pool_id);
 
         let now = Utc::now();
@@ -440,43 +616,9 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        let Some(pool) = state.user_pools.remove(pool_id) else {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool {pool_id} does not exist."),
-            ));
-        };
-
-        // Remove associated users
-        state.users.remove(pool_id);
-
-        // Remove associated clients
-        state
-            .user_pool_clients
-            .retain(|_, c| c.user_pool_id != pool_id);
-
-        // Remove associated groups and user-group associations
-        state.groups.remove(pool_id);
-        state.user_groups.remove(pool_id);
-
-        // Remove associated identity providers
-        state.identity_providers.remove(pool_id);
-
-        // Remove associated resource servers
-        state.resource_servers.remove(pool_id);
-
-        // Remove associated multi-region replicas
-        state.user_pool_replicas.remove(pool_id);
-
-        // Remove associated domains
-        state.domains.retain(|_, d| d.user_pool_id != pool_id);
-
-        // Remove the tags stored under the pool's ARN.
-        state.tags.remove(&pool.arn);
-
-        // Remove associated import jobs
-        state.import_jobs.remove(pool_id);
+        ensure_user_pool_exists(state, pool_id)?;
+        ensure_user_pool_deletable(state, pool_id).map_err(invalid_parameter)?;
+        purge_user_pool(state, pool_id);
 
         Ok(AwsResponse::ok_json(json!({})))
     }
@@ -583,17 +725,21 @@ impl CognitoService {
             body["RefreshTokenValidity"].as_i64(),
             parse_token_validity_units(&body["TokenValidityUnits"]),
         )
-        .map_err(|m| {
-            AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterException", m)
-        })?;
+        .map_err(invalid_parameter)?;
+
+        // App clients have no tags, so a `_custom_id_:<id>` ClientName picks
+        // the client id instead.
+        let custom_client_id = custom_client_id(client_name).map_err(invalid_parameter)?;
 
         let mut accounts = self.state.write();
+        // Validate pool exists
+        ensure_user_pool_exists(accounts.get_or_create(&req.account_id), pool_id)?;
+        if let Some(id) = &custom_client_id {
+            ensure_user_pool_client_id_unused(&accounts, id).map_err(invalid_parameter)?;
+        }
         let state = accounts.get_or_create(&req.account_id);
 
-        // Validate pool exists
-        ensure_user_pool_exists(state, pool_id)?;
-
-        let client_id = generate_client_id();
+        let client_id = custom_client_id.unwrap_or_else(generate_client_id);
         let generate_secret = body["GenerateSecret"].as_bool().unwrap_or(false);
         let client_secret = if generate_secret {
             Some(generate_client_secret())
@@ -768,9 +914,7 @@ impl CognitoService {
             body["RefreshTokenValidity"].as_i64(),
             parse_token_validity_units(&body["TokenValidityUnits"]),
         )
-        .map_err(|m| {
-            AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterException", m)
-        })?;
+        .map_err(invalid_parameter)?;
 
         // UpdateUserPoolClient replaces the client's configuration: every
         // setting the request omits goes back to its default (what
@@ -870,7 +1014,7 @@ impl CognitoService {
             }
         }
 
-        state.user_pool_clients.remove(client_id);
+        purge_user_pool_client(state, client_id);
         Ok(AwsResponse::ok_json(json!({})))
     }
 

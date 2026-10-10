@@ -179,6 +179,7 @@ curl http://localhost:4566/_fakecloud/health
 | `/_fakecloud/cognito/auth-events` | GET | List authentication events recorded by adaptive auth. |
 | `/_fakecloud/cognito/authorization-codes` | POST | Mint an OAuth2 authorization code (for hosted-UI flow simulation). |
 | `/_fakecloud/cognito/compromised-passwords` | POST | **NEW** -- Mark a password as compromised so the next AdminInitiateAuth surfaces the advisory. |
+| `/_fakecloud/cognito/software-token` | POST | Give a user a verified authenticator-app (TOTP) secret. Body `{"userPoolId", "username", "secretCode"}` (base32, like `AssociateSoftwareToken`'s `SecretCode`). Returns `{"enrolled": true}`, `400` for a secret that is not base32, `404` for an unknown user. |
 | `/_fakecloud/cognito/webauthn-credentials` | GET | **NEW** -- List registered WebAuthn credentials with their attestation details. |
 | `/_fakecloud/cognito/pretokengen/invocations` | GET | **NEW** -- List PreTokenGeneration Lambda trigger invocations with parsed claim overrides, suppressed claims, and group overrides. |
 

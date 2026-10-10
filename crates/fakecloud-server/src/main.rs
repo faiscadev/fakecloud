@@ -10215,6 +10215,58 @@ async fn main() {
             }),
         )
         .route(
+            "/_fakecloud/cognito/software-token",
+            axum::routing::post({
+                let cs = cognito_state.clone();
+                let store = cognito_oauth2_snapshot_store.clone();
+                let lock = cognito_oauth2_snapshot_lock.clone();
+                move |axum::Json(body): axum::Json<types::SetSoftwareTokenRequest>| {
+                    let cs = cs.clone();
+                    let store = store.clone();
+                    let lock = lock.clone();
+                    async move {
+                        match fakecloud_cognito::set_software_token(
+                            &cs,
+                            &body.user_pool_id,
+                            &body.username,
+                            &body.secret_code,
+                        ) {
+                            Ok(()) => {
+                                fakecloud_cognito::save_cognito_snapshot(
+                                    &cs,
+                                    store.clone(),
+                                    &lock,
+                                )
+                                .await;
+                                (
+                                    axum::http::StatusCode::OK,
+                                    axum::Json(serde_json::json!(
+                                        types::SetSoftwareTokenResponse { enrolled: true }
+                                    )),
+                                )
+                            }
+                            Err(err) => {
+                                let (status, msg) = match err {
+                                    fakecloud_cognito::SetSoftwareTokenError::InvalidSecret => (
+                                        axum::http::StatusCode::BAD_REQUEST,
+                                        "secretCode must be a non-empty base32 string",
+                                    ),
+                                    fakecloud_cognito::SetSoftwareTokenError::UserNotFound => (
+                                        axum::http::StatusCode::NOT_FOUND,
+                                        "user not found in pool",
+                                    ),
+                                };
+                                (
+                                    status,
+                                    axum::Json(serde_json::json!({"error": msg})),
+                                )
+                            }
+                        }
+                    }
+                }
+            }),
+        )
+        .route(
             "/_fakecloud/s3/lifecycle-processor/tick",
             axum::routing::post({
                 let ss = s3_sim_lifecycle_state;

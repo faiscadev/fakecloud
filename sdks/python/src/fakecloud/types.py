@@ -1776,6 +1776,36 @@ class MintAuthorizationCodeResponse:
 
 
 @dataclass
+class SetSoftwareTokenRequest:
+    """Payload for `POST /_fakecloud/cognito/software-token`.
+
+    Gives the user a verified authenticator-app (TOTP) secret, as if they
+    had completed `AssociateSoftwareToken` + `VerifySoftwareToken` with it.
+    `secret_code` is base32, like `AssociateSoftwareToken`'s `SecretCode`.
+    """
+
+    user_pool_id: str
+    username: str
+    secret_code: str
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "userPoolId": self.user_pool_id,
+            "username": self.username,
+            "secretCode": self.secret_code,
+        }
+
+
+@dataclass
+class SetSoftwareTokenResponse:
+    enrolled: bool
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> SetSoftwareTokenResponse:
+        return cls(enrolled=data["enrolled"])
+
+
+@dataclass
 class CompromisedPasswordsRequest:
     """Payload for `POST /_fakecloud/cognito/compromised-passwords`.
 

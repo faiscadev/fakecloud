@@ -642,6 +642,22 @@ export interface MintAuthorizationCodeResponse {
 }
 
 /**
+ * Payload for `POST /_fakecloud/cognito/software-token`. Gives the user a
+ * verified authenticator-app (TOTP) secret, as if they had completed
+ * `AssociateSoftwareToken` + `VerifySoftwareToken` with it. `secretCode` is
+ * base32, like `AssociateSoftwareToken`'s `SecretCode`.
+ */
+export interface SetSoftwareTokenRequest {
+  userPoolId: string;
+  username: string;
+  secretCode: string;
+}
+
+export interface SetSoftwareTokenResponse {
+  enrolled: boolean;
+}
+
+/**
  * Payload for `POST /_fakecloud/cognito/compromised-passwords`. Each
  * plaintext is SHA-256 hashed server-side and added to the
  * compromised-password set; subsequent `SignUp` / `AdminInitiateAuth`

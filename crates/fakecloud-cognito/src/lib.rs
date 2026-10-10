@@ -9,13 +9,16 @@ pub mod user_status;
 pub mod webauthn;
 
 pub use service::{
-    default_refresh_token_validity, ensure_pool_signing_key, handle_oauth2_authorize,
-    handle_oauth2_revoke, handle_oauth2_token, handle_oauth2_userinfo, mint_authorization_code,
-    oidc_discovery_document, pool_existence_and_domain, pool_jwks_document, resolve_token_validity,
-    save_cognito_snapshot, validate_token_validity, CognitoIdentityService, CognitoService,
-    MintAuthorizationCodeError, MintAuthorizationCodeRequest, OAuth2AuthorizeError,
+    custom_client_id, custom_user_pool_id, default_refresh_token_validity, ensure_pool_signing_key,
+    ensure_user_pool_client_id_unused, ensure_user_pool_deletable, ensure_user_pool_id_unused,
+    handle_oauth2_authorize, handle_oauth2_revoke, handle_oauth2_token, handle_oauth2_userinfo,
+    mint_authorization_code, oidc_discovery_document, pool_existence_and_domain,
+    pool_jwks_document, purge_user_pool, purge_user_pool_client, resolve_token_validity,
+    save_cognito_snapshot, set_software_token, validate_token_validity, CognitoIdentityService,
+    CognitoService, MintAuthorizationCodeError, MintAuthorizationCodeRequest, OAuth2AuthorizeError,
     OAuth2AuthorizeOutcome, OAuth2AuthorizeRequest, OAuthRevokeError, OAuthTokenError,
-    OAuthTokenResponse, OAuthUserInfoError, ResolvedTokenValidity,
+    OAuthTokenResponse, OAuthUserInfoError, ResolvedTokenValidity, SetSoftwareTokenError,
+    CUSTOM_ID_TAG,
 };
 pub use state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,

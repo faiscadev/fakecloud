@@ -693,6 +693,15 @@ public sealed class FakeCloudClient : IDisposable
             _http.PostJsonAsync<MintAuthorizationCodeResponse>(
                 "/_fakecloud/cognito/authorization-codes", req, ct);
 
+        /// <summary>
+        /// Give a user a verified authenticator-app (TOTP) secret chosen by
+        /// the caller, so its codes can be generated outside fakecloud.
+        /// </summary>
+        public Task<SetSoftwareTokenResponse> SetSoftwareTokenAsync(
+            SetSoftwareTokenRequest req, CancellationToken ct = default) =>
+            _http.PostJsonAsync<SetSoftwareTokenResponse>(
+                "/_fakecloud/cognito/software-token", req, ct);
+
         public Task<CompromisedPasswordsResponse> SetCompromisedPasswordsAsync(
             CompromisedPasswordsRequest req, CancellationToken ct = default) =>
             _http.PostJsonAsync<CompromisedPasswordsResponse>(

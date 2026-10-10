@@ -690,6 +690,19 @@ public final class Types {
     public record MintAuthorizationCodeResponse(String code) {}
 
     /**
+     * Payload for {@code POST /_fakecloud/cognito/software-token}. Gives the
+     * user a verified authenticator-app (TOTP) secret, as if they had
+     * completed {@code AssociateSoftwareToken} + {@code VerifySoftwareToken}
+     * with it. {@code secretCode} is base32, like
+     * {@code AssociateSoftwareToken}'s {@code SecretCode}.
+     */
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SetSoftwareTokenRequest(String userPoolId, String username, String secretCode) {}
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public record SetSoftwareTokenResponse(boolean enrolled) {}
+
+    /**
      * Payload for {@code POST /_fakecloud/cognito/compromised-passwords}.
      * Each plaintext is SHA-256 hashed server-side and added to the
      * per-account compromised-password set; subsequent {@code SignUp}

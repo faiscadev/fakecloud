@@ -117,6 +117,18 @@ func (c *CognitoClient) MintAuthorizationCode(ctx context.Context, req *MintAuth
 	return &out, nil
 }
 
+// SetSoftwareToken gives a user a verified authenticator-app (TOTP) secret
+// chosen by the caller, as if they had completed AssociateSoftwareToken +
+// VerifySoftwareToken with it, so its codes can be generated outside
+// fakecloud.
+func (c *CognitoClient) SetSoftwareToken(ctx context.Context, req *SetSoftwareTokenRequest) (*SetSoftwareTokenResponse, error) {
+	var out SetSoftwareTokenResponse
+	if err := c.fc.doPost(ctx, "/_fakecloud/cognito/software-token", req, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}
+
 // SetCompromisedPasswords registers plaintext passwords as compromised.
 // Each is SHA-256 hashed server-side and added to the per-account
 // compromised-password set, after which `SignUp` / `AdminInitiateAuth`

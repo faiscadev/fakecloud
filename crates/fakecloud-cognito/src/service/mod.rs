@@ -14,6 +14,11 @@ mod user_pools;
 mod users;
 
 pub use identity_pools::CognitoIdentityService;
+pub use user_pools::{
+    custom_client_id, custom_user_pool_id, ensure_user_pool_client_id_unused,
+    ensure_user_pool_deletable, ensure_user_pool_id_unused, purge_user_pool,
+    purge_user_pool_client, CUSTOM_ID_TAG,
+};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -655,6 +660,15 @@ impl AwsService for CognitoService {
             "UpdateProvisionedLimit",
         ]
     }
+}
+
+/// The standard `InvalidParameterException` (400) with `msg`.
+pub(super) fn invalid_parameter(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterException",
+        msg.into(),
+    )
 }
 
 /// Confirm that ``pool_id`` refers to a known user pool, returning the standard
@@ -3535,6 +3549,47 @@ pub fn mint_authorization_code(
         return Ok(code);
     }
     Err(MintAuthorizationCodeError::InvalidClient)
+}
+
+/// Validation failures from [`set_software_token`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetSoftwareTokenError {
+    /// The secret is empty or not base32.
+    InvalidSecret,
+    /// The user isn't in the pool, or the pool doesn't exist.
+    UserNotFound,
+}
+
+/// Give a user a verified authenticator-app (TOTP) secret chosen by the
+/// caller, the state `AssociateSoftwareToken` + `VerifySoftwareToken` leave
+/// behind, so a local setup can enroll a known secret in an authenticator app.
+pub fn set_software_token(
+    state: &SharedCognitoState,
+    user_pool_id: &str,
+    username: &str,
+    secret_code: &str,
+) -> Result<(), SetSoftwareTokenError> {
+    if crate::totp::compute_totp_at(secret_code, 0).is_none() {
+        return Err(SetSoftwareTokenError::InvalidSecret);
+    }
+    let mut mas = state.write();
+    let account = mas
+        .iter_mut()
+        .map(|(_, account)| account)
+        .find(|account| account.users.contains_key(user_pool_id))
+        .ok_or(SetSoftwareTokenError::UserNotFound)?;
+    // UsernameAttributes pools store a UUID username; accept the email or
+    // phone alias like every other user operation does.
+    let username = resolve_alias_username(account, user_pool_id, username);
+    let user = account
+        .users
+        .get_mut(user_pool_id)
+        .and_then(|users| users.get_mut(&username))
+        .ok_or(SetSoftwareTokenError::UserNotFound)?;
+    user.totp_secret = Some(secret_code.to_string());
+    user.totp_verified = true;
+    user.user_last_modified_date = Utc::now();
+    Ok(())
 }
 
 /// Query parameters accepted by [`handle_oauth2_authorize`]. Mirrors

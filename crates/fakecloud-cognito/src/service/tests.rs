@@ -10631,3 +10631,277 @@ fn describe_terms_by_client_resolves_by_client_and_name() {
         assert_eq!(err.code(), "ResourceNotFoundException");
     }
 }
+
+// ── Custom ids and seeded software tokens ──
+
+#[test]
+fn create_user_pool_takes_id_from_custom_id_tag() {
+    let (svc, _) = make_svc();
+    let body = json!({"PoolName": "local", "UserPoolTags": {"_custom_id_": "us-east-1_Local"}});
+    let req = make_req("CreateUserPool", &body.to_string());
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
+    let b = resp_json(&resp);
+    assert_eq!(b["UserPool"]["Id"], "us-east-1_Local");
+    assert!(b["UserPool"]["Arn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":userpool/us-east-1_Local"));
+
+    let err = expect_err(block_on(svc.create_user_pool(&req)));
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    for bad in ["eu-west-1_Local", "us-east-1_", "us-east-1_lo-cal", "Local"] {
+        let body = json!({"PoolName": "bad", "UserPoolTags": {"_custom_id_": bad}});
+        let req = make_req("CreateUserPool", &body.to_string());
+        let err = expect_err(block_on(svc.create_user_pool(&req)));
+        assert_eq!(err.code(), "InvalidParameterException", "{bad}");
+    }
+}
+
+#[test]
+fn create_user_pool_client_takes_id_from_custom_id_name() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let body = json!({"UserPoolId": pool_id, "ClientName": "_custom_id_:localclient"});
+    let req = make_req("CreateUserPoolClient", &body.to_string());
+    let resp = svc.create_user_pool_client(&req).unwrap();
+    let b = resp_json(&resp);
+    assert_eq!(b["UserPoolClient"]["ClientId"], "localclient");
+
+    let err = expect_err(svc.create_user_pool_client(&req));
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    for bad in [
+        "_custom_id_:",
+        "_custom_id_:local client",
+        "_custom_id_:local-client",
+    ] {
+        let body = json!({"UserPoolId": pool_id, "ClientName": bad});
+        let req = make_req("CreateUserPoolClient", &body.to_string());
+        let err = expect_err(svc.create_user_pool_client(&req));
+        assert_eq!(err.code(), "InvalidParameterException", "{bad}");
+    }
+}
+
+#[test]
+fn set_software_token_enrolls_a_verified_secret() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+
+    set_software_token(&state, &pool_id, "alice", "JBSWY3DPEHPK3PXP").unwrap();
+    {
+        let mas = state.read();
+        let user = &mas.default_ref().users[&pool_id]["alice"];
+        assert_eq!(user.totp_secret.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+        assert!(user.totp_verified);
+    }
+
+    assert_eq!(
+        set_software_token(&state, &pool_id, "alice", "not base32!"),
+        Err(SetSoftwareTokenError::InvalidSecret)
+    );
+    assert_eq!(
+        set_software_token(&state, &pool_id, "alice", ""),
+        Err(SetSoftwareTokenError::InvalidSecret)
+    );
+    assert_eq!(
+        set_software_token(&state, &pool_id, "alice", "ŁŁŁŁŁŁŁŁ"),
+        Err(SetSoftwareTokenError::InvalidSecret)
+    );
+    assert_eq!(
+        set_software_token(&state, &pool_id, "bob", "JBSWY3DPEHPK3PXP"),
+        Err(SetSoftwareTokenError::UserNotFound)
+    );
+    assert_eq!(
+        set_software_token(&state, "us-east-1_missing", "alice", "JBSWY3DPEHPK3PXP"),
+        Err(SetSoftwareTokenError::UserNotFound)
+    );
+}
+
+#[test]
+fn set_software_token_resolves_an_email_alias() {
+    let (svc, state) = make_svc();
+    let resp = block_on(svc.create_user_pool(&make_req(
+        "CreateUserPool",
+        &json!({"PoolName": "emailpool", "UsernameAttributes": ["email"]}).to_string(),
+    )))
+    .unwrap();
+    let pool_id = resp_json(&resp)["UserPool"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": "carol@example.com"}).to_string(),
+    )))
+    .unwrap();
+    let minted = resp_json(&resp)["User"]["Username"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(minted, "carol@example.com");
+
+    set_software_token(&state, &pool_id, "carol@example.com", "JBSWY3DPEHPK3PXP").unwrap();
+    let mas = state.read();
+    let user = &mas.default_ref().users[&pool_id][&minted];
+    assert_eq!(user.totp_secret.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+    assert!(user.totp_verified);
+    assert!(!mas.default_ref().users[&pool_id].contains_key("carol@example.com"));
+}
+
+/// Create the `us-east-1_Local` pool with the `localclient` app client and an
+/// `ivan` user, returning the pool ARN and a refresh token issued to ivan.
+fn custom_id_pool_with_refresh_token(svc: &CognitoService) -> (String, String) {
+    let body = json!({"PoolName": "local", "UserPoolTags": {"_custom_id_": "us-east-1_Local"}});
+    let resp =
+        block_on(svc.create_user_pool(&make_req("CreateUserPool", &body.to_string()))).unwrap();
+    let arn = resp_json(&resp)["UserPool"]["Arn"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let body = json!({
+        "UserPoolId": "us-east-1_Local",
+        "ClientName": "_custom_id_:localclient",
+        "ExplicitAuthFlows": ["ADMIN_NO_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+    });
+    svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    admin_create_user_helper(svc, "us-east-1_Local", "ivan");
+    set_user_password(svc, "us-east-1_Local", "ivan", "SecurePass1!");
+    let body = json!({
+        "UserPoolId": "us-east-1_Local",
+        "ClientId": "localclient",
+        "AuthFlow": "ADMIN_NO_SRP_AUTH",
+        "AuthParameters": {"USERNAME": "ivan", "PASSWORD": "SecurePass1!"},
+    });
+    let resp = block_on(svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &body.to_string())))
+        .unwrap();
+    let rt = resp_json(&resp)["AuthenticationResult"]["RefreshToken"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    (arn, rt)
+}
+
+fn refresh_with(svc: &CognitoService, rt: &str) -> Result<AwsResponse, AwsServiceError> {
+    let body = json!({"RefreshToken": rt, "ClientId": "localclient"});
+    block_on(
+        svc.get_tokens_from_refresh_token(&make_req(
+            "GetTokensFromRefreshToken",
+            &body.to_string(),
+        )),
+    )
+}
+
+#[test]
+fn deleted_custom_id_pool_leaves_nothing_for_its_successor() {
+    let (svc, state) = make_svc();
+    let (arn, old_rt) = custom_id_pool_with_refresh_token(&svc);
+    refresh_with(&svc, &old_rt).unwrap();
+
+    let body = json!({"ResourceArn": arn, "Tags": {"env": "old"}});
+    svc.tag_resource(&make_req("TagResource", &body.to_string()))
+        .unwrap();
+    let body = json!({"UserPoolId": "us-east-1_Local", "CSS": ".banner { background: red; }"});
+    svc.set_ui_customization(&make_req("SetUICustomization", &body.to_string()))
+        .unwrap();
+    let body = json!({
+        "UserPoolId": "us-east-1_Local",
+        "ClientId": "localclient",
+        "CompromisedCredentialsRiskConfiguration": {"Actions": {"EventAction": "BLOCK"}},
+    });
+    svc.set_risk_configuration(&make_req("SetRiskConfiguration", &body.to_string()))
+        .unwrap();
+
+    let body = json!({"UserPoolId": "us-east-1_Local"});
+    svc.delete_user_pool(&make_req("DeleteUserPool", &body.to_string()))
+        .unwrap();
+    let (_, new_rt) = custom_id_pool_with_refresh_token(&svc);
+
+    let err = expect_err(refresh_with(&svc, &old_rt));
+    assert_eq!(err.code(), "NotAuthorizedException");
+    refresh_with(&svc, &new_rt).unwrap();
+
+    let body = json!({"ResourceArn": arn});
+    let resp = svc
+        .list_tags_for_resource(&make_req("ListTagsForResource", &body.to_string()))
+        .unwrap();
+    assert_eq!(resp_json(&resp)["Tags"], json!({}));
+    let mas = state.read();
+    let st = mas.default_ref();
+    assert!(st.ui_customizations.is_empty());
+    assert!(st.risk_configurations.is_empty());
+    assert_eq!(st.refresh_tokens.len(), 1);
+}
+
+#[test]
+fn deleted_custom_id_client_leaves_nothing_for_its_successor() {
+    let (svc, state) = make_svc();
+    let (_, old_rt) = custom_id_pool_with_refresh_token(&svc);
+    let body = json!({
+        "UserPoolId": "us-east-1_Local",
+        "ClientId": "localclient",
+        "CompromisedCredentialsRiskConfiguration": {"Actions": {"EventAction": "BLOCK"}},
+    });
+    svc.set_risk_configuration(&make_req("SetRiskConfiguration", &body.to_string()))
+        .unwrap();
+
+    let body = json!({"UserPoolId": "us-east-1_Local", "ClientId": "localclient"});
+    svc.delete_user_pool_client(&make_req("DeleteUserPoolClient", &body.to_string()))
+        .unwrap();
+    {
+        let mas = state.read();
+        let st = mas.default_ref();
+        assert!(st.refresh_tokens.is_empty());
+        assert!(st.access_tokens.is_empty());
+        assert!(st.risk_configurations.is_empty());
+    }
+    let body = json!({
+        "UserPoolId": "us-east-1_Local",
+        "ClientName": "_custom_id_:localclient",
+        "ExplicitAuthFlows": ["ADMIN_NO_SRP_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+    });
+    svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    expect_err(refresh_with(&svc, &old_rt));
+}
+
+#[test]
+fn custom_client_id_on_missing_pool_is_resource_not_found() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let body = json!({"UserPoolId": pool_id, "ClientName": "_custom_id_:taken"});
+    svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    // The id is taken, but the missing pool is reported first.
+    let body = json!({"UserPoolId": "us-east-1_missing", "ClientName": "_custom_id_:taken"});
+    let err = expect_err(
+        svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string())),
+    );
+    assert_eq!(err.code(), "ResourceNotFoundException");
+}
+
+#[test]
+fn delete_user_pool_refuses_while_deletion_protection_is_active() {
+    let (svc, state) = make_svc();
+    let body = json!({"PoolName": "guarded", "DeletionProtection": "ACTIVE"});
+    let resp =
+        block_on(svc.create_user_pool(&make_req("CreateUserPool", &body.to_string()))).unwrap();
+    let pool_id = resp_json(&resp)["UserPool"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let delete = json!({"UserPoolId": pool_id}).to_string();
+    let err = expect_err(svc.delete_user_pool(&make_req("DeleteUserPool", &delete)));
+    assert_eq!(err.code(), "InvalidParameterException");
+    assert!(state.read().default_ref().user_pools.contains_key(&pool_id));
+
+    let body = json!({"UserPoolId": pool_id, "DeletionProtection": "INACTIVE"});
+    svc.update_user_pool(&make_req("UpdateUserPool", &body.to_string()))
+        .unwrap();
+    svc.delete_user_pool(&make_req("DeleteUserPool", &delete))
+        .unwrap();
+    assert!(!state.read().default_ref().user_pools.contains_key(&pool_id));
+}

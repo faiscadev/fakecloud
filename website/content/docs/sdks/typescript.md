@@ -107,6 +107,7 @@ const fc = new FakeCloud("http://localhost:5000");
 | `getAuthEvents()`                   | List auth events                                                                              |
 | `getPreTokenGenInvocations()`       | List PreTokenGeneration Lambda trigger invocations with parsed claim mutations                |
 | `mintAuthorizationCode(req)`        | Mint a single-use OAuth2 authorization code (programmatic alternative to `/oauth2/authorize`) |
+| `setSoftwareToken(req)`             | Give a user a verified authenticator-app (TOTP) secret chosen by the caller                   |
 | `setCompromisedPasswords(req)`      | Replace the compromised-password list used by adaptive auth                                   |
 | `getWebAuthnCredentials()`          | List stored WebAuthn credentials                                                              |
 

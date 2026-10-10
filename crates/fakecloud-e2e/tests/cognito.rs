@@ -7178,3 +7178,161 @@ async fn cognito_acr_configuration_and_step_up_sign_in() {
         "{err}"
     );
 }
+
+/// A local setup creates the pool and client with fixed ids from the AWS CLI
+/// and seeds the developer's authenticator secret, then signs in with codes
+/// generated from that secret.
+#[tokio::test]
+async fn cognito_custom_ids_and_seeded_software_token() {
+    use aws_sdk_cognitoidentityprovider::types::AuthFlowType;
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = server
+        .aws_cli(&[
+            "cognito-idp",
+            "create-user-pool",
+            "--pool-name",
+            "local",
+            "--user-pool-tags",
+            "_custom_id_=us-east-1_Local",
+        ])
+        .await;
+    assert!(pool.success(), "{}", pool.stderr_text());
+    assert_eq!(pool.stdout_json()["UserPool"]["Id"], "us-east-1_Local");
+
+    let app = server
+        .aws_cli(&[
+            "cognito-idp",
+            "create-user-pool-client",
+            "--user-pool-id",
+            "us-east-1_Local",
+            "--client-name",
+            "_custom_id_:localclient",
+            "--explicit-auth-flows",
+            "ALLOW_ADMIN_USER_PASSWORD_AUTH",
+            "ALLOW_REFRESH_TOKEN_AUTH",
+        ])
+        .await;
+    assert!(app.success(), "{}", app.stderr_text());
+    assert_eq!(
+        app.stdout_json()["UserPoolClient"]["ClientId"],
+        "localclient"
+    );
+
+    // The ids are taken: creating them again fails.
+    let again = server
+        .aws_cli(&[
+            "cognito-idp",
+            "create-user-pool",
+            "--pool-name",
+            "local",
+            "--user-pool-tags",
+            "_custom_id_=us-east-1_Local",
+        ])
+        .await;
+    assert!(!again.success());
+    assert!(
+        again.stderr_text().contains("InvalidParameterException"),
+        "{}",
+        again.stderr_text()
+    );
+
+    client
+        .admin_create_user()
+        .user_pool_id("us-east-1_Local")
+        .username("dev")
+        .send()
+        .await
+        .expect("create user");
+    client
+        .admin_set_user_password()
+        .user_pool_id("us-east-1_Local")
+        .username("dev")
+        .password("Passw0rd!")
+        .permanent(true)
+        .send()
+        .await
+        .expect("set password");
+    client
+        .set_user_pool_mfa_config()
+        .user_pool_id("us-east-1_Local")
+        .mfa_configuration(UserPoolMfaType::On)
+        .software_token_mfa_configuration(
+            SoftwareTokenMfaConfigType::builder().enabled(true).build(),
+        )
+        .send()
+        .await
+        .expect("set pool mfa config");
+
+    let http = reqwest::Client::new();
+    let seed_url = format!("{}/_fakecloud/cognito/software-token", server.endpoint());
+    let secret = "JBSWY3DPEHPK3PXP";
+    let seeded = http
+        .post(&seed_url)
+        .json(&serde_json::json!({
+            "userPoolId": "us-east-1_Local",
+            "username": "dev",
+            "secretCode": secret,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seeded.status(), 200);
+
+    let bad_secret = http
+        .post(&seed_url)
+        .json(&serde_json::json!({
+            "userPoolId": "us-east-1_Local",
+            "username": "dev",
+            "secretCode": "not base32!",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(bad_secret.status(), 400);
+    let unknown_user = http
+        .post(&seed_url)
+        .json(&serde_json::json!({
+            "userPoolId": "us-east-1_Local",
+            "username": "nobody",
+            "secretCode": secret,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(unknown_user.status(), 404);
+
+    let challenge = client
+        .admin_initiate_auth()
+        .user_pool_id("us-east-1_Local")
+        .client_id("localclient")
+        .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "dev")
+        .auth_parameters("PASSWORD", "Passw0rd!")
+        .send()
+        .await
+        .expect("auth challenge");
+    assert_eq!(
+        challenge.challenge_name(),
+        Some(&ChallengeNameType::SoftwareTokenMfa)
+    );
+    let done = client
+        .admin_respond_to_auth_challenge()
+        .user_pool_id("us-east-1_Local")
+        .client_id("localclient")
+        .challenge_name(ChallengeNameType::SoftwareTokenMfa)
+        .session(challenge.session().unwrap())
+        .challenge_responses("USERNAME", "dev")
+        .challenge_responses(
+            "SOFTWARE_TOKEN_MFA_CODE",
+            fakecloud_cognito::totp::compute_totp_now(secret).unwrap(),
+        )
+        .send()
+        .await
+        .expect("mfa challenge completes");
+    assert!(done
+        .authentication_result()
+        .and_then(|r| r.access_token())
+        .is_some());
+}

@@ -564,6 +564,20 @@ public sealed record MintAuthorizationCodeRequest(
 public sealed record MintAuthorizationCodeResponse(string? Code);
 
 /// <summary>
+/// Payload for <c>POST /_fakecloud/cognito/software-token</c>. Gives the user
+/// a verified authenticator-app (TOTP) secret, as if they had completed
+/// <c>AssociateSoftwareToken</c> + <c>VerifySoftwareToken</c> with it.
+/// <c>SecretCode</c> is base32, like <c>AssociateSoftwareToken</c>'s
+/// <c>SecretCode</c>.
+/// </summary>
+public sealed record SetSoftwareTokenRequest(
+    string? UserPoolId,
+    string? Username,
+    string? SecretCode);
+
+public sealed record SetSoftwareTokenResponse(bool Enrolled);
+
+/// <summary>
 /// Payload for <c>POST /_fakecloud/cognito/compromised-passwords</c>. Each
 /// plaintext is SHA-256 hashed server-side and added to the per-account
 /// compromised-password set; subsequent <c>SignUp</c> /

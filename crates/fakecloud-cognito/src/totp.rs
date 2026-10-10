@@ -25,6 +25,11 @@ fn base32_decode(s: &str) -> Option<Vec<u8>> {
         if c.is_whitespace() {
             continue;
         }
+        // Reject non-ASCII before narrowing to a byte: `as u8` would
+        // truncate e.g. U+0141 to a valid alphabet letter.
+        if !c.is_ascii() {
+            return None;
+        }
         let up = c.to_ascii_uppercase() as u8;
         let idx = ALPHABET.iter().position(|&a| a == up)?;
         buffer = (buffer << 5) | idx as u64;
@@ -124,6 +129,16 @@ mod tests {
             compute_totp_at(RFC_SECRET_B32, 1_111_111_109).as_deref(),
             Some("081804")
         );
+    }
+
+    #[test]
+    fn base32_rejects_non_ascii() {
+        // U+0141 narrows to 0x41 ('A') with `as u8`; it must not decode.
+        assert_eq!(base32_decode("ŁŁŁŁŁŁŁŁ"), None);
+        assert_eq!(compute_totp_at("JBSWY3DPEHPK3PXŁ", 59), None);
+        // Unicode whitespace is still skipped, like ASCII whitespace.
+        assert_eq!(base32_decode("JBSW\u{00A0}Y3DP"), base32_decode("JBSWY3DP"));
+        assert!(base32_decode("JBSW\u{00A0}Y3DP").is_some());
     }
 
     #[test]
