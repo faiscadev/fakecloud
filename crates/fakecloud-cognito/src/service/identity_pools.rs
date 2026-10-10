@@ -127,8 +127,6 @@ impl AwsService for CognitoIdentityService {
 
 // --- helpers ----------------------------------------------------------------
 
-/// Return `InvalidParameterException` — the one error every cognito-identity
-/// op in the Smithy model declares for input validation.
 /// Enforce a Smithy `@length(min, max)` trait. Returns
 /// `InvalidParameterException` (the declared error shape for every op
 /// that uses it).

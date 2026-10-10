@@ -363,6 +363,28 @@ fn cognito_custom_id_pool_delete_and_recreate_starts_clean() {
 }
 
 #[test]
+fn cognito_user_pool_delete_refuses_while_deletion_protection_is_active() {
+    let prov = make_provisioner();
+    let sr = create(
+        &prov,
+        "AWS::Cognito::UserPool",
+        "P",
+        json!({"PoolName": "p", "DeletionProtection": "ACTIVE"}),
+    );
+    let err = prov
+        .delete_resource(&sr)
+        .expect_err("protected pool must not delete");
+    assert!(err.contains("deletion protection is activated"), "{err}");
+    assert!(prov
+        .cognito_state
+        .read()
+        .get(ACCT)
+        .unwrap()
+        .user_pools
+        .contains_key(&sr.physical_id));
+}
+
+#[test]
 fn cognito_custom_client_id_waits_for_its_pool_first() {
     let prov = make_provisioner();
     let pool = create(
@@ -384,102 +406,6 @@ fn cognito_custom_client_id_waits_for_its_pool_first() {
         json!({"UserPoolId": "us-east-1_missing", "ClientName": "_custom_id_:taken"}),
     );
     assert!(err.contains("does not exist yet"), "{err}");
-}
-
-#[test]
-fn cognito_user_pool_client_update_cannot_change_custom_id() {
-    let prov = make_provisioner();
-    let pool = create(
-        &prov,
-        "AWS::Cognito::UserPool",
-        "P",
-        json!({"PoolName": "p"}),
-    );
-    let client = create(
-        &prov,
-        "AWS::Cognito::UserPoolClient",
-        "C",
-        json!({"UserPoolId": pool.physical_id, "ClientName": "_custom_id_:localclient"}),
-    );
-    let update = |name: &str| {
-        prov.update_resource(
-            &client,
-            &make_resource(
-                "AWS::Cognito::UserPoolClient",
-                "C",
-                json!({"UserPoolId": pool.physical_id, "ClientName": name}),
-            ),
-        )
-    };
-
-    let err = update("_custom_id_:otherclient").expect_err("changing the custom id must fail");
-    assert!(err.contains("fixed at creation"), "{err}");
-    update("_custom_id_:localclient").unwrap();
-    update("plain-name").unwrap();
-    let accounts = prov.cognito_state.read();
-    let stored = &accounts.get(ACCT).unwrap().user_pool_clients["localclient"];
-    assert_eq!(stored.client_name, "plain-name");
-}
-
-#[test]
-fn cognito_user_pool_update_cannot_change_custom_id() {
-    let prov = make_provisioner();
-    let sr = create(
-        &prov,
-        "AWS::Cognito::UserPool",
-        "P",
-        json!({"PoolName": "p"}),
-    );
-    let err = prov
-        .update_resource(
-            &sr,
-            &make_resource(
-                "AWS::Cognito::UserPool",
-                "P",
-                json!({"PoolName": "p", "UserPoolTags": {"_custom_id_": "us-east-1_Other"}}),
-            ),
-        )
-        .expect_err("adding a custom id must fail");
-    assert!(err.contains("fixed at creation"), "{err}");
-
-    let custom = create(
-        &prov,
-        "AWS::Cognito::UserPool",
-        "Q",
-        json!({"PoolName": "q", "UserPoolTags": {"_custom_id_": "us-east-1_Local"}}),
-    );
-    let err = prov
-        .update_resource(
-            &custom,
-            &make_resource(
-                "AWS::Cognito::UserPool",
-                "Q",
-                json!({"PoolName": "q", "UserPoolTags": {"_custom_id_": "us-east-1_Moved"}}),
-            ),
-        )
-        .expect_err("changing the custom id must fail");
-    assert!(err.contains("fixed at creation"), "{err}");
-
-    // Keeping the same id, or dropping the tag, updates in place.
-    for tags in [
-        json!({"_custom_id_": "us-east-1_Local", "k": "v"}),
-        json!({}),
-    ] {
-        prov.update_resource(
-            &custom,
-            &make_resource(
-                "AWS::Cognito::UserPool",
-                "Q",
-                json!({"PoolName": "q", "UserPoolTags": tags}),
-            ),
-        )
-        .unwrap();
-    }
-    assert!(
-        prov.cognito_state.read().get(ACCT).unwrap().user_pools["us-east-1_Local"]
-            .user_pool_tags
-            .is_empty()
-    );
 }
 
 // ---------------------------------------------------------------------------

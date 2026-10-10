@@ -89,25 +89,33 @@ pub fn ensure_user_pool_client_id_unused(
     Ok(())
 }
 
-/// Remove a user pool and everything that belongs to it: clients (with their
-/// own state, see [`purge_user_pool_client`]), users, groups, identity
-/// providers, resource servers, domains, replicas, import jobs, tags,
-/// pool-level UI/risk/log-delivery config, WebAuthn credentials and every
-/// token, session and authorization code issued in the pool. Custom ids make
-/// a pool id reusable, so nothing of a deleted pool may survive into a new
-/// pool with the same id. Returns the removed pool, or `None` (touching
-/// nothing) when it does not exist.
+/// A pool with `DeletionProtection` `ACTIVE` cannot be deleted until it is
+/// switched off.
+pub fn ensure_user_pool_deletable(state: &CognitoState, pool_id: &str) -> Result<(), String> {
+    let protected = state
+        .user_pools
+        .get(pool_id)
+        .is_some_and(|p| p.deletion_protection.as_deref() == Some("ACTIVE"));
+    if protected {
+        return Err("The user pool cannot be deleted because deletion protection is activated. Deletion protection must be inactivated first.".to_string());
+    }
+    Ok(())
+}
+
+/// Remove a user pool and everything that belongs to it: clients, users,
+/// groups, identity providers, resource servers, domains, replicas, import
+/// jobs, tags, UI/risk/log-delivery config, managed-login branding, terms,
+/// WebAuthn credentials, every token, session and authorization code issued
+/// in the pool, and its auth-event and PreTokenGeneration logs. Each map is
+/// filtered by pool, which also covers the client-scoped entries of the
+/// pool's clients. Custom ids make a pool id reusable, so nothing of a
+/// deleted pool may survive into a new pool with the same id. Returns the
+/// removed pool, or `None` (touching nothing) when it does not exist.
 pub fn purge_user_pool(state: &mut CognitoState, pool_id: &str) -> Option<UserPool> {
     let pool = state.user_pools.remove(pool_id)?;
-    let client_ids: Vec<String> = state
+    state
         .user_pool_clients
-        .values()
-        .filter(|c| c.user_pool_id == pool_id)
-        .map(|c| c.client_id.clone())
-        .collect();
-    for client_id in &client_ids {
-        purge_user_pool_client(state, client_id);
-    }
+        .retain(|_, c| c.user_pool_id != pool_id);
     state.users.remove(pool_id);
     state.groups.remove(pool_id);
     state.user_groups.remove(pool_id);
@@ -141,6 +149,10 @@ pub fn purge_user_pool(state: &mut CognitoState, pool_id: &str) -> Option<UserPo
     state
         .authorization_codes
         .retain(|_, c| c.user_pool_id != pool_id);
+    state.auth_events.retain(|e| e.user_pool_id != pool_id);
+    state
+        .pre_token_gen_invocations
+        .retain(|i| i.pool_id != pool_id);
     Some(pool)
 }
 
@@ -604,13 +616,9 @@ impl CognitoService {
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
 
-        if purge_user_pool(state, pool_id).is_none() {
-            return Err(AwsServiceError::aws_error(
-                StatusCode::BAD_REQUEST,
-                "ResourceNotFoundException",
-                format!("User pool {pool_id} does not exist."),
-            ));
-        }
+        ensure_user_pool_exists(state, pool_id)?;
+        ensure_user_pool_deletable(state, pool_id).map_err(invalid_parameter)?;
+        purge_user_pool(state, pool_id);
 
         Ok(AwsResponse::ok_json(json!({})))
     }

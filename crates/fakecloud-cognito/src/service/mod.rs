@@ -16,7 +16,8 @@ mod users;
 pub use identity_pools::CognitoIdentityService;
 pub use user_pools::{
     custom_client_id, custom_user_pool_id, ensure_user_pool_client_id_unused,
-    ensure_user_pool_id_unused, purge_user_pool, purge_user_pool_client, CUSTOM_ID_TAG,
+    ensure_user_pool_deletable, ensure_user_pool_id_unused, purge_user_pool,
+    purge_user_pool_client, CUSTOM_ID_TAG,
 };
 
 use std::collections::BTreeMap;

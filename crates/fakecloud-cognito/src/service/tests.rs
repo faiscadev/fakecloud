@@ -10794,3 +10794,27 @@ fn custom_client_id_on_missing_pool_is_resource_not_found() {
     );
     assert_eq!(err.code(), "ResourceNotFoundException");
 }
+
+#[test]
+fn delete_user_pool_refuses_while_deletion_protection_is_active() {
+    let (svc, state) = make_svc();
+    let body = json!({"PoolName": "guarded", "DeletionProtection": "ACTIVE"});
+    let resp =
+        block_on(svc.create_user_pool(&make_req("CreateUserPool", &body.to_string()))).unwrap();
+    let pool_id = resp_json(&resp)["UserPool"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let delete = json!({"UserPoolId": pool_id}).to_string();
+    let err = expect_err(svc.delete_user_pool(&make_req("DeleteUserPool", &delete)));
+    assert_eq!(err.code(), "InvalidParameterException");
+    assert!(state.read().default_ref().user_pools.contains_key(&pool_id));
+
+    let body = json!({"UserPoolId": pool_id, "DeletionProtection": "INACTIVE"});
+    svc.update_user_pool(&make_req("UpdateUserPool", &body.to_string()))
+        .unwrap();
+    svc.delete_user_pool(&make_req("DeleteUserPool", &delete))
+        .unwrap();
+    assert!(!state.read().default_ref().user_pools.contains_key(&pool_id));
+}

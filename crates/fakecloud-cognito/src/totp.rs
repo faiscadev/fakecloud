@@ -22,13 +22,13 @@ fn base32_decode(s: &str) -> Option<Vec<u8>> {
     let mut bits: u32 = 0;
     let mut out = Vec::new();
     for c in s.trim_end_matches('=').chars() {
+        if c.is_whitespace() {
+            continue;
+        }
         // Reject non-ASCII before narrowing to a byte: `as u8` would
         // truncate e.g. U+0141 to a valid alphabet letter.
         if !c.is_ascii() {
             return None;
-        }
-        if c.is_whitespace() {
-            continue;
         }
         let up = c.to_ascii_uppercase() as u8;
         let idx = ALPHABET.iter().position(|&a| a == up)?;
@@ -136,6 +136,9 @@ mod tests {
         // U+0141 narrows to 0x41 ('A') with `as u8`; it must not decode.
         assert_eq!(base32_decode("ŁŁŁŁŁŁŁŁ"), None);
         assert_eq!(compute_totp_at("JBSWY3DPEHPK3PXŁ", 59), None);
+        // Unicode whitespace is still skipped, like ASCII whitespace.
+        assert_eq!(base32_decode("JBSW\u{00A0}Y3DP"), base32_decode("JBSWY3DP"));
+        assert!(base32_decode("JBSW\u{00A0}Y3DP").is_some());
     }
 
     #[test]

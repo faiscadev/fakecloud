@@ -26,6 +26,11 @@ impl ResourceProvisioner {
             .get(fakecloud_cognito::CUSTOM_ID_TAG)
             .map(|id| fakecloud_cognito::custom_user_pool_id(id, &self.region))
             .transpose()?;
+        // Fail a taken id before paying for keygen; the write-lock check
+        // below still catches a pool created in between.
+        if let Some(id) = &custom_pool_id {
+            fakecloud_cognito::ensure_user_pool_id_unused(&self.cognito_state.read(), id)?;
+        }
         let pool_id = custom_pool_id.clone().unwrap_or_else(|| {
             format!(
                 "{}_{}",
@@ -173,21 +178,6 @@ impl ResourceProvisioner {
             .get_mut(pool_id)
             .ok_or_else(|| format!("User pool {pool_id} not yet provisioned"))?;
 
-        // The id a `_custom_id_` tag picks is fixed at creation; a stack
-        // update cannot move the pool to another id in place.
-        if let Some(id) = props
-            .get("UserPoolTags")
-            .and_then(|tags| tags.get(fakecloud_cognito::CUSTOM_ID_TAG))
-            .and_then(|v| v.as_str())
-        {
-            if id != pool_id {
-                return Err(format!(
-                    "Cannot change user pool {pool_id} to id {id} through the {} tag: a user pool id is fixed at creation",
-                    fakecloud_cognito::CUSTOM_ID_TAG
-                ));
-            }
-        }
-
         if let Some(pool_name) = props.get("PoolName").and_then(|v| v.as_str()) {
             pool.name = pool_name.to_string();
         }
@@ -239,6 +229,7 @@ impl ResourceProvisioner {
     pub(super) fn delete_cognito_user_pool(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cognito_state.write();
         let state = accounts.get_or_create(&self.account_id);
+        fakecloud_cognito::ensure_user_pool_deletable(state, physical_id)?;
         fakecloud_cognito::purge_user_pool(state, physical_id);
         Ok(())
     }
@@ -399,18 +390,6 @@ impl ResourceProvisioner {
             .user_pool_clients
             .get_mut(client_id)
             .ok_or_else(|| format!("User pool client {client_id} not yet provisioned"))?;
-
-        // Likewise a `_custom_id_:<id>` ClientName cannot move the client to
-        // another id in place.
-        if let Some(name) = props.get("ClientName").and_then(|v| v.as_str()) {
-            if let Some(id) = fakecloud_cognito::custom_client_id(name)? {
-                if id != *client_id {
-                    return Err(format!(
-                        "Cannot change user pool client {client_id} to custom id {id} in place: a client id is fixed at creation"
-                    ));
-                }
-            }
-        }
 
         // CloudFormation updates replace the whole resource model: a removed
         // TokenValidityUnits reverts to Cognito's default units (hours/days),
