@@ -9703,7 +9703,7 @@ fn sub_cannot_be_deleted_via_attribute_delete() {
     }
 }
 
-/// Create a UsernameAttributes=["email"] pool with a USER_AUTH-capable client
+/// Create a UsernameAttributes=["email"] pool with a USER_AUTH/CUSTOM_AUTH-capable client
 /// and one user created by email. Returns (svc, pool_id, client_id, minted, email).
 fn setup_email_alias_pool() -> (CognitoService, String, String, String, String) {
     let state = std::sync::Arc::new(parking_lot::RwLock::new(
@@ -9730,6 +9730,7 @@ fn setup_email_alias_pool() -> (CognitoService, String, String, String, String) 
                 "ClientName": "c",
                 "ExplicitAuthFlows": [
                     "ALLOW_USER_AUTH",
+                    "ALLOW_CUSTOM_AUTH",
                     "ALLOW_USER_PASSWORD_AUTH",
                     "ALLOW_ADMIN_USER_PASSWORD_AUTH"
                 ],
@@ -9752,6 +9753,92 @@ fn setup_email_alias_pool() -> (CognitoService, String, String, String, String) 
     let ub: Value = serde_json::from_slice(resp.body.expect_bytes()).unwrap();
     let minted = ub["User"]["Username"].as_str().unwrap().to_string();
     (svc, pool_id, client_id, minted, email)
+}
+
+#[test]
+fn custom_auth_resolves_email_alias_to_stored_username() {
+    let (svc, _pool_id, client_id, minted, email) = setup_email_alias_pool();
+    assert_ne!(
+        minted, email,
+        "email-based pools store a generated username"
+    );
+
+    for username in [&email, &minted] {
+        let body = json!({
+            "ClientId": client_id,
+            "AuthFlow": "CUSTOM_AUTH",
+            "AuthParameters": {"USERNAME": username},
+        });
+        let err = block_on(svc.initiate_auth(&make_req("InitiateAuth", &body.to_string())))
+            .err()
+            .expect("custom auth requires a DefineAuthChallenge trigger");
+        assert_eq!(
+            err.code(),
+            "InvalidLambdaResponseException",
+            "{username} must resolve the user and reach the challenge setup: {err}"
+        );
+    }
+}
+
+#[test]
+fn custom_auth_rejects_unknown_email_alias() {
+    let (svc, _pool_id, client_id, _minted, _email) = setup_email_alias_pool();
+    let body = json!({
+        "ClientId": client_id,
+        "AuthFlow": "CUSTOM_AUTH",
+        "AuthParameters": {"USERNAME": "unknown@example.com"},
+    });
+    let err = block_on(svc.initiate_auth(&make_req("InitiateAuth", &body.to_string())))
+        .err()
+        .expect("unknown users must be rejected before the challenge");
+    assert_eq!(err.code(), "NotAuthorizedException");
+}
+
+#[test]
+fn custom_auth_checks_secret_hash_before_resolving_email_alias() {
+    let (svc, pool_id, _client_id, minted, email) = setup_email_alias_pool();
+    let client = resp_json(
+        &svc.create_user_pool_client(&make_req(
+            "CreateUserPoolClient",
+            &json!({
+                "UserPoolId": pool_id,
+                "ClientName": "custom-auth-secret",
+                "GenerateSecret": true,
+                "ExplicitAuthFlows": ["ALLOW_CUSTOM_AUTH"],
+            })
+            .to_string(),
+        ))
+        .unwrap(),
+    );
+    let client_id = client["UserPoolClient"]["ClientId"].as_str().unwrap();
+    let client_secret = client["UserPoolClient"]["ClientSecret"].as_str().unwrap();
+    let email_hash = crate::service::compute_secret_hash(&email, client_id, client_secret);
+    let username_hash = crate::service::compute_secret_hash(&minted, client_id, client_secret);
+
+    for (hash, expected_code) in [
+        (None, "InvalidParameterException"),
+        (Some("incorrect"), "NotAuthorizedException"),
+        (Some(username_hash.as_str()), "NotAuthorizedException"),
+        (Some(email_hash.as_str()), "InvalidLambdaResponseException"),
+    ] {
+        let mut params = json!({"USERNAME": email});
+        if let Some(hash) = hash {
+            params["SECRET_HASH"] = json!(hash);
+        }
+        let body = json!({
+            "ClientId": client_id,
+            "AuthFlow": "CUSTOM_AUTH",
+            "AuthParameters": params,
+        });
+        let err = block_on(svc.initiate_auth(&make_req("InitiateAuth", &body.to_string())))
+            .err()
+            .expect("authentication must validate the client secret before the challenge");
+        assert_eq!(
+            err.code(),
+            expected_code,
+            "unexpected custom-auth error: {err}"
+        );
+    }
 }
 
 #[test]

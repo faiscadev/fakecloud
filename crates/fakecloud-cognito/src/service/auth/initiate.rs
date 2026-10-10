@@ -1105,6 +1105,15 @@ impl CognitoService {
         // SECRET_HASH enforcement for clients with a secret.
         self.require_secret_hash(client_id, username, auth_params.get("SECRET_HASH"))?;
 
+        // Resolve aliases after validating the hash against the supplied identifier.
+        let resolved_username = {
+            let accounts = self.state.read();
+            let empty = CognitoState::new(&req.account_id, &req.region);
+            let state = accounts.get(&req.account_id).unwrap_or(&empty);
+            crate::service::resolve_alias_username(state, pool_id, username)
+        };
+        let username = resolved_username.as_str();
+
         let (user_attrs, region, account_id) = {
             let accounts = self.state.read();
             let empty = CognitoState::new(&req.account_id, &req.region);

@@ -30,6 +30,78 @@ use aws_sdk_cognitoidentityprovider::types::{
 };
 
 #[tokio::test]
+async fn cognito_custom_auth_resolves_email_alias() {
+    use aws_sdk_cognitoidentityprovider::types::{
+        AuthFlowType, MessageActionType, UsernameAttributeType,
+    };
+
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+    let pool = client
+        .create_user_pool()
+        .pool_name("custom-auth-email-alias")
+        .username_attributes(UsernameAttributeType::Email)
+        .send()
+        .await
+        .expect("create email-based pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap();
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(pool_id)
+        .client_name("custom-auth-email-alias")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowCustomAuth)
+        .send()
+        .await
+        .expect("create custom-auth client");
+    let client_id = app.user_pool_client().unwrap().client_id().unwrap();
+    let email = "owner@example.com";
+    let created = client
+        .admin_create_user()
+        .user_pool_id(pool_id)
+        .username(email)
+        .message_action(MessageActionType::Suppress)
+        .send()
+        .await
+        .expect("create user by email");
+    let username = created.user().unwrap().username().unwrap();
+    assert_ne!(username, email);
+
+    // Without a Lambda trigger, both identifiers must find the user and reach
+    // the same challenge configuration error rather than fail the user lookup.
+    for identifier in [email, username] {
+        let error = client
+            .initiate_auth()
+            .client_id(client_id)
+            .auth_flow(AuthFlowType::CustomAuth)
+            .auth_parameters("USERNAME", identifier)
+            .send()
+            .await
+            .expect_err("custom auth requires a DefineAuthChallenge trigger");
+        assert!(
+            error
+                .as_service_error()
+                .is_some_and(|error| error.is_invalid_lambda_response_exception()),
+            "{identifier} must resolve the user and reach challenge setup: {error:?}"
+        );
+    }
+
+    let error = client
+        .initiate_auth()
+        .client_id(client_id)
+        .auth_flow(AuthFlowType::CustomAuth)
+        .auth_parameters("USERNAME", "unknown@example.com")
+        .send()
+        .await
+        .expect_err("unknown users must be rejected");
+    assert!(
+        error
+            .as_service_error()
+            .is_some_and(|error| error.is_not_authorized_exception()),
+        "unknown users must fail before the challenge: {error:?}"
+    );
+}
+
+#[tokio::test]
 async fn cognito_create_describe_user_pool() {
     let server = TestServer::start().await;
     let client = server.cognito_client().await;
