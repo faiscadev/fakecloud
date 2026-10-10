@@ -1149,6 +1149,25 @@ pub struct MintAuthorizationCodeResponse {
     pub code: String,
 }
 
+/// Request body for the `/_fakecloud/cognito/software-token` admin
+/// endpoint: gives the user a verified authenticator-app (TOTP) secret, as
+/// if they had completed `AssociateSoftwareToken` + `VerifySoftwareToken`
+/// with it. `secret_code` is base32, like `AssociateSoftwareToken`'s
+/// `SecretCode`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSoftwareTokenRequest {
+    pub user_pool_id: String,
+    pub username: String,
+    pub secret_code: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetSoftwareTokenResponse {
+    pub enrolled: bool,
+}
+
 // ── API Gateway v2 ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

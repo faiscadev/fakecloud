@@ -1246,6 +1246,25 @@ impl CognitoClient<'_> {
         FakeCloud::parse(resp).await
     }
 
+    /// Give a user a verified authenticator-app (TOTP) secret chosen by
+    /// the caller, so its codes can be generated outside fakecloud.
+    pub async fn set_software_token(
+        &self,
+        req: &SetSoftwareTokenRequest,
+    ) -> Result<SetSoftwareTokenResponse, Error> {
+        let resp = self
+            .fc
+            .client
+            .post(format!(
+                "{}/_fakecloud/cognito/software-token",
+                self.fc.base_url
+            ))
+            .json(req)
+            .send()
+            .await?;
+        FakeCloud::parse(resp).await
+    }
+
     /// Register one or more plaintext passwords with the compromised-
     /// credentials set so subsequent `InitiateAuth` /
     /// `AdminInitiateAuth` calls trip the `BLOCK` action when the pool's

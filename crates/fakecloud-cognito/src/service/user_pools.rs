@@ -19,6 +19,19 @@ use super::{
     validate_range, validate_string_length, CognitoService,
 };
 
+/// Reserved `UserPoolTags` key (and `ClientName` prefix, as
+/// `_custom_id_:<id>`) that picks the id of a new user pool or app client
+/// instead of a random one, the same convention LocalStack uses.
+const CUSTOM_ID_TAG: &str = "_custom_id_";
+
+fn invalid_parameter(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterException",
+        msg.into(),
+    )
+}
+
 impl CognitoService {
     pub(super) async fn create_user_pool(
         &self,
@@ -79,6 +92,25 @@ impl CognitoService {
             ));
         }
 
+        let custom_pool_id = body["UserPoolTags"][CUSTOM_ID_TAG].as_str();
+        if let Some(id) = custom_pool_id {
+            // The region is read back out of the pool id, so it must be the
+            // request's region.
+            let valid = id
+                .strip_prefix(req.region.as_str())
+                .and_then(|rest| rest.strip_prefix('_'))
+                .is_some_and(|suffix| {
+                    !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_alphanumeric())
+                })
+                && id.len() <= 55;
+            if !valid {
+                return Err(invalid_parameter(format!(
+                    "Invalid {CUSTOM_ID_TAG} tag value {id}: a custom user pool id must be <region>_<alphanumeric id> in the request's region ({}) and at most 55 characters.",
+                    req.region
+                )));
+            }
+        }
+
         // Generate the per-pool RSA-2048 keypair eagerly so every
         // token-issuing path (InitiateAuth, RespondToAuthChallenge,
         // AdminInitiateAuth, GetTokensFromRefreshToken, OAuth2 token
@@ -104,12 +136,24 @@ impl CognitoService {
         let signing_kid = signing.kid;
 
         let mut accounts = self.state.write();
+        // Pool ids are global: the JWKS, discovery and hosted-UI routes find a
+        // pool by id across every account.
+        if let Some(id) = custom_pool_id {
+            if accounts.iter().any(|(_, a)| a.user_pools.contains_key(id)) {
+                return Err(invalid_parameter(format!("User pool {id} already exists.")));
+            }
+        }
         let state = accounts.get_or_create(&req.account_id);
         // The pool id bakes in the request's credential-scope region
         // (`{region}_{rand}`) so it becomes the single source of truth for the
         // pool's region; the ARN and every issuer/discovery derivation read the
         // region back out of the pool id. Storage is keyed by pool id, unchanged.
-        let pool_id = generate_pool_id(req.region.as_str());
+        // A `_custom_id_` tag picks the id instead, so local setups can create
+        // a pool whose id is known in advance.
+        let pool_id = match custom_pool_id {
+            Some(id) => id.to_string(),
+            None => generate_pool_id(req.region.as_str()),
+        };
         let arn = crate::user_pool_arn(req.region.as_str(), &state.account_id, &pool_id);
 
         let now = Utc::now();
@@ -587,13 +631,45 @@ impl CognitoService {
             AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidParameterException", m)
         })?;
 
+        // App clients have no tags, so a `_custom_id_:<id>` ClientName picks
+        // the client id instead.
+        let custom_client_id = client_name
+            .strip_prefix(CUSTOM_ID_TAG)
+            .and_then(|rest| rest.strip_prefix(':'));
+        if let Some(id) = custom_client_id {
+            let valid = (1..=128).contains(&id.len())
+                && id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+');
+            if !valid {
+                return Err(invalid_parameter(format!(
+                    "Invalid custom client id {id}: it must be 1-128 characters of letters, digits, _ and +."
+                )));
+            }
+        }
+
         let mut accounts = self.state.write();
+        // Client ids are global: the OAuth2 endpoints find a client by id
+        // across every account.
+        if let Some(id) = custom_client_id {
+            if accounts
+                .iter()
+                .any(|(_, a)| a.user_pool_clients.contains_key(id))
+            {
+                return Err(invalid_parameter(format!(
+                    "User pool client {id} already exists."
+                )));
+            }
+        }
         let state = accounts.get_or_create(&req.account_id);
 
         // Validate pool exists
         ensure_user_pool_exists(state, pool_id)?;
 
-        let client_id = generate_client_id();
+        let client_id = match custom_client_id {
+            Some(id) => id.to_string(),
+            None => generate_client_id(),
+        };
         let generate_secret = body["GenerateSecret"].as_bool().unwrap_or(false);
         let client_secret = if generate_secret {
             Some(generate_client_secret())

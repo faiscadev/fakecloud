@@ -3537,6 +3537,38 @@ pub fn mint_authorization_code(
     Err(MintAuthorizationCodeError::InvalidClient)
 }
 
+/// Validation failures from [`set_software_token`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetSoftwareTokenError {
+    /// The secret is empty or not base32.
+    InvalidSecret,
+    /// The user isn't in the pool, or the pool doesn't exist.
+    UserNotFound,
+}
+
+/// Give a user a verified authenticator-app (TOTP) secret chosen by the
+/// caller, the state `AssociateSoftwareToken` + `VerifySoftwareToken` leave
+/// behind, so a local setup can enroll a known secret in an authenticator app.
+pub fn set_software_token(
+    state: &SharedCognitoState,
+    user_pool_id: &str,
+    username: &str,
+    secret_code: &str,
+) -> Result<(), SetSoftwareTokenError> {
+    if crate::totp::compute_totp_at(secret_code, 0).is_none() {
+        return Err(SetSoftwareTokenError::InvalidSecret);
+    }
+    let mut mas = state.write();
+    let user = mas
+        .iter_mut()
+        .find_map(|(_, account)| account.users.get_mut(user_pool_id)?.get_mut(username))
+        .ok_or(SetSoftwareTokenError::UserNotFound)?;
+    user.totp_secret = Some(secret_code.to_string());
+    user.totp_verified = true;
+    user.user_last_modified_date = Utc::now();
+    Ok(())
+}
+
 /// Query parameters accepted by [`handle_oauth2_authorize`]. Mirrors
 /// the OAuth 2.0 Authorization Request shape (RFC 6749 §4.1.1 /
 /// §4.2.1) plus the synthetic `username`/`password` pair fakecloud

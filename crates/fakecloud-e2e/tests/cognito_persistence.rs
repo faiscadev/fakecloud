@@ -263,3 +263,112 @@ async fn persistence_auth_events_not_persisted() {
         "auth_events buffer should reset on restart, got: {post:?}"
     );
 }
+
+/// Custom pool/client ids and a seeded authenticator secret survive a
+/// restart. Seeding is the last write before the restart, so the
+/// introspection endpoint itself must persist it.
+#[tokio::test]
+async fn persistence_custom_ids_and_seeded_software_token() {
+    use aws_sdk_cognitoidentityprovider::types::{
+        AuthFlowType, ChallengeNameType, ExplicitAuthFlowsType, SoftwareTokenMfaConfigType,
+        UserPoolMfaType,
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let mut server = TestServer::start_persistent(tmp.path()).await;
+    let client = server.cognito_client().await;
+
+    client
+        .create_user_pool()
+        .pool_name("local")
+        .user_pool_tags("_custom_id_", "us-east-1_Local")
+        .send()
+        .await
+        .unwrap();
+    client
+        .set_user_pool_mfa_config()
+        .user_pool_id("us-east-1_Local")
+        .mfa_configuration(UserPoolMfaType::On)
+        .software_token_mfa_configuration(
+            SoftwareTokenMfaConfigType::builder().enabled(true).build(),
+        )
+        .send()
+        .await
+        .unwrap();
+    client
+        .create_user_pool_client()
+        .user_pool_id("us-east-1_Local")
+        .client_name("_custom_id_:localclient")
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowAdminUserPasswordAuth)
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_create_user()
+        .user_pool_id("us-east-1_Local")
+        .username("dev")
+        .send()
+        .await
+        .unwrap();
+    client
+        .admin_set_user_password()
+        .user_pool_id("us-east-1_Local")
+        .username("dev")
+        .password("Passw0rd!")
+        .permanent(true)
+        .send()
+        .await
+        .unwrap();
+
+    let secret = "JBSWY3DPEHPK3PXP";
+    let seeded = reqwest::Client::new()
+        .post(format!(
+            "{}/_fakecloud/cognito/software-token",
+            server.endpoint()
+        ))
+        .json(&serde_json::json!({
+            "userPoolId": "us-east-1_Local",
+            "username": "dev",
+            "secretCode": secret,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(seeded.status(), 200);
+
+    drop(client);
+    server.restart().await;
+    let client = server.cognito_client().await;
+
+    let challenge = client
+        .admin_initiate_auth()
+        .user_pool_id("us-east-1_Local")
+        .client_id("localclient")
+        .auth_flow(AuthFlowType::AdminUserPasswordAuth)
+        .auth_parameters("USERNAME", "dev")
+        .auth_parameters("PASSWORD", "Passw0rd!")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        challenge.challenge_name(),
+        Some(&ChallengeNameType::SoftwareTokenMfa)
+    );
+    let done = client
+        .admin_respond_to_auth_challenge()
+        .user_pool_id("us-east-1_Local")
+        .client_id("localclient")
+        .challenge_name(ChallengeNameType::SoftwareTokenMfa)
+        .session(challenge.session().unwrap())
+        .challenge_responses("USERNAME", "dev")
+        .challenge_responses(
+            "SOFTWARE_TOKEN_MFA_CODE",
+            fakecloud_cognito::totp::compute_totp_now(secret).unwrap(),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert!(done
+        .authentication_result()
+        .and_then(|r| r.access_token())
+        .is_some());
+}

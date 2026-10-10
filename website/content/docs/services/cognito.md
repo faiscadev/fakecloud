@@ -10,6 +10,7 @@ fakecloud implements **126 of 126** Cognito User Pools operations at 100% Smithy
 
 - **User pools** — CRUD, password policies, attribute configuration, account recovery, email/SMS configuration
 - **App clients** — CRUD, OAuth flows, token validity, supported identity providers
+- **Fixed ids** — a `_custom_id_` user pool tag (`<region>_<alphanumeric id>`, in the request's region) sets the id of a new user pool, and a `_custom_id_:<id>` client name sets the id of a new app client, so local setups can use ids known in advance (the same convention as LocalStack). An id already in use is rejected with `InvalidParameterException`
 - **Users** — admin create/delete/update, self-signup, group membership
 - **Groups** — CRUD, user membership, precedence
 - **MFA** — SMS, TOTP, software token setup/verification
@@ -50,6 +51,7 @@ JSON protocol. `X-Amz-Target` header, JSON body, JSON responses.
 - `GET /_fakecloud/cognito/auth-events` — list auth events (signup, signin, failures)
 - `POST /_fakecloud/cognito/authorization-codes` — mint a single-use OAuth2 authorization code for the `authorization_code` grant (programmatic alternative to driving `/oauth2/authorize`)
 - `POST /_fakecloud/cognito/compromised-passwords` — register plaintext passwords as compromised; each is SHA-256 hashed server-side and added to the per-account set checked by `CompromisedCredentialsRiskConfiguration` enforcement
+- `POST /_fakecloud/cognito/software-token` — give a user a verified authenticator-app (TOTP) secret chosen by the caller (body `{"userPoolId", "username", "secretCode"}`, base32), as if they had completed `AssociateSoftwareToken` + `VerifySoftwareToken` with it, so the same secret can be added to an authenticator app
 - `GET /_fakecloud/cognito/webauthn-credentials` — list registered WebAuthn credentials with parsed `packed`-attestation info (AAGUID, certificate chain summary, signature counter)
 - `GET /_fakecloud/cognito/pretokengen/invocations` — list PreTokenGeneration Lambda trigger invocations recorded by `InitiateAuth`, with full request/response payloads plus pre-parsed `claims_added`, `claims_overridden`, and `group_overrides` so tests can assert claim mutation flows without inspecting the issued JWT
 

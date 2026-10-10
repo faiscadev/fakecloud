@@ -12,10 +12,10 @@ pub use service::{
     default_refresh_token_validity, ensure_pool_signing_key, handle_oauth2_authorize,
     handle_oauth2_revoke, handle_oauth2_token, handle_oauth2_userinfo, mint_authorization_code,
     oidc_discovery_document, pool_existence_and_domain, pool_jwks_document, resolve_token_validity,
-    save_cognito_snapshot, validate_token_validity, CognitoIdentityService, CognitoService,
-    MintAuthorizationCodeError, MintAuthorizationCodeRequest, OAuth2AuthorizeError,
+    save_cognito_snapshot, set_software_token, validate_token_validity, CognitoIdentityService,
+    CognitoService, MintAuthorizationCodeError, MintAuthorizationCodeRequest, OAuth2AuthorizeError,
     OAuth2AuthorizeOutcome, OAuth2AuthorizeRequest, OAuthRevokeError, OAuthTokenError,
-    OAuthTokenResponse, OAuthUserInfoError, ResolvedTokenValidity,
+    OAuthTokenResponse, OAuthUserInfoError, ResolvedTokenValidity, SetSoftwareTokenError,
 };
 pub use state::{
     default_schema_attributes, AccountRecoverySetting, AdminCreateUserConfig,

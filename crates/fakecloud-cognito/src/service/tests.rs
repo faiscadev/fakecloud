@@ -10544,3 +10544,86 @@ fn describe_terms_by_client_resolves_by_client_and_name() {
         assert_eq!(err.code(), "ResourceNotFoundException");
     }
 }
+
+// ── Custom ids and seeded software tokens ──
+
+#[test]
+fn create_user_pool_takes_id_from_custom_id_tag() {
+    let (svc, _) = make_svc();
+    let body = json!({"PoolName": "local", "UserPoolTags": {"_custom_id_": "us-east-1_Local"}});
+    let req = make_req("CreateUserPool", &body.to_string());
+    let resp = block_on(svc.create_user_pool(&req)).unwrap();
+    let b = resp_json(&resp);
+    assert_eq!(b["UserPool"]["Id"], "us-east-1_Local");
+    assert!(b["UserPool"]["Arn"]
+        .as_str()
+        .unwrap()
+        .ends_with(":userpool/us-east-1_Local"));
+
+    let err = expect_err(block_on(svc.create_user_pool(&req)));
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    for bad in ["eu-west-1_Local", "us-east-1_", "us-east-1_lo-cal", "Local"] {
+        let body = json!({"PoolName": "bad", "UserPoolTags": {"_custom_id_": bad}});
+        let req = make_req("CreateUserPool", &body.to_string());
+        let err = expect_err(block_on(svc.create_user_pool(&req)));
+        assert_eq!(err.code(), "InvalidParameterException", "{bad}");
+    }
+}
+
+#[test]
+fn create_user_pool_client_takes_id_from_custom_id_name() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let body = json!({"UserPoolId": pool_id, "ClientName": "_custom_id_:localclient"});
+    let req = make_req("CreateUserPoolClient", &body.to_string());
+    let resp = svc.create_user_pool_client(&req).unwrap();
+    let b = resp_json(&resp);
+    assert_eq!(b["UserPoolClient"]["ClientId"], "localclient");
+
+    let err = expect_err(svc.create_user_pool_client(&req));
+    assert_eq!(err.code(), "InvalidParameterException");
+
+    for bad in [
+        "_custom_id_:",
+        "_custom_id_:local client",
+        "_custom_id_:local-client",
+    ] {
+        let body = json!({"UserPoolId": pool_id, "ClientName": bad});
+        let req = make_req("CreateUserPoolClient", &body.to_string());
+        let err = expect_err(svc.create_user_pool_client(&req));
+        assert_eq!(err.code(), "InvalidParameterException", "{bad}");
+    }
+}
+
+#[test]
+fn set_software_token_enrolls_a_verified_secret() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    admin_create_user_helper(&svc, &pool_id, "alice");
+
+    set_software_token(&state, &pool_id, "alice", "JBSWY3DPEHPK3PXP").unwrap();
+    {
+        let mas = state.read();
+        let user = &mas.default_ref().users[&pool_id]["alice"];
+        assert_eq!(user.totp_secret.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+        assert!(user.totp_verified);
+    }
+
+    assert_eq!(
+        set_software_token(&state, &pool_id, "alice", "not base32!"),
+        Err(SetSoftwareTokenError::InvalidSecret)
+    );
+    assert_eq!(
+        set_software_token(&state, &pool_id, "alice", ""),
+        Err(SetSoftwareTokenError::InvalidSecret)
+    );
+    assert_eq!(
+        set_software_token(&state, &pool_id, "bob", "JBSWY3DPEHPK3PXP"),
+        Err(SetSoftwareTokenError::UserNotFound)
+    );
+    assert_eq!(
+        set_software_token(&state, "us-east-1_missing", "alice", "JBSWY3DPEHPK3PXP"),
+        Err(SetSoftwareTokenError::UserNotFound)
+    );
+}
