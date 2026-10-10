@@ -173,6 +173,21 @@ impl ResourceProvisioner {
             .get_mut(pool_id)
             .ok_or_else(|| format!("User pool {pool_id} not yet provisioned"))?;
 
+        // The id a `_custom_id_` tag picks is fixed at creation; a stack
+        // update cannot move the pool to another id in place.
+        if let Some(id) = props
+            .get("UserPoolTags")
+            .and_then(|tags| tags.get(fakecloud_cognito::CUSTOM_ID_TAG))
+            .and_then(|v| v.as_str())
+        {
+            if id != pool_id {
+                return Err(format!(
+                    "Cannot change user pool {pool_id} to id {id} through the {} tag: a user pool id is fixed at creation",
+                    fakecloud_cognito::CUSTOM_ID_TAG
+                ));
+            }
+        }
+
         if let Some(pool_name) = props.get("PoolName").and_then(|v| v.as_str()) {
             pool.name = pool_name.to_string();
         }
@@ -224,18 +239,7 @@ impl ResourceProvisioner {
     pub(super) fn delete_cognito_user_pool(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cognito_state.write();
         let state = accounts.get_or_create(&self.account_id);
-        state.user_pools.remove(physical_id);
-        // Cascade: drop clients tied to this pool, plus per-pool side maps.
-        state
-            .user_pool_clients
-            .retain(|_, c| c.user_pool_id != physical_id);
-        state.users.remove(physical_id);
-        state.groups.remove(physical_id);
-        state.user_groups.remove(physical_id);
-        state.identity_providers.remove(physical_id);
-        state.resource_servers.remove(physical_id);
-        state.import_jobs.remove(physical_id);
-        state.domains.retain(|_, d| d.user_pool_id != physical_id);
+        fakecloud_cognito::purge_user_pool(state, physical_id);
         Ok(())
     }
 
@@ -260,16 +264,20 @@ impl ResourceProvisioner {
         let custom_client_id = fakecloud_cognito::custom_client_id(&client_name)?;
 
         let mut accounts = self.cognito_state.write();
-        if let Some(id) = &custom_client_id {
-            fakecloud_cognito::ensure_user_pool_client_id_unused(&accounts, id)?;
-        }
-        let state = accounts.get_or_create(&self.account_id);
-        if !state.user_pools.contains_key(&pool_id) {
+        if !accounts
+            .get_or_create(&self.account_id)
+            .user_pools
+            .contains_key(&pool_id)
+        {
             // Force CFN to retry once UserPool resource provisions.
             return Err(format!(
                 "User pool {pool_id} does not exist yet — retry once it has been provisioned"
             ));
         }
+        if let Some(id) = &custom_client_id {
+            fakecloud_cognito::ensure_user_pool_client_id_unused(&accounts, id)?;
+        }
+        let state = accounts.get_or_create(&self.account_id);
 
         let client_id: String = custom_client_id.unwrap_or_else(|| {
             format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
@@ -392,6 +400,18 @@ impl ResourceProvisioner {
             .get_mut(client_id)
             .ok_or_else(|| format!("User pool client {client_id} not yet provisioned"))?;
 
+        // Likewise a `_custom_id_:<id>` ClientName cannot move the client to
+        // another id in place.
+        if let Some(name) = props.get("ClientName").and_then(|v| v.as_str()) {
+            if let Some(id) = fakecloud_cognito::custom_client_id(name)? {
+                if id != *client_id {
+                    return Err(format!(
+                        "Cannot change user pool client {client_id} to custom id {id} in place: a client id is fixed at creation"
+                    ));
+                }
+            }
+        }
+
         // CloudFormation updates replace the whole resource model: a removed
         // TokenValidityUnits reverts to Cognito's default units (hours/days),
         // and removed validity values revert to their defaults (unset access/id,
@@ -456,7 +476,7 @@ impl ResourceProvisioner {
     pub(super) fn delete_cognito_user_pool_client(&self, physical_id: &str) -> Result<(), String> {
         let mut accounts = self.cognito_state.write();
         let state = accounts.get_or_create(&self.account_id);
-        state.user_pool_clients.remove(physical_id);
+        fakecloud_cognito::purge_user_pool_client(state, physical_id);
         Ok(())
     }
 

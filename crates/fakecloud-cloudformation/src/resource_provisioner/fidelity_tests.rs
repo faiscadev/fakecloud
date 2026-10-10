@@ -318,6 +318,170 @@ fn cognito_user_pool_client_takes_id_from_custom_id_name() {
     assert!(err.contains("Invalid custom client id"), "{err}");
 }
 
+#[test]
+fn cognito_custom_id_pool_delete_and_recreate_starts_clean() {
+    let prov = make_provisioner();
+    let props = json!({"PoolName": "p", "UserPoolTags": {"_custom_id_": "us-east-1_Local"}});
+    let pool = create(&prov, "AWS::Cognito::UserPool", "P", props.clone());
+    let client = create(
+        &prov,
+        "AWS::Cognito::UserPoolClient",
+        "C",
+        json!({"UserPoolId": "us-east-1_Local", "ClientName": "_custom_id_:localclient"}),
+    );
+    let arn = {
+        let mut accounts = prov.cognito_state.write();
+        let state = accounts.get_or_create(ACCT);
+        let arn = state.user_pools["us-east-1_Local"].arn.clone();
+        state
+            .tags
+            .insert(arn.clone(), [("env".to_string(), "old".to_string())].into());
+        state
+            .risk_configurations
+            .insert("us-east-1_Local:localclient".to_string(), json!({}));
+        arn
+    };
+
+    prov.delete_resource(&client).unwrap();
+    prov.delete_resource(&pool).unwrap();
+    {
+        let accounts = prov.cognito_state.read();
+        let state = accounts.get(ACCT).unwrap();
+        assert!(!state.tags.contains_key(&arn));
+        assert!(state.risk_configurations.is_empty());
+        assert!(state.user_pool_clients.is_empty());
+    }
+    let again = create(&prov, "AWS::Cognito::UserPool", "P", props);
+    assert_eq!(again.physical_id, "us-east-1_Local");
+    assert!(!prov
+        .cognito_state
+        .read()
+        .get(ACCT)
+        .unwrap()
+        .tags
+        .contains_key(&arn));
+}
+
+#[test]
+fn cognito_custom_client_id_waits_for_its_pool_first() {
+    let prov = make_provisioner();
+    let pool = create(
+        &prov,
+        "AWS::Cognito::UserPool",
+        "P",
+        json!({"PoolName": "p"}),
+    );
+    create(
+        &prov,
+        "AWS::Cognito::UserPoolClient",
+        "C",
+        json!({"UserPoolId": pool.physical_id, "ClientName": "_custom_id_:taken"}),
+    );
+    let err = create_err(
+        &prov,
+        "AWS::Cognito::UserPoolClient",
+        "C2",
+        json!({"UserPoolId": "us-east-1_missing", "ClientName": "_custom_id_:taken"}),
+    );
+    assert!(err.contains("does not exist yet"), "{err}");
+}
+
+#[test]
+fn cognito_user_pool_client_update_cannot_change_custom_id() {
+    let prov = make_provisioner();
+    let pool = create(
+        &prov,
+        "AWS::Cognito::UserPool",
+        "P",
+        json!({"PoolName": "p"}),
+    );
+    let client = create(
+        &prov,
+        "AWS::Cognito::UserPoolClient",
+        "C",
+        json!({"UserPoolId": pool.physical_id, "ClientName": "_custom_id_:localclient"}),
+    );
+    let update = |name: &str| {
+        prov.update_resource(
+            &client,
+            &make_resource(
+                "AWS::Cognito::UserPoolClient",
+                "C",
+                json!({"UserPoolId": pool.physical_id, "ClientName": name}),
+            ),
+        )
+    };
+
+    let err = update("_custom_id_:otherclient").expect_err("changing the custom id must fail");
+    assert!(err.contains("fixed at creation"), "{err}");
+    update("_custom_id_:localclient").unwrap();
+    update("plain-name").unwrap();
+    let accounts = prov.cognito_state.read();
+    let stored = &accounts.get(ACCT).unwrap().user_pool_clients["localclient"];
+    assert_eq!(stored.client_name, "plain-name");
+}
+
+#[test]
+fn cognito_user_pool_update_cannot_change_custom_id() {
+    let prov = make_provisioner();
+    let sr = create(
+        &prov,
+        "AWS::Cognito::UserPool",
+        "P",
+        json!({"PoolName": "p"}),
+    );
+    let err = prov
+        .update_resource(
+            &sr,
+            &make_resource(
+                "AWS::Cognito::UserPool",
+                "P",
+                json!({"PoolName": "p", "UserPoolTags": {"_custom_id_": "us-east-1_Other"}}),
+            ),
+        )
+        .expect_err("adding a custom id must fail");
+    assert!(err.contains("fixed at creation"), "{err}");
+
+    let custom = create(
+        &prov,
+        "AWS::Cognito::UserPool",
+        "Q",
+        json!({"PoolName": "q", "UserPoolTags": {"_custom_id_": "us-east-1_Local"}}),
+    );
+    let err = prov
+        .update_resource(
+            &custom,
+            &make_resource(
+                "AWS::Cognito::UserPool",
+                "Q",
+                json!({"PoolName": "q", "UserPoolTags": {"_custom_id_": "us-east-1_Moved"}}),
+            ),
+        )
+        .expect_err("changing the custom id must fail");
+    assert!(err.contains("fixed at creation"), "{err}");
+
+    // Keeping the same id, or dropping the tag, updates in place.
+    for tags in [
+        json!({"_custom_id_": "us-east-1_Local", "k": "v"}),
+        json!({}),
+    ] {
+        prov.update_resource(
+            &custom,
+            &make_resource(
+                "AWS::Cognito::UserPool",
+                "Q",
+                json!({"PoolName": "q", "UserPoolTags": tags}),
+            ),
+        )
+        .unwrap();
+    }
+    assert!(
+        prov.cognito_state.read().get(ACCT).unwrap().user_pools["us-east-1_Local"]
+            .user_pool_tags
+            .is_empty()
+    );
+}
+
 // ---------------------------------------------------------------------------
 // 3. RestApi / HttpApi OpenAPI import.
 // ---------------------------------------------------------------------------

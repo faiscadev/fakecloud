@@ -14,15 +14,7 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsServiceError};
 
 use crate::state::ReplicaEntry;
 
-use super::{ensure_user_pool_exists, require_str, CognitoService};
-
-fn invalid_parameter(msg: impl Into<String>) -> AwsServiceError {
-    AwsServiceError::aws_error(
-        StatusCode::BAD_REQUEST,
-        "InvalidParameterException",
-        msg.into(),
-    )
-}
+use super::{ensure_user_pool_exists, invalid_parameter, require_str, CognitoService};
 
 fn not_found(msg: impl Into<String>) -> AwsServiceError {
     AwsServiceError::aws_error(

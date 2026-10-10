@@ -29,6 +29,8 @@ use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceErr
 use fakecloud_iam::xml_responses::{generate_role_id, StsCredentials};
 use fakecloud_iam::{CredentialIdentity, SharedIamState, StsTempCredential};
 
+use super::invalid_parameter;
+
 use crate::state::{
     CognitoIdentityProvider, CognitoState, FederatedIdentity, IdentityPool,
     IdentityPoolRoleAttachment, PrincipalTagAttributeMap, SharedCognitoState,
@@ -127,14 +129,6 @@ impl AwsService for CognitoIdentityService {
 
 /// Return `InvalidParameterException` — the one error every cognito-identity
 /// op in the Smithy model declares for input validation.
-fn invalid_parameter(msg: impl Into<String>) -> AwsServiceError {
-    AwsServiceError::aws_error(
-        StatusCode::BAD_REQUEST,
-        "InvalidParameterException",
-        msg.into(),
-    )
-}
-
 /// Enforce a Smithy `@length(min, max)` trait. Returns
 /// `InvalidParameterException` (the declared error shape for every op
 /// that uses it).

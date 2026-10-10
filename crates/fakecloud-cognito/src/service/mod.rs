@@ -16,7 +16,7 @@ mod users;
 pub use identity_pools::CognitoIdentityService;
 pub use user_pools::{
     custom_client_id, custom_user_pool_id, ensure_user_pool_client_id_unused,
-    ensure_user_pool_id_unused, CUSTOM_ID_TAG,
+    ensure_user_pool_id_unused, purge_user_pool, purge_user_pool_client, CUSTOM_ID_TAG,
 };
 
 use std::collections::BTreeMap;
@@ -659,6 +659,15 @@ impl AwsService for CognitoService {
             "UpdateProvisionedLimit",
         ]
     }
+}
+
+/// The standard `InvalidParameterException` (400) with `msg`.
+pub(super) fn invalid_parameter(msg: impl Into<String>) -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::BAD_REQUEST,
+        "InvalidParameterException",
+        msg.into(),
+    )
 }
 
 /// Confirm that ``pool_id`` refers to a known user pool, returning the standard
