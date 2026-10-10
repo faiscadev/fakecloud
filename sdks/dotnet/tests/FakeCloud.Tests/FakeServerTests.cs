@@ -131,6 +131,31 @@ public sealed class FakeServerTests : IDisposable
     }
 
     [Fact]
+    public async Task SetSoftwareTokenPostsSecret()
+    {
+        _routes["POST /_fakecloud/cognito/software-token"] = (200, """{"enrolled":true}""");
+        var fc = new FakeCloudClient(_baseUrl);
+        var resp = await fc.Cognito.SetSoftwareTokenAsync(
+            new SetSoftwareTokenRequest("us-east-1_Local", "alice", "JBSWY3DPEHPK3PXP"));
+        Assert.True(resp.Enrolled);
+        Assert.Equal(
+            """{"userPoolId":"us-east-1_Local","username":"alice","secretCode":"JBSWY3DPEHPK3PXP"}""",
+            _requests.Single(r => r.Path == "/_fakecloud/cognito/software-token").Body);
+    }
+
+    [Fact]
+    public async Task SetSoftwareTokenSurfaces404()
+    {
+        _routes["POST /_fakecloud/cognito/software-token"] =
+            (404, """{"error":"user not found in pool"}""");
+        var fc = new FakeCloudClient(_baseUrl);
+        var err = await Assert.ThrowsAsync<FakeCloudException>(
+            () => fc.Cognito.SetSoftwareTokenAsync(
+                new SetSoftwareTokenRequest("us-east-1_Local", "nobody", "JBSWY3DPEHPK3PXP")));
+        Assert.Equal(404, err.Status);
+    }
+
+    [Fact]
     public async Task Non2xxThrowsWithStatusAndBody()
     {
         _routes["GET /_fakecloud/health"] = (503, "upstream unavailable");

@@ -10627,3 +10627,34 @@ fn set_software_token_enrolls_a_verified_secret() {
         Err(SetSoftwareTokenError::UserNotFound)
     );
 }
+
+#[test]
+fn set_software_token_resolves_an_email_alias() {
+    let (svc, state) = make_svc();
+    let resp = block_on(svc.create_user_pool(&make_req(
+        "CreateUserPool",
+        &json!({"PoolName": "emailpool", "UsernameAttributes": ["email"]}).to_string(),
+    )))
+    .unwrap();
+    let pool_id = resp_json(&resp)["UserPool"]["Id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let resp = block_on(svc.admin_create_user(&make_req(
+        "AdminCreateUser",
+        &json!({"UserPoolId": pool_id, "Username": "carol@example.com"}).to_string(),
+    )))
+    .unwrap();
+    let minted = resp_json(&resp)["User"]["Username"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(minted, "carol@example.com");
+
+    set_software_token(&state, &pool_id, "carol@example.com", "JBSWY3DPEHPK3PXP").unwrap();
+    let mas = state.read();
+    let user = &mas.default_ref().users[&pool_id][&minted];
+    assert_eq!(user.totp_secret.as_deref(), Some("JBSWY3DPEHPK3PXP"));
+    assert!(user.totp_verified);
+    assert!(!mas.default_ref().users[&pool_id].contains_key("carol@example.com"));
+}

@@ -156,6 +156,7 @@ All methods are async and accept an optional trailing `CancellationToken`.
 | `GetAuthEventsAsync()`                     | List auth events                                                                              |
 | `GetPreTokenGenInvocationsAsync()`         | List PreTokenGeneration Lambda trigger invocations recorded by `InitiateAuth`                 |
 | `MintAuthorizationCodeAsync(req)`          | Mint a single-use OAuth2 authorization code (programmatic alternative to `/oauth2/authorize`) |
+| `SetSoftwareTokenAsync(req)`               | Give a user a verified authenticator-app (TOTP) secret chosen by the caller                   |
 | `SetCompromisedPasswordsAsync(req)`        | Seed the compromised-password list used by Advanced Security                                  |
 | `GetWebAuthnCredentialsAsync()`            | List stored WebAuthn credentials                                                              |
 

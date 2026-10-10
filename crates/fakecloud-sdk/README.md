@@ -123,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 | `get_auth_events().await`                 | List recorded auth events                                  |
 | `get_pre_token_gen_invocations().await`   | List Pre-Token-Generation Lambda invocations               |
 | `mint_authorization_code(req).await`      | Mint an OAuth2 authorization code without a real browser   |
+| `set_software_token(req).await`           | Give a user a verified authenticator-app (TOTP) secret chosen by the caller |
 | `set_compromised_passwords(req).await`    | Seed the compromised-credentials list                      |
 | `get_webauthn_credentials().await`        | List registered WebAuthn credentials                       |
 

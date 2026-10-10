@@ -924,6 +924,21 @@ final class CognitoClient
         );
     }
 
+    /**
+     * Give a user a verified authenticator-app (TOTP) secret chosen by the
+     * caller, so its codes can be generated outside fakecloud.
+     */
+    public function setSoftwareToken(
+        SetSoftwareTokenRequest $req
+    ): SetSoftwareTokenResponse {
+        return SetSoftwareTokenResponse::fromArray(
+            $this->http->postJson(
+                '/_fakecloud/cognito/software-token',
+                $req->toArray()
+            )
+        );
+    }
+
     public function setCompromisedPasswords(
         CompromisedPasswordsRequest $req
     ): CompromisedPasswordsResponse {

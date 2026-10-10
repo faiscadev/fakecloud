@@ -95,6 +95,8 @@ import type {
   PreTokenGenInvocationsResponse,
   MintAuthorizationCodeRequest,
   MintAuthorizationCodeResponse,
+  SetSoftwareTokenRequest,
+  SetSoftwareTokenResponse,
   CompromisedPasswordsRequest,
   CompromisedPasswordsResponse,
   WebAuthnCredentialsResponse,
@@ -828,6 +830,24 @@ export class CognitoClient {
   ): Promise<MintAuthorizationCodeResponse> {
     const resp = await fetch(
       `${this.baseUrl}/_fakecloud/cognito/authorization-codes`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(req),
+      },
+    );
+    return parse(resp);
+  }
+
+  /**
+   * Give a user a verified authenticator-app (TOTP) secret chosen by the
+   * caller, so its codes can be generated outside fakecloud.
+   */
+  async setSoftwareToken(
+    req: SetSoftwareTokenRequest,
+  ): Promise<SetSoftwareTokenResponse> {
+    const resp = await fetch(
+      `${this.baseUrl}/_fakecloud/cognito/software-token`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },

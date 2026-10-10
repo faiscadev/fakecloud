@@ -20,16 +20,24 @@ impl ResourceProvisioner {
             .unwrap_or(&generated_name)
             .to_string();
 
-        let pool_id = format!(
-            "{}_{}",
-            self.region,
-            Uuid::new_v4()
-                .simple()
-                .to_string()
-                .chars()
-                .take(9)
-                .collect::<String>()
-        );
+        let user_pool_tags = parse_cognito_tags(props.get("UserPoolTags"));
+        // A `_custom_id_` tag picks the pool id, as it does for CreateUserPool.
+        let custom_pool_id = user_pool_tags
+            .get(fakecloud_cognito::CUSTOM_ID_TAG)
+            .map(|id| fakecloud_cognito::custom_user_pool_id(id, &self.region))
+            .transpose()?;
+        let pool_id = custom_pool_id.clone().unwrap_or_else(|| {
+            format!(
+                "{}_{}",
+                self.region,
+                Uuid::new_v4()
+                    .simple()
+                    .to_string()
+                    .chars()
+                    .take(9)
+                    .collect::<String>()
+            )
+        });
         let arn = fakecloud_cognito::user_pool_arn(&self.region, &self.account_id, &pool_id);
         let now = Utc::now();
 
@@ -67,7 +75,6 @@ impl ResourceProvisioner {
             .get("DeletionProtection")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
-        let user_pool_tags = parse_cognito_tags(props.get("UserPoolTags"));
         let email_configuration =
             parse_cognito_email_configuration(props.get("EmailConfiguration"));
         let sms_configuration = parse_cognito_sms_configuration(props.get("SmsConfiguration"));
@@ -128,6 +135,9 @@ impl ResourceProvisioner {
         };
 
         let mut accounts = self.cognito_state.write();
+        if let Some(id) = &custom_pool_id {
+            fakecloud_cognito::ensure_user_pool_id_unused(&accounts, id)?;
+        }
         let state = accounts.get_or_create(&self.account_id);
         state.user_pools.insert(pool_id.clone(), pool);
 
@@ -245,8 +255,14 @@ impl ResourceProvisioner {
             .and_then(|v| v.as_str())
             .unwrap_or(&generated_name)
             .to_string();
+        // A `_custom_id_:<id>` ClientName picks the client id, as it does for
+        // CreateUserPoolClient.
+        let custom_client_id = fakecloud_cognito::custom_client_id(&client_name)?;
 
         let mut accounts = self.cognito_state.write();
+        if let Some(id) = &custom_client_id {
+            fakecloud_cognito::ensure_user_pool_client_id_unused(&accounts, id)?;
+        }
         let state = accounts.get_or_create(&self.account_id);
         if !state.user_pools.contains_key(&pool_id) {
             // Force CFN to retry once UserPool resource provisions.
@@ -255,12 +271,14 @@ impl ResourceProvisioner {
             ));
         }
 
-        let client_id: String = format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-            .chars()
-            .filter(|c| c.is_ascii_alphanumeric())
-            .take(26)
-            .collect::<String>()
-            .to_lowercase();
+        let client_id: String = custom_client_id.unwrap_or_else(|| {
+            format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+                .chars()
+                .filter(|c| c.is_ascii_alphanumeric())
+                .take(26)
+                .collect::<String>()
+                .to_lowercase()
+        });
         let generate_secret = props
             .get("GenerateSecret")
             .and_then(|v| v.as_bool())

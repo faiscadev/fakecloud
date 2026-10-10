@@ -14,6 +14,10 @@ mod user_pools;
 mod users;
 
 pub use identity_pools::CognitoIdentityService;
+pub use user_pools::{
+    custom_client_id, custom_user_pool_id, ensure_user_pool_client_id_unused,
+    ensure_user_pool_id_unused, CUSTOM_ID_TAG,
+};
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -3559,9 +3563,18 @@ pub fn set_software_token(
         return Err(SetSoftwareTokenError::InvalidSecret);
     }
     let mut mas = state.write();
-    let user = mas
+    let account = mas
         .iter_mut()
-        .find_map(|(_, account)| account.users.get_mut(user_pool_id)?.get_mut(username))
+        .map(|(_, account)| account)
+        .find(|account| account.users.contains_key(user_pool_id))
+        .ok_or(SetSoftwareTokenError::UserNotFound)?;
+    // UsernameAttributes pools store a UUID username; accept the email or
+    // phone alias like every other user operation does.
+    let username = resolve_alias_username(account, user_pool_id, username);
+    let user = account
+        .users
+        .get_mut(user_pool_id)
+        .and_then(|users| users.get_mut(&username))
         .ok_or(SetSoftwareTokenError::UserNotFound)?;
     user.totp_secret = Some(secret_code.to_string());
     user.totp_verified = true;

@@ -172,6 +172,7 @@ Sub-clients are accessed via methods: `fc.SES()`, `fc.SNS()`, `fc.Lambda()`, etc
 | `ExpireTokens(ctx, req)` | Expire tokens |
 | `GetAuthEvents(ctx)` | List auth events |
 | `MintAuthorizationCode(ctx, req)` | Mint a single-use OAuth2 authorization code |
+| `SetSoftwareToken(ctx, req)`      | Give a user a verified authenticator-app (TOTP) secret chosen by the caller |
 | `SetCompromisedPasswords(ctx, req)` | Mark passwords as compromised to drive advanced security |
 | `GetPreTokenGenInvocations(ctx)` | List pre-token-generation Lambda invocations |
 | `GetWebAuthnCredentials(ctx)` | List registered WebAuthn credentials |

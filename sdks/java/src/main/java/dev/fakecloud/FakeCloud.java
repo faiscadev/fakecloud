@@ -10,6 +10,8 @@ import dev.fakecloud.Types.AuthEventsResponse;
 import dev.fakecloud.Types.PreTokenGenInvocationsResponse;
 import dev.fakecloud.Types.MintAuthorizationCodeRequest;
 import dev.fakecloud.Types.MintAuthorizationCodeResponse;
+import dev.fakecloud.Types.SetSoftwareTokenRequest;
+import dev.fakecloud.Types.SetSoftwareTokenResponse;
 import dev.fakecloud.Types.CompromisedPasswordsRequest;
 import dev.fakecloud.Types.CompromisedPasswordsResponse;
 import dev.fakecloud.Types.WebAuthnCredentialsResponse;
@@ -940,6 +942,17 @@ public final class FakeCloud {
                     "/_fakecloud/cognito/authorization-codes",
                     req,
                     MintAuthorizationCodeResponse.class);
+        }
+
+        /**
+         * Give a user a verified authenticator-app (TOTP) secret chosen by
+         * the caller, so its codes can be generated outside fakecloud.
+         */
+        public SetSoftwareTokenResponse setSoftwareToken(SetSoftwareTokenRequest req) {
+            return http.postJson(
+                    "/_fakecloud/cognito/software-token",
+                    req,
+                    SetSoftwareTokenResponse.class);
         }
 
         public CompromisedPasswordsResponse setCompromisedPasswords(

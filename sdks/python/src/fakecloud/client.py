@@ -127,6 +127,8 @@ from fakecloud.types import (
     SesMetrics,
     SesSandboxResponse,
     SesSmtpSubmissionsResponse,
+    SetSoftwareTokenRequest,
+    SetSoftwareTokenResponse,
     SetSsmCommandStatusRequest,
     SetSsmCommandStatusResponse,
     SfnEnqueueActivityTaskRequest,
@@ -1766,6 +1768,17 @@ class CognitoClient:
         _check(resp)
         return MintAuthorizationCodeResponse.from_dict(resp.json())
 
+    async def set_software_token(
+        self, req: SetSoftwareTokenRequest
+    ) -> SetSoftwareTokenResponse:
+        """Give a user a verified authenticator-app (TOTP) secret."""
+        resp = await self._client.post(
+            f"{self._base}/_fakecloud/cognito/software-token",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return SetSoftwareTokenResponse.from_dict(resp.json())
+
     async def set_compromised_passwords(
         self, req: CompromisedPasswordsRequest
     ) -> CompromisedPasswordsResponse:
@@ -2665,6 +2678,17 @@ class _SyncCognitoClient:
         )
         _check(resp)
         return MintAuthorizationCodeResponse.from_dict(resp.json())
+
+    def set_software_token(
+        self, req: SetSoftwareTokenRequest
+    ) -> SetSoftwareTokenResponse:
+        """Give a user a verified authenticator-app (TOTP) secret."""
+        resp = self._client.post(
+            f"{self._base}/_fakecloud/cognito/software-token",
+            json=req.to_dict(),
+        )
+        _check(resp)
+        return SetSoftwareTokenResponse.from_dict(resp.json())
 
     def set_compromised_passwords(
         self, req: CompromisedPasswordsRequest

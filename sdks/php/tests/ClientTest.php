@@ -61,6 +61,8 @@ use FakeCloud\RotationTickResponse;
 use FakeCloud\S3Notification;
 use FakeCloud\S3NotificationsResponse;
 use FakeCloud\SentEmail;
+use FakeCloud\SetSoftwareTokenRequest;
+use FakeCloud\SetSoftwareTokenResponse;
 use FakeCloud\SesEmailsResponse;
 use FakeCloud\SnsMessage;
 use FakeCloud\SnsMessagesResponse;
@@ -330,6 +332,16 @@ final class ClientTest extends TestCase
             ],
         ]);
         $this->assertCount(1, $events->events);
+    }
+
+    public function testSetSoftwareTokenTypes(): void
+    {
+        $req = new SetSoftwareTokenRequest('us-east-1_Local', 'alice', 'JBSWY3DPEHPK3PXP');
+        $this->assertSame(
+            ['userPoolId' => 'us-east-1_Local', 'username' => 'alice', 'secretCode' => 'JBSWY3DPEHPK3PXP'],
+            $req->toArray(),
+        );
+        $this->assertTrue(SetSoftwareTokenResponse::fromArray(['enrolled' => true])->enrolled);
     }
 
     public function testStepFunctionsResponseFromArray(): void

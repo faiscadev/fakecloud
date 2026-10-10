@@ -2070,6 +2070,40 @@ final class MintAuthorizationCodeResponse
 }
 
 /**
+ * Payload for `POST /_fakecloud/cognito/software-token`. Gives the user a
+ * verified authenticator-app (TOTP) secret, as if they had completed
+ * `AssociateSoftwareToken` + `VerifySoftwareToken` with it. `secretCode` is
+ * base32, like `AssociateSoftwareToken`'s `SecretCode`.
+ */
+final class SetSoftwareTokenRequest
+{
+    public function __construct(
+        public readonly string $userPoolId,
+        public readonly string $username,
+        public readonly string $secretCode,
+    ) {}
+
+    public function toArray(): array
+    {
+        return [
+            'userPoolId' => $this->userPoolId,
+            'username' => $this->username,
+            'secretCode' => $this->secretCode,
+        ];
+    }
+}
+
+final class SetSoftwareTokenResponse
+{
+    public function __construct(public readonly bool $enrolled) {}
+
+    public static function fromArray(array $data): self
+    {
+        return new self($data['enrolled']);
+    }
+}
+
+/**
  * Payload for `POST /_fakecloud/cognito/compromised-passwords`. Each
  * plaintext is SHA-256 hashed server-side and added to the per-account
  * compromised-password set; subsequent `SignUp` / `AdminInitiateAuth`

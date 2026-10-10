@@ -258,6 +258,66 @@ fn cognito_user_pool_applies_lambda_config_on_create_and_update() {
     assert_eq!(lambda_config(&prov), None);
 }
 
+#[test]
+fn cognito_user_pool_takes_id_from_custom_id_tag() {
+    let prov = make_provisioner();
+    let props = json!({"PoolName": "p", "UserPoolTags": {"_custom_id_": "us-east-1_Local"}});
+    let sr = create(&prov, "AWS::Cognito::UserPool", "P", props.clone());
+    assert_eq!(sr.physical_id, "us-east-1_Local");
+    assert_eq!(
+        prov.cognito_state.read().get(ACCT).unwrap().user_pools["us-east-1_Local"].arn,
+        "arn:aws:cognito-idp:us-east-1:123456789012:userpool/us-east-1_Local"
+    );
+
+    let err = create_err(&prov, "AWS::Cognito::UserPool", "P2", props);
+    assert!(err.contains("already exists"), "{err}");
+    for bad in ["eu-west-1_Local", "us-east-1_", "us-east-1_lo-cal"] {
+        let err = create_err(
+            &prov,
+            "AWS::Cognito::UserPool",
+            "P3",
+            json!({"PoolName": "bad", "UserPoolTags": {"_custom_id_": bad}}),
+        );
+        assert!(
+            err.contains("Invalid _custom_id_ tag value"),
+            "{bad}: {err}"
+        );
+    }
+}
+
+#[test]
+fn cognito_user_pool_client_takes_id_from_custom_id_name() {
+    let prov = make_provisioner();
+    let pool = create(
+        &prov,
+        "AWS::Cognito::UserPool",
+        "P",
+        json!({"PoolName": "p"}),
+    );
+    let props = json!({"UserPoolId": pool.physical_id, "ClientName": "_custom_id_:localclient"});
+    let sr = create(&prov, "AWS::Cognito::UserPoolClient", "C", props.clone());
+    assert_eq!(sr.physical_id, "localclient");
+    assert_eq!(
+        prov.cognito_state
+            .read()
+            .get(ACCT)
+            .unwrap()
+            .user_pool_clients["localclient"]
+            .user_pool_id,
+        pool.physical_id
+    );
+
+    let err = create_err(&prov, "AWS::Cognito::UserPoolClient", "C2", props);
+    assert!(err.contains("already exists"), "{err}");
+    let err = create_err(
+        &prov,
+        "AWS::Cognito::UserPoolClient",
+        "C3",
+        json!({"UserPoolId": pool.physical_id, "ClientName": "_custom_id_:local-client"}),
+    );
+    assert!(err.contains("Invalid custom client id"), "{err}");
+}
+
 // ---------------------------------------------------------------------------
 // 3. RestApi / HttpApi OpenAPI import.
 // ---------------------------------------------------------------------------

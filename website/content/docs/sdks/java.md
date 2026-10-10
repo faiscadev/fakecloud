@@ -190,6 +190,7 @@ FakeCloud fc2 = new FakeCloud("http://localhost:5000"); // explicit base URL
 | `getAuthEvents()`                     | List auth events                                                                             |
 | `getPreTokenGenInvocations()`         | List PreTokenGeneration Lambda trigger invocations recorded by `InitiateAuth`                |
 | `mintAuthorizationCode(req)`          | Mint a single-use OAuth2 authorization code (programmatic alternative to `/oauth2/authorize`) |
+| `setSoftwareToken(req)`               | Give a user a verified authenticator-app (TOTP) secret chosen by the caller                   |
 | `setCompromisedPasswords(req)`        | Seed the compromised-password list used by Advanced Security                                 |
 | `getWebAuthnCredentials()`            | List stored WebAuthn credentials                                                             |
 

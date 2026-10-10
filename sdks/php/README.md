@@ -229,6 +229,7 @@ $fc = new FakeCloud('http://localhost:4566'); // explicit base URL
 | `getAuthEvents()`                     | List auth events                                                             |
 | `getPreTokenGenInvocations()`         | List PreTokenGeneration Lambda trigger invocations                           |
 | `mintAuthorizationCode($req)`         | Mint a single-use OAuth2 authorization code (alternative to /oauth2/authorize) |
+| `setSoftwareToken($req)`              | Give a user a verified authenticator-app (TOTP) secret chosen by the caller    |
 | `setCompromisedPasswords($req)`       | Mark passwords as compromised for the advanced-security simulator            |
 | `getWebAuthnCredentials()`            | List enrolled WebAuthn credentials                                           |
 
