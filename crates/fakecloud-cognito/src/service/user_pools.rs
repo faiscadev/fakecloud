@@ -65,6 +65,27 @@ pub fn custom_client_id(client_name: &str) -> Result<Option<String>, String> {
     Ok(Some(id.to_string()))
 }
 
+/// Checks a caller-chosen `ClientSecret` against `ClientSecretType`: 24-64
+/// characters matching `[\w+]+`. The member is sensitive, so the message
+/// leaves the value out.
+fn validate_client_secret(secret: &str) -> Result<(), AwsServiceError> {
+    let constraint = if secret.len() < 24 {
+        "Member must have length greater than or equal to 24"
+    } else if secret.len() > 64 {
+        "Member must have length less than or equal to 64"
+    } else if !secret
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '+')
+    {
+        "Member must satisfy regular expression pattern: [\\w+]+"
+    } else {
+        return Ok(());
+    };
+    Err(invalid_parameter(format!(
+        "1 validation error detected: Value at 'clientSecret' failed to satisfy constraint: {constraint}"
+    )))
+}
+
 /// Pool ids are global: the JWKS, discovery and hosted-UI routes find a pool
 /// by id across every account, so a custom id must be unused everywhere.
 pub fn ensure_user_pool_id_unused(accounts: &CognitoAccounts, id: &str) -> Result<(), String> {
@@ -727,6 +748,17 @@ impl CognitoService {
         )
         .map_err(invalid_parameter)?;
 
+        let generate_secret = body["GenerateSecret"].as_bool().unwrap_or(false);
+        let custom_secret = body["ClientSecret"].as_str();
+        if let Some(secret) = custom_secret {
+            validate_client_secret(secret)?;
+            if generate_secret {
+                return Err(invalid_parameter(
+                    "You cannot specify both GenerateSecret as true and provide a ClientSecret value.",
+                ));
+            }
+        }
+
         // App clients have no tags, so a `_custom_id_:<id>` ClientName picks
         // the client id instead.
         let custom_client_id = custom_client_id(client_name).map_err(invalid_parameter)?;
@@ -740,12 +772,9 @@ impl CognitoService {
         let state = accounts.get_or_create(&req.account_id);
 
         let client_id = custom_client_id.unwrap_or_else(generate_client_id);
-        let generate_secret = body["GenerateSecret"].as_bool().unwrap_or(false);
-        let client_secret = if generate_secret {
-            Some(generate_client_secret())
-        } else {
-            None
-        };
+        let client_secret = custom_secret
+            .map(str::to_string)
+            .or_else(|| generate_secret.then(generate_client_secret));
 
         let now = Utc::now();
 

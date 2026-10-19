@@ -10883,6 +10883,60 @@ fn custom_client_id_on_missing_pool_is_resource_not_found() {
 }
 
 #[test]
+fn custom_client_secret_is_the_clients_secret() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let secret = "local_dev_client_secret+0123456789";
+    let body = json!({"UserPoolId": pool_id, "ClientName": "app", "ClientSecret": secret});
+    let resp = svc
+        .create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+        .unwrap();
+    let created = resp_json(&resp);
+    assert_eq!(created["UserPoolClient"]["ClientSecret"], secret);
+    let client_id = created["UserPoolClient"]["ClientId"].as_str().unwrap();
+    assert_eq!(
+        state.read().default_ref().user_pool_clients[client_id]
+            .client_secret
+            .as_deref(),
+        Some(secret)
+    );
+}
+
+#[test]
+fn custom_client_secret_is_validated() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    for (secret, generate, constraint) in [
+        ("a".repeat(23), false, "length greater than or equal to 24"),
+        ("a".repeat(65), false, "length less than or equal to 64"),
+        (
+            "has-a-dash-0123456789abcdef".to_string(),
+            false,
+            "regular expression pattern",
+        ),
+        ("a".repeat(24), true, "GenerateSecret"),
+    ] {
+        let body = json!({
+            "UserPoolId": pool_id,
+            "ClientName": "app",
+            "ClientSecret": secret,
+            "GenerateSecret": generate,
+        });
+        let err = expect_err(
+            svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string())),
+        );
+        assert_eq!(err.code(), "InvalidParameterException");
+        assert!(err.message().contains(constraint), "{}", err.message());
+        assert!(!err.message().contains(&secret), "{}", err.message());
+    }
+    for secret in ["a".repeat(24), "a".repeat(64)] {
+        let body = json!({"UserPoolId": pool_id, "ClientName": "app", "ClientSecret": secret});
+        svc.create_user_pool_client(&make_req("CreateUserPoolClient", &body.to_string()))
+            .unwrap();
+    }
+}
+
+#[test]
 fn delete_user_pool_refuses_while_deletion_protection_is_active() {
     let (svc, state) = make_svc();
     let body = json!({"PoolName": "guarded", "DeletionProtection": "ACTIVE"});
