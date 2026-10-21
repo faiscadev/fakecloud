@@ -136,8 +136,22 @@ impl AccountState for ServiceQuotasData {
 /// Key of an applied value. Global quotas apply in every region, so their key
 /// carries no region.
 pub fn applied_key(region: &str, global: bool, service_code: &str, quota_code: &str) -> String {
+    let mut key = String::new();
+    write_applied_key(&mut key, region, global, service_code, quota_code);
+    key
+}
+
+/// [`applied_key`] written over `buf`, so repeated lookups reuse one buffer.
+pub(crate) fn write_applied_key(
+    buf: &mut String,
+    region: &str,
+    global: bool,
+    service_code: &str,
+    quota_code: &str,
+) {
     let region = if global { "" } else { region };
-    format!("{region}|{service_code}|{quota_code}")
+    buf.clear();
+    buf.extend([region, "|", service_code, "|", quota_code]);
 }
 
 pub fn template_key(service_code: &str, quota_code: &str, aws_region: &str) -> String {

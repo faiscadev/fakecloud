@@ -4475,7 +4475,7 @@ final class ServiceQuota
         /** Whether a fakecloud service checks requests against this quota. */
         public readonly bool $enforceable,
         public readonly bool $enforced,
-        /** `not_enforceable`, `account_override`, `override` or `global`. */
+        /** `not_enforceable`, `account_override`, `override`, `global` or `auto_scaling_default`. */
         public readonly string $enforcementSource,
     ) {}
 

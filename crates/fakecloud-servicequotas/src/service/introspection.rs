@@ -212,7 +212,7 @@ impl ServiceQuotasService {
         def: &QuotaDef,
         usage: Option<f64>,
     ) -> Value {
-        let (enforced, source) = enforcement(settings, data, def);
+        let (enforced, source) = enforcement(settings, data, region, def);
         json!({
             "serviceCode": def.service_code,
             "quotaCode": def.quota_code,
@@ -220,7 +220,7 @@ impl ServiceQuotasService {
             "global": def.global,
             "adjustable": def.adjustable,
             "unit": def.unit,
-            "defaultValue": def.default,
+            "defaultValue": catalog::default_value(region, def),
             "appliedValue": applied_value(data, region, def),
             "usage": usage,
             "enforceable": def.enforceable,

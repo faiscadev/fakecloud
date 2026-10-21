@@ -4,6 +4,10 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
+use fakecloud_core::quota::{
+    QuotaProvider, FIREHOSE_MIB_PER_SECOND, FIREHOSE_PUT_REQUESTS_PER_SECOND,
+    FIREHOSE_RECORDS_PER_SECOND, FIREHOSE_SERVICE_CODE,
+};
 use fakecloud_core::service::AwsServiceError;
 use fakecloud_persistence::S3Store;
 use fakecloud_s3::{delivery::DeliveryWriteOutcome, SharedS3State};
@@ -14,6 +18,7 @@ use tokio::task::{Id, JoinHandle, JoinSet};
 use tokio::time::Instant;
 
 use crate::output::object_key;
+use crate::throughput::{ThroughputLimits, ThroughputWindow};
 use crate::writer::{BatchWriter, DeliveryBatch, S3BatchWriter};
 use crate::{delivery_config, DeliveryConfig, DeliveryStream, SharedFirehoseState, StreamKey};
 
@@ -148,6 +153,9 @@ impl StreamBuffer {
 #[derive(Default)]
 struct Registry {
     streams: BTreeMap<StreamKey, StreamBuffer>,
+    // Ingestion accounting outlives a drained S3 buffer and also covers streams
+    // with configuration-only destinations. Never used by delivery retries.
+    windows: BTreeMap<StreamKey, ThroughputWindow>,
     // Last assigned stream, not last scanned. A removed generation remains a
     // valid ordering cursor; range selection skips it and wraps naturally.
     last_scheduled: Option<StreamKey>,
@@ -161,6 +169,7 @@ struct EngineCore {
     registry: Mutex<Registry>,
     clock: Arc<dyn Clock>,
     writer: RwLock<Option<Arc<dyn BatchWriter>>>,
+    quota_provider: RwLock<Option<Arc<dyn QuotaProvider>>>,
     store: Arc<RwLock<Option<Arc<dyn S3Store>>>>,
     wake: Arc<Notify>,
 }
@@ -198,6 +207,7 @@ impl FirehoseEngine {
                 registry: Mutex::new(Registry::default()),
                 clock: Arc::new(SystemClock),
                 writer: RwLock::new(None),
+                quota_provider: RwLock::new(None),
                 store: Arc::new(RwLock::new(None)),
                 wake: Arc::new(Notify::new()),
             }),
@@ -220,6 +230,10 @@ impl FirehoseEngine {
         self.core.wake.notify_one();
     }
 
+    pub fn set_quota_provider(&self, provider: Arc<dyn QuotaProvider>) {
+        *self.core.quota_provider.write() = Some(provider);
+    }
+
     pub fn enqueue(
         &self,
         account: &str,
@@ -227,6 +241,51 @@ impl FirehoseEngine {
         name: &str,
         records: Vec<Bytes>,
     ) -> Result<(), AwsServiceError> {
+        self.enqueue_admission(account, region, name, records, None)
+            .map(|_| ())
+    }
+
+    pub(crate) fn enqueue_put(
+        &self,
+        account: &str,
+        region: &str,
+        name: &str,
+        records: Vec<Bytes>,
+    ) -> Result<Vec<bool>, AwsServiceError> {
+        // Provider implementations can consult other services (including
+        // Firehose). Release even the provider guard before resolving limits,
+        // and never call them under configuration or registry locks.
+        let provider = self.core.quota_provider.read().clone();
+        let limits = provider.map(|provider| {
+            let values = provider.enforced_limits(
+                account,
+                region,
+                FIREHOSE_SERVICE_CODE,
+                &[
+                    FIREHOSE_PUT_REQUESTS_PER_SECOND,
+                    FIREHOSE_RECORDS_PER_SECOND,
+                    FIREHOSE_MIB_PER_SECOND,
+                ],
+            );
+            ThroughputLimits {
+                requests: values[0],
+                records: values[1],
+                mib: values[2],
+            }
+        });
+        let limits =
+            limits.filter(|l| l.requests.is_some() || l.records.is_some() || l.mib.is_some());
+        self.enqueue_admission(account, region, name, records, limits)
+    }
+
+    fn enqueue_admission(
+        &self,
+        account: &str,
+        region: &str,
+        name: &str,
+        records: Vec<Bytes>,
+        limits: Option<ThroughputLimits>,
+    ) -> Result<Vec<bool>, AwsServiceError> {
         // Every path holding both takes configuration before the registry. Keep
         // the read guard until admission and immediate detachment both commit.
         let config = self.core.state.read();
@@ -258,24 +317,44 @@ impl FirehoseEngine {
                 "This operation is not permitted on KinesisStreamAsSource delivery stream type.",
             ));
         }
-        let Some(destination) = stream_delivery(stream)? else {
-            return Ok(());
-        };
+        // Complete destination preflight before touching usage or buffers.
+        let destination = stream_delivery(stream)?;
         let key = StreamKey {
             account_id: account.into(),
             region: region.into(),
             name: name.into(),
             instance_id: stream.instance_id,
         };
+        let now = self.core.clock.now();
+        let mut accepted = vec![true; records.len()];
+        if let Some(limits) = limits {
+            let window = registry
+                .windows
+                .entry(key.clone())
+                .or_insert_with(|| ThroughputWindow::new(now.monotonic));
+            if !window.try_request(now.monotonic, limits) {
+                return Err(throughput_error());
+            }
+            for (admitted, record) in accepted.iter_mut().zip(&records) {
+                *admitted = window.try_record(limits, record.len());
+            }
+        }
+        // Non-S3 streams retain the configuration-only acknowledgement, but
+        // public ingestion is still metered even without an S3 backend.
+        let Some(destination) = destination else {
+            return Ok(accepted);
+        };
         let buffer = registry.streams.entry(key.clone()).or_default();
-        if !records.is_empty() {
-            let now = self.core.clock.now();
+        if accepted.iter().any(|admitted| *admitted) {
             let active = buffer.active.get_or_insert_with(|| ActiveBuffer {
                 records: Vec::new(),
                 input_bytes: 0,
                 first: now.clone(),
             });
-            for record in records {
+            for (record, admitted) in records.into_iter().zip(&accepted) {
+                if !admitted {
+                    continue;
+                }
                 active.input_bytes += record.len();
                 active.records.push(record);
             }
@@ -289,7 +368,7 @@ impl FirehoseEngine {
         drop(registry);
         drop(config);
         self.core.wake.notify_one();
-        Ok(())
+        Ok(accepted)
     }
 
     /// Start once inside an active Tokio runtime. Admission can precede startup.
@@ -454,6 +533,9 @@ impl EngineCore {
         registry
             .streams
             .retain(|key, _| current(&config, key).is_some());
+        registry
+            .windows
+            .retain(|key, _| current(&config, key).is_some());
         for (key, buffer) in &registry.streams {
             if blocked.contains(key) || buffer.in_flight {
                 continue;
@@ -500,6 +582,9 @@ impl EngineCore {
         // completion and the S3 writer's commit guard handles invalidation there.
         registry
             .streams
+            .retain(|key, _| current(&config, key).is_some());
+        registry
+            .windows
             .retain(|key, _| current(&config, key).is_some());
         if registry.closed && !force {
             return Vec::new();
@@ -640,6 +725,16 @@ impl EngineCore {
     }
 }
 
+/// Throttle response using the API reference's HTTP 500, not the model's 503.
+/// Closed admission is a separate, local shutdown condition and retains 503.
+pub(crate) fn throughput_error() -> AwsServiceError {
+    AwsServiceError::aws_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        crate::throughput::THROUGHPUT_ERROR_CODE,
+        crate::throughput::THROUGHPUT_ERROR_MESSAGE,
+    )
+}
+
 /// The one delivery decision shared by admission, scheduling, and the final
 /// drain, so they cannot disagree about whether a stream can deliver.
 /// `Ok(None)`: no destination is configured, so nothing is written.
@@ -658,6 +753,8 @@ fn current<'a>(config: &'a crate::FirehoseAccounts, key: &StreamKey) -> Option<&
 
 #[cfg(test)]
 mod tests {
+    mod throughput;
+
     use super::*;
     use crate::{config::parse_s3_destination, DeliveryStream, FirehoseAccounts, S3Destination};
     use serde_json::json;

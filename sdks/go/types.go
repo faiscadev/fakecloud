@@ -1956,7 +1956,7 @@ type ServiceQuota struct {
 	Enforceable bool     `json:"enforceable"`
 	Enforced    bool     `json:"enforced"`
 	// EnforcementSource says what decided Enforced: "not_enforceable",
-	// "account_override", "override" or "global".
+	// "account_override", "override", "global" or "auto_scaling_default".
 	EnforcementSource string `json:"enforcementSource"`
 }
 

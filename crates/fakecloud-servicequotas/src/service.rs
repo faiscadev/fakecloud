@@ -520,7 +520,9 @@ impl ServiceQuotasService {
         b: &Value,
     ) -> Result<AwsResponse, AwsServiceError> {
         let def = quota_from(b)?;
-        ok(json!({ "Quota": quota_json(&req.region, "", def, def.default) }))
+        ok(
+            json!({ "Quota": quota_json(&req.region, "", def, catalog::default_value(&req.region, def)) }),
+        )
     }
 
     fn list_aws_default_service_quotas(
@@ -532,7 +534,7 @@ impl ServiceQuotasService {
         let (items, token) = page(catalog::quotas_of(svc), b, 100, 100)?;
         let quotas: Vec<Value> = items
             .iter()
-            .map(|d| quota_json(&req.region, "", d, d.default))
+            .map(|d| quota_json(&req.region, "", d, catalog::default_value(&req.region, d)))
             .collect();
         let mut out = Map::new();
         out.insert("Quotas".into(), Value::Array(quotas));
@@ -1280,7 +1282,7 @@ impl ServiceQuotasService {
                         .map(|m| m.namespace)
                         .unwrap_or("AWS/Usage"),
                     "Utilization": utilization,
-                    "DefaultValue": def.map(|d| d.default).unwrap_or(0.0),
+                    "DefaultValue": def.map(|d| catalog::default_value(&req.region, d)).unwrap_or(0.0),
                     "AppliedValue": e.applied_value,
                     "ServiceName": catalog::service_name(&e.service_code),
                     "Adjustable": def.is_some_and(|d| d.adjustable),

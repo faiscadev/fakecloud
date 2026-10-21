@@ -9,10 +9,13 @@
 //! Nothing is enforced by default, so a local test suite that creates more
 //! resources than a fresh AWS account allows keeps working until the user
 //! asks for limit fidelity. Only quotas a fakecloud service can check
-//! ([`QuotaDef::enforceable`]) are ever enforced.
+//! ([`QuotaDef::enforceable`]) are ever enforced, and a quota whose capacity
+//! AWS scales automatically ([`catalog::AUTO_SCALING`]) only once the account
+//! set an explicit applied value for it in the region.
 //!
 //! The server-wide part lives in [`QuotaSettings`]; per-account overrides live
 //! in [`ServiceQuotasData::enforcement`] next to the account's applied values.
+//! [`AccountEnforcement`] combines them.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -20,8 +23,8 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::QuotaDef;
-use crate::state::ServiceQuotasData;
+use crate::catalog::{self, QuotaDef};
+use crate::state::{write_applied_key, ServiceQuotasData};
 
 /// How `RequestServiceQuotaIncrease` (and template entries applied to new
 /// accounts) are decided.
@@ -81,6 +84,10 @@ pub enum EnforcementSource {
     Override,
     /// The global switch.
     Global,
+    /// Switched on, but AWS scales this quota's capacity automatically and
+    /// the account set no explicit value for it in the region, so there is
+    /// no limit to enforce.
+    AutoScalingDefault,
 }
 
 impl EnforcementSource {
@@ -90,6 +97,7 @@ impl EnforcementSource {
             Self::AccountOverride => "account_override",
             Self::Override => "override",
             Self::Global => "global",
+            Self::AutoScalingDefault => "auto_scaling_default",
         }
     }
 }
@@ -102,7 +110,14 @@ pub fn quota_ref(def: &QuotaDef) -> String {
 
 /// [`quota_ref`] from the codes.
 pub fn quota_ref_of(service_code: &str, quota_code: &str) -> String {
-    format!("{service_code}/{quota_code}")
+    let mut key = String::new();
+    write_quota_ref(&mut key, service_code, quota_code);
+    key
+}
+
+fn write_quota_ref(buf: &mut String, service_code: &str, quota_code: &str) {
+    buf.clear();
+    buf.extend([service_code, "/", quota_code]);
 }
 
 /// Resolve a `service_code/quota_code` reference to an enforceable quota (as
@@ -126,46 +141,117 @@ pub fn resolve_enforceable(reference: &str) -> Result<String, String> {
     Ok(quota_ref(def))
 }
 
-/// Whether `def` is enforced for the account holding `data`, and why.
+/// Whether `def` is enforced for the account holding `data` in `region`, and
+/// why. See [`AccountEnforcement::of`].
 pub fn enforcement(
     settings: &QuotaSettings,
     data: Option<&ServiceQuotasData>,
+    region: &str,
     def: &QuotaDef,
 ) -> (bool, EnforcementSource) {
-    enforcement_of(settings, data, def.service_code, def.quota_code)
+    AccountEnforcement::new(settings, data, region).of(def.service_code, def.quota_code)
 }
 
-/// [`enforcement`] by codes. Reads only the static enforceable overlay, never
-/// the decoded catalog, so the request path of a service that enforces nothing
-/// stays cheap.
-pub fn enforcement_of(
-    settings: &QuotaSettings,
-    data: Option<&ServiceQuotasData>,
-    service_code: &str,
-    quota_code: &str,
-) -> (bool, EnforcementSource) {
-    if !crate::catalog::is_enforceable(service_code, quota_code) {
-        return (false, EnforcementSource::NotEnforceable);
+/// Effective enforcement for one account in one region, read from one
+/// settings and state snapshot: the single place both the
+/// [`fakecloud_core::quota::QuotaProvider`] and the introspection view decide
+/// whether a quota is enforced. Lookups reuse one key buffer, so resolving
+/// several quotas allocates at most once.
+pub struct AccountEnforcement<'a> {
+    settings: &'a QuotaSettings,
+    data: Option<&'a ServiceQuotasData>,
+    region: &'a str,
+    key: String,
+}
+
+impl<'a> AccountEnforcement<'a> {
+    pub fn new(
+        settings: &'a QuotaSettings,
+        data: Option<&'a ServiceQuotasData>,
+        region: &'a str,
+    ) -> Self {
+        Self {
+            settings,
+            data,
+            region,
+            key: String::new(),
+        }
     }
-    let key = quota_ref_of(service_code, quota_code);
-    if let Some(on) = data.and_then(|d| d.enforcement.get(&key)) {
-        return (*on, EnforcementSource::AccountOverride);
+
+    /// Whether `service_code/quota_code` is enforced, and why: the override
+    /// precedence, except that a quota AWS scales automatically
+    /// ([`crate::catalog::AUTO_SCALING`]) is enforced only at an applied value
+    /// the account set explicitly for the region. The catalog is decoded only
+    /// for such a quota once it is switched on, so the request path of a
+    /// service that enforces nothing stays cheap.
+    pub fn of(&mut self, service_code: &str, quota_code: &str) -> (bool, EnforcementSource) {
+        if !catalog::is_enforceable(service_code, quota_code) {
+            return (false, EnforcementSource::NotEnforceable);
+        }
+        let (on, source) = self.switch(service_code, quota_code);
+        if on
+            && catalog::is_auto_scaling(service_code, quota_code)
+            && catalog::quota(service_code, quota_code)
+                .and_then(|def| self.explicit_value(def))
+                .is_none()
+        {
+            return (false, EnforcementSource::AutoScalingDefault);
+        }
+        (on, source)
     }
-    if let Some(on) = settings.overrides.get(&key) {
-        return (*on, EnforcementSource::Override);
+
+    /// The limit fakecloud enforces for `service_code/quota_code`: its
+    /// applied value while [`AccountEnforcement::of`] says it is enforced.
+    pub fn limit(&mut self, service_code: &str, quota_code: &str) -> Option<f64> {
+        if !self.of(service_code, quota_code).0 {
+            return None;
+        }
+        let def = catalog::quota(service_code, quota_code)?;
+        Some(
+            self.explicit_value(def)
+                .unwrap_or_else(|| catalog::default_value(self.region, def)),
+        )
     }
-    (settings.enforce_all, EnforcementSource::Global)
+
+    /// The account switch, else the server-wide override, else the global
+    /// switch.
+    fn switch(&mut self, service_code: &str, quota_code: &str) -> (bool, EnforcementSource) {
+        write_quota_ref(&mut self.key, service_code, quota_code);
+        let key = self.key.as_str();
+        if let Some(on) = self.data.and_then(|d| d.enforcement.get(key)) {
+            return (*on, EnforcementSource::AccountOverride);
+        }
+        if let Some(on) = self.settings.overrides.get(key) {
+            return (*on, EnforcementSource::Override);
+        }
+        (self.settings.enforce_all, EnforcementSource::Global)
+    }
+
+    /// The applied value the account set for `def` in the region (an
+    /// approved request or the introspection API), if any.
+    fn explicit_value(&mut self, def: &QuotaDef) -> Option<f64> {
+        let data = self.data?;
+        write_applied_key(
+            &mut self.key,
+            self.region,
+            def.global,
+            def.service_code,
+            def.quota_code,
+        );
+        data.applied.get(self.key.as_str()).copied()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::catalog;
+    use crate::state::applied_key;
 
     #[test]
     fn nothing_is_enforced_by_default() {
         for def in catalog::quotas() {
-            assert!(!enforcement(&QuotaSettings::default(), None, def).0);
+            assert!(!enforcement(&QuotaSettings::default(), None, "us-east-1", def).0);
         }
     }
 
@@ -177,18 +263,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            enforcement(&settings, None, def),
+            enforcement(&settings, None, "us-east-1", def),
             (true, EnforcementSource::Global)
         );
         settings.overrides.insert(quota_ref(def), false);
         assert_eq!(
-            enforcement(&settings, None, def),
+            enforcement(&settings, None, "us-east-1", def),
             (false, EnforcementSource::Override)
         );
         let mut data = ServiceQuotasData::default();
         data.enforcement.insert(quota_ref(def), true);
         assert_eq!(
-            enforcement(&settings, Some(&data), def),
+            enforcement(&settings, Some(&data), "us-east-1", def),
             (true, EnforcementSource::AccountOverride)
         );
     }
@@ -203,9 +289,71 @@ mod tests {
         };
         settings.overrides.insert(quota_ref(def), true);
         assert_eq!(
-            enforcement(&settings, None, def),
+            enforcement(&settings, None, "us-east-1", def),
             (false, EnforcementSource::NotEnforceable)
         );
+    }
+
+    #[test]
+    fn an_auto_scaling_quota_is_enforced_only_at_an_explicit_value() {
+        use EnforcementSource::*;
+        let def = catalog::quota(
+            catalog::FIREHOSE_SERVICE_CODE,
+            catalog::FIREHOSE_RECORDS_PER_SECOND,
+        )
+        .unwrap();
+        let mut settings = QuotaSettings {
+            enforce_all: true,
+            ..Default::default()
+        };
+        let mut data = ServiceQuotasData::default();
+        assert_eq!(
+            enforcement(&settings, Some(&data), "us-east-2", def),
+            (false, AutoScalingDefault)
+        );
+        assert_eq!(AutoScalingDefault.as_str(), "auto_scaling_default");
+        data.applied.insert(
+            applied_key("us-east-2", false, def.service_code, def.quota_code),
+            9.0,
+        );
+        let effective = |settings: &QuotaSettings, data: &ServiceQuotasData, region| {
+            enforcement(settings, Some(data), region, def)
+        };
+        assert_eq!(effective(&settings, &data, "us-east-2"), (true, Global));
+        assert_eq!(
+            effective(&settings, &data, "us-east-1"),
+            (false, AutoScalingDefault)
+        );
+        assert_eq!(
+            enforcement(&settings, None, "us-east-2", def),
+            (false, AutoScalingDefault)
+        );
+        // Switched off, the switch says why, value or not.
+        settings.overrides.insert(quota_ref(def), false);
+        assert_eq!(effective(&settings, &data, "us-east-2"), (false, Override));
+        assert_eq!(effective(&settings, &data, "us-east-1"), (false, Override));
+        data.enforcement.insert(quota_ref(def), true);
+        assert_eq!(
+            effective(&settings, &data, "us-east-2"),
+            (true, AccountOverride)
+        );
+        assert_eq!(
+            effective(&settings, &data, "us-east-1"),
+            (false, AutoScalingDefault)
+        );
+
+        let mut account = AccountEnforcement::new(&settings, Some(&data), "us-east-2");
+        assert_eq!(account.limit(def.service_code, def.quota_code), Some(9.0));
+        assert_eq!(
+            account.limit(def.service_code, catalog::FIREHOSE_MIB_PER_SECOND),
+            None
+        );
+        // Quotas AWS does not scale are enforced at the default.
+        assert_eq!(
+            account.limit(catalog::VPC, catalog::RULES_PER_SECURITY_GROUP),
+            Some(60.0)
+        );
+        assert_eq!(account.limit("lambda", "L-B99A9384"), None);
     }
 
     #[test]

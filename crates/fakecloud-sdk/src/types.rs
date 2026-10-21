@@ -2569,8 +2569,7 @@ pub struct Ec2InstanceNetworksResponse {
 // ── Service Quotas ──────────────────────────────────────────────────
 
 /// One quota as `/_fakecloud/service-quotas/quotas` reports it for an account
-/// and region. `enforcementSource` is one of `not_enforceable`,
-/// `account_override`, `override`, `global`.
+/// and region.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ServiceQuota {
@@ -2587,6 +2586,8 @@ pub struct ServiceQuota {
     /// Whether a fakecloud service checks requests against this quota.
     pub enforceable: bool,
     pub enforced: bool,
+    /// What decided `enforced`: `not_enforceable`, `account_override`,
+    /// `override`, `global` or `auto_scaling_default`.
     pub enforcement_source: String,
 }
 

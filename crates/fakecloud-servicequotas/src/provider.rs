@@ -11,7 +11,7 @@ use fakecloud_organizations::SharedOrganizationsState;
 use fakecloud_persistence::SnapshotHook;
 
 use crate::catalog::{self, QuotaDef};
-use crate::settings::{enforcement_of, RequestApproval, SharedQuotaSettings};
+use crate::settings::{AccountEnforcement, RequestApproval, SharedQuotaSettings};
 use crate::state::{
     applied_key, QuotaRequest, ServiceQuotasData, SharedServiceQuotasState, TemplateEntry,
 };
@@ -29,7 +29,7 @@ pub fn applied_value(data: Option<&ServiceQuotasData>, region: &str, def: &Quota
             ))
             .copied()
     })
-    .unwrap_or(def.default)
+    .unwrap_or_else(|| catalog::default_value(region, def))
 }
 
 /// The region a quota's ARN and applied value live in: global quotas have
@@ -252,10 +252,12 @@ impl ServiceQuotasProvider {
 
 impl ServiceQuotasProvider {
     /// Apply the organization's template to `account_id` if it is due,
-    /// persisting the change.
-    fn apply_template(&self, account_id: &str) {
+    /// persisting the change. Whether it changed anything.
+    fn apply_template(&self, account_id: &str) -> bool {
         let approval = self.settings.read().request_approval;
-        if apply_template_if_new(&self.state, &self.orgs, approval, account_id, Utc::now()) {
+        let applied =
+            apply_template_if_new(&self.state, &self.orgs, approval, account_id, Utc::now());
+        if applied {
             // The lookup is synchronous; the snapshot write runs on the
             // runtime the enforcing service is called from.
             if let (Some(hook), Ok(rt)) = (
@@ -265,6 +267,25 @@ impl ServiceQuotasProvider {
                 rt.spawn(hook());
             }
         }
+        applied
+    }
+
+    /// The enforced limits of `quota_codes`, from one settings and state
+    /// snapshot.
+    fn snapshot_limits(
+        &self,
+        account_id: &str,
+        region: &str,
+        service_code: &str,
+        quota_codes: &[&str],
+    ) -> Vec<Option<f64>> {
+        let settings = self.settings.read();
+        let guard = self.state.read();
+        let mut account = AccountEnforcement::new(&settings, guard.get(account_id), region);
+        quota_codes
+            .iter()
+            .map(|code| account.limit(service_code, code))
+            .collect()
     }
 }
 
@@ -289,26 +310,59 @@ impl QuotaProvider for ServiceQuotasProvider {
         service_code: &str,
         quota_code: &str,
     ) -> Option<f64> {
-        // Whether the quota is enforced is answered from the static overlay
-        // and the settings; the catalog is only decoded for a quota that is.
-        if !catalog::is_enforceable(service_code, quota_code) {
-            return None;
+        self.enforced_limits(account_id, region, service_code, &[quota_code])
+            .pop()
+            .flatten()
+    }
+
+    fn enforced_limits(
+        &self,
+        account_id: &str,
+        region: &str,
+        service_code: &str,
+        quota_codes: &[&str],
+    ) -> Vec<Option<f64>> {
+        // Whether a quota is enforced is answered from the static overlay and
+        // the settings; the catalog is only decoded for a quota that is.
+        if !quota_codes
+            .iter()
+            .any(|code| catalog::is_enforceable(service_code, code))
+        {
+            return vec![None; quota_codes.len()];
         }
+        let limits = self.snapshot_limits(account_id, region, service_code, quota_codes);
+        #[cfg(test)]
+        tests::after_initial_snapshot();
+        if !limits.iter().any(Option::is_some) {
+            // This fast path applies to every enforcing service: an ignored
+            // quota must not trigger the lazy organization-template fallback.
+            // Explicit applied-value lookups still apply a due template.
+            return limits;
+        }
+        // Enforcing something touches the account's quotas, which applies a
+        // due organization template (see `apply_template_if_new`); answer
+        // from the values it left, even if another lookup applied it.
         self.apply_template(account_id);
-        let settings = self.settings.read();
-        let guard = self.state.read();
-        let data = guard.get(account_id);
-        if !enforcement_of(&settings, data, service_code, quota_code).0 {
-            return None;
-        }
-        let def = catalog::quota(service_code, quota_code)?;
-        Some(applied_value(data, region, def))
+        self.snapshot_limits(account_id, region, service_code, quota_codes)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        // One-shot scheduling seam, isolated to the lookup's test thread.
+        static AFTER_INITIAL_SNAPSHOT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+            const { std::cell::RefCell::new(None) };
+    }
+
+    pub(super) fn after_initial_snapshot() {
+        let hook = AFTER_INITIAL_SNAPSHOT.with(|hook| hook.borrow_mut().take());
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
 
     fn provider(settings: crate::settings::QuotaSettings) -> ServiceQuotasProvider {
         use parking_lot::RwLock;
@@ -322,6 +376,196 @@ mod tests {
             Arc::new(RwLock::new(Default::default())),
             Arc::new(RwLock::new(settings)),
         )
+    }
+
+    #[test]
+    fn firehose_provider_reports_regional_defaults_but_enforces_none() {
+        let p = provider(Default::default());
+        let before = catalog::catalog_reads();
+        for code in ["L-7681C790", "L-17D4EADE", "L-937C879B"] {
+            assert_eq!(
+                p.enforced_limit("000000000000", "us-east-2", "firehose", code),
+                None
+            );
+        }
+        assert_eq!(catalog::catalog_reads(), before);
+        for (code, high, low) in [
+            ("L-7681C790", 2000.0, 1000.0),
+            ("L-17D4EADE", 500_000.0, 100_000.0),
+            ("L-937C879B", 5.0, 1.0),
+        ] {
+            for (region, expected) in [
+                ("us-east-1", high),
+                ("us-west-2", high),
+                ("eu-west-1", high),
+                ("us-east-2", low),
+            ] {
+                for account in ["000000000000", "222222222222"] {
+                    assert_eq!(
+                        p.applied_value(account, region, "firehose", code),
+                        Some(expected)
+                    );
+                    // AWS scales this capacity: its default is no limit.
+                    p.settings.write().enforce_all = true;
+                    assert_eq!(p.enforced_limit(account, region, "firehose", code), None);
+                    p.settings.write().enforce_all = false;
+                }
+            }
+        }
+    }
+
+    /// One batched lookup answers exactly what one lookup per code does.
+    #[test]
+    fn enforced_limits_match_one_lookup_per_code() {
+        use fakecloud_core::quota::{
+            FIREHOSE_MIB_PER_SECOND as MIB, FIREHOSE_PUT_REQUESTS_PER_SECOND as REQUESTS,
+            FIREHOSE_RECORDS_PER_SECOND as RECORDS,
+        };
+        const ACCT: &str = "000000000000";
+        let p = provider(Default::default());
+        let codes = [REQUESTS, RECORDS, MIB, "L-14BB0BE7", "L-NOPE"];
+        let limits = |p: &ServiceQuotasProvider| {
+            for (account, region) in [
+                (ACCT, "us-east-1"),
+                (ACCT, "us-east-2"),
+                ("222222222222", "us-east-2"),
+            ] {
+                let one_by_one: Vec<_> = codes
+                    .iter()
+                    .map(|code| p.enforced_limit(account, region, "firehose", code))
+                    .collect();
+                assert_eq!(
+                    p.enforced_limits(account, region, "firehose", &codes),
+                    one_by_one,
+                    "{account}/{region}"
+                );
+            }
+            p.enforced_limits(ACCT, "us-east-2", "firehose", &codes)
+        };
+        let explicit = |code: &str, v: f64| {
+            p.state
+                .write()
+                .get_or_create(ACCT)
+                .applied
+                .insert(applied_key("us-east-2", false, "firehose", code), v);
+        };
+
+        assert_eq!(limits(&p), [None; 5]);
+        p.settings.write().enforce_all = true;
+        assert_eq!(limits(&p), [None; 5]);
+        explicit(REQUESTS, 10.0);
+        explicit(MIB, 0.5);
+        assert_eq!(limits(&p), [Some(10.0), None, Some(0.5), None, None]);
+        p.settings
+            .write()
+            .overrides
+            .insert(format!("firehose/{MIB}"), false);
+        assert_eq!(limits(&p), [Some(10.0), None, None, None, None]);
+        p.settings.write().enforce_all = false;
+        explicit(RECORDS, 7.0);
+        p.state
+            .write()
+            .get_or_create(ACCT)
+            .enforcement
+            .insert(format!("firehose/{RECORDS}"), true);
+        assert_eq!(limits(&p), [None, Some(7.0), None, None, None]);
+        assert_eq!(
+            p.enforced_limits(ACCT, "us-east-2", "firehose", &[]),
+            Vec::<Option<f64>>::new()
+        );
+
+        // Quotas AWS does not scale are enforced at their applied value.
+        p.settings.write().enforce_all = true;
+        assert_eq!(
+            p.enforced_limits(
+                ACCT,
+                "us-east-2",
+                catalog::VPC,
+                &["L-0EA8095F", "L-2AFB9258"]
+            ),
+            [Some(60.0), Some(5.0)]
+        );
+    }
+
+    #[test]
+    fn enforced_limits_resnapshot_when_another_lookup_applies_the_template() {
+        use fakecloud_organizations::{MemberAccount, OrganizationState};
+        use std::sync::mpsc;
+
+        const MGMT: &str = "111111111111";
+        const MEMBER: &str = "222222222222";
+        const REGION: &str = "us-east-1";
+        const CODES: &[&str] = &["L-2AFB9258", "L-0EA8095F", "L-NOPE"];
+        let p = provider(crate::settings::QuotaSettings {
+            enforce_all: true,
+            ..Default::default()
+        });
+        let associated_at = DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+        let mut org = OrganizationState::bootstrap_in(REGION, MGMT);
+        org.accounts.insert(
+            MEMBER.to_string(),
+            MemberAccount {
+                id: MEMBER.to_string(),
+                arn: org.account_arn(MEMBER),
+                email: format!("{MEMBER}@example.com"),
+                name: "member".into(),
+                status: "ACTIVE".into(),
+                joined_method: "CREATED".into(),
+                joined_timestamp: associated_at + chrono::Duration::seconds(1),
+                parent_id: org.root_id.clone(),
+                gov_cloud_mirror: false,
+            },
+        );
+        p.orgs.write().insert(org);
+        {
+            let mut guard = p.state.write();
+            let management = guard.get_or_create(MGMT);
+            management.template_associated_at = Some(associated_at);
+            management.template.insert(
+                crate::state::template_key(catalog::VPC, CODES[0], REGION),
+                TemplateEntry {
+                    service_code: catalog::VPC.into(),
+                    quota_code: CODES[0].into(),
+                    aws_region: REGION.into(),
+                    desired_value: 8.0,
+                },
+            );
+        }
+        assert_eq!(
+            p.snapshot_limits(MEMBER, REGION, catalog::VPC, CODES),
+            [Some(5.0), Some(60.0), None]
+        );
+
+        std::thread::scope(|scope| {
+            let (snapshotted_tx, snapshotted_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let p = &p;
+            let losing_lookup = scope.spawn(move || {
+                AFTER_INITIAL_SNAPSHOT.with(|hook| {
+                    *hook.borrow_mut() = Some(Box::new(move || {
+                        snapshotted_tx.send(()).unwrap();
+                        resume_rx.recv().unwrap();
+                    }));
+                });
+                p.enforced_limits(MEMBER, REGION, catalog::VPC, CODES)
+            });
+
+            // Both lookups snapshot the defaults before the winner applies
+            // the real template. The paused lookup then sees its marker and
+            // gets false from apply_template, but must still return 8, not 5.
+            snapshotted_rx.recv().unwrap();
+            let winning_limits = p.enforced_limits(MEMBER, REGION, catalog::VPC, CODES);
+            resume_tx.send(()).unwrap();
+            let losing_limits = losing_lookup.join().unwrap();
+            assert_eq!(winning_limits, [Some(8.0), Some(60.0), None]);
+            assert_eq!(losing_limits, [Some(8.0), Some(60.0), None]);
+        });
+        assert!(!p.apply_template(MEMBER));
+        let guard = p.state.read();
+        let member = guard.get(MEMBER).unwrap();
+        assert!(member.template_checked.is_some());
+        assert_eq!(member.requests.len(), 1, "template applied more than once");
+        assert_eq!(member.requests.values().next().unwrap().status, "APPROVED");
     }
 
     /// With enforcement off, an enforcing service's limit lookup on its
@@ -342,6 +586,15 @@ mod tests {
                 None
             );
         }
+        assert_eq!(
+            p.enforced_limits(
+                "000000000000",
+                "us-east-1",
+                "firehose",
+                &["L-7681C790", "L-17D4EADE", "L-937C879B", "L-14BB0BE7"]
+            ),
+            [None; 4]
+        );
         assert_eq!(catalog::catalog_reads(), before);
     }
 

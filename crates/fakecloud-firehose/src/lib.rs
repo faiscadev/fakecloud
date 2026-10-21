@@ -9,6 +9,7 @@ pub(crate) mod state;
 #[cfg(test)]
 #[path = "../tests/fixtures/xerial_decoder.rs"]
 mod test_xerial_decoder;
+mod throughput;
 pub mod writer;
 
 pub use config::{buffering_policy, delivery_config, BufferingPolicy, DeliveryConfig};
