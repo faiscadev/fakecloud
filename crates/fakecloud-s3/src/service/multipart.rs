@@ -941,7 +941,7 @@ impl S3Service {
             };
             (
                 upload,
-                b.objects.contains_key(key),
+                b.objects.get(key).is_some_and(|o| !o.is_delete_marker),
                 b.region.clone(),
                 b.acl_owner_id.clone(),
             )
@@ -1247,7 +1247,9 @@ impl S3Service {
             // phase-1 snapshot, so revalidate `If-None-Match: *` here rather
             // than trusting the stale `already_has_object`. Leave the upload
             // intact for retry/abort; nothing has been persisted yet.
-            if if_none_match.as_deref() == Some("*") && b.objects.contains_key(key) {
+            if if_none_match.as_deref() == Some("*")
+                && b.objects.get(key).is_some_and(|o| !o.is_delete_marker)
+            {
                 return Err(precondition_failed("If-None-Match"));
             }
             // Checks passed -- persist, then commit to memory, all under the

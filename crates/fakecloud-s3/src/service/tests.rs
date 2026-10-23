@@ -3681,6 +3681,86 @@ async fn put_object_if_none_match_prevents_overwrite() {
     );
 }
 
+#[tokio::test]
+async fn put_object_if_none_match_on_nonexistent_key() {
+    let svc = make_service();
+    seed_bucket(&svc, "cnm2");
+
+    let mut req = make_request(Method::PUT, "/cnm2/fresh.txt", &[], b"data");
+    req.headers.insert("if-none-match", "*".parse().unwrap());
+    svc.put_object("123456789012", &req, "cnm2", "fresh.txt")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn put_object_if_none_match_succeeds_after_versioned_delete() {
+    let svc = make_service();
+    seed_bucket(&svc, "cnm3");
+
+    let req = make_request(
+        Method::PUT,
+        "/cnm3",
+        &[("versioning", "")],
+        b"<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+    );
+    svc.put_bucket_versioning("123456789012", &req, "cnm3")
+        .unwrap();
+
+    let req = make_request(Method::PUT, "/cnm3/lock.txt", &[], b"v1");
+    svc.put_object("123456789012", &req, "cnm3", "lock.txt")
+        .await
+        .unwrap();
+
+    let req = make_request(Method::DELETE, "/cnm3/lock.txt", &[], b"");
+    let resp = svc.delete_object("123456789012", &req, "cnm3", "lock.txt").unwrap();
+    assert_eq!(resp.headers.get("x-amz-delete-marker").unwrap(), "true");
+
+    let mut req = make_request(Method::PUT, "/cnm3/lock.txt", &[], b"v2");
+    req.headers.insert("if-none-match", "*".parse().unwrap());
+    svc.put_object("123456789012", &req, "cnm3", "lock.txt")
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn put_object_if_match_returns_no_such_key_for_delete_marker() {
+    let svc = make_service();
+    seed_bucket(&svc, "cnm4");
+
+    let req = make_request(
+        Method::PUT,
+        "/cnm4",
+        &[("versioning", "")],
+        b"<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>",
+    );
+    svc.put_bucket_versioning("123456789012", &req, "cnm4")
+        .unwrap();
+
+    let req = make_request(Method::PUT, "/cnm4/obj.txt", &[], b"data");
+    let resp = svc
+        .put_object("123456789012", &req, "cnm4", "obj.txt")
+        .await
+        .unwrap();
+    let etag = resp
+        .headers
+        .get("etag")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    let req = make_request(Method::DELETE, "/cnm4/obj.txt", &[], b"");
+    svc.delete_object("123456789012", &req, "cnm4", "obj.txt").unwrap();
+
+    let mut req = make_request(Method::PUT, "/cnm4/obj.txt", &[], b"update");
+    req.headers.insert("if-match", etag.parse().unwrap());
+    assert_aws_err(
+        svc.put_object("123456789012", &req, "cnm4", "obj.txt").await,
+        "NoSuchKey",
+    );
+}
+
 // ── Storage class ──
 
 #[tokio::test]
