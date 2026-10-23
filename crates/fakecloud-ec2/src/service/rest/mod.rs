@@ -219,7 +219,7 @@ pub(crate) fn associate_iam_instance_profile(
     let arn = iam_profile_arn(req)?.ok_or_else(|| missing_parameter("IamInstanceProfile"))?;
     let assoc = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let inst = state
             .instances
             .get(&instance_id)
@@ -505,7 +505,7 @@ pub(crate) fn create_public_ipv4_pool(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -592,7 +592,7 @@ pub(crate) fn delete_public_ipv4_pool(
     let id = require(&req.query_params, "PoolId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.public_ipv4_pools.remove(&id);
         state.tags.remove(&id);
     }
@@ -624,7 +624,7 @@ pub(crate) fn deprovision_public_ipv4_pool_cidr(
     {
         let mut accounts = svc.state.write();
         if let Some(p) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .public_ipv4_pools
             .get_mut(&id)
         {
@@ -649,7 +649,9 @@ pub(crate) fn describe_aggregate_id_format(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // Aggregated = true only when every tracked resource uses long ids (and at
     // least one is tracked), matching how AWS reports the account roll-up.
     let aggregated = !state.id_format.is_empty() && state.id_format.values().all(|v| *v);
@@ -810,7 +812,9 @@ pub(crate) fn describe_iam_instance_profile_associations(
     let filters = parse_filters(&req.query_params);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // An explicitly-named association that does not exist is a hard error on
     // AWS, not an empty set — the same contract Replace/Disassociate now hold.
     for id in &wanted {
@@ -844,7 +848,9 @@ pub(crate) fn describe_id_format(
     let filter = req.query_params.get("Resource").filter(|v| !v.is_empty());
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .id_format
         .iter()
@@ -866,7 +872,9 @@ pub(crate) fn describe_identity_id_format(
     let filter = req.query_params.get("Resource").filter(|v| !v.is_empty());
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .identity_id_format
         .get(&principal)
@@ -1042,7 +1050,9 @@ pub(crate) fn describe_principal_id_format(
     let resource_filter = indexed_list(&req.query_params, "Resource");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let keep = |r: &str| resource_filter.is_empty() || resource_filter.iter().any(|f| f == r);
     let mut items: Vec<String> = Vec::new();
     // The account root principal carries the account-default id-format settings.
@@ -1090,7 +1100,9 @@ pub(crate) fn describe_public_ipv4_pools(
     let wanted = indexed_list(&req.query_params, "PoolId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .public_ipv4_pools
         .values()
@@ -1306,7 +1318,7 @@ pub(crate) fn disassociate_iam_instance_profile(
     let assoc = {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .iam_instance_profile_associations
             .remove(&assoc_id)
     }
@@ -1476,7 +1488,9 @@ pub(crate) fn get_default_credit_specification(
     )?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // AWS default for burstable families is `standard` until explicitly set.
     let cpu_credits = state
         .default_credit_specs
@@ -1551,7 +1565,9 @@ pub(crate) fn get_managed_resource_visibility(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let visibility = state
         .managed_resource_default_visibility
         .clone()
@@ -1626,7 +1642,7 @@ pub(crate) fn modify_availability_zone_group(
     )?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.az_group_optin.insert(group, status);
     }
     Ok(Ec2Service::respond(
@@ -1657,7 +1673,7 @@ pub(crate) fn modify_default_credit_specification(
     )?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state
             .default_credit_specs
             .insert(family.clone(), cpu_credits.clone());
@@ -1686,7 +1702,7 @@ pub(crate) fn modify_id_format(
     let use_long_ids = require(&req.query_params, "UseLongIds")? == "true";
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.id_format.insert(resource, use_long_ids);
     }
     Ok(Ec2Service::respond("ModifyIdFormat", &req.request_id, ""))
@@ -1701,7 +1717,7 @@ pub(crate) fn modify_identity_id_format(
     let principal = require(&req.query_params, "PrincipalArn")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state
             .identity_id_format
             .entry(principal)
@@ -1727,7 +1743,7 @@ pub(crate) fn modify_managed_resource_visibility(
     )?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.managed_resource_default_visibility = Some(visibility.clone());
     }
     Ok(Ec2Service::respond(
@@ -1748,7 +1764,7 @@ pub(crate) fn modify_private_dns_name_options(
         &["ip-name", "resource-name"],
     )?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // EC2 declares no error shape for this op in the Smithy model, so an
     // unknown instance id still returns success (synthesize without
     // persisting); a real instance has its private-DNS options persisted.
@@ -1794,7 +1810,7 @@ pub(crate) fn modify_public_ip_dns_name_options(
     // error shape for this op, so a synthetic id still returns successful=true).
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(eni) = state.network_interfaces.get_mut(&eni_id) {
             eni.public_ip_dns_hostname_type = Some(hostname_type);
         }
@@ -1834,7 +1850,7 @@ pub(crate) fn provision_public_ipv4_pool_cidr(
         })?;
     let cidr = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let pool = state.public_ipv4_pools.get_mut(&id);
         match pool {
             Some(p) => {
@@ -1900,7 +1916,7 @@ pub(crate) fn replace_iam_instance_profile_association(
     let arn = iam_profile_arn(req)?.ok_or_else(|| missing_parameter("IamInstanceProfile"))?;
     let assoc = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // AWS retires the old association and mints a new one for the same
         // instance (its doc sample answers with a fresh association id).
         let old = state
@@ -1990,7 +2006,7 @@ pub(crate) fn describe_capacity_reservation_cancellation_quotes(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{assoc_id_of, err_of, seed_instance};
+    use crate::test_support::{assoc_id_of, err_of, seed_instance, seed_instance_in_region};
 
     fn req(action: &str, query: &[(&str, &str)]) -> AwsRequest {
         AwsRequest {
@@ -2595,7 +2611,10 @@ mod tests {
         )
         .unwrap();
         let accounts = svc.state.read();
-        let inst = &accounts.get("000000000000").unwrap().instances["i-1"];
+        let inst = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .instances["i-1"];
         assert_eq!(
             inst.private_dns_hostname_type.as_deref(),
             Some("resource-name")
@@ -2630,7 +2649,7 @@ mod tests {
         // No persistent resource was invented.
         let accounts = svc.state.read();
         assert!(accounts
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .map(|s| s.managed_prefix_lists.is_empty())
             .unwrap_or(true));
     }
@@ -3045,7 +3064,7 @@ mod tests {
         // IAM mints the profile ARN in the region's partition; synthesizing
         // `arn:aws:` in cn-* / us-gov-* would never compare equal to it.
         let svc = Ec2Service::new();
-        seed_instance(&svc, "i-123");
+        seed_instance_in_region(&svc, "i-123", "cn-north-1");
         let mut r = req(
             "AssociateIamInstanceProfile",
             &[
@@ -3068,7 +3087,7 @@ mod tests {
         seed_instance(&svc, "i-dead");
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             let inst = state.instances.get_mut("i-dead").unwrap();
             inst.state_code = 48;
             inst.state_name = "terminated".into();

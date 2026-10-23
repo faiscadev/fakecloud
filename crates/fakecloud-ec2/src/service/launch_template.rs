@@ -185,7 +185,7 @@ pub fn resolve_launch_template_in(
 ) -> Result<ResolvedLaunchTemplate, AwsServiceError> {
     let accounts = state.read();
     let empty = Ec2State::new(account_id, region);
-    let s = accounts.get(account_id).unwrap_or(&empty);
+    let s = accounts.regional(account_id, region).unwrap_or(&empty);
     resolve_launch_template(s, id, name, version)
 }
 

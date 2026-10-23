@@ -13,7 +13,7 @@ pub(crate) fn copy_fpga_image(
     let id = gen_id("afi");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let src = state.fpga_images.get(&source).cloned();
         let f = FpgaImage {
             id: id.clone(),
@@ -97,7 +97,7 @@ pub(crate) fn create_fpga_image(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "fpga-image");
         state.fpga_images.insert(id.clone(), f);
     }
@@ -119,7 +119,7 @@ pub(crate) fn delete_fpga_image(
     let id = require(&req.query_params, "FpgaImageId")?;
     let removed = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let r = state.fpga_images.remove(&id).is_some();
         if r {
             state.tags.remove(&id);
@@ -146,7 +146,9 @@ pub(crate) fn describe_fpga_image_attribute(
     )?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // Echo the stored image when present; for a synthetic id return the attribute
     // shape with empty members (EC2's Query API models no error for this op).
     let synth = FpgaImage {
@@ -173,7 +175,9 @@ pub(crate) fn describe_fpga_images(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .fpga_images
         .values()
@@ -205,7 +209,7 @@ pub(crate) fn modify_fpga_image_attribute(
     let rm_users = nested_indexed(req, "LoadPermission.Remove", "UserId");
     let rm_groups = nested_indexed(req, "LoadPermission.Remove", "Group");
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when the image exists; otherwise synthesize the attribute response
     // from the request (probe-only synthetic ids). EC2 models no error here.
     let mut synth = FpgaImage {
@@ -254,7 +258,7 @@ pub(crate) fn reset_fpga_image_attribute(
     validate_enum(&req.query_params, "Attribute", &["loadPermission"])?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(f) = state.fpga_images.get_mut(&id) {
             f.load_permission_users.clear();
             f.load_permission_groups.clear();

@@ -146,15 +146,15 @@ impl NeptuneService {
                 subnets,
             ));
         };
-        let placed =
-            fakecloud_ec2::vpc_lookup::resolve_subnet_group(ec2, &req.account_id, subnet_ids)
-                .map_err(|e| {
-                    AwsServiceError::aws_error(
-                        http::StatusCode::BAD_REQUEST,
-                        "InvalidSubnet",
-                        e.message(),
-                    )
-                })?;
+        let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(
+            ec2,
+            &req.account_id,
+            &req.region,
+            subnet_ids,
+        )
+        .map_err(|e| {
+            AwsServiceError::aws_error(http::StatusCode::BAD_REQUEST, "InvalidSubnet", e.message())
+        })?;
         if placed.distinct_availability_zones() < 2 {
             return Err(AwsServiceError::aws_error(
                 http::StatusCode::BAD_REQUEST,
@@ -2265,6 +2265,7 @@ impl NeptuneService {
                 if !fakecloud_ec2::vpc_lookup::subnet_group_vpc_change_allowed(
                     ec2,
                     &req.account_id,
+                    &req.region,
                     &group.vpc_id,
                     &vpc_id,
                 ) {

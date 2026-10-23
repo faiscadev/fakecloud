@@ -94,6 +94,7 @@ impl ResourceProvisioner {
         let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &subnet_ids,
         )
         .map_err(|e| e.message())?;

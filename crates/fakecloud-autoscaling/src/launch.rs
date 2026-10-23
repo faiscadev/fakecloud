@@ -207,7 +207,7 @@ pub fn launch_configuration_from_instance(
 ) -> Result<(LaunchConfiguration, Option<String>, String), String> {
     let accounts = ec2_state.read();
     let st = accounts
-        .get(account_id)
+        .regional(account_id, region)
         .ok_or_else(|| format!("Invalid instance id {instance_id}"))?;
     let inst = st
         .instances

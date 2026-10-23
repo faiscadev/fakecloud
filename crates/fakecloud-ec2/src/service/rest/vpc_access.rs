@@ -51,7 +51,7 @@ pub(crate) fn create_vpc_block_public_access_exclusion(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -78,7 +78,7 @@ pub(crate) fn delete_vpc_block_public_access_exclusion(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ExclusionId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let mut e = state
         .vpc_bpa_exclusions
         .remove(&id)
@@ -109,7 +109,9 @@ pub(crate) fn describe_vpc_block_public_access_exclusions(
     let wanted = indexed_list(&req.query_params, "ExclusionId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .vpc_bpa_exclusions
         .values()
@@ -146,7 +148,9 @@ pub(crate) fn describe_vpc_block_public_access_options(
     let region = region_of(req);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mode = state
         .vpc_bpa_internet_gateway_block_mode
         .clone()
@@ -170,7 +174,7 @@ pub(crate) fn modify_vpc_block_public_access_exclusion(
         &["allow-bidirectional", "allow-egress"],
     )?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when present; synthesize for a probe-only synthetic id.
     let mut synth = VpcBpaExclusion {
         id: id.clone(),
@@ -206,7 +210,7 @@ pub(crate) fn modify_vpc_block_public_access_options(
     let region = region_of(req);
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.vpc_bpa_internet_gateway_block_mode = Some(mode.clone());
     }
     Ok(Ec2Service::respond(

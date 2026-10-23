@@ -206,6 +206,48 @@ async fn raised_rule_quota_is_enforced_by_ec2() {
         .await
         .unwrap();
 
+    // Terraform updates an existing quota by submitting another increase,
+    // then reading both the applied quota and the new request's status.
+    let id = request_increase(&sq, RULES_PER_SG, 200.0).await;
+    assert_eq!(status(&sq, &id).await, RequestStatus::Approved);
+    assert_eq!(applied(&sq, RULES_PER_SG).await, 200.0);
+    ec2.authorize_security_group_ingress()
+        .group_id(&sg_id)
+        .set_ip_permissions(Some((61..200).map(cidr_rule).collect()))
+        .send()
+        .await
+        .unwrap();
+    let err = ec2
+        .authorize_security_group_ingress()
+        .group_id(&sg_id)
+        .ip_permissions(cidr_rule(200))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        aws_sdk_ec2::error::ProvideErrorMetadata::code(&err),
+        Some("RulesPerSecurityGroupLimitExceeded")
+    );
+    // The same applied quota independently allows 200 outbound rules (one
+    // default outbound rule already exists); inbound usage is not added.
+    ec2.authorize_security_group_egress()
+        .group_id(&sg_id)
+        .set_ip_permissions(Some((0..199).map(cidr_rule).collect()))
+        .send()
+        .await
+        .unwrap();
+    let err = ec2
+        .authorize_security_group_egress()
+        .group_id(&sg_id)
+        .ip_permissions(cidr_rule(199))
+        .send()
+        .await
+        .unwrap_err();
+    assert_eq!(
+        aws_sdk_ec2::error::ProvideErrorMetadata::code(&err),
+        Some("RulesPerSecurityGroupLimitExceeded")
+    );
+
     let history = sq
         .list_requested_service_quota_change_history_by_quota()
         .service_code(VPC)
@@ -213,7 +255,7 @@ async fn raised_rule_quota_is_enforced_by_ec2() {
         .send()
         .await
         .unwrap();
-    assert_eq!(history.requested_quotas().len(), 1);
+    assert_eq!(history.requested_quotas().len(), 2);
 }
 
 #[tokio::test]

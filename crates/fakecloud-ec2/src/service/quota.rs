@@ -287,7 +287,7 @@ pub(crate) fn check_launch_groups(
         // A group named by `SecurityGroup.N` is the same group when its id is
         // also listed, so resolve names to ids before counting.
         let accounts = svc.state.read();
-        if let Some(state) = accounts.get(account_id) {
+        if let Some(state) = accounts.regional(account_id, region) {
             for name in &names {
                 let resolved: Vec<&String> = state
                     .security_groups
@@ -373,7 +373,7 @@ impl QuotaUsageSource for Ec2QuotaUsage {
         // as the EC2 read paths report it. Resolved before the EC2 lock.
         let fallback = self.default_counts(region);
         let accounts = self.state.read();
-        let state = accounts.get(account_id).unwrap_or(&fallback);
+        let state = accounts.regional(account_id, region).unwrap_or(&fallback);
         resource_quotas::usage(state, quota).map(|n| n as f64)
     }
 }

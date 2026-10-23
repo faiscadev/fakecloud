@@ -3164,7 +3164,7 @@ pub(crate) mod tests {
             )),
             cognito: shared::<fakecloud_cognito::CognitoState>(),
             rds: shared::<fakecloud_rds::RdsState>(),
-            ec2: shared::<fakecloud_ec2::Ec2State>(),
+            ec2: shared::<fakecloud_core::multi_account::RegionalState<fakecloud_ec2::Ec2State>>(),
             autoscaling: Arc::new(parking_lot::RwLock::new(
                 fakecloud_autoscaling::AutoScalingAccounts::new(),
             )),

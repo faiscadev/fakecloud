@@ -68,7 +68,7 @@ pub(crate) fn create_traffic_mirror_filter(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -132,7 +132,7 @@ pub(crate) fn create_traffic_mirror_filter_rule(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state
             .traffic_mirror_filter_rules
             .insert(id.clone(), r.clone());
@@ -205,7 +205,7 @@ pub(crate) fn create_traffic_mirror_session(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -285,7 +285,7 @@ pub(crate) fn create_traffic_mirror_target(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -312,7 +312,7 @@ pub(crate) fn delete_traffic_mirror_filter(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "TrafficMirrorFilterId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let existed = state.traffic_mirror_filters.remove(&id).is_some();
     if existed {
         state.tags.remove(&id);
@@ -333,7 +333,7 @@ pub(crate) fn delete_traffic_mirror_filter_rule(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "TrafficMirrorFilterRuleId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     state.traffic_mirror_filter_rules.remove(&id);
     Ok(Ec2Service::respond(
         "DeleteTrafficMirrorFilterRule",
@@ -348,7 +348,7 @@ pub(crate) fn delete_traffic_mirror_session(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "TrafficMirrorSessionId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let existed = state.traffic_mirror_sessions.remove(&id).is_some();
     if existed {
         state.tags.remove(&id);
@@ -366,7 +366,7 @@ pub(crate) fn delete_traffic_mirror_target(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "TrafficMirrorTargetId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let existed = state.traffic_mirror_targets.remove(&id).is_some();
     if existed {
         state.tags.remove(&id);
@@ -390,7 +390,9 @@ pub(crate) fn describe_traffic_mirror_filter_rules(
         .filter(|v| !v.is_empty());
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .traffic_mirror_filter_rules
         .values()
@@ -413,7 +415,9 @@ pub(crate) fn describe_traffic_mirror_filters(
     let wanted = indexed_list(&req.query_params, "TrafficMirrorFilterId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .traffic_mirror_filters
         .values()
@@ -443,7 +447,9 @@ pub(crate) fn describe_traffic_mirror_sessions(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .traffic_mirror_sessions
         .values()
@@ -466,7 +472,9 @@ pub(crate) fn describe_traffic_mirror_targets(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .traffic_mirror_targets
         .values()
@@ -488,7 +496,7 @@ pub(crate) fn modify_traffic_mirror_filter_network_services(
     let add = indexed_list(&req.query_params, "AddNetworkService");
     let remove = indexed_list(&req.query_params, "RemoveNetworkService");
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when present; synthesize for a probe-only synthetic id.
     let mut synth = TrafficMirrorFilter {
         id: id.clone(),
@@ -535,7 +543,7 @@ pub(crate) fn modify_traffic_mirror_filter_rule(
     validate_enum(&req.query_params, "RuleAction", &["accept", "reject"])?;
     let remove_fields = indexed_list(&req.query_params, "RemoveField");
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when present; synthesize for a probe-only synthetic id.
     let mut synth = TrafficMirrorFilterRule {
         id: id.clone(),
@@ -622,7 +630,7 @@ pub(crate) fn modify_traffic_mirror_session(
     let owner = req.account_id.clone();
     let remove_fields = indexed_list(&req.query_params, "RemoveField");
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when present; synthesize for a probe-only synthetic id.
     let mut synth = TrafficMirrorSession {
         id: id.clone(),

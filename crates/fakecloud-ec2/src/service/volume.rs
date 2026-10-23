@@ -66,7 +66,7 @@ pub(crate) fn ebs_default_key(svc: &Ec2Service, account_id: &str, region: &str) 
     let custom = svc
         .state
         .read()
-        .get(account_id)
+        .regional(account_id, region)
         .and_then(|s| s.ebs_default_kms_key(region));
     custom.or_else(|| {
         fakecloud_core::delivery::aws_managed_kms_key_arn(
@@ -107,7 +107,7 @@ pub(crate) fn new_volume_encryption(
 ) -> (bool, Option<String>, Option<i64>) {
     let (by_default, source) = {
         let accounts = svc.state.read();
-        let state = accounts.get(account_id);
+        let state = accounts.regional(account_id, region);
         (
             state.is_some_and(|s| s.ebs_encryption_by_default(region)),
             snapshot_id
@@ -391,7 +391,7 @@ pub(crate) fn create_volume(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "volume");
         let t = state.tags_for(&id).to_vec();
         state.volumes.insert(id.clone(), v.clone());
@@ -410,7 +410,7 @@ pub(crate) fn delete_volume(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VolumeId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let retention = state.recycle_bin_retention.volumes;
     let vol = state
         .volumes
@@ -449,11 +449,13 @@ pub(crate) fn describe_volumes(
     let wanted = indexed_list(&req.query_params, "VolumeId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // An explicitly-requested VolumeId that does not exist (or is in the
     // recycle bin) is a hard error on AWS, not a silently-empty result.
     for id in &wanted {
-        if !state.volumes.get(id).is_some_and(|v| !v.in_recycle_bin) {
+        if state.volumes.get(id).is_none_or(|v| v.in_recycle_bin) {
             return Err(not_found("InvalidVolume.NotFound", id));
         }
     }
@@ -542,7 +544,7 @@ pub(crate) fn attach_volume(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let v = state
             .volumes
             .get_mut(&volume_id)
@@ -575,7 +577,7 @@ pub(crate) fn detach_volume(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let v = state
             .volumes
             .get_mut(&volume_id)
@@ -629,7 +631,7 @@ pub(crate) fn modify_volume(
     validate_enum(&req.query_params, "VolumeType", VOLUME_TYPES)?;
     let rendered = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let v = state
             .volumes
             .get_mut(&id)
@@ -686,7 +688,9 @@ pub(crate) fn describe_volumes_modifications(
     let wanted = indexed_list(&req.query_params, "VolumeId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .volumes
         .values()
@@ -711,7 +715,9 @@ pub(crate) fn describe_volume_status(
     let wanted = indexed_list(&req.query_params, "VolumeId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .volumes
         .values()
@@ -747,7 +753,7 @@ pub(crate) fn describe_volume_attribute(
     let auto = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .and_then(|s| s.volumes.get(&id).map(|v| v.auto_enable_io))
             .unwrap_or(false)
     };
@@ -769,7 +775,7 @@ pub(crate) fn modify_volume_attribute(
     let id = require(&req.query_params, "VolumeId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(v) = state.volumes.get_mut(&id) {
             if let Some(a) = req.query_params.get("AutoEnableIO.Value") {
                 v.auto_enable_io = a == "true";
@@ -804,7 +810,7 @@ pub(crate) fn get_ebs_encryption_by_default(
     let enabled = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .map(|s| s.ebs_encryption_by_default(&req.region))
             .unwrap_or(false)
     };
@@ -826,7 +832,7 @@ fn set_ebs_default(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .set_ebs_encryption_by_default(&req.region, val);
     }
     Ok(Ec2Service::respond(
@@ -875,7 +881,7 @@ pub(crate) fn modify_ebs_default_kms_key_id(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .set_ebs_default_kms_key(&req.region, Some(key.clone()));
     }
     Ok(Ec2Service::respond(
@@ -892,7 +898,7 @@ pub(crate) fn reset_ebs_default_kms_key_id(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .set_ebs_default_kms_key(&req.region, None);
     }
     let key = ebs_default_key(svc, &req.account_id, &req.region)
@@ -912,7 +918,9 @@ pub(crate) fn list_volumes_in_recycle_bin(
 ) -> Result<AwsResponse, AwsServiceError> {
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .volumes
         .values()
@@ -939,7 +947,7 @@ pub(crate) fn restore_volume_from_recycle_bin(
     let id = require(&req.query_params, "VolumeId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(v) = state.volumes.get_mut(&id) {
             v.in_recycle_bin = false;
             v.state = "available".to_string();
@@ -959,7 +967,7 @@ mod tests {
 
     fn seed_volume(svc: &Ec2Service, id: &str, state_name: &str, attached: bool) {
         let mut accounts = svc.state.write();
-        let st = accounts.get_or_create("000000000000");
+        let st = accounts.regional_mut("000000000000", "us-east-1");
         st.volumes.insert(
             id.to_string(),
             Volume {
@@ -1066,7 +1074,7 @@ mod tests {
         assert!(svc
             .state
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .volumes
             .contains_key("vol-1"));
@@ -1080,7 +1088,7 @@ mod tests {
         assert!(!svc
             .state
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .volumes
             .contains_key("vol-1"));
@@ -1092,7 +1100,7 @@ mod tests {
         seed_volume(&svc, "vol-1", "available", false);
         svc.state
             .write()
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .recycle_bin_retention
             .volumes = true;
         delete_volume(&svc, &req("DeleteVolume", &[("VolumeId", "vol-1")])).unwrap();
@@ -1133,7 +1141,7 @@ mod tests {
         .unwrap();
         {
             let st = svc.state.read();
-            let v = &st.get("000000000000").unwrap().volumes["vol-1"];
+            let v = &st.regional("000000000000", "us-east-1").unwrap().volumes["vol-1"];
             assert_eq!(v.size, 100);
             assert_eq!(v.iops, Some(6000));
             assert_eq!(v.throughput, Some(250));
@@ -1215,7 +1223,7 @@ mod tests {
         seed_volume(&svc, "vol-1", "available", false);
         {
             let mut accounts = svc.state.write();
-            let st = accounts.get_or_create("000000000000");
+            let st = accounts.regional_mut("000000000000", "us-east-1");
             st.tags.insert(
                 "vol-1".to_string(),
                 vec![Tag {
@@ -1649,7 +1657,7 @@ mod tests {
 
         let (root, data) = {
             let accounts = svc.state.read();
-            let st = accounts.get("000000000000").unwrap();
+            let st = accounts.regional("000000000000", "us-east-1").unwrap();
             let find = |dev: &str| {
                 st.volumes
                     .values()
@@ -1685,7 +1693,7 @@ mod tests {
         .await
         .unwrap();
         let accounts = svc.state.read();
-        let st = accounts.get("000000000000").unwrap();
+        let st = accounts.regional("000000000000", "us-east-1").unwrap();
         assert!(!st.volumes.contains_key(&root.volume_id));
         let kept = &st.volumes[&data.volume_id];
         assert_eq!(kept.state, "available");

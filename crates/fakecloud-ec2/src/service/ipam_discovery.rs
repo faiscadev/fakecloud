@@ -56,7 +56,7 @@ pub(crate) fn create_ipam_resource_discovery(
     let region = region_of(req);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -87,7 +87,7 @@ pub(crate) fn delete_ipam_resource_discovery(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let d = state
         .ipam_resource_discoveries
         .remove(&id)
@@ -116,7 +116,9 @@ pub(crate) fn describe_ipam_resource_discoveries(
     let region = region_of(req);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_resource_discoveries
         .values()
@@ -138,7 +140,7 @@ pub(crate) fn modify_ipam_resource_discovery(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let d = match state.ipam_resource_discoveries.get_mut(&id) {
         Some(entry) => {
             if let Some(desc) = req.query_params.get("Description") {
@@ -193,7 +195,7 @@ pub(crate) fn associate_ipam_resource_discovery(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_rd_associations
             .insert(assoc.clone(), (disco.clone(), ipam.clone()));
     }
@@ -216,7 +218,7 @@ pub(crate) fn disassociate_ipam_resource_discovery(
     let (disco, ipam) = {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_rd_associations
             .remove(&assoc)
             .unwrap_or_default()
@@ -240,7 +242,9 @@ pub(crate) fn describe_ipam_resource_discovery_associations(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_rd_associations
         .iter()
@@ -325,7 +329,7 @@ pub(crate) fn associate_ipam_byoasn(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_byoasns
             .insert(asn.clone(), cidr.clone());
     }
@@ -347,7 +351,9 @@ pub(crate) fn disassociate_ipam_byoasn(
     let cidr = require(&req.query_params, "Cidr")?;
     {
         let mut accounts = svc.state.write();
-        let byoasns = &mut accounts.get_or_create(&req.account_id).ipam_byoasns;
+        let byoasns = &mut accounts
+            .regional_mut(&req.account_id, &req.region)
+            .ipam_byoasns;
         // Only break the association when the stored CIDR matches the request,
         // so a mismatched CIDR leaves the association intact.
         if byoasns.get(&asn).is_some_and(|c| c == &cidr) {
@@ -374,7 +380,7 @@ pub(crate) fn provision_ipam_byoasn(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_byoasns
             .entry(asn.clone())
             .or_default();
@@ -395,7 +401,7 @@ pub(crate) fn deprovision_ipam_byoasn(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .ipam_byoasns
             .remove(&asn);
     }
@@ -413,7 +419,9 @@ pub(crate) fn describe_ipam_byoasn(
     validate_max_results(&req.query_params, 1, 100)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_byoasns
         .keys()
@@ -472,7 +480,7 @@ pub(crate) fn create_ipam_external_resource_verification_token(
     let region = region_of(req);
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -500,7 +508,7 @@ pub(crate) fn delete_ipam_external_resource_verification_token(
     let region = region_of(req);
     let ipam = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let ipam = state
             .ipam_ext_tokens
             .remove(&id)
@@ -527,7 +535,9 @@ pub(crate) fn describe_ipam_external_resource_verification_tokens(
     let region = region_of(req);
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .ipam_ext_tokens
         .iter()

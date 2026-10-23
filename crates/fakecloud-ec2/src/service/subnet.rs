@@ -197,7 +197,7 @@ pub(crate) fn create_subnet(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::SUBNETS_PER_VPC);
     let body = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         check_subnet_count(state, &subnet.vpc_id, limit)?;
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &id, "subnet");
         let tags = state.tags_for(&id).to_vec();
@@ -237,7 +237,7 @@ pub(crate) fn create_default_subnet(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::SUBNETS_PER_VPC);
     let body = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // Attach to the account's real default VPC, not the literal
         // `vpc-default` (which matches no VPC and orphaned the subnet —
         // bug-hunt 2026-06-18 finding 1.2). If a default subnet already exists
@@ -311,7 +311,7 @@ pub(crate) fn delete_subnet(
     let id = require(&req.query_params, "SubnetId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.subnets.remove(&id);
         state.tags.remove(&id);
     }
@@ -346,7 +346,9 @@ pub(crate) fn describe_subnets(
 
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     // An explicitly-requested SubnetId that does not exist is a hard error on
     // AWS (InvalidSubnetID.NotFound), not a silently-empty result.
@@ -446,7 +448,7 @@ pub(crate) fn modify_subnet_attribute(
     )?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(s) = state.subnets.get_mut(&subnet_id) {
             if let Some(v) = req.query_params.get("MapPublicIpOnLaunch.Value") {
                 s.map_public_ip_on_launch = v == "true";
@@ -499,7 +501,7 @@ pub(crate) fn associate_subnet_cidr_block(
     // resource waits for it via the returned association id.
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(s) = state.subnets.get_mut(&subnet_id) {
             s.ipv6_cidr_block = Some(ipv6.clone());
         }
@@ -562,7 +564,7 @@ pub(crate) fn create_subnet_cidr_reservation(
     let owner = req.account_id.clone();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.subnet_cidr_reservations.insert(id, res.clone());
     }
     let body = format!(
@@ -584,7 +586,7 @@ pub(crate) fn delete_subnet_cidr_reservation(
     let owner = req.account_id.clone();
     let removed = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.subnet_cidr_reservations.remove(&id)
     };
     // Response echoes the deleted reservation; synthesize if unknown (lenient).
@@ -616,7 +618,9 @@ pub(crate) fn get_subnet_cidr_reservations(
 
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .subnet_cidr_reservations
         .values()
@@ -771,7 +775,7 @@ mod tests {
         let id = make_subnet(&svc, "vpc-test", "10.0.9.0/24");
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.tags.insert(
                 id.clone(),
                 vec![Tag {

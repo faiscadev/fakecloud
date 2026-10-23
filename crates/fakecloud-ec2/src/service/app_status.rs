@@ -374,11 +374,12 @@ fn get_check<'a>(
 /// throwaway `Ec2State` here would seed a whole default network and AMI
 /// catalogue on every read.
 fn account_state<'a>(
-    accounts: &'a fakecloud_core::multi_account::MultiAccountState<Ec2State>,
+    accounts: &'a fakecloud_core::multi_account::MultiRegionState<Ec2State>,
     account_id: &str,
+    region: &str,
     requested: &[String],
 ) -> Result<Option<&'a Ec2State>, AwsServiceError> {
-    match accounts.get(account_id) {
+    match accounts.regional(account_id, region) {
         Some(state) => Ok(Some(state)),
         None => match requested.first() {
             Some(id) => Err(not_found("InvalidApplicationStatusCheckId.NotFound", id)),
@@ -511,7 +512,7 @@ pub(crate) fn create_application_status_check(
     check.create_fingerprint = check.client_token.is_some().then(|| fingerprint.clone());
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
 
     // Replaying a create with the same idempotency token must not mint a
     // second check; AWS answers the retry with the original object. A retry
@@ -578,7 +579,7 @@ pub(crate) fn describe_application_status_checks(
         .get("IncludeAll")
         .is_some_and(|v| v.eq_ignore_ascii_case("true"));
     let accounts = svc.state.read();
-    let state = account_state(&accounts, &req.account_id, &ids)?;
+    let state = account_state(&accounts, &req.account_id, &req.region, &ids)?;
     let items: Vec<String> = state
         .map(|s| {
             ensure_checks_exist(s, &ids, include_all)?;
@@ -616,7 +617,7 @@ pub(crate) fn modify_application_status_check(
     validate_probe(req)?;
     let paths = health_check_paths(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let dry = dry_run(req);
     let check = get_check(state, &id)?;
     // Interval and Timeout are each optional, so the invariant has to hold
@@ -701,7 +702,7 @@ pub(crate) fn delete_application_status_check(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "ApplicationStatusCheckId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let dry = dry_run(req);
     // get_check already treats a tombstoned check as gone, so reaching here
     // means the check is live.
@@ -762,7 +763,7 @@ fn change_associations(
     }
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let known_instances: Vec<String> = state.instances.keys().cloned().collect();
     let dry = dry_run(req);
     let check = get_check(state, &id)?;
@@ -868,7 +869,7 @@ pub(crate) fn describe_application_status_check_associations(
     };
     let accounts = svc.state.read();
     let mut items = Vec::new();
-    if let Some(state) = account_state(&accounts, &req.account_id, &ids)? {
+    if let Some(state) = account_state(&accounts, &req.account_id, &req.region, &ids)? {
         ensure_checks_exist(state, &ids, true)?;
         for c in state.application_status_checks.values() {
             if !ids.is_empty() && !ids.contains(&c.id) {
@@ -923,7 +924,7 @@ pub(crate) fn describe_application_status(
     // An explicitly-requested instance that does not exist is a hard error on
     // AWS, not a silently-short list — including when the account holds no
     // state at all.
-    let Some(state) = accounts.get(&req.account_id) else {
+    let Some(state) = accounts.regional(&req.account_id, &req.region) else {
         if let Some(id) = requested.first() {
             return Err(instance_not_found(id));
         }
@@ -1139,7 +1140,7 @@ fn change_suppression(
     }
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let known: Vec<String> = state.instances.keys().cloned().collect();
 
     let mut successful = Vec::new();
@@ -1247,7 +1248,7 @@ mod tests {
     /// Register an instance directly so association targets exist.
     fn seed_instance(svc: &Ec2Service, id: &str, tags: &[(&str, &str)]) {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         state.instances.insert(
             id.to_string(),
             crate::state::Instance {
@@ -2102,7 +2103,7 @@ mod tests {
         seed_instance(&svc, "i-9999999999999999c", &[]);
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.application_status_suppressions.insert(
                 "i-9999999999999999c".to_string(),
                 ApplicationStatusSuppression {
@@ -2339,7 +2340,7 @@ mod tests {
         // A check persisted before the fingerprint was recorded.
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state
                 .application_status_checks
                 .get_mut(&id)

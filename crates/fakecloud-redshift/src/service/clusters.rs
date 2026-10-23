@@ -157,6 +157,7 @@ impl RedshiftService {
         };
         let vpc_id = self.cluster_vpc_id(
             &req.account_id,
+            &req.region,
             param(req, "ClusterSubnetGroupName").as_deref(),
         );
         let mut guard = self.state.write();

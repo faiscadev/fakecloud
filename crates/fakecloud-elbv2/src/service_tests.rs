@@ -916,10 +916,15 @@ fn xml_field(body: &str, tag: &str) -> String {
 #[tokio::test]
 async fn create_lb_derives_vpc_azs_and_default_sg_from_ec2() {
     let (svc, ec2) = ec2_svc();
-    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012");
+    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1");
     let vpc = subnets[0].vpc_id.clone();
-    let default_sg =
-        fakecloud_ec2::vpc_lookup::default_security_group_id(&ec2, "123456789012", &vpc).unwrap();
+    let default_sg = fakecloud_ec2::vpc_lookup::default_security_group_id(
+        &ec2,
+        "123456789012",
+        "us-east-1",
+        &vpc,
+    )
+    .unwrap();
     let resp = svc
         .handle(req(
             "CreateLoadBalancer",
@@ -966,7 +971,7 @@ async fn create_lb_derives_vpc_azs_and_default_sg_from_ec2() {
 #[tokio::test]
 async fn create_lb_rejects_unknown_subnets_and_security_groups() {
     let (svc, ec2) = ec2_svc();
-    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012");
+    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1");
     let err = svc
         .handle(req(
             "CreateLoadBalancer",
@@ -1116,10 +1121,15 @@ async fn listener_actions_round_trip_auth_and_stickiness() {
 #[tokio::test]
 async fn legacy_invented_vpc_id_is_re_derived_not_enforced() {
     let (svc, ec2) = ec2_svc();
-    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012");
+    let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1");
     let vpc = subnets[0].vpc_id.clone();
-    let default_sg =
-        fakecloud_ec2::vpc_lookup::default_security_group_id(&ec2, "123456789012", &vpc).unwrap();
+    let default_sg = fakecloud_ec2::vpc_lookup::default_security_group_id(
+        &ec2,
+        "123456789012",
+        "us-east-1",
+        &vpc,
+    )
+    .unwrap();
     let body = body_string(
         &svc.handle(req(
             "CreateLoadBalancer",
@@ -1171,7 +1181,8 @@ async fn legacy_invented_vpc_id_is_re_derived_not_enforced() {
 #[tokio::test]
 async fn restore_vpc_ids_re_derives_from_subnets() {
     let ec2 = ec2_state();
-    let subnet = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012").remove(0);
+    let subnet =
+        fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1").remove(0);
     let svc = Elbv2Service::new_without_dataplane(Arc::new(RwLock::new(
         crate::state::Elbv2Accounts::new(),
     )));

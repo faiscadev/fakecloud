@@ -24,13 +24,14 @@ fn string_list(v: Option<&Value>) -> Vec<String> {
 pub fn derive_vpc_options(
     ec2: &SharedEc2State,
     account_id: &str,
+    region: &str,
     opts: &Value,
 ) -> Result<Value, String> {
     let subnet_ids = string_list(opts.get("SubnetIds"));
     if subnet_ids.is_empty() {
         return Ok(opts.clone());
     }
-    let subnets = vpc_lookup::resolve_subnets(ec2, account_id, &subnet_ids)
+    let subnets = vpc_lookup::resolve_subnets(ec2, account_id, region, &subnet_ids)
         .map_err(|id| format!("The subnet '{id}' does not exist."))?;
     let vpc_id = subnets[0].vpc_id.clone();
     if subnets.iter().any(|s| s.vpc_id != vpc_id) {
@@ -38,11 +39,11 @@ pub fn derive_vpc_options(
     }
     let requested_groups = string_list(opts.get("SecurityGroupIds"));
     let groups = if requested_groups.is_empty() {
-        vpc_lookup::default_security_group_id(ec2, account_id, &vpc_id)
+        vpc_lookup::default_security_group_id(ec2, account_id, region, &vpc_id)
             .into_iter()
             .collect::<Vec<_>>()
     } else {
-        let resolved = vpc_lookup::security_group_vpcs(ec2, account_id, &requested_groups)
+        let resolved = vpc_lookup::security_group_vpcs(ec2, account_id, region, &requested_groups)
             .map_err(|id| format!("The security group '{id}' does not exist."))?;
         if let Some((id, _)) = resolved.iter().find(|(_, v)| *v != vpc_id) {
             return Err(format!(
@@ -79,12 +80,18 @@ mod tests {
             "us-east-1",
             "",
         )));
-        let subnets = vpc_lookup::default_vpc_subnets(&ec2, "123456789012");
-        let sg = vpc_lookup::default_security_group_id(&ec2, "123456789012", &subnets[0].vpc_id)
-            .unwrap();
+        let subnets = vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1");
+        let sg = vpc_lookup::default_security_group_id(
+            &ec2,
+            "123456789012",
+            "us-east-1",
+            &subnets[0].vpc_id,
+        )
+        .unwrap();
         let out = derive_vpc_options(
             &ec2,
             "123456789012",
+            "us-east-1",
             &json!({ "SubnetIds": [subnets[0].subnet_id, subnets[1].subnet_id] }),
         )
         .unwrap();
@@ -97,6 +104,7 @@ mod tests {
         assert!(derive_vpc_options(
             &ec2,
             "123456789012",
+            "us-east-1",
             &json!({ "SubnetIds": ["subnet-0000dead"] })
         )
         .is_err());

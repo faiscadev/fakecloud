@@ -46,7 +46,7 @@ pub(crate) fn create_vpc_encryption_control(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -73,7 +73,7 @@ pub(crate) fn delete_vpc_encryption_control(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VpcEncryptionControlId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let mut c = state
         .vpc_encryption_controls
         .remove(&id)
@@ -105,7 +105,9 @@ pub(crate) fn describe_vpc_encryption_controls(
     let wanted = indexed_list(&req.query_params, "VpcEncryptionControlId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .vpc_encryption_controls
         .values()
@@ -162,7 +164,7 @@ pub(crate) fn modify_vpc_encryption_control(
         &["enable", "disable"],
     )?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when present; synthesize for a probe-only synthetic id.
     let mut synth = VpcEncryptionControl {
         id: id.clone(),
@@ -225,7 +227,7 @@ pub(crate) fn describe_account_vpc_encryption_control(
     let accounts = svc.state.read();
     let default = AccountVpcEncryptionControl::default();
     let c = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.account_vpc_encryption_control.as_ref())
         .unwrap_or(&default);
     Ok(Ec2Service::respond(
@@ -252,7 +254,7 @@ pub(crate) fn modify_account_vpc_encryption_control(
     }
     let c = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let entry = state
             .account_vpc_encryption_control
             .get_or_insert_with(AccountVpcEncryptionControl::default);

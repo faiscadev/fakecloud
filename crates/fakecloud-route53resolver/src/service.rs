@@ -472,7 +472,7 @@ fn with_ec2_in_region<R>(
     _region: &str,
     f: impl FnOnce(&fakecloud_ec2::Ec2State) -> R,
 ) -> R {
-    fakecloud_ec2::vpc_lookup::with_account(ec2, account, f)
+    fakecloud_ec2::vpc_lookup::with_account(ec2, account, _region, f)
 }
 
 impl Default for Route53ResolverService {

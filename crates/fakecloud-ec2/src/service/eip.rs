@@ -99,7 +99,7 @@ pub(crate) fn allocate_address(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::ELASTIC_IPS);
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // The AWS-managed "amazon" pool is always valid; any BYOIP pool id must
         // have been provisioned first, else AWS returns
         // InvalidPublicIpv4PoolID.NotFound.
@@ -149,7 +149,7 @@ pub(crate) fn release_address(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if let Some(id) = req.query_params.get("AllocationId") {
         if state.elastic_ips.remove(id).is_none() {
             return Err(not_found("InvalidAllocationID.NotFound", id));
@@ -189,7 +189,9 @@ pub(crate) fn describe_addresses(
     let wanted_ips = indexed_list(&req.query_params, "PublicIp");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .elastic_ips
         .values()
@@ -237,7 +239,7 @@ pub(crate) fn associate_address(
 ) -> Result<AwsResponse, AwsServiceError> {
     let assoc_id = gen_id("eipassoc");
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Resolve the target address by AllocationId (VPC) or PublicIp (Classic).
     // An unknown identifier must error rather than fabricate a phantom
     // association that no Describe would ever reflect.
@@ -287,7 +289,7 @@ pub(crate) fn disassociate_address(
 ) -> Result<AwsResponse, AwsServiceError> {
     if let Some(assoc) = req.query_params.get("AssociationId") {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for e in state.elastic_ips.values_mut() {
             if e.association_id.as_deref() == Some(assoc.as_str()) {
                 e.association_id = None;
@@ -312,7 +314,9 @@ pub(crate) fn describe_addresses_attribute(
     let wanted = indexed_list(&req.query_params, "AllocationId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // AWS only returns addresses that have a domain-name attribute set.
     let mut items: Vec<String> = state
         .elastic_ips
@@ -349,7 +353,7 @@ pub(crate) fn modify_address_attribute(
     let alloc = require(&req.query_params, "AllocationId")?;
     let domain_name = req.query_params.get("DomainName").cloned();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let eip = state
         .elastic_ips
         .get_mut(&alloc)
@@ -373,7 +377,7 @@ pub(crate) fn reset_address_attribute(
     require(&req.query_params, "Attribute")?;
     validate_enum(&req.query_params, "Attribute", &["domain-name"])?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let eip = state
         .elastic_ips
         .get_mut(&alloc)
@@ -545,7 +549,7 @@ pub(crate) fn create_key_pair(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if state.key_pairs.contains_key(&key_name) {
             return Err(duplicate_key_pair(&key_name));
         }
@@ -577,7 +581,7 @@ pub(crate) fn import_key_pair(
     let fingerprint = "aa:bb:cc:dd:ee:ff:00:11:22:33:44:55:66:77:88:99".to_string();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if state.key_pairs.contains_key(&key_name) {
             return Err(duplicate_key_pair(&key_name));
         }
@@ -605,7 +609,7 @@ pub(crate) fn delete_key_pair(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if let Some(name) = req.query_params.get("KeyName") {
         state.key_pairs.remove(name);
     } else if let Some(id) = req.query_params.get("KeyPairId") {
@@ -634,7 +638,9 @@ pub(crate) fn describe_key_pairs(
     let wanted_ids = indexed_list(&req.query_params, "KeyPairId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .key_pairs
         .values()
@@ -716,7 +722,7 @@ pub(crate) fn create_placement_group(
     let region = req.region.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -745,7 +751,7 @@ pub(crate) fn delete_placement_group(
     let name = require(&req.query_params, "GroupName")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.placement_groups.remove(&name);
     }
     Ok(Ec2Service::respond(
@@ -764,7 +770,9 @@ pub(crate) fn describe_placement_groups(
     let region = req.region.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .placement_groups
         .values()
@@ -909,7 +917,7 @@ mod eip_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.public_ipv4_pools.insert(
                 "ipv4pool-ec2-0abc".to_string(),
                 crate::state::PublicIpv4Pool {
@@ -1013,7 +1021,7 @@ mod eip_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.public_ipv4_pools.insert(
                 "ipv4pool-ec2-0abc".to_string(),
                 crate::state::PublicIpv4Pool {
@@ -1073,7 +1081,7 @@ mod eip_tests {
         allocate_address(&svc, &req("AllocateAddress", &[("Domain", "vpc")])).unwrap();
         allocate_address(&svc, &req("AllocateAddress", &[("Domain", "vpc")])).unwrap();
         let accounts = svc.state.read();
-        let state = accounts.get("000000000000").unwrap();
+        let state = accounts.regional("000000000000", "us-east-1").unwrap();
         let ips: std::collections::HashSet<_> =
             state.elastic_ips.values().map(|e| &e.public_ip).collect();
         assert_eq!(ips.len(), 2, "each allocation should get a distinct IP");

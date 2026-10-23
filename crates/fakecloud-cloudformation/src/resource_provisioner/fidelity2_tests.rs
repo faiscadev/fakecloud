@@ -762,7 +762,7 @@ fn ec2_networking_resources_exist_in_ec2() {
     );
     {
         let ec2 = prov.ec2_state.read();
-        let st = ec2.get(ACCT).unwrap();
+        let st = ec2.regional(ACCT, "us-east-1").unwrap();
         assert!(st.internet_gateways[&igw.physical_id]
             .attachments
             .iter()
@@ -782,7 +782,7 @@ fn ec2_networking_resources_exist_in_ec2() {
         prov.delete_resource(r).unwrap();
     }
     let ec2 = prov.ec2_state.read();
-    let st = ec2.get(ACCT).unwrap();
+    let st = ec2.regional(ACCT, "us-east-1").unwrap();
     assert!(st.internet_gateways[&igw.physical_id]
         .attachments
         .is_empty());
@@ -1086,7 +1086,7 @@ fn ec2_eip_and_nat_gateway_tag_updates_are_in_place() {
     let tags_of = |id: &str| -> Vec<(String, String)> {
         prov.ec2_state
             .read()
-            .get(ACCT)
+            .regional(ACCT, "us-east-1")
             .unwrap()
             .tags_for(id)
             .iter()
@@ -1123,7 +1123,7 @@ fn ec2_eip_and_nat_gateway_tag_updates_are_in_place() {
     let replaced = update(&prov, &standalone, json!({"Domain": "standard"}));
     assert_ne!(replaced.physical_id, standalone.physical_id);
     let ec2 = prov.ec2_state.read();
-    let st = ec2.get(ACCT).unwrap();
+    let st = ec2.regional(ACCT, "us-east-1").unwrap();
     assert!(!st
         .elastic_ips
         .values()

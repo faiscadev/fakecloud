@@ -188,7 +188,7 @@ pub(crate) fn create_route_table(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::ROUTE_TABLES_PER_VPC);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         rq::check(
             limit,
             rq::route_tables_in_vpc(state, &rt.vpc_id),
@@ -224,7 +224,7 @@ pub(crate) fn delete_route_table(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "RouteTableId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     state.route_tables.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -244,7 +244,9 @@ pub(crate) fn describe_route_tables(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .route_tables
         .values()
@@ -329,7 +331,7 @@ fn route_mutate(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mut route = parse_route(&req.query_params);
         if !replace {
             if let Some(rt) = state.route_tables.get(&rt_id) {
@@ -412,7 +414,7 @@ pub(crate) fn delete_route(
     let cidr = req.query_params.get("DestinationCidrBlock").cloned();
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(rt) = state.route_tables.get_mut(&rt_id) {
             rt.routes
                 .retain(|r| r.destination_cidr_block != cidr || cidr.is_none());
@@ -433,7 +435,7 @@ pub(crate) fn associate_route_table(
     let assoc_id = gen_id("rtbassoc");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(rt) = state.route_tables.get_mut(&rt_id) {
             rt.associations.push(RouteTableAssociation {
                 association_id: assoc_id.clone(),
@@ -462,7 +464,7 @@ pub(crate) fn disassociate_route_table(
     let assoc_id = require(&req.query_params, "AssociationId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for rt in state.route_tables.values_mut() {
             rt.associations.retain(|a| a.association_id != assoc_id);
         }
@@ -483,7 +485,7 @@ pub(crate) fn replace_route_table_association(
     let new_id = gen_id("rtbassoc");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // Detach the association from whichever route table currently owns it,
         // preserving whether it's the main association or a subnet association.
         let mut moved: Option<crate::state::RouteTableAssociation> = None;
@@ -539,7 +541,7 @@ pub(crate) fn create_internet_gateway(
     );
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         rq::check(
             limit,
             rq::internet_gateways(state),
@@ -574,7 +576,7 @@ pub(crate) fn delete_internet_gateway(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "InternetGatewayId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     state.internet_gateways.remove(&id);
     state.tags.remove(&id);
     Ok(Ec2Service::respond(
@@ -593,7 +595,9 @@ pub(crate) fn describe_internet_gateways(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .internet_gateways
         .values()
@@ -616,7 +620,7 @@ pub(crate) fn attach_internet_gateway(
     let vpc = require(&req.query_params, "VpcId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(g) = state.internet_gateways.get_mut(&id) {
             g.attachments.push((vpc, "available".to_string()));
         }
@@ -636,7 +640,7 @@ pub(crate) fn detach_internet_gateway(
     let vpc = require(&req.query_params, "VpcId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(g) = state.internet_gateways.get_mut(&id) {
             g.attachments.retain(|(v, _)| v != &vpc);
         }
@@ -662,7 +666,7 @@ pub(crate) fn create_egress_only_igw(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -692,7 +696,7 @@ pub(crate) fn delete_egress_only_igw(
     let id = require(&req.query_params, "EgressOnlyInternetGatewayId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.egress_only_igws.remove(&id);
         state.tags.remove(&id);
     }
@@ -711,7 +715,9 @@ pub(crate) fn describe_egress_only_igws(
     let wanted = indexed_list(&req.query_params, "EgressOnlyInternetGatewayId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .egress_only_igws
         .values()
@@ -752,7 +758,7 @@ pub(crate) fn create_nat_gateway(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::NAT_GATEWAYS_PER_AZ);
     let (nat, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // The quota is per Availability Zone: the zone of the gateway's
         // subnet. A subnet fakecloud does not know places it in no zone.
         if let Some(az) = rq::subnet_az(state, &subnet_id) {
@@ -803,7 +809,7 @@ pub(crate) fn delete_nat_gateway(
     let id = require(&req.query_params, "NatGatewayId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.nat_gateways.remove(&id);
         state.tags.remove(&id);
     }
@@ -822,7 +828,9 @@ pub(crate) fn describe_nat_gateways(
     let wanted = indexed_list(&req.query_params, "NatGatewayId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .nat_gateways
         .values()
@@ -922,10 +930,11 @@ mod nat_tests {
     #[test]
     fn create_nat_gateway_derives_vpc_from_subnet() {
         let svc = Ec2Service::new();
+        svc.state.write().regional_mut("000000000000", "us-east-1");
         // Use a seeded default subnet and read its VPC.
         let (subnet_id, vpc_id) = {
             let accounts = svc.state.read();
-            let state = accounts.get("000000000000").unwrap();
+            let state = accounts.regional("000000000000", "us-east-1").unwrap();
             let subnet = state.subnets.values().next().expect("default subnet");
             (subnet.subnet_id.clone(), subnet.vpc_id.clone())
         };

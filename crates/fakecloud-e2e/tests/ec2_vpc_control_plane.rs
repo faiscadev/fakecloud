@@ -6,6 +6,67 @@ mod helpers;
 use helpers::TestServer;
 
 #[tokio::test]
+async fn secondary_ipv4_cidr_is_readable_by_terraform_filter() {
+    let server = TestServer::start().await;
+    let c = server.ec2_client().await;
+    let created = c
+        .create_vpc()
+        .cidr_block("10.40.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let vpc_id = created.vpc().unwrap().vpc_id().unwrap();
+    let associated = c
+        .associate_vpc_cidr_block()
+        .vpc_id(vpc_id)
+        .cidr_block("10.41.0.0/16")
+        .send()
+        .await
+        .unwrap();
+    let association_id = associated
+        .cidr_block_association()
+        .unwrap()
+        .association_id()
+        .unwrap();
+    let filter = aws_sdk_ec2::types::Filter::builder()
+        .name("cidr-block-association.association-id")
+        .values(association_id)
+        .build();
+    // This is the DescribeVpcs request Terraform's create waiter and refresh use.
+    let described = c
+        .describe_vpcs()
+        .filters(filter.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(described.vpcs().len(), 1);
+    assert_eq!(described.vpcs()[0].vpc_id(), Some(vpc_id));
+    let association = described.vpcs()[0]
+        .cidr_block_association_set()
+        .iter()
+        .find(|a| a.association_id() == Some(association_id))
+        .unwrap();
+    assert_eq!(association.cidr_block(), Some("10.41.0.0/16"));
+    assert_eq!(
+        association.cidr_block_state().unwrap().state(),
+        Some(&aws_sdk_ec2::types::VpcCidrBlockStateCode::Associated)
+    );
+    c.disassociate_vpc_cidr_block()
+        .association_id(association_id)
+        .send()
+        .await
+        .unwrap();
+    assert!(c
+        .describe_vpcs()
+        .filters(filter)
+        .send()
+        .await
+        .unwrap()
+        .vpcs()
+        .is_empty());
+}
+
+#[tokio::test]
 async fn create_vpc_provisions_default_resources() {
     let server = TestServer::start().await;
     let c = server.ec2_client().await;

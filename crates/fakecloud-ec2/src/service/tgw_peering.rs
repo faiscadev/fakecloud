@@ -52,7 +52,7 @@ pub(crate) fn create_transit_gateway_peering_attachment(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_peerings
             .insert(id.clone(), p.clone());
     }
@@ -69,7 +69,7 @@ pub(crate) fn create_transit_gateway_peering_attachment(
 fn peering_lookup(svc: &Ec2Service, req: &AwsRequest, id: &str) -> TgwPeering {
     svc.state
         .read()
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_peerings.get(id).cloned())
         .unwrap_or(TgwPeering {
             id: id.to_string(),
@@ -94,7 +94,7 @@ fn peering_state_change(
     }
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if action == "DeleteTransitGatewayPeeringAttachment" {
             state.tgw_peerings.remove(&id);
         } else if let Some(stored) = state.tgw_peerings.get_mut(&id) {
@@ -153,7 +153,9 @@ pub(crate) fn describe_transit_gateway_peering_attachments(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_peerings
         .values()
@@ -180,7 +182,7 @@ pub(crate) fn create_transit_gateway_connect(
     // reports the real parent rather than a placeholder.
     let tgw_id = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let tgw_id = state
             .tgw_attachments
             .get(&transport)
@@ -213,7 +215,7 @@ pub(crate) fn delete_transit_gateway_connect(
     let transport = {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_connects
             .remove(&id)
             .map(|(t, _)| t)
@@ -238,7 +240,9 @@ pub(crate) fn describe_transit_gateway_connects(
     mr(req)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_connects
         .iter()
@@ -271,7 +275,7 @@ pub(crate) fn create_transit_gateway_connect_peer(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_connect_peers
             .insert(id.clone(), att.clone());
     }
@@ -299,7 +303,7 @@ pub(crate) fn delete_transit_gateway_connect_peer(
     let att = {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_connect_peers
             .remove(&id)
             .unwrap_or_default()
@@ -326,7 +330,9 @@ pub(crate) fn describe_transit_gateway_connect_peers(
     mr(req)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_connect_peers
         .iter()
@@ -366,7 +372,7 @@ pub(crate) fn create_transit_gateway_policy_table(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_policy_tables
             .insert(id.clone(), tgw_id.clone());
     }
@@ -387,7 +393,7 @@ pub(crate) fn delete_transit_gateway_policy_table(
     let id = require(&req.query_params, "TransitGatewayPolicyTableId")?;
     let tgw = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.tgw_policy_table_associations.remove(&id);
         state
             .tgw_policy_tables
@@ -411,7 +417,9 @@ pub(crate) fn describe_transit_gateway_policy_tables(
     mr(req)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_policy_tables
         .iter()
@@ -434,7 +442,7 @@ pub(crate) fn associate_transit_gateway_policy_table(
     {
         let mut accounts = svc.state.write();
         let assocs = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_policy_table_associations
             .entry(pt.clone())
             .or_default();
@@ -463,7 +471,7 @@ pub(crate) fn disassociate_transit_gateway_policy_table(
     {
         let mut accounts = svc.state.write();
         if let Some(assocs) = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_policy_table_associations
             .get_mut(&pt)
         {
@@ -490,7 +498,7 @@ pub(crate) fn get_transit_gateway_policy_table_associations(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_policy_table_associations.get(&pt))
         .map(|atts| {
             atts.iter()
@@ -569,7 +577,7 @@ pub(crate) fn create_transit_gateway_policy_table_entry(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_policy_table_entries
             .entry(pt.clone())
             .or_default()
@@ -594,7 +602,7 @@ pub(crate) fn modify_transit_gateway_policy_table_entry(
     let entry = {
         let mut accounts = svc.state.write();
         let entries = accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_policy_table_entries
             .entry(pt.clone())
             .or_default();
@@ -645,7 +653,7 @@ pub(crate) fn delete_transit_gateway_policy_table_entry(
     let entry = {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .tgw_policy_table_entries
             .get_mut(&pt)
             .and_then(|m| m.remove(&rule_number))
@@ -669,7 +677,7 @@ pub(crate) fn get_transit_gateway_policy_table_entries(
     mr(req)?;
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.tgw_policy_table_entries.get(&pt))
         .map(|m| m.values().map(|e| policy_entry_xml(e, "active")).collect())
         .unwrap_or_default();
@@ -711,7 +719,7 @@ pub(crate) fn create_transit_gateway_route_table_announcement(
     let id = gen_id("tgw-rtb-announce");
     let tgw_id = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let tgw_id = tgw_of_rtb(state, &rtb);
         state
             .tgw_announcements
@@ -735,7 +743,7 @@ pub(crate) fn delete_transit_gateway_route_table_announcement(
     let id = require(&req.query_params, "TransitGatewayRouteTableAnnouncementId")?;
     let (rtb, peering, tgw_id) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let (rtb, peering) = state.tgw_announcements.remove(&id).unwrap_or_default();
         let tgw_id = tgw_of_rtb(state, &rtb);
         (rtb, peering, tgw_id)
@@ -757,7 +765,9 @@ pub(crate) fn describe_transit_gateway_route_table_announcements(
     mr(req)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .tgw_announcements
         .iter()

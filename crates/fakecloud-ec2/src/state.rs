@@ -11,26 +11,45 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 
-/// Shared, account-partitioned EC2 state handle.
-pub type SharedEc2State = Arc<RwLock<fakecloud_core::multi_account::MultiAccountState<Ec2State>>>;
+/// Shared, (account, region)-partitioned EC2 state handle.
+pub type SharedEc2State = Arc<RwLock<fakecloud_core::multi_account::MultiRegionState<Ec2State>>>;
 
-/// On-disk snapshot envelope for EC2 state. Versioned so format changes fail
-/// loudly on upgrade rather than silently mis-parsing. Backing containers are
-/// not serialized -- on restore the server reconciles them via
-/// `Ec2Service::recover_persisted_containers`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Ec2Snapshot {
-    pub schema_version: u32,
-    #[serde(default)]
-    pub accounts: Option<fakecloud_core::multi_account::MultiAccountState<Ec2State>>,
-}
+/// On-disk snapshot envelope for EC2 state.
+pub type Ec2Snapshot = fakecloud_core::multi_account::RegionalSnapshot<Ec2State>;
 
-pub const EC2_SNAPSHOT_SCHEMA_VERSION: u32 = 1;
+pub const EC2_SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 
 impl fakecloud_core::multi_account::AccountState for Ec2State {
     fn new_for_account(account_id: &str, region: &str, _endpoint: &str) -> Self {
         Self::new(account_id, region)
     }
+}
+
+impl fakecloud_core::multi_account::SplitByRegion for Ec2State {
+    fn split_by_region(self, into: &mut fakecloud_core::multi_account::RegionalState<Self>) {
+        let target =
+            into.region_or_default_mut(Some(self.region.as_str()).filter(|r| !r.is_empty()));
+        *target = self;
+    }
+}
+
+/// Parse a persisted EC2 snapshot, migrating older schemas (v1: one
+/// account-wide state per account) by splitting each account by region.
+pub fn parse_ec2_snapshot(bytes: &[u8]) -> Result<Ec2Snapshot, serde_json::Error> {
+    fakecloud_core::multi_account::parse_regional_snapshot(
+        bytes,
+        EC2_SNAPSHOT_SCHEMA_VERSION,
+        |state: Ec2State| {
+            let account_id = state.account_id.clone();
+            let region = state.region.clone();
+            fakecloud_core::multi_account::RegionalState::from_legacy(
+                &account_id,
+                &region,
+                "",
+                state,
+            )
+        },
+    )
 }
 
 /// Recycle Bin retention rules in effect for an account, per resource type.

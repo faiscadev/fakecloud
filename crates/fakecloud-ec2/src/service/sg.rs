@@ -404,7 +404,7 @@ pub(crate) fn create_security_group(
         Some(v) => v.clone(),
         None => {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create(&req.account_id);
+            let state = accounts.regional_mut(&req.account_id, &req.region);
             state
                 .vpcs
                 .values()
@@ -443,7 +443,7 @@ pub(crate) fn create_security_group(
         svc.enforced_count_quota(&req.account_id, &req.region, rq::SECURITY_GROUPS_PER_REGION);
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         rq::check(
             limit,
             rq::security_groups(state),
@@ -482,7 +482,7 @@ pub(crate) fn delete_security_group(
     req: &AwsRequest,
 ) -> Result<AwsResponse, AwsServiceError> {
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // The VPC's `default` security group cannot be deleted — AWS returns
     // `CannotDelete`. Without this guard, deleting it left a VPC with no
     // default group, so a later no-SecurityGroupId RunInstances launched with
@@ -538,7 +538,9 @@ pub(crate) fn describe_security_groups(
 
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     // An explicitly-requested group id / name that does not exist is a hard
     // error on AWS (InvalidGroup.NotFound), not a silently-empty result.
@@ -677,7 +679,7 @@ fn authorize(
     let rule_limit = svc.enforced_rules_per_security_group(&req.account_id, &req.region);
     let rule_items = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // A missing or empty GroupId (or a nonexistent one) is a hard error on
         // AWS, not a silent no-op.
         let weights = RuleWeights::new(&state.managed_prefix_lists, &req.region);
@@ -743,7 +745,7 @@ fn revoke(
     let described = parse_ip_permissions(&req.query_params, &group_id, is_egress);
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         // A missing/empty/nonexistent GroupId is a hard error on AWS.
         let sg = state
             .security_groups
@@ -802,7 +804,9 @@ pub(crate) fn describe_security_group_rules(
 
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .security_groups
         .values()
@@ -858,7 +862,7 @@ pub(crate) fn modify_security_group_rules(
     let rule_limit = svc.enforced_rules_per_security_group(&req.account_id, &req.region);
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let weights = RuleWeights::new(&state.managed_prefix_lists, &req.region);
         let sg = state.security_groups.get_mut(&group_id).ok_or_else(|| {
             AwsServiceError::aws_error(
@@ -949,7 +953,7 @@ fn update_rule_descriptions(
     let p = &req.query_params;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let sg = state.security_groups.get_mut(&group_id).ok_or_else(|| {
             AwsServiceError::aws_error(
                 http::StatusCode::BAD_REQUEST,
@@ -1059,7 +1063,7 @@ pub(crate) fn associate_security_group_vpc(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .security_group_vpc_associations
             .insert(sg_vpc_assoc_key(&group_id, &vpc_id), assoc);
     }
@@ -1079,7 +1083,7 @@ pub(crate) fn disassociate_security_group_vpc(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .security_group_vpc_associations
             .remove(&sg_vpc_assoc_key(&group_id, &vpc_id));
     }
@@ -1099,7 +1103,9 @@ pub(crate) fn describe_security_group_vpc_associations(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .security_group_vpc_associations
         .values()
@@ -1129,7 +1135,9 @@ pub(crate) fn get_security_groups_for_vpc(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .security_groups
         .values()
@@ -1220,7 +1228,9 @@ pub(crate) fn validate_security_group_quotas_for_interface(
     {
         let accounts = svc.state.read();
         let empty = Ec2State::new(&req.account_id, &req.region);
-        let state = accounts.get(&req.account_id).unwrap_or(&empty);
+        let state = accounts
+            .regional(&req.account_id, &req.region)
+            .unwrap_or(&empty);
         let weights = RuleWeights::new(&state.managed_prefix_lists, &req.region);
         for id in &group_ids {
             let sg = state
@@ -1299,7 +1309,7 @@ mod modify_tests {
 
     fn seed_group(svc: &Ec2Service, rule: SecurityGroupRule) -> String {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         state.security_groups.insert(
             "sg-1".to_string(),
             SecurityGroup {
@@ -1356,7 +1366,11 @@ mod modify_tests {
         .unwrap();
 
         let accounts = svc.state.read();
-        let r = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules[0];
+        let r = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .security_groups["sg-1"]
+            .rules[0];
         assert_eq!(r.from_port, 443);
         assert_eq!(r.to_port, 443);
         assert_eq!(r.cidr_ipv4.as_deref(), Some("0.0.0.0/0"));
@@ -1383,7 +1397,7 @@ mod modify_tests {
 
     fn seed_group_rules(svc: &Ec2Service, rules: Vec<SecurityGroupRule>) {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         state.security_groups.insert(
             "sg-1".to_string(),
             SecurityGroup {
@@ -1422,7 +1436,11 @@ mod modify_tests {
         .unwrap();
 
         let accounts = svc.state.read();
-        let rules = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules;
+        let rules = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .security_groups["sg-1"]
+            .rules;
         assert_eq!(rules.len(), 1, "only the port-22 rule should be revoked");
         assert_eq!(rules[0].rule_id, "sgr-b");
     }
@@ -1446,7 +1464,7 @@ mod modify_tests {
             .unwrap()
             .to_string();
         let accounts = svc.state.read();
-        let state = accounts.get("000000000000").unwrap();
+        let state = accounts.regional("000000000000", "us-east-1").unwrap();
         let default_vpc = state.vpcs.values().find(|v| v.is_default).unwrap();
         assert_eq!(state.security_groups[&sg_id].vpc_id, default_vpc.vpc_id);
     }
@@ -1493,7 +1511,11 @@ mod modify_tests {
         .unwrap();
 
         let accounts = svc.state.read();
-        let rules = &accounts.get("000000000000").unwrap().security_groups[&sg_id].rules;
+        let rules = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .security_groups[&sg_id]
+            .rules;
         assert!(
             rules.iter().all(|r| !r.is_egress),
             "default all-traffic egress rule should be revoked despite 0/0 ports"
@@ -1555,7 +1577,7 @@ mod modify_tests {
         let svc = Ec2Service::new();
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.security_groups.insert(
                 "sg-prod".into(),
                 SecurityGroup {
@@ -1628,14 +1650,18 @@ mod modify_tests {
         .unwrap();
 
         let accounts = svc.state.read();
-        let r = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules[0];
+        let r = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .security_groups["sg-1"]
+            .rules[0];
         assert_eq!(r.description, "ssh from vpc");
     }
 
     fn empty_group(svc: &Ec2Service) {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .security_groups
             .insert(
                 "sg-1".to_string(),
@@ -1672,7 +1698,11 @@ mod modify_tests {
         // The stored rule carries the inline description...
         {
             let accounts = svc.state.read();
-            let rules = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules;
+            let rules = &accounts
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .security_groups["sg-1"]
+                .rules;
             let r = rules.iter().find(|r| !r.is_egress).unwrap();
             assert_eq!(r.description, "https from vpc");
         }
@@ -1810,7 +1840,7 @@ mod modify_tests {
         let mut b = ingress_rule("sgr-b", 443, "0.0.0.0/0");
         b.group_id = "sg-b".into();
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         for (id, rule) in [("sg-a", a), ("sg-b", b)] {
             state.security_groups.insert(
                 id.to_string(),
@@ -1910,7 +1940,7 @@ mod modify_tests {
         .unwrap();
         let accounts = svc.state.read();
         assert!(accounts
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .tags_for(&rule_id)
             .is_empty());
@@ -1984,7 +2014,11 @@ mod modify_tests {
         )
         .unwrap();
         let accounts = svc.state.read();
-        let rules = &accounts.get("000000000000").unwrap().security_groups["sg-1"].rules;
+        let rules = &accounts
+            .regional("000000000000", "us-east-1")
+            .unwrap()
+            .security_groups["sg-1"]
+            .rules;
         let r = rules
             .iter()
             .find(|r| r.referenced_group_name.is_some())
@@ -2062,7 +2096,7 @@ mod modify_tests {
         seed_group(&svc, base_rule());
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.tags.insert(
                 "sg-1".to_string(),
                 vec![Tag {
@@ -2180,7 +2214,7 @@ mod modify_tests {
             rules.push(r);
         }
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         state.security_groups.insert(
             group_id.to_string(),
             SecurityGroup {
@@ -2199,7 +2233,7 @@ mod modify_tests {
         seed_sized_group(&svc, "sg-a", 0, 0);
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             for (id, max_entries) in [("pl-big", 61), ("pl-small", 60)] {
                 state.managed_prefix_lists.insert(
                     id.to_string(),

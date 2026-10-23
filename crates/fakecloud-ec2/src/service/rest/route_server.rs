@@ -70,7 +70,7 @@ pub(crate) fn create_route_server(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -128,7 +128,7 @@ pub(crate) fn create_route_server_endpoint(
     let id = gen_id("rse");
     let (endpoint, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let vpc_id = state
             .subnets
             .get(&subnet_id)
@@ -180,7 +180,7 @@ pub(crate) fn create_route_server_peer(
     let id = gen_id("rsp");
     let (peer, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let endpoint = state.route_server_endpoints.get(&endpoint_id);
         let peer = RouteServerPeer {
             id: id.clone(),
@@ -222,7 +222,7 @@ pub(crate) fn delete_route_server(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "RouteServerId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let mut r = state
         .route_servers
         .remove(&id)
@@ -251,7 +251,7 @@ pub(crate) fn delete_route_server_endpoint(
     let id = require(&req.query_params, "RouteServerEndpointId")?;
     let (endpoint, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mut endpoint =
             state
                 .route_server_endpoints
@@ -287,7 +287,7 @@ pub(crate) fn delete_route_server_peer(
     let id = require(&req.query_params, "RouteServerPeerId")?;
     let (peer, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let mut peer = state
             .route_server_peers
             .remove(&id)
@@ -326,7 +326,9 @@ pub(crate) fn describe_route_server_endpoints(
     let wanted = indexed_list(&req.query_params, "RouteServerEndpointId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .route_server_endpoints
         .values()
@@ -348,7 +350,9 @@ pub(crate) fn describe_route_server_peers(
     let wanted = indexed_list(&req.query_params, "RouteServerPeerId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .route_server_peers
         .values()
@@ -370,7 +374,9 @@ pub(crate) fn describe_route_servers(
     let wanted = indexed_list(&req.query_params, "RouteServerId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .route_servers
         .values()
@@ -471,7 +477,7 @@ pub(crate) fn modify_route_server(
         &["enable", "disable", "reset"],
     )?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when present; synthesize for a probe-only synthetic id.
     let mut synth = RouteServer {
         id: id.clone(),

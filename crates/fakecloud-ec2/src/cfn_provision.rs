@@ -45,10 +45,11 @@ pub async fn cfn_back_instance(
     state: SharedEc2State,
     runtime: Option<Arc<Ec2Runtime>>,
     account_id: String,
+    region: String,
     instance_id: String,
 ) {
     let svc = Ec2Service::with_state(state).with_runtime(runtime);
-    cfn_boot_instance(&svc, &account_id, &instance_id).await;
+    cfn_boot_instance(&svc, &account_id, &region, &instance_id).await;
 }
 
 /// Terminate a CFN-created instance and reap its REAL backing container when its

@@ -311,7 +311,7 @@ pub(crate) fn create_capacity_reservation(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -392,7 +392,7 @@ pub(crate) fn cancel_capacity_reservation(
     )?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let r = state
             .capacity_reservations
             .get_mut(&id)
@@ -418,7 +418,9 @@ pub(crate) fn describe_capacity_reservations(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .capacity_reservations
         .values()
@@ -467,7 +469,7 @@ pub(crate) fn modify_capacity_reservation(
     let now = Utc::now();
     let result = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let r = state
             .capacity_reservations
             .get_mut(&id)
@@ -624,7 +626,7 @@ pub(crate) fn create_capacity_reservation_date_change_quote(
         .cloned();
     let now = Utc::now();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Idempotent retry: the same ClientToken returns the original quote.
     if let Some(token) = &client_token {
         if let Some(q) = state
@@ -758,7 +760,9 @@ pub(crate) fn describe_capacity_reservation_date_change_quotes(
     let now = Utc::now();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let quotes = &state.capacity_reservation_modification_quotes;
     if let Some(missing) = wanted.iter().find(|id| !quotes.contains_key(*id)) {
         return Err(quote_not_found(missing));
@@ -797,7 +801,7 @@ pub(crate) fn get_capacity_reservation_usage(
     validate_max_results(&req.query_params, 1, 1000)?;
     let accounts = svc.state.read();
     let r = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.capacity_reservations.get(&id).cloned());
     let (itype, total, avail) = r
         .map(|r| {
@@ -844,7 +848,7 @@ pub(crate) fn create_capacity_reservation_fleet(
         // The map value stores the fleet's TotalTargetCapacity so Describe /
         // Modify can round-trip it rather than reporting a hardcoded 1.
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .capacity_reservation_fleets
             .insert(id.clone(), cap.clone());
     }
@@ -873,7 +877,9 @@ pub(crate) fn describe_capacity_reservation_fleets(
     let wanted = indexed_list(&req.query_params, "CapacityReservationFleetId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .capacity_reservation_fleets
         .iter()
@@ -902,7 +908,7 @@ pub(crate) fn cancel_capacity_reservation_fleets(
     let ids = indexed_list(&req.query_params, "CapacityReservationFleetId");
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for id in &ids {
             state.capacity_reservation_fleets.remove(id);
         }
@@ -930,7 +936,7 @@ pub(crate) fn modify_capacity_reservation_fleet(
     let id = require(&req.query_params, "CapacityReservationFleetId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let cap = state
             .capacity_reservation_fleets
             .get_mut(&id)
@@ -1156,7 +1162,7 @@ pub(crate) fn create_capacity_reservation_by_splitting(
     let owner = req.account_id.clone();
     let now = Utc::now();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if let Some(used) = replay_transfer(state, token.as_deref(), ACTION, &src_id, None, count)? {
         let body = transfer_result_xml(state, &owner, &used);
         return Ok(Ec2Service::respond(ACTION, &req.request_id, &body));
@@ -1233,7 +1239,7 @@ pub(crate) fn move_capacity_reservation_instances(
     let owner = req.account_id.clone();
     let now = Utc::now();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if let Some(used) = replay_transfer(
         state,
         token.as_deref(),
@@ -1507,7 +1513,7 @@ pub(crate) fn describe_capacity_block_offerings(
     let mut items = Vec::new();
     if available {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for t in types {
             let mut offering = crate::state::CapacityBlockOffering {
                 id: String::new(),
@@ -1573,7 +1579,7 @@ pub(crate) fn purchase_capacity_block(
     let owner = req.account_id.clone();
     let now = Utc::now();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let offering = state
         .capacity_block_offerings
         .remove(&offering_id)
@@ -1751,7 +1757,7 @@ pub(crate) fn create_interruptible_capacity_reservation_allocation(
         ));
     }
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let source = state
         .capacity_reservations
         .get(&source_id)
@@ -1854,7 +1860,7 @@ pub(crate) fn update_interruptible_capacity_reservation_allocation(
         None => None,
     };
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let source = state
         .capacity_reservations
         .get(&source_id)
@@ -1963,7 +1969,7 @@ mod crfleet_tests {
     fn cr(svc: &Ec2Service, id: &str) -> CapacityReservation {
         svc.state
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .capacity_reservations[id]
             .clone()
@@ -2218,7 +2224,7 @@ mod crfleet_tests {
         {
             let mut accounts = svc.state.write();
             let r = accounts
-                .get_or_create("000000000000")
+                .regional_mut("000000000000", "us-east-1")
                 .capacity_reservations
                 .get_mut(&src)
                 .unwrap();
@@ -2237,7 +2243,7 @@ mod crfleet_tests {
         {
             let mut accounts = svc.state.write();
             accounts
-                .get_or_create("000000000000")
+                .regional_mut("000000000000", "us-east-1")
                 .capacity_reservations
                 .get_mut(&icr)
                 .unwrap()
@@ -2903,7 +2909,7 @@ mod split_move_tests {
     fn cr(svc: &Ec2Service, id: &str) -> CapacityReservation {
         svc.state
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .capacity_reservations[id]
             .clone()
@@ -2912,7 +2918,7 @@ mod split_move_tests {
     fn set_available(svc: &Ec2Service, id: &str, available: i64) {
         svc.state
             .write()
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .capacity_reservations
             .get_mut(id)
             .unwrap()
@@ -3126,7 +3132,7 @@ mod split_move_tests {
         {
             let mut accounts = svc.state.write();
             let r = accounts
-                .get_or_create("000000000000")
+                .regional_mut("000000000000", "us-east-1")
                 .capacity_reservations
                 .get_mut(&scheduled)
                 .unwrap();
@@ -3143,7 +3149,7 @@ mod split_move_tests {
         // Delivered, so only its kind keeps it from being split.
         svc.state
             .write()
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .capacity_reservations
             .get_mut(&block_id)
             .unwrap()

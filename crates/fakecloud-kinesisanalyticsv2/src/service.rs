@@ -1151,12 +1151,11 @@ impl Ka2Service {
     /// -- on a 2-core CI runner this wedged the provider's status waiters to the
     /// job timeout even though it never reproduced on a many-core dev box.
     /// Returns an empty map when EC2 is not wired.
-    fn ec2_subnet_vpc_map(&self, account: &str) -> BTreeMap<String, String> {
+    fn ec2_subnet_vpc_map(&self, account: &str, region: &str) -> BTreeMap<String, String> {
         let Some(ec2) = self.ec2_state.as_ref() else {
             return BTreeMap::new();
         };
-        // An account EC2 has not seen yet still resolves its default subnets.
-        fakecloud_ec2::vpc_lookup::with_account(ec2, account, |st| {
+        fakecloud_ec2::vpc_lookup::with_account(ec2, account, region, |st| {
             st.subnets
                 .iter()
                 .map(|(sid, sub)| (sid.clone(), sub.vpc_id.clone()))
@@ -1198,7 +1197,7 @@ impl Ka2Service {
 
         // Snapshot the EC2 subnet->vpc map BEFORE taking the ka2 write lock so
         // the EC2 read lock is never nested inside it (see `ec2_subnet_vpc_map`).
-        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id, &req.region);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         // Build + insert through the shared builder so a CFN-provisioned
@@ -1287,7 +1286,7 @@ impl Ka2Service {
         let role_update = opt_str_len(&b, "ServiceExecutionRoleUpdate", 1, 2048, ec)?;
 
         // Snapshot EC2 subnet->vpc BEFORE the ka2 write lock (no nested locks).
-        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id, &req.region);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let app = st
@@ -1954,7 +1953,7 @@ impl Ka2Service {
             .cloned()
             .ok_or_else(|| fault(ec, "VpcConfiguration is required."))?;
         // Snapshot EC2 subnet->vpc BEFORE the ka2 write lock (no nested locks).
-        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id);
+        let vpc_map = self.ec2_subnet_vpc_map(&req.account_id, &req.region);
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let app = st
@@ -3641,7 +3640,7 @@ mod tests {
             "",
         )));
         let svc = svc().with_ec2_state(ec2);
-        let map = svc.ec2_subnet_vpc_map("111111111111");
+        let map = svc.ec2_subnet_vpc_map("111111111111", "us-east-1");
         assert!(!map.is_empty());
         assert!(map.values().all(|vpc| vpc.starts_with("vpc-")));
     }

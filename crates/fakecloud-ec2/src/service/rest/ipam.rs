@@ -23,7 +23,9 @@ pub(crate) fn describe_ipam_pool_allocations(
     let pool_filter = req.query_params.get("IpamPoolId").filter(|v| !v.is_empty());
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = Vec::new();
     for (pool, allocs) in &state.ipam_pool_allocations {
         if pool_filter.is_some_and(|p| p != pool) {
@@ -57,7 +59,7 @@ pub(crate) fn modify_ipam_pool_allocation(
     let alloc_id = require(&req.query_params, "IpamPoolAllocationId")?;
     let description = req.query_params.get("Description").cloned();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Locate the allocation across pools so the response echoes its real CIDR.
     // For a known allocation echo its real CIDR and persist the description; for
     // a synthetic id (probe-only) synthesize a placeholder CIDR and echo the

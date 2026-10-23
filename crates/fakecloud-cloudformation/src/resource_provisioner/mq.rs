@@ -45,6 +45,7 @@ impl ResourceProvisioner {
         let body = mq_shared::resolve_broker_network(
             &self.ec2_state,
             &self.account_id,
+            &self.region,
             &cfn_broker_body(props, &name),
         )?;
         let engine = body

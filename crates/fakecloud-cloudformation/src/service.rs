@@ -958,12 +958,14 @@ impl ContainerBackingHandles {
                     let ec2_state = self.ec2_state.clone();
                     let ec2_runtime = self.ec2_runtime.clone();
                     let account = self.account_id.clone();
+                    let region = self.region.clone();
                     let persist = self.persist_hook("ec2");
                     tokio::spawn(async move {
                         fakecloud_ec2::cfn_provision::cfn_back_instance(
                             ec2_state,
                             ec2_runtime,
                             account,
+                            region,
                             instance_id,
                         )
                         .await;

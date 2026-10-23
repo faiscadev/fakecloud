@@ -69,7 +69,7 @@ pub(crate) fn create_dhcp_options(
     let owner = req.account_id.clone();
     let body = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -97,7 +97,7 @@ pub(crate) fn delete_dhcp_options(
     let id = require(&req.query_params, "DhcpOptionsId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.dhcp_options.remove(&id);
         state.tags.remove(&id);
     }
@@ -119,7 +119,9 @@ pub(crate) fn describe_dhcp_options(
 
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     let mut items: Vec<String> = state
         .dhcp_options
@@ -169,7 +171,7 @@ pub(crate) fn associate_dhcp_options(
     let vpc_id = require(&req.query_params, "VpcId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(vpc) = state.vpcs.get_mut(&vpc_id) {
             vpc.dhcp_options_id = dopt;
         }

@@ -131,7 +131,7 @@ fn instance_specific(facts: &InstanceFacts, region: &str, path: &str) -> Option<
 fn instance_facts(state: &Ec2ImdsState, instance_id: &str) -> Option<InstanceFacts> {
     let (account_id, mut facts, profile_arn) = {
         let accounts = state.ec2.read();
-        let found = accounts.iter().find_map(|(account_id, st)| {
+        let found = accounts.iter_regional().find_map(|(account_id, _, st)| {
             let inst = st.instances.get(instance_id)?;
             let profile_arn = st
                 .iam_instance_profile_associations

@@ -30,6 +30,7 @@ impl EcsRuntime {
         &self,
         state: &SharedEcsState,
         account_id: &str,
+        region: &str,
         task_id: &str,
     ) {
         let accounts = state.read();
@@ -48,7 +49,7 @@ impl EcsRuntime {
         };
         // Its ENI goes with the task, as on ECS.
         if let Some(eni_id) = super::eni::task_eni_id(task) {
-            bus.delete_task_eni(account_id, &eni_id);
+            bus.delete_task_eni(account_id, region, &eni_id);
         }
         let targets = compute_elbv2_targets(s, task);
         drop(accounts);

@@ -680,7 +680,7 @@ impl EcsRuntime {
                     .iter()
                     .any(|(plan, _)| plan.network_mode.as_deref() == Some("awsvpc"));
                 if let (true, Some(pod_ip)) = (awsvpc, pod_ip) {
-                    let eni_ip = self.attach_task_eni(state, account_id, task_id);
+                    let eni_ip = self.attach_task_eni(state, account_id, &region, task_id);
                     for (plan, _) in &resolved {
                         for pm in &plan.port_mappings {
                             fakecloud_core::dataplane::register_target(
@@ -799,7 +799,8 @@ impl EcsRuntime {
             final_stop_code,
             final_reason.clone(),
         );
-        self.deregister_lb_targets(state, account_id, task_id);
+        let region = super::task_region(state, account_id, task_id);
+        self.deregister_lb_targets(state, account_id, &region, task_id);
         let reason_msg = final_reason.unwrap_or_else(|| format!("Exit code {primary}"));
         self.emit_state_change(
             state,

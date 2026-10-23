@@ -434,9 +434,16 @@ impl OpenSearchService {
 
     /// Resolve requested `VPCOptions` into `VPCDerivedInfo` (see
     /// [`crate::vpc::derive_vpc_options`]); kept as given without EC2.
-    fn derive_vpc_options(&self, account_id: &str, opts: &Value) -> Result<Value, AwsServiceError> {
+    fn derive_vpc_options(
+        &self,
+        account_id: &str,
+        region: &str,
+        opts: &Value,
+    ) -> Result<Value, AwsServiceError> {
         match &self.ec2_state {
-            Some(ec2) => crate::vpc::derive_vpc_options(ec2, account_id, opts).map_err(validation),
+            Some(ec2) => {
+                crate::vpc::derive_vpc_options(ec2, account_id, region, opts).map_err(validation)
+            }
             None => Ok(opts.clone()),
         }
     }
@@ -1168,7 +1175,7 @@ impl OpenSearchService {
         let name = req_str(&b, "DomainName")?;
         validate_domain_name(&name)?;
         let vpc_options = match b.get("VPCOptions").filter(|v| v.is_object()) {
-            Some(v) => Some(self.derive_vpc_options(&req.account_id, v)?),
+            Some(v) => Some(self.derive_vpc_options(&req.account_id, &req.region, v)?),
             None => None,
         };
 
@@ -1373,7 +1380,7 @@ impl OpenSearchService {
             ));
         }
         let vpc_options = match b.get("VPCOptions").filter(|v| v.is_object()) {
-            Some(v) => Some(self.derive_vpc_options(&req.account_id, v)?),
+            Some(v) => Some(self.derive_vpc_options(&req.account_id, &req.region, v)?),
             None => None,
         };
         let mut accounts = self.state.write();
@@ -1761,8 +1768,11 @@ impl OpenSearchService {
     fn create_vpc_endpoint(&self, req: &AwsRequest) -> Result<AwsResponse, AwsServiceError> {
         let b = body(req);
         let domain_arn = req_str(&b, "DomainArn")?;
-        let vpc_options =
-            self.derive_vpc_options(&req.account_id, b.get("VpcOptions").unwrap_or(&json!({})))?;
+        let vpc_options = self.derive_vpc_options(
+            &req.account_id,
+            &req.region,
+            b.get("VpcOptions").unwrap_or(&json!({})),
+        )?;
         let mut accounts = self.state.write();
         let st = accounts.get_or_create(&req.account_id);
         let id = format!("aos-{}", short_id());
@@ -1784,7 +1794,7 @@ impl OpenSearchService {
         let b = body(req);
         let id = req_str(&b, "VpcEndpointId")?;
         let vpc_options = match b.get("VpcOptions") {
-            Some(vo) => Some(self.derive_vpc_options(&req.account_id, vo)?),
+            Some(vo) => Some(self.derive_vpc_options(&req.account_id, &req.region, vo)?),
             None => None,
         };
         let mut accounts = self.state.write();

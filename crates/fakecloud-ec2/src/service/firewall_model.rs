@@ -194,8 +194,8 @@ pub(crate) async fn reconcile(state: &SharedEc2State, runtime: &Arc<Ec2Runtime>)
             .reconcile_network_policies(|| {
                 let accounts = state.read();
                 accounts
-                    .iter()
-                    .flat_map(|(_, s)| instance_rules(s, &[]))
+                    .iter_regional()
+                    .flat_map(|(_, _, s)| instance_rules(s, &[]))
                     .collect()
             })
             .await;
@@ -206,8 +206,8 @@ pub(crate) async fn reconcile(state: &SharedEc2State, runtime: &Arc<Ec2Runtime>)
             let extra = runtime.extra_group_members();
             let accounts = state.read();
             accounts
-                .iter()
-                .flat_map(|(_, s)| build_for_state(s, &extra))
+                .iter_regional()
+                .flat_map(|(_, _, s)| build_for_state(s, &extra))
                 .collect()
         })
         .await;

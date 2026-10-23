@@ -21,7 +21,9 @@ pub mod vpc_lookup;
 pub use runtime::Ec2Runtime;
 pub use service::quota::Ec2QuotaUsage;
 pub use service::Ec2Service;
-pub use state::{Ec2Snapshot, Ec2State, SharedEc2State, EC2_SNAPSHOT_SCHEMA_VERSION};
+pub use state::{
+    parse_ec2_snapshot, Ec2Snapshot, Ec2State, SharedEc2State, EC2_SNAPSHOT_SCHEMA_VERSION,
+};
 
 /// Shared test helpers for the in-crate handler unit tests.
 #[cfg(test)]
@@ -48,8 +50,16 @@ pub(crate) mod test_support {
     /// Insert a minimal running instance into the default test account so
     /// handlers that look the instance up have something to find.
     pub(crate) fn seed_instance(svc: &crate::service::Ec2Service, id: &str) {
+        seed_instance_in_region(svc, id, "us-east-1");
+    }
+
+    pub(crate) fn seed_instance_in_region(
+        svc: &crate::service::Ec2Service,
+        id: &str,
+        region: &str,
+    ) {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", region);
         let inst = crate::state::Instance {
             instance_id: id.into(),
             image_id: "ami-1".into(),

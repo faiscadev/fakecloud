@@ -82,12 +82,26 @@ fn generated_ipv6_cidr(vpc_id: &str) -> String {
 }
 
 /// Shared `Filter.N` matcher for VPC describe: supports `vpc-id`, `cidr`,
-/// `dhcp-options-id`, `isDefault`, `state`, and the `tag:`/`tag-key` family.
+/// CIDR associations, `dhcp-options-id`, `isDefault`, `state`, and tags.
 fn vpc_matches(vpc: &Vpc, tags: &[Tag], filters: &[Filter]) -> bool {
     filters.iter().all(|f| {
         let candidates: Vec<String> = match f.name.as_str() {
             "vpc-id" => vec![vpc.vpc_id.clone()],
-            "cidr" | "cidr-block-association.cidr-block" => vec![vpc.cidr_block.clone()],
+            "cidr" => vec![vpc.cidr_block.clone()],
+            "cidr-block-association.cidr-block" => std::iter::once(vpc.cidr_block.clone())
+                .chain(vpc.cidr_associations.iter().map(|a| a.cidr_block.clone()))
+                .collect(),
+            // Terraform uses this filter to poll and refresh secondary CIDRs.
+            // Include the primary association with the same id as vpc_xml.
+            "cidr-block-association.association-id" => {
+                std::iter::once(format!("vpc-cidr-assoc-{}", &vpc.vpc_id[4..]))
+                    .chain(
+                        vpc.cidr_associations
+                            .iter()
+                            .map(|a| a.association_id.clone()),
+                    )
+                    .collect()
+            }
             "dhcp-options-id" => vec![vpc.dhcp_options_id.clone()],
             "state" => vec![vpc.state.clone()],
             "isDefault" | "is-default" => vec![vpc.is_default.to_string()],
@@ -157,7 +171,7 @@ pub(crate) fn create_vpc(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::VPCS_PER_REGION);
     let body = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         check_vpc_count(state, limit)?;
         crate::service::tags::apply_tag_specifications(state, &req.query_params, &vpc_id, "vpc");
         let tags = state.tags_for(&vpc_id).to_vec();
@@ -184,7 +198,7 @@ pub(crate) fn create_default_vpc(
     let limit = svc.enforced_count_quota(&req.account_id, &req.region, rq::VPCS_PER_REGION);
     let body = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let vpc = match state.vpcs.values().find(|v| v.is_default).cloned() {
             Some(v) => v,
             // No default VPC somehow (e.g. it was deleted): re-create one,
@@ -237,7 +251,7 @@ pub(crate) fn delete_vpc(
     let id = require(&req.query_params, "VpcId")?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.vpcs.remove(&id);
         state.tags.remove(&id);
     }
@@ -259,7 +273,9 @@ pub(crate) fn describe_vpcs(
 
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
 
     // An explicitly-requested VpcId that does not exist is a hard error on AWS
     // (InvalidVpcID.NotFound), not a silently-empty result.
@@ -301,7 +317,7 @@ pub(crate) fn modify_vpc_attribute(
 ) -> Result<AwsResponse, AwsServiceError> {
     let vpc_id = require(&req.query_params, "VpcId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if let Some(vpc) = state.vpcs.get_mut(&vpc_id) {
         if let Some(v) = bool_attr(&req.query_params, "EnableDnsSupport.Value") {
             vpc.enable_dns_support = v;
@@ -341,7 +357,9 @@ pub(crate) fn describe_vpc_attribute(
     // probe's positive variants must not 4xx).
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let (dns_support, dns_hostnames, nau_metrics) = state
         .vpcs
         .get(&vpc_id)
@@ -380,7 +398,7 @@ pub(crate) fn modify_vpc_tenancy(
     validate_enum(&req.query_params, "InstanceTenancy", &["default"])?;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(vpc) = state.vpcs.get_mut(&vpc_id) {
             vpc.instance_tenancy = tenancy;
         }
@@ -417,8 +435,15 @@ pub(crate) fn associate_vpc_cidr_block(
         );
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create(&req.account_id);
+            let state = accounts.regional_mut(&req.account_id, &req.region);
             if let Some(vpc) = state.vpcs.get_mut(&vpc_id) {
+                if vpc.ipv6_cidr_block.is_some() {
+                    return Err(AwsServiceError::aws_error(
+                        http::StatusCode::BAD_REQUEST,
+                        "CidrBlockAssociationAlreadyAssociated",
+                        format!("The VPC '{vpc_id}' already has an IPv6 CIDR block associated."),
+                    ));
+                }
                 vpc.ipv6_cidr_block = Some(ipv6.clone());
             }
         }
@@ -447,8 +472,23 @@ pub(crate) fn associate_vpc_cidr_block(
         svc.enforced_count_quota(&req.account_id, &req.region, rq::IPV4_CIDR_BLOCKS_PER_VPC);
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         if let Some(vpc) = state.vpcs.get_mut(&vpc_id) {
+            if vpc.cidr_block == assoc.cidr_block
+                || vpc
+                    .cidr_associations
+                    .iter()
+                    .any(|a| a.cidr_block == assoc.cidr_block && a.state == "associated")
+            {
+                return Err(AwsServiceError::aws_error(
+                    http::StatusCode::BAD_REQUEST,
+                    "CidrBlockAssociationAlreadyAssociated",
+                    format!(
+                        "The CIDR '{}' is already associated with vpc '{vpc_id}'.",
+                        assoc.cidr_block,
+                    ),
+                ));
+            }
             rq::check(
                 limit,
                 rq::ipv4_cidr_blocks(vpc),
@@ -485,7 +525,7 @@ pub(crate) fn disassociate_vpc_cidr_block(
     let mut found: Option<(String, VpcCidrAssoc)> = None;
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         for vpc in state.vpcs.values_mut() {
             if let Some(pos) = vpc
                 .cidr_associations
@@ -546,6 +586,176 @@ mod tests {
             .and_then(|s| s.split("</vpcId>").next())
             .unwrap()
             .to_string()
+    }
+
+    fn req_in(region: &str, action: &str, query: &[(&str, &str)]) -> AwsRequest {
+        let mut r = req(action, query);
+        r.region = region.to_string();
+        r
+    }
+
+    fn make_vpc_in(svc: &Ec2Service, region: &str, cidr: &str) -> String {
+        let body =
+            body_of(create_vpc(svc, &req_in(region, "CreateVpc", &[("CidrBlock", cidr)])).unwrap());
+        body.split("<vpcId>")
+            .nth(1)
+            .and_then(|s| s.split("</vpcId>").next())
+            .unwrap()
+            .to_string()
+    }
+
+    #[test]
+    fn vpcs_are_region_isolated() {
+        let svc = Ec2Service::new();
+        let east_vpc = make_vpc_in(&svc, "us-east-1", "10.0.0.0/16");
+        let west_vpc = make_vpc_in(&svc, "us-west-2", "10.1.0.0/16");
+
+        let east_body =
+            body_of(describe_vpcs(&svc, &req_in("us-east-1", "DescribeVpcs", &[])).unwrap());
+        assert!(
+            east_body.contains(&format!("<vpcId>{east_vpc}</vpcId>")),
+            "us-east-1 VPC should appear in us-east-1 describe: {east_body}"
+        );
+        assert!(
+            !east_body.contains(&format!("<vpcId>{west_vpc}</vpcId>")),
+            "us-west-2 VPC should NOT appear in us-east-1 describe: {east_body}"
+        );
+
+        let west_body =
+            body_of(describe_vpcs(&svc, &req_in("us-west-2", "DescribeVpcs", &[])).unwrap());
+        assert!(
+            west_body.contains(&format!("<vpcId>{west_vpc}</vpcId>")),
+            "us-west-2 VPC should appear in us-west-2 describe: {west_body}"
+        );
+        assert!(
+            !west_body.contains(&format!("<vpcId>{east_vpc}</vpcId>")),
+            "us-east-1 VPC should NOT appear in us-west-2 describe: {west_body}"
+        );
+    }
+
+    #[test]
+    fn ipv4_cidr_association_filters_follow_lifecycle() {
+        let svc = Ec2Service::new();
+        let vpc_id = make_vpc(&svc, "10.0.0.0/16");
+        let other = make_vpc(&svc, "10.2.0.0/16");
+        let response = body_of(
+            associate_vpc_cidr_block(
+                &svc,
+                &req(
+                    "AssociateVpcCidrBlock",
+                    &[("VpcId", &vpc_id), ("CidrBlock", "10.1.0.0/16")],
+                ),
+            )
+            .unwrap(),
+        );
+        let association_id = response
+            .split("<associationId>")
+            .nth(1)
+            .unwrap()
+            .split("</associationId>")
+            .next()
+            .unwrap();
+        let primary_id = format!("vpc-cidr-assoc-{}", &vpc_id[4..]);
+        for (filter, value, matches) in [
+            (
+                "cidr-block-association.association-id",
+                association_id,
+                true,
+            ),
+            (
+                "cidr-block-association.association-id",
+                primary_id.as_str(),
+                true,
+            ),
+            (
+                "cidr-block-association.association-id",
+                "vpc-cidr-assoc-missing",
+                false,
+            ),
+            ("cidr-block-association.cidr-block", "10.1.0.0/16", true),
+            ("cidr-block-association.cidr-block", "10.0.0.0/16", true),
+            ("cidr", "10.1.0.0/16", false),
+        ] {
+            let body = body_of(
+                describe_vpcs(
+                    &svc,
+                    &req(
+                        "DescribeVpcs",
+                        &[("Filter.1.Name", filter), ("Filter.1.Value.1", value)],
+                    ),
+                )
+                .unwrap(),
+            );
+            assert_eq!(
+                body.contains(&format!("<vpcId>{vpc_id}</vpcId>")),
+                matches,
+                "{filter}={value}: {body}"
+            );
+            assert!(!body.contains(&format!("<vpcId>{other}</vpcId>")), "{body}");
+        }
+        disassociate_vpc_cidr_block(
+            &svc,
+            &req(
+                "DisassociateVpcCidrBlock",
+                &[("AssociationId", association_id)],
+            ),
+        )
+        .unwrap();
+        for (filter, value) in [
+            ("cidr-block-association.association-id", association_id),
+            ("cidr-block-association.cidr-block", "10.1.0.0/16"),
+        ] {
+            let body = body_of(
+                describe_vpcs(
+                    &svc,
+                    &req(
+                        "DescribeVpcs",
+                        &[("Filter.1.Name", filter), ("Filter.1.Value.1", value)],
+                    ),
+                )
+                .unwrap(),
+            );
+            assert!(
+                !body.contains(&format!("<vpcId>{vpc_id}</vpcId>")),
+                "{body}"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_cidr_association_rejected() {
+        let svc = Ec2Service::new();
+        let vpc_id = make_vpc(&svc, "10.0.0.0/16");
+
+        // First association should succeed.
+        let resp = associate_vpc_cidr_block(
+            &svc,
+            &req(
+                "AssociateVpcCidrBlock",
+                &[("VpcId", &vpc_id), ("CidrBlock", "10.1.0.0/16")],
+            ),
+        );
+        assert!(resp.is_ok(), "first association should succeed");
+
+        // Same CIDR again should fail.
+        let err = err_of(associate_vpc_cidr_block(
+            &svc,
+            &req(
+                "AssociateVpcCidrBlock",
+                &[("VpcId", &vpc_id), ("CidrBlock", "10.1.0.0/16")],
+            ),
+        ));
+        assert_eq!(err.code(), "CidrBlockAssociationAlreadyAssociated");
+
+        // Primary CIDR should also fail.
+        let err = err_of(associate_vpc_cidr_block(
+            &svc,
+            &req(
+                "AssociateVpcCidrBlock",
+                &[("VpcId", &vpc_id), ("CidrBlock", "10.0.0.0/16")],
+            ),
+        ));
+        assert_eq!(err.code(), "CidrBlockAssociationAlreadyAssociated");
     }
 
     #[test]
@@ -614,7 +824,7 @@ mod tests {
         let id = make_vpc(&svc, "10.8.0.0/16");
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state.tags.insert(
                 id.clone(),
                 vec![Tag {

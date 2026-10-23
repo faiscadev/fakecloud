@@ -4471,6 +4471,10 @@ mod tests {
             prov.kms_state.clone(),
             Default::default(),
         )));
+        // Seed EC2 region state so default resources (VPC, subnets, etc.) exist.
+        prov.ec2_state
+            .write()
+            .regional_mut("123456789012", "us-east-1");
         prov
     }
 
@@ -6207,7 +6211,7 @@ mod tests {
         // SG/route-table/NACL the handler creates), not a recorded no-op.
         {
             let ec2 = prov.ec2_state.read();
-            let acct = ec2.get("123456789012").unwrap();
+            let acct = ec2.regional("123456789012", "us-east-1").unwrap();
             assert!(acct.vpcs.contains_key(&vpc.physical_id));
         }
         // GetAtt VpcId/CidrBlock resolve; Ref is the vpc id.
@@ -6231,7 +6235,7 @@ mod tests {
         assert!(subnet.physical_id.starts_with("subnet-"));
         {
             let ec2 = prov.ec2_state.read();
-            let acct = ec2.get("123456789012").unwrap();
+            let acct = ec2.regional("123456789012", "us-east-1").unwrap();
             assert!(acct.subnets.contains_key(&subnet.physical_id));
         }
 
@@ -6324,7 +6328,7 @@ mod tests {
 
         // All three still exist under their original ids in EC2 state.
         let ec2 = prov.ec2_state.read();
-        let acct = ec2.get("123456789012").unwrap();
+        let acct = ec2.regional("123456789012", "us-east-1").unwrap();
         assert!(acct.vpcs.contains_key(&vpc_id));
         assert!(acct.subnets.contains_key(&subnet_id));
         assert!(acct.route_tables.contains_key(&rtb_id));
@@ -6378,7 +6382,7 @@ mod tests {
         assert_eq!(up.physical_id, sg_id, "security group id preserved");
 
         let ec2 = prov.ec2_state.read();
-        let acct = ec2.get("123456789012").unwrap();
+        let acct = ec2.regional("123456789012", "us-east-1").unwrap();
         let g = acct.security_groups.get(&sg_id).expect("SG still exists");
         let ingress: Vec<_> = g.rules.iter().filter(|r| !r.is_egress).collect();
         assert!(
@@ -6424,7 +6428,10 @@ mod tests {
             ))
             .expect("60 egress rules fit the quota");
         let ec2 = prov.ec2_state.read();
-        let g = &ec2.get("123456789012").unwrap().security_groups[&sg.physical_id];
+        let g = &ec2
+            .regional("123456789012", "us-east-1")
+            .unwrap()
+            .security_groups[&sg.physical_id];
         let out: Vec<_> = g.rules.iter().filter(|r| r.is_egress).collect();
         assert_eq!(out.len(), 60);
         assert!(
@@ -6440,9 +6447,10 @@ mod tests {
         let mut prov = make_provisioner();
         let vpcs = prov
             .ec2_state
-            .read()
-            .get("123456789012")
-            .map_or(0, |s| s.vpcs.len());
+            .write()
+            .regional_mut("123456789012", "us-east-1")
+            .vpcs
+            .len();
         prov.quota_provider = Some(Arc::new(
             fakecloud_core::quota::FixedQuotas::default()
                 .with("vpc", "L-F678F1CE", (vpcs + 1) as f64)
@@ -6516,7 +6524,7 @@ mod tests {
         let groups_before = prov
             .ec2_state
             .read()
-            .get("123456789012")
+            .regional("123456789012", "us-east-1")
             .unwrap()
             .security_groups
             .len();
@@ -6534,7 +6542,7 @@ mod tests {
         assert_eq!(
             prov.ec2_state
                 .read()
-                .get("123456789012")
+                .regional("123456789012", "us-east-1")
                 .unwrap()
                 .security_groups
                 .len(),
@@ -6569,7 +6577,10 @@ mod tests {
             )
             .is_err());
         let ec2 = prov.ec2_state.read();
-        let g = &ec2.get("123456789012").unwrap().security_groups[&sg.physical_id];
+        let g = &ec2
+            .regional("123456789012", "us-east-1")
+            .unwrap()
+            .security_groups[&sg.physical_id];
         let ingress: Vec<_> = g.rules.iter().filter(|r| !r.is_egress).collect();
         assert_eq!(ingress.len(), 1);
         assert_eq!(ingress[0].from_port, 22);
@@ -8886,7 +8897,7 @@ mod tests {
         );
         let (encrypted, key, size) = {
             let ec2 = prov.ec2_state.read();
-            let v = &ec2.get(acct).unwrap().volumes[&vol.physical_id];
+            let v = &ec2.regional(acct, "us-east-1").unwrap().volumes[&vol.physical_id];
             (v.encrypted, v.kms_key_id.clone(), v.size)
         };
         assert!(encrypted);
@@ -8911,7 +8922,7 @@ mod tests {
         {
             let ec2 = prov.ec2_state.read();
             let root = ec2
-                .get(acct)
+                .regional(acct, "us-east-1")
                 .unwrap()
                 .volumes
                 .values()
@@ -8931,7 +8942,7 @@ mod tests {
         assert!(!prov
             .ec2_state
             .read()
-            .get(acct)
+            .regional(acct, "us-east-1")
             .unwrap()
             .volumes
             .contains_key(&vol.physical_id));
@@ -8992,7 +9003,7 @@ mod tests {
             .unwrap();
         {
             let ec2 = prov.ec2_state.read();
-            let st = ec2.get(acct).unwrap();
+            let st = ec2.regional(acct, "us-east-1").unwrap();
             let i = &st.instances[&inst.physical_id];
             assert_eq!(i.image_id, "ami-0tmpl");
             assert_eq!(i.instance_type, "m5.large", "instance property wins");
@@ -9050,7 +9061,7 @@ mod tests {
         );
         {
             let ec2 = prov.ec2_state.read();
-            let t = &ec2.get(acct).unwrap().launch_templates[&lt.physical_id];
+            let t = &ec2.regional(acct, "us-east-1").unwrap().launch_templates[&lt.physical_id];
             assert_eq!((t.default_version, t.latest_version), (2, 2));
         }
         // Same template version: in-place update keeps the instance; a new
@@ -9089,7 +9100,12 @@ mod tests {
             "new version replaces"
         );
         assert_eq!(
-            prov.ec2_state.read().get(acct).unwrap().instances[&replaced.physical_id].image_id,
+            prov.ec2_state
+                .read()
+                .regional(acct, "us-east-1")
+                .unwrap()
+                .instances[&replaced.physical_id]
+                .image_id,
             "ami-0v2"
         );
 
@@ -9177,7 +9193,7 @@ mod tests {
         // works after the source instance is gone.
         prov.ec2_state
             .write()
-            .get_or_create(acct)
+            .regional_mut(acct, "us-east-1")
             .instances
             .remove(&replaced.physical_id);
         prov.update_resource(
@@ -9273,7 +9289,7 @@ mod tests {
         {
             let ec2 = prov.ec2_state.read();
             let tags: Vec<(String, String)> = ec2
-                .get(acct)
+                .regional(acct, "us-east-1")
                 .unwrap()
                 .tags_for(&lt.physical_id)
                 .iter()
@@ -10672,12 +10688,16 @@ mod tests {
     #[test]
     fn cfn_vpc_resources_resolve_through_ec2_and_autoscaling() {
         let prov = make_provisioner();
-        let subnets =
-            fakecloud_ec2::vpc_lookup::default_vpc_subnets(&prov.ec2_state, &prov.account_id);
+        let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(
+            &prov.ec2_state,
+            &prov.account_id,
+            &prov.region,
+        );
         let vpc = subnets[0].vpc_id.clone();
         let default_sg = fakecloud_ec2::vpc_lookup::default_security_group_id(
             &prov.ec2_state,
             &prov.account_id,
+            &prov.region,
             &vpc,
         )
         .unwrap();
@@ -10886,12 +10906,15 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_string())
             .collect();
         // Placed in one real default-VPC subnet, as the API path does.
-        let expected: Vec<String> =
-            fakecloud_ec2::vpc_lookup::default_vpc_subnets(&prov.ec2_state, "123456789012")
-                .into_iter()
-                .take(1)
-                .map(|s| s.subnet_id)
-                .collect();
+        let expected: Vec<String> = fakecloud_ec2::vpc_lookup::default_vpc_subnets(
+            &prov.ec2_state,
+            "123456789012",
+            "us-east-1",
+        )
+        .into_iter()
+        .take(1)
+        .map(|s| s.subnet_id)
+        .collect();
         assert_eq!(subnets.len(), 1);
         assert_eq!(subnets, expected, "CFN subnets match the shared API path");
     }
@@ -12348,11 +12371,14 @@ mod tests {
     #[test]
     fn a_reprovisioned_unnamed_resource_keeps_its_name() {
         let prov = make_provisioner();
-        let subnets: Vec<String> =
-            fakecloud_ec2::vpc_lookup::default_vpc_subnets(&prov.ec2_state, &prov.account_id)
-                .into_iter()
-                .map(|s| s.subnet_id)
-                .collect();
+        let subnets: Vec<String> = fakecloud_ec2::vpc_lookup::default_vpc_subnets(
+            &prov.ec2_state,
+            &prov.account_id,
+            &prov.region,
+        )
+        .into_iter()
+        .map(|s| s.subnet_id)
+        .collect();
         // No dedicated update arm: an update re-provisions the resource.
         let group = prov
             .create_resource(&make_resource(

@@ -397,7 +397,7 @@ impl ResourceProvisioner {
             .is_some_and(|rules| !rules.is_empty())
         {
             let mut accounts = self.ec2_state.write();
-            let state = accounts.get_or_create(&self.account_id);
+            let state = accounts.regional_mut(&self.account_id, &self.region);
             if let Some(sg) = state.security_groups.get_mut(&id) {
                 sg.rules.retain(|r| !r.is_egress);
             }
@@ -602,7 +602,7 @@ impl ResourceProvisioner {
         // manages inline), then authorize the desired set via the real handler.
         let removed: Vec<_> = {
             let mut accounts = self.ec2_state.write();
-            let state = accounts.get_or_create(&self.account_id);
+            let state = accounts.regional_mut(&self.account_id, &self.region);
             match state.security_groups.get_mut(group_id) {
                 Some(sg) => {
                     let (removed, kept) = std::mem::take(&mut sg.rules)
@@ -625,7 +625,7 @@ impl ResourceProvisioner {
                 // quota, say): put the direction's previous rules back so the
                 // group is left as it was, not stripped.
                 let mut accounts = self.ec2_state.write();
-                let state = accounts.get_or_create(&self.account_id);
+                let state = accounts.regional_mut(&self.account_id, &self.region);
                 if let Some(sg) = state.security_groups.get_mut(group_id) {
                     sg.rules.extend(removed);
                 }
@@ -634,7 +634,7 @@ impl ResourceProvisioner {
         }
         // The replaced rules are gone for good: their tags go with them.
         let mut accounts = self.ec2_state.write();
-        let state = accounts.get_or_create(&self.account_id);
+        let state = accounts.regional_mut(&self.account_id, &self.region);
         for r in &removed {
             state.tags.remove(&r.rule_id);
         }
@@ -767,7 +767,7 @@ impl ResourceProvisioner {
     ) -> bool {
         let launched = {
             let accounts = self.ec2_state.read();
-            let Some(st) = accounts.get(&self.account_id) else {
+            let Some(st) = accounts.regional(&self.account_id, &self.region) else {
                 return false;
             };
             let tag = |k: &str| {
@@ -1005,7 +1005,7 @@ impl ResourceProvisioner {
     ) -> bool {
         let accounts = self.ec2_state.read();
         let Some(current) = accounts
-            .get(&self.account_id)
+            .regional(&self.account_id, &self.region)
             .and_then(|s| s.launch_templates.get(&existing.physical_id))
             .map(|t| t.name.clone())
         else {
@@ -1058,7 +1058,7 @@ impl ResourceProvisioner {
             .collect();
         {
             let mut accounts = self.ec2_state.write();
-            let state = accounts.get_or_create(&self.account_id);
+            let state = accounts.regional_mut(&self.account_id, &self.region);
             if desired.is_empty() {
                 state.tags.remove(&id);
             } else {

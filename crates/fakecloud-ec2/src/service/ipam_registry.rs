@@ -521,7 +521,7 @@ pub(crate) fn create_ipam_internet_registry_association(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     if !state.ipams.contains_key(&ipam_id) {
         return Err(not_found("InvalidIpamId.NotFound", &ipam_id));
     }
@@ -620,7 +620,7 @@ pub(crate) fn enable_ipam_internet_registry_association(
 
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let tags = state.tags.get(&id).cloned().unwrap_or_default();
     let a = get_association(state, &id)?;
     // A DryRun validates the request -- including that the association exists
@@ -691,7 +691,7 @@ pub(crate) fn delete_ipam_internet_registry_association(
     let id = require(&req.query_params, "IpamInternetRegistryAssociationId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // The model is explicit that the registrations have to be removed before
     // the association can go, and deleting one that still publishes ROAs would
     // orphan them. EC2 reports a delete blocked by what depends on the
@@ -751,7 +751,7 @@ pub(crate) fn describe_ipam_internet_registry_associations(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let mut items = Vec::new();
-    if let Some(state) = accounts.get(&req.account_id) {
+    if let Some(state) = accounts.regional(&req.account_id, &req.region) {
         for (id, a) in &state.ipam_ir_associations {
             if !ids.is_empty() && !ids.contains(id) {
                 continue;
@@ -991,7 +991,7 @@ fn upsert_registration(
     let fingerprint = request_fingerprint(req);
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let a = get_association(state, &id)?;
     require_enabled(a)?;
     // A retry replays the delta the first call produced instead of tripping
@@ -1074,7 +1074,7 @@ pub(crate) fn delete_ipam_routing_policy_registration(
     let token = client_token(req);
     let fingerprint = request_fingerprint(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let a = get_association(state, &id)?;
     // A token reused for a different CIDR is not a retry: replaying the first
     // delete's success would report a CIDR removed that is still registered,
@@ -1231,7 +1231,7 @@ pub(crate) fn batch_modify_ipam_routing_policy_registrations(
     let removals = batch_removals(&parsed)?;
 
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let a = get_association(state, &id)?;
     // Only a document that publishes needs the RPKI service; one that only
     // removes registrations does not -- see [`require_enabled`].
@@ -1285,7 +1285,7 @@ pub(crate) fn get_ipam_routing_policy_registrations(
     let cidr = req.query_params.get("Cidr").filter(|v| !v.is_empty());
     let accounts = svc.state.read();
     let items: Vec<String> = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_ir_associations.get(&id))
         .ok_or_else(|| association_not_found(&id))?
         .registrations
@@ -1319,7 +1319,7 @@ pub(crate) fn get_ipam_routing_policy_registration_deltas(
 
     let accounts = svc.state.read();
     let a = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_ir_associations.get(&id))
         .ok_or_else(|| association_not_found(&id))?;
 
@@ -1385,7 +1385,7 @@ pub(crate) fn get_ipam_route_origin_authorizations(
     let cidr = req.query_params.get("Cidr").filter(|v| !v.is_empty());
     let accounts = svc.state.read();
     let a = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_ir_associations.get(&id))
         .ok_or_else(|| association_not_found(&id))?;
 
@@ -1422,7 +1422,7 @@ pub(crate) fn get_ipam_internet_registry_association_asns(
     let filters = parse_filters(&req.query_params);
     let accounts = svc.state.read();
     let a = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_ir_associations.get(&id))
         .ok_or_else(|| association_not_found(&id))?;
 
@@ -1458,7 +1458,7 @@ pub(crate) fn get_ipam_internet_registry_association_cidrs(
     let filters = parse_filters(&req.query_params);
     let accounts = svc.state.read();
     let a = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.ipam_ir_associations.get(&id))
         .ok_or_else(|| association_not_found(&id))?;
 
@@ -1497,7 +1497,7 @@ pub(crate) fn get_ipam_discovered_routes(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let state = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .ok_or_else(|| not_found("InvalidIpamResourceDiscoveryId.NotFound", &discovery_id))?;
     if !state.ipam_resource_discoveries.contains_key(&discovery_id) {
         return Err(not_found(
@@ -1560,7 +1560,7 @@ pub(crate) fn get_ipam_route_protection_findings(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let state = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .ok_or_else(|| not_found("InvalidIpamId.NotFound", &ipam_id))?;
     if !state.ipams.contains_key(&ipam_id) {
         return Err(not_found("InvalidIpamId.NotFound", &ipam_id));
@@ -1651,7 +1651,7 @@ mod tests {
     /// Register an IPAM directly so an association has something to attach to.
     fn seed_ipam(svc: &Ec2Service) {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         state.ipams.insert(
             "ipam-1".to_string(),
             crate::state::Ipam {
@@ -1784,7 +1784,7 @@ mod tests {
     fn stored_child_request(svc: &Ec2Service, id: &str) -> String {
         svc.state
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .ipam_ir_associations
             .get(id)
@@ -1837,7 +1837,7 @@ mod tests {
         f: impl FnOnce(&mut IpamInternetRegistryAssociation) -> T,
     ) -> T {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create("000000000000");
+        let state = accounts.regional_mut("000000000000", "us-east-1");
         f(state.ipam_ir_associations.get_mut(id).unwrap())
     }
 

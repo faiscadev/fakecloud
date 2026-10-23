@@ -265,6 +265,7 @@ impl super::EcsRuntime {
         &self,
         state: &crate::state::SharedEcsState,
         account_id: &str,
+        region: &str,
         task_id: &str,
     ) -> String {
         let (subnet, groups, description, attachment_id, in_use) = {
@@ -293,7 +294,7 @@ impl super::EcsRuntime {
         // allocator (lock order: the ECS state lock is released first).
         let from_ec2 = subnet.as_deref().and_then(|s| {
             let bus = self.delivery_bus.as_ref()?;
-            match bus.create_task_eni(account_id, s, groups.clone(), description.clone())? {
+            match bus.create_task_eni(account_id, region, s, groups.clone(), description.clone())? {
                 Ok(eni) => Some(eni),
                 Err(error) => {
                     tracing::warn!(task = %task_id, subnet = %s, %error, "EC2 could not create the task ENI; using a synthetic one");

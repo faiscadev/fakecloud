@@ -2537,42 +2537,34 @@ async fn main() {
             let path = reset::snapshot_store_path(&data_path, "ec2");
             let store = fakecloud_persistence::DiskSnapshotStore::new(path);
             match fakecloud_persistence::SnapshotStore::load(&store) {
-                Ok(Some(bytes)) => {
-                    match serde_json::from_slice::<fakecloud_ec2::Ec2Snapshot>(&bytes) {
-                        Ok(snapshot) => {
-                            if snapshot.schema_version > fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION
-                            {
-                                fatal_exit(format_args!(
-                                    "ec2 persistence schema too new: on-disk={}, max supported={}",
-                                    snapshot.schema_version,
-                                    fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION,
-                                ));
-                            }
-                            if let Some(accounts) = snapshot.accounts {
-                                let account_count = accounts.account_count();
-                                *ec2_state.write() = accounts;
-                                // Backfill the public AMI catalogue into any
-                                // restored account that predates it (legacy
-                                // snapshot from before #1964). Idempotent —
-                                // seeds have deterministic ids, so already-seeded
-                                // accounts are unchanged.
-                                {
-                                    let mut guard = ec2_state.write();
-                                    for (_, st) in guard.iter_mut() {
-                                        st.ensure_public_images_seeded();
-                                    }
-                                }
-                                tracing::info!(
-                                    accounts = account_count,
-                                    "loaded ec2 persistence snapshot"
-                                );
-                            }
+                Ok(Some(bytes)) => match fakecloud_ec2::parse_ec2_snapshot(&bytes) {
+                    Ok(snapshot) => {
+                        if snapshot.schema_version > fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION {
+                            fatal_exit(format_args!(
+                                "ec2 persistence schema too new: on-disk={}, max supported={}",
+                                snapshot.schema_version,
+                                fakecloud_ec2::EC2_SNAPSHOT_SCHEMA_VERSION,
+                            ));
                         }
-                        Err(err) => fatal_exit(format_args!(
-                            "failed to parse ec2 persistence snapshot: {err}"
-                        )),
+                        if let Some(accounts) = snapshot.accounts {
+                            let account_count = accounts.account_count();
+                            *ec2_state.write() = accounts;
+                            {
+                                let mut guard = ec2_state.write();
+                                for (_, _, st) in guard.iter_regional_mut() {
+                                    st.ensure_public_images_seeded();
+                                }
+                            }
+                            tracing::info!(
+                                accounts = account_count,
+                                "loaded ec2 persistence snapshot"
+                            );
+                        }
                     }
-                }
+                    Err(err) => fatal_exit(format_args!(
+                        "failed to parse ec2 persistence snapshot: {err}"
+                    )),
+                },
                 Ok(None) => {
                     tracing::info!("no ec2 persistence snapshot found; starting empty");
                 }
@@ -3880,9 +3872,9 @@ async fn main() {
             let ec2 = ec2_state.clone();
             Arc::new(move |vpc_id: &str, _region: &str| {
                 ec2.read()
-                    .iter()
-                    .find(|(_, st)| st.vpcs.contains_key(vpc_id))
-                    .map(|(account, _)| account.to_string())
+                    .iter_regional()
+                    .find(|(_, _, st)| st.vpcs.contains_key(vpc_id))
+                    .map(|(account, _, _)| account.to_string())
             })
         });
     if let Some(store) = route53_snapshot_store.clone() {
@@ -10353,8 +10345,8 @@ async fn main() {
                         // real callers land under their derived account id, not
                         // the default partition.
                         let mut instances: Vec<types::Ec2Instance> = accounts
-                            .iter()
-                            .flat_map(|(_, state)| state.instances.values())
+                            .iter_regional()
+                            .flat_map(|(_, _, state)| state.instances.values())
                             .map(ec2_instance_response)
                             .collect();
                         instances.sort_by(|a, b| a.instance_id.cmp(&b.instance_id));
@@ -10375,8 +10367,8 @@ async fn main() {
                         let summary = rt.as_ref().map(|r| r.network_isolation_summary());
                         let accounts = es.read();
                         let mut instance_networks: Vec<types::Ec2InstanceNetwork> = accounts
-                            .iter()
-                            .flat_map(|(_, state)| state.instances.values())
+                            .iter_regional()
+                            .flat_map(|(_, _, state)| state.instances.values())
                             .map(|inst| {
                                 introspection::ec2_instance_network_response(inst, summary.as_ref())
                             })

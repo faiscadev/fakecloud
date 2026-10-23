@@ -135,7 +135,12 @@ impl ResourceProvisioner {
             vpc_config: cfg
                 .vpc_config
                 .map(|c| {
-                    fakecloud_lambda::vpc::resolve_vpc_config(&self.ec2_state, &self.account_id, &c)
+                    fakecloud_lambda::vpc::resolve_vpc_config(
+                        &self.ec2_state,
+                        &self.account_id,
+                        &self.region,
+                        &c,
+                    )
                 })
                 .transpose()?,
             snap_start: cfg.snap_start,
@@ -273,7 +278,12 @@ impl ResourceProvisioner {
             .vpc_config
             .clone()
             .map(|c| {
-                fakecloud_lambda::vpc::resolve_vpc_config(&self.ec2_state, &self.account_id, &c)
+                fakecloud_lambda::vpc::resolve_vpc_config(
+                    &self.ec2_state,
+                    &self.account_id,
+                    &self.region,
+                    &c,
+                )
             })
             .transpose()?;
         let storage_limit = self.lambda_storage_limit();

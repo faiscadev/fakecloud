@@ -46,12 +46,12 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex as AsyncMutex;
 
-use fakecloud_core::multi_account::MultiAccountState;
+use fakecloud_core::multi_account::MultiRegionState;
 use fakecloud_core::service::{AwsRequest, AwsResponse, AwsService, AwsServiceError};
 use fakecloud_persistence::SnapshotStore;
 
 use crate::runtime::Ec2Runtime;
-use crate::state::{Ec2Snapshot, SharedEc2State, EC2_SNAPSHOT_SCHEMA_VERSION};
+use crate::state::{SharedEc2State, EC2_SNAPSHOT_SCHEMA_VERSION};
 
 /// EC2 read actions all start with `Describe`, `Get`, `Search`, or `List`;
 /// every other action mutates state. The inverse formulation guarantees no
@@ -939,10 +939,10 @@ pub struct Ec2Service {
 }
 
 impl Ec2Service {
-    /// Construct a service over a fresh, empty account-partitioned state.
+    /// Construct a service over a fresh, empty (account, region)-partitioned state.
     pub fn new() -> Self {
         Self {
-            state: Arc::new(RwLock::new(MultiAccountState::new(
+            state: Arc::new(RwLock::new(MultiRegionState::new(
                 "000000000000",
                 "us-east-1",
                 "",
@@ -1171,7 +1171,7 @@ impl Ec2Service {
         let flipped = {
             let mut accounts = self.state.write();
             let mut n = 0;
-            for (_, state) in accounts.iter_mut() {
+            for (_, _, state) in accounts.iter_regional_mut() {
                 for inst in state.instances.values_mut() {
                     if inst.state_code == 0 {
                         inst.state_code = 16;
@@ -1202,6 +1202,7 @@ impl Ec2Service {
 
         struct Pending {
             account_id: String,
+            region: String,
             id: String,
             user_data: Option<String>,
             tags: std::collections::BTreeMap<String, String>,
@@ -1211,8 +1212,9 @@ impl Ec2Service {
         let pending: Vec<Pending> = {
             let mut accounts = self.state.write();
             let mut out = Vec::new();
-            for (_, state) in accounts.iter_mut() {
-                let account_id = state.account_id.clone();
+            for (acct, rgn, state) in accounts.iter_regional_mut() {
+                let account_id = acct.to_string();
+                let region = rgn.to_string();
                 // Snapshot the tag map first so we don't hold two borrows of
                 // `state` at once when re-deriving per-instance Pod tags.
                 let tag_snapshot: std::collections::BTreeMap<String, Vec<crate::state::Tag>> =
@@ -1252,6 +1254,7 @@ impl Ec2Service {
                     inst.container_id = None;
                     out.push(Pending {
                         account_id: account_id.clone(),
+                        region: region.clone(),
                         id: id.clone(),
                         user_data: inst.user_data.clone(),
                         tags,
@@ -1289,7 +1292,7 @@ impl Ec2Service {
                     let mut accounts = state.write();
                     recovery_outcome(
                         accounts
-                            .get_mut(&p.account_id)
+                            .regional_get_mut(&p.account_id, &p.region)
                             .and_then(|s| s.instances.get_mut(&p.id)),
                         running,
                         &p.id,
@@ -1352,10 +1355,10 @@ pub async fn save_ec2_snapshot(
         return;
     };
     let _guard = lock.lock().await;
-    let snapshot = Ec2Snapshot {
-        schema_version: EC2_SNAPSHOT_SCHEMA_VERSION,
-        accounts: Some(state.read().clone()),
-    };
+    let snapshot = fakecloud_core::multi_account::RegionalSnapshot::of(
+        EC2_SNAPSHOT_SCHEMA_VERSION,
+        state.read().clone(),
+    );
     let join = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
         let bytes = serde_json::to_vec(&snapshot)
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -3017,7 +3020,7 @@ mod recover_guard_tests {
         let outcome = |code: i64, running| {
             let mut accounts = svc.state.write();
             let inst = accounts
-                .get_or_create("000000000000")
+                .regional_mut("000000000000", "us-east-1")
                 .instances
                 .get_mut("i-1")
                 .unwrap();
@@ -3051,7 +3054,10 @@ mod recover_guard_tests {
         assert_eq!(outcome(0, ok()), PostStart::Keep);
         let state_of = || {
             let accounts = svc.state.read();
-            let inst = &accounts.get("000000000000").unwrap().instances["i-1"];
+            let inst = &accounts
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .instances["i-1"];
             (inst.state_code, inst.container_id.clone())
         };
         assert_eq!(state_of(), (16, Some("c-1".to_string())));
@@ -3159,7 +3165,7 @@ mod recover_persist_tests {
         let svc = Ec2Service::new().with_snapshot_store(Arc::new(RecordingStore(recorded.clone())));
         {
             let mut accounts = svc.state.write();
-            let state = accounts.get_or_create("000000000000");
+            let state = accounts.regional_mut("000000000000", "us-east-1");
             state
                 .instances
                 .insert("i-1".into(), pending_instance("i-1"));
@@ -3173,7 +3179,7 @@ mod recover_persist_tests {
         {
             let accounts = svc.state.read();
             let inst = accounts
-                .get("000000000000")
+                .regional("000000000000", "us-east-1")
                 .unwrap()
                 .instances
                 .get("i-1")
@@ -3191,7 +3197,7 @@ mod recover_persist_tests {
         let snap: crate::Ec2Snapshot = serde_json::from_slice(&bytes).unwrap();
         let persisted = snap.accounts.expect("accounts present");
         let inst = persisted
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .instances
             .get("i-1")

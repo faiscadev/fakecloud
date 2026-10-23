@@ -386,11 +386,18 @@ impl Elbv2Service {
                 groups.to_vec(),
             ));
         };
-        let network = crate::network::resolve_subnets(ec2, &req.account_id, subnets, expected_vpc)
-            .map_err(|e| e.to_aws())?;
+        let network = crate::network::resolve_subnets(
+            ec2,
+            &req.account_id,
+            &req.region,
+            subnets,
+            expected_vpc,
+        )
+        .map_err(|e| e.to_aws())?;
         let groups = crate::network::resolve_security_groups(
             ec2,
             &req.account_id,
+            &req.region,
             &network.vpc_id,
             lb_type,
             groups,
@@ -424,7 +431,13 @@ impl Elbv2Service {
             )
         };
         let vpc = match &self.ec2_state {
-            Some(ec2) => crate::network::effective_vpc(ec2, &req.account_id, &stored_vpc, &subnets),
+            Some(ec2) => crate::network::effective_vpc(
+                ec2,
+                &req.account_id,
+                &req.region,
+                &stored_vpc,
+                &subnets,
+            ),
             None => Some(stored_vpc).filter(|v| !v.is_empty()),
         };
         Ok((lb_type, vpc, groups))
@@ -684,6 +697,7 @@ impl Elbv2Service {
                         crate::network::resolve_security_groups(
                             ec2,
                             &req.account_id,
+                            &req.region,
                             &vpc_id,
                             "network",
                             &sgs,
@@ -693,10 +707,15 @@ impl Elbv2Service {
                     // A load balancer whose VPC cannot be resolved: the
                     // groups must still exist.
                     None => {
-                        fakecloud_ec2::vpc_lookup::security_group_vpcs(ec2, &req.account_id, &sgs)
-                            .map_err(|id| {
-                                crate::network::NetworkError::SecurityGroupNotFound(id).to_aws()
-                            })?;
+                        fakecloud_ec2::vpc_lookup::security_group_vpcs(
+                            ec2,
+                            &req.account_id,
+                            &req.region,
+                            &sgs,
+                        )
+                        .map_err(|id| {
+                            crate::network::NetworkError::SecurityGroupNotFound(id).to_aws()
+                        })?;
                     }
                 }
             }

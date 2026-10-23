@@ -623,6 +623,7 @@ impl EksService {
             let network = crate::cluster_sg::create_cluster_security_group(
                 ec2,
                 &account_id,
+                &region,
                 &name,
                 &string_list(vpc_req.get("subnetIds")),
                 resources_vpc_config["vpcId"].as_str().unwrap_or_default(),
@@ -780,7 +781,13 @@ impl EksService {
             &self.ec2_state,
             cluster.resources_vpc_config["clusterSecurityGroupId"].as_str(),
         ) {
-            crate::cluster_sg::delete_cluster_security_group(ec2, &req.account_id, name, sg);
+            crate::cluster_sg::delete_cluster_security_group(
+                ec2,
+                &req.account_id,
+                &req.region,
+                name,
+                sg,
+            );
         }
         let id = arn_cluster_id(&cluster.endpoint);
         Ok(AwsResponse::json(

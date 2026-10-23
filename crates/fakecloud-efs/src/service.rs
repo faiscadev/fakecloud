@@ -991,11 +991,13 @@ impl EfsService {
         let h = hash_str(&subnet_id);
         let placement = match &self.ec2_state {
             Some(ec2) => {
-                let subnet = crate::network::resolve_subnet(ec2, &ctx.account, &subnet_id)
-                    .map_err(|e| e.to_aws())?;
+                let subnet =
+                    crate::network::resolve_subnet(ec2, &ctx.account, &ctx.region, &subnet_id)
+                        .map_err(|e| e.to_aws())?;
                 let groups = crate::network::resolve_security_groups(
                     ec2,
                     &ctx.account,
+                    &ctx.region,
                     &subnet.vpc_id,
                     &requested_groups,
                 )
@@ -1055,6 +1057,7 @@ impl EfsService {
                 let net = crate::network::create_mount_target_eni(
                     ec2,
                     &ctx.account,
+                    &ctx.region,
                     &fsid,
                     &mtid,
                     &subnet,
@@ -1185,7 +1188,7 @@ impl EfsService {
             &self.ec2_state,
             mt.get("NetworkInterfaceId").and_then(Value::as_str),
         ) {
-            crate::network::delete_mount_target_eni(ec2, &ctx.account, eni);
+            crate::network::delete_mount_target_eni(ec2, &ctx.account, &ctx.region, eni);
         }
         empty(StatusCode::NO_CONTENT)
     }
@@ -1234,11 +1237,17 @@ impl EfsService {
             })
             .unwrap_or_default();
         if let (Some(ec2), Some(eni)) = (&self.ec2_state, eni_id.as_deref()) {
-            if let Some(vpc_id) = crate::network::eni_vpc_id(ec2, &ctx.account, eni) {
-                sgs = crate::network::resolve_security_groups(ec2, &ctx.account, &vpc_id, &sgs)
-                    .map_err(|e| e.to_aws())?;
+            if let Some(vpc_id) = crate::network::eni_vpc_id(ec2, &ctx.account, &ctx.region, eni) {
+                sgs = crate::network::resolve_security_groups(
+                    ec2,
+                    &ctx.account,
+                    &ctx.region,
+                    &vpc_id,
+                    &sgs,
+                )
+                .map_err(|e| e.to_aws())?;
             }
-            crate::network::set_mount_target_eni_groups(ec2, &ctx.account, eni, &sgs);
+            crate::network::set_mount_target_eni_groups(ec2, &ctx.account, &ctx.region, eni, &sgs);
         }
         data.mount_target_security_groups
             .insert(label.to_string(), sgs);
@@ -2265,10 +2274,15 @@ mod tests {
 
     /// A default subnet of the account and its VPC's default security group.
     fn default_subnet(ec2: &fakecloud_ec2::SharedEc2State) -> (String, String, String, String) {
-        let sub = fakecloud_ec2::vpc_lookup::default_vpc_subnets(ec2, "000000000000").remove(0);
-        let sg =
-            fakecloud_ec2::vpc_lookup::default_security_group_id(ec2, "000000000000", &sub.vpc_id)
-                .unwrap();
+        let sub = fakecloud_ec2::vpc_lookup::default_vpc_subnets(ec2, "000000000000", "us-east-1")
+            .remove(0);
+        let sg = fakecloud_ec2::vpc_lookup::default_security_group_id(
+            ec2,
+            "000000000000",
+            "us-east-1",
+            &sub.vpc_id,
+        )
+        .unwrap();
         (sub.subnet_id, sub.vpc_id, sub.cidr_block, sg)
     }
 
@@ -2295,7 +2309,10 @@ mod tests {
         );
         {
             let g = ec2.read();
-            let eni = &g.get("000000000000").unwrap().network_interfaces[&eni_id];
+            let eni = &g
+                .regional("000000000000", "us-east-1")
+                .unwrap()
+                .network_interfaces[&eni_id];
             assert!(eni.requester_managed);
             assert_eq!(eni.subnet_id, subnet);
             assert_eq!(eni.private_ip_address, ip);
@@ -2326,7 +2343,7 @@ mod tests {
         s.delete_mount_target(&ctx(), &mtid).unwrap();
         assert!(!ec2
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .network_interfaces
             .contains_key(&eni_id));
@@ -2366,7 +2383,7 @@ mod tests {
         // Nothing leaked into EC2 from the rejected calls.
         assert!(ec2
             .read()
-            .get("000000000000")
+            .regional("000000000000", "us-east-1")
             .unwrap()
             .network_interfaces
             .values()

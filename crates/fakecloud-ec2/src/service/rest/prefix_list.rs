@@ -87,7 +87,7 @@ pub(crate) fn create_managed_prefix_list(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -116,7 +116,7 @@ pub(crate) fn delete_managed_prefix_list(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Remove when present; for a synthetic id synthesize the deleted-state shape
     // (EC2's Query API has no modeled error shape for this op).
     let mut pl = state
@@ -185,7 +185,9 @@ pub(crate) fn describe_managed_prefix_lists(
     };
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // The AWS-managed lists every account can reference (owner `AWS`). They
     // report no MaxEntries or version: a reference weighs the list's
     // published weight instead.
@@ -248,6 +250,22 @@ pub(crate) fn describe_prefix_lists(
 ) -> Result<AwsResponse, AwsServiceError> {
     let region = region_of(req);
     let wanted = indexed_list(&req.query_params, "PrefixListId");
+    let filters = parse_filters(&req.query_params);
+    let selected = |id: &str, name: &str| {
+        (wanted.is_empty() || wanted.iter().any(|w| w == id))
+            && filters.iter().all(|f| {
+                let candidates: Vec<&str> = match f.name.as_str() {
+                    "prefix-list-id" => vec![id],
+                    "prefix-list-name" => vec![name],
+                    _ => Vec::new(),
+                };
+                f.values.iter().any(|v| {
+                    candidates
+                        .iter()
+                        .any(|c| crate::service_helpers::filter_value_matches(v, c))
+                })
+            })
+    };
     // The gateway-endpoint AWS-managed lists, with their published ranges.
     let mut items: Vec<String> = Vec::new();
     for list in GATEWAY_ENDPOINT_SERVICES
@@ -255,7 +273,7 @@ pub(crate) fn describe_prefix_lists(
         .filter_map(|s| aws_prefix_lists::gateway_endpoint_list(s))
     {
         let id = list.id_in(&region);
-        if wanted.is_empty() || wanted.contains(&id) {
+        if selected(&id, &list.name_in(&region)) {
             items.push(legacy_pl_xml(
                 &id,
                 &list.name_in(&region),
@@ -266,9 +284,11 @@ pub(crate) fn describe_prefix_lists(
     // Customer-managed prefix lists also appear here, with their entry CIDRs.
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     for p in state.managed_prefix_lists.values() {
-        if wanted.is_empty() || wanted.contains(&p.prefix_list_id) {
+        if selected(&p.prefix_list_id, &p.prefix_list_name) {
             let cidrs: Vec<String> = p.entries.iter().map(|e| e.cidr.clone()).collect();
             items.push(legacy_pl_xml(
                 &p.prefix_list_id,
@@ -309,7 +329,9 @@ pub(crate) fn get_managed_prefix_list_entries(
         .and_then(|v| v.parse::<i64>().ok());
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     // An AWS-managed list reports its published address ranges (from AWS's
     // ip-ranges.json); any other unknown id an empty entry set (EC2 models no
     // error for this op).
@@ -378,7 +400,7 @@ pub(crate) fn modify_managed_prefix_list(
     // Resolved before the EC2 lock is taken: Service Quotas answers it.
     let rule_limit = svc.enforced_rules_per_security_group(&req.account_id, &req.region);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // A larger MaxEntries weighs more in every security group that references
     // the list. AWS fails the resize (the list goes to `modify-failed`, naming
     // up to ten resources in its state message) when a referencing group
@@ -509,7 +531,7 @@ pub(crate) fn restore_managed_prefix_list_version(
     let owner = req.account_id.clone();
     let region = region_of(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let (out, tags) = if let Some(pl) = state.managed_prefix_lists.get_mut(&id) {
         if let Some(restored) = pl.version_history.get(&previous).cloned() {
             pl.entries = restored;
@@ -635,6 +657,41 @@ mod tests {
     }
 
     #[test]
+    fn describe_prefix_lists_filters_by_name() {
+        let svc = Ec2Service::new();
+        let all = body(
+            super::describe_prefix_lists(&svc, &ec2_request("DescribePrefixLists", &[])).unwrap(),
+        );
+        assert!(
+            all.matches("<prefixListId>").count() > 1,
+            "unfiltered should return multiple lists: {all}"
+        );
+
+        let filtered = body(
+            super::describe_prefix_lists(
+                &svc,
+                &ec2_request(
+                    "DescribePrefixLists",
+                    &[
+                        ("Filter.1.Name", "prefix-list-name"),
+                        ("Filter.1.Value.1", "com.amazonaws.us-east-1.s3"),
+                    ],
+                ),
+            )
+            .unwrap(),
+        );
+        assert_eq!(
+            filtered.matches("<prefixListId>").count(),
+            1,
+            "filter by name should return exactly one list: {filtered}"
+        );
+        assert!(
+            filtered.contains("com.amazonaws.us-east-1.s3"),
+            "filtered result should contain the S3 prefix list: {filtered}"
+        );
+    }
+
+    #[test]
     fn resizing_a_referenced_list_past_the_rules_quota_fails() {
         let svc = crate::test_support::svc_enforcing_sg_quotas();
         let created = body(
@@ -665,7 +722,7 @@ mod tests {
         rules.push(pl_rule);
         svc.state
             .write()
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .security_groups
             .insert(
                 "sg-a".into(),
@@ -698,7 +755,7 @@ mod tests {
         assert_eq!(
             svc.state
                 .read()
-                .get("000000000000")
+                .regional("000000000000", "us-east-1")
                 .unwrap()
                 .managed_prefix_lists[&pl_id]
                 .max_entries,
@@ -708,7 +765,7 @@ mod tests {
         // Once the group has room, the same resize goes through.
         svc.state
             .write()
-            .get_or_create("000000000000")
+            .regional_mut("000000000000", "us-east-1")
             .security_groups
             .get_mut("sg-a")
             .unwrap()

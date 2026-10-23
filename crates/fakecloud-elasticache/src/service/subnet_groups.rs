@@ -16,22 +16,26 @@ impl ElastiCacheService {
         let Some(ec2) = &self.ec2_state else {
             return Ok((String::new(), Vec::new()));
         };
-        let placed =
-            fakecloud_ec2::vpc_lookup::resolve_subnet_group(ec2, &request.account_id, subnet_ids)
-                .map_err(|e| {
-                AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidSubnet", e.message())
-            })?;
+        let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(
+            ec2,
+            &request.account_id,
+            &request.region,
+            subnet_ids,
+        )
+        .map_err(|e| {
+            AwsServiceError::aws_error(StatusCode::BAD_REQUEST, "InvalidSubnet", e.message())
+        })?;
         let zones = placed.availability_zones();
         Ok((placed.vpc_id, zones))
     }
 
     /// Point the account's `default` cache subnet group at the default VPC's
     /// subnets, as on AWS, when EC2 state is wired.
-    pub(super) fn sync_default_subnet_group(&self, account_id: &str) {
+    pub(super) fn sync_default_subnet_group(&self, account_id: &str, region: &str) {
         let Some(ec2) = &self.ec2_state else {
             return;
         };
-        let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(ec2, account_id);
+        let subnets = fakecloud_ec2::vpc_lookup::default_vpc_subnets(ec2, account_id, region);
         let Some(first) = subnets.first() else {
             return;
         };
@@ -131,7 +135,7 @@ impl ElastiCacheService {
         &self,
         request: &AwsRequest,
     ) -> Result<AwsResponse, AwsServiceError> {
-        self.sync_default_subnet_group(&request.account_id);
+        self.sync_default_subnet_group(&request.account_id, &request.region);
         let group_name =
             optional_query_param(request, "CacheSubnetGroupName").map(|n| n.to_lowercase());
         let max_records = optional_usize_param(request, "MaxRecords")?;
@@ -260,6 +264,7 @@ impl ElastiCacheService {
                 if !fakecloud_ec2::vpc_lookup::subnet_group_vpc_change_allowed(
                     ec2,
                     &request.account_id,
+                    &request.region,
                     &group.vpc_id,
                     &vpc_id,
                 ) {

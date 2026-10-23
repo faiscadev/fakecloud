@@ -54,7 +54,7 @@ pub(crate) fn create_verified_access_instance(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -81,7 +81,7 @@ pub(crate) fn delete_verified_access_instance(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VerifiedAccessInstanceId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let i = state
         .va_instances
         .remove(&id)
@@ -109,7 +109,9 @@ pub(crate) fn describe_verified_access_instances(
     validate_max_results(&req.query_params, 5, 200)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .va_instances
         .values()
@@ -130,7 +132,7 @@ pub(crate) fn modify_verified_access_instance(
     let id = require(&req.query_params, "VerifiedAccessInstanceId")?;
     let (i, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let i = match state.va_instances.get_mut(&id) {
             Some(e) => {
                 if let Some(d) = req.query_params.get("Description") {
@@ -205,7 +207,7 @@ pub(crate) fn create_verified_access_trust_provider(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -232,7 +234,7 @@ pub(crate) fn delete_verified_access_trust_provider(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VerifiedAccessTrustProviderId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let t = state
         .va_trust_providers
         .remove(&id)
@@ -261,7 +263,9 @@ pub(crate) fn describe_verified_access_trust_providers(
     validate_max_results(&req.query_params, 5, 200)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .va_trust_providers
         .values()
@@ -282,7 +286,7 @@ pub(crate) fn modify_verified_access_trust_provider(
     let id = require(&req.query_params, "VerifiedAccessTrustProviderId")?;
     let (t, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let t = match state.va_trust_providers.get_mut(&id) {
             Some(e) => {
                 if let Some(d) = req.query_params.get("Description") {
@@ -348,7 +352,7 @@ fn attach_detach(
     Vec<Tag>,
 ) {
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let i = {
         let entry = state
             .va_instances
@@ -418,7 +422,7 @@ pub(crate) fn create_verified_access_group(
     let owner = req.account_id.clone();
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -449,7 +453,7 @@ pub(crate) fn delete_verified_access_group(
     let id = require(&req.query_params, "VerifiedAccessGroupId")?;
     let owner = req.account_id.clone();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let g = state.va_groups.remove(&id).unwrap_or(VerifiedAccessGroup {
         id: id.clone(),
         instance_id: "vai-0".to_string(),
@@ -476,7 +480,9 @@ pub(crate) fn describe_verified_access_groups(
     let owner = req.account_id.clone();
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .va_groups
         .values()
@@ -498,7 +504,7 @@ pub(crate) fn modify_verified_access_group(
     let owner = req.account_id.clone();
     let (g, tags) = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         let g = match state.va_groups.get_mut(&id) {
             Some(e) => {
                 if let Some(d) = req.query_params.get("Description") {
@@ -544,7 +550,7 @@ pub(crate) fn get_verified_access_group_policy(
     let id = require(&req.query_params, "VerifiedAccessGroupId")?;
     let accounts = svc.state.read();
     let doc = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.va_group_policies.get(&id).cloned())
         .unwrap_or_default();
     Ok(Ec2Service::respond(
@@ -567,7 +573,7 @@ pub(crate) fn modify_verified_access_group_policy(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .va_group_policies
             .insert(id, doc.clone());
     }
@@ -615,7 +621,7 @@ pub(crate) fn create_verified_access_endpoint(
     let instance_id = {
         let accounts = svc.state.read();
         accounts
-            .get(&req.account_id)
+            .regional(&req.account_id, &req.region)
             .and_then(|s| s.va_groups.get(&group).map(|g| g.instance_id.clone()))
             .unwrap_or_else(|| "vai-0".to_string())
     };
@@ -634,7 +640,7 @@ pub(crate) fn create_verified_access_endpoint(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -664,7 +670,7 @@ pub(crate) fn delete_verified_access_endpoint(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VerifiedAccessEndpointId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let e = state
         .va_endpoints
         .remove(&id)
@@ -696,7 +702,9 @@ pub(crate) fn describe_verified_access_endpoints(
     validate_max_results(&req.query_params, 5, 1000)?;
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .va_endpoints
         .values()
@@ -716,7 +724,7 @@ pub(crate) fn modify_verified_access_endpoint(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "VerifiedAccessEndpointId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let e = state.va_endpoints.get_mut(&id).ok_or_else(|| {
         AwsServiceError::aws_error(
             http::StatusCode::BAD_REQUEST,
@@ -750,7 +758,7 @@ pub(crate) fn get_verified_access_endpoint_policy(
     let id = require(&req.query_params, "VerifiedAccessEndpointId")?;
     let accounts = svc.state.read();
     let doc = accounts
-        .get(&req.account_id)
+        .regional(&req.account_id, &req.region)
         .and_then(|s| s.va_endpoint_policies.get(&id).cloned())
         .unwrap_or_default();
     Ok(Ec2Service::respond(
@@ -773,7 +781,7 @@ pub(crate) fn modify_verified_access_endpoint_policy(
     {
         let mut accounts = svc.state.write();
         accounts
-            .get_or_create(&req.account_id)
+            .regional_mut(&req.account_id, &req.region)
             .va_endpoint_policies
             .insert(id, doc.clone());
     }
@@ -834,7 +842,9 @@ pub(crate) fn describe_verified_access_instance_logging_configurations(
     let wanted = indexed_list(&req.query_params, "VerifiedAccessInstanceId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let mut items: Vec<String> = state
         .va_logging
         .iter()
@@ -877,7 +887,7 @@ pub(crate) fn modify_verified_access_instance_logging_configuration(
     };
     {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         state.va_logging.insert(inst.clone(), cfg.clone());
     }
     let body = format!(

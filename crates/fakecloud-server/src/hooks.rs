@@ -299,12 +299,13 @@ impl fakecloud_core::delivery::Ec2NetworkLookup for Ec2NetworkLookupImpl {
     fn create_task_eni(
         &self,
         account_id: &str,
+        region: &str,
         subnet_id: &str,
         group_ids: Vec<String>,
         description: String,
     ) -> Result<fakecloud_core::delivery::TaskEni, String> {
         let mut accounts = self.state.write();
-        let state = accounts.get_or_create(account_id);
+        let state = accounts.regional_mut(account_id, region);
         let (eni_id, private_ip) = fakecloud_ec2::vpc_lookup::create_service_eni(
             state,
             fakecloud_ec2::vpc_lookup::ServiceEni {
@@ -327,9 +328,9 @@ impl fakecloud_core::delivery::Ec2NetworkLookup for Ec2NetworkLookupImpl {
         })
     }
 
-    fn delete_task_eni(&self, account_id: &str, eni_id: &str) {
+    fn delete_task_eni(&self, account_id: &str, region: &str, eni_id: &str) {
         let mut accounts = self.state.write();
-        if let Some(state) = accounts.get_mut(account_id) {
+        if let Some(state) = accounts.regional_get_mut(account_id, region) {
             fakecloud_ec2::vpc_lookup::delete_service_eni(state, eni_id);
         }
     }
@@ -490,14 +491,16 @@ mod task_eni_tests {
             fakecloud_core::multi_account::MultiAccountState::new("123456789012", "us-east-1", ""),
         ));
         // The default VPC's subnets stand in for the task's subnet.
-        let subnet = fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012")
-            .into_iter()
-            .next()
-            .expect("default subnet");
+        let subnet =
+            fakecloud_ec2::vpc_lookup::default_vpc_subnets(&ec2, "123456789012", "us-east-1")
+                .into_iter()
+                .next()
+                .expect("default subnet");
         let lookup = Ec2NetworkLookupImpl { state: ec2.clone() };
         let eni = lookup
             .create_task_eni(
                 "123456789012",
+                "us-east-1",
                 &subnet.subnet_id,
                 vec!["sg-1".into()],
                 "arn:aws:ecs:us-east-1:123456789012:attachment/a1".into(),
@@ -513,24 +516,39 @@ mod task_eni_tests {
         ));
         {
             let accounts = ec2.read();
-            let iface = &accounts.get("123456789012").unwrap().network_interfaces[&eni.eni_id];
+            let iface = &accounts
+                .regional("123456789012", "us-east-1")
+                .unwrap()
+                .network_interfaces[&eni.eni_id];
             assert!(iface.requester_managed);
             assert_eq!(iface.mac_address, eni.mac_address);
             assert_eq!(iface.group_ids, vec!["sg-1".to_string()]);
         }
         // A second task never gets the same address.
         let other = lookup
-            .create_task_eni("123456789012", &subnet.subnet_id, Vec::new(), String::new())
+            .create_task_eni(
+                "123456789012",
+                "us-east-1",
+                &subnet.subnet_id,
+                Vec::new(),
+                String::new(),
+            )
             .unwrap();
         assert_ne!(other.private_ip, eni.private_ip);
         // Unknown subnet: refused.
         assert!(lookup
-            .create_task_eni("123456789012", "subnet-nope", Vec::new(), String::new())
+            .create_task_eni(
+                "123456789012",
+                "us-east-1",
+                "subnet-nope",
+                Vec::new(),
+                String::new()
+            )
             .is_err());
-        lookup.delete_task_eni("123456789012", &eni.eni_id);
+        lookup.delete_task_eni("123456789012", "us-east-1", &eni.eni_id);
         assert!(!ec2
             .read()
-            .get("123456789012")
+            .regional("123456789012", "us-east-1")
             .unwrap()
             .network_interfaces
             .contains_key(&eni.eni_id));

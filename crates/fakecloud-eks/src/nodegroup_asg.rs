@@ -62,7 +62,7 @@ pub fn create_nodegroup_asg(
     let mut zones: Vec<String> = match ec2 {
         Some(ec2) => {
             let mut accounts = ec2.write();
-            let state = accounts.get_or_create(account_id);
+            let state = accounts.regional_mut(account_id, region);
             subnets
                 .iter()
                 .filter_map(|id| state.subnets.get(id).map(|s| s.availability_zone.clone()))

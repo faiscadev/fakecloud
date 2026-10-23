@@ -20,7 +20,7 @@ pub(crate) fn associate_instance_event_window(
             })
             .collect();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate in place when the window exists; otherwise synthesize a response
     // (probe-only synthetic ids) without inventing a persistent resource.
     let w = if let Some(entry) = state.instance_event_windows.get_mut(&id) {
@@ -148,7 +148,7 @@ pub(crate) fn create_instance_event_window(
     };
     let tags = {
         let mut accounts = svc.state.write();
-        let state = accounts.get_or_create(&req.account_id);
+        let state = accounts.regional_mut(&req.account_id, &req.region);
         crate::service::tags::apply_tag_specifications(
             state,
             &req.query_params,
@@ -175,7 +175,7 @@ pub(crate) fn delete_instance_event_window(
 ) -> Result<AwsResponse, AwsServiceError> {
     let id = require(&req.query_params, "InstanceEventWindowId")?;
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     let existed = state.instance_event_windows.remove(&id).is_some();
     if existed {
         state.tags.remove(&id);
@@ -200,7 +200,9 @@ pub(crate) fn describe_instance_event_windows(
     let wanted = indexed_list(&req.query_params, "InstanceEventWindowId");
     let accounts = svc.state.read();
     let empty = Ec2State::new(&req.account_id, &req.region);
-    let state = accounts.get(&req.account_id).unwrap_or(&empty);
+    let state = accounts
+        .regional(&req.account_id, &req.region)
+        .unwrap_or(&empty);
     let items: Vec<String> = state
         .instance_event_windows
         .values()
@@ -227,7 +229,7 @@ pub(crate) fn disassociate_instance_event_window(
             .map(|(k, _)| k)
             .collect();
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when the window exists; otherwise synthesize a response for the
     // probe-only synthetic id without inventing a persistent resource.
     let w = if let Some(entry) = state.instance_event_windows.get_mut(&id) {
@@ -267,7 +269,7 @@ pub(crate) fn modify_instance_event_window(
     let id = require(&req.query_params, "InstanceEventWindowId")?;
     let time_ranges = parse_event_window_time_ranges(req);
     let mut accounts = svc.state.write();
-    let state = accounts.get_or_create(&req.account_id);
+    let state = accounts.regional_mut(&req.account_id, &req.region);
     // Mutate when the window exists; otherwise synthesize a response for the
     // probe-only synthetic id without inventing a persistent resource.
     let w = if let Some(entry) = state.instance_event_windows.get_mut(&id) {

@@ -380,15 +380,15 @@ impl RedshiftService {
                 .collect();
             return Ok((String::new(), subnets));
         };
-        let placed =
-            fakecloud_ec2::vpc_lookup::resolve_subnet_group(ec2, &req.account_id, subnet_ids)
-                .map_err(|e| {
-                    AwsServiceError::aws_error(
-                        http::StatusCode::BAD_REQUEST,
-                        "InvalidSubnet",
-                        e.message(),
-                    )
-                })?;
+        let placed = fakecloud_ec2::vpc_lookup::resolve_subnet_group(
+            ec2,
+            &req.account_id,
+            &req.region,
+            subnet_ids,
+        )
+        .map_err(|e| {
+            AwsServiceError::aws_error(http::StatusCode::BAD_REQUEST, "InvalidSubnet", e.message())
+        })?;
         let subnets = placed
             .subnets
             .iter()
@@ -505,6 +505,7 @@ impl RedshiftService {
                 if !fakecloud_ec2::vpc_lookup::subnet_group_vpc_change_allowed(
                     ec2,
                     &req.account_id,
+                    &req.region,
                     &g.vpc_id,
                     &vpc_id,
                 ) {
