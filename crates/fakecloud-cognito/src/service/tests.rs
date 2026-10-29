@@ -7230,7 +7230,7 @@ fn user_pool_client_secret_crud() {
     let body = json!({
         "UserPoolId": pool_id,
         "ClientId": client_id,
-        "ClientSecret": "super-secret"
+        "ClientSecret": "super_secret_0123456789abcdef"
     });
     let req = make_req("AddUserPoolClientSecret", &body.to_string());
     let resp = svc.add_user_pool_client_secret(&req).unwrap();
@@ -7241,7 +7241,7 @@ fn user_pool_client_secret_crud() {
         .to_string();
     assert_eq!(
         b["ClientSecretDescriptor"]["ClientSecretValue"],
-        "super-secret"
+        "super_secret_0123456789abcdef"
     );
 
     let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
@@ -7278,6 +7278,31 @@ fn add_user_pool_client_secret_generates_secret_when_missing() {
         .as_str()
         .unwrap()
         .is_empty());
+}
+
+#[test]
+fn add_user_pool_client_secret_rejects_secret_outside_client_secret_type() {
+    let (svc, _) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    for secret in ["too_short", "has-a-dash-0123456789abcdef"] {
+        let body = json!({
+            "UserPoolId": pool_id,
+            "ClientId": client_id,
+            "ClientSecret": secret
+        });
+        let req = make_req("AddUserPoolClientSecret", &body.to_string());
+        let err = match svc.add_user_pool_client_secret(&req) {
+            Ok(_) => panic!("{secret} must be rejected"),
+            Err(err) => err,
+        };
+        assert_eq!(err.code(), "InvalidParameterException");
+        assert!(!err.message().contains(secret));
+    }
+    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
+    let req = make_req("ListUserPoolClientSecrets", &body.to_string());
+    let b = resp_json(&svc.list_user_pool_client_secrets(&req).unwrap());
+    assert!(b["ClientSecrets"].as_array().unwrap().is_empty());
 }
 
 #[test]

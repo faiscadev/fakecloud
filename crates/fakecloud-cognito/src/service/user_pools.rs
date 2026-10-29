@@ -1167,6 +1167,9 @@ impl CognitoService {
         let pool_id = require_str(&body, "UserPoolId")?;
         let client_id = require_str(&body, "ClientId")?;
         let custom_secret = body["ClientSecret"].as_str();
+        if let Some(secret) = custom_secret {
+            validate_client_secret(secret)?;
+        }
 
         let mut accounts = self.state.write();
         let state = accounts.get_or_create(&req.account_id);
