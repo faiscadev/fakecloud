@@ -7549,7 +7549,7 @@ async fn cognito_added_client_secret_authenticates_until_deleted() {
         .expect_err("SecretHash required");
     assert!(
         err.as_service_error()
-            .is_some_and(|e| e.is_invalid_parameter_exception()),
+            .is_some_and(|e| e.is_not_authorized_exception()),
         "{err:?}"
     );
     client

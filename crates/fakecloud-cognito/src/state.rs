@@ -654,9 +654,6 @@ pub struct UserPoolClient {
     pub analytics_configuration: Option<serde_json::Value>,
 }
 
-/// AWS keeps at most two active secrets per app client for rotation.
-pub const MAX_CLIENT_SECRETS: usize = 2;
-
 impl UserPoolClient {
     /// Whether this is a confidential client, i.e. it was created with a
     /// secret. Secrets added to a public client do not make it confidential.
@@ -677,17 +674,25 @@ impl UserPoolClient {
         self.client_secret.as_deref().into_iter().chain(added)
     }
 
-    /// Whether `supplied` matches any of the client's secrets. Every secret
-    /// is compared in constant time so the match position is not leaked.
+    /// Whether `supplied` matches any of the client's secrets.
     pub fn secret_matches(&self, supplied: &str) -> bool {
-        self.secret_values().fold(false, |acc, secret| {
-            crate::srp::ct_eq(supplied.as_bytes(), secret.as_bytes()) | acc
+        self.any_secret(|secret| crate::srp::ct_eq(supplied.as_bytes(), secret.as_bytes()))
+    }
+
+    /// Whether `supplied` is the `SECRET_HASH` of `username` under any of
+    /// the client's secrets.
+    pub fn secret_hash_matches(&self, username: &str, supplied: &str) -> bool {
+        self.any_secret(|secret| {
+            let expected = crate::service::compute_secret_hash(username, &self.client_id, secret);
+            crate::srp::ct_eq(supplied.as_bytes(), expected.as_bytes())
         })
     }
 
-    /// Number of active secrets, the primary included.
-    pub fn secret_count(&self) -> usize {
-        usize::from(self.is_confidential()) + self.client_secrets.len()
+    /// Evaluate `check` against every secret without short-circuiting, so
+    /// the position of a match is not leaked through timing.
+    fn any_secret(&self, check: impl Fn(&str) -> bool) -> bool {
+        self.secret_values()
+            .fold(false, |acc, secret| check(secret) | acc)
     }
 }
 

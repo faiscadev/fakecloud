@@ -816,34 +816,28 @@ pub(crate) fn compute_secret_hash(username: &str, client_id: &str, client_secret
 
 /// Validate a request's `SECRET_HASH` for a client that has a secret.
 /// The hash may be computed from any of the client's current secrets (the
-/// primary or one added for rotation). Returns the AWS error when the hash
-/// is missing or wrong; a no-op when the client has no secret (mirrors the OAuth `/token` enforcement but
-/// for the JSON InitiateAuth / SignUp / Confirm* surface). AWS uses
-/// InvalidParameterException when the hash is absent and
-/// NotAuthorizedException when it's present but wrong.
+/// primary or one added for rotation). A no-op when the client has no
+/// secret (mirrors the OAuth `/token` enforcement but for the JSON
+/// InitiateAuth / SignUp / Confirm* surface). AWS answers a missing hash and
+/// a wrong one alike with NotAuthorizedException, differing only in the
+/// message.
 pub(crate) fn validate_secret_hash(
     client: &UserPoolClient,
     supplied_secret_hash: Option<&str>,
     username: &str,
 ) -> Result<(), AwsServiceError> {
-    let client_id = client.client_id.as_str();
     if !client.is_confidential() {
         return Ok(());
     }
+    let client_id = client.client_id.as_str();
     let Some(supplied) = supplied_secret_hash else {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
-            "InvalidParameterException",
-            format!(
-                "Client {client_id} is configured with secret but SECRET_HASH was not received"
-            ),
+            "NotAuthorizedException",
+            format!("Client {client_id} is configured for secret but secret was not received"),
         ));
     };
-    let matches = client.secret_values().fold(false, |acc, secret| {
-        let expected = compute_secret_hash(username, client_id, secret);
-        crate::srp::ct_eq(supplied.as_bytes(), expected.as_bytes()) | acc
-    });
-    if !matches {
+    if !client.secret_hash_matches(username, supplied) {
         return Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             "NotAuthorizedException",
@@ -2753,9 +2747,7 @@ pub async fn handle_oauth2_token(
                 found = Some((
                     client.user_pool_id.clone(),
                     client
-                        .secret_values()
-                        .next()
-                        .is_some()
+                        .is_confidential()
                         .then(|| supplied_secret.is_some_and(|s| client.secret_matches(s))),
                     client.allowed_o_auth_flows.clone(),
                     client.allowed_o_auth_scopes.clone(),
@@ -3413,12 +3405,12 @@ pub enum OAuthRevokeError {
 /// The token being revoked was issued to a different app client.
 pub(crate) struct TokenClientMismatch;
 
-/// Revoke `token` from one account's state on behalf of `client_id`.
-/// Revoking a refresh token also invalidates every access token issued from
-/// it (matched by client_id + username + issued_at >= refresh issued_at).
-/// Returns whether the token was found; a token issued to another client is
-/// left untouched and reported as a mismatch.
-pub(crate) fn revoke_client_token(
+/// Revoke refresh token `token` from one account's state on behalf of
+/// `client_id`, also invalidating every access token issued from it (matched
+/// by client_id + username + issued_at >= refresh issued_at). Returns whether
+/// the refresh token was found; one issued to another client is left
+/// untouched and reported as a mismatch.
+pub(crate) fn revoke_refresh_token(
     account: &mut crate::state::CognitoState,
     token: &str,
     client_id: &str,
@@ -3434,6 +3426,19 @@ pub(crate) fn revoke_client_token(
                 && at.user_pool_id == rt.user_pool_id
                 && at.issued_at >= rt.issued_at)
         });
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+/// Revoke `token` as [`revoke_refresh_token`] does or, failing that, as a
+/// bare access token issued to `client_id` (the `/oauth2/revoke` surface).
+fn revoke_client_token(
+    account: &mut crate::state::CognitoState,
+    token: &str,
+    client_id: &str,
+) -> Result<bool, TokenClientMismatch> {
+    if revoke_refresh_token(account, token, client_id)? {
         return Ok(true);
     }
     if let Some(at) = account.access_tokens.get(token) {

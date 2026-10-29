@@ -661,9 +661,10 @@ impl CognitoService {
             ));
         }
 
-        // Revoke the token and the access tokens issued from it, refusing a
-        // token another client was issued (as `/oauth2/revoke` does).
-        super::revoke_client_token(state, token, client_id).map_err(|_| {
+        // Revoke the refresh token and the access tokens issued from it,
+        // refusing a token another client was issued (as `/oauth2/revoke`
+        // does). Anything that is not a known refresh token is a no-op.
+        super::revoke_refresh_token(state, token, client_id).map_err(|_| {
             AwsServiceError::aws_error(
                 StatusCode::BAD_REQUEST,
                 "UnauthorizedException",
@@ -1234,9 +1235,7 @@ fn require_client_secret(
         None => Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,
             code,
-            format!(
-                "Client {client_id} is configured with secret but ClientSecret was not received"
-            ),
+            format!("Client {client_id} is configured for secret but secret was not received"),
         )),
         Some(secret) if !client.secret_matches(secret) => Err(AwsServiceError::aws_error(
             StatusCode::BAD_REQUEST,

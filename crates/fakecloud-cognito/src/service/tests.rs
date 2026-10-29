@@ -2303,12 +2303,16 @@ fn secret_hash_enforced_for_clients_with_secret() {
         .unwrap()
         .to_string();
 
-    // SignUp WITHOUT SecretHash -> InvalidParameterException.
+    // SignUp WITHOUT SecretHash -> NotAuthorizedException.
     let su = json!({"ClientId": client_id, "Username": "u1", "Password": "P@ssw0rd!"});
     let err = block_on(svc.sign_up(&make_req("SignUp", &su.to_string())))
         .err()
         .expect("missing secret hash rejected");
-    assert_eq!(err.code(), "InvalidParameterException");
+    assert_eq!(err.code(), "NotAuthorizedException");
+    assert_eq!(
+        err.message(),
+        format!("Client {client_id} is configured for secret but secret was not received")
+    );
 
     // SignUp WITH the wrong SecretHash -> NotAuthorizedException.
     let su = json!({
@@ -2345,7 +2349,7 @@ fn secret_hash_enforced_for_clients_with_secret() {
     let err = block_on(svc.initiate_auth(&make_req("InitiateAuth", &ia.to_string())))
         .err()
         .expect("InitiateAuth without SECRET_HASH rejected");
-    assert_eq!(err.code(), "InvalidParameterException");
+    assert_eq!(err.code(), "NotAuthorizedException");
 
     // InitiateAuth WITH correct SECRET_HASH -> success.
     let ia = json!({
@@ -7287,18 +7291,6 @@ fn delete_client_secret(
     svc.delete_user_pool_client_secret(&make_req("DeleteUserPoolClientSecret", &body.to_string()))
 }
 
-#[test]
-fn add_user_pool_client_secret_caps_at_two_secrets() {
-    let (svc, _) = make_svc();
-    let pool_id = create_pool(&svc);
-    let (client_id, _) = create_m2m_client(&svc, &pool_id, &[]);
-    add_client_secret(&svc, &pool_id, &client_id);
-    let body = json!({"UserPoolId": pool_id, "ClientId": client_id});
-    let req = make_req("AddUserPoolClientSecret", &body.to_string());
-    let err = expect_err(svc.add_user_pool_client_secret(&req));
-    assert_eq!(err.code(), "LimitExceededException");
-}
-
 /// A secret added for rotation authenticates SECRET_HASH flows (SignUp,
 /// InitiateAuth, AdminInitiateAuth) alongside the primary, and stops working
 /// once deleted.
@@ -7452,7 +7444,7 @@ fn confirmation_flows_enforce_secret_hash() {
             let err = expect_err(call(body));
             assert_eq!(
                 err.code(),
-                "InvalidParameterException",
+                "NotAuthorizedException",
                 "{op} without SecretHash"
             );
             let mut wrong = body.clone();
@@ -7702,6 +7694,10 @@ fn revoke_token_requires_one_of_the_clients_secrets() {
 
     let err = expect_err(revoke("rt-1", None));
     assert_eq!(err.code(), "UnauthorizedException");
+    assert_eq!(
+        err.message(),
+        format!("Client {client_id} is configured for secret but secret was not received")
+    );
     let err = expect_err(revoke("rt-1", Some("wrong_secret_0123456789abcdef")));
     assert_eq!(err.code(), "UnauthorizedException");
     assert!(has_token("rt-1"), "a rejected revoke must keep the token");
@@ -7822,6 +7818,39 @@ fn revoke_token_rejects_another_clients_token_and_drops_derived_access_tokens() 
     );
 }
 
+/// RevokeToken only revokes refresh tokens: an access token passed as
+/// `Token` is left alone, as is an unknown token.
+#[test]
+fn revoke_token_ignores_tokens_that_are_not_refresh_tokens() {
+    let (svc, state) = make_svc();
+    let pool_id = create_pool(&svc);
+    let client_id = create_client(&svc, &pool_id);
+    {
+        let mut st = state.write();
+        st.get_or_create("123456789012").access_tokens.insert(
+            "at-only".to_string(),
+            crate::state::AccessTokenData {
+                user_pool_id: pool_id.clone(),
+                username: "alice".to_string(),
+                client_id: client_id.clone(),
+                issued_at: chrono::Utc::now(),
+                expires_at: None,
+                auth_context: None,
+            },
+        );
+    }
+    for token in ["at-only", "no-such-token"] {
+        let body = json!({"Token": token, "ClientId": client_id});
+        svc.revoke_token(&make_req("RevokeToken", &body.to_string()))
+            .unwrap();
+    }
+    assert!(state
+        .read()
+        .default_ref()
+        .access_tokens
+        .contains_key("at-only"));
+}
+
 #[test]
 fn revoke_token_honors_disabled_token_revocation() {
     let (svc, state) = make_svc();
@@ -7894,6 +7923,10 @@ fn get_tokens_from_refresh_token_requires_one_of_the_clients_secrets() {
 
     let err = expect_err(refresh(&client_id, None));
     assert_eq!(err.code(), "NotAuthorizedException");
+    assert_eq!(
+        err.message(),
+        format!("Client {client_id} is configured for secret but secret was not received")
+    );
     let err = expect_err(refresh(&client_id, Some("wrong_secret_0123456789abcdef")));
     assert_eq!(err.code(), "NotAuthorizedException");
     let b = resp_json(&refresh(&client_id, Some(&added)).unwrap());
@@ -10444,7 +10477,7 @@ fn custom_auth_checks_secret_hash_before_resolving_email_alias() {
     let username_hash = crate::service::compute_secret_hash(&minted, client_id, client_secret);
 
     for (hash, expected_code) in [
-        (None, "InvalidParameterException"),
+        (None, "NotAuthorizedException"),
         (Some("incorrect"), "NotAuthorizedException"),
         (Some(username_hash.as_str()), "NotAuthorizedException"),
         (Some(email_hash.as_str()), "InvalidLambdaResponseException"),
@@ -10952,7 +10985,7 @@ fn admin_initiate_auth_enforces_secret_hash() {
     let err = block_on(svc.admin_initiate_auth(&make_req("AdminInitiateAuth", &ia.to_string())))
         .err()
         .expect("admin auth without SECRET_HASH rejected");
-    assert_eq!(err.code(), "InvalidParameterException");
+    assert_eq!(err.code(), "NotAuthorizedException");
 
     // Correct SECRET_HASH -> success.
     let ia = json!({
