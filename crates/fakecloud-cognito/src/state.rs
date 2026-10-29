@@ -418,6 +418,19 @@ pub struct SessionData {
     /// Target ACR level and completed factors of a step-up sign-in.
     #[serde(default)]
     pub step_up: Option<StepUpContext>,
+    /// The identifier the user signed in with (an email or phone alias under
+    /// UsernameAttributes / AliasAttributes, otherwise the username). A
+    /// confidential client computes the challenge-response `SECRET_HASH`
+    /// over it. `None` on legacy snapshots -> the stored username.
+    #[serde(default)]
+    pub sign_in_identifier: Option<String>,
+}
+
+impl SessionData {
+    /// The identifier this sign-in was started with.
+    pub fn signed_in_as(&self) -> &str {
+        self.sign_in_identifier.as_deref().unwrap_or(&self.username)
+    }
 }
 
 /// Tracks the result of a single challenge round in a CUSTOM_AUTH flow.

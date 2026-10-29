@@ -26,6 +26,8 @@ struct AdminAuthInput {
     client_id: String,
     auth_flow: String,
     username: String,
+    /// The USERNAME as supplied, before alias resolution rewrites `username`.
+    sign_in_identifier: String,
     password: String,
 }
 
@@ -82,6 +84,7 @@ impl AdminAuthInput {
             pool_id,
             client_id,
             auth_flow,
+            sign_in_identifier: username.clone(),
             username,
             password,
         })

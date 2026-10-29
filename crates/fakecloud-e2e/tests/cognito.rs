@@ -7607,3 +7607,98 @@ async fn cognito_added_client_secret_authenticates_until_deleted() {
         "{err:?}"
     );
 }
+
+#[tokio::test]
+async fn cognito_respond_to_auth_challenge_requires_secret_hash() {
+    use aws_sdk_cognitoidentityprovider::types::AuthFlowType;
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+
+    fn secret_hash(username: &str, client_id: &str, secret: &str) -> String {
+        let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(username.as_bytes());
+        mac.update(client_id.as_bytes());
+        base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+    }
+
+    let server = TestServer::start().await;
+    let client = server.cognito_client().await;
+
+    let pool = client
+        .create_user_pool()
+        .pool_name("challenge-secret-pool")
+        .send()
+        .await
+        .expect("create pool");
+    let pool_id = pool.user_pool().unwrap().id().unwrap().to_string();
+
+    let app = client
+        .create_user_pool_client()
+        .user_pool_id(&pool_id)
+        .client_name("challenge-secret-client")
+        .generate_secret(true)
+        .explicit_auth_flows(ExplicitAuthFlowsType::AllowUserPasswordAuth)
+        .send()
+        .await
+        .expect("create client");
+    let app = app.user_pool_client().unwrap();
+    let client_id = app.client_id().unwrap().to_string();
+    let client_secret = app.client_secret().unwrap().to_string();
+    let hash = secret_hash("newcomer", &client_id, &client_secret);
+
+    client
+        .admin_create_user()
+        .user_pool_id(&pool_id)
+        .username("newcomer")
+        .temporary_password("TempPass1!")
+        .send()
+        .await
+        .expect("create user");
+
+    let challenge = client
+        .initiate_auth()
+        .client_id(&client_id)
+        .auth_flow(AuthFlowType::UserPasswordAuth)
+        .auth_parameters("USERNAME", "newcomer")
+        .auth_parameters("PASSWORD", "TempPass1!")
+        .auth_parameters("SECRET_HASH", &hash)
+        .send()
+        .await
+        .expect("initiate auth");
+    assert_eq!(
+        challenge.challenge_name(),
+        Some(&ChallengeNameType::NewPasswordRequired)
+    );
+    let session = challenge.session().unwrap().to_string();
+
+    let respond = || {
+        client
+            .respond_to_auth_challenge()
+            .client_id(&client_id)
+            .challenge_name(ChallengeNameType::NewPasswordRequired)
+            .session(&session)
+            .challenge_responses("USERNAME", "newcomer")
+            .challenge_responses("NEW_PASSWORD", "NewPass1!")
+    };
+
+    let err = respond().send().await.expect_err("SECRET_HASH required");
+    let service_err = err.as_service_error().expect("service error");
+    assert!(service_err.is_not_authorized_exception(), "{err:?}");
+    assert_eq!(
+        service_err.meta().message(),
+        Some(
+            format!("Client {client_id} is configured for secret but secret was not received")
+                .as_str()
+        )
+    );
+
+    let done = respond()
+        .challenge_responses("SECRET_HASH", &hash)
+        .send()
+        .await
+        .expect("challenge completes with SECRET_HASH");
+    assert!(done
+        .authentication_result()
+        .and_then(|r| r.access_token())
+        .is_some());
+}
