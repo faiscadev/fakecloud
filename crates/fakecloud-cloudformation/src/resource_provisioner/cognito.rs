@@ -352,7 +352,7 @@ impl ResourceProvisioner {
                 .unwrap_or(false),
             client_secrets: Vec::new(),
             primary_secret: None,
-            last_secret_epoch_ms: 0,
+            last_secret_epoch_secs: 0,
             refresh_token_rotation: None,
             analytics_configuration: props
                 .get("AnalyticsConfiguration")

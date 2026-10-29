@@ -7290,13 +7290,13 @@ fn list_client_secrets_includes_primary_first_without_values() {
     for entry in &listed {
         assert!(entry.get("ClientSecretValue").is_none(), "{entry}");
         let id = entry["ClientSecretId"].as_str().unwrap();
-        let epoch_ms: i64 = id
+        let epoch: i64 = id
             .strip_prefix(&format!("{client_id}--"))
             .unwrap()
             .parse()
             .unwrap();
         let date = entry["ClientSecretCreateDate"].as_f64().unwrap();
-        assert_eq!((date * 1000.0).round() as i64, epoch_ms, "{entry}");
+        assert_eq!(date, epoch as f64, "{entry}");
     }
 }
 
@@ -7424,10 +7424,7 @@ fn client_secret_ids_are_never_reused() {
     assert!(b.client_secret_create_date > a.client_secret_create_date);
     assert_eq!(
         b.client_secret_id,
-        format!(
-            "{client_id}--{}",
-            b.client_secret_create_date.timestamp_millis()
-        )
+        format!("{client_id}--{}", b.client_secret_create_date.timestamp())
     );
 }
 
@@ -7439,21 +7436,21 @@ fn legacy_client_without_primary_secret_id_loads_and_rotates() {
     let (svc, state) = make_svc();
     let pool_id = create_pool(&svc);
     let (client_id, primary) = create_m2m_client(&svc, &pool_id, &[]);
-    let creation_ms = {
+    let creation_secs = {
         let mut accounts = state.write();
         let clients = &mut accounts.get_or_create("123456789012").user_pool_clients;
         let mut legacy = serde_json::to_value(&clients[&client_id]).unwrap();
         let obj = legacy.as_object_mut().unwrap();
         obj.remove("primary_secret");
-        obj.remove("last_secret_epoch_ms");
+        obj.remove("last_secret_epoch_secs");
         let loaded: crate::state::UserPoolClient = serde_json::from_value(legacy).unwrap();
         assert!(loaded.primary_secret.is_none());
-        let ms = loaded.creation_date.timestamp_millis();
+        let secs = loaded.creation_date.timestamp();
         clients.insert(client_id.clone(), loaded);
-        ms
+        secs
     };
 
-    let derived = format!("{client_id}--{creation_ms}");
+    let derived = format!("{client_id}--{creation_secs}");
     let listed = list_client_secrets(&svc, &pool_id, &client_id);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0]["ClientSecretId"], derived.as_str());
@@ -7956,6 +7953,15 @@ fn public_client_with_added_secret_stays_public() {
         assert!(!client.secret_matches(&added));
         assert_eq!(client.secret_values().count(), 0);
     }
+    // The stray secret is invisible to List, and so not found by Delete.
+    assert!(list_client_secrets(&svc, &pool_id, &client_id).is_empty());
+    let err = expect_err(delete_client_secret(
+        &svc,
+        &pool_id,
+        &client_id,
+        &format!("{client_id}--1"),
+    ));
+    assert_eq!(err.code(), "ResourceNotFoundException");
 
     let su = json!({"ClientId": client_id, "Username": "pub", "Password": "P@ssw0rd!"});
     block_on(svc.sign_up(&make_req("SignUp", &su.to_string()))).unwrap();

@@ -816,7 +816,7 @@ impl CognitoService {
                 .unwrap_or(false),
             client_secrets: Vec::new(),
             primary_secret: None,
-            last_secret_epoch_ms: 0,
+            last_secret_epoch_secs: 0,
             refresh_token_rotation: parse_refresh_token_rotation(&body["RefreshTokenRotation"]),
             analytics_configuration: body
                 .get("AnalyticsConfiguration")
@@ -1201,7 +1201,7 @@ impl CognitoService {
         let meta = upc.issue_secret_meta(Utc::now());
         let mut descriptor_json = json!({
             "ClientSecretId": meta.client_secret_id,
-            "ClientSecretCreateDate": epoch_seconds(meta.client_secret_create_date),
+            "ClientSecretCreateDate": meta.client_secret_create_date.timestamp() as f64,
         });
         let secret_value = match custom_secret {
             Some(secret) => secret.to_string(),
@@ -1268,9 +1268,12 @@ impl CognitoService {
                 client_secret_id: promoted.client_secret_id,
                 client_secret_create_date: promoted.client_secret_create_date,
             });
-        } else {
-            upc.client_secrets
-                .retain(|s| s.client_secret_id != secret_id);
+        } else if let Some(idx) = upc
+            .client_secrets
+            .iter()
+            .position(|s| s.client_secret_id == secret_id)
+        {
+            upc.client_secrets.remove(idx);
         }
 
         Ok(AwsResponse::ok_json(json!({})))
@@ -1301,7 +1304,7 @@ impl CognitoService {
             .map(|m| {
                 json!({
                     "ClientSecretId": m.client_secret_id,
-                    "ClientSecretCreateDate": epoch_seconds(m.client_secret_create_date),
+                    "ClientSecretCreateDate": m.client_secret_create_date.timestamp() as f64,
                 })
             })
             .collect();
@@ -1410,10 +1413,4 @@ fn client_not_found(client_id: &str) -> AwsServiceError {
         "ResourceNotFoundException",
         format!("Client {client_id} does not exist."),
     )
-}
-
-/// A timestamp as fractional epoch seconds, keeping the millisecond
-/// precision a client secret id carries.
-fn epoch_seconds(date: chrono::DateTime<Utc>) -> f64 {
-    date.timestamp_millis() as f64 / 1000.0
 }
