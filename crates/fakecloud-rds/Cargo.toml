@@ -25,7 +25,7 @@ chrono = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 tokio-postgres = { workspace = true }
-mysql_async = "0.34"
+mysql_async = "0.37"
 base64 = { workspace = true }
 tracing = { workspace = true }
 tempfile = { workspace = true }
