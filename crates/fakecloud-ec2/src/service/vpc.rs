@@ -194,6 +194,7 @@ pub(crate) fn create_vpc(
         .unwrap_or(false)
     {
         vpc.ipv6_cidr_block = Some(generated_ipv6_cidr(&vpc_id));
+        vpc.ipv6_blocks_minted = 1;
     }
 
     let owner = req.account_id.clone();
@@ -274,6 +275,7 @@ fn build_vpc(cidr: String, tenancy: String, is_default: bool) -> Vpc {
         cidr_associations: Vec::new(),
         ipv6_cidr_block: None,
         ipv6_cidr_associations: Vec::new(),
+        ipv6_blocks_minted: 0,
     }
 }
 
@@ -459,8 +461,10 @@ pub(crate) fn associate_vpc_cidr_block(
         .map(|v| v == "true")
         .unwrap_or(false)
     {
-        // The first block keeps its id derived from the VPC id; each later
-        // one (a VPC holds up to five) gets its own association id and /56.
+        // The VPC's first block ever keeps its id derived from the VPC id;
+        // every later one (a VPC holds up to five) gets a freshly minted
+        // association id and a /56 not issued to it before, even when it
+        // replaces a disassociated block.
         let limit =
             svc.enforced_count_quota(&req.account_id, &req.region, rq::IPV6_CIDR_BLOCKS_PER_VPC);
         let border_group = req
@@ -480,15 +484,18 @@ pub(crate) fn associate_vpc_cidr_block(
                             "The network '{vpc_id}' has met its maximum number of allowed CIDRs ( {limit} ) for network border group '{border_group}'"
                         )
                     })?;
-                    if vpc.ipv6_cidr_block.is_none() {
+                    let issued = vpc.ipv6_blocks_issued();
+                    if issued == 0 && vpc.ipv6_cidr_block.is_none() {
                         let ipv6 = generated_ipv6_cidr(&vpc_id);
                         vpc.ipv6_cidr_block = Some(ipv6.clone());
+                        vpc.ipv6_blocks_minted = 1;
                         (primary_ipv6_assoc_id(&vpc_id), ipv6)
                     } else {
-                        let ipv6 = (1u32..)
-                            .map(|n| generated_ipv6_cidr(&format!("{vpc_id}/{n}")))
-                            .find(|c| existing.iter().all(|a| &a.cidr_block != c))
+                        let (n, ipv6) = (issued.max(1)..)
+                            .map(|n| (n, generated_ipv6_cidr(&format!("{vpc_id}/{n}"))))
+                            .find(|(_, c)| existing.iter().all(|a| &a.cidr_block != c))
                             .expect("an unbounded sequence yields a free block");
+                        vpc.ipv6_blocks_minted = n.saturating_add(1);
                         let assoc = VpcCidrAssoc {
                             association_id: gen_id("vpc-cidr-assoc"),
                             cidr_block: ipv6.clone(),
@@ -589,7 +596,10 @@ pub(crate) fn disassociate_vpc_cidr_block(
         let mut accounts = svc.state.write();
         let state = accounts.regional_mut(&req.account_id, &req.region);
         state.vpcs.values_mut().find_map(|vpc| {
+            // Remember how many blocks were issued before releasing one, so
+            // a later association never reuses its id or /56.
             if vpc.ipv6_cidr_block.is_some() && primary_ipv6_assoc_id(&vpc.vpc_id) == assoc_id {
+                vpc.ipv6_blocks_minted = vpc.ipv6_blocks_issued();
                 let cidr = vpc.ipv6_cidr_block.take()?;
                 return Some((vpc.vpc_id.clone(), cidr));
             }
@@ -597,6 +607,7 @@ pub(crate) fn disassociate_vpc_cidr_block(
                 .ipv6_cidr_associations
                 .iter()
                 .position(|a| a.association_id == assoc_id)?;
+            vpc.ipv6_blocks_minted = vpc.ipv6_blocks_issued();
             let a = vpc.ipv6_cidr_associations.remove(pos);
             Some((vpc.vpc_id.clone(), a.cidr_block))
         })
@@ -914,6 +925,65 @@ mod tests {
         let described =
             body_of(describe_vpcs(&svc, &req("DescribeVpcs", &[("VpcId.1", &vpc_id)])).unwrap());
         assert!(described.contains(&first_id) && !described.contains(&second_id));
+    }
+
+    /// Re-associating after the primary Amazon IPv6 block was disassociated
+    /// mints a fresh association id and a /56 never issued to the VPC, as
+    /// AWS does; so does re-associating after a later block is released.
+    #[test]
+    fn ipv6_reassociation_mints_fresh_id_and_block() {
+        let svc = Ec2Service::new();
+        let vpc_id = make_vpc(&svc, "10.0.0.0/16");
+        let assoc_ipv6 = || {
+            body_of(
+                associate_vpc_cidr_block(
+                    &svc,
+                    &req(
+                        "AssociateVpcCidrBlock",
+                        &[("VpcId", &vpc_id), ("AmazonProvidedIpv6CidrBlock", "true")],
+                    ),
+                )
+                .unwrap(),
+            )
+        };
+        let disassoc = |id: &str| {
+            disassociate_vpc_cidr_block(
+                &svc,
+                &req("DisassociateVpcCidrBlock", &[("AssociationId", id)]),
+            )
+            .unwrap();
+        };
+        let field = |xml: &str, name: &str| {
+            xml.split(&format!("<{name}>"))
+                .nth(1)
+                .and_then(|s| s.split(&format!("</{name}>")).next())
+                .unwrap()
+                .to_string()
+        };
+        let mut seen_ids = std::collections::HashSet::new();
+        let mut seen_blocks = std::collections::HashSet::new();
+        let first = assoc_ipv6();
+        let first_id = field(&first, "associationId");
+        assert_eq!(first_id, primary_ipv6_assoc_id(&vpc_id));
+        seen_ids.insert(first_id.clone());
+        seen_blocks.insert(field(&first, "ipv6CidrBlock"));
+        disassoc(&first_id);
+        let mut last_id = first_id;
+        for _ in 0..3 {
+            let next = assoc_ipv6();
+            let id = field(&next, "associationId");
+            let block = field(&next, "ipv6CidrBlock");
+            assert!(seen_ids.insert(id.clone()), "association id {id} reused");
+            assert!(seen_blocks.insert(block.clone()), "block {block} reused");
+            assert!(block.ends_with("00::/56"), "{block}");
+            let described = body_of(
+                describe_vpcs(&svc, &req("DescribeVpcs", &[("VpcId.1", &vpc_id)])).unwrap(),
+            );
+            assert!(described.contains(&id), "{described}");
+            assert!(!described.contains(&last_id), "{described}");
+            disassoc(&id);
+            last_id = id;
+        }
     }
 
     /// With the IPv6-blocks-per-VPC quota enforced, the block past it is

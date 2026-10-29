@@ -620,13 +620,20 @@ pub(crate) fn launch_instances(
         // When the caller named no security group, AWS attaches the VPC's
         // `default` group. Resolve it from the subnet's VPC (or the default VPC).
         let resolved_vpc = subnet.map(|s| s.vpc_id.clone());
+        // The account's default VPC as recorded in state: a state migrated
+        // from a pre-regional snapshot keeps its original default VPC id,
+        // which is not the region-derived one.
+        let default_vpc = state
+            .vpcs
+            .values()
+            .find(|v| v.is_default)
+            .map(|v| v.vpc_id.clone())
+            .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id, region));
         // Honor `SecurityGroup.N` (group *names*, EC2-Classic/default-VPC form)
         // by resolving each to its id, alongside the modern `SecurityGroupId.N`.
         let sg_names = indexed_list(params, "SecurityGroup");
         if !sg_names.is_empty() {
-            let target_vpc = resolved_vpc
-                .clone()
-                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id, region));
+            let target_vpc = resolved_vpc.clone().unwrap_or_else(|| default_vpc.clone());
             for name in &sg_names {
                 if let Some(sg) = state
                     .security_groups
@@ -640,9 +647,7 @@ pub(crate) fn launch_instances(
             }
         }
         if sg_ids.is_empty() {
-            let vpc = resolved_vpc
-                .clone()
-                .unwrap_or_else(|| crate::defaults::default_vpc_id(account_id, region));
+            let vpc = resolved_vpc.clone().unwrap_or_else(|| default_vpc.clone());
             if let Some(sg) = state
                 .security_groups
                 .values()
@@ -670,10 +675,7 @@ pub(crate) fn launch_instances(
                 .unwrap_or((None, false)),
             // No subnet (and no default subnet found): still a default-VPC
             // launch, which assigns public IPs by default.
-            None => (
-                Some(crate::defaults::default_vpc_id(account_id, region)),
-                true,
-            ),
+            None => (Some(default_vpc), true),
         };
         // Metadata-only private IP base, derived from the resolved subnet's
         // CIDR so DescribeInstances reports an IP inside the subnet (was a
@@ -3750,6 +3752,66 @@ mod modify_tests {
             "got: {out}"
         );
         assert!(!out.contains("instance-profile/web-profile"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn run_instances_uses_state_default_vpc_and_sg_over_derived_ids() {
+        // A state migrated from a pre-regional snapshot keeps its original
+        // default VPC / default SG ids, which are not the region-derived
+        // ones. A launch with no resolvable subnet must still land in that
+        // VPC with its `default` group.
+        let svc = Ec2Service::new();
+        {
+            let mut accounts = svc.state.write();
+            let st = accounts.regional_mut("000000000000", "us-east-1");
+            let old_vpc = st
+                .vpcs
+                .values()
+                .find(|v| v.is_default)
+                .unwrap()
+                .vpc_id
+                .clone();
+            let mut vpc = st.vpcs.remove(&old_vpc).unwrap();
+            vpc.vpc_id = "vpc-0legacy000000001".into();
+            st.vpcs.insert(vpc.vpc_id.clone(), vpc);
+            let mut sg = st
+                .security_groups
+                .values()
+                .find(|g| g.vpc_id == old_vpc && g.group_name == "default")
+                .unwrap()
+                .clone();
+            st.security_groups.retain(|_, g| g.vpc_id != old_vpc);
+            sg.group_id = "sg-0legacy000000001".into();
+            sg.vpc_id = "vpc-0legacy000000001".into();
+            st.security_groups.insert(sg.group_id.clone(), sg);
+            // No default subnet to resolve.
+            st.subnets.clear();
+            assert_ne!(
+                "vpc-0legacy000000001",
+                crate::defaults::default_vpc_id("000000000000", "us-east-1")
+            );
+        }
+        run_instances(
+            &svc,
+            &req(
+                "RunInstances",
+                &[
+                    ("ImageId", "ami-12345678"),
+                    ("MinCount", "1"),
+                    ("MaxCount", "1"),
+                ],
+            ),
+        )
+        .await
+        .unwrap();
+        let accounts = svc.state.read();
+        let st = accounts.regional("000000000000", "us-east-1").unwrap();
+        let inst = st.instances.values().next().unwrap();
+        assert_eq!(inst.vpc_id.as_deref(), Some("vpc-0legacy000000001"));
+        assert_eq!(
+            inst.security_group_ids,
+            vec!["sg-0legacy000000001".to_string()]
+        );
     }
 
     #[tokio::test]

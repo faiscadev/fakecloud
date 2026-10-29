@@ -352,6 +352,7 @@ pub(crate) fn bootstrap_default_network(state: &mut Ec2State) {
             cidr_associations: Vec::new(),
             ipv6_cidr_block: None,
             ipv6_cidr_associations: Vec::new(),
+            ipv6_blocks_minted: 0,
         },
     );
 
